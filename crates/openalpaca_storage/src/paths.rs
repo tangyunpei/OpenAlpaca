@@ -31,6 +31,11 @@ pub fn lock_path() -> anyhow::Result<PathBuf> {
     Ok(app_dir()?.join("openalpacad.lock"))
 }
 
+/// Path to the SQLite database file.
+pub fn database_path() -> anyhow::Result<PathBuf> {
+    Ok(app_dir()?.join("openalpaca.db"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

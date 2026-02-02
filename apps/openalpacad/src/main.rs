@@ -20,7 +20,7 @@ use axum::{
     routing::{get, post},
 };
 use events::EventBroadcaster;
-use openalpaca_storage::discovery;
+use openalpaca_storage::{Database, discovery, paths};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
@@ -33,6 +33,7 @@ pub struct AppState {
     pub instance_id: String,
     pub token: String,
     pub event_broadcaster: EventBroadcaster,
+    pub db: Database,
 }
 
 #[tokio::main]
@@ -77,14 +78,20 @@ async fn main() -> Result<()> {
     // Extract token from discovery for sharing with AppState
     let token = disc.auth.token.clone();
 
-    // Step 4: Create event broadcaster for WebSocket streaming
+    // Step 4: Initialize database
+    let db_path = paths::database_path()?;
+    let db = Database::open(&db_path).context("Failed to initialize database")?;
+    info!("Database initialized: {}", db_path.display());
+
+    // Step 5: Create event broadcaster for WebSocket streaming
     let event_broadcaster = EventBroadcaster::new(64, instance_id.clone());
 
-    // Step 5: Build HTTP router with public/protected/websocket split
+    // Step 6: Build HTTP router with public/protected/websocket split
     let state = Arc::new(AppState {
         instance_id: instance_id.clone(),
         token,
         event_broadcaster,
+        db,
     });
 
     // Public routes (no auth required)

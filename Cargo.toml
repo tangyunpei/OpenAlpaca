@@ -39,10 +39,12 @@ tokio = { version = "1", features = [
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# daemon api
-axum = { version = "0.7", features = ["ws"] }
-tokio-tungstenite = "0.26"
+# daemon api (server)
+axum = { version = "0.8", features = ["ws"] }
 futures-util = { version = "0.3", features = ["sink"] }
+
+# client (CLI tail)
+tokio-tungstenite = "0.28"
 
 # wake
 tokio-cron-scheduler = "0.15"
