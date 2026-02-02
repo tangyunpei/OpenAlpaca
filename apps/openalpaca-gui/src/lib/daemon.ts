@@ -8,16 +8,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import { writable, type Writable } from "svelte/store";
 
-/** Connection info returned from daemon discovery */
+/** Connection info returned from daemon discovery (camelCase from Rust) */
 export interface ConnectionInfo {
-  base_url: string;
+  baseUrl: string;
   token: string;
-  instance_id: string;
+  instanceId: string;
 }
 
-/** Server event types from daemon */
+/** Server event types from daemon (snake_case from Rust events) */
 export interface ServerEvent {
-  type: "heartbeat" | "log" | "command_received" | "agent_status" | "task_update";
+  type: "heartbeat" | "log" | "command_received" | "agent_status" | "task_update" | "wake";
   ts: string;
   instance_id: string;
   // Additional fields based on type
@@ -29,6 +29,7 @@ export interface ServerEvent {
   status?: string;
   task_id?: string;
   progress?: number;
+  wake?: any; // For wake events
 }
 
 /** Connection state */
@@ -61,10 +62,10 @@ export async function connectToDaemon(): Promise<void> {
     // Ensure daemon is running and get connection info
     const info: ConnectionInfo = await invoke("ensure_daemon_running");
     connectionInfo.set(info);
-    currentInstanceId = info.instance_id;
+    currentInstanceId = info.instanceId;
 
     // Connect to WebSocket
-    const wsUrl = info.base_url.replace("http", "ws");
+    const wsUrl = info.baseUrl.replace("http", "ws");
     ws = new WebSocket(`${wsUrl}/v1/events?token=${encodeURIComponent(info.token)}`);
 
     ws.onopen = () => {
@@ -130,12 +131,12 @@ function scheduleReconnect(): void {
     try {
       // Check if instance changed
       const info: ConnectionInfo = await invoke("get_connection_info");
-      if (info.instance_id !== currentInstanceId) {
+      if (info.instanceId !== currentInstanceId) {
         console.log("[daemon] Instance changed, re-bootstrapping");
         await connectToDaemon();
       } else {
         // Same instance, just reconnect WS
-        const wsUrl = info.base_url.replace("http", "ws");
+        const wsUrl = info.baseUrl.replace("http", "ws");
         ws = new WebSocket(`${wsUrl}/v1/events?token=${encodeURIComponent(info.token)}`);
         ws.onopen = () => connectionState.set("connected");
         ws.onmessage = (event) => {

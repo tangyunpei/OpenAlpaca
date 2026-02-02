@@ -1,13 +1,18 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use super::EventWatcher;
 use openalpaca_api::events::WakeEvent;
+
+/// Debounce window in milliseconds
+const DEBOUNCE_MS: u128 = 100;
 
 /// Watcher for filesystem changes
 pub struct FilesystemWatcher {
@@ -28,34 +33,51 @@ impl FilesystemWatcher {
 impl EventWatcher for FilesystemWatcher {
     async fn start(&self, tx: mpsc::Sender<WakeEvent>) -> Result<()> {
         let tx_clone = tx.clone();
+        // Simple debounce: track last event time per path
+        let last_event: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+        let last_event_clone = last_event.clone();
 
         // Setup notify watcher
         let mut watcher = RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
                 match res {
                     Ok(event) => {
-                        // Filter for only Create/Modify events roughly
-                        // notify events can be complex, but for wake purposes any change is a signal
+                        // Filter: Only handle Create/Modify/Remove events
+                        let is_relevant = matches!(
+                            event.kind,
+                            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                        );
+
+                        if !is_relevant {
+                            return;
+                        }
+
                         if let Some(path) = event.paths.first() {
                             let path_str = path.to_string_lossy().to_string();
-                            let kind = format!("{:?}", event.kind);
+
+                            // Simple debounce: skip if same path within DEBOUNCE_MS
+                            {
+                                let mut last = last_event_clone.lock().unwrap();
+                                let now = Instant::now();
+                                if let Some(last_time) = last.get(&path_str) {
+                                    if now.duration_since(*last_time).as_millis() < DEBOUNCE_MS {
+                                        debug!("Debounced event for: {}", path_str);
+                                        return;
+                                    }
+                                }
+                                last.insert(path_str.clone(), now);
+                            }
+
+                            let change_type = format!("{:?}", event.kind);
 
                             let wake_event = WakeEvent::FileChanged {
                                 path: path_str,
-                                kind,
+                                change_type,
                             };
 
                             // Use try_send to avoid blocking the watcher thread
                             if let Err(_e) = tx_clone.try_send(wake_event) {
-                                // It's expected to fail if channel is full or closed, just log debug/warn
-                                // tracing might also block, so be careful.
-                                // But here we just log error if strictly needed.
-                                // For high throughput, we might drop logs.
-                                // However, try_send error usually means receiver dropped or full.
-                                // We ignore Full error based on architectural decision (drop if system overloaded)
-                                // But let's log debug.
-                                // Note: we can't easily use tracing in sync callback if it blocks?
-                                // Usually it's fine.
+                                // Drop if channel full (backpressure)
                             }
                         }
                     }

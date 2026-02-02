@@ -3,7 +3,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_cron_scheduler::{Job, JobScheduler};
-use tracing::{error, info};
+use tracing::{info, warn};
 
 use crate::models::ScheduledTask;
 use openalpaca_api::events::WakeEvent;
@@ -43,9 +43,13 @@ impl WakeScheduler {
             let job_id = job_id.clone();
             let tag = tag.clone();
             Box::pin(async move {
-                let event = WakeEvent::Timer { job_id, tag };
-                if let Err(e) = tx.send(event).await {
-                    error!("Failed to send cron wake event: {}", e);
+                let event = WakeEvent::Timer {
+                    job_id: job_id.clone(),
+                    tag,
+                };
+                // Use try_send for backpressure consistency (drop if channel full)
+                if let Err(e) = tx.try_send(event) {
+                    warn!("Cron wake event dropped (channel full or closed): {}", e);
                 }
             })
         })?;
@@ -64,8 +68,9 @@ impl WakeScheduler {
                 job_id: "oneshot".to_string(),
                 tag,
             };
-            if let Err(e) = tx.send(event).await {
-                error!("Failed to send oneshot wake event: {}", e);
+            // Use try_send for backpressure consistency
+            if let Err(e) = tx.try_send(event) {
+                warn!("Oneshot wake event dropped (channel full or closed): {}", e);
             }
         });
         info!("Scheduled oneshot task with delay: {:?}", delay);
@@ -79,7 +84,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_schedule_once_robust() {
-        let (tx, mut rx) = mpsc::channel::<WakeEvent>(1);
+        let (tx, mut rx) = mpsc::channel::<WakeEvent>(16);
         let scheduler = WakeScheduler::new(tx).await.unwrap();
 
         // Schedule a task 100ms later
@@ -99,5 +104,40 @@ mod tests {
             Ok(Some(_)) => panic!("Wrong event type"),
             Err(_) => panic!("Timed out await event"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_schedule_cron_ticks() {
+        let (tx, mut rx) = mpsc::channel::<WakeEvent>(16);
+        let scheduler = WakeScheduler::new(tx).await.unwrap();
+        scheduler.start().await.unwrap();
+
+        // Schedule a cron job that fires every second
+        let task = ScheduledTask {
+            id: "test_cron".to_string(),
+            cron: "*/1 * * * * *".to_string(),
+            tag: "cron_test".to_string(),
+        };
+        scheduler.schedule_cron(task).await.unwrap();
+
+        // Wait up to 5 seconds, expecting at least 2 ticks
+        let mut tick_count = 0;
+        let result = timeout(Duration::from_secs(5), async {
+            while tick_count < 2 {
+                if let Some(WakeEvent::Timer { job_id, .. }) = rx.recv().await {
+                    if job_id == "test_cron" {
+                        tick_count += 1;
+                    }
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok(), "Timed out waiting for cron ticks");
+        assert!(
+            tick_count >= 2,
+            "Expected at least 2 cron ticks, got {}",
+            tick_count
+        );
     }
 }

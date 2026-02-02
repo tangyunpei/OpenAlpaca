@@ -69,7 +69,7 @@ impl EventBroadcaster {
     /// Broadcast a Wake event and persist it
     pub fn wake(&self, wake_event: openalpaca_api::events::WakeEvent) {
         let event = ServerEvent::Wake {
-            event: wake_event,
+            wake: wake_event,
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };
@@ -103,9 +103,9 @@ impl EventBroadcaster {
                     repo.log("command_received", None, Some(&detail), None)
                 }
                 // Wake events are persisted by the same mechanism
-                ServerEvent::Wake { event, .. } => {
+                ServerEvent::Wake { wake, .. } => {
                     let detail = serde_json::json!({
-                        "wake_event": event
+                        "wake_event": wake
                     });
                     repo.log("wake", None, Some(&detail), None)
                 }

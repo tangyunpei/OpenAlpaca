@@ -90,7 +90,7 @@ async fn main() -> Result<()> {
     let event_broadcaster = EventBroadcaster::new(64, instance_id.clone(), Some(db.clone()));
 
     // Step 5.1: Initialize WakeManager and integration
-    let (wake_tx, mut wake_rx) = mpsc::channel(32);
+    let (wake_tx, mut wake_rx) = mpsc::channel(256);
     let wake_manager = WakeManager::new(wake_tx)
         .await
         .context("Failed to init WakeManager")?;
@@ -100,9 +100,6 @@ async fn main() -> Result<()> {
         .start()
         .await
         .context("Failed to start WakeManager")?;
-
-    // [VERIFICATION] Schedule a test task to fire in 5 seconds (Commented out after verification)
-    // wake_manager.scheduler().schedule_once(tokio::time::Duration::from_secs(5), "startup_verification".to_string()).await;
 
     // Spawn forwarding task: WakeEvent -> ServerEvent::Wake -> Broadcast & Persist
     let eb_clone = event_broadcaster.clone();

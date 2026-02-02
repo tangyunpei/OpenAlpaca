@@ -13,7 +13,7 @@
 
   // Subscribe to stores using regular variables
   let state: string = "disconnected";
-  let info: { base_url: string; instance_id: string } | null = null;
+  let info: { baseUrl: string; instanceId: string } | null = null;
   let eventList: ServerEvent[] = [];
   let error: string | null = null;
 
@@ -66,7 +66,11 @@
 <main class="container">
   <header class="header">
     <h1>🦙 OpenAlpaca</h1>
-    <div class="status" class:connected={state === "connected"} class:error={state === "error"}>
+    <div
+      class="status"
+      class:connected={state === "connected"}
+      class:error={state === "error"}
+    >
       <span class="dot"></span>
       <span class="text">{state}</span>
     </div>
@@ -78,8 +82,8 @@
 
   {#if info}
     <div class="info-bar">
-      <span class="instance">Instance: {info.instance_id.slice(0, 8)}...</span>
-      <span class="url">{info.base_url}</span>
+      <span class="instance">Instance: {info.instanceId.slice(0, 8)}...</span>
+      <span class="url">{info.baseUrl}</span>
     </div>
   {/if}
 
@@ -129,7 +133,11 @@
     padding: 0;
     background: var(--bg);
     color: var(--text);
-    font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+    font-family:
+      "Inter",
+      -apple-system,
+      BlinkMacSystemFont,
+      sans-serif;
     min-height: 100vh;
   }
 
