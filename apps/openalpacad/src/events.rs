@@ -2,32 +2,10 @@
 //!
 //! All events include instance_id for client validation.
 
-use chrono::{DateTime, Utc};
-use serde::Serialize;
+use chrono::Utc;
 use tokio::sync::broadcast;
 
-/// Server events pushed to clients via WebSocket
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ServerEvent {
-    Heartbeat {
-        ts: DateTime<Utc>,
-        instance_id: String,
-    },
-    Log {
-        level: String,
-        message: String,
-        ts: DateTime<Utc>,
-        instance_id: String,
-    },
-    CommandReceived {
-        request_id: String,
-        command: String,
-        ts: DateTime<Utc>,
-        instance_id: String,
-    },
-}
-
+use openalpaca_api::events::ServerEvent;
 use openalpaca_storage::{Database, repository::EventLogRepository};
 
 /// Event broadcaster for pushing events to all connected clients and persisting to DB
@@ -88,6 +66,18 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
+    /// Broadcast a Wake event and persist it
+    pub fn wake(&self, wake_event: openalpaca_api::events::WakeEvent) {
+        let event = ServerEvent::Wake {
+            event: wake_event,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
     /// Persist important events to the database
     fn persist(&self, event: &ServerEvent) {
         if let Some(db) = &self.db {
@@ -111,6 +101,13 @@ impl EventBroadcaster {
                         "command": command
                     });
                     repo.log("command_received", None, Some(&detail), None)
+                }
+                // Wake events are persisted by the same mechanism
+                ServerEvent::Wake { event, .. } => {
+                    let detail = serde_json::json!({
+                        "wake_event": event
+                    });
+                    repo.log("wake", None, Some(&detail), None)
                 }
             };
             // Error handling strategy: log errors but don't crash or block broadcast
