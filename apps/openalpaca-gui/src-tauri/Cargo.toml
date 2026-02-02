@@ -24,5 +24,9 @@ tracing.workspace = true
 directories.workspace = true
 
 tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"                                    # 保留这个插件以防构建报错，除非你确定要删
+tauri-plugin-opener = "2"
 openalpaca_api = { path = "../../../crates/openalpaca_api" }
+openalpaca_storage = { path = "../../../crates/openalpaca_storage" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
