@@ -84,7 +84,7 @@ async fn main() -> Result<()> {
     info!("Database initialized: {}", db_path.display());
 
     // Step 5: Create event broadcaster for WebSocket streaming
-    let event_broadcaster = EventBroadcaster::new(64, instance_id.clone());
+    let event_broadcaster = EventBroadcaster::new(64, instance_id.clone(), Some(db.clone()));
 
     // Step 6: Build HTTP router with public/protected/websocket split
     let state = Arc::new(AppState {
@@ -102,6 +102,7 @@ async fn main() -> Result<()> {
     // Protected routes (Bearer token required)
     let protected = Router::new()
         .route("/v1/command", post(routes::command_handler))
+        .route("/v1/events/history", get(routes::events_history_handler))
         .layer(from_fn_with_state(
             state.clone(),
             middleware::auth_middleware,

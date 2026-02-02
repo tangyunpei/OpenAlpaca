@@ -23,7 +23,7 @@ pub struct EventLog {
     pub agent_id: Option<String>,
     pub event_type: String,
     pub detail: Option<serde_json::Value>,
-    pub result: Option<String>,
+    pub result: Option<serde_json::Value>,
 }
 
 /// Memory entry (conversation message)

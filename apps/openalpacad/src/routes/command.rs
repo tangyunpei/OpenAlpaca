@@ -14,8 +14,10 @@ use crate::AppState;
 pub struct CommandRequest {
     pub command: String,
     #[serde(default)]
+    #[allow(dead_code)]
     pub args: HashMap<String, serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[allow(dead_code)]
     pub target_agent: Option<String>,
 }
 
@@ -30,7 +32,7 @@ pub struct CommandResponse {
 ///
 /// Currently implements echo for testing; will be extended for real commands.
 pub async fn command_handler(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(request): Json<CommandRequest>,
 ) -> impl IntoResponse {
     let request_id = Uuid::new_v4().to_string();
@@ -44,6 +46,11 @@ pub async fn command_handler(
     // Phase 1: Echo command for testing
     match request.command.as_str() {
         "echo" => {
+            // Broadcast and persist the command event
+            state
+                .event_broadcaster
+                .command_received(&request_id, &request.command);
+
             let response = CommandResponse {
                 request_id,
                 status: "accepted".to_string(),

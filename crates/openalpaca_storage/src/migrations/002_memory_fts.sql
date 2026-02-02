@@ -1,4 +1,12 @@
--- FTS5 全文索引
+-- FTS5 全文索引 (幂等版本)
+-- 先删除已有触发器和表，确保可重复执行
+
+DROP TRIGGER IF EXISTS memory_ai;
+DROP TRIGGER IF EXISTS memory_ad;
+DROP TRIGGER IF EXISTS memory_au;
+DROP TABLE IF EXISTS memory_fts;
+
+-- 创建 FTS5 虚拟表
 CREATE VIRTUAL TABLE memory_fts USING fts5(
     content,
     agent_id UNINDEXED,
@@ -18,7 +26,7 @@ CREATE TRIGGER memory_ad AFTER DELETE ON memory BEGIN
     VALUES ('delete', OLD.id, OLD.content, OLD.agent_id);
 END;
 
--- UPDATE 触发器
+-- UPDATE 触发器 (先删旧索引，再插新索引)
 CREATE TRIGGER memory_au AFTER UPDATE ON memory BEGIN
     INSERT INTO memory_fts(memory_fts, rowid, content, agent_id)
     VALUES ('delete', OLD.id, OLD.content, OLD.agent_id);

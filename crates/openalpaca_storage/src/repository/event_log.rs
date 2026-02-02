@@ -15,23 +15,30 @@ impl<'a> EventLogRepository<'a> {
         Self { db }
     }
 
-    /// Log an event
+    /// Log an event with optional result
     pub fn log(
         &self,
         event_type: &str,
         agent_id: Option<&str>,
         detail: Option<&serde_json::Value>,
+        result: Option<&serde_json::Value>,
     ) -> Result<i64> {
         self.db.with_connection(|conn| {
             conn.execute(
-                "INSERT INTO event_log (event_type, agent_id, detail) VALUES (?1, ?2, ?3)",
-                (event_type, agent_id, detail.map(|v| v.to_string())),
+                "INSERT INTO event_log (event_type, agent_id, detail, result) VALUES (?1, ?2, ?3, ?4)",
+                (
+                    event_type,
+                    agent_id,
+                    detail.map(|v| v.to_string()),
+                    result.map(|v| v.to_string()),
+                ),
             )?;
             Ok(conn.last_insert_rowid())
         })
     }
 
-    /// Log an event with result
+    /// Log an event with string result (convenience method)
+    #[deprecated(note = "Use log() with result parameter instead")]
     pub fn log_with_result(
         &self,
         event_type: &str,
@@ -39,13 +46,8 @@ impl<'a> EventLogRepository<'a> {
         detail: Option<&serde_json::Value>,
         result: &str,
     ) -> Result<i64> {
-        self.db.with_connection(|conn| {
-            conn.execute(
-                "INSERT INTO event_log (event_type, agent_id, detail, result) VALUES (?1, ?2, ?3, ?4)",
-                (event_type, agent_id, detail.map(|v| v.to_string()), result),
-            )?;
-            Ok(conn.last_insert_rowid())
-        })
+        let result_json = serde_json::Value::String(result.to_string());
+        self.log(event_type, agent_id, detail, Some(&result_json))
     }
 
     /// Get recent events
@@ -111,7 +113,7 @@ impl<'a> EventLogRepository<'a> {
         let agent_id: Option<String> = row.get(2)?;
         let event_type: String = row.get(3)?;
         let detail_str: Option<String> = row.get(4)?;
-        let result: Option<String> = row.get(5)?;
+        let result_str: Option<String> = row.get(5)?;
 
         let detail = detail_str
             .map(|s| serde_json::from_str(&s))
@@ -121,6 +123,11 @@ impl<'a> EventLogRepository<'a> {
         let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now());
+
+        let result = result_str
+            .map(|s| serde_json::from_str(&s))
+            .transpose()
+            .context("Failed to parse event result JSON")?;
 
         Ok(EventLog {
             id,
@@ -148,13 +155,32 @@ mod tests {
         let db = test_db();
         let repo = EventLogRepository::new(&db);
 
-        // Log event
-        let id = repo.log("test_event", None, None).unwrap();
+        // Log event (now with 4 args)
+        let id = repo.log("test_event", None, None, None).unwrap();
         assert!(id > 0);
 
         // Get recent
         let events = repo.recent(10).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "test_event");
+    }
+
+    #[test]
+    fn test_event_log_result_roundtrip() {
+        let db = test_db();
+        let repo = EventLogRepository::new(&db);
+
+        let detail = serde_json::json!({"key": "value"});
+        let result = serde_json::json!({"ok": true, "code": 200});
+
+        let _id = repo
+            .log("test", Some("agent-1"), Some(&detail), Some(&result))
+            .unwrap();
+
+        let rows = repo.recent(1).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].detail.as_ref().unwrap()["key"], "value");
+        assert_eq!(rows[0].result.as_ref().unwrap()["ok"], true);
+        assert_eq!(rows[0].result.as_ref().unwrap()["code"], 200);
     }
 }
