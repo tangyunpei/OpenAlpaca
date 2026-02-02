@@ -67,3 +67,19 @@ out/
 *.temp
 coverage/
 .cache/
+
+# ============================================
+# Tauri
+# ============================================
+src-tauri/target/
+src-tauri/gen/
+apps/openalpaca-gui/src-tauri/target/
+apps/openalpaca-gui/src-tauri/gen/
+
+# ============================================
+# Database (SQLite)
+# ============================================
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
