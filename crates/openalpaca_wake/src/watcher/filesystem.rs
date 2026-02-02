@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{error, info};
@@ -46,7 +46,7 @@ impl EventWatcher for FilesystemWatcher {
                             };
 
                             // Use try_send to avoid blocking the watcher thread
-                            if let Err(e) = tx_clone.try_send(wake_event) {
+                            if let Err(_e) = tx_clone.try_send(wake_event) {
                                 // It's expected to fail if channel is full or closed, just log debug/warn
                                 // tracing might also block, so be careful.
                                 // But here we just log error if strictly needed.

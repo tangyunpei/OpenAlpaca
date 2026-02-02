@@ -11,6 +11,7 @@ mod events;
 mod middleware;
 mod routes;
 
+use ::tokio::sync::mpsc;
 use anyhow::{Context, Result};
 use axum::{
     Router,
@@ -21,8 +22,10 @@ use axum::{
 };
 use events::EventBroadcaster;
 use openalpaca_storage::{Database, discovery, paths};
+use openalpaca_wake::manager::WakeManager;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -86,7 +89,32 @@ async fn main() -> Result<()> {
     // Step 5: Create event broadcaster for WebSocket streaming
     let event_broadcaster = EventBroadcaster::new(64, instance_id.clone(), Some(db.clone()));
 
+    // Step 5.1: Initialize WakeManager and integration
+    let (wake_tx, mut wake_rx) = mpsc::channel(32);
+    let wake_manager = WakeManager::new(wake_tx)
+        .await
+        .context("Failed to init WakeManager")?;
+
+    // Start WakeManager (spawns internal scheduler/watchers)
+    wake_manager
+        .start()
+        .await
+        .context("Failed to start WakeManager")?;
+
+    // [VERIFICATION] Schedule a test task to fire in 5 seconds (Commented out after verification)
+    // wake_manager.scheduler().schedule_once(tokio::time::Duration::from_secs(5), "startup_verification".to_string()).await;
+
+    // Spawn forwarding task: WakeEvent -> ServerEvent::Wake -> Broadcast & Persist
+    let eb_clone = event_broadcaster.clone();
+    tokio::spawn(async move {
+        while let Some(event) = wake_rx.recv().await {
+            info!("Received WakeEvent: {:?}", event);
+            eb_clone.wake(event);
+        }
+    });
+
     // Step 6: Build HTTP router with public/protected/websocket split
+
     let state = Arc::new(AppState {
         instance_id: instance_id.clone(),
         token,
