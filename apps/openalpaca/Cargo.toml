@@ -25,4 +25,4 @@ colored = "3"
 urlencoding = "2"
 
 # Workspace crates
-openalpaca_storage = { path = "../../crates/openalpaca_storage" }
+openalpaca_storage = { workspace = true }

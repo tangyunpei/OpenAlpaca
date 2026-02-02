@@ -19,7 +19,7 @@ chrono.workspace = true
 futures-util.workspace = true
 
 # Workspace crates
-openalpaca_core = { path = "../../crates/openalpaca_core" }
-openalpaca_api = { path = "../../crates/openalpaca_api" }
-openalpaca_storage = { path = "../../crates/openalpaca_storage" }
-openalpaca_wake = { path = "../../crates/openalpaca_wake" }
+openalpaca_core = { workspace = true }
+openalpaca_api = { workspace = true }
+openalpaca_storage = { workspace = true }
+openalpaca_wake = { workspace = true }
