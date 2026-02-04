@@ -3151,6 +3151,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "openalpaca_api",
+ "openalpaca_connectors",
  "openalpaca_core",
  "openalpaca_storage",
  "openalpaca_wake",

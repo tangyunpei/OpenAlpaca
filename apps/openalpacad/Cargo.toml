@@ -20,7 +20,9 @@ futures-util.workspace = true
 tower-http = { workspace = true }
 
 # Workspace crates
+# Workspace crates
 openalpaca_core = { workspace = true }
+openalpaca_connectors = { workspace = true, features = ["telegram"] }
 openalpaca_api = { workspace = true }
 openalpaca_storage = { workspace = true }
 openalpaca_wake = { workspace = true }

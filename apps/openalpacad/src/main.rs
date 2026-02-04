@@ -22,6 +22,7 @@ use axum::{
     routing::{get, post},
 };
 use events::EventBroadcaster;
+use openalpaca_connectors::{Connector, ConnectorBuilder};
 use openalpaca_storage::{Database, discovery, paths};
 use openalpaca_wake::manager::WakeManager;
 use std::sync::Arc;
@@ -119,13 +120,36 @@ async fn main() -> Result<()> {
     // Shutdown channel for API-triggered shutdown
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
 
+    // Create CoreCtx early so we can share the EventBus with connectors
+    let core_ctx = core_ctx::CoreCtx::new();
+
+    // Step 5.2: Connector Lifecycle (Phase 4.1.5)
+    // Auto-spawn connectors if tokens are present in environment
+    if let Ok(token) = std::env::var("OPENALPACA_TELEGRAM_TOKEN") {
+        info!("Found OPENALPACA_TELEGRAM_TOKEN, spawning Telegram Connector...");
+
+        let db_clone = db.clone();
+        let bus = core_ctx.bus.clone();
+
+        tokio::spawn(async move {
+            let builder = ConnectorBuilder::new(db_clone, bus);
+            let connector = builder.telegram(token);
+
+            info!("Telegram Connector initialized via Auto-Discovery");
+            // Run the connector (blocking loop)
+            if let Err(e) = connector.run().await {
+                error!("Telegram Connector crashed: {e}");
+            }
+        });
+    }
+
     let state = Arc::new(AppState {
         instance_id: instance_id.clone(),
         token,
         event_broadcaster,
         db,
         shutdown_tx,
-        core_ctx: core_ctx::CoreCtx::new(),
+        core_ctx,
     });
 
     // Public routes (no auth required)
