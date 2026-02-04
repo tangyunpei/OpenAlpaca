@@ -1,0 +1,37 @@
+[package]
+name = "openalpaca_connectors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Unified connector module for chat platforms (Telegram, iMessage, WeChat, etc.)"
+
+[features]
+default = []
+# Enable Telegram connector
+telegram = ["dep:teloxide"]
+# Future: iMessage connector (macOS only)
+# imessage = []
+# Future: WeChat connector
+# wechat = []
+
+[dependencies]
+# Async runtime
+tokio.workspace = true
+tracing.workspace = true
+async-trait = { workspace = true }
+thiserror.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+
+# Internal crates
+openalpaca_core.workspace = true
+openalpaca_storage.workspace = true
+
+# Optional: Telegram (only when feature enabled)
+teloxide = { workspace = true, optional = true }

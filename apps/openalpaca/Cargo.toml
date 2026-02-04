@@ -16,13 +16,10 @@ futures-util.workspace = true
 tokio-tungstenite.workspace = true
 
 # CLI
-clap = { version = "4", features = ["derive"] }
-reqwest = { version = "0.12", default-features = false, features = [
-    "json",
-    "rustls-tls",
-] }
-colored = "3"
-urlencoding = "2"
+clap.workspace = true
+reqwest.workspace = true
+colored.workspace = true
+urlencoding.workspace = true
 
 # Workspace crates
 openalpaca_storage = { workspace = true }

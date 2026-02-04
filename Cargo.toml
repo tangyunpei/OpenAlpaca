@@ -6,6 +6,7 @@ members = [
     "crates/openalpaca_storage",
     "crates/openalpaca_platform",
     "crates/openalpaca_platform_macos",
+    "crates/openalpaca_connectors",
     "apps/openalpacad",
     "apps/openalpaca",
     "apps/openalpaca-gui/src-tauri",
@@ -59,9 +60,30 @@ openalpaca_wake = { path = "crates/openalpaca_wake" }
 openalpaca_platform = { path = "crates/openalpaca_platform" }
 openalpaca_platform_macos = { path = "crates/openalpaca_platform_macos" }
 
+# cli
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+colored = "3"
+urlencoding = "2"
+
 # storage
 rusqlite = { version = "0.38", features = ["bundled"] }
 directories = "6"
 file-lock = "2"
 base64 = "0.22"
 rand = "0.9"
+libc = "0.2"
+tempfile = "3"
+
+# middleware
+regex = "1.12"
+
+# telegram
+teloxide = { version = "0.14", features = ["macros"] }
+async-trait = "0.1"
+
+# Internal Crates (continued)
+openalpaca_connectors = { path = "crates/openalpaca_connectors" }
