@@ -68,15 +68,15 @@ pub async fn run(args: ConfigArgs) -> Result<()> {
                     .interact()?;
 
                 if confirm {
-                    repo.clear_all()?;
-                    println!("✅ All configuration cleared.");
+                    db.factory_reset()?;
+                    println!("✅ All configuration and data wiped (Factory Reset).");
                 } else {
                     println!("Cancelled.");
                 }
             }
         }
         None => {
-            run_interactive(&repo)?;
+            run_interactive(&repo, &db)?;
         }
     }
 
@@ -84,7 +84,7 @@ pub async fn run(args: ConfigArgs) -> Result<()> {
 }
 
 /// Run interactive configuration TUI
-fn run_interactive(repo: &ConfigRepository) -> Result<()> {
+fn run_interactive(repo: &ConfigRepository, db: &Database) -> Result<()> {
     println!(
         "{}",
         style("⚙️  OpenAlpaca Configuration Mode").bold().cyan()
@@ -148,9 +148,12 @@ fn run_interactive(repo: &ConfigRepository) -> Result<()> {
                     .interact_text()?;
 
                 if input == "yes" || input == "y" {
-                    repo.clear_all()?;
+                    db.factory_reset()?;
                     config_map.clear();
-                    println!("{}", style("✅ Database config wiped. Exiting.").green());
+                    println!(
+                        "{}",
+                        style("✅ Database wiped (Factory Reset). Exiting.").green()
+                    );
                     break;
                 } else {
                     println!("{}", style("❌ Cancelled.").red());

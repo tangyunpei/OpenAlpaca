@@ -142,6 +142,13 @@ impl ConnectorManager {
         config_repo.delete(&format!("{}.token", name))?;
         config_repo.delete(&format!("{}.enabled", name))?;
 
+        // Also clean up identity data (individual reset)
+        use openalpaca_storage::IdentityRepository;
+        let identity_repo = IdentityRepository::new(&self.db);
+        if let Err(e) = identity_repo.delete_data_for_provider(name) {
+            tracing::warn!("Failed to clean up identity data for {}: {}", name, e);
+        }
+
         self.stop(name).await?;
         self.broadcast_status(name, "unconfigured");
         Ok(())

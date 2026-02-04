@@ -133,6 +133,33 @@ impl Database {
         let mut conn = self.conn.lock().unwrap();
         f(&mut conn)
     }
+
+    /// Wipe all content from the database (Factory Reset)
+    pub fn factory_reset(&self) -> Result<()> {
+        self.with_connection(|conn| {
+            // Disable foreign keys temporarily to allow truncating in any order,
+            // though we try to do it effectively.
+            // conn.execute("PRAGMA foreign_keys = OFF", [])?;
+
+            // Note: SQLite doesn't have TRUNCATE, so we use DELETE.
+            // Order matters if FKs are ON.
+
+            // 1. Identity & Config System
+            conn.execute("DELETE FROM conversation_map", [])?;
+            conn.execute("DELETE FROM link_token", [])?;
+            conn.execute("DELETE FROM external_identity", [])?;
+            conn.execute("DELETE FROM global_user", [])?;
+            conn.execute("DELETE FROM system_config", [])?;
+
+            // 2. Connector & Agent data
+            // Triggers on memory should clean up memory_fts automatically
+            conn.execute("DELETE FROM memory", [])?;
+            conn.execute("DELETE FROM event_log", [])?;
+            conn.execute("DELETE FROM agent", [])?;
+
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]

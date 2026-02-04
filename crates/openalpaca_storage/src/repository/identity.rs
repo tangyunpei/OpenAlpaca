@@ -143,6 +143,17 @@ impl<'a> IdentityRepository<'a> {
         })
     }
 
+    /// Unlink external identity (remove global user association)
+    pub fn unlink_external_identity(&self, external_identity_id: i64) -> Result<()> {
+        self.db.with_connection(|conn| {
+            conn.execute(
+                "UPDATE external_identity SET global_user_id = NULL, linked_at = NULL WHERE id = ?1",
+                (external_identity_id,),
+            )?;
+            Ok(())
+        })
+    }
+
     fn row_to_external_identity(row: &rusqlite::Row<'_>) -> Result<ExternalIdentity> {
         let id: i64 = row.get(0)?;
         let provider: String = row.get(1)?;
@@ -315,6 +326,25 @@ impl<'a> IdentityRepository<'a> {
                 }
                 None => Ok(None),
             }
+        })
+    }
+
+    /// Delete all data associated with a provider (Factory Reset for single connector)
+    pub fn delete_data_for_provider(&self, provider: &str) -> Result<()> {
+        self.db.with_connection(|conn| {
+            // Delete conversation maps first (FKs usually not an issue here but good practice)
+            conn.execute(
+                "DELETE FROM conversation_map WHERE provider = ?1",
+                [provider],
+            )?;
+
+            // Delete external identities
+            conn.execute(
+                "DELETE FROM external_identity WHERE provider = ?1",
+                [provider],
+            )?;
+
+            Ok(())
         })
     }
 }

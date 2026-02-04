@@ -117,7 +117,7 @@ impl TelegramConnector {
             info!("User {} is NOT linked (Untrusted)", user_id);
         }
 
-        // Step 2: Handle /link command specially
+        // Step 2: Handle /link and /unlink commands
         if text.starts_with("/link ") {
             let token = text.strip_prefix("/link ").unwrap().trim();
             return Self::handle_link_command(
@@ -125,6 +125,15 @@ impl TelegramConnector {
                 chat_id,
                 &user_id,
                 token,
+                external_identity_id,
+                &identity_repo,
+            )
+            .await;
+        } else if text == "/unlink" || text == "/unbind" {
+            return Self::handle_unlink_command(
+                &bot,
+                chat_id,
+                &user_id,
                 external_identity_id,
                 &identity_repo,
             )
@@ -227,6 +236,33 @@ impl TelegramConnector {
             }
         }
 
+        Ok(())
+    }
+    /// Handle the /unlink command.
+    async fn handle_unlink_command(
+        bot: &Bot,
+        chat_id: ChatId,
+        user_id: &str,
+        external_identity_id: i64,
+        identity_repo: &IdentityRepository<'_>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        info!("Processing /unlink command for user {}", user_id);
+
+        match identity_repo.unlink_external_identity(external_identity_id) {
+            Ok(_) => {
+                info!("Successfully unlinked telegram:{}", user_id);
+                bot.send_message(
+                    chat_id,
+                    "✅ Account unlinked successfully.\nYou are now acting as an anonymous/external user.",
+                )
+                .await?;
+            }
+            Err(e) => {
+                error!("Error unlinking identity: {}", e);
+                bot.send_message(chat_id, format!("❌ Error: {}", e))
+                    .await?;
+            }
+        }
         Ok(())
     }
 }
