@@ -56,7 +56,9 @@ pub enum ConnectorError {
 
 /// Builder for creating connectors with shared dependencies.
 pub struct ConnectorBuilder {
+    #[allow(dead_code)]
     db: Arc<Database>,
+    #[allow(dead_code)]
     bus: Arc<EventBus>,
 }
 

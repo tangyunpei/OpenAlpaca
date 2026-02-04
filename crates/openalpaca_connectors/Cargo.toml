@@ -7,6 +7,14 @@ publish.workspace = true
 license.workspace = true
 description = "Unified connector module for chat platforms (Telegram, iMessage, WeChat, etc.)"
 
+[[example]]
+name = "telegram"
+required-features = ["telegram"]
+
+[dev-dependencies]
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+
 [features]
 default = []
 # Enable Telegram connector

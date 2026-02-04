@@ -53,10 +53,13 @@ pub async fn command_handler(
 
             (
                 StatusCode::ACCEPTED,
-                Json(serde_json::json!({
-                    "request_id": request_id,
-                    "status": "accepted"
-                })),
+                Json(
+                    serde_json::to_value(CommandResponse {
+                        request_id,
+                        status: "accepted".to_string(),
+                    })
+                    .unwrap(),
+                ),
             )
         }
         "process" => {

@@ -55,6 +55,16 @@ impl TrustGate {
                 ));
             }
 
+            // Explicitly deny chat.respond for unlinked users to force /link flow
+            // Exception: We might want allow-listed commands later, but currently
+            // the connector handles /link *before* calling TrustGate.
+            if action == "chat.respond" {
+                return Err(format!(
+                    "Permission Denied: Unlinked {} user cannot chat. Please link your account.",
+                    provider
+                ));
+            }
+
             // iMessage Special Policy: Even low risks might need confirmation if not whitelisted
             // (Strictly enforce "No Write" for now for unknown external)
             if provider == "imessage" && action.starts_with("fs.") {
