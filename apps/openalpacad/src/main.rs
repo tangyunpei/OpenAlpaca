@@ -9,6 +9,7 @@
 
 mod core_ctx;
 mod events;
+mod managers;
 mod middleware;
 mod routes;
 
@@ -17,12 +18,10 @@ use anyhow::{Context, Result};
 use axum::{
     Router,
     extract::State,
-    middleware::from_fn_with_state,
     response::Json,
     routing::{get, post},
 };
 use events::EventBroadcaster;
-use openalpaca_connectors::startup;
 use openalpaca_storage::{Database, discovery, paths};
 use openalpaca_wake::manager::WakeManager;
 use std::sync::Arc;
@@ -42,6 +41,7 @@ pub struct AppState {
     pub db: Database,
     pub shutdown_tx: mpsc::Sender<()>,
     pub core_ctx: core_ctx::CoreCtx,
+    pub connector_manager: managers::connector::ConnectorManager,
 }
 
 #[tokio::main]
@@ -121,17 +121,25 @@ async fn main() -> Result<()> {
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
 
     // Create CoreCtx early so we can share the EventBus with connectors
-    let core_ctx = core_ctx::CoreCtx::new();
+    let ctx = core_ctx::CoreCtx::new();
 
-    // Step 5.2: Connector Lifecycle (Phase 4.1.6)
-    // Auto-discover and spawn all enabled connectors (Telegram, etc.)
-    // We pass clones of db and bus (from core_ctx) to the startup utility.
-    let started_connectors = startup::auto_start_connectors(db.clone(), core_ctx.bus.clone());
-    if !started_connectors.is_empty() {
-        info!("Started connectors: {:?}", started_connectors);
-    } else {
-        info!("No optional connectors configured (e.g. OPENALPACA_TELEGRAM_TOKEN not set)");
-    }
+    // Spawn bridge: SystemEvent (Core) -> ServerEvent (API)
+    let eb_bridge = event_broadcaster.clone();
+    let mut core_rx = ctx.bus.subscribe();
+    tokio::spawn(async move {
+        while let Ok(event) = core_rx.recv().await {
+            match event {
+                openalpaca_core::events::SystemEvent::ConnectorStatus { id, status, .. } => {
+                    eb_bridge.connector_status(&id, &status);
+                }
+                _ => {} // Ignore other system events for now
+            }
+        }
+    });
+
+    // Step 5.2: Connector Lifecycle (Phase 4.1.8)
+    let connector_manager = managers::connector::ConnectorManager::new(db.clone(), ctx.bus.clone());
+    connector_manager.start_all().await;
 
     let state = Arc::new(AppState {
         instance_id: instance_id.clone(),
@@ -139,7 +147,8 @@ async fn main() -> Result<()> {
         event_broadcaster,
         db,
         shutdown_tx,
-        core_ctx,
+        core_ctx: ctx,
+        connector_manager,
     });
 
     // Public routes (no auth required)
@@ -147,11 +156,21 @@ async fn main() -> Result<()> {
         .route("/", get(root_handler))
         .route("/v1/health", get(health_handler));
 
-    // Protected routes (Bearer token required)
-    let protected = Router::new()
+    // Protected routes (require token)
+    let protected_routes = Router::new()
         .route("/v1/command", post(routes::command_handler))
         .route("/v1/events/history", get(routes::events_history_handler))
-        .layer(from_fn_with_state(
+        .route("/v1/connectors", get(routes::list_connectors_handler))
+        .route(
+            "/v1/connectors/{id}/action",
+            post(routes::connector_action_handler),
+        )
+        .route(
+            "/v1/connectors/{id}/config",
+            post(routes::connector_config_handler),
+        )
+        .route("/v1/auth/link", post(routes::generate_link_token_handler))
+        .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_middleware,
         ));
@@ -161,7 +180,7 @@ async fn main() -> Result<()> {
 
     // Merge all routes
     let app = public
-        .merge(protected)
+        .merge(protected_routes)
         .merge(websocket)
         .with_state(state.clone())
         .layer(CorsLayer::permissive());

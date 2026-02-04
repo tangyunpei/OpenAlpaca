@@ -82,3 +82,47 @@ impl ConnectorBuilder {
 // Re-exports for convenience
 #[cfg(feature = "telegram")]
 pub use telegram::TelegramConnector;
+
+/// Factory trait for creating connectors dynamically
+pub trait ConnectorFactory: Send + Sync {
+    /// Get the unique name of the connector (e.g. "telegram")
+    fn name(&self) -> &str;
+
+    /// Create and spawn a new instance of the connector
+    fn spawn(
+        &self,
+        token: String,
+        db: Database,
+        bus: EventBus,
+    ) -> Result<startup::ConnectorHandle, ConnectorError>;
+}
+
+/// Registry of supported connectors based on compiled features
+pub fn get_supported_connectors() -> Vec<Box<dyn ConnectorFactory>> {
+    let mut connectors: Vec<Box<dyn ConnectorFactory>> = Vec::new();
+
+    #[cfg(feature = "telegram")]
+    connectors.push(Box::new(TelegramFactory));
+
+    connectors
+}
+
+#[cfg(feature = "telegram")]
+struct TelegramFactory;
+
+#[cfg(feature = "telegram")]
+impl ConnectorFactory for TelegramFactory {
+    fn name(&self) -> &str {
+        "telegram"
+    }
+
+    fn spawn(
+        &self,
+        token: String,
+        db: Database,
+        bus: EventBus,
+    ) -> Result<startup::ConnectorHandle, ConnectorError> {
+        let handle = startup::spawn_telegram_connector(token, db, bus);
+        Ok(handle)
+    }
+}

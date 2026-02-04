@@ -109,9 +109,30 @@ impl EventBroadcaster {
                     });
                     repo.log("wake", None, Some(&detail), None)
                 }
+                // Log connector status changes
+                ServerEvent::ConnectorStatus { id, status, .. } => {
+                    let detail = serde_json::json!({
+                        "connector_id": id,
+                        "status": status
+                    });
+                    repo.log("agent_status", None, Some(&detail), None)
+                }
             };
             // Error handling strategy: log errors but don't crash or block broadcast
             // For now we just ignore errors as per architecture plan
         }
+    }
+
+    /// Broadcast a connector status change and persist it
+    pub fn connector_status(&self, id: &str, status: &str) {
+        let event = ServerEvent::ConnectorStatus {
+            id: id.to_string(),
+            status: status.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
     }
 }

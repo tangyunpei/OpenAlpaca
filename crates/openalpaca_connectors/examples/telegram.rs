@@ -33,7 +33,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Note: In a real app, you'd spawn this or run in background
     // For the example, we run it blocking.
-    connector.run_blocking().await;
+    let shutdown_token = connector.run_with_signal().await;
+
+    // Simulate running for a bit
+    tokio::signal::ctrl_c().await.unwrap();
+    shutdown_token.shutdown().unwrap().await;
 
     Ok(())
 }

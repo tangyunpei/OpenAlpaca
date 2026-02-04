@@ -36,4 +36,11 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// Event triggered when a connector status changes
+    ConnectorStatus {
+        id: String,
+        status: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
 }

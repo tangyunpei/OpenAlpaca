@@ -37,6 +37,12 @@ pub enum SystemEvent {
         message: String,
         timestamp: DateTime<Utc>,
     },
+    /// A connector status change
+    ConnectorStatus {
+        id: String,
+        status: String,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

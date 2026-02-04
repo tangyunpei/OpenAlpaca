@@ -20,6 +20,12 @@ clap.workspace = true
 reqwest.workspace = true
 colored.workspace = true
 urlencoding.workspace = true
+dialoguer.workspace = true
+console.workspace = true
+nix.workspace = true
+sysinfo.workspace = true
+log.workspace = true
+env_logger.workspace = true
 
 # Workspace crates
 openalpaca_storage = { workspace = true }

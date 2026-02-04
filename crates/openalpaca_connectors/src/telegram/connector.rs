@@ -2,7 +2,7 @@
 //!
 //! Handles the integration between Telegram Bot API and the OpenAlpaca agent system.
 
-use crate::common::{format_denial_message, handle_link_token, resolve_principal, LinkResult};
+use crate::common::{LinkResult, format_denial_message, handle_link_token, resolve_principal};
 use crate::{Connector, ConnectorError};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -40,7 +40,8 @@ impl TelegramConnector {
     }
 
     /// Start the connector (blocking, runs the teloxide dispatcher).
-    pub async fn run_blocking(self) {
+    /// Returns a ShutdownToken to stop the dispatcher.
+    pub async fn run_with_signal(self) -> teloxide::dispatching::ShutdownToken {
         info!("Starting Telegram Connector...");
 
         let handler = Update::filter_message().endpoint(Self::handle_message);
@@ -50,12 +51,20 @@ impl TelegramConnector {
         let bus = self.bus.clone();
         let system_persona = Arc::new(self.system_persona);
 
-        Dispatcher::builder(self.bot, handler)
+        let mut dispatcher = Dispatcher::builder(self.bot, handler)
             .dependencies(dptree::deps![db, bus, system_persona])
             .enable_ctrlc_handler()
-            .build()
-            .dispatch()
-            .await;
+            .build();
+
+        let token = dispatcher.shutdown_token();
+
+        // Spawn dispatcher loop so we can return token
+        tokio::spawn(async move {
+            dispatcher.dispatch().await;
+            info!("Telegram connector dispatcher finished");
+        });
+
+        token
     }
 
     /// Handle an incoming Telegram message.
@@ -91,10 +100,17 @@ impl TelegramConnector {
 
         // Step 1: Resolve Principal
         let identity_repo = IdentityRepository::new(&db);
-        let (principal, external_identity_id) =
-            resolve_principal(&identity_repo, "telegram", &user_id, display_name.as_deref())?;
+        let (principal, external_identity_id) = resolve_principal(
+            &identity_repo,
+            "telegram",
+            &user_id,
+            display_name.as_deref(),
+        )?;
 
-        let is_linked = matches!(principal, openalpaca_core::security::policy::Principal::User { .. });
+        let is_linked = matches!(
+            principal,
+            openalpaca_core::security::policy::Principal::User { .. }
+        );
         if is_linked {
             info!("User {} is linked (Trusted)", user_id);
         } else {
@@ -104,7 +120,15 @@ impl TelegramConnector {
         // Step 2: Handle /link command specially
         if text.starts_with("/link ") {
             let token = text.strip_prefix("/link ").unwrap().trim();
-            return Self::handle_link_command(&bot, chat_id, &user_id, token, external_identity_id, &identity_repo).await;
+            return Self::handle_link_command(
+                &bot,
+                chat_id,
+                &user_id,
+                token,
+                external_identity_id,
+                &identity_repo,
+            )
+            .await;
         }
 
         // Step 3: Permission Check via TrustGate

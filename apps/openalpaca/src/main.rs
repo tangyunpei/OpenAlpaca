@@ -3,10 +3,12 @@
 //! Command-line interface for interacting with the OpenAlpaca daemon.
 //!
 //! Commands:
-//! - status: Show daemon status
-//! - tail: Stream events from daemon
+//! - daemon: Manage daemon process (start/stop/status/tail)
+//! - config: Manage system configuration
+//! - gui: Manage GUI process
 
 mod commands;
+mod manager;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -21,14 +23,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Show daemon status
-    Status,
-    /// Stream events from daemon (Ctrl+C to stop)
-    Tail {
-        /// Number of events to show (0 = unlimited)
-        #[arg(short, long, default_value = "0")]
-        count: usize,
-    },
+    /// Manage daemon process (status, tail, start, stop)
+    Daemon(commands::daemon::DaemonArgs),
+
+    /// Manage system configuration (interactive if no subcommands)
+    Config(commands::config::ConfigArgs),
+
+    /// Manage GUI process
+    Gui(commands::gui::GuiArgs),
+
+    /// Manage platform connectors (Telegram, etc.)
+    Connector(commands::connector::ConnectorArgs),
 }
 
 #[tokio::main]
@@ -36,7 +41,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Status => commands::status::run().await,
-        Commands::Tail { count } => commands::tail::run(count).await,
+        Commands::Daemon(args) => commands::daemon::run(args).await,
+        Commands::Config(args) => commands::config::run(args).await,
+        Commands::Gui(args) => commands::gui::run(args).await,
+        Commands::Connector(args) => commands::connector::run(args).await,
     }
 }
