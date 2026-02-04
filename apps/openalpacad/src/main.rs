@@ -22,7 +22,7 @@ use axum::{
     routing::{get, post},
 };
 use events::EventBroadcaster;
-use openalpaca_connectors::{Connector, ConnectorBuilder};
+use openalpaca_connectors::startup;
 use openalpaca_storage::{Database, discovery, paths};
 use openalpaca_wake::manager::WakeManager;
 use std::sync::Arc;
@@ -123,24 +123,14 @@ async fn main() -> Result<()> {
     // Create CoreCtx early so we can share the EventBus with connectors
     let core_ctx = core_ctx::CoreCtx::new();
 
-    // Step 5.2: Connector Lifecycle (Phase 4.1.5)
-    // Auto-spawn connectors if tokens are present in environment
-    if let Ok(token) = std::env::var("OPENALPACA_TELEGRAM_TOKEN") {
-        info!("Found OPENALPACA_TELEGRAM_TOKEN, spawning Telegram Connector...");
-
-        let db_clone = db.clone();
-        let bus = core_ctx.bus.clone();
-
-        tokio::spawn(async move {
-            let builder = ConnectorBuilder::new(db_clone, bus);
-            let connector = builder.telegram(token);
-
-            info!("Telegram Connector initialized via Auto-Discovery");
-            // Run the connector (blocking loop)
-            if let Err(e) = connector.run().await {
-                error!("Telegram Connector crashed: {e}");
-            }
-        });
+    // Step 5.2: Connector Lifecycle (Phase 4.1.6)
+    // Auto-discover and spawn all enabled connectors (Telegram, etc.)
+    // We pass clones of db and bus (from core_ctx) to the startup utility.
+    let started_connectors = startup::auto_start_connectors(db.clone(), core_ctx.bus.clone());
+    if !started_connectors.is_empty() {
+        info!("Started connectors: {:?}", started_connectors);
+    } else {
+        info!("No optional connectors configured (e.g. OPENALPACA_TELEGRAM_TOKEN not set)");
     }
 
     let state = Arc::new(AppState {

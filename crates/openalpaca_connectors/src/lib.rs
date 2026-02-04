@@ -13,6 +13,8 @@ pub mod common;
 #[cfg(feature = "telegram")]
 pub mod telegram;
 
+pub mod startup;
+
 use async_trait::async_trait;
 use openalpaca_core::bus::EventBus;
 use openalpaca_storage::Database;
