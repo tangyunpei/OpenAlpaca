@@ -42,6 +42,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # daemon api (server)
 axum = { version = "0.8", features = ["ws"] }
 futures-util = { version = "0.3", features = ["sink"] }
+tower-http = { version = "0.5", features = ["cors"] }
 
 # client (CLI tail)
 tokio-tungstenite = "0.28"

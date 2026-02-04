@@ -7,6 +7,7 @@
 //! - HTTP API for health checks and commands
 //! - WebSocket for real-time event streaming
 
+mod core_ctx;
 mod events;
 mod middleware;
 mod routes;
@@ -25,6 +26,7 @@ use openalpaca_storage::{Database, discovery, paths};
 use openalpaca_wake::manager::WakeManager;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tower_http::cors::CorsLayer;
 
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -37,6 +39,8 @@ pub struct AppState {
     pub token: String,
     pub event_broadcaster: EventBroadcaster,
     pub db: Database,
+    pub shutdown_tx: mpsc::Sender<()>,
+    pub core_ctx: core_ctx::CoreCtx,
 }
 
 #[tokio::main]
@@ -112,11 +116,16 @@ async fn main() -> Result<()> {
 
     // Step 6: Build HTTP router with public/protected/websocket split
 
+    // Shutdown channel for API-triggered shutdown
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
+
     let state = Arc::new(AppState {
         instance_id: instance_id.clone(),
         token,
         event_broadcaster,
         db,
+        shutdown_tx,
+        core_ctx: core_ctx::CoreCtx::new(),
     });
 
     // Public routes (no auth required)
@@ -140,7 +149,8 @@ async fn main() -> Result<()> {
     let app = public
         .merge(protected)
         .merge(websocket)
-        .with_state(state.clone());
+        .with_state(state.clone())
+        .layer(CorsLayer::permissive());
 
     // Step 6: Spawn daemon-level heartbeat task
     let heartbeat_state = state.clone();
@@ -165,7 +175,10 @@ async fn main() -> Result<()> {
             }
         }
         _ = shutdown_signal() => {
-            info!("Shutdown signal received");
+            info!("Shutdown signal received (OS)");
+        }
+        _ = shutdown_rx.recv() => {
+            info!("Shutdown signal received (API)");
         }
     }
 

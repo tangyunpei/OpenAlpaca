@@ -51,18 +51,101 @@ pub async fn command_handler(
                 .event_broadcaster
                 .command_received(&request_id, &request.command);
 
-            let response = CommandResponse {
-                request_id,
-                status: "accepted".to_string(),
-            };
-            (StatusCode::ACCEPTED, Json(response))
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "request_id": request_id,
+                    "status": "accepted"
+                })),
+            )
         }
-        _ => {
-            let response = CommandResponse {
-                request_id,
-                status: "rejected".to_string(),
+        "process" => {
+            // PR-1: Route through CoreCtx unified pipeline
+            use openalpaca_core::middleware::prompt::AgentPersona;
+            use openalpaca_core::security::policy::{Principal, Scope};
+
+            let content = request
+                .args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Hello from process command")
+                .to_string();
+
+            // Default to System principal (trusted, local call)
+            let principal = Principal::System;
+            let scope = Scope::Global;
+            let agent_persona = AgentPersona {
+                role: "Assistant".to_string(),
+                tone: "Friendly".to_string(),
+                domain_knowledge: vec![],
             };
-            (StatusCode::BAD_REQUEST, Json(response))
+
+            let req_uuid =
+                uuid::Uuid::parse_str(&request_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
+
+            match state.core_ctx.handle_user_request(
+                req_uuid,
+                "http".to_string(),
+                content,
+                principal,
+                scope,
+                &agent_persona,
+            ) {
+                Ok(output) => {
+                    state
+                        .event_broadcaster
+                        .command_received(&request_id, "process");
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "request_id": request_id,
+                            "status": "completed",
+                            "output": output.content
+                        })),
+                    )
+                }
+                Err(e) => (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "request_id": request_id,
+                        "status": "rejected",
+                        "error": e
+                    })),
+                ),
+            }
         }
+        "shutdown" => {
+            tracing::info!("Shutdown command received via API");
+
+            // Broadcast shutdown event
+            state
+                .event_broadcaster
+                .command_received(&request_id, "shutdown");
+
+            // Trigger shutdown signal (spawn a task to avoid blocking response)
+            let shutdown_tx = state.shutdown_tx.clone();
+            tokio::spawn(async move {
+                // Determine small delay to allow response to be sent
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if let Err(e) = shutdown_tx.send(()).await {
+                    tracing::error!("Failed to send shutdown signal: {}", e);
+                }
+            });
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "request_id": request_id,
+                    "status": "shutting_down"
+                })),
+            )
+        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "request_id": request_id,
+                "status": "rejected"
+            })),
+        ),
     }
 }

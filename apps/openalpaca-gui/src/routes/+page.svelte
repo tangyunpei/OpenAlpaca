@@ -10,6 +10,7 @@
     errorMessage,
     type ServerEvent,
   } from "$lib/daemon";
+  import { shutdownDaemon } from "$lib/daemon_control";
 
   // Subscribe to stores using regular variables
   let state: string = "disconnected";
@@ -92,6 +93,9 @@
       {state === "connecting" ? "Connecting..." : "Reconnect"}
     </button>
     <button onclick={() => clearEvents()}>Clear</button>
+    <button class="danger" onclick={() => shutdownDaemon()}
+      >Quit OpenAlpaca</button
+    >
   </div>
 
   <div class="event-log">
@@ -248,6 +252,17 @@
   button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  button.danger {
+    background: rgba(239, 68, 68, 0.2);
+    border: 1px solid var(--error);
+    color: var(--error);
+  }
+
+  button.danger:hover:not(:disabled) {
+    background: var(--error);
+    color: #fff;
   }
 
   .event-log {
