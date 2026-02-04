@@ -24,3 +24,4 @@ openalpaca_core = { workspace = true }
 openalpaca_api = { workspace = true }
 openalpaca_storage = { workspace = true }
 openalpaca_wake = { workspace = true }
+rand.workspace = true
