@@ -1,0 +1,19 @@
+[agent]
+id = "research_agent"
+name = "Research Agent"
+description = "Focused on web search, data collection, and information synthesis"
+icon = "magnifying_glass"
+
+[skills]
+assigned = ["web_search", "web_fetch", "summarize", "browser"]
+denied = ["shell_execute", "file_write"]
+
+[preset]
+persona = "You are a professional research assistant."
+temperature = 0.3
+verbosity = "detailed"
+
+[constraints]
+max_tool_calls = 20
+timeout_seconds = 300
+max_cost_per_task = 0.50

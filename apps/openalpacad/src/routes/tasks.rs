@@ -101,7 +101,7 @@ pub async fn create_task_handler(
     state.gateway.lane_manager.create_task_lane(&task_id);
 
     // 4. Emit event
-    let _ = state.core_ctx.bus.publish(SystemEvent::TaskCreated {
+    let _ = state.gateway.bus.publish(SystemEvent::TaskCreated {
         task_id: task_id.clone(),
         title: request.title,
         created_by: request.created_by,
@@ -306,7 +306,7 @@ pub async fn task_action_handler(
             timestamp: now,
         },
     };
-    let _ = state.core_ctx.bus.publish(event);
+    let _ = state.gateway.bus.publish(event);
 
     (
         StatusCode::OK,

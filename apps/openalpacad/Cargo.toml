@@ -24,4 +24,5 @@ openalpaca_connectors = { workspace = true, features = ["telegram"] }
 openalpaca_api = { workspace = true }
 openalpaca_storage = { workspace = true }
 openalpaca_wake = { workspace = true }
+toml.workspace = true
 rand.workspace = true

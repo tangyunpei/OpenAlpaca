@@ -1,0 +1,18 @@
+[agent]
+id = "system_agent"
+name = "System Agent"
+description = "Focused on file operations, system commands, and local tasks"
+
+[skills]
+assigned = ["file_read", "file_write", "shell_execute", "file_organize"]
+denied = ["web_search"]
+
+[preset]
+persona = "You are a system operations assistant."
+temperature = 0.2
+verbosity = "concise"
+
+[constraints]
+max_tool_calls = 30
+timeout_seconds = 600
+require_confirmation_for = ["file_delete", "shell_execute"]

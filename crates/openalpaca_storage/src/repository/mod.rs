@@ -8,6 +8,7 @@ pub mod event_log;
 pub mod identity;
 pub mod memory;
 pub mod preference;
+pub mod subagent;
 pub mod task;
 
 pub use agent::AgentRepository;
@@ -16,4 +17,5 @@ pub use event_log::EventLogRepository;
 pub use identity::IdentityRepository;
 pub use memory::MemoryRepository;
 pub use preference::PreferenceRepository;
+pub use subagent::SubAgentRepository;
 pub use task::TaskRepository;

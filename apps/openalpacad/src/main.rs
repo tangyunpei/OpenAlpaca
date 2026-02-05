@@ -27,6 +27,8 @@ use openalpaca_core::{
     context::SharedContext,
     gateway::Gateway,
     lane::LaneManager,
+    middleware::prompt::SystemPersona,
+    orchestrator::Orchestrator,
 };
 use openalpaca_storage::{Database, discovery, paths};
 use openalpaca_wake::manager::WakeManager;
@@ -39,6 +41,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 /// Shared application state
+#[allow(deprecated)]
 #[derive(Clone)]
 pub struct AppState {
     pub instance_id: String,
@@ -128,10 +131,12 @@ async fn main() -> Result<()> {
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
 
     // Create CoreCtx early so we can share the EventBus with connectors
+    #[allow(deprecated)]
     let ctx = core_ctx::CoreCtx::new();
 
     // Spawn bridge: SystemEvent (Core) -> ServerEvent (API)
     let eb_bridge = event_broadcaster.clone();
+    #[allow(deprecated)]
     let mut core_rx = ctx.bus.subscribe();
     tokio::spawn(async move {
         while let Ok(event) = core_rx.recv().await {
@@ -165,24 +170,101 @@ async fn main() -> Result<()> {
                 } => {
                     eb_bridge.task_status(&task_id, "", "failed", None, None, Some(error));
                 }
+                openalpaca_core::events::SystemEvent::AgentRegistered {
+                    agent_id, name, ..
+                } => {
+                    eb_bridge.agent_status(&agent_id, &name, "idle", None);
+                }
+                openalpaca_core::events::SystemEvent::AgentStatusChanged {
+                    agent_id, status, current_task_id, ..
+                } => {
+                    eb_bridge.agent_status(&agent_id, "", &status, current_task_id);
+                }
                 _ => {}
             }
         }
     });
 
     // Step 5.2: Gateway Construction (Phase 4.3)
-    let handler = Arc::new(gateway_bridge::CoreCtxHandler::new(ctx.clone()));
+    let shared_context = Arc::new(SharedContext::new());
+
+    // Step 5.2.1: Load agent configs from TOML files (Phase 4.5)
+    let config_dir = std::env::current_dir()
+        .unwrap_or_default()
+        .join("config/agents");
+    if config_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&config_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "toml") {
+                    match std::fs::read_to_string(&path) {
+                        Ok(content) => {
+                            match toml::from_str::<openalpaca_core::agent::AgentConfigFile>(&content)
+                            {
+                                Ok(agent_config) => {
+                                    // Register in-memory
+                                    let subagent = agent_config.clone().into_subagent();
+                                    shared_context.agent_registry.register(subagent);
+
+                                    // Persist to DB
+                                    let storage_config = agent_config.into_storage_config();
+                                    let agent_id = storage_config.id.clone();
+                                    let repo =
+                                        openalpaca_storage::SubAgentRepository::new(&db);
+                                    let _ = repo.upsert(&storage_config);
+
+                                    // Initialize metrics row if not exists
+                                    if let Ok(None) = repo.get_metrics(&agent_id) {
+                                        let _ = repo.upsert_metrics(
+                                            &openalpaca_storage::AgentMetrics::new_empty(
+                                                &agent_id,
+                                            ),
+                                        );
+                                    }
+
+                                    info!("Loaded agent config: {}", path.display());
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to parse agent config {}: {}",
+                                        path.display(),
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to read agent config {}: {}", path.display(), e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let lane_manager = Arc::new(LaneManager::new());
+
+    // Construct Orchestrator as the new message handler
+    #[allow(deprecated)]
+    let bus = ctx.bus.clone();
+    let orchestrator = Arc::new(Orchestrator::new(
+        shared_context.clone(),
+        lane_manager.clone(),
+        bus.clone(),
+        SystemPersona::default(),
+    ));
+    let handler = Arc::new(gateway_bridge::OrchestratorHandler::new(orchestrator));
     let gateway = Arc::new(Gateway::new(
-        Arc::new(SharedContext::new()),
-        Arc::new(LaneManager::new()),
+        shared_context,
+        lane_manager,
         handler,
-        ctx.bus.clone(),
+        bus.clone(),
     ));
 
     // Step 5.3: Connector Lifecycle (Phase 4.1.8)
     let connector_manager = managers::connector::ConnectorManager::new(
         db.clone(),
-        ctx.bus.clone(),
+        bus,
         gateway.clone(),
     );
     connector_manager.start_all().await;
@@ -221,6 +303,12 @@ async fn main() -> Result<()> {
         .route("/v1/tasks", get(routes::list_tasks_handler))
         .route("/v1/tasks/{id}", get(routes::get_task_handler))
         .route("/v1/tasks/{id}/action", post(routes::task_action_handler))
+        .route("/v1/agents", get(routes::list_agents_handler))
+        .route("/v1/agents/{id}", get(routes::get_agent_handler))
+        .route(
+            "/v1/agents/{id}/action",
+            post(routes::agent_action_handler),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_middleware,

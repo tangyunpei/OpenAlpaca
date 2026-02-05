@@ -4,8 +4,10 @@
 
 mod core;
 pub mod identity;
+pub mod subagent;
 pub mod task;
 
 pub use core::{Agent, EventLog, Memory, MemoryRole};
 pub use identity::{ConversationMap, ExternalIdentity, GlobalUser, LinkToken};
+pub use subagent::{AgentMetrics, AgentTaskHistory, SubAgentConfig};
 pub use task::{AssignmentStatus, Task, TaskAgentAssignment, TaskStatus};

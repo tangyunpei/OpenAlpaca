@@ -41,4 +41,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "tasks",
         sql: include_str!("006_tasks.sql"),
     },
+    Migration {
+        version: 7,
+        name: "subagents",
+        sql: include_str!("007_subagents.sql"),
+    },
 ];

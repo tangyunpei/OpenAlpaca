@@ -18,12 +18,14 @@ use uuid::Uuid;
 
 /// CoreCtx holds all core modules for the daemon.
 /// This is the single integration point for new logic.
+#[deprecated(since = "0.5.0", note = "Use Orchestrator via Gateway instead")]
 #[derive(Clone)]
 pub struct CoreCtx {
     pub bus: EventBus,
     pub system_persona: SystemPersona,
 }
 
+#[allow(deprecated)]
 impl CoreCtx {
     pub fn new() -> Self {
         Self {

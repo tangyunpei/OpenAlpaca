@@ -374,9 +374,21 @@ mod tests {
         // Shared context task count
         assert_eq!(shared.task_registry.count(), 1);
 
-        // Agent state
-        shared.agent_states.set("a1".into(), "active".into());
-        assert_eq!(shared.agent_states.get("a1").unwrap(), "active");
+        // Agent registry
+        use crate::agent::subagent::{AgentConstraints, AgentPreset, AgentStatus, SubAgent};
+        let agent = SubAgent {
+            id: "a1".to_string(),
+            name: "Test Agent".to_string(),
+            description: None,
+            icon: None,
+            status: AgentStatus::Idle,
+            current_task: None,
+            skills: vec![],
+            preset: AgentPreset::default(),
+            constraints: AgentConstraints::default(),
+        };
+        assert!(shared.agent_registry.register(agent));
+        assert!(shared.agent_registry.get("a1").is_some());
 
         // Health
         assert!(gw.is_healthy());

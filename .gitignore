@@ -89,3 +89,4 @@ apps/openalpaca-gui/src-tauri/gen/
 # Agent
 # ============================================
 .claude/
+.claude/*   

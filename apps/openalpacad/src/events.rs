@@ -117,6 +117,22 @@ impl EventBroadcaster {
                     });
                     repo.log("agent_status", None, Some(&detail), None)
                 }
+                // Log agent status changes
+                ServerEvent::AgentStatus {
+                    agent_id,
+                    name,
+                    status,
+                    current_task_id,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "agent_id": agent_id,
+                        "name": name,
+                        "status": status,
+                        "current_task_id": current_task_id
+                    });
+                    repo.log("agent_status_change", None, Some(&detail), None)
+                }
                 // Log task status changes
                 ServerEvent::TaskStatus {
                     task_id,
@@ -158,6 +174,27 @@ impl EventBroadcaster {
             progress_current,
             progress_total,
             result_summary,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast an agent status event and persist it
+    pub fn agent_status(
+        &self,
+        agent_id: &str,
+        name: &str,
+        status: &str,
+        current_task_id: Option<String>,
+    ) {
+        let event = ServerEvent::AgentStatus {
+            agent_id: agent_id.to_string(),
+            name: name.to_string(),
+            status: status.to_string(),
+            current_task_id,
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };

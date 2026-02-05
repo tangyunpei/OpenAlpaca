@@ -1,3 +1,4 @@
+use crate::agent::registry::AgentRegistry;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -117,46 +118,17 @@ impl Default for TaskRegistry {
     }
 }
 
-/// Store for agent runtime states.
-pub struct AgentStateStore {
-    states: Mutex<HashMap<String, String>>,
-}
-
-impl AgentStateStore {
-    pub fn new() -> Self {
-        Self {
-            states: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Set an agent's state.
-    pub fn set(&self, agent_id: String, state: String) {
-        self.states.lock().unwrap().insert(agent_id, state);
-    }
-
-    /// Get an agent's state.
-    pub fn get(&self, agent_id: &str) -> Option<String> {
-        self.states.lock().unwrap().get(agent_id).cloned()
-    }
-}
-
-impl Default for AgentStateStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Shared context holding cross-cutting state for the gateway.
 pub struct SharedContext {
     pub task_registry: TaskRegistry,
-    pub agent_states: AgentStateStore,
+    pub agent_registry: AgentRegistry,
 }
 
 impl SharedContext {
     pub fn new() -> Self {
         Self {
             task_registry: TaskRegistry::new(),
-            agent_states: AgentStateStore::new(),
+            agent_registry: AgentRegistry::new(),
         }
     }
 }
@@ -175,7 +147,7 @@ mod tests {
     fn test_shared_context_creation() {
         let ctx = SharedContext::new();
         assert_eq!(ctx.task_registry.count(), 0);
-        assert!(ctx.agent_states.get("any").is_none());
+        assert_eq!(ctx.agent_registry.count(), 0);
     }
 
     #[test]
@@ -232,12 +204,23 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_state_store() {
-        let store = AgentStateStore::new();
-        assert!(store.get("a1").is_none());
-        store.set("a1".into(), "idle".into());
-        assert_eq!(store.get("a1").unwrap(), "idle");
-        store.set("a1".into(), "running".into());
-        assert_eq!(store.get("a1").unwrap(), "running");
+    fn test_agent_registry_in_shared_context() {
+        use crate::agent::subagent::{AgentConstraints, AgentPreset, AgentStatus, SubAgent};
+
+        let ctx = SharedContext::new();
+        let agent = SubAgent {
+            id: "a1".to_string(),
+            name: "Test Agent".to_string(),
+            description: None,
+            icon: None,
+            status: AgentStatus::Idle,
+            current_task: None,
+            skills: vec![],
+            preset: AgentPreset::default(),
+            constraints: AgentConstraints::default(),
+        };
+        assert!(ctx.agent_registry.register(agent));
+        assert_eq!(ctx.agent_registry.count(), 1);
+        assert!(ctx.agent_registry.get("a1").is_some());
     }
 }

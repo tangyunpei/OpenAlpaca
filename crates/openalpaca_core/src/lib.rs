@@ -6,6 +6,7 @@ pub mod gateway;
 pub mod lane;
 pub mod memory;
 pub mod middleware;
+pub mod orchestrator;
 pub mod runtime;
 pub mod security;
 pub mod supervisor;

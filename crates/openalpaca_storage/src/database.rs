@@ -144,7 +144,11 @@ impl Database {
             // Note: SQLite doesn't have TRUNCATE, so we use DELETE.
             // Order matters if FKs are ON.
 
-            // 0. Task System (has FK to nothing, safe to delete first)
+            // 0. SubAgent System (FK to agent and task)
+            conn.execute("DELETE FROM agent_task_history", [])?;
+            conn.execute("DELETE FROM agent_metrics", [])?;
+
+            // 1. Task System
             conn.execute("DELETE FROM task_agent_assignment", [])?;
             conn.execute("DELETE FROM task", [])?;
 
@@ -179,7 +183,7 @@ mod tests {
 
         let db = Database::open(&db_path).unwrap();
         assert!(db_path.exists());
-        assert_eq!(db.schema_version().unwrap(), 6);
+        assert_eq!(db.schema_version().unwrap(), 7);
     }
 
     #[test]
@@ -191,7 +195,7 @@ mod tests {
         let _db1 = Database::open(&db_path).unwrap();
         let db2 = Database::open(&db_path).unwrap();
 
-        assert_eq!(db2.schema_version().unwrap(), 6);
+        assert_eq!(db2.schema_version().unwrap(), 7);
     }
 
     #[test]

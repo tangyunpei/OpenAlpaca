@@ -55,6 +55,15 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// Event triggered when an agent status changes
+    AgentStatus {
+        agent_id: String,
+        name: String,
+        status: String,
+        current_task_id: Option<String>,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
 }
 
 // ── Unified Event System (M3.5) ────────────────────────────────────

@@ -70,6 +70,25 @@ pub enum SystemEvent {
         error: String,
         timestamp: DateTime<Utc>,
     },
+    /// An agent was registered or config updated
+    AgentRegistered {
+        agent_id: String,
+        name: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// An agent's status changed
+    AgentStatusChanged {
+        agent_id: String,
+        status: String,
+        current_task_id: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
+    /// The Orchestrator classified a user's intent
+    IntentClassified {
+        request_id: Uuid,
+        intent_type: String,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
