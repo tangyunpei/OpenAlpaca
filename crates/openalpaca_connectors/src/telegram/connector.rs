@@ -5,37 +5,35 @@
 use crate::common::{LinkResult, format_denial_message, handle_link_token, resolve_principal};
 use crate::{Connector, ConnectorError};
 use async_trait::async_trait;
-use chrono::Utc;
+use openalpaca_api::events::EventSource;
 use openalpaca_core::{
     bus::EventBus,
-    events::SystemEvent,
-    middleware::prompt::{AgentPersona, PromptAssembler, SystemPersona},
-    security::policy::{Scope, TrustGate},
+    gateway::{Gateway, GatewayRequest},
+    security::policy::Scope,
     types::Capability,
 };
 use openalpaca_storage::{Database, IdentityRepository};
 use std::sync::Arc;
 use teloxide::prelude::*;
 use tracing::{error, info, warn};
-use uuid::Uuid;
 
 /// TelegramConnector manages the Telegram bot lifecycle and message handling.
 pub struct TelegramConnector {
     bot: Bot,
     db: Arc<Database>,
     bus: Arc<EventBus>,
-    system_persona: SystemPersona,
+    gateway: Arc<Gateway>,
 }
 
 impl TelegramConnector {
     /// Create a new TelegramConnector with the given bot token.
-    pub fn new(token: String, db: Arc<Database>, bus: Arc<EventBus>) -> Self {
+    pub fn new(token: String, db: Arc<Database>, bus: Arc<EventBus>, gateway: Arc<Gateway>) -> Self {
         let bot = Bot::new(token);
         Self {
             bot,
             db,
             bus,
-            system_persona: SystemPersona::default(),
+            gateway,
         }
     }
 
@@ -49,10 +47,10 @@ impl TelegramConnector {
         // Clone state for the handler
         let db = self.db.clone();
         let bus = self.bus.clone();
-        let system_persona = Arc::new(self.system_persona);
+        let gateway = self.gateway.clone();
 
         let mut dispatcher = Dispatcher::builder(self.bot, handler)
-            .dependencies(dptree::deps![db, bus, system_persona])
+            .dependencies(dptree::deps![db, bus, gateway])
             .enable_ctrlc_handler()
             .build();
 
@@ -73,7 +71,7 @@ impl TelegramConnector {
         msg: Message,
         db: Arc<Database>,
         bus: Arc<EventBus>,
-        system_persona: Arc<SystemPersona>,
+        gateway: Arc<Gateway>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match msg.text() {
             Some(t) => t.to_string(),
@@ -117,7 +115,7 @@ impl TelegramConnector {
             info!("User {} is NOT linked (Untrusted)", user_id);
         }
 
-        // Step 2: Handle /link and /unlink commands
+        // Step 2: Handle /link and /unlink commands (connector-specific)
         if text.starts_with("/link ") {
             let token = text.strip_prefix("/link ").unwrap().trim();
             return Self::handle_link_command(
@@ -140,7 +138,7 @@ impl TelegramConnector {
             .await;
         }
 
-        // Step 3: Permission Check via TrustGate
+        // Step 3: Pre-check TrustGate (for early denial message to user)
         let capability = Capability {
             name: "chat.respond".to_string(),
         };
@@ -148,46 +146,35 @@ impl TelegramConnector {
             id: chat_id.0.to_string(),
         };
 
-        if let Err(e) = TrustGate::check(&principal, &capability, &scope) {
+        if let Err(e) = openalpaca_core::security::policy::TrustGate::check(
+            &principal,
+            &capability,
+            &scope,
+        ) {
             warn!("TrustGate denied request: {}", e);
             bot.send_message(chat_id, format_denial_message(&e)).await?;
             return Ok(());
         }
 
-        // Step 4: Emit UserRequest event
-        let request_id = Uuid::new_v4();
-        bus.publish(SystemEvent::UserRequest {
-            request_id,
-            source: "telegram".to_string(),
+        // Step 4: Route through Gateway (replaces manual pipeline)
+        let response = gateway.handle_event(GatewayRequest {
+            source: EventSource::Telegram {
+                chat_id: chat_id.0.to_string(),
+                user_id: user_id.clone(),
+            },
             content: text.clone(),
-            timestamp: Utc::now(),
+            principal,
+            scope: Scope::Conversation {
+                id: chat_id.0.to_string(),
+            },
         });
 
-        // Step 5: Assemble prompt and process (STUB: echo for now)
-        let agent_persona = AgentPersona {
-            role: "Assistant".to_string(),
-            tone: "Friendly".to_string(),
-            domain_knowledge: vec![],
-        };
+        // Step 5: Send response back to Telegram
+        bot.send_message(chat_id, &response.content).await?;
 
-        let _full_prompt = PromptAssembler::assemble(&system_persona, &agent_persona, &text);
-
-        // STUB: In production, this would call the LLM/Agent
-        let response_text = format!(
-            "✨ Received: {}",
-            text.chars().take(100).collect::<String>()
-        );
-
-        // Step 6: Send response back to Telegram
-        bot.send_message(chat_id, &response_text).await?;
-
-        // Step 7: Emit AgentResponse event
-        bus.publish(SystemEvent::AgentResponse {
-            request_id,
-            agent_id: "telegram_connector".to_string(),
-            content: response_text,
-            timestamp: Utc::now(),
-        });
+        // Note: EventBus events (UserRequest + AgentResponse) are now emitted
+        // by Gateway and the MessageHandler, not by the connector.
+        let _ = bus; // Keep bus in deps for /link events if needed
 
         Ok(())
     }

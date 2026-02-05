@@ -9,6 +9,7 @@
 
 mod core_ctx;
 mod events;
+mod gateway_bridge;
 mod managers;
 mod middleware;
 mod routes;
@@ -22,6 +23,11 @@ use axum::{
     routing::{get, post},
 };
 use events::EventBroadcaster;
+use openalpaca_core::{
+    context::SharedContext,
+    gateway::Gateway,
+    lane::LaneManager,
+};
 use openalpaca_storage::{Database, discovery, paths};
 use openalpaca_wake::manager::WakeManager;
 use std::sync::Arc;
@@ -42,6 +48,7 @@ pub struct AppState {
     pub shutdown_tx: mpsc::Sender<()>,
     pub core_ctx: core_ctx::CoreCtx,
     pub connector_manager: managers::connector::ConnectorManager,
+    pub gateway: Arc<Gateway>,
 }
 
 #[tokio::main]
@@ -137,8 +144,21 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Step 5.2: Connector Lifecycle (Phase 4.1.8)
-    let connector_manager = managers::connector::ConnectorManager::new(db.clone(), ctx.bus.clone());
+    // Step 5.2: Gateway Construction (Phase 4.3)
+    let handler = Arc::new(gateway_bridge::CoreCtxHandler::new(ctx.clone()));
+    let gateway = Arc::new(Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        handler,
+        ctx.bus.clone(),
+    ));
+
+    // Step 5.3: Connector Lifecycle (Phase 4.1.8)
+    let connector_manager = managers::connector::ConnectorManager::new(
+        db.clone(),
+        ctx.bus.clone(),
+        gateway.clone(),
+    );
     connector_manager.start_all().await;
 
     let state = Arc::new(AppState {
@@ -149,6 +169,7 @@ async fn main() -> Result<()> {
         shutdown_tx,
         core_ctx: ctx,
         connector_manager,
+        gateway,
     });
 
     // Public routes (no auth required)

@@ -17,3 +17,4 @@ tracing.workspace = true
 tokio.workspace = true
 chrono.workspace = true
 regex.workspace = true
+openalpaca_api.workspace = true

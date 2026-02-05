@@ -3128,6 +3128,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "openalpaca_api",
  "regex",
  "serde",
  "serde_json",

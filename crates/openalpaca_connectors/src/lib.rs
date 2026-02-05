@@ -18,6 +18,7 @@ pub mod startup;
 
 use async_trait::async_trait;
 use openalpaca_core::bus::EventBus;
+use openalpaca_core::gateway::Gateway;
 use openalpaca_storage::Database;
 use std::sync::Arc;
 
@@ -63,20 +64,22 @@ pub struct ConnectorBuilder {
     db: Arc<Database>,
     #[allow(dead_code)]
     bus: Arc<EventBus>,
+    gateway: Arc<Gateway>,
 }
 
 impl ConnectorBuilder {
-    pub fn new(db: Database, bus: EventBus) -> Self {
+    pub fn new(db: Database, bus: EventBus, gateway: Arc<Gateway>) -> Self {
         Self {
             db: Arc::new(db),
             bus: Arc::new(bus),
+            gateway,
         }
     }
 
     /// Build a Telegram connector (requires `telegram` feature).
     #[cfg(feature = "telegram")]
     pub fn telegram(self, token: String) -> telegram::TelegramConnector {
-        telegram::TelegramConnector::new(token, self.db, self.bus)
+        telegram::TelegramConnector::new(token, self.db, self.bus, self.gateway)
     }
 }
 
@@ -95,6 +98,7 @@ pub trait ConnectorFactory: Send + Sync {
         token: String,
         db: Database,
         bus: EventBus,
+        gateway: Arc<Gateway>,
     ) -> Result<startup::ConnectorHandle, ConnectorError>;
 }
 
@@ -122,8 +126,9 @@ impl ConnectorFactory for TelegramFactory {
         token: String,
         db: Database,
         bus: EventBus,
+        gateway: Arc<Gateway>,
     ) -> Result<startup::ConnectorHandle, ConnectorError> {
-        let handle = startup::spawn_telegram_connector(token, db, bus);
+        let handle = startup::spawn_telegram_connector(token, db, bus, gateway);
         Ok(handle)
     }
 }

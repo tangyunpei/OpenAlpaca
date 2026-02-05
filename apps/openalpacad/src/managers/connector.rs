@@ -1,6 +1,7 @@
 use anyhow::Result;
 use openalpaca_connectors::startup::ConnectorHandle;
 use openalpaca_core::bus::EventBus;
+use openalpaca_core::gateway::Gateway;
 use openalpaca_storage::{ConfigRepository, Database};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,14 +13,16 @@ use tracing::info;
 pub struct ConnectorManager {
     db: Database,
     bus: EventBus,
+    gateway: Arc<Gateway>,
     handles: Arc<Mutex<HashMap<String, ConnectorHandle>>>,
 }
 
 impl ConnectorManager {
-    pub fn new(db: Database, bus: EventBus) -> Self {
+    pub fn new(db: Database, bus: EventBus, gateway: Arc<Gateway>) -> Self {
         Self {
             db,
             bus,
+            gateway,
             handles: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -46,7 +49,7 @@ impl ConnectorManager {
             if enabled {
                 let token_key = format!("{}.token", name);
                 if let Ok(Some(token)) = config_repo.get(&token_key) {
-                    match factory.spawn(token, self.db.clone(), self.bus.clone()) {
+                    match factory.spawn(token, self.db.clone(), self.bus.clone(), self.gateway.clone()) {
                         Ok(handle) => {
                             handles.insert(name.to_string(), handle);
                             self.broadcast_status(name, "active");
@@ -197,7 +200,7 @@ impl ConnectorManager {
 
             if let Some(token) = config_repo.get(&token_key)? {
                 let handle = factory
-                    .spawn(token, self.db.clone(), self.bus.clone())
+                    .spawn(token, self.db.clone(), self.bus.clone(), self.gateway.clone())
                     .map_err(|e| anyhow::anyhow!("Failed to spawn {}: {}", name, e))?;
 
                 _guard.insert(name.to_string(), handle);

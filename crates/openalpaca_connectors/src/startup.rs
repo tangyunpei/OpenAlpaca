@@ -1,7 +1,9 @@
 //! Startup logic for auto-discovering and spawning connectors.
 
 use openalpaca_core::bus::EventBus;
+use openalpaca_core::gateway::Gateway;
 use openalpaca_storage::{ConfigRepository, Database};
+use std::sync::Arc;
 #[allow(unused_imports)]
 use tracing::{info, warn};
 
@@ -48,6 +50,7 @@ impl ConnectorHandle {
 pub fn auto_start_connectors(
     db: Database,
     bus: EventBus,
+    gateway: Arc<Gateway>,
 ) -> std::collections::HashMap<String, ConnectorHandle> {
     let mut started = std::collections::HashMap::new();
 
@@ -88,7 +91,8 @@ pub fn auto_start_connectors(
                 info!("Autostart: Finding Telegram Token (Source: {})", source);
 
                 // Clone dependencies to keep the originals valid for subsequent connectors
-                let connector = ConnectorBuilder::new(db.clone(), bus.clone()).telegram(token);
+                let connector =
+                    ConnectorBuilder::new(db.clone(), bus.clone(), gateway.clone()).telegram(token);
                 let handle = spawn_telegram(connector);
                 started.insert("telegram".to_string(), ConnectorHandle::Telegram(handle));
             }
@@ -105,8 +109,13 @@ pub fn auto_start_connectors(
 
 /// Spawn the Telegram connector using a provided token.
 #[cfg(feature = "telegram")]
-pub fn spawn_telegram_connector(token: String, db: Database, bus: EventBus) -> ConnectorHandle {
-    let connector = ConnectorBuilder::new(db, bus).telegram(token);
+pub fn spawn_telegram_connector(
+    token: String,
+    db: Database,
+    bus: EventBus,
+    gateway: Arc<Gateway>,
+) -> ConnectorHandle {
+    let connector = ConnectorBuilder::new(db, bus, gateway).telegram(token);
     ConnectorHandle::Telegram(spawn_telegram(connector))
 }
 

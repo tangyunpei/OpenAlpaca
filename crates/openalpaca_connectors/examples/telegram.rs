@@ -5,9 +5,16 @@
 //! 2. Run: TELOXIDE_TOKEN=your_token cargo run --example telegram --features telegram
 
 use openalpaca_connectors::TelegramConnector;
-use openalpaca_core::bus::EventBus;
+use openalpaca_core::{
+    bus::EventBus,
+    context::SharedContext,
+    gateway::{Gateway, MessageHandler},
+    lane::LaneManager,
+    security::policy::{Principal, Scope},
+};
 use openalpaca_storage::{Database, paths};
 use std::sync::Arc;
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,8 +35,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Starting Telegram Connector Example...");
     println!("Bot Token: {}...", &token[..8]);
 
-    // 4. Create and run connector
-    let connector = TelegramConnector::new(token, Arc::new(db), Arc::new(bus));
+    // 4. Create Gateway with a stub handler
+    struct EchoHandler;
+    impl MessageHandler for EchoHandler {
+        fn handle(
+            &self,
+            _request_id: Uuid,
+            _source: String,
+            content: String,
+            _principal: Principal,
+            _scope: Scope,
+        ) -> Result<String, String> {
+            Ok(format!("Echo: {content}"))
+        }
+    }
+
+    let gateway = Arc::new(Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        Arc::new(EchoHandler),
+        bus.clone(),
+    ));
+
+    // 5. Create and run connector
+    let connector = TelegramConnector::new(token, Arc::new(db), Arc::new(bus), gateway);
 
     // Note: In a real app, you'd spawn this or run in background
     // For the example, we run it blocking.

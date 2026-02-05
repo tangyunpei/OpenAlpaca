@@ -1,3 +1,3 @@
 mod router;
 
-pub use router::{Gateway, GatewayResponse};
+pub use router::{Gateway, GatewayRequest, GatewayResponse, MessageHandler};

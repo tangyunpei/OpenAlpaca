@@ -63,8 +63,9 @@ pub async fn command_handler(
             )
         }
         "process" => {
-            // PR-1: Route through CoreCtx unified pipeline
-            use openalpaca_core::middleware::prompt::AgentPersona;
+            // Route through Gateway (Phase 4.3)
+            use openalpaca_api::events::EventSource;
+            use openalpaca_core::gateway::GatewayRequest;
             use openalpaca_core::security::policy::{Principal, Scope};
 
             let content = request
@@ -74,47 +75,37 @@ pub async fn command_handler(
                 .unwrap_or("Hello from process command")
                 .to_string();
 
-            // Default to System principal (trusted, local call)
-            let principal = Principal::System;
-            let scope = Scope::Global;
-            let agent_persona = AgentPersona {
-                role: "Assistant".to_string(),
-                tone: "Friendly".to_string(),
-                domain_knowledge: vec![],
-            };
-
-            let req_uuid =
-                uuid::Uuid::parse_str(&request_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
-
-            match state.core_ctx.handle_user_request(
-                req_uuid,
-                "http".to_string(),
+            let response = state.gateway.handle_event(GatewayRequest {
+                source: EventSource::Api {
+                    request_id: request_id.clone(),
+                },
                 content,
-                principal,
-                scope,
-                &agent_persona,
-            ) {
-                Ok(output) => {
-                    state
-                        .event_broadcaster
-                        .command_received(&request_id, "process");
-                    (
-                        StatusCode::OK,
-                        Json(serde_json::json!({
-                            "request_id": request_id,
-                            "status": "completed",
-                            "output": output.content
-                        })),
-                    )
-                }
-                Err(e) => (
+                principal: Principal::System,
+                scope: Scope::Global,
+            });
+
+            // Check if the response is an error
+            if response.content.starts_with("Error: ") {
+                (
                     StatusCode::FORBIDDEN,
                     Json(serde_json::json!({
                         "request_id": request_id,
                         "status": "rejected",
-                        "error": e
+                        "error": response.content.strip_prefix("Error: ").unwrap_or(&response.content)
                     })),
-                ),
+                )
+            } else {
+                state
+                    .event_broadcaster
+                    .command_received(&request_id, "process");
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "request_id": request_id,
+                        "status": "completed",
+                        "output": response.content
+                    })),
+                )
             }
         }
         // PR-2: /link command skeleton
