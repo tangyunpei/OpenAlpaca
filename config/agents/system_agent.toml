@@ -16,3 +16,5 @@ verbosity = "concise"
 max_tool_calls = 30
 timeout_seconds = 600
 require_confirmation_for = ["file_delete", "shell_execute"]
+allowed_capabilities = ["file_read", "file_write", "shell_execute", "file_organize"]
+denied_capabilities = ["web_search"]

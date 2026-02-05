@@ -180,6 +180,22 @@ async fn main() -> Result<()> {
                 } => {
                     eb_bridge.agent_status(&agent_id, "", &status, current_task_id);
                 }
+                openalpaca_core::events::SystemEvent::SecurityViolation {
+                    agent_id, tool_name, reason, ..
+                } => {
+                    tracing::warn!(
+                        "Security violation: agent={}, tool={}, reason={}",
+                        agent_id, tool_name, reason
+                    );
+                }
+                openalpaca_core::events::SystemEvent::ToolExecuted {
+                    agent_id, tool_name, success, duration_ms, ..
+                } => {
+                    tracing::debug!(
+                        "Tool executed: agent={}, tool={}, success={}, duration={}ms",
+                        agent_id, tool_name, success, duration_ms
+                    );
+                }
                 _ => {}
             }
         }
@@ -272,9 +288,18 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Construct Orchestrator as the new message handler
+    // Construct SecurityGate → SandboxManager → StubToolExecutor chain
     #[allow(deprecated)]
     let bus = ctx.bus.clone();
+    let stub_executor = std::sync::Arc::new(openalpaca_core::runner::StubToolExecutor);
+    let sandbox_manager = std::sync::Arc::new(
+        openalpaca_core::security::sandbox::SandboxManager::new(stub_executor, bus.clone()),
+    );
+    let security_gate = std::sync::Arc::new(
+        openalpaca_core::security::gate::SecurityGate::new(sandbox_manager),
+    );
+
+    // Construct Orchestrator as the new message handler
     let orchestrator = Arc::new(Orchestrator::new(
         shared_context.clone(),
         lane_manager.clone(),
@@ -282,6 +307,7 @@ async fn main() -> Result<()> {
         SystemPersona::default(),
         llm_provider,
         openalpaca_core::runner::LoopConfig::default(),
+        security_gate,
     ));
     let handler = Arc::new(gateway_bridge::OrchestratorHandler::new(orchestrator));
     let gateway = Arc::new(Gateway::new(

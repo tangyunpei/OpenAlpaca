@@ -1,3 +1,4 @@
+use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use openalpaca_llm::{ChatMessage, ChatRequest, FinishReason, LlmProvider, ToolDefinition};
 use std::time::Duration;
 
@@ -40,13 +41,17 @@ pub enum LoopFinishReason {
 
 /// Run the agentic loop.
 ///
-/// Currently tool execution is stubbed (returns error "tool not implemented").
-/// Phase 5.2 will implement real tool execution via ToolSandbox.
+/// When `sandbox` is `Some`, tool calls are routed through the SandboxManager
+/// with capability checks, input sanitization, and timeout enforcement.
+/// When `sandbox` is `None`, falls back to stub behavior (backward compat).
 pub async fn run_agentic_loop(
     provider: &dyn LlmProvider,
     initial_messages: Vec<ChatMessage>,
     tools: Vec<ToolDefinition>,
     config: &LoopConfig,
+    sandbox: Option<&SandboxManager>,
+    agent_id: &str,
+    sandbox_policy: Option<&SandboxPolicy>,
 ) -> LoopResult {
     let mut messages = initial_messages;
     let mut rounds = 0usize;
@@ -98,14 +103,36 @@ pub async fn run_agentic_loop(
                     // Record assistant message with tool calls
                     messages.push(ChatMessage::assistant_with_tools(&response));
 
-                    // Stub: return error for each tool call (Phase 5.2 implements real tools)
-                    for tc in &response.tool_calls {
+                    // Enforce max_tools_per_round
+                    let calls_this_round = response.tool_calls.len().min(config.max_tools_per_round);
+
+                    for tc in response.tool_calls.iter().take(calls_this_round) {
                         tool_calls_made += 1;
+
+                        let result_text = if let (Some(sbx), Some(policy)) =
+                            (sandbox, sandbox_policy)
+                        {
+                            // Route through sandbox
+                            match sbx.execute_tool(agent_id, tc, policy).await {
+                                Ok(output) => output,
+                                Err(err) => format!("Error: {}", err),
+                            }
+                        } else {
+                            // Fallback: stub
+                            format!("Error: tool '{}' not yet implemented", tc.name)
+                        };
+
+                        messages.push(ChatMessage::tool_result(&tc.id, &result_text));
+                    }
+
+                    // If we truncated, add error for remaining tool calls
+                    for tc in response.tool_calls.iter().skip(calls_this_round) {
                         messages.push(ChatMessage::tool_result(
                             &tc.id,
-                            &format!("Error: tool '{}' not yet implemented", tc.name),
+                            "Error: max tools per round exceeded",
                         ));
                     }
+
                     continue;
                 }
 
@@ -239,7 +266,7 @@ mod tests {
         let messages = vec![ChatMessage::user("hello")];
         let config = LoopConfig::default();
 
-        let result = run_agentic_loop(&provider, messages, vec![], &config).await;
+        let result = run_agentic_loop(&provider, messages, vec![], &config, None, "test", None).await;
 
         assert_eq!(result.finish_reason, LoopFinishReason::Complete);
         assert_eq!(result.rounds_used, 1);
@@ -257,7 +284,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_agentic_loop(&provider, messages, vec![], &config).await;
+        let result = run_agentic_loop(&provider, messages, vec![], &config, None, "test", None).await;
 
         assert_eq!(result.finish_reason, LoopFinishReason::MaxRounds);
         assert_eq!(result.rounds_used, 3);
@@ -273,7 +300,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_agentic_loop(&provider, messages, vec![], &config).await;
+        let result = run_agentic_loop(&provider, messages, vec![], &config, None, "test", None).await;
 
         assert_eq!(result.finish_reason, LoopFinishReason::CostExceeded);
     }
@@ -286,7 +313,7 @@ mod tests {
         let messages = vec![ChatMessage::user("hello")];
         let config = LoopConfig::default();
 
-        let result = run_agentic_loop(&provider, messages, vec![], &config).await;
+        let result = run_agentic_loop(&provider, messages, vec![], &config, None, "test", None).await;
 
         match result.finish_reason {
             LoopFinishReason::Error(msg) => assert!(msg.contains("connection refused")),
@@ -304,7 +331,7 @@ mod tests {
         let messages = vec![ChatMessage::user("search something")];
         let config = LoopConfig::default();
 
-        let result = run_agentic_loop(&provider, messages, vec![], &config).await;
+        let result = run_agentic_loop(&provider, messages, vec![], &config, None, "test", None).await;
 
         assert_eq!(result.finish_reason, LoopFinishReason::Complete);
         assert_eq!(result.rounds_used, 2);
@@ -321,11 +348,161 @@ mod tests {
         let messages = vec![ChatMessage::user("test")];
         let config = LoopConfig::default();
 
-        let result = run_agentic_loop(&provider, messages, vec![], &config).await;
+        let result = run_agentic_loop(&provider, messages, vec![], &config, None, "test", None).await;
 
         assert_eq!(result.rounds_used, 2);
         assert_eq!(result.total_input_tokens, 30); // 20 + 10
         assert_eq!(result.total_output_tokens, 20); // 15 + 5
         assert_eq!(result.tool_calls_made, 1);
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_execution() {
+        use crate::bus::EventBus;
+        use crate::security::sandbox::{SandboxManager, SandboxPolicy, ToolExecutor};
+
+        struct TestExecutor;
+
+        #[async_trait]
+        impl ToolExecutor for TestExecutor {
+            async fn execute(
+                &self,
+                _tool_name: &str,
+                _arguments: &serde_json::Value,
+            ) -> Result<String, String> {
+                Ok("sandbox result".to_string())
+            }
+            fn registered_tools(&self) -> Vec<String> {
+                vec!["search".to_string()]
+            }
+        }
+
+        let sandbox = SandboxManager::new(
+            std::sync::Arc::new(TestExecutor),
+            EventBus::default(),
+        );
+        let policy = SandboxPolicy {
+            agent_id: "test_agent".to_string(),
+            allowed_capabilities: vec![],
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 60,
+        };
+
+        let provider = MockProvider::new(vec![
+            Ok(MockProvider::tool_use_response()),
+            Ok(MockProvider::simple_response("Done with sandbox.")),
+        ]);
+        let messages = vec![ChatMessage::user("test")];
+        let config = LoopConfig::default();
+
+        let result = run_agentic_loop(
+            &provider, messages, vec![], &config,
+            Some(&sandbox), "test_agent", Some(&policy),
+        ).await;
+
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        assert_eq!(result.tool_calls_made, 1);
+        assert_eq!(result.final_content, "Done with sandbox.");
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_denied_tool() {
+        use crate::bus::EventBus;
+        use crate::security::sandbox::{SandboxManager, SandboxPolicy, ToolExecutor};
+
+        struct TestExecutor;
+
+        #[async_trait]
+        impl ToolExecutor for TestExecutor {
+            async fn execute(
+                &self,
+                _tool_name: &str,
+                _arguments: &serde_json::Value,
+            ) -> Result<String, String> {
+                Ok("should not reach".to_string())
+            }
+            fn registered_tools(&self) -> Vec<String> {
+                vec!["search".to_string()]
+            }
+        }
+
+        let sandbox = SandboxManager::new(
+            std::sync::Arc::new(TestExecutor),
+            EventBus::default(),
+        );
+        let policy = SandboxPolicy {
+            agent_id: "test_agent".to_string(),
+            allowed_capabilities: vec![],
+            denied_capabilities: vec!["search".to_string()], // deny the tool
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 60,
+        };
+
+        let provider = MockProvider::new(vec![
+            Ok(MockProvider::tool_use_response()),
+            Ok(MockProvider::simple_response("Fallback.")),
+        ]);
+        let messages = vec![ChatMessage::user("test")];
+        let config = LoopConfig::default();
+
+        let result = run_agentic_loop(
+            &provider, messages, vec![], &config,
+            Some(&sandbox), "test_agent", Some(&policy),
+        ).await;
+
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        assert_eq!(result.tool_calls_made, 1);
+        // The LLM gets back an error and responds with "Fallback."
+        assert_eq!(result.final_content, "Fallback.");
+    }
+
+    #[tokio::test]
+    async fn test_max_tools_per_round_enforced() {
+        // Create a response with 3 tool calls
+        let multi_tool_response = ChatResponse {
+            content: "Using tools.".to_string(),
+            tool_calls: vec![
+                openalpaca_llm::ToolCall {
+                    id: "tc_1".to_string(),
+                    name: "search".to_string(),
+                    arguments: serde_json::json!({}),
+                },
+                openalpaca_llm::ToolCall {
+                    id: "tc_2".to_string(),
+                    name: "search".to_string(),
+                    arguments: serde_json::json!({}),
+                },
+                openalpaca_llm::ToolCall {
+                    id: "tc_3".to_string(),
+                    name: "search".to_string(),
+                    arguments: serde_json::json!({}),
+                },
+            ],
+            model: "mock-model".to_string(),
+            usage: Usage {
+                input_tokens: 20,
+                output_tokens: 15,
+            },
+            finish_reason: FinishReason::ToolUse,
+        };
+
+        let provider = MockProvider::new(vec![
+            Ok(multi_tool_response),
+            Ok(MockProvider::simple_response("Done.")),
+        ]);
+        let messages = vec![ChatMessage::user("test")];
+        let config = LoopConfig {
+            max_tools_per_round: 2, // Only allow 2 per round
+            ..Default::default()
+        };
+
+        let result = run_agentic_loop(&provider, messages, vec![], &config, None, "test", None).await;
+
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        // Only 2 tool calls should have been counted (the 3rd was truncated)
+        assert_eq!(result.tool_calls_made, 2);
     }
 }

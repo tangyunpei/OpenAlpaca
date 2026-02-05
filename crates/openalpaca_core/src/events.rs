@@ -89,6 +89,21 @@ pub enum SystemEvent {
         intent_type: String,
         timestamp: DateTime<Utc>,
     },
+    /// A security policy was violated
+    SecurityViolation {
+        agent_id: String,
+        tool_name: String,
+        reason: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// A tool was executed by an agent
+    ToolExecuted {
+        agent_id: String,
+        tool_name: String,
+        success: bool,
+        duration_ms: u64,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

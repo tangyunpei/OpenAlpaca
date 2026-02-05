@@ -41,6 +41,8 @@ pub struct AgentConstraintsConfig {
     pub timeout_seconds: Option<u64>,
     pub max_cost_per_task: Option<f64>,
     pub require_confirmation_for: Option<Vec<String>>,
+    pub allowed_capabilities: Option<Vec<String>>,
+    pub denied_capabilities: Option<Vec<String>>,
 }
 
 impl AgentConfigFile {
@@ -63,19 +65,35 @@ impl AgentConfigFile {
             verbosity: self.preset.verbosity.clone().unwrap_or_else(|| "normal".to_string()),
         };
 
+        // Merge skills.denied into denied_capabilities
+        let skills_denied = self.skills.denied.clone().unwrap_or_default();
+
         let constraints = self
             .constraints
             .as_ref()
-            .map(|c| AgentConstraints {
-                max_tool_calls: c.max_tool_calls,
-                timeout_seconds: c.timeout_seconds,
-                max_cost_per_task: c.max_cost_per_task,
-                require_confirmation_for: c
-                    .require_confirmation_for
-                    .clone()
-                    .unwrap_or_default(),
+            .map(|c| {
+                let mut denied = c.denied_capabilities.clone().unwrap_or_default();
+                for d in &skills_denied {
+                    if !denied.contains(d) {
+                        denied.push(d.clone());
+                    }
+                }
+                AgentConstraints {
+                    max_tool_calls: c.max_tool_calls,
+                    timeout_seconds: c.timeout_seconds,
+                    max_cost_per_task: c.max_cost_per_task,
+                    require_confirmation_for: c
+                        .require_confirmation_for
+                        .clone()
+                        .unwrap_or_default(),
+                    allowed_capabilities: c.allowed_capabilities.clone().unwrap_or_default(),
+                    denied_capabilities: denied,
+                }
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| AgentConstraints {
+                denied_capabilities: skills_denied,
+                ..Default::default()
+            });
 
         SubAgent {
             id: self.agent.id,
@@ -109,11 +127,23 @@ impl AgentConfigFile {
             verbosity: self.preset.verbosity.clone().unwrap_or_else(|| "normal".to_string()),
         };
 
-        let constraints = self.constraints.as_ref().map(|c| AgentConstraints {
-            max_tool_calls: c.max_tool_calls,
-            timeout_seconds: c.timeout_seconds,
-            max_cost_per_task: c.max_cost_per_task,
-            require_confirmation_for: c.require_confirmation_for.clone().unwrap_or_default(),
+        let skills_denied2 = self.skills.denied.clone().unwrap_or_default();
+
+        let constraints = self.constraints.as_ref().map(|c| {
+            let mut denied = c.denied_capabilities.clone().unwrap_or_default();
+            for d in &skills_denied2 {
+                if !denied.contains(d) {
+                    denied.push(d.clone());
+                }
+            }
+            AgentConstraints {
+                max_tool_calls: c.max_tool_calls,
+                timeout_seconds: c.timeout_seconds,
+                max_cost_per_task: c.max_cost_per_task,
+                require_confirmation_for: c.require_confirmation_for.clone().unwrap_or_default(),
+                allowed_capabilities: c.allowed_capabilities.clone().unwrap_or_default(),
+                denied_capabilities: denied,
+            }
         });
 
         let now = Utc::now();
@@ -194,5 +224,62 @@ require_confirmation_for = ["file_delete"]
         assert_eq!(sc.id, "test_agent");
         assert_eq!(sc.status, "idle");
         assert!(sc.constraints_json.is_some());
+    }
+
+    #[test]
+    fn test_skills_denied_merged_into_denied_capabilities() {
+        let config: AgentConfigFile = toml::from_str(sample_toml()).unwrap();
+        let agent = config.into_subagent();
+        // skills.denied = ["shell_execute"] should be merged
+        assert!(agent.constraints.denied_capabilities.contains(&"shell_execute".to_string()));
+    }
+
+    #[test]
+    fn test_toml_with_capabilities() {
+        let toml_str = r#"
+[agent]
+id = "cap_agent"
+name = "Cap Agent"
+description = "Agent with capabilities"
+
+[skills]
+assigned = ["web_search"]
+denied = ["shell_execute"]
+
+[preset]
+persona = "test"
+
+[constraints]
+max_tool_calls = 5
+allowed_capabilities = ["web_search", "summarize"]
+denied_capabilities = ["file_write"]
+"#;
+        let config: AgentConfigFile = toml::from_str(toml_str).unwrap();
+        let agent = config.into_subagent();
+        assert_eq!(agent.constraints.allowed_capabilities, vec!["web_search", "summarize"]);
+        // "file_write" from denied_capabilities + "shell_execute" from skills.denied
+        assert!(agent.constraints.denied_capabilities.contains(&"file_write".to_string()));
+        assert!(agent.constraints.denied_capabilities.contains(&"shell_execute".to_string()));
+    }
+
+    #[test]
+    fn test_toml_without_constraints_but_with_denied_skills() {
+        let toml_str = r#"
+[agent]
+id = "no_constraints"
+name = "No Constraints"
+description = "Agent without constraints section"
+
+[skills]
+assigned = ["web_search"]
+denied = ["shell_execute"]
+
+[preset]
+persona = "test"
+"#;
+        let config: AgentConfigFile = toml::from_str(toml_str).unwrap();
+        let agent = config.into_subagent();
+        // skills.denied should still be captured even without [constraints]
+        assert!(agent.constraints.denied_capabilities.contains(&"shell_execute".to_string()));
     }
 }

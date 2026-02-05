@@ -84,6 +84,10 @@ pub struct AgentConstraints {
     pub timeout_seconds: Option<u64>,
     pub max_cost_per_task: Option<f64>,
     pub require_confirmation_for: Vec<String>,
+    #[serde(default)]
+    pub allowed_capabilities: Vec<String>,
+    #[serde(default)]
+    pub denied_capabilities: Vec<String>,
 }
 
 impl Default for AgentConstraints {
@@ -93,6 +97,8 @@ impl Default for AgentConstraints {
             timeout_seconds: None,
             max_cost_per_task: None,
             require_confirmation_for: Vec::new(),
+            allowed_capabilities: Vec::new(),
+            denied_capabilities: Vec::new(),
         }
     }
 }
@@ -201,5 +207,30 @@ mod tests {
         let c = AgentConstraints::default();
         assert!(c.max_tool_calls.is_none());
         assert!(c.require_confirmation_for.is_empty());
+        assert!(c.allowed_capabilities.is_empty());
+        assert!(c.denied_capabilities.is_empty());
+    }
+
+    #[test]
+    fn test_constraints_deserialize_without_capabilities() {
+        // Existing JSON without new fields should deserialize fine via #[serde(default)]
+        let json = r#"{"max_tool_calls":10,"require_confirmation_for":[]}"#;
+        let c: AgentConstraints = serde_json::from_str(json).unwrap();
+        assert_eq!(c.max_tool_calls, Some(10));
+        assert!(c.allowed_capabilities.is_empty());
+        assert!(c.denied_capabilities.is_empty());
+    }
+
+    #[test]
+    fn test_constraints_with_capabilities() {
+        let json = r#"{
+            "max_tool_calls": 5,
+            "require_confirmation_for": [],
+            "allowed_capabilities": ["web_search", "summarize"],
+            "denied_capabilities": ["shell_execute"]
+        }"#;
+        let c: AgentConstraints = serde_json::from_str(json).unwrap();
+        assert_eq!(c.allowed_capabilities, vec!["web_search", "summarize"]);
+        assert_eq!(c.denied_capabilities, vec!["shell_execute"]);
     }
 }

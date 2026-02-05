@@ -17,3 +17,5 @@ verbosity = "detailed"
 max_tool_calls = 20
 timeout_seconds = 300
 max_cost_per_task = 0.50
+allowed_capabilities = ["web_search", "web_fetch", "summarize", "browser"]
+denied_capabilities = ["shell_execute", "file_write"]

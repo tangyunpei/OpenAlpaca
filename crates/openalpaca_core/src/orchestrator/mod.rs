@@ -14,7 +14,8 @@ use crate::lane::{LaneManager, TaskLaneStatus};
 use crate::middleware::guard::OutputGuard;
 use crate::middleware::prompt::{AgentPersona, PromptAssembler, SystemPersona};
 use crate::runner::{LoopConfig, run_agentic_loop};
-use crate::security::policy::{Principal, Scope, TrustGate};
+use crate::security::gate::SecurityGate;
+use crate::security::policy::{Principal, Scope};
 use crate::types::Capability;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmProvider};
@@ -38,6 +39,7 @@ pub struct Orchestrator {
     pub system_persona: SystemPersona,
     pub llm_provider: Option<Arc<dyn LlmProvider>>,
     pub loop_config: LoopConfig,
+    pub security_gate: Arc<SecurityGate>,
     intent_parser: IntentParser,
     task_dispatcher: TaskDispatcher,
 }
@@ -50,6 +52,7 @@ impl Orchestrator {
         system_persona: SystemPersona,
         llm_provider: Option<Arc<dyn LlmProvider>>,
         loop_config: LoopConfig,
+        security_gate: Arc<SecurityGate>,
     ) -> Self {
         let task_dispatcher =
             TaskDispatcher::new(shared_context.clone(), lane_manager.clone(), bus.clone());
@@ -60,16 +63,18 @@ impl Orchestrator {
             system_persona,
             llm_provider,
             loop_config,
+            security_gate,
             intent_parser: IntentParser,
             task_dispatcher,
         }
     }
 
     /// Handle a user message through the full pipeline:
-    /// 1. TrustGate permission check
-    /// 2. Intent classification
-    /// 3. Emit IntentClassified event
-    /// 4. Route to appropriate handler
+    /// 1. SecurityGate permission check (wraps TrustGate)
+    /// 2. Input sanitization
+    /// 3. Intent classification
+    /// 4. Emit IntentClassified event
+    /// 5. Route to appropriate handler
     pub async fn handle_message(
         &self,
         request_id: Uuid,
@@ -78,13 +83,16 @@ impl Orchestrator {
         principal: Principal,
         scope: Scope,
     ) -> Result<String, String> {
-        // 1. Permission check
+        // 1. Permission check via SecurityGate (wraps TrustGate)
         let capability = Capability {
             name: "chat.respond".to_string(),
         };
-        TrustGate::check(&principal, &capability, &scope)?;
+        SecurityGate::check_access(&principal, &capability, &scope)?;
 
-        // 2. Classify intent
+        // 2. Input sanitization
+        let content = SecurityGate::sanitize_input(&content)?;
+
+        // 3. Classify intent
         let intent = self.intent_parser.parse(&content);
 
         // 3. Emit IntentClassified event
@@ -141,6 +149,9 @@ impl Orchestrator {
                 messages,
                 vec![], // No tools for simple queries
                 &self.loop_config,
+                Some(self.security_gate.sandbox()),
+                "orchestrator",
+                None, // No policy for simple queries (no tools)
             )
             .await;
             result.final_content
@@ -294,11 +305,22 @@ fn task_entry_to_json(entry: &TaskEntry) -> String {
 mod tests {
     use super::*;
     use crate::agent::subagent::{AgentConstraints, AgentPreset, AgentStatus, Skill, SubAgent};
+    use crate::runner::StubToolExecutor;
+    use crate::security::sandbox::SandboxManager;
+
+    fn make_security_gate(bus: &EventBus) -> Arc<SecurityGate> {
+        let sandbox = Arc::new(SandboxManager::new(
+            Arc::new(StubToolExecutor),
+            bus.clone(),
+        ));
+        Arc::new(SecurityGate::new(sandbox))
+    }
 
     fn make_orchestrator() -> Orchestrator {
         let ctx = Arc::new(SharedContext::new());
         let lanes = Arc::new(LaneManager::new());
         let bus = EventBus::default();
+        let gate = make_security_gate(&bus);
         Orchestrator::new(
             ctx,
             lanes,
@@ -306,6 +328,7 @@ mod tests {
             SystemPersona::default(),
             None,
             LoopConfig::default(),
+            gate,
         )
     }
 
@@ -316,6 +339,7 @@ mod tests {
         }
         let lanes = Arc::new(LaneManager::new());
         let bus = EventBus::default();
+        let gate = make_security_gate(&bus);
         Orchestrator::new(
             ctx,
             lanes,
@@ -323,6 +347,7 @@ mod tests {
             SystemPersona::default(),
             None,
             LoopConfig::default(),
+            gate,
         )
     }
 
@@ -521,6 +546,7 @@ mod tests {
         let ctx = Arc::new(SharedContext::new());
         let lanes = Arc::new(LaneManager::new());
         let bus = EventBus::default();
+        let gate = make_security_gate(&bus);
         let orch = Orchestrator::new(
             ctx,
             lanes,
@@ -528,6 +554,7 @@ mod tests {
             SystemPersona::default(),
             Some(Arc::new(MockLlm)),
             LoopConfig::default(),
+            gate,
         );
 
         let result = orch
@@ -543,5 +570,42 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
         assert_eq!(json["status"], "ok");
         assert_eq!(json["answer"], "Mock LLM response");
+    }
+
+    #[tokio::test]
+    async fn test_input_sanitization_blocks_null_bytes() {
+        let orch = make_orchestrator();
+        let result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "cli".to_string(),
+                "hello\0world".to_string(),
+                Principal::System,
+                Scope::Global,
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("null bytes"));
+    }
+
+    #[tokio::test]
+    async fn test_security_gate_replaces_trust_gate() {
+        // Verify that SecurityGate (wrapping TrustGate) still blocks external users
+        let orch = make_orchestrator();
+        let result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "telegram".to_string(),
+                "hello".to_string(),
+                Principal::External {
+                    provider: "telegram".to_string(),
+                    id: "unknown".to_string(),
+                },
+                Scope::Global,
+            )
+            .await;
+        assert!(result.is_err());
+        // SecurityGate wraps TrustGate error as "Access denied: Permission Denied: ..."
+        assert!(result.unwrap_err().contains("denied"));
     }
 }

@@ -15,3 +15,5 @@ verbosity = "detailed"
 [constraints]
 max_tool_calls = 10
 timeout_seconds = 180
+allowed_capabilities = ["text_generate", "markdown_format", "file_write"]
+denied_capabilities = ["shell_execute", "web_search"]
