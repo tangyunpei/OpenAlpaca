@@ -10,3 +10,6 @@ CREATE TABLE IF NOT EXISTS system_config (
 
 -- Index for faster lookups (though primary key is already indexed)
 -- No extra index needed for PK.
+
+-- Update schema version
+UPDATE schema_version SET version = 4 WHERE version = 3;

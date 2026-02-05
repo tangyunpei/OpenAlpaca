@@ -31,4 +31,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "config",
         sql: include_str!("004_config.sql"),
     },
+    Migration {
+        version: 5,
+        name: "preference",
+        sql: include_str!("005_preference.sql"),
+    },
 ];

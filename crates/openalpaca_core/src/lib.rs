@@ -1,6 +1,9 @@
 pub mod agent;
 pub mod bus;
+pub mod context;
 pub mod events;
+pub mod gateway;
+pub mod lane;
 pub mod memory;
 pub mod middleware;
 pub mod runtime;

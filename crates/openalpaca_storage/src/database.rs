@@ -144,7 +144,8 @@ impl Database {
             // Note: SQLite doesn't have TRUNCATE, so we use DELETE.
             // Order matters if FKs are ON.
 
-            // 1. Identity & Config System
+            // 1. Identity, Config & Preference System
+            conn.execute("DELETE FROM preference", [])?;
             conn.execute("DELETE FROM conversation_map", [])?;
             conn.execute("DELETE FROM link_token", [])?;
             conn.execute("DELETE FROM external_identity", [])?;
@@ -174,7 +175,7 @@ mod tests {
 
         let db = Database::open(&db_path).unwrap();
         assert!(db_path.exists());
-        assert_eq!(db.schema_version().unwrap(), 2);
+        assert_eq!(db.schema_version().unwrap(), 5);
     }
 
     #[test]
@@ -186,7 +187,7 @@ mod tests {
         let _db1 = Database::open(&db_path).unwrap();
         let db2 = Database::open(&db_path).unwrap();
 
-        assert_eq!(db2.schema_version().unwrap(), 2);
+        assert_eq!(db2.schema_version().unwrap(), 5);
     }
 
     #[test]

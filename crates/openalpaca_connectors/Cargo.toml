@@ -38,6 +38,7 @@ chrono.workspace = true
 uuid.workspace = true
 
 # Internal crates
+openalpaca_api.workspace = true
 openalpaca_core.workspace = true
 openalpaca_storage.workspace = true
 

@@ -15,4 +15,5 @@ pub use models::{Agent, EventLog, Memory, MemoryRole};
 pub use models::{ConversationMap, ExternalIdentity, GlobalUser, LinkToken};
 pub use repository::{
     AgentRepository, ConfigRepository, EventLogRepository, IdentityRepository, MemoryRepository,
+    PreferenceRepository,
 };

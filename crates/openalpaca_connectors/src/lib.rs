@@ -8,6 +8,7 @@
 //!
 //! All connectors implement the `Connector` trait for a uniform interface.
 
+pub mod adapter;
 pub mod common;
 
 #[cfg(feature = "telegram")]
