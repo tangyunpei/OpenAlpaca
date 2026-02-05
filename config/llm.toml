@@ -1,0 +1,20 @@
+# LLM Provider Configuration
+# Supported providers: "anthropic", "openai", "ollama"
+#
+# === Ollama (local, no API key needed) ===
+provider = "ollama"
+model = "llama3"
+base_url = "http://localhost:11434/v1"
+max_tokens = 4096
+#
+# === Anthropic ===
+# provider = "anthropic"
+# model = "claude-sonnet-4-5-20250929"
+# api_key = "sk-..."  # Or set ANTHROPIC_API_KEY env var
+# max_tokens = 4096
+#
+# === OpenAI ===
+# provider = "openai"
+# model = "gpt-4o"
+# api_key = "sk-..."  # Or set OPENAI_API_KEY env var
+# max_tokens = 4096

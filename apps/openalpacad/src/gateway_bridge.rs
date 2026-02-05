@@ -1,5 +1,6 @@
 #[allow(deprecated)]
 use crate::core_ctx::CoreCtx;
+use async_trait::async_trait;
 use openalpaca_core::{
     gateway::MessageHandler,
     middleware::prompt::AgentPersona,
@@ -23,8 +24,9 @@ impl CoreCtxHandler {
 }
 
 #[allow(deprecated)]
+#[async_trait]
 impl MessageHandler for CoreCtxHandler {
-    fn handle(
+    async fn handle(
         &self,
         request_id: Uuid,
         source: String,
@@ -55,8 +57,9 @@ impl OrchestratorHandler {
     }
 }
 
+#[async_trait]
 impl MessageHandler for OrchestratorHandler {
-    fn handle(
+    async fn handle(
         &self,
         request_id: Uuid,
         source: String,
@@ -66,5 +69,6 @@ impl MessageHandler for OrchestratorHandler {
     ) -> Result<String, String> {
         self.orchestrator
             .handle_message(request_id, source, content, principal, scope)
+            .await
     }
 }

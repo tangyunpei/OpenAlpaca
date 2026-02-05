@@ -82,7 +82,7 @@ pub async fn command_handler(
                 content,
                 principal: Principal::System,
                 scope: Scope::Global,
-            });
+            }).await;
 
             // Check if the response is an error
             if response.content.starts_with("Error: ") {

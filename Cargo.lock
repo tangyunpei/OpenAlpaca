@@ -3129,6 +3129,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "openalpaca_api",
+ "openalpaca_llm",
  "openalpaca_storage",
  "regex",
  "serde",
@@ -3155,6 +3156,20 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-opener",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "openalpaca_llm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.8.2",
  "tracing",
 ]
 
@@ -3204,12 +3219,14 @@ name = "openalpacad"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "chrono",
  "futures-util",
  "openalpaca_api",
  "openalpaca_connectors",
  "openalpaca_core",
+ "openalpaca_llm",
  "openalpaca_storage",
  "openalpaca_wake",
  "rand 0.9.2",

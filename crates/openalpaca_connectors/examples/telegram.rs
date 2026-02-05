@@ -4,6 +4,7 @@
 //! 1. Get a bot token from @BotFather
 //! 2. Run: TELOXIDE_TOKEN=your_token cargo run --example telegram --features telegram
 
+use async_trait::async_trait;
 use openalpaca_connectors::TelegramConnector;
 use openalpaca_core::{
     bus::EventBus,
@@ -27,18 +28,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Connect to the real system database (shared with Daemon)
     let db_path = paths::database_path()?;
-    println!("📂 Using Database: {}", db_path.display());
+    println!("Using Database: {}", db_path.display());
 
     let db = Database::open(&db_path)?;
     let bus = EventBus::default();
 
-    println!("🚀 Starting Telegram Connector Example...");
+    println!("Starting Telegram Connector Example...");
     println!("Bot Token: {}...", &token[..8]);
 
     // 4. Create Gateway with a stub handler
     struct EchoHandler;
+
+    #[async_trait]
     impl MessageHandler for EchoHandler {
-        fn handle(
+        async fn handle(
             &self,
             _request_id: Uuid,
             _source: String,

@@ -167,7 +167,7 @@ impl TelegramConnector {
             scope: Scope::Conversation {
                 id: chat_id.0.to_string(),
             },
-        });
+        }).await;
 
         // Step 5: Send response back to Telegram
         bot.send_message(chat_id, &response.content).await?;

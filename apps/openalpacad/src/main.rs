@@ -244,6 +244,34 @@ async fn main() -> Result<()> {
 
     let lane_manager = Arc::new(LaneManager::new());
 
+    // Step 5.2.2: Load LLM config (Phase 5.1)
+    let llm_provider: Option<Arc<dyn openalpaca_llm::LlmProvider>> = {
+        let llm_config_path = std::env::current_dir()
+            .unwrap_or_default()
+            .join("config/llm.toml");
+        if llm_config_path.exists() {
+            match openalpaca_llm::LlmConfig::from_file(&llm_config_path) {
+                Ok(config) => match openalpaca_llm::build_provider(&config) {
+                    Ok(provider) => {
+                        info!("LLM provider loaded: {}", provider.name());
+                        Some(Arc::from(provider))
+                    }
+                    Err(e) => {
+                        warn!("Failed to build LLM provider: {e}. Falling back to echo stub.");
+                        None
+                    }
+                },
+                Err(e) => {
+                    warn!("Failed to load LLM config: {e}. Falling back to echo stub.");
+                    None
+                }
+            }
+        } else {
+            info!("No config/llm.toml found. Using echo stub.");
+            None
+        }
+    };
+
     // Construct Orchestrator as the new message handler
     #[allow(deprecated)]
     let bus = ctx.bus.clone();
@@ -252,6 +280,8 @@ async fn main() -> Result<()> {
         lane_manager.clone(),
         bus.clone(),
         SystemPersona::default(),
+        llm_provider,
+        openalpaca_core::runner::LoopConfig::default(),
     ));
     let handler = Arc::new(gateway_bridge::OrchestratorHandler::new(orchestrator));
     let gateway = Arc::new(Gateway::new(

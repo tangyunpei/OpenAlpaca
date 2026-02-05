@@ -3,15 +3,17 @@ use crate::context::SharedContext;
 use crate::events::SystemEvent;
 use crate::lane::{LaneKey, LaneManager};
 use crate::security::policy::{Principal, Scope};
+use async_trait::async_trait;
 use chrono::Utc;
 use openalpaca_api::events::EventSource;
 use std::sync::Arc;
 use uuid::Uuid;
 
 /// Trait for processing messages through the pipeline.
-/// The daemon implements this by delegating to CoreCtx.
+/// The daemon implements this by delegating to the Orchestrator.
+#[async_trait]
 pub trait MessageHandler: Send + Sync {
-    fn handle(
+    async fn handle(
         &self,
         request_id: Uuid,
         source: String,
@@ -60,7 +62,7 @@ impl Gateway {
     }
 
     /// Handle an inbound event from any source.
-    pub fn handle_event(&self, req: GatewayRequest) -> GatewayResponse {
+    pub async fn handle_event(&self, req: GatewayRequest) -> GatewayResponse {
         let (user_id, source_name) = derive_user_and_source(&req.source);
         let key = LaneKey::new(&user_id, &source_name);
         let lane = self.lane_manager.get_or_create_conversation(key.clone());
@@ -78,14 +80,12 @@ impl Gateway {
         // Record message on the lane
         lane.record_message();
 
-        // Delegate to the handler (CoreCtx pipeline)
-        match self.handler.handle(
-            request_id,
-            source_name,
-            req.content,
-            req.principal,
-            req.scope,
-        ) {
+        // Delegate to the handler
+        match self
+            .handler
+            .handle(request_id, source_name, req.content, req.principal, req.scope)
+            .await
+        {
             Ok(content) => GatewayResponse {
                 lane_key: key,
                 content,
@@ -98,7 +98,7 @@ impl Gateway {
     }
 
     /// Backward-compatible handle_message (delegates to handle_event with defaults).
-    pub fn handle_message(
+    pub async fn handle_message(
         &self,
         _user_id: &str,
         _source: &str,
@@ -112,6 +112,7 @@ impl Gateway {
             principal: Principal::System,
             scope: Scope::Global,
         })
+        .await
     }
 
     /// Health check.
@@ -138,8 +139,9 @@ mod tests {
     /// A stub handler that echoes the content.
     struct StubHandler;
 
+    #[async_trait]
     impl MessageHandler for StubHandler {
-        fn handle(
+        async fn handle(
             &self,
             _request_id: Uuid,
             _source: String,
@@ -154,8 +156,9 @@ mod tests {
     /// A handler that always fails.
     struct FailHandler;
 
+    #[async_trait]
     impl MessageHandler for FailHandler {
-        fn handle(
+        async fn handle(
             &self,
             _request_id: Uuid,
             _source: String,
@@ -185,30 +188,32 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_gateway_creation() {
+    #[tokio::test]
+    async fn test_gateway_creation() {
         let gw = make_gateway();
         assert!(gw.is_healthy());
     }
 
-    #[test]
-    fn test_handle_event_echo() {
+    #[tokio::test]
+    async fn test_handle_event_echo() {
         let gw = make_gateway();
-        let resp = gw.handle_event(GatewayRequest {
-            source: EventSource::Cli {
-                session_id: "user1".to_string(),
-            },
-            content: "hello".to_string(),
-            principal: Principal::System,
-            scope: Scope::Global,
-        });
+        let resp = gw
+            .handle_event(GatewayRequest {
+                source: EventSource::Cli {
+                    session_id: "user1".to_string(),
+                },
+                content: "hello".to_string(),
+                principal: Principal::System,
+                scope: Scope::Global,
+            })
+            .await;
         assert_eq!(resp.lane_key.user_id, "user1");
         assert_eq!(resp.lane_key.source, "cli");
         assert_eq!(resp.content, "Echo: hello");
     }
 
-    #[test]
-    fn test_handle_event_creates_lane() {
+    #[tokio::test]
+    async fn test_handle_event_creates_lane() {
         let gw = make_gateway();
         assert_eq!(gw.lane_manager.conversation_count(), 0);
 
@@ -220,7 +225,8 @@ mod tests {
             content: "hi".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
-        });
+        })
+        .await;
         assert_eq!(gw.lane_manager.conversation_count(), 1);
 
         // Same user+source should not create a new lane
@@ -232,26 +238,29 @@ mod tests {
             content: "again".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
-        });
+        })
+        .await;
         assert_eq!(gw.lane_manager.conversation_count(), 1);
     }
 
-    #[test]
-    fn test_handle_event_error_propagation() {
+    #[tokio::test]
+    async fn test_handle_event_error_propagation() {
         let gw = make_failing_gateway();
-        let resp = gw.handle_event(GatewayRequest {
-            source: EventSource::Api {
-                request_id: "req1".to_string(),
-            },
-            content: "test".to_string(),
-            principal: Principal::System,
-            scope: Scope::Global,
-        });
+        let resp = gw
+            .handle_event(GatewayRequest {
+                source: EventSource::Api {
+                    request_id: "req1".to_string(),
+                },
+                content: "test".to_string(),
+                principal: Principal::System,
+                scope: Scope::Global,
+            })
+            .await;
         assert_eq!(resp.content, "Error: Access denied");
     }
 
-    #[test]
-    fn test_handle_event_emits_user_request() {
+    #[tokio::test]
+    async fn test_handle_event_emits_user_request() {
         let gw = make_gateway();
         let mut rx = gw.bus.subscribe();
 
@@ -262,7 +271,8 @@ mod tests {
             content: "hello bus".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
-        });
+        })
+        .await;
 
         let event = rx.try_recv().unwrap();
         match event {
@@ -274,8 +284,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_handle_event_records_message_on_lane() {
+    #[tokio::test]
+    async fn test_handle_event_records_message_on_lane() {
         let gw = make_gateway();
 
         gw.handle_event(GatewayRequest {
@@ -286,7 +296,8 @@ mod tests {
             content: "msg1".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
-        });
+        })
+        .await;
         gw.handle_event(GatewayRequest {
             source: EventSource::Telegram {
                 chat_id: "c1".to_string(),
@@ -295,29 +306,30 @@ mod tests {
             content: "msg2".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
-        });
+        })
+        .await;
 
         let key = LaneKey::new("u1", "telegram");
         let lane = gw.lane_manager.get_or_create_conversation(key);
         assert_eq!(lane.message_count(), 2);
     }
 
-    #[test]
-    fn test_backward_compat_handle_message() {
+    #[tokio::test]
+    async fn test_backward_compat_handle_message() {
         let gw = make_gateway();
-        let resp = gw.handle_message("user1", "cli", "hello");
+        let resp = gw.handle_message("user1", "cli", "hello").await;
         // handle_message now delegates through the handler
         assert!(resp.content.starts_with("Echo:"));
     }
 
-    #[test]
-    fn test_health_check() {
+    #[tokio::test]
+    async fn test_health_check() {
         let gw = make_gateway();
         assert!(gw.is_healthy());
     }
 
-    #[test]
-    fn test_full_gateway_stack_integration() {
+    #[tokio::test]
+    async fn test_full_gateway_stack_integration() {
         let shared = Arc::new(SharedContext::new());
         let lanes = Arc::new(LaneManager::new());
         let gw = Gateway::new(
@@ -334,32 +346,38 @@ mod tests {
             .register("task-1".into(), "integration test".into()));
 
         // Handle messages from multiple sources
-        let r1 = gw.handle_event(GatewayRequest {
-            source: EventSource::Telegram {
-                chat_id: "c1".to_string(),
-                user_id: "alice".to_string(),
-            },
-            content: "hello".to_string(),
-            principal: Principal::System,
-            scope: Scope::Global,
-        });
-        let r2 = gw.handle_event(GatewayRequest {
-            source: EventSource::Gui {
-                connection_id: "bob".to_string(),
-            },
-            content: "/status".to_string(),
-            principal: Principal::System,
-            scope: Scope::Global,
-        });
-        let r3 = gw.handle_event(GatewayRequest {
-            source: EventSource::Telegram {
-                chat_id: "c1".to_string(),
-                user_id: "alice".to_string(),
-            },
-            content: "follow-up".to_string(),
-            principal: Principal::System,
-            scope: Scope::Global,
-        });
+        let r1 = gw
+            .handle_event(GatewayRequest {
+                source: EventSource::Telegram {
+                    chat_id: "c1".to_string(),
+                    user_id: "alice".to_string(),
+                },
+                content: "hello".to_string(),
+                principal: Principal::System,
+                scope: Scope::Global,
+            })
+            .await;
+        let r2 = gw
+            .handle_event(GatewayRequest {
+                source: EventSource::Gui {
+                    connection_id: "bob".to_string(),
+                },
+                content: "/status".to_string(),
+                principal: Principal::System,
+                scope: Scope::Global,
+            })
+            .await;
+        let r3 = gw
+            .handle_event(GatewayRequest {
+                source: EventSource::Telegram {
+                    chat_id: "c1".to_string(),
+                    user_id: "alice".to_string(),
+                },
+                content: "follow-up".to_string(),
+                principal: Principal::System,
+                scope: Scope::Global,
+            })
+            .await;
 
         // Verify lanes
         assert_eq!(lanes.conversation_count(), 2); // alice+telegram, bob+gui

@@ -26,3 +26,5 @@ openalpaca_storage = { workspace = true }
 openalpaca_wake = { workspace = true }
 toml.workspace = true
 rand.workspace = true
+async-trait.workspace = true
+openalpaca_llm = { workspace = true, features = ["anthropic", "openai", "ollama"] }

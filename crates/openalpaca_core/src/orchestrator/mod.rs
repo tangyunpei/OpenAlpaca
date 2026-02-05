@@ -13,9 +13,11 @@ use crate::events::SystemEvent;
 use crate::lane::{LaneManager, TaskLaneStatus};
 use crate::middleware::guard::OutputGuard;
 use crate::middleware::prompt::{AgentPersona, PromptAssembler, SystemPersona};
+use crate::runner::{LoopConfig, run_agentic_loop};
 use crate::security::policy::{Principal, Scope, TrustGate};
 use crate::types::Capability;
 use chrono::Utc;
+use openalpaca_llm::{ChatMessage, LlmProvider};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -25,7 +27,7 @@ use intent::{Intent, IntentParser};
 /// The Orchestrator: unified message handler for all user interactions.
 ///
 /// Replaces CoreCtx with intent-based routing:
-/// - SimpleQuery → echo stub (LLM in Phase 5.1)
+/// - SimpleQuery → LLM call (or echo stub if no LLM configured)
 /// - TaskQuery → query task registry
 /// - ComplexTask → dispatch to agents via TaskDispatcher
 /// - TaskControl → manage task lifecycle
@@ -34,6 +36,8 @@ pub struct Orchestrator {
     pub lane_manager: Arc<LaneManager>,
     pub bus: EventBus,
     pub system_persona: SystemPersona,
+    pub llm_provider: Option<Arc<dyn LlmProvider>>,
+    pub loop_config: LoopConfig,
     intent_parser: IntentParser,
     task_dispatcher: TaskDispatcher,
 }
@@ -44,6 +48,8 @@ impl Orchestrator {
         lane_manager: Arc<LaneManager>,
         bus: EventBus,
         system_persona: SystemPersona,
+        llm_provider: Option<Arc<dyn LlmProvider>>,
+        loop_config: LoopConfig,
     ) -> Self {
         let task_dispatcher =
             TaskDispatcher::new(shared_context.clone(), lane_manager.clone(), bus.clone());
@@ -52,6 +58,8 @@ impl Orchestrator {
             lane_manager,
             bus,
             system_persona,
+            llm_provider,
+            loop_config,
             intent_parser: IntentParser,
             task_dispatcher,
         }
@@ -62,7 +70,7 @@ impl Orchestrator {
     /// 2. Intent classification
     /// 3. Emit IntentClassified event
     /// 4. Route to appropriate handler
-    pub fn handle_message(
+    pub async fn handle_message(
         &self,
         request_id: Uuid,
         source: String,
@@ -89,7 +97,7 @@ impl Orchestrator {
         // 4. Route by intent
         match intent {
             Intent::SimpleQuery { query } => {
-                self.handle_simple_query(request_id, &source, &query)
+                self.handle_simple_query(request_id, &source, &query).await
             }
             Intent::TaskQuery { task_id } => self.handle_task_query(task_id),
             Intent::ComplexTask {
@@ -108,29 +116,44 @@ impl Orchestrator {
         }
     }
 
-    fn handle_simple_query(
+    async fn handle_simple_query(
         &self,
         request_id: Uuid,
         _source: &str,
         query: &str,
     ) -> Result<String, String> {
-        // Assemble prompt (for future LLM use)
         let agent_persona = AgentPersona {
             role: "Assistant".to_string(),
             tone: "Friendly".to_string(),
             domain_knowledge: vec![],
         };
-        let _full_prompt =
+        let full_prompt =
             PromptAssembler::assemble(&self.system_persona, &agent_persona, query);
 
-        // Stub echo response
-        let raw_response = format!(
-            "{{\"status\": \"ok\", \"echo\": \"Received: {}\"}}",
-            query.chars().take(50).collect::<String>()
-        );
+        let response_content = if let Some(ref provider) = self.llm_provider {
+            // Real LLM call via agentic loop
+            let messages = vec![
+                ChatMessage::system(&full_prompt),
+                ChatMessage::user(query),
+            ];
+            let result = run_agentic_loop(
+                provider.as_ref(),
+                messages,
+                vec![], // No tools for simple queries
+                &self.loop_config,
+            )
+            .await;
+            result.final_content
+        } else {
+            // Fallback: echo stub (backward compatible)
+            format!(
+                "{{\"status\": \"ok\", \"echo\": \"Received: {}\"}}",
+                query.chars().take(50).collect::<String>()
+            )
+        };
 
         // Output guard
-        let validated = OutputGuard::ensure_json(&raw_response)?;
+        let validated = OutputGuard::ensure_json(&response_content)?;
 
         // Emit AgentResponse event
         self.bus.publish(SystemEvent::AgentResponse {
@@ -276,7 +299,14 @@ mod tests {
         let ctx = Arc::new(SharedContext::new());
         let lanes = Arc::new(LaneManager::new());
         let bus = EventBus::default();
-        Orchestrator::new(ctx, lanes, bus, SystemPersona::default())
+        Orchestrator::new(
+            ctx,
+            lanes,
+            bus,
+            SystemPersona::default(),
+            None,
+            LoopConfig::default(),
+        )
     }
 
     fn make_orchestrator_with_agents(agents: Vec<SubAgent>) -> Orchestrator {
@@ -286,7 +316,14 @@ mod tests {
         }
         let lanes = Arc::new(LaneManager::new());
         let bus = EventBus::default();
-        Orchestrator::new(ctx, lanes, bus, SystemPersona::default())
+        Orchestrator::new(
+            ctx,
+            lanes,
+            bus,
+            SystemPersona::default(),
+            None,
+            LoopConfig::default(),
+        )
     }
 
     fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
@@ -310,106 +347,118 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_simple_query_echo() {
+    #[tokio::test]
+    async fn test_simple_query_echo() {
         let orch = make_orchestrator();
-        let result = orch.handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "hello world".to_string(),
-            Principal::System,
-            Scope::Global,
-        );
+        let result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "cli".to_string(),
+                "hello world".to_string(),
+                Principal::System,
+                Scope::Global,
+            )
+            .await;
         assert!(result.is_ok());
         let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
         assert_eq!(json["status"], "ok");
         assert!(json["echo"].as_str().unwrap().contains("hello world"));
     }
 
-    #[test]
-    fn test_task_query_empty() {
+    #[tokio::test]
+    async fn test_task_query_empty() {
         let orch = make_orchestrator();
-        let result = orch.handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "/status".to_string(),
-            Principal::System,
-            Scope::Global,
-        );
+        let result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "cli".to_string(),
+                "/status".to_string(),
+                Principal::System,
+                Scope::Global,
+            )
+            .await;
         assert!(result.is_ok());
         let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
         assert_eq!(json["count"], 0);
     }
 
-    #[test]
-    fn test_complex_task_dispatch() {
+    #[tokio::test]
+    async fn test_complex_task_dispatch() {
         let orch = make_orchestrator_with_agents(vec![
             make_agent("a1", vec!["web_search"]),
             make_agent("a2", vec!["text_generate"]),
         ]);
-        let result = orch.handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "please research and write about Rust".to_string(),
-            Principal::System,
-            Scope::Global,
-        );
+        let result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "cli".to_string(),
+                "please research and write about Rust".to_string(),
+                Principal::System,
+                Scope::Global,
+            )
+            .await;
         assert!(result.is_ok());
         let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
         assert_eq!(json["status"], "queued");
         assert!(json["task_id"].as_str().is_some());
     }
 
-    #[test]
-    fn test_task_control_cancel() {
+    #[tokio::test]
+    async fn test_task_control_cancel() {
         let orch = make_orchestrator();
         // Register a task first
         orch.shared_context
             .task_registry
             .register("t1".to_string(), "test task".to_string());
 
-        let result = orch.handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "/cancel t1".to_string(),
-            Principal::System,
-            Scope::Global,
-        );
+        let result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "cli".to_string(),
+                "/cancel t1".to_string(),
+                Principal::System,
+                Scope::Global,
+            )
+            .await;
         assert!(result.is_ok());
         let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
         assert_eq!(json["new_status"], "cancelled");
     }
 
-    #[test]
-    fn test_permission_denied_external() {
+    #[tokio::test]
+    async fn test_permission_denied_external() {
         let orch = make_orchestrator();
-        let result = orch.handle_message(
-            Uuid::new_v4(),
-            "telegram".to_string(),
-            "hello".to_string(),
-            Principal::External {
-                provider: "telegram".to_string(),
-                id: "unknown".to_string(),
-            },
-            Scope::Global,
-        );
+        let result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "telegram".to_string(),
+                "hello".to_string(),
+                Principal::External {
+                    provider: "telegram".to_string(),
+                    id: "unknown".to_string(),
+                },
+                Scope::Global,
+            )
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Permission Denied"));
     }
 
-    #[test]
-    fn test_full_lifecycle_events() {
+    #[tokio::test]
+    async fn test_full_lifecycle_events() {
         let orch = make_orchestrator_with_agents(vec![make_agent("a1", vec!["web_search"])]);
         let mut rx = orch.bus.subscribe();
 
         // Send a complex task
-        let _result = orch.handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "can you search for Rust tutorials".to_string(),
-            Principal::System,
-            Scope::Global,
-        );
+        let _result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "cli".to_string(),
+                "can you search for Rust tutorials".to_string(),
+                Principal::System,
+                Scope::Global,
+            )
+            .await;
 
         // Collect events
         let mut events = Vec::new();
@@ -438,5 +487,61 @@ mod tests {
             "Missing TaskCreated event. Got: {:?}",
             event_types
         );
+    }
+
+    #[tokio::test]
+    async fn test_simple_query_with_mock_llm() {
+        use async_trait::async_trait;
+        use openalpaca_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, Usage};
+
+        struct MockLlm;
+
+        #[async_trait]
+        impl LlmProvider for MockLlm {
+            fn name(&self) -> &str {
+                "mock"
+            }
+            fn supports_tools(&self) -> bool {
+                false
+            }
+            async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+                Ok(ChatResponse {
+                    content: r#"{"status": "ok", "answer": "Mock LLM response"}"#.to_string(),
+                    tool_calls: vec![],
+                    model: "mock-model".to_string(),
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 20,
+                    },
+                    finish_reason: FinishReason::Stop,
+                })
+            }
+        }
+
+        let ctx = Arc::new(SharedContext::new());
+        let lanes = Arc::new(LaneManager::new());
+        let bus = EventBus::default();
+        let orch = Orchestrator::new(
+            ctx,
+            lanes,
+            bus,
+            SystemPersona::default(),
+            Some(Arc::new(MockLlm)),
+            LoopConfig::default(),
+        );
+
+        let result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "cli".to_string(),
+                "What is Rust?".to_string(),
+                Principal::System,
+                Scope::Global,
+            )
+            .await;
+        assert!(result.is_ok());
+        let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["answer"], "Mock LLM response");
     }
 }

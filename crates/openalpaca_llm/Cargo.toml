@@ -1,23 +1,25 @@
 [package]
-name = "openalpaca_core"
+name = "openalpaca_llm"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[features]
+default = []
+anthropic = ["dep:reqwest"]
+openai = ["dep:reqwest"]
+ollama = ["dep:reqwest"]
+
 [dependencies]
 async-trait.workspace = true
-anyhow.workspace = true
-thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-uuid.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
-chrono.workspace = true
-regex.workspace = true
 toml.workspace = true
-openalpaca_api.workspace = true
-openalpaca_llm.workspace = true
-openalpaca_storage.workspace = true
+
+# Optional: HTTP client (only when a provider feature is enabled)
+reqwest = { workspace = true, optional = true }
