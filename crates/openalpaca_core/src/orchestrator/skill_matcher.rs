@@ -94,7 +94,7 @@ impl SkillMatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::subagent::{AgentConstraints, AgentPreset, AgentStatus, Skill, SubAgent};
+    use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent};
 
     fn make_agent(id: &str, name: &str, skills: Vec<&str>) -> SubAgent {
         SubAgent {
@@ -114,6 +114,7 @@ mod tests {
                 .collect(),
             preset: AgentPreset::default(),
             constraints: AgentConstraints::default(),
+            llm_config: AgentLlmConfig::default(),
         }
     }
 

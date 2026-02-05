@@ -393,7 +393,7 @@ mod tests {
         assert_eq!(shared.task_registry.count(), 1);
 
         // Agent registry
-        use crate::agent::subagent::{AgentConstraints, AgentPreset, AgentStatus, SubAgent};
+        use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, SubAgent};
         let agent = SubAgent {
             id: "a1".to_string(),
             name: "Test Agent".to_string(),
@@ -404,6 +404,7 @@ mod tests {
             skills: vec![],
             preset: AgentPreset::default(),
             constraints: AgentConstraints::default(),
+            llm_config: AgentLlmConfig::default(),
         };
         assert!(shared.agent_registry.register(agent));
         assert!(shared.agent_registry.get("a1").is_some());

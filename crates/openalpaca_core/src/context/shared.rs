@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_agent_registry_in_shared_context() {
-        use crate::agent::subagent::{AgentConstraints, AgentPreset, AgentStatus, SubAgent};
+        use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, SubAgent};
 
         let ctx = SharedContext::new();
         let agent = SubAgent {
@@ -218,6 +218,7 @@ mod tests {
             skills: vec![],
             preset: AgentPreset::default(),
             constraints: AgentConstraints::default(),
+            llm_config: AgentLlmConfig::default(),
         };
         assert!(ctx.agent_registry.register(agent));
         assert_eq!(ctx.agent_registry.count(), 1);

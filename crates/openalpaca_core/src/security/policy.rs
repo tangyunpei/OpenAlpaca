@@ -78,16 +78,13 @@ impl TrustGate {
         if let Principal::User { .. } = principal {
             // Future: Check granular ACLs here
             // For now, Trusted User is allowed.
-            match scope {
-                Scope::Global => {
-                    // Critical system config changes might still require explicit confirmation (OTP)
-                    // The TrustGate just checks "Permission", separate step for "Confirmation".
-                    if action == "system.shutdown" {
-                        // OK, but caller should verify OTP if managed.
-                        // TrustGate says "You have RIGHT", PolicyMiddleware checks "You have PROOF".
-                    }
+            if let Scope::Global = scope {
+                // Critical system config changes might still require explicit confirmation (OTP)
+                // The TrustGate just checks "Permission", separate step for "Confirmation".
+                if action == "system.shutdown" {
+                    // OK, but caller should verify OTP if managed.
+                    // TrustGate says "You have RIGHT", PolicyMiddleware checks "You have PROOF".
                 }
-                _ => {}
             }
         }
 

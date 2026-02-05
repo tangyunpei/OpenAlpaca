@@ -22,14 +22,13 @@ impl OutputGuard {
         // 3. Last Resort: Regex search for first { ... } block (Simple recursive regex is hard in Rust's regex crate,
         // so we assume top-level object starts with { and ends with })
         // A naive trim scan:
-        if let Some(start) = content.find('{') {
-            if let Some(end) = content.rfind('}') {
-                if end > start {
-                    let candidate = &content[start..=end];
-                    if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
-                        return Ok(candidate.to_string());
-                    }
-                }
+        if let Some(start) = content.find('{')
+            && let Some(end) = content.rfind('}')
+            && end > start
+        {
+            let candidate = &content[start..=end];
+            if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                return Ok(candidate.to_string());
             }
         }
 

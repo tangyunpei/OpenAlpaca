@@ -70,7 +70,7 @@ impl PromptAssembler {
                 prompt.push_str(&format!("- {}\n", domain));
             }
         }
-        prompt.push_str("\n");
+        prompt.push('\n');
 
         // 3. User Context (Dynamic)
         prompt.push_str("### USER INPUT ###\n");

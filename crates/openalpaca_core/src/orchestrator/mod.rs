@@ -13,12 +13,12 @@ use crate::events::SystemEvent;
 use crate::lane::{LaneManager, TaskLaneStatus};
 use crate::middleware::guard::OutputGuard;
 use crate::middleware::prompt::{AgentPersona, PromptAssembler, SystemPersona};
-use crate::runner::{LoopConfig, run_agentic_loop};
+use crate::runner::{LoopConfig, run_agentic_loop_routed};
 use crate::security::gate::SecurityGate;
 use crate::security::policy::{Principal, Scope};
 use crate::types::Capability;
 use chrono::Utc;
-use openalpaca_llm::{ChatMessage, LlmProvider};
+use openalpaca_llm::{ChatMessage, LlmRouter};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -37,7 +37,7 @@ pub struct Orchestrator {
     pub lane_manager: Arc<LaneManager>,
     pub bus: EventBus,
     pub system_persona: SystemPersona,
-    pub llm_provider: Option<Arc<dyn LlmProvider>>,
+    pub llm_router: Option<Arc<LlmRouter>>,
     pub loop_config: LoopConfig,
     pub security_gate: Arc<SecurityGate>,
     intent_parser: IntentParser,
@@ -50,7 +50,7 @@ impl Orchestrator {
         lane_manager: Arc<LaneManager>,
         bus: EventBus,
         system_persona: SystemPersona,
-        llm_provider: Option<Arc<dyn LlmProvider>>,
+        llm_router: Option<Arc<LlmRouter>>,
         loop_config: LoopConfig,
         security_gate: Arc<SecurityGate>,
     ) -> Self {
@@ -61,7 +61,7 @@ impl Orchestrator {
             lane_manager,
             bus,
             system_persona,
-            llm_provider,
+            llm_router,
             loop_config,
             security_gate,
             intent_parser: IntentParser,
@@ -138,20 +138,21 @@ impl Orchestrator {
         let full_prompt =
             PromptAssembler::assemble(&self.system_persona, &agent_persona, query);
 
-        let response_content = if let Some(ref provider) = self.llm_provider {
-            // Real LLM call via agentic loop
+        let response_content = if let Some(ref router) = self.llm_router {
+            // Real LLM call via routed agentic loop
             let messages = vec![
                 ChatMessage::system(&full_prompt),
                 ChatMessage::user(query),
             ];
-            let result = run_agentic_loop(
-                provider.as_ref(),
+            let result = run_agentic_loop_routed(
+                router.as_ref(),
                 messages,
                 vec![], // No tools for simple queries
                 &self.loop_config,
                 Some(self.security_gate.sandbox()),
                 "orchestrator",
                 None, // No policy for simple queries (no tools)
+                None, // No task_id for simple queries
             )
             .await;
             result.final_content
@@ -304,7 +305,7 @@ fn task_entry_to_json(entry: &TaskEntry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::subagent::{AgentConstraints, AgentPreset, AgentStatus, Skill, SubAgent};
+    use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent};
     use crate::runner::StubToolExecutor;
     use crate::security::sandbox::SandboxManager;
 
@@ -369,6 +370,7 @@ mod tests {
                 .collect(),
             preset: AgentPreset::default(),
             constraints: AgentConstraints::default(),
+            llm_config: AgentLlmConfig::default(),
         }
     }
 
@@ -517,7 +519,7 @@ mod tests {
     #[tokio::test]
     async fn test_simple_query_with_mock_llm() {
         use async_trait::async_trait;
-        use openalpaca_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, Usage};
+        use openalpaca_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, LlmRouter, ProviderType, Usage};
 
         struct MockLlm;
 
@@ -547,12 +549,17 @@ mod tests {
         let lanes = Arc::new(LaneManager::new());
         let bus = EventBus::default();
         let gate = make_security_gate(&bus);
+        let router = LlmRouter::single_provider(
+            Arc::new(MockLlm),
+            ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
         let orch = Orchestrator::new(
             ctx,
             lanes,
             bus,
             SystemPersona::default(),
-            Some(Arc::new(MockLlm)),
+            Some(Arc::new(router)),
             LoopConfig::default(),
             gate,
         );

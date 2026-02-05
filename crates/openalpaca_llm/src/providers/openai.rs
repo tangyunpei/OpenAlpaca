@@ -1,5 +1,3 @@
-#![cfg(feature = "openai")]
-
 use crate::error::LlmError;
 use crate::types::*;
 use crate::LlmProvider;
@@ -198,6 +196,13 @@ impl LlmProvider for OpenAiProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        match self.api_key {
+            Some(ref key) => self.chat_with_key(key, request).await,
+            None => self.chat_with_key("", request).await,
+        }
+    }
+
+    async fn chat_with_key(&self, key: &str, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         let body = self.build_request_body(&request);
         let url = format!("{}/chat/completions", self.base_url);
 
@@ -206,7 +211,9 @@ impl LlmProvider for OpenAiProvider {
             .post(&url)
             .header("content-type", "application/json");
 
-        if let Some(ref api_key) = self.api_key {
+        if !key.is_empty() {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", key));
+        } else if let Some(ref api_key) = self.api_key {
             req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
         }
 

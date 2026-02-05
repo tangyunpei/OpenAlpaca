@@ -1,5 +1,8 @@
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
-use openalpaca_llm::{ChatMessage, ChatRequest, FinishReason, LlmProvider, ToolDefinition};
+use openalpaca_llm::{
+    ChatMessage, ChatRequest, FinishReason, LlmProvider, LlmRouter, RequestContext,
+    RouterRequest, ToolDefinition,
+};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -8,6 +11,10 @@ pub struct LoopConfig {
     pub max_tools_per_round: usize,
     pub max_tool_runtime: Duration,
     pub max_cost: f64,
+    /// Override model for this loop (used by LlmRouter).
+    pub model: Option<String>,
+    /// Fallback models (informational — fallback is handled by router's fallback chain).
+    pub fallback_models: Vec<String>,
 }
 
 impl Default for LoopConfig {
@@ -17,6 +24,8 @@ impl Default for LoopConfig {
             max_tools_per_round: 5,
             max_tool_runtime: Duration::from_secs(60),
             max_cost: 1.00,
+            model: None,
+            fallback_models: Vec::new(),
         }
     }
 }
@@ -137,6 +146,144 @@ pub async fn run_agentic_loop(
                 }
 
                 // No tool calls or stop -> done
+                return LoopResult {
+                    final_content: response.content,
+                    rounds_used: rounds,
+                    total_input_tokens: total_input,
+                    total_output_tokens: total_output,
+                    tool_calls_made,
+                    finish_reason: LoopFinishReason::Complete,
+                };
+            }
+            Err(e) => {
+                return LoopResult {
+                    final_content: String::new(),
+                    rounds_used: rounds,
+                    total_input_tokens: total_input,
+                    total_output_tokens: total_output,
+                    tool_calls_made,
+                    finish_reason: LoopFinishReason::Error(e.to_string()),
+                };
+            }
+        }
+    }
+}
+
+/// Run the agentic loop using the LlmRouter (multi-provider, multi-key).
+///
+/// Same bounded-loop logic as `run_agentic_loop`, but uses `RouterRequest`
+/// and `router.complete()` with key rotation, fallback chains, and cost tracking.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_agentic_loop_routed(
+    router: &LlmRouter,
+    initial_messages: Vec<ChatMessage>,
+    tools: Vec<ToolDefinition>,
+    config: &LoopConfig,
+    sandbox: Option<&SandboxManager>,
+    agent_id: &str,
+    sandbox_policy: Option<&SandboxPolicy>,
+    task_id: Option<&str>,
+) -> LoopResult {
+    let mut messages = initial_messages;
+    let mut rounds = 0usize;
+    let mut total_input = 0u32;
+    let mut total_output = 0u32;
+    let mut tool_calls_made = 0usize;
+
+    let context = RequestContext {
+        agent_id: Some(agent_id.to_string()),
+        task_id: task_id.map(|s| s.to_string()),
+    };
+
+    loop {
+        if rounds >= config.max_rounds {
+            return LoopResult {
+                final_content: String::new(),
+                rounds_used: rounds,
+                total_input_tokens: total_input,
+                total_output_tokens: total_output,
+                tool_calls_made,
+                finish_reason: LoopFinishReason::MaxRounds,
+            };
+        }
+
+        // Check cost via router's cost tracker (agent-level)
+        if let Some(usage) = router.cost_tracker.get_agent_usage(agent_id).await
+            && usage.total_cost_usd > config.max_cost
+        {
+            return LoopResult {
+                final_content: String::new(),
+                rounds_used: rounds,
+                total_input_tokens: total_input,
+                total_output_tokens: total_output,
+                tool_calls_made,
+                finish_reason: LoopFinishReason::CostExceeded,
+            };
+        }
+
+        // Also check simple estimate as a fallback
+        let estimated_cost = estimate_cost(total_input, total_output);
+        if estimated_cost > config.max_cost {
+            return LoopResult {
+                final_content: String::new(),
+                rounds_used: rounds,
+                total_input_tokens: total_input,
+                total_output_tokens: total_output,
+                tool_calls_made,
+                finish_reason: LoopFinishReason::CostExceeded,
+            };
+        }
+
+        let request = RouterRequest {
+            model: config.model.clone(),
+            messages: messages.clone(),
+            tools: tools.clone(),
+            temperature: None,
+            max_tokens: None,
+            context: context.clone(),
+        };
+
+        match router.complete(request).await {
+            Ok(response) => {
+                total_input += response.usage.input_tokens;
+                total_output += response.usage.output_tokens;
+                rounds += 1;
+
+                if response.finish_reason == FinishReason::ToolUse
+                    && !response.tool_calls.is_empty()
+                {
+                    messages.push(ChatMessage::assistant_with_tools(&response));
+
+                    let calls_this_round =
+                        response.tool_calls.len().min(config.max_tools_per_round);
+
+                    for tc in response.tool_calls.iter().take(calls_this_round) {
+                        tool_calls_made += 1;
+
+                        let result_text = if let (Some(sbx), Some(policy)) =
+                            (sandbox, sandbox_policy)
+                        {
+                            match sbx.execute_tool(agent_id, tc, policy).await {
+                                Ok(output) => output,
+                                Err(err) => format!("Error: {}", err),
+                            }
+                        } else {
+                            format!("Error: tool '{}' not yet implemented", tc.name)
+                        };
+
+                        messages.push(ChatMessage::tool_result(&tc.id, &result_text));
+                    }
+
+                    for tc in response.tool_calls.iter().skip(calls_this_round) {
+                        messages.push(ChatMessage::tool_result(
+                            &tc.id,
+                            "Error: max tools per round exceeded",
+                        ));
+                    }
+
+                    continue;
+                }
+
                 return LoopResult {
                     final_content: response.content,
                     rounds_used: rounds,

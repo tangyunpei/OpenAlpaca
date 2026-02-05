@@ -1,10 +1,18 @@
 pub mod config;
+pub mod cost_tracker;
 pub mod error;
+pub mod key_pool;
+pub mod model_registry;
 pub mod providers;
+pub mod router;
 pub mod types;
 
-pub use config::{LlmConfig, build_provider};
+pub use config::{LlmConfig, LlmRouterConfig, build_provider, build_router};
+pub use cost_tracker::{CallRecord, CostTracker, ModelUsageStats, UsageStats};
 pub use error::LlmError;
+pub use key_pool::{ApiKey, CallResult, KeyGuard, KeyPool, KeyPoolError, ProviderType, SelectionStrategy};
+pub use model_registry::{ModelInfo, ModelRegistry, PricingInfo};
+pub use router::{LlmRouter, LlmRouterError, RequestContext, RouterRequest};
 pub use types::*;
 
 use async_trait::async_trait;
@@ -14,6 +22,12 @@ pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &str;
     fn supports_tools(&self) -> bool;
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError>;
+
+    /// Chat using a specific API key. Default delegates to `chat()`.
+    /// Providers override this to inject the key into their HTTP requests.
+    async fn chat_with_key(&self, _key: &str, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        self.chat(request).await
+    }
 }
 
 #[cfg(test)]

@@ -14,6 +14,7 @@ pub struct SubAgent {
     pub skills: Vec<Skill>,
     pub preset: AgentPreset,
     pub constraints: AgentConstraints,
+    pub llm_config: AgentLlmConfig,
 }
 
 /// Runtime status of an agent.
@@ -77,30 +78,36 @@ impl Default for AgentPreset {
     }
 }
 
+/// Per-agent LLM configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentLlmConfig {
+    /// Override model for this agent (None = inherit from orchestrator).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Fallback models if the primary is unavailable.
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
+    /// Additional provider-specific overrides (e.g. temperature, max_tokens).
+    #[serde(default)]
+    pub overrides: std::collections::HashMap<String, String>,
+}
+
 /// Constraints on agent behavior.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentConstraints {
     pub max_tool_calls: Option<u32>,
     pub timeout_seconds: Option<u64>,
     pub max_cost_per_task: Option<f64>,
+    #[serde(default)]
     pub require_confirmation_for: Vec<String>,
     #[serde(default)]
     pub allowed_capabilities: Vec<String>,
     #[serde(default)]
     pub denied_capabilities: Vec<String>,
-}
-
-impl Default for AgentConstraints {
-    fn default() -> Self {
-        Self {
-            max_tool_calls: None,
-            timeout_seconds: None,
-            max_cost_per_task: None,
-            require_confirmation_for: Vec::new(),
-            allowed_capabilities: Vec::new(),
-            denied_capabilities: Vec::new(),
-        }
-    }
+    #[serde(default)]
+    pub allowed_models: Vec<String>,
+    #[serde(default)]
+    pub denied_models: Vec<String>,
 }
 
 impl SubAgent {
@@ -111,6 +118,11 @@ impl SubAgent {
             serde_json::from_str(&config.preset_json).unwrap_or_default();
         let constraints: AgentConstraints = config
             .constraints_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let llm_config: AgentLlmConfig = config
+            .llm_config_json
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
@@ -138,6 +150,7 @@ impl SubAgent {
             skills,
             preset,
             constraints,
+            llm_config,
         }
     }
 }
@@ -209,6 +222,8 @@ mod tests {
         assert!(c.require_confirmation_for.is_empty());
         assert!(c.allowed_capabilities.is_empty());
         assert!(c.denied_capabilities.is_empty());
+        assert!(c.allowed_models.is_empty());
+        assert!(c.denied_models.is_empty());
     }
 
     #[test]

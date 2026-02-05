@@ -1,5 +1,3 @@
-#![cfg(feature = "ollama")]
-
 use crate::error::LlmError;
 use crate::types::*;
 use crate::LlmProvider;

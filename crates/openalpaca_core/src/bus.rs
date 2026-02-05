@@ -26,10 +26,7 @@ impl EventBus {
         // We ignore the error if there are no subscribers,
         // but we might want to log it if it's critical.
         // For now, implicit drop is fine.
-        match self.sender.send(event) {
-            Ok(count) => count,
-            Err(_) => 0, // No active receivers
-        }
+        self.sender.send(event).unwrap_or_default()
     }
 }
 

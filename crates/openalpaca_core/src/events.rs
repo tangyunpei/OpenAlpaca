@@ -104,6 +104,22 @@ pub enum SystemEvent {
         duration_ms: u64,
         timestamp: DateTime<Utc>,
     },
+    /// An LLM call completed
+    LlmCallCompleted {
+        agent_id: String,
+        model: String,
+        input_tokens: u32,
+        output_tokens: u32,
+        cost_usd: f64,
+        timestamp: DateTime<Utc>,
+    },
+    /// An agent was denied access to a model
+    ModelAccessDenied {
+        agent_id: String,
+        model_id: String,
+        reason: String,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

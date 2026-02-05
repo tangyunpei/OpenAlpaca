@@ -1,5 +1,3 @@
-#![cfg(feature = "anthropic")]
-
 use crate::error::LlmError;
 use crate::types::*;
 use crate::LlmProvider;
@@ -201,12 +199,16 @@ impl LlmProvider for AnthropicProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        self.chat_with_key(&self.api_key, request).await
+    }
+
+    async fn chat_with_key(&self, key: &str, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         let body = self.build_request_body(&request);
 
         let response = self
             .client
             .post(API_URL)
-            .header("x-api-key", &self.api_key)
+            .header("x-api-key", key)
             .header("anthropic-version", API_VERSION)
             .header("content-type", "application/json")
             .json(&body)

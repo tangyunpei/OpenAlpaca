@@ -30,11 +30,11 @@ fn get_connection_info() -> Result<ConnectionInfo, String> {
 #[tauri::command]
 async fn ensure_daemon_running() -> Result<ConnectionInfo, String> {
     // Step 1: Check if daemon is already running
-    if let Ok(Some(d)) = discovery::read_discovery() {
-        if discovery::ensure_not_expired(&d).is_ok() {
-            // Optionally verify via health check (TODO)
-            return Ok(ConnectionInfo::from(&d));
-        }
+    if let Ok(Some(d)) = discovery::read_discovery()
+        && discovery::ensure_not_expired(&d).is_ok()
+    {
+        // Optionally verify via health check (TODO)
+        return Ok(ConnectionInfo::from(&d));
     }
 
     // Step 2: Spawn the daemon process
@@ -44,10 +44,10 @@ async fn ensure_daemon_running() -> Result<ConnectionInfo, String> {
     for _ in 0..25 {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        if let Ok(Some(d)) = discovery::read_discovery() {
-            if discovery::ensure_not_expired(&d).is_ok() {
-                return Ok(ConnectionInfo::from(&d));
-            }
+        if let Ok(Some(d)) = discovery::read_discovery()
+            && discovery::ensure_not_expired(&d).is_ok()
+        {
+            return Ok(ConnectionInfo::from(&d));
         }
     }
 

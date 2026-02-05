@@ -59,11 +59,11 @@ impl EventWatcher for FilesystemWatcher {
                             {
                                 let mut last = last_event_clone.lock().unwrap();
                                 let now = Instant::now();
-                                if let Some(last_time) = last.get(&path_str) {
-                                    if now.duration_since(*last_time).as_millis() < DEBOUNCE_MS {
-                                        debug!("Debounced event for: {}", path_str);
-                                        return;
-                                    }
+                                if let Some(last_time) = last.get(&path_str)
+                                    && now.duration_since(*last_time).as_millis() < DEBOUNCE_MS
+                                {
+                                    debug!("Debounced event for: {}", path_str);
+                                    return;
                                 }
                                 last.insert(path_str.clone(), now);
                             }

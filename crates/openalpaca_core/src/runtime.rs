@@ -2,13 +2,14 @@ use std::panic::AssertUnwindSafe;
 
 /// A safe wrapper for executing Agent logic.
 /// It catches panics and ensures the daemon doesn't crash.
+#[derive(Default)]
 pub struct AgentRuntime {
     // TODO: Add metrics, limits, etc.
 }
 
 impl AgentRuntime {
     pub fn new() -> Self {
-        Self {}
+        Self::default()
     }
 
     /// Execute a closure safely.

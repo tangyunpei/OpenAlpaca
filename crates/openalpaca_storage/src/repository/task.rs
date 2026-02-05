@@ -53,7 +53,7 @@ impl<'a> TaskRepository<'a> {
                  FROM task WHERE id = ?",
             )?;
             let task = stmt
-                .query_row([id], |row| Self::row_to_task(row))
+                .query_row([id], Self::row_to_task)
                 .optional()
                 .context("Failed to get task")?;
             Ok(task)
@@ -202,7 +202,7 @@ impl<'a> TaskRepository<'a> {
                 "SELECT id, task_id, agent_id, role, status, step_order, started_at, completed_at
                  FROM task_agent_assignment WHERE task_id = ? ORDER BY step_order ASC",
             )?;
-            let rows = stmt.query_map([task_id], |row| Self::row_to_assignment(row))?;
+            let rows = stmt.query_map([task_id], Self::row_to_assignment)?;
             let mut assignments = Vec::new();
             for row in rows {
                 assignments.push(row?);

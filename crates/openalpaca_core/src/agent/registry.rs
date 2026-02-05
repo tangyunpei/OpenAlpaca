@@ -93,7 +93,7 @@ impl Default for AgentRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::subagent::{AgentConstraints, AgentPreset, Skill};
+    use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, Skill};
 
     fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
         SubAgent {
@@ -113,6 +113,7 @@ mod tests {
                 .collect(),
             preset: AgentPreset::default(),
             constraints: AgentConstraints::default(),
+            llm_config: AgentLlmConfig::default(),
         }
     }
 

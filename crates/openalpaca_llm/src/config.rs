@@ -1,6 +1,12 @@
 use crate::error::LlmError;
+use crate::key_pool::{ApiKey, KeyPool, ProviderType, SelectionStrategy};
+use crate::model_registry::{ModelInfo, ModelRegistry};
+use crate::cost_tracker::CostTracker;
+use crate::router::{LlmRouter, ProviderEntry};
 use crate::LlmProvider;
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LlmConfig {
@@ -71,6 +77,257 @@ pub fn build_provider(config: &LlmConfig) -> Result<Box<dyn LlmProvider>, LlmErr
     }
 }
 
+// ── Hierarchical Router Config ────────────────────────────────────────
+
+/// Top-level config for the LLM router (new hierarchical format).
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmRouterConfig {
+    pub orchestrator: Option<OrchestratorLlmConfig>,
+    pub providers: Option<HashMap<String, ProviderConfig>>,
+    pub models: Option<HashMap<String, ModelConfigEntry>>,
+    pub fallback_chains: Option<HashMap<String, Vec<String>>>,
+    pub limits: Option<LimitsConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OrchestratorLlmConfig {
+    pub model: String,
+    pub fallback_models: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderConfig {
+    pub enabled: Option<bool>,
+    pub base_url: Option<String>,
+    pub strategy: Option<String>,
+    pub keys: Option<Vec<KeyConfig>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct KeyConfig {
+    pub id: String,
+    pub secret_env: String,
+    pub tier: Option<String>,
+    pub monthly_budget: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelConfigEntry {
+    pub provider: String,
+    pub input_price: Option<f64>,
+    pub output_price: Option<f64>,
+    pub context: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LimitsConfig {
+    pub max_cost_per_task: Option<f64>,
+    pub max_cost_per_agent: Option<f64>,
+}
+
+fn parse_provider_type(name: &str) -> Option<ProviderType> {
+    match name {
+        "anthropic" => Some(ProviderType::Anthropic),
+        "openai" => Some(ProviderType::OpenAI),
+        "ollama" => Some(ProviderType::Ollama),
+        _ => None,
+    }
+}
+
+fn resolve_key_secret(env_var: &str) -> Option<String> {
+    std::env::var(env_var).ok()
+}
+
+/// Build an LlmRouter from a config file path.
+///
+/// Auto-detects format:
+/// - If `providers` key is present → new hierarchical format
+/// - Otherwise → legacy flat format (wraps in single-provider router)
+pub fn build_router(path: &std::path::Path) -> Result<LlmRouter, LlmError> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| LlmError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
+
+    // Try parsing as a generic Value to detect format
+    let raw: toml::Value = toml::from_str(&content)
+        .map_err(|e| LlmError::Config(format!("Failed to parse {}: {}", path.display(), e)))?;
+
+    if raw.get("providers").is_some() {
+        build_router_from_hierarchical(&content)
+    } else {
+        build_router_from_legacy(&content)
+    }
+}
+
+/// Build router from legacy flat format (single provider).
+fn build_router_from_legacy(content: &str) -> Result<LlmRouter, LlmError> {
+    let config: LlmConfig = toml::from_str(content)
+        .map_err(|e| LlmError::Config(format!("Failed to parse legacy config: {}", e)))?;
+
+    let provider = build_provider(&config)?;
+    let provider_type = parse_provider_type(&config.provider)
+        .ok_or_else(|| LlmError::UnknownProvider(config.provider.clone()))?;
+
+    let default_model = config.model.unwrap_or_else(|| match provider_type {
+        ProviderType::Anthropic => "claude-sonnet-4-5-20250929".to_string(),
+        ProviderType::OpenAI => "gpt-4o".to_string(),
+        ProviderType::Ollama => "llama3".to_string(),
+    });
+
+    Ok(LlmRouter::single_provider(
+        Arc::from(provider),
+        provider_type,
+        default_model,
+    ))
+}
+
+/// Build router from new hierarchical format.
+#[allow(unused_variables, unused_mut, unreachable_code)]
+fn build_router_from_hierarchical(content: &str) -> Result<LlmRouter, LlmError> {
+    let config: LlmRouterConfig = toml::from_str(content)
+        .map_err(|e| LlmError::Config(format!("Failed to parse router config: {}", e)))?;
+
+    let mut providers_map: HashMap<ProviderType, ProviderEntry> = HashMap::new();
+
+    // Build provider entries
+    if let Some(ref providers) = config.providers {
+        for (provider_name, provider_config) in providers {
+            if provider_config.enabled == Some(false) {
+                continue;
+            }
+
+            let provider_type = parse_provider_type(provider_name)
+                .ok_or_else(|| LlmError::UnknownProvider(provider_name.clone()))?;
+
+            // Collect keys
+            let mut api_keys = Vec::new();
+            if let Some(ref keys) = provider_config.keys {
+                for key_config in keys {
+                    let secret = resolve_key_secret(&key_config.secret_env)
+                        .ok_or_else(|| {
+                            LlmError::Config(format!(
+                                "Missing env var '{}' for key '{}'",
+                                key_config.secret_env, key_config.id
+                            ))
+                        })?;
+
+                    let mut api_key = ApiKey::new(
+                        key_config.id.clone(),
+                        provider_type,
+                        secret.clone(),
+                    );
+                    api_key.tier = key_config.tier.clone();
+                    api_key.monthly_budget = key_config.monthly_budget;
+                    api_keys.push(api_key);
+                }
+            }
+
+            let strategy = match provider_config.strategy.as_deref() {
+                Some("lru") => SelectionStrategy::LeastRecentlyUsed,
+                _ => SelectionStrategy::RoundRobin,
+            };
+
+            let key_pool = KeyPool::new(api_keys, strategy);
+
+            // Build the actual provider
+            // Use the first key's secret for the default provider instance
+            let first_secret = if let Some(ref keys) = provider_config.keys {
+                keys.first()
+                    .and_then(|k| resolve_key_secret(&k.secret_env))
+            } else {
+                None
+            };
+
+            let provider: Box<dyn LlmProvider> = match provider_type {
+                #[cfg(feature = "anthropic")]
+                ProviderType::Anthropic => {
+                    let key = first_secret.ok_or_else(|| {
+                        LlmError::Config("No Anthropic API key configured".to_string())
+                    })?;
+                    Box::new(crate::providers::anthropic::AnthropicProvider::new(
+                        key, None, None,
+                    ))
+                }
+                #[cfg(feature = "openai")]
+                ProviderType::OpenAI => {
+                    let key = first_secret.ok_or_else(|| {
+                        LlmError::Config("No OpenAI API key configured".to_string())
+                    })?;
+                    Box::new(crate::providers::openai::OpenAiProvider::new(
+                        key,
+                        None,
+                        provider_config.base_url.clone(),
+                        None,
+                    ))
+                }
+                #[cfg(feature = "ollama")]
+                ProviderType::Ollama => {
+                    Box::new(crate::providers::ollama::OllamaProvider::new(
+                        "llama3".to_string(),
+                        provider_config.base_url.clone(),
+                    ))
+                }
+                #[allow(unreachable_patterns)]
+                _ => {
+                    return Err(LlmError::UnknownProvider(provider_name.clone()));
+                }
+            };
+
+            providers_map.insert(
+                provider_type,
+                ProviderEntry {
+                    provider: Arc::from(provider),
+                    key_pool,
+                },
+            );
+        }
+    }
+
+    // Build model registry
+    let mut model_registry = ModelRegistry::with_defaults();
+    if let Some(ref models) = config.models {
+        for (model_id, model_config) in models {
+            if let Some(pt) = parse_provider_type(&model_config.provider) {
+                model_registry.register(
+                    model_id.clone(),
+                    ModelInfo {
+                        provider: pt,
+                        input_price_per_million: model_config.input_price.unwrap_or(3.0),
+                        output_price_per_million: model_config.output_price.unwrap_or(15.0),
+                        context_window: model_config.context.unwrap_or(200_000),
+                    },
+                );
+            }
+        }
+    }
+
+    // Default model
+    let default_model = config
+        .orchestrator
+        .as_ref()
+        .map(|o| o.model.clone())
+        .unwrap_or_else(|| "claude-sonnet-4-5-20250929".to_string());
+
+    // Fallback chains
+    let mut fallback_chains = config.fallback_chains.unwrap_or_default();
+    if let Some(ref orch) = config.orchestrator
+        && let Some(ref fallbacks) = orch.fallback_models
+    {
+        fallback_chains
+            .entry(orch.model.clone())
+            .or_insert_with(|| fallbacks.clone());
+    }
+
+    let cost_tracker = Arc::new(CostTracker::new(ModelRegistry::with_defaults()));
+
+    Ok(LlmRouter::new(
+        providers_map,
+        model_registry,
+        fallback_chains,
+        cost_tracker,
+        default_model,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +388,78 @@ max_tokens = 4096
             LlmError::UnknownProvider(name) => assert_eq!(name, "unknown_provider"),
             other => panic!("Expected UnknownProvider, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_detect_legacy_format() {
+        let toml_str = r#"
+provider = "anthropic"
+model = "claude-sonnet-4-5-20250929"
+max_tokens = 4096
+"#;
+        let raw: toml::Value = toml::from_str(toml_str).unwrap();
+        assert!(raw.get("providers").is_none());
+    }
+
+    #[test]
+    fn test_detect_hierarchical_format() {
+        let toml_str = r#"
+[orchestrator]
+model = "claude-sonnet-4-5-20250929"
+
+[providers.anthropic]
+enabled = true
+
+[[providers.anthropic.keys]]
+id = "key1"
+secret_env = "ANTHROPIC_API_KEY"
+"#;
+        let raw: toml::Value = toml::from_str(toml_str).unwrap();
+        assert!(raw.get("providers").is_some());
+    }
+
+    #[test]
+    fn test_parse_router_config() {
+        let toml_str = r#"
+[orchestrator]
+model = "claude-sonnet-4-5-20250929"
+fallback_models = ["gpt-4o"]
+
+[providers.anthropic]
+enabled = true
+strategy = "round_robin"
+
+[[providers.anthropic.keys]]
+id = "key1"
+secret_env = "ANTHROPIC_API_KEY"
+tier = "tier1"
+monthly_budget = 100.0
+
+[models.custom-model]
+provider = "anthropic"
+input_price = 5.0
+output_price = 25.0
+context = 100000
+
+[fallback_chains]
+"claude-sonnet-4-5-20250929" = ["gpt-4o"]
+"#;
+        let config: LlmRouterConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.orchestrator.as_ref().unwrap().model, "claude-sonnet-4-5-20250929");
+        assert!(config.providers.as_ref().unwrap().contains_key("anthropic"));
+        assert!(config.models.as_ref().unwrap().contains_key("custom-model"));
+
+        let key = &config.providers.as_ref().unwrap()["anthropic"]
+            .keys.as_ref().unwrap()[0];
+        assert_eq!(key.id, "key1");
+        assert_eq!(key.tier.as_deref(), Some("tier1"));
+    }
+
+    #[test]
+    fn test_parse_provider_type_fn() {
+        assert_eq!(parse_provider_type("anthropic"), Some(ProviderType::Anthropic));
+        assert_eq!(parse_provider_type("openai"), Some(ProviderType::OpenAI));
+        assert_eq!(parse_provider_type("ollama"), Some(ProviderType::Ollama));
+        assert_eq!(parse_provider_type("unknown"), None);
     }
 }

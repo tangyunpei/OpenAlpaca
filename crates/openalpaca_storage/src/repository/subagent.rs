@@ -23,8 +23,8 @@ impl<'a> SubAgentRepository<'a> {
         self.db.with_connection(|conn| {
             let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
             conn.execute(
-                "INSERT INTO agent (id, name, persona, description, icon, status, current_task_id, skills_json, preset_json, constraints_json, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                "INSERT INTO agent (id, name, persona, description, icon, status, current_task_id, skills_json, preset_json, constraints_json, llm_config_json, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(id) DO UPDATE SET
                    name = excluded.name,
                    persona = excluded.persona,
@@ -33,6 +33,7 @@ impl<'a> SubAgentRepository<'a> {
                    skills_json = excluded.skills_json,
                    preset_json = excluded.preset_json,
                    constraints_json = excluded.constraints_json,
+                   llm_config_json = excluded.llm_config_json,
                    updated_at = excluded.updated_at",
                 rusqlite::params![
                     config.id,
@@ -45,6 +46,7 @@ impl<'a> SubAgentRepository<'a> {
                     config.skills_json,
                     config.preset_json,
                     config.constraints_json,
+                    config.llm_config_json,
                     config.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
                     now,
                 ],
@@ -58,11 +60,11 @@ impl<'a> SubAgentRepository<'a> {
     pub fn get(&self, id: &str) -> Result<Option<SubAgentConfig>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, persona, description, icon, status, current_task_id, skills_json, preset_json, constraints_json, created_at, updated_at
+                "SELECT id, name, persona, description, icon, status, current_task_id, skills_json, preset_json, constraints_json, llm_config_json, created_at, updated_at
                  FROM agent WHERE id = ?",
             )?;
             let config = stmt
-                .query_row([id], |row| Self::row_to_config(row))
+                .query_row([id], Self::row_to_config)
                 .optional()
                 .context("Failed to get SubAgentConfig")?;
             Ok(config)
@@ -73,7 +75,7 @@ impl<'a> SubAgentRepository<'a> {
     pub fn list(&self, limit: usize) -> Result<Vec<SubAgentConfig>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, persona, description, icon, status, current_task_id, skills_json, preset_json, constraints_json, created_at, updated_at
+                "SELECT id, name, persona, description, icon, status, current_task_id, skills_json, preset_json, constraints_json, llm_config_json, created_at, updated_at
                  FROM agent ORDER BY created_at DESC LIMIT ?",
             )?;
             let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
@@ -91,7 +93,7 @@ impl<'a> SubAgentRepository<'a> {
     pub fn list_by_status(&self, status: &str, limit: usize) -> Result<Vec<SubAgentConfig>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, persona, description, icon, status, current_task_id, skills_json, preset_json, constraints_json, created_at, updated_at
+                "SELECT id, name, persona, description, icon, status, current_task_id, skills_json, preset_json, constraints_json, llm_config_json, created_at, updated_at
                  FROM agent WHERE status = ? ORDER BY created_at DESC LIMIT ?",
             )?;
             let rows = stmt.query_map(rusqlite::params![status, limit as i64], |row| {
@@ -138,7 +140,7 @@ impl<'a> SubAgentRepository<'a> {
                  FROM agent_metrics WHERE agent_id = ?",
             )?;
             let metrics = stmt
-                .query_row([agent_id], |row| Self::row_to_metrics(row))
+                .query_row([agent_id], Self::row_to_metrics)
                 .optional()
                 .context("Failed to get AgentMetrics")?;
             Ok(metrics)
@@ -253,8 +255,8 @@ impl<'a> SubAgentRepository<'a> {
     // ── Row Mappers ─────────────────────────────────────────────
 
     fn row_to_config(row: &Row) -> rusqlite::Result<SubAgentConfig> {
-        let created_str: String = row.get(10)?;
-        let updated_str: Option<String> = row.get(11)?;
+        let created_str: String = row.get(11)?;
+        let updated_str: Option<String> = row.get(12)?;
 
         Ok(SubAgentConfig {
             id: row.get(0)?,
@@ -267,6 +269,7 @@ impl<'a> SubAgentRepository<'a> {
             skills_json: row.get::<_, Option<String>>(7)?.unwrap_or_else(|| "[]".to_string()),
             preset_json: row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "{}".to_string()),
             constraints_json: row.get(9)?,
+            llm_config_json: row.get(10)?,
             created_at: parse_datetime(&created_str),
             updated_at: updated_str.as_deref().map(parse_datetime),
         })
@@ -332,6 +335,7 @@ mod tests {
                 .to_string(),
             preset_json: r#"{"persona":"test","temperature":0.5,"verbosity":"normal"}"#.to_string(),
             constraints_json: None,
+            llm_config_json: None,
             persona: Some("Test persona".to_string()),
             created_at: Utc::now(),
             updated_at: None,

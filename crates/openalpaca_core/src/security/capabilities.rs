@@ -30,6 +30,12 @@ pub enum SecurityViolation {
         tool_name: String,
         reason: String,
     },
+    /// Agent tried to use a model it's not authorized for.
+    UnauthorizedModelAccess {
+        agent_id: String,
+        model_id: String,
+        reason: String,
+    },
 }
 
 impl fmt::Display for SecurityViolation {
@@ -61,6 +67,15 @@ impl fmt::Display for SecurityViolation {
                 f,
                 "Sandbox violation: agent='{}', tool='{}', reason='{}'",
                 agent_id, tool_name, reason
+            ),
+            Self::UnauthorizedModelAccess {
+                agent_id,
+                model_id,
+                reason,
+            } => write!(
+                f,
+                "Model access denied: agent='{}', model='{}', reason='{}'",
+                agent_id, model_id, reason
             ),
         }
     }
@@ -115,6 +130,40 @@ impl CapabilityManager {
             return Err(SecurityViolation::CapabilityNotAllowed {
                 agent_id: agent_id.to_string(),
                 capability: tool_name.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Check whether an agent is allowed to use a particular model.
+    ///
+    /// Rules (same deny/allow pattern as capabilities):
+    /// - If the model is on `denied_models`, always block.
+    /// - If `allowed_models` is non-empty and the model is NOT on it, block.
+    /// - Otherwise, allow.
+    pub fn check_model_access(
+        agent_id: &str,
+        model_id: &str,
+        constraints: &AgentConstraints,
+    ) -> Result<(), SecurityViolation> {
+        // Check deny list first
+        if constraints.denied_models.iter().any(|d| d == model_id) {
+            return Err(SecurityViolation::UnauthorizedModelAccess {
+                agent_id: agent_id.to_string(),
+                model_id: model_id.to_string(),
+                reason: format!("Model '{}' is on the deny list", model_id),
+            });
+        }
+
+        // If allow list is non-empty, model must be on it
+        if !constraints.allowed_models.is_empty()
+            && !constraints.allowed_models.iter().any(|a| a == model_id)
+        {
+            return Err(SecurityViolation::UnauthorizedModelAccess {
+                agent_id: agent_id.to_string(),
+                model_id: model_id.to_string(),
+                reason: format!("Model '{}' is not in the allow list", model_id),
             });
         }
 
@@ -212,5 +261,65 @@ mod tests {
         assert!(
             CapabilityManager::check_agent_capability("agent1", "anything", &constraints).is_ok()
         );
+    }
+
+    // ── Model access tests ──────────────────────────────────────
+
+    #[test]
+    fn test_model_access_no_constraints() {
+        let constraints = default_constraints();
+        assert!(
+            CapabilityManager::check_model_access("agent1", "claude-sonnet-4-5-20250929", &constraints).is_ok()
+        );
+    }
+
+    #[test]
+    fn test_model_access_denied_model() {
+        let constraints = AgentConstraints {
+            denied_models: vec!["gpt-4o".to_string()],
+            ..default_constraints()
+        };
+        let result = CapabilityManager::check_model_access("agent1", "gpt-4o", &constraints);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityViolation::UnauthorizedModelAccess { agent_id, model_id, .. } => {
+                assert_eq!(agent_id, "agent1");
+                assert_eq!(model_id, "gpt-4o");
+            }
+            other => panic!("Expected UnauthorizedModelAccess, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_model_access_not_in_allow_list() {
+        let constraints = AgentConstraints {
+            allowed_models: vec!["claude-sonnet-4-5-20250929".to_string()],
+            ..default_constraints()
+        };
+        let result = CapabilityManager::check_model_access("agent1", "gpt-4o", &constraints);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_model_access_in_allow_list() {
+        let constraints = AgentConstraints {
+            allowed_models: vec!["claude-sonnet-4-5-20250929".to_string()],
+            ..default_constraints()
+        };
+        assert!(
+            CapabilityManager::check_model_access("agent1", "claude-sonnet-4-5-20250929", &constraints).is_ok()
+        );
+    }
+
+    #[test]
+    fn test_unauthorized_model_access_display() {
+        let v = SecurityViolation::UnauthorizedModelAccess {
+            agent_id: "a1".to_string(),
+            model_id: "gpt-4o".to_string(),
+            reason: "denied".to_string(),
+        };
+        let s = format!("{}", v);
+        assert!(s.contains("a1"));
+        assert!(s.contains("gpt-4o"));
     }
 }

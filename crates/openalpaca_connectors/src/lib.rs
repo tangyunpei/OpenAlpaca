@@ -104,10 +104,10 @@ pub trait ConnectorFactory: Send + Sync {
 
 /// Registry of supported connectors based on compiled features
 pub fn get_supported_connectors() -> Vec<Box<dyn ConnectorFactory>> {
-    let mut connectors: Vec<Box<dyn ConnectorFactory>> = Vec::new();
-
-    #[cfg(feature = "telegram")]
-    connectors.push(Box::new(TelegramFactory));
+    let connectors: Vec<Box<dyn ConnectorFactory>> = vec![
+        #[cfg(feature = "telegram")]
+        Box::new(TelegramFactory),
+    ];
 
     connectors
 }

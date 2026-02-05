@@ -115,9 +115,8 @@ fn print_event(event: &ServerEvent) {
         ServerEvent::Heartbeat { ts, instance_id } => {
             let time = ts.format("%H:%M:%S").to_string();
             println!(
-                "{} {} {} {}",
+                "{} 💓 {} {}",
                 time.dimmed(),
-                "💓".to_string(),
                 "heartbeat".cyan(),
                 format!("[{}...]", &instance_id[..8]).dimmed()
             );
@@ -131,9 +130,8 @@ fn print_event(event: &ServerEvent) {
                 _ => level.normal(),
             };
             println!(
-                "{} {} {} {}",
+                "{} 📝 {} {}",
                 time.dimmed(),
-                "📝",
                 level_colored,
                 message
             );
@@ -141,9 +139,8 @@ fn print_event(event: &ServerEvent) {
         ServerEvent::CommandReceived { request_id, command, ts, .. } => {
             let time = ts.format("%H:%M:%S").to_string();
             println!(
-                "{} {} {} {} {}",
+                "{} ⚡ {} {} {}",
                 time.dimmed(),
-                "⚡",
                 "command".magenta(),
                 command.bold(),
                 format!("[{}...]", &request_id[..8]).dimmed()

@@ -168,7 +168,7 @@ fn run_interactive(repo: &ConfigRepository, db: &Database) -> Result<()> {
 
 fn save_and_exit(repo: &ConfigRepository, config_map: &HashMap<String, String>) -> Result<()> {
     for (k, v) in config_map {
-        repo.set(&k, &v, "string")?;
+        repo.set(k, v, "string")?;
     }
     println!("{}", style("✅ Configuration saved!").bold().green());
     Ok(())

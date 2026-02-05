@@ -123,8 +123,8 @@ impl IntentParser {
         if lower == "/status" || lower == "/tasks" {
             return Some(Intent::TaskQuery { task_id: None });
         }
-        if lower.starts_with("/status ") {
-            let id = lower["/status ".len()..].trim().to_string();
+        if let Some(rest) = lower.strip_prefix("/status ") {
+            let id = rest.trim().to_string();
             if !id.is_empty() {
                 return Some(Intent::TaskQuery {
                     task_id: Some(id),

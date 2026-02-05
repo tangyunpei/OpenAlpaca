@@ -15,6 +15,7 @@ pub struct SubAgentConfig {
     pub skills_json: String,
     pub preset_json: String,
     pub constraints_json: Option<String>,
+    pub llm_config_json: Option<String>,
     pub persona: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,

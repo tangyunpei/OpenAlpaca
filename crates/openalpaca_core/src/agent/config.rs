@@ -1,6 +1,6 @@
 //! TOML-based agent configuration file structure
 
-use super::subagent::{AgentConstraints, AgentPreset, AgentStatus, Skill, SubAgent};
+use super::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent};
 use chrono::Utc;
 use openalpaca_storage::SubAgentConfig;
 use serde::Deserialize;
@@ -12,6 +12,7 @@ pub struct AgentConfigFile {
     pub skills: AgentSkillsConfig,
     pub preset: AgentPresetConfig,
     pub constraints: Option<AgentConstraintsConfig>,
+    pub llm: Option<AgentLlmConfigFile>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -43,6 +44,16 @@ pub struct AgentConstraintsConfig {
     pub require_confirmation_for: Option<Vec<String>>,
     pub allowed_capabilities: Option<Vec<String>>,
     pub denied_capabilities: Option<Vec<String>>,
+    pub allowed_models: Option<Vec<String>>,
+    pub denied_models: Option<Vec<String>>,
+}
+
+/// TOML structure for per-agent LLM config.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentLlmConfigFile {
+    pub model: Option<String>,
+    pub fallback_models: Option<Vec<String>>,
+    pub overrides: Option<std::collections::HashMap<String, String>>,
 }
 
 impl AgentConfigFile {
@@ -88,12 +99,24 @@ impl AgentConfigFile {
                         .unwrap_or_default(),
                     allowed_capabilities: c.allowed_capabilities.clone().unwrap_or_default(),
                     denied_capabilities: denied,
+                    allowed_models: c.allowed_models.clone().unwrap_or_default(),
+                    denied_models: c.denied_models.clone().unwrap_or_default(),
                 }
             })
             .unwrap_or_else(|| AgentConstraints {
                 denied_capabilities: skills_denied,
                 ..Default::default()
             });
+
+        let llm_config = self
+            .llm
+            .as_ref()
+            .map(|l| AgentLlmConfig {
+                model: l.model.clone(),
+                fallback_models: l.fallback_models.clone().unwrap_or_default(),
+                overrides: l.overrides.clone().unwrap_or_default(),
+            })
+            .unwrap_or_default();
 
         SubAgent {
             id: self.agent.id,
@@ -105,6 +128,7 @@ impl AgentConfigFile {
             skills,
             preset,
             constraints,
+            llm_config,
         }
     }
 
@@ -143,8 +167,21 @@ impl AgentConfigFile {
                 require_confirmation_for: c.require_confirmation_for.clone().unwrap_or_default(),
                 allowed_capabilities: c.allowed_capabilities.clone().unwrap_or_default(),
                 denied_capabilities: denied,
+                allowed_models: c.allowed_models.clone().unwrap_or_default(),
+                denied_models: c.denied_models.clone().unwrap_or_default(),
             }
         });
+
+        let llm_config = self.llm.as_ref().map(|l| {
+            AgentLlmConfig {
+                model: l.model.clone(),
+                fallback_models: l.fallback_models.clone().unwrap_or_default(),
+                overrides: l.overrides.clone().unwrap_or_default(),
+            }
+        });
+        let llm_config_json = llm_config
+            .as_ref()
+            .and_then(|c| serde_json::to_string(c).ok());
 
         let now = Utc::now();
 
@@ -160,6 +197,7 @@ impl AgentConfigFile {
             constraints_json: constraints
                 .as_ref()
                 .map(|c| serde_json::to_string(c).unwrap_or_else(|_| "{}".to_string())),
+            llm_config_json,
             persona: Some(self.preset.persona),
             created_at: now,
             updated_at: Some(now),

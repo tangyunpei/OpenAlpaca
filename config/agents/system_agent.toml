@@ -18,3 +18,7 @@ timeout_seconds = 600
 require_confirmation_for = ["file_delete", "shell_execute"]
 allowed_capabilities = ["file_read", "file_write", "shell_execute", "file_organize"]
 denied_capabilities = ["web_search"]
+
+[llm]
+model = "claude-haiku-4-5-20251001"
+fallback_models = ["claude-sonnet-4-20250514"]

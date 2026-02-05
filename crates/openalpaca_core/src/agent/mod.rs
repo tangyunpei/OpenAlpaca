@@ -7,7 +7,7 @@ use async_trait::async_trait;
 
 pub use config::AgentConfigFile;
 pub use registry::AgentRegistry;
-pub use subagent::{AgentConstraints, AgentPreset, AgentStatus, Skill, SubAgent};
+pub use subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent};
 
 // The core interface for all intelligent agents.
 #[async_trait]

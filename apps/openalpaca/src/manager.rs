@@ -54,7 +54,7 @@ pub fn is_daemon_running() -> bool {
     if let Ok(Some(d)) = discovery::read_discovery() {
         // Verify PID existence
         let s = System::new_all();
-        if let Some(_) = s.processes().get(&sysinfo::Pid::from(d.pid as usize)) {
+        if s.processes().get(&sysinfo::Pid::from(d.pid as usize)).is_some() {
             return true;
         }
     }

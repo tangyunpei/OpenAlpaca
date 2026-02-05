@@ -196,6 +196,22 @@ async fn main() -> Result<()> {
                         agent_id, tool_name, success, duration_ms
                     );
                 }
+                openalpaca_core::events::SystemEvent::LlmCallCompleted {
+                    agent_id, model, input_tokens, output_tokens, cost_usd, ..
+                } => {
+                    tracing::debug!(
+                        "LLM call: agent={}, model={}, tokens={}/{}, cost=${:.6}",
+                        agent_id, model, input_tokens, output_tokens, cost_usd
+                    );
+                }
+                openalpaca_core::events::SystemEvent::ModelAccessDenied {
+                    agent_id, model_id, reason, ..
+                } => {
+                    tracing::warn!(
+                        "Model access denied: agent={}, model={}, reason={}",
+                        agent_id, model_id, reason
+                    );
+                }
                 _ => {}
             }
         }
@@ -208,50 +224,50 @@ async fn main() -> Result<()> {
     let config_dir = std::env::current_dir()
         .unwrap_or_default()
         .join("config/agents");
-    if config_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&config_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map_or(false, |e| e == "toml") {
-                    match std::fs::read_to_string(&path) {
-                        Ok(content) => {
-                            match toml::from_str::<openalpaca_core::agent::AgentConfigFile>(&content)
-                            {
-                                Ok(agent_config) => {
-                                    // Register in-memory
-                                    let subagent = agent_config.clone().into_subagent();
-                                    shared_context.agent_registry.register(subagent);
+    if config_dir.exists()
+        && let Ok(entries) = std::fs::read_dir(&config_dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "toml") {
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => {
+                        match toml::from_str::<openalpaca_core::agent::AgentConfigFile>(&content)
+                        {
+                            Ok(agent_config) => {
+                                // Register in-memory
+                                let subagent = agent_config.clone().into_subagent();
+                                shared_context.agent_registry.register(subagent);
 
-                                    // Persist to DB
-                                    let storage_config = agent_config.into_storage_config();
-                                    let agent_id = storage_config.id.clone();
-                                    let repo =
-                                        openalpaca_storage::SubAgentRepository::new(&db);
-                                    let _ = repo.upsert(&storage_config);
+                                // Persist to DB
+                                let storage_config = agent_config.into_storage_config();
+                                let agent_id = storage_config.id.clone();
+                                let repo =
+                                    openalpaca_storage::SubAgentRepository::new(&db);
+                                let _ = repo.upsert(&storage_config);
 
-                                    // Initialize metrics row if not exists
-                                    if let Ok(None) = repo.get_metrics(&agent_id) {
-                                        let _ = repo.upsert_metrics(
-                                            &openalpaca_storage::AgentMetrics::new_empty(
-                                                &agent_id,
-                                            ),
-                                        );
-                                    }
-
-                                    info!("Loaded agent config: {}", path.display());
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "Failed to parse agent config {}: {}",
-                                        path.display(),
-                                        e
+                                // Initialize metrics row if not exists
+                                if let Ok(None) = repo.get_metrics(&agent_id) {
+                                    let _ = repo.upsert_metrics(
+                                        &openalpaca_storage::AgentMetrics::new_empty(
+                                            &agent_id,
+                                        ),
                                     );
                                 }
+
+                                info!("Loaded agent config: {}", path.display());
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Failed to parse agent config {}: {}",
+                                    path.display(),
+                                    e
+                                );
                             }
                         }
-                        Err(e) => {
-                            warn!("Failed to read agent config {}: {}", path.display(), e);
-                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to read agent config {}: {}", path.display(), e);
                     }
                 }
             }
@@ -260,25 +276,22 @@ async fn main() -> Result<()> {
 
     let lane_manager = Arc::new(LaneManager::new());
 
-    // Step 5.2.2: Load LLM config (Phase 5.1)
-    let llm_provider: Option<Arc<dyn openalpaca_llm::LlmProvider>> = {
+    // Step 5.2.2: Load LLM config (Phase 5.1 → 5.2.5 LlmRouter)
+    let llm_router: Option<Arc<openalpaca_llm::LlmRouter>> = {
         let llm_config_path = std::env::current_dir()
             .unwrap_or_default()
             .join("config/llm.toml");
         if llm_config_path.exists() {
-            match openalpaca_llm::LlmConfig::from_file(&llm_config_path) {
-                Ok(config) => match openalpaca_llm::build_provider(&config) {
-                    Ok(provider) => {
-                        info!("LLM provider loaded: {}", provider.name());
-                        Some(Arc::from(provider))
-                    }
-                    Err(e) => {
-                        warn!("Failed to build LLM provider: {e}. Falling back to echo stub.");
-                        None
-                    }
-                },
+            match openalpaca_llm::build_router(&llm_config_path) {
+                Ok(router) => {
+                    info!(
+                        "LLM router loaded (default model: {})",
+                        router.default_model()
+                    );
+                    Some(Arc::new(router))
+                }
                 Err(e) => {
-                    warn!("Failed to load LLM config: {e}. Falling back to echo stub.");
+                    warn!("Failed to build LLM router: {e}. Falling back to echo stub.");
                     None
                 }
             }
@@ -305,7 +318,7 @@ async fn main() -> Result<()> {
         lane_manager.clone(),
         bus.clone(),
         SystemPersona::default(),
-        llm_provider,
+        llm_router,
         openalpaca_core::runner::LoopConfig::default(),
         security_gate,
     ));
