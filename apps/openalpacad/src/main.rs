@@ -139,7 +139,33 @@ async fn main() -> Result<()> {
                 openalpaca_core::events::SystemEvent::ConnectorStatus { id, status, .. } => {
                     eb_bridge.connector_status(&id, &status);
                 }
-                _ => {} // Ignore other system events for now
+                openalpaca_core::events::SystemEvent::TaskCreated {
+                    task_id, title, created_by: _, ..
+                } => {
+                    eb_bridge.task_status(&task_id, &title, "queued", None, None, None);
+                }
+                openalpaca_core::events::SystemEvent::TaskUpdated {
+                    task_id,
+                    status,
+                    progress_current,
+                    progress_total,
+                    ..
+                } => {
+                    eb_bridge.task_status(&task_id, "", &status, progress_current, progress_total, None);
+                }
+                openalpaca_core::events::SystemEvent::TaskCompleted {
+                    task_id,
+                    result_summary,
+                    ..
+                } => {
+                    eb_bridge.task_status(&task_id, "", "completed", None, None, result_summary);
+                }
+                openalpaca_core::events::SystemEvent::TaskFailed {
+                    task_id, error, ..
+                } => {
+                    eb_bridge.task_status(&task_id, "", "failed", None, None, Some(error));
+                }
+                _ => {}
             }
         }
     });
@@ -191,6 +217,10 @@ async fn main() -> Result<()> {
             post(routes::connector_config_handler),
         )
         .route("/v1/auth/link", post(routes::generate_link_token_handler))
+        .route("/v1/tasks", post(routes::create_task_handler))
+        .route("/v1/tasks", get(routes::list_tasks_handler))
+        .route("/v1/tasks/{id}", get(routes::get_task_handler))
+        .route("/v1/tasks/{id}/action", post(routes::task_action_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_middleware,

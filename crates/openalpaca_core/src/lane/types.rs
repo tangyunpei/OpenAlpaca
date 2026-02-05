@@ -71,19 +71,85 @@ impl ConversationLane {
     }
 }
 
+/// Status of a task lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskLaneStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Paused,
+}
+
+impl TaskLaneStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Paused => "paused",
+        }
+    }
+}
+
 /// A task lane: tracks a single background task.
-#[derive(Debug)]
 pub struct TaskLane {
     pub task_id: String,
+    pub source_lane: Option<LaneKey>,
     pub created_at: DateTime<Utc>,
+    status: Mutex<TaskLaneStatus>,
+    assigned_agents: Mutex<Vec<String>>,
+}
+
+impl std::fmt::Debug for TaskLane {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskLane")
+            .field("task_id", &self.task_id)
+            .field("source_lane", &self.source_lane)
+            .field("created_at", &self.created_at)
+            .field("status", &*self.status.lock().unwrap())
+            .finish()
+    }
 }
 
 impl TaskLane {
     pub fn new(task_id: impl Into<String>) -> Self {
         Self {
             task_id: task_id.into(),
+            source_lane: None,
             created_at: Utc::now(),
+            status: Mutex::new(TaskLaneStatus::Queued),
+            assigned_agents: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Set the source lane that originated this task.
+    pub fn with_source(mut self, source: LaneKey) -> Self {
+        self.source_lane = Some(source);
+        self
+    }
+
+    /// Get the current status.
+    pub fn status(&self) -> TaskLaneStatus {
+        *self.status.lock().unwrap()
+    }
+
+    /// Set the status.
+    pub fn set_status(&self, status: TaskLaneStatus) {
+        *self.status.lock().unwrap() = status;
+    }
+
+    /// Assign an agent to this task.
+    pub fn assign_agent(&self, agent_id: String) {
+        self.assigned_agents.lock().unwrap().push(agent_id);
+    }
+
+    /// Get the list of assigned agents.
+    pub fn assigned_agents(&self) -> Vec<String> {
+        self.assigned_agents.lock().unwrap().clone()
     }
 }
 
@@ -123,5 +189,40 @@ mod tests {
         let k3 = LaneKey::new("u1", "gui");
         assert_eq!(k1, k2);
         assert_ne!(k1, k3);
+    }
+
+    #[test]
+    fn test_task_lane_status() {
+        let lane = TaskLane::new("task-1");
+        assert_eq!(lane.status(), TaskLaneStatus::Queued);
+
+        lane.set_status(TaskLaneStatus::Running);
+        assert_eq!(lane.status(), TaskLaneStatus::Running);
+
+        lane.set_status(TaskLaneStatus::Completed);
+        assert_eq!(lane.status(), TaskLaneStatus::Completed);
+    }
+
+    #[test]
+    fn test_task_lane_with_source() {
+        let lane = TaskLane::new("task-1").with_source(LaneKey::new("u1", "cli"));
+        assert_eq!(
+            lane.source_lane,
+            Some(LaneKey::new("u1", "cli"))
+        );
+    }
+
+    #[test]
+    fn test_task_lane_agents() {
+        let lane = TaskLane::new("task-1");
+        assert!(lane.assigned_agents().is_empty());
+
+        lane.assign_agent("agent-1".into());
+        lane.assign_agent("agent-2".into());
+
+        let agents = lane.assigned_agents();
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0], "agent-1");
+        assert_eq!(agents[1], "agent-2");
     }
 }

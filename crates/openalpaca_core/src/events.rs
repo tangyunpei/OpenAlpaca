@@ -43,6 +43,33 @@ pub enum SystemEvent {
         status: String,
         timestamp: DateTime<Utc>,
     },
+    /// A new task was created
+    TaskCreated {
+        task_id: String,
+        title: String,
+        created_by: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// A task was updated (status change, progress update)
+    TaskUpdated {
+        task_id: String,
+        status: String,
+        progress_current: Option<i32>,
+        progress_total: Option<i32>,
+        timestamp: DateTime<Utc>,
+    },
+    /// A task completed successfully
+    TaskCompleted {
+        task_id: String,
+        result_summary: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
+    /// A task failed
+    TaskFailed {
+        task_id: String,
+        error: String,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

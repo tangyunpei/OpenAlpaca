@@ -44,6 +44,17 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// Event triggered when a task status changes
+    TaskStatus {
+        task_id: String,
+        title: String,
+        status: String,
+        progress_current: Option<i32>,
+        progress_total: Option<i32>,
+        result_summary: Option<String>,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
 }
 
 // ── Unified Event System (M3.5) ────────────────────────────────────

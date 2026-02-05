@@ -117,10 +117,53 @@ impl EventBroadcaster {
                     });
                     repo.log("agent_status", None, Some(&detail), None)
                 }
+                // Log task status changes
+                ServerEvent::TaskStatus {
+                    task_id,
+                    status,
+                    progress_current,
+                    progress_total,
+                    result_summary,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "task_id": task_id,
+                        "status": status,
+                        "progress_current": progress_current,
+                        "progress_total": progress_total,
+                        "result_summary": result_summary
+                    });
+                    repo.log("task_status", None, Some(&detail), None)
+                }
             };
             // Error handling strategy: log errors but don't crash or block broadcast
             // For now we just ignore errors as per architecture plan
         }
+    }
+
+    /// Broadcast a task status event and persist it
+    pub fn task_status(
+        &self,
+        task_id: &str,
+        title: &str,
+        status: &str,
+        progress_current: Option<i32>,
+        progress_total: Option<i32>,
+        result_summary: Option<String>,
+    ) {
+        let event = ServerEvent::TaskStatus {
+            task_id: task_id.to_string(),
+            title: title.to_string(),
+            status: status.to_string(),
+            progress_current,
+            progress_total,
+            result_summary,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
     }
 
     /// Broadcast a connector status change and persist it

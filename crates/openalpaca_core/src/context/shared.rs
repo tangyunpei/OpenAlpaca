@@ -1,9 +1,48 @@
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+/// Status of a task entry in the in-memory registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskEntryStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Paused,
+}
+
+impl TaskEntryStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Paused => "paused",
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
+/// An in-memory task entry tracked by the registry.
+#[derive(Debug, Clone)]
+pub struct TaskEntry {
+    pub task_id: String,
+    pub title: String,
+    pub status: TaskEntryStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Registry for tracking active tasks.
 pub struct TaskRegistry {
-    tasks: Mutex<HashMap<String, String>>,
+    tasks: Mutex<HashMap<String, TaskEntry>>,
 }
 
 impl TaskRegistry {
@@ -14,13 +53,40 @@ impl TaskRegistry {
     }
 
     /// Register a task. Returns false if the task_id already exists.
-    pub fn register(&self, task_id: String, description: String) -> bool {
+    pub fn register(&self, task_id: String, title: String) -> bool {
         let mut tasks = self.tasks.lock().unwrap();
         if tasks.contains_key(&task_id) {
             return false;
         }
-        tasks.insert(task_id, description);
+        let now = Utc::now();
+        tasks.insert(
+            task_id.clone(),
+            TaskEntry {
+                task_id,
+                title,
+                status: TaskEntryStatus::Queued,
+                created_at: now,
+                updated_at: now,
+            },
+        );
         true
+    }
+
+    /// Update the status of a task. Returns false if the task doesn't exist.
+    pub fn update_status(&self, task_id: &str, status: TaskEntryStatus) -> bool {
+        let mut tasks = self.tasks.lock().unwrap();
+        if let Some(entry) = tasks.get_mut(task_id) {
+            entry.status = status;
+            entry.updated_at = Utc::now();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get a task entry by ID.
+    pub fn get(&self, task_id: &str) -> Option<TaskEntry> {
+        self.tasks.lock().unwrap().get(task_id).cloned()
     }
 
     /// Remove a task by id. Returns true if it existed.
@@ -28,9 +94,20 @@ impl TaskRegistry {
         self.tasks.lock().unwrap().remove(task_id).is_some()
     }
 
-    /// Number of active tasks.
+    /// Number of tracked tasks.
     pub fn count(&self) -> usize {
         self.tasks.lock().unwrap().len()
+    }
+
+    /// List all non-terminal (active) task entries.
+    pub fn list_active(&self) -> Vec<TaskEntry> {
+        self.tasks
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|e| !e.status.is_terminal())
+            .cloned()
+            .collect()
     }
 }
 
@@ -116,6 +193,42 @@ mod tests {
         assert!(reg.remove("t1"));
         assert_eq!(reg.count(), 0);
         assert!(!reg.remove("t1"));
+    }
+
+    #[test]
+    fn test_task_registry_update_status() {
+        let reg = TaskRegistry::new();
+        reg.register("t1".into(), "task one".into());
+
+        assert!(reg.update_status("t1", TaskEntryStatus::Running));
+        let entry = reg.get("t1").unwrap();
+        assert_eq!(entry.status, TaskEntryStatus::Running);
+
+        assert!(!reg.update_status("nope", TaskEntryStatus::Running));
+    }
+
+    #[test]
+    fn test_task_registry_list_active() {
+        let reg = TaskRegistry::new();
+        reg.register("t1".into(), "queued".into());
+        reg.register("t2".into(), "will run".into());
+        reg.register("t3".into(), "will complete".into());
+
+        reg.update_status("t2", TaskEntryStatus::Running);
+        reg.update_status("t3", TaskEntryStatus::Completed);
+
+        let active = reg.list_active();
+        assert_eq!(active.len(), 2); // t1 (queued) and t2 (running)
+    }
+
+    #[test]
+    fn test_task_entry_status_terminal() {
+        assert!(!TaskEntryStatus::Queued.is_terminal());
+        assert!(!TaskEntryStatus::Running.is_terminal());
+        assert!(!TaskEntryStatus::Paused.is_terminal());
+        assert!(TaskEntryStatus::Completed.is_terminal());
+        assert!(TaskEntryStatus::Failed.is_terminal());
+        assert!(TaskEntryStatus::Cancelled.is_terminal());
     }
 
     #[test]

@@ -33,6 +33,21 @@ impl LaneManager {
         lane
     }
 
+    /// Get a task lane by ID.
+    pub fn get_task_lane(&self, task_id: &str) -> Option<Arc<TaskLane>> {
+        self.tasks.lock().unwrap().get(task_id).cloned()
+    }
+
+    /// Remove a task lane by ID.
+    pub fn remove_task_lane(&self, task_id: &str) -> Option<Arc<TaskLane>> {
+        self.tasks.lock().unwrap().remove(task_id)
+    }
+
+    /// List all task lane IDs.
+    pub fn list_task_lanes(&self) -> Vec<String> {
+        self.tasks.lock().unwrap().keys().cloned().collect()
+    }
+
     /// Number of active conversation lanes.
     pub fn conversation_count(&self) -> usize {
         self.conversations.lock().unwrap().len()
@@ -80,6 +95,39 @@ mod tests {
         let lane = mgr.create_task_lane("task-abc");
         assert_eq!(lane.task_id, "task-abc");
         assert_eq!(mgr.task_count(), 1);
+    }
+
+    #[test]
+    fn test_get_task_lane() {
+        let mgr = LaneManager::new();
+        assert!(mgr.get_task_lane("nope").is_none());
+
+        mgr.create_task_lane("t1");
+        let lane = mgr.get_task_lane("t1").unwrap();
+        assert_eq!(lane.task_id, "t1");
+    }
+
+    #[test]
+    fn test_remove_task_lane() {
+        let mgr = LaneManager::new();
+        mgr.create_task_lane("t1");
+        assert_eq!(mgr.task_count(), 1);
+
+        let removed = mgr.remove_task_lane("t1");
+        assert!(removed.is_some());
+        assert_eq!(mgr.task_count(), 0);
+        assert!(mgr.remove_task_lane("t1").is_none());
+    }
+
+    #[test]
+    fn test_list_task_lanes() {
+        let mgr = LaneManager::new();
+        mgr.create_task_lane("t1");
+        mgr.create_task_lane("t2");
+
+        let mut ids = mgr.list_task_lanes();
+        ids.sort();
+        assert_eq!(ids, vec!["t1", "t2"]);
     }
 
     #[test]
