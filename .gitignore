@@ -83,3 +83,9 @@ apps/openalpaca-gui/src-tauri/gen/
 *.db-shm
 *.db-wal
 *.db-journal
+
+
+# ============================================
+# Agent
+# ============================================
+.claude/

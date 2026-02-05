@@ -1,2 +1,5 @@
 packages:
-  - "apps/openalpaca-gui"
+  - apps/openalpaca-gui
+
+onlyBuiltDependencies:
+  - esbuild

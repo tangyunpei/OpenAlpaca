@@ -1,5 +1,7 @@
 {
   "name": "openalpaca",
   "private": true,
-  "workspaces": ["apps/openalpaca-gui"]
+  "workspaces": [
+    "apps/openalpaca-gui"
+  ]
 }
