@@ -15,22 +15,15 @@ export interface ConnectionInfo {
   instanceId: string;
 }
 
-/** Server event types from daemon (snake_case from Rust events) */
-export interface ServerEvent {
-  type: "heartbeat" | "log" | "command_received" | "agent_status" | "task_update" | "wake";
-  ts: string;
-  instance_id: string;
-  // Additional fields based on type
-  level?: string;
-  message?: string;
-  request_id?: string;
-  command?: string;
-  agent_id?: string;
-  status?: string;
-  task_id?: string;
-  progress?: number;
-  wake?: any; // For wake events
-}
+/** Server event types from daemon — discriminated union matching Rust ServerEvent enum */
+export type ServerEvent =
+  | { type: "heartbeat"; ts: string; instance_id: string }
+  | { type: "log"; level: string; message: string; ts: string; instance_id: string }
+  | { type: "command_received"; request_id: string; command: string; ts: string; instance_id: string }
+  | { type: "wake"; wake: unknown; ts: string; instance_id: string }
+  | { type: "connector_status"; id: string; status: string; ts: string; instance_id: string }
+  | { type: "task_status"; task_id: string; title: string; status: string; progress_current: number | null; progress_total: number | null; result_summary: string | null; ts: string; instance_id: string }
+  | { type: "agent_status"; agent_id: string; name: string; status: string; current_task_id: string | null; ts: string; instance_id: string };
 
 /** Connection state */
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "error";

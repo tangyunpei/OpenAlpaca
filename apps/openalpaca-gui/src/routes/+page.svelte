@@ -3,53 +3,60 @@
   import {
     connectToDaemon,
     disconnect,
-    clearEvents,
     connectionState,
     connectionInfo,
     events,
     errorMessage,
     type ServerEvent,
   } from "$lib/daemon";
-  import { shutdownDaemon } from "$lib/daemon_control";
 
-  import {
-    getConnectors,
-    performConnectorAction,
-    generateLinkToken,
-    configureConnector,
-    type Connector,
-  } from "$lib/connectors";
+  import AppHeader from "$lib/components/AppHeader.svelte";
+  import TabBar from "$lib/components/TabBar.svelte";
+  import EventLog from "$lib/components/EventLog.svelte";
+  import ConnectorPanel from "$lib/components/ConnectorPanel.svelte";
+  import TaskPanel from "$lib/components/TaskPanel.svelte";
+  import AgentPanel from "$lib/components/AgentPanel.svelte";
 
-  // Reactive state using Svelte 5 runes
+  import { loadTasks, subscribeToTaskEvents } from "$lib/stores/tasks";
+  import { loadAgents, subscribeToAgentEvents } from "$lib/stores/agents";
+
+  // Reactive state from stores
   let statusState = $state("disconnected");
   let info = $state<{ baseUrl: string; instanceId: string } | null>(null);
   let eventList = $state<ServerEvent[]>([]);
   let error = $state<string | null>(null);
 
-  // Tabs and Connectors state
-  let activeTab = $state<"events" | "connectors">("events");
-  let connectorsList = $state<Connector[]>([]);
-  let linkToken = $state<string | null>(null);
-  let isLoadingConnectors = $state(false);
+  let activeTab = $state<string>("events");
 
-  // Configuration Modal State
-  let showConfigModal = $state(false);
-  let configTargetId = $state<string | null>(null);
-  let configToken = $state("");
+  let connectorPanel: ConnectorPanel | undefined = $state();
+
+  const tabs = [
+    { id: "events", label: "Event Log" },
+    { id: "connectors", label: "Connectors" },
+    { id: "tasks", label: "Tasks" },
+    { id: "agents", label: "Agents" },
+  ];
 
   // Store subscriptions
   const unsubState = connectionState.subscribe((v) => {
     statusState = v;
-    if (v === "connected" && activeTab === "connectors") {
-      refreshConnectors();
+    if (v === "connected") {
+      if (activeTab === "connectors") connectorPanel?.refreshConnectors();
+      loadTasks();
+      loadAgents();
     }
   });
   const unsubInfo = connectionInfo.subscribe((v) => (info = v));
   const unsubEvents = events.subscribe((v) => (eventList = v));
   const unsubError = errorMessage.subscribe((v) => (error = v));
 
+  let unsubTaskEvents: (() => void) | null = null;
+  let unsubAgentEvents: (() => void) | null = null;
+
   onMount(() => {
     connectToDaemon();
+    unsubTaskEvents = subscribeToTaskEvents();
+    unsubAgentEvents = subscribeToAgentEvents();
   });
 
   onDestroy(() => {
@@ -58,304 +65,38 @@
     unsubInfo();
     unsubEvents();
     unsubError();
+    unsubTaskEvents?.();
+    unsubAgentEvents?.();
   });
 
-  async function refreshConnectors() {
-    if (statusState !== "connected") return;
-    isLoadingConnectors = true;
-    try {
-      connectorsList = await getConnectors();
-    } catch (e) {
-      console.error("Failed to load connectors:", e);
-    } finally {
-      isLoadingConnectors = false;
-    }
-  }
-
-  async function handleToggle(id: string, currentlyActive: boolean) {
-    const action = currentlyActive ? "disable" : "enable";
-    await handleAction(id, action);
-  }
-
-  async function handleAction(
-    id: string,
-    action: "enable" | "disable" | "delete",
-  ) {
-    try {
-      await performConnectorAction(id, action);
-      await refreshConnectors();
-    } catch (e) {
-      alert(`Action failed: ${e}`);
-    }
-  }
-
-  function openConfigModal(id: string) {
-    configTargetId = id;
-    configToken = "";
-    showConfigModal = true;
-  }
-
-  async function handleConfigSubmit() {
-    if (!configTargetId || !configToken) return;
-    try {
-      await configureConnector(configTargetId, configToken);
-      showConfigModal = false;
-      await refreshConnectors();
-    } catch (e) {
-      alert(`Configuration failed: ${e}`);
-    }
-  }
-
-  async function handleGenerateToken() {
-    try {
-      linkToken = await generateLinkToken();
-    } catch (e) {
-      alert(`Failed: ${e}`);
-    }
-  }
-
-  function formatTime(ts: string): string {
-    const date = new Date(ts);
-    return date.toLocaleTimeString("en-US", {
-      hour12: false,
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-  }
-
-  function getStatusLabel(status: string): string {
-    switch (status) {
-      case "unconfigured":
-        return "Not Configured";
-      case "active":
-        return "Active";
-      case "disabled":
-        return "Disabled";
-      case "error":
-        return "Error";
-      default:
-        return status;
-    }
-  }
-
-  function getEventIcon(type: string): string {
-    switch (type) {
-      case "heartbeat":
-        return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>`;
-      case "log":
-        return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>`;
-      case "command_received":
-        return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 14 7-9 1 11h6L12 25l-1-11H5Z"/></svg>`;
-      case "agent_status":
-        return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>`;
-      case "task_update":
-        return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="20" x="4" y="2" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><line x1="8" y1="10" x2="16" y2="10"/><line x1="8" y1="14" x2="16" y2="14"/><line x1="8" y1="18" x2="16" y2="18"/></svg>`;
-      default:
-        return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9.5C2 7 4 5 6.5 5H18c2.2 0 4 1.8 4 4v8Z"/><path d="m22 9-10 7L2 9"/></svg>`;
-    }
+  function handleTabChange(id: string) {
+    activeTab = id;
+    if (id === "connectors") connectorPanel?.refreshConnectors();
+    if (id === "tasks") loadTasks();
+    if (id === "agents") loadAgents();
   }
 </script>
 
 <main class="container">
-  <header class="header">
-    <div class="brand">
-      <h1>🦙 OpenAlpaca</h1>
-      {#if info}
-        <div class="info-tag">
-          <span class="instance">{info.instanceId.slice(0, 8)}</span>
-          <span class="url">{info.baseUrl}</span>
-        </div>
-      {/if}
-    </div>
-    <div
-      class="status"
-      class:connected={statusState === "connected"}
-      class:error={statusState === "error"}
-    >
-      <span class="dot"></span>
-      <span class="text">{statusState}</span>
-    </div>
-  </header>
+  <AppHeader {statusState} {info} />
 
   {#if error}
     <div class="error-banner">{error}</div>
   {/if}
 
-  <div class="nav-tabs">
-    <button
-      class="tab-btn"
-      class:active={activeTab === "events"}
-      onclick={() => (activeTab = "events")}
-    >
-      Event Log
-    </button>
-    <button
-      class="tab-btn"
-      class:active={activeTab === "connectors"}
-      onclick={() => {
-        activeTab = "connectors";
-        refreshConnectors();
-      }}
-    >
-      Connectors
-    </button>
-  </div>
+  <TabBar {activeTab} {tabs} onTabChange={handleTabChange} />
 
   <div class="tab-content">
     {#if activeTab === "events"}
-      <div class="controls">
-        <button
-          onclick={() => connectToDaemon()}
-          disabled={statusState === "connecting"}
-        >
-          {statusState === "connecting" ? "Connecting..." : "Reconnect"}
-        </button>
-        <button onclick={() => clearEvents()}>Clear</button>
-        <button class="danger" onclick={() => shutdownDaemon()}
-          >Quit OpenAlpaca</button
-        >
-      </div>
-
-      <div class="view-panel">
-        <div class="panel-header">
-          <h2>Events ({eventList.length})</h2>
-        </div>
-        <ul class="events">
-          {#each eventList as event (event.ts)}
-            <li class="event {event.type}">
-              <span class="icon">{@html getEventIcon(event.type)}</span>
-              <span class="time">{formatTime(event.ts)}</span>
-              <span class="type">{event.type}</span>
-              {#if event.message}
-                <span class="message">{event.message}</span>
-              {/if}
-              {#if event.command}
-                <span class="command">cmd: {event.command}</span>
-              {/if}
-            </li>
-          {:else}
-            <li class="empty">No events yet...</li>
-          {/each}
-        </ul>
-      </div>
+      <EventLog events={eventList} connectionState={statusState} />
     {:else if activeTab === "connectors"}
-      <div class="controls">
-        <button onclick={refreshConnectors} disabled={isLoadingConnectors}>
-          {isLoadingConnectors ? "Refreshing..." : "Refresh"}
-        </button>
-        <button onclick={handleGenerateToken}>Generate Bind Token</button>
-      </div>
-
-      {#if linkToken}
-        <div class="token-panel">
-          <p>Binding Code (expires in 5m):</p>
-          <div class="token-box">
-            <code>{linkToken}</code>
-          </div>
-          <p class="hint">
-            Send <code>/link {linkToken}</code> to your Telegram bot.
-          </p>
-        </div>
-      {/if}
-
-      <div class="view-panel">
-        <div class="panel-header">
-          <h2>Platform Connectors</h2>
-        </div>
-        <div class="connector-list">
-          {#each connectorsList as connector}
-            <div class="connector-card">
-              <div class="connector-info">
-                <h3>{connector.name}</h3>
-                <span class="status-badge {connector.status}">
-                  {getStatusLabel(connector.status)}
-                </span>
-              </div>
-              <div class="connector-actions">
-                <button
-                  class="action-btn icon"
-                  title="Configure"
-                  onclick={() => openConfigModal(connector.id)}
-                >
-                  <svg
-                    width="18"
-                    height="18"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2.5"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  >
-                    <path
-                      d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"
-                    />
-                    <circle cx="12" cy="12" r="3" />
-                  </svg>
-                </button>
-
-                <label class="switch">
-                  <input
-                    type="checkbox"
-                    checked={connector.status === "active"}
-                    onchange={() =>
-                      handleToggle(connector.id, connector.status === "active")}
-                  />
-                  <span class="slider"></span>
-                </label>
-                <button
-                  class="action-btn danger icon"
-                  title="Clear Config"
-                  onclick={() => handleAction(connector.id, "delete")}
-                >
-                  <svg
-                    width="18"
-                    height="18"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2.5"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  >
-                    <path
-                      d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2m-6 5v6m4-6v6"
-                    />
-                  </svg>
-                </button>
-              </div>
-            </div>
-          {:else}
-            <div class="empty">
-              No connectors found. Check your configuration.
-            </div>
-          {/each}
-        </div>
-      </div>
+      <ConnectorPanel bind:this={connectorPanel} connectionState={statusState} />
+    {:else if activeTab === "tasks"}
+      <TaskPanel />
+    {:else if activeTab === "agents"}
+      <AgentPanel />
     {/if}
   </div>
-
-  {#if showConfigModal}
-    <div class="modal-backdrop">
-      <div class="modal">
-        <h3>Configure {configTargetId}</h3>
-        <p>Enter the authentication token for this connector.</p>
-        <input
-          type="text"
-          bind:value={configToken}
-          placeholder="Token (e.g. 12345:ABC...)"
-          class="token-input"
-        />
-        <div class="modal-actions">
-          <button class="secondary" onclick={() => (showConfigModal = false)}
-            >Cancel</button
-          >
-          <button onclick={handleConfigSubmit}>Save & Enable</button>
-        </div>
-      </div>
-    </div>
-  {/if}
 </main>
 
 <style>
@@ -384,421 +125,10 @@
   }
 
   .container {
-    max-width: 900px;
-    margin: 0 auto;
-    padding: 20px;
-  }
-
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 25px;
-    padding-bottom: 15px;
-    border-bottom: 2px solid var(--primary);
-  }
-
-  .brand {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  h1 {
-    margin: 0;
-    font-size: 2rem;
-    font-weight: 800;
-    color: var(--text);
-    letter-spacing: -0.5px;
-  }
-
-  .info-tag {
-    display: flex;
-    gap: 12px;
-    font-family: "Fira Code", monospace;
-    font-size: 0.75rem;
-    color: var(--text-dim);
-  }
-
-  .info-tag .instance {
-    background: var(--primary);
-    padding: 0 6px;
-    border-radius: 4px;
-    color: var(--text);
-  }
-
-  .nav-tabs {
-    display: flex;
-    background: rgba(0, 0, 0, 0.25);
-    padding: 4px;
-    border-radius: 10px;
-    margin: 0 auto 24px auto;
-    gap: 4px;
-    width: fit-content;
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
-  }
-
-  .tab-btn {
-    padding: 8px 24px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: 0.9rem;
-    font-weight: 500;
-    border-radius: 6px;
-    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  }
-
-  .tab-btn:hover {
-    color: var(--text);
-  }
-
-  .tab-btn.active {
-    background: rgba(255, 255, 255, 0.1);
-    color: #fff;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-  }
-
-  .view-panel {
-    background: rgba(30, 30, 50, 0.7);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
-    border-radius: 16px;
-    padding: 0;
-    overflow: hidden;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-  }
-
-  .panel-header {
-    padding: 15px 20px;
-    background: rgba(255, 255, 255, 0.02);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  }
-
-  .view-panel h2 {
-    margin: 0;
-    font-size: 1rem;
-    font-weight: 600;
-    color: var(--text);
-  }
-
-  .connector-list {
-    padding: 10px;
-  }
-
-  .connector-card {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 16px 20px;
-    background: rgba(255, 255, 255, 0.03);
-    border-radius: 10px;
-    margin-bottom: 10px;
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    transition: all 0.2s;
-  }
-
-  .connector-card:hover {
-    background: rgba(255, 255, 255, 0.06);
-    transform: translateX(4px);
-    border-color: var(--primary);
-  }
-
-  .connector-info h3 {
-    margin: 0 0 4px 0;
-    font-size: 1.1rem;
-  }
-
-  .status-badge {
-    font-size: 0.75rem;
-    padding: 2px 8px;
-    border-radius: 20px;
-    text-transform: uppercase;
-    font-weight: 700;
-  }
-
-  .status-badge.active {
-    background: rgba(16, 185, 129, 0.2);
-    color: var(--success);
-  }
-  .status-badge.error {
-    background: rgba(239, 68, 68, 0.2);
-    color: var(--error);
-  }
-  .status-badge.disabled {
-    background: rgba(107, 114, 128, 0.2);
-    color: #9ca3af;
-  }
-  .status-badge.unconfigured {
-    background: rgba(255, 255, 255, 0.05);
-    color: var(--text-dim);
-  }
-
-  .connector-actions {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-  }
-
-  .action-btn {
-    padding: 8px 14px;
-    font-size: 0.8rem;
-    border-radius: 6px;
-    cursor: pointer;
-    border: none;
-    transition: all 0.2s;
-  }
-
-  .action-btn.icon {
-    padding: 6px 10px;
-    font-size: 1.2rem;
-    font-weight: bold;
-    line-height: 1;
-  }
-
-  .action-btn.danger {
-    background: rgba(239, 68, 68, 0.1);
-    color: var(--error);
-  }
-  .action-btn.danger:hover {
-    background: var(--error);
-    color: white;
-  }
-
-  /* Toggle Switch */
-  .switch {
-    position: relative;
-    display: inline-block;
-    width: 44px;
-    height: 24px;
-    flex-shrink: 0;
-  }
-
-  .switch input {
-    opacity: 0;
-    width: 0;
-    height: 0;
-  }
-
-  .slider {
-    position: absolute;
-    cursor: pointer;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background-color: var(--primary);
-    transition: 0.4s;
-    border-radius: 24px;
-  }
-
-  .slider:before {
-    position: absolute;
-    content: "";
-    height: 18px;
-    width: 18px;
-    left: 3px;
-    bottom: 3px;
-    background-color: white;
-    transition: 0.4s;
-    border-radius: 50%;
-  }
-
-  input:checked + .slider {
-    background-color: var(--success);
-  }
-
-  input:checked + .slider:before {
-    transform: translateX(20px);
-  }
-
-  .token-panel {
-    background: linear-gradient(135deg, var(--primary), #1a3a5f);
-    padding: 20px;
-    border-radius: 12px;
-    margin-bottom: 20px;
-    text-align: center;
-    border: 1px solid var(--accent);
-  }
-
-  .token-box {
-    background: rgba(0, 0, 0, 0.3);
-    padding: 15px;
-    border-radius: 8px;
-    font-size: 2rem;
-    letter-spacing: 4px;
-    margin: 10px 0;
-    color: var(--accent);
-    font-weight: 800;
-  }
-
-  .hint {
-    font-size: 0.85rem;
-    color: var(--text-dim);
-  }
-
-  .controls {
-    display: flex;
-    gap: 10px;
-    margin-bottom: 20px;
-  }
-
-  button:not(.action-btn) {
-    padding: 10px 20px;
-    border: none;
-    border-radius: 8px;
-    background: var(--primary);
-    color: var(--text);
-    font-size: 0.9rem;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-
-  button:not(.action-btn):hover:not(:disabled) {
-    background: var(--accent);
-    transform: translateY(-1px);
-  }
-
-  button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  button.danger:not(.action-btn) {
-    background: rgba(239, 68, 68, 0.2);
-    border: 1px solid var(--error);
-    color: var(--error);
-  }
-
-  button.danger:not(.action-btn):hover:not(:disabled) {
-    background: var(--error);
-    color: #fff;
-  }
-
-  .events {
-    list-style: none;
-    margin: 0;
-    padding: 10px;
-    max-height: 60vh;
-    overflow-y: auto;
-  }
-
-  .event {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px 16px;
-    border-radius: 8px;
-    margin-bottom: 6px;
-    background: rgba(255, 255, 255, 0.02);
-    font-size: 0.9rem;
-    transition: background 0.15s;
-  }
-
-  .event:hover {
-    background: rgba(255, 255, 255, 0.04);
-  }
-
-  .event .icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 24px;
-    flex-shrink: 0;
-  }
-
-  .icon-svg {
-    display: block;
+    padding: 20px 32px;
     width: 100%;
-    height: 100%;
-  }
-
-  .event .time {
-    color: var(--text-dim);
-    font-family: "Fira Code", monospace;
-    font-size: 0.8rem;
-  }
-
-  .event .type {
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    font-weight: 700;
-    min-width: 80px;
-    text-align: center;
-  }
-
-  .event.heartbeat .type {
-    background: rgba(16, 185, 129, 0.1);
-    color: var(--success);
-  }
-
-  .event.log .type {
-    background: rgba(59, 130, 246, 0.1);
-    color: #60a5fa;
-  }
-
-  .event.command_received .type {
-    background: rgba(233, 69, 96, 0.1);
-    color: var(--accent);
-  }
-
-  .event.wake .type {
-    background: rgba(139, 92, 246, 0.1);
-    color: #a78bfa;
-  }
-
-  .event .message,
-  .event .command {
-    color: var(--text-dim);
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .status {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 16px;
-    border-radius: 20px;
-    background: var(--surface);
-    font-size: 0.85rem;
-    text-transform: capitalize;
-  }
-
-  .status .dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: var(--text-dim);
-    animation: pulse 2s infinite;
-  }
-
-  .status.connected .dot {
-    background: var(--success);
-  }
-
-  .status.error .dot {
-    background: var(--error);
-    animation: none;
-  }
-
-  @keyframes pulse {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.5;
-    }
+    box-sizing: border-box;
+    min-height: 100vh;
   }
 
   .error-banner {
@@ -810,99 +140,48 @@
     margin-bottom: 15px;
   }
 
-  .empty {
-    color: var(--text-dim);
-    text-align: center;
-    padding: 60px 40px;
-  }
-
-  /* Scrollbar styling */
-  .events::-webkit-scrollbar {
-    width: 6px;
-  }
-
-  .events::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .events::-webkit-scrollbar-thumb {
-    background: var(--primary);
-    border-radius: 3px;
-  }
-
-  /* Modal Styling */
-  .modal-backdrop {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0, 0, 0, 0.6);
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    z-index: 1000;
-  }
-
-  .modal {
-    background: var(--surface);
-    padding: 24px;
-    border-radius: 12px;
-    width: 90%;
-    max-width: 400px;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-    border: 1px solid var(--border);
-  }
-
-  .modal h3 {
-    margin-top: 0;
-    color: var(--primary);
-  }
-
-  .token-input {
-    width: 100%;
-    padding: 10px;
-    margin: 15px 0;
-    background: var(--bg-dark);
-    border: 1px solid var(--border);
-    color: var(--text);
-    border-radius: 6px;
-    box-sizing: border-box;
-  }
-
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-  }
-
-  .action-btn.icon {
-    background: var(--bg-dark);
-    border: 1px solid var(--border);
-    padding: 6px;
-    width: 32px;
-    height: 32px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
+  /* Global button base styles */
+  :global(button:not(.action-btn):not(.tab-btn):not(.filter-btn):not(.close-btn)) {
+    padding: 10px 20px;
+    border: none;
     border-radius: 8px;
-    color: var(--text-dim);
-    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+    background: var(--primary);
+    color: var(--text);
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: all 0.2s;
   }
 
-  .action-btn.icon:hover {
-    background: var(--surface);
-    border-color: var(--primary);
-    color: var(--primary);
+  :global(button:not(.action-btn):not(.tab-btn):not(.filter-btn):not(.close-btn):hover:not(:disabled)) {
+    background: var(--accent);
     transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   }
 
-  .action-btn.danger.icon:hover {
-    border-color: var(--error);
+  :global(button:disabled) {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  :global(button.danger:not(.action-btn)) {
+    background: rgba(239, 68, 68, 0.2);
+    border: 1px solid var(--error);
     color: var(--error);
-    background: rgba(239, 68, 68, 0.1);
+  }
+
+  :global(button.danger:not(.action-btn):hover:not(:disabled)) {
+    background: var(--error);
+    color: #fff;
+  }
+
+  :global(button.secondary) {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-dim);
+  }
+
+  /* Responsive layout */
+  @media (max-width: 640px) {
+    .container {
+      padding: 12px;
+    }
   }
 </style>
