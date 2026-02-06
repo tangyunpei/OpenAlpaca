@@ -169,6 +169,16 @@ impl TelegramConnector {
             },
         }).await;
 
+        // Step 4.5: Map external Telegram chat_id to internal lane_key
+        let lane_key = format!("{}:telegram", user_id);
+        if let Err(e) = identity_repo.update_conversation_map_lane_key(
+            "telegram",
+            &chat_id.0.to_string(),
+            &lane_key,
+        ) {
+            warn!("Failed to update conversation_map lane_key: {e}");
+        }
+
         // Step 5: Send response back to Telegram
         bot.send_message(chat_id, &response.content).await?;
 

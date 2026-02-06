@@ -11,7 +11,7 @@ use openalpaca_storage::{ConversationMessage, ConversationRepository, Database};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{error, info};
+use tracing::info;
 
 /// Response returned after sending a chat message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,9 +55,7 @@ impl ChatService {
         // Spawn background task for the actual gateway call
         let gateway = self.gateway.clone();
         let stream_manager = self.stream_manager.clone();
-        let db = self.db.clone();
         let sid = stream_id.clone();
-        let lk = lane_key.clone();
         let user_content = content.clone();
         let principal_owned = principal.to_string();
 
@@ -80,21 +78,8 @@ impl ChatService {
 
             let duration_ms = start.elapsed().as_millis() as u64;
 
-            // Persist user message
-            let repo = ConversationRepository::new(&db);
-            if let Err(e) = repo.insert(&ConversationMessage {
-                id: 0,
-                lane_key: lk.clone(),
-                role: "user".to_string(),
-                content: user_content,
-                model: None,
-                tokens_in: None,
-                tokens_out: None,
-                duration_ms: None,
-                created_at: String::new(),
-            }) {
-                error!("Failed to persist user message: {e}");
-            }
+            // Note: Message persistence is now handled by Gateway (GatewayPersistence).
+            // ChatService only manages the SSE stream events.
 
             let is_error = response.content.starts_with("Error:");
 
@@ -106,21 +91,6 @@ impl ChatService {
                     },
                 );
             } else {
-                // Persist assistant message
-                if let Err(e) = repo.insert(&ConversationMessage {
-                    id: 0,
-                    lane_key: lk.clone(),
-                    role: "assistant".to_string(),
-                    content: response.content.clone(),
-                    model: Some("default".to_string()),
-                    tokens_in: Some(0),
-                    tokens_out: Some(0),
-                    duration_ms: Some(duration_ms as i64),
-                    created_at: String::new(),
-                }) {
-                    error!("Failed to persist assistant message: {e}");
-                }
-
                 let _ = stream_manager.send(
                     &sid,
                     ChatStreamEvent::Done {

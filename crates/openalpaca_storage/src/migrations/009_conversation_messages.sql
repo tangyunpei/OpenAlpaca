@@ -11,3 +11,5 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_conv_msg_lane ON conversation_messages(lane_key);
 CREATE INDEX IF NOT EXISTS idx_conv_msg_created ON conversation_messages(created_at);
+
+UPDATE schema_version SET version = 9 WHERE version = 8;

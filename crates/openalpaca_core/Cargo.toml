@@ -22,3 +22,6 @@ dashmap.workspace = true
 openalpaca_api.workspace = true
 openalpaca_llm.workspace = true
 openalpaca_storage.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

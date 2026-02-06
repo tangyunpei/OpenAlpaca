@@ -15,3 +15,16 @@ pub struct ConversationMessage {
     pub duration_ms: Option<i64>,
     pub created_at: String,
 }
+
+/// A conversation master record, tracking all conversations across sources.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Conversation {
+    pub id: String,
+    pub lane_key: String,
+    pub source: String,
+    pub title: String,
+    pub message_count: i64,
+    pub last_message_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}

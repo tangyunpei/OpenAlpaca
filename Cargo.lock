@@ -3244,6 +3244,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml 0.8.2",
@@ -3312,6 +3313,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3347,6 +3349,7 @@ dependencies = [
  "rand 0.9.2",
  "serde",
  "serde_json",
+ "teloxide",
  "tokio",
  "tokio-stream",
  "toml 0.8.2",

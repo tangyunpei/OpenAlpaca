@@ -12,6 +12,7 @@ mod events;
 mod gateway_bridge;
 mod managers;
 mod middleware;
+mod notification;
 mod routes;
 
 use ::tokio::sync::mpsc;
@@ -371,15 +372,30 @@ async fn main() -> Result<()> {
         lane_manager,
         handler,
         bus.clone(),
+        Some(db.clone()),
     ));
 
     // Step 5.3: Connector Lifecycle (Phase 4.1.8)
+    let notif_bus = bus.clone();
     let connector_manager = managers::connector::ConnectorManager::new(
         db.clone(),
         bus,
         gateway.clone(),
     );
     connector_manager.start_all().await;
+
+    // Step 5.3.1: Spawn NotificationDispatcher (Phase 5.6)
+    {
+        let config_repo = openalpaca_storage::ConfigRepository::new(&db);
+        let telegram_bot = config_repo
+            .get("telegram.token")
+            .ok()
+            .flatten()
+            .map(teloxide::Bot::new);
+        let notif_rx = notif_bus.subscribe();
+        let dispatcher = notification::NotificationDispatcher::new(notif_rx, telegram_bot, db.clone());
+        tokio::spawn(dispatcher.run());
+    }
 
     // Step 5.4: Build ChatService (Phase 5.6)
     let chat_stream_manager = Arc::new(ChatStreamManager::new());
@@ -443,6 +459,9 @@ async fn main() -> Result<()> {
         .route("/v1/chat", post(routes::send_chat_handler))
         .route("/v1/chat/history", get(routes::get_chat_history_handler))
         .route("/v1/chat/history", delete(routes::delete_chat_history_handler))
+        // Cross-platform conversation API (Phase 5.6)
+        .route("/v1/conversations", get(routes::list_conversations_handler))
+        .route("/v1/conversations/{id}/messages", get(routes::get_conversation_messages_handler))
         // Settings routes (Phase 5.5)
         .route("/v1/settings/llm", get(routes::get_llm_settings))
         .route("/v1/settings/llm", put(routes::upsert_key))

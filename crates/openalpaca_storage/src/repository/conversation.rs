@@ -1,7 +1,7 @@
 //! ConversationRepository - Chat message persistence
 
 use crate::Database;
-use crate::models::conversation::ConversationMessage;
+use crate::models::conversation::{Conversation, ConversationMessage};
 use anyhow::Result;
 
 /// Repository for conversation message CRUD operations
@@ -98,6 +98,126 @@ impl<'a> ConversationRepository<'a> {
                 |row| row.get(0),
             )?;
             Ok(count)
+        })
+    }
+
+    // ========== Conversation Master ==========
+
+    /// Get or create a conversation master record for the given lane_key.
+    pub fn get_or_create_conversation(&self, lane_key: &str, source: &str) -> Result<Conversation> {
+        // Try to find existing
+        if let Some(conv) = self.get_conversation_by_lane(lane_key)? {
+            return Ok(conv);
+        }
+
+        // Create new
+        let id = uuid::Uuid::new_v4().to_string();
+        self.db.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO conversations (id, lane_key, source, title, message_count)
+                 VALUES (?1, ?2, ?3, '', 0)",
+                rusqlite::params![id, lane_key, source],
+            )?;
+            Ok(Conversation {
+                id,
+                lane_key: lane_key.to_string(),
+                source: source.to_string(),
+                title: String::new(),
+                message_count: 0,
+                last_message_at: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+        })
+    }
+
+    /// Get a conversation by lane_key.
+    pub fn get_conversation_by_lane(&self, lane_key: &str) -> Result<Option<Conversation>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, lane_key, source, title, message_count, last_message_at, created_at, updated_at
+                 FROM conversations WHERE lane_key = ?1",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![lane_key])?;
+            match rows.next()? {
+                Some(row) => Ok(Some(Self::row_to_conversation(row)?)),
+                None => Ok(None),
+            }
+        })
+    }
+
+    /// Get a conversation by ID.
+    pub fn get_conversation(&self, id: &str) -> Result<Option<Conversation>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, lane_key, source, title, message_count, last_message_at, created_at, updated_at
+                 FROM conversations WHERE id = ?1",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![id])?;
+            match rows.next()? {
+                Some(row) => Ok(Some(Self::row_to_conversation(row)?)),
+                None => Ok(None),
+            }
+        })
+    }
+
+    /// List conversations with optional source filter.
+    pub fn list_conversations(
+        &self,
+        source_filter: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Conversation>> {
+        self.db.with_connection(|conn| {
+            let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match source_filter {
+                Some(source) => (
+                    "SELECT id, lane_key, source, title, message_count, last_message_at, created_at, updated_at
+                     FROM conversations WHERE source = ?1 ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3".to_string(),
+                    vec![Box::new(source.to_string()), Box::new(limit), Box::new(offset)],
+                ),
+                None => (
+                    "SELECT id, lane_key, source, title, message_count, last_message_at, created_at, updated_at
+                     FROM conversations ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2".to_string(),
+                    vec![Box::new(limit), Box::new(offset)],
+                ),
+            };
+
+            let mut stmt = conn.prepare(&sql)?;
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+            let mut rows = stmt.query(params_refs.as_slice())?;
+            let mut conversations = Vec::new();
+            while let Some(row) = rows.next()? {
+                conversations.push(Self::row_to_conversation(row)?);
+            }
+            Ok(conversations)
+        })
+    }
+
+    /// Increment the message count and update last_message_at for a conversation.
+    pub fn increment_message_count(&self, lane_key: &str) -> Result<()> {
+        self.db.with_connection(|conn| {
+            conn.execute(
+                "UPDATE conversations
+                 SET message_count = message_count + 1,
+                     last_message_at = datetime('now'),
+                     updated_at = datetime('now')
+                 WHERE lane_key = ?1",
+                [lane_key],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn row_to_conversation(row: &rusqlite::Row<'_>) -> Result<Conversation> {
+        Ok(Conversation {
+            id: row.get(0)?,
+            lane_key: row.get(1)?,
+            source: row.get(2)?,
+            title: row.get(3)?,
+            message_count: row.get(4)?,
+            last_message_at: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
         })
     }
 
@@ -259,6 +379,56 @@ mod tests {
         assert_eq!(recent[0].content, "Message 7");
         assert_eq!(recent[1].content, "Message 8");
         assert_eq!(recent[2].content, "Message 9");
+    }
+
+    #[test]
+    fn test_get_or_create_conversation() {
+        let db = test_db();
+        let repo = ConversationRepository::new(&db);
+
+        let conv = repo.get_or_create_conversation("user1:telegram", "telegram").unwrap();
+        assert_eq!(conv.lane_key, "user1:telegram");
+        assert_eq!(conv.source, "telegram");
+        assert_eq!(conv.message_count, 0);
+
+        // Second call should return the same conversation
+        let conv2 = repo.get_or_create_conversation("user1:telegram", "telegram").unwrap();
+        assert_eq!(conv.id, conv2.id);
+    }
+
+    #[test]
+    fn test_list_conversations() {
+        let db = test_db();
+        let repo = ConversationRepository::new(&db);
+
+        repo.get_or_create_conversation("user1:gui", "gui").unwrap();
+        repo.get_or_create_conversation("user2:telegram", "telegram").unwrap();
+        repo.get_or_create_conversation("user3:telegram", "telegram").unwrap();
+
+        // List all
+        let all = repo.list_conversations(None, 50, 0).unwrap();
+        assert_eq!(all.len(), 3);
+
+        // Filter by source
+        let tg = repo.list_conversations(Some("telegram"), 50, 0).unwrap();
+        assert_eq!(tg.len(), 2);
+
+        let gui = repo.list_conversations(Some("gui"), 50, 0).unwrap();
+        assert_eq!(gui.len(), 1);
+    }
+
+    #[test]
+    fn test_increment_message_count() {
+        let db = test_db();
+        let repo = ConversationRepository::new(&db);
+
+        repo.get_or_create_conversation("user1:gui", "gui").unwrap();
+        repo.increment_message_count("user1:gui").unwrap();
+        repo.increment_message_count("user1:gui").unwrap();
+
+        let conv = repo.get_conversation_by_lane("user1:gui").unwrap().unwrap();
+        assert_eq!(conv.message_count, 2);
+        assert!(conv.last_message_at.is_some());
     }
 
     #[test]

@@ -1,11 +1,13 @@
 use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::events::SystemEvent;
+use crate::gateway::persistence::GatewayPersistence;
 use crate::lane::{LaneKey, LaneManager};
 use crate::security::policy::{Principal, Scope};
 use async_trait::async_trait;
 use chrono::Utc;
 use openalpaca_api::events::EventSource;
+use openalpaca_storage::Database;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -45,6 +47,7 @@ pub struct Gateway {
     pub lane_manager: Arc<LaneManager>,
     pub handler: Arc<dyn MessageHandler>,
     pub bus: EventBus,
+    persistence: Option<GatewayPersistence>,
 }
 
 impl Gateway {
@@ -53,12 +56,15 @@ impl Gateway {
         lane_manager: Arc<LaneManager>,
         handler: Arc<dyn MessageHandler>,
         bus: EventBus,
+        db: Option<Database>,
     ) -> Self {
+        let persistence = db.map(GatewayPersistence::new);
         Self {
             shared_context,
             lane_manager,
             handler,
             bus,
+            persistence,
         }
     }
 
@@ -66,6 +72,7 @@ impl Gateway {
     pub async fn handle_event(&self, req: GatewayRequest) -> GatewayResponse {
         let (user_id, source_name) = derive_user_and_source(&req.source);
         let key = LaneKey::new(&user_id, &source_name);
+        let lane_key_str = format!("{}:{}", key.user_id, key.source);
         let lane = self.lane_manager.get_or_create_conversation(key.clone());
 
         let request_id = Uuid::new_v4();
@@ -81,16 +88,34 @@ impl Gateway {
         // Record message on the lane
         lane.record_message();
 
+        // Persist user message
+        if let Some(ref p) = self.persistence {
+            if let Err(e) = p.persist_user_message(&lane_key_str, &req.content, &source_name) {
+                tracing::warn!("Failed to persist user message: {e}");
+            }
+        }
+
+        let start = std::time::Instant::now();
+
         // Delegate to the handler
         match self
             .handler
-            .handle(request_id, source_name, req.content, req.principal, req.scope, format!("{}:{}", key.user_id, key.source))
+            .handle(request_id, source_name.clone(), req.content, req.principal, req.scope, lane_key_str.clone())
             .await
         {
-            Ok(content) => GatewayResponse {
-                lane_key: key,
-                content,
-            },
+            Ok(content) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
+                // Persist assistant message
+                if let Some(ref p) = self.persistence {
+                    if let Err(e) = p.persist_assistant_message(&lane_key_str, &content, Some(duration_ms), &source_name) {
+                        tracing::warn!("Failed to persist assistant message: {e}");
+                    }
+                }
+                GatewayResponse {
+                    lane_key: key,
+                    content,
+                }
+            }
             Err(e) => GatewayResponse {
                 lane_key: key,
                 content: format!("Error: {e}"),
@@ -179,6 +204,7 @@ mod tests {
             Arc::new(LaneManager::new()),
             Arc::new(StubHandler),
             EventBus::default(),
+            None,
         )
     }
 
@@ -188,6 +214,7 @@ mod tests {
             Arc::new(LaneManager::new()),
             Arc::new(FailHandler),
             EventBus::default(),
+            None,
         )
     }
 
@@ -332,6 +359,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_gateway_persists_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+
+        let gw = Gateway::new(
+            Arc::new(SharedContext::new()),
+            Arc::new(LaneManager::new()),
+            Arc::new(StubHandler),
+            EventBus::default(),
+            Some(db.clone()),
+        );
+
+        gw.handle_event(GatewayRequest {
+            source: EventSource::Telegram {
+                chat_id: "c1".to_string(),
+                user_id: "alice".to_string(),
+            },
+            content: "hello from telegram".to_string(),
+            principal: Principal::System,
+            scope: Scope::Global,
+        })
+        .await;
+
+        // Verify messages persisted
+        let repo = openalpaca_storage::ConversationRepository::new(&db);
+        let messages = repo.list_by_lane("alice:telegram", 50, 0).unwrap();
+        assert_eq!(messages.len(), 2); // user + assistant
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content, "hello from telegram");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].content, "Echo: hello from telegram");
+
+        // Verify conversation master record
+        let conv = repo.get_conversation_by_lane("alice:telegram").unwrap().unwrap();
+        assert_eq!(conv.source, "telegram");
+        assert_eq!(conv.message_count, 2);
+    }
+
+    #[tokio::test]
     async fn test_full_gateway_stack_integration() {
         let shared = Arc::new(SharedContext::new());
         let lanes = Arc::new(LaneManager::new());
@@ -340,6 +406,7 @@ mod tests {
             lanes.clone(),
             Arc::new(StubHandler),
             EventBus::default(),
+            None,
         );
 
         // Register a task in shared context

@@ -59,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(LaneManager::new()),
         Arc::new(EchoHandler),
         bus.clone(),
+        None,
     ));
 
     // 5. Create and run connector

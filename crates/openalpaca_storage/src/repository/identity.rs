@@ -329,6 +329,53 @@ impl<'a> IdentityRepository<'a> {
         })
     }
 
+    /// Update the lane_key on a conversation_map entry.
+    pub fn update_conversation_map_lane_key(
+        &self,
+        provider: &str,
+        provider_conversation_id: &str,
+        lane_key: &str,
+    ) -> Result<()> {
+        self.db.with_connection(|conn| {
+            // Ensure the conversation_map entry exists
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM conversation_map WHERE provider = ?1 AND provider_conversation_id = ?2)",
+                [provider, provider_conversation_id],
+                |row| row.get(0),
+            )?;
+
+            if exists {
+                conn.execute(
+                    "UPDATE conversation_map SET lane_key = ?1 WHERE provider = ?2 AND provider_conversation_id = ?3",
+                    rusqlite::params![lane_key, provider, provider_conversation_id],
+                )?;
+            } else {
+                conn.execute(
+                    "INSERT INTO conversation_map (provider, provider_conversation_id, lane_key, created_at) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![provider, provider_conversation_id, lane_key, Utc::now().to_rfc3339()],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Get the provider_conversation_id (e.g. Telegram chat_id) for a given lane_key and provider.
+    pub fn get_chat_id_by_lane_key(&self, lane_key: &str, provider: &str) -> Result<Option<i64>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT provider_conversation_id FROM conversation_map WHERE lane_key = ?1 AND provider = ?2",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![lane_key, provider])?;
+            match rows.next()? {
+                Some(row) => {
+                    let id_str: String = row.get(0)?;
+                    Ok(id_str.parse::<i64>().ok())
+                }
+                None => Ok(None),
+            }
+        })
+    }
+
     /// Delete all data associated with a provider (Factory Reset for single connector)
     pub fn delete_data_for_provider(&self, provider: &str) -> Result<()> {
         self.db.with_connection(|conn| {

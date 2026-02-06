@@ -8,7 +8,7 @@ pub mod identity;
 pub mod subagent;
 pub mod task;
 
-pub use conversation::ConversationMessage;
+pub use conversation::{Conversation, ConversationMessage};
 pub use core::{Agent, EventLog, Memory, MemoryRole};
 pub use identity::{ConversationMap, ExternalIdentity, GlobalUser, LinkToken};
 pub use subagent::{AgentMetrics, AgentTaskHistory, SubAgentConfig};

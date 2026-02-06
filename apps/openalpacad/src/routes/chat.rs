@@ -39,6 +39,25 @@ pub struct ChatSendResponseBody {
 pub struct HistoryQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    pub lane_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ConversationsQuery {
+    pub source: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct ConversationsResponse {
+    pub conversations: Vec<openalpaca_storage::Conversation>,
+}
+
+#[derive(Serialize)]
+pub struct ConversationMessagesResponse {
+    pub messages: Vec<openalpaca_storage::ConversationMessage>,
+    pub total: i64,
 }
 
 #[derive(Serialize)]
@@ -223,7 +242,7 @@ pub async fn get_chat_history_handler(
 
     let limit = query.limit.unwrap_or(50);
     let offset = query.offset.unwrap_or(0);
-    let lane_key = "gui_user:gui";
+    let lane_key = query.lane_key.as_deref().unwrap_or("gui_user:gui");
 
     match chat_service.get_history(lane_key, limit, offset) {
         Ok((messages, total)) => Json(ChatHistoryResponse { messages, total }).into_response(),
@@ -260,6 +279,74 @@ pub async fn delete_chat_history_handler(
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "GATEWAY_ERROR",
+            &e.to_string(),
+        )
+        .into_response(),
+    }
+}
+
+// ── GET /v1/conversations ─────────────────────────────────────────
+
+pub async fn list_conversations_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ConversationsQuery>,
+) -> impl IntoResponse {
+    let repo = openalpaca_storage::ConversationRepository::new(&state.db);
+    let limit = query.limit.unwrap_or(50);
+    let offset = query.offset.unwrap_or(0);
+
+    match repo.list_conversations(query.source.as_deref(), limit, offset) {
+        Ok(conversations) => Json(ConversationsResponse { conversations }).into_response(),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            &e.to_string(),
+        )
+        .into_response(),
+    }
+}
+
+// ── GET /v1/conversations/{id}/messages ───────────────────────────
+
+pub async fn get_conversation_messages_handler(
+    Path(id): Path<String>,
+    Query(query): Query<HistoryQuery>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let repo = openalpaca_storage::ConversationRepository::new(&state.db);
+
+    // Look up the conversation to get its lane_key
+    let conv = match repo.get_conversation(&id) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                "Conversation not found",
+            )
+            .into_response();
+        }
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DB_ERROR",
+                &e.to_string(),
+            )
+            .into_response();
+        }
+    };
+
+    let limit = query.limit.unwrap_or(50);
+    let offset = query.offset.unwrap_or(0);
+
+    match repo.list_by_lane(&conv.lane_key, limit, offset) {
+        Ok(messages) => {
+            let total = repo.count_by_lane(&conv.lane_key).unwrap_or(0);
+            Json(ConversationMessagesResponse { messages, total }).into_response()
+        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
             &e.to_string(),
         )
         .into_response(),
