@@ -5,7 +5,8 @@
 import { writable, derived, type Readable } from "svelte/store";
 import { events, type ServerEvent } from "../daemon";
 import { getLlmSettings } from "../api/settings";
-import type { LlmSettingsResponse, ProviderInfo } from "../types";
+import { getOrchestratorConfig, updateOrchestratorConfig } from "../api/orchestrator";
+import type { LlmSettingsResponse, ProviderInfo, OrchestratorConfigResponse } from "../types";
 
 /** Current LLM settings */
 export const llmSettings = writable<LlmSettingsResponse | null>(null);
@@ -15,6 +16,9 @@ export const settingsLoading = writable(false);
 
 /** Error state */
 export const settingsError = writable<string | null>(null);
+
+/** Orchestrator config */
+export const orchestratorConfig = writable<OrchestratorConfigResponse | null>(null);
 
 /** Derived: sorted list of [providerName, providerInfo] entries */
 export const providerList: Readable<[string, ProviderInfo][]> = derived(
@@ -42,6 +46,25 @@ export async function loadSettings(): Promise<void> {
   }
 }
 
+/** Fetch orchestrator config */
+export async function loadOrchestratorConfig(): Promise<void> {
+  try {
+    const config = await getOrchestratorConfig();
+    orchestratorConfig.set(config);
+  } catch (e) {
+    console.error("[settings-store] Failed to load orchestrator config:", e);
+  }
+}
+
+/** Save orchestrator config */
+export async function saveOrchestratorConfig(
+  model: string,
+  fallbackModels: string[],
+): Promise<void> {
+  await updateOrchestratorConfig({ model, fallback_models: fallbackModels });
+  await loadOrchestratorConfig();
+}
+
 /** Subscribe to WebSocket events for key_status_changed.
  *  On change, refresh the full settings.
  *  Returns an unsubscribe function. */
@@ -53,5 +76,17 @@ export function subscribeToKeyEvents(): () => void {
 
     // Refresh settings when a key changes
     loadSettings();
+  });
+}
+
+/** Subscribe to orchestrator_config_changed events.
+ *  Returns an unsubscribe function. */
+export function subscribeToOrchestratorEvents(): () => void {
+  return events.subscribe(($events) => {
+    if ($events.length === 0) return;
+    const latest = $events[0] as ServerEvent;
+    if (latest.type !== "orchestrator_config_changed") return;
+
+    loadOrchestratorConfig();
   });
 }

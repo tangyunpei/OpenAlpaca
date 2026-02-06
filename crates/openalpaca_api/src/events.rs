@@ -72,6 +72,35 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// Event triggered when a chat stream starts
+    ChatStreamStarted {
+        stream_id: String,
+        lane_key: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// Event triggered when a chat stream ends
+    ChatStreamEnded {
+        stream_id: String,
+        lane_key: String,
+        status: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// Event triggered when an agent config is created, updated, or deleted
+    AgentConfigChanged {
+        agent_id: String,
+        action: String, // "created" | "updated" | "deleted"
+        config_version: u64,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// Event triggered when orchestrator config changes
+    OrchestratorConfigChanged {
+        model: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
 }
 
 // ── Unified Event System (M3.5) ────────────────────────────────────

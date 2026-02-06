@@ -89,6 +89,23 @@ pub struct KeyValidationResult {
     pub rate_limits: Option<String>,
 }
 
+// ── Orchestrator Config Types ────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestratorConfigResponse {
+    pub model: String,
+    pub fallback_models: Vec<String>,
+    pub active_agents: usize,
+    pub active_tasks: usize,
+    pub daily_cost_usd: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateOrchestratorRequest {
+    pub model: String,
+    pub fallback_models: Vec<String>,
+}
+
 // ── Service ──────────────────────────────────────────────────────────
 
 /// High-level service for managing LLM settings.
@@ -126,13 +143,18 @@ impl LlmSettingsService {
         });
 
         let mut providers = HashMap::new();
+        let configured = self.router.configured_providers();
 
-        for provider_type in self.router.configured_providers() {
+        for &provider_type in ProviderType::all() {
             let provider_name = provider_type.to_string();
+            let is_configured = configured.contains(&provider_type);
 
-            // Get live key statuses
-            let statuses = self.router.key_statuses(provider_type).await
-                .unwrap_or_default();
+            // Get live key statuses (only available for configured providers)
+            let statuses = if is_configured {
+                self.router.key_statuses(provider_type).await.unwrap_or_default()
+            } else {
+                vec![]
+            };
             let status_map: HashMap<String, &KeyStatus> = statuses.iter()
                 .map(|s| (s.id.clone(), s))
                 .collect();
@@ -184,8 +206,14 @@ impl LlmSettingsService {
                 })
                 .unwrap_or_default();
 
+            let enabled = if is_configured {
+                provider_config.and_then(|p| p.enabled).unwrap_or(true)
+            } else {
+                provider_config.and_then(|p| p.enabled).unwrap_or(false)
+            };
+
             providers.insert(provider_name, ProviderInfo {
-                enabled: provider_config.and_then(|p| p.enabled).unwrap_or(true),
+                enabled,
                 key_selection_strategy: strategy,
                 keys,
             });
@@ -339,6 +367,52 @@ impl LlmSettingsService {
             }
         }
         result
+    }
+
+    /// Get orchestrator config (model + fallback_models) from disk.
+    /// Stats (agents/tasks/cost) are populated by the caller.
+    pub fn get_orchestrator_config(&self) -> Result<(String, Vec<String>), String> {
+        let config = read_config(&self.config_path)
+            .map_err(|e| format!("Failed to read config: {e}"))?;
+
+        let model = config
+            .orchestrator
+            .as_ref()
+            .map(|o| o.model.clone())
+            .unwrap_or_else(|| self.router.default_model().to_string());
+
+        let fallback_models = config
+            .orchestrator
+            .as_ref()
+            .and_then(|o| o.fallback_models.clone())
+            .unwrap_or_default();
+
+        Ok((model, fallback_models))
+    }
+
+    /// Update orchestrator config (model + fallback_models).
+    /// Takes effect on next restart (no hot-reload of orchestrator model).
+    pub fn update_orchestrator_config(&self, req: UpdateOrchestratorRequest) -> Result<(), String> {
+        let mut config = read_config(&self.config_path)
+            .map_err(|e| format!("Failed to read config: {e}"))?;
+
+        let orch = config.orchestrator.get_or_insert_with(|| {
+            crate::config::OrchestratorLlmConfig {
+                model: "claude-sonnet-4-5-20250929".to_string(),
+                fallback_models: None,
+            }
+        });
+        orch.model = req.model;
+        orch.fallback_models = if req.fallback_models.is_empty() {
+            None
+        } else {
+            Some(req.fallback_models)
+        };
+
+        write_config(&self.config_path, &config)
+            .map_err(|e| format!("Failed to write config: {e}"))?;
+
+        Ok(())
     }
 
     /// Internal: apply a mutation to the config, persist, and hot-reload.

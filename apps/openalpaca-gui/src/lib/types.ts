@@ -178,3 +178,93 @@ export interface KeyStatusMap {
     is_available: boolean;
   }>;
 }
+
+// ── Agent Config types ─────────────────────────────────────────────
+
+export interface AgentConfigFile {
+  agent: { id: string; name: string; description: string; icon?: string };
+  skills: { assigned: string[]; denied?: string[] };
+  preset: { persona: string; temperature?: number; verbosity?: string };
+  constraints?: {
+    max_tool_calls?: number;
+    timeout_seconds?: number;
+    max_cost_per_task?: number;
+    require_confirmation_for?: string[];
+    allowed_capabilities?: string[];
+    denied_capabilities?: string[];
+  };
+  llm?: { model?: string; fallback_models?: string[] };
+}
+
+export interface AgentConfigResponse {
+  config: AgentConfigFile;
+  config_version: number;
+}
+
+export interface UpdateAgentConfigRequest {
+  config: AgentConfigFile;
+  config_version: number;
+}
+
+export interface CreateAgentRequest {
+  config: AgentConfigFile;
+}
+
+export interface CreateAgentFromTomlRequest {
+  toml_content: string;
+}
+
+// ── Orchestrator Config types ──────────────────────────────────────
+
+export interface OrchestratorConfigResponse {
+  model: string;
+  fallback_models: string[];
+  active_agents: number;
+  active_tasks: number;
+  daily_cost_usd: number;
+}
+
+export interface UpdateOrchestratorRequest {
+  model: string;
+  fallback_models: string[];
+}
+
+// ── Chat types ─────────────────────────────────────────────────────
+
+export interface ChatMessage {
+  id: number;
+  lane_key: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  model?: string;
+  tokens_in?: number;
+  tokens_out?: number;
+  duration_ms?: number;
+  created_at: string;
+}
+
+export interface ChatSendRequest {
+  content: string;
+}
+
+export interface ChatSendResponse {
+  stream_id: string;
+  lane_key: string;
+}
+
+export interface ChatHistoryResponse {
+  messages: ChatMessage[];
+  total: number;
+}
+
+export interface ChatDeleteResponse {
+  deleted: number;
+}
+
+export interface ChatStreamDoneData {
+  content: string;
+  model: string;
+  tokens_in: number;
+  tokens_out: number;
+  duration_ms: number;
+}

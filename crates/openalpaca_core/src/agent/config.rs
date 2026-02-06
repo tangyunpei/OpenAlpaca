@@ -3,10 +3,10 @@
 use super::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent};
 use chrono::Utc;
 use openalpaca_storage::SubAgentConfig;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// TOML config file structure for agent definitions.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfigFile {
     pub agent: AgentMeta,
     pub skills: AgentSkillsConfig,
@@ -15,7 +15,7 @@ pub struct AgentConfigFile {
     pub llm: Option<AgentLlmConfigFile>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMeta {
     pub id: String,
     pub name: String,
@@ -23,20 +23,20 @@ pub struct AgentMeta {
     pub icon: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSkillsConfig {
     pub assigned: Vec<String>,
     pub denied: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentPresetConfig {
     pub persona: String,
     pub temperature: Option<f32>,
     pub verbosity: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConstraintsConfig {
     pub max_tool_calls: Option<u32>,
     pub timeout_seconds: Option<u64>,
@@ -49,7 +49,7 @@ pub struct AgentConstraintsConfig {
 }
 
 /// TOML structure for per-agent LLM config.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentLlmConfigFile {
     pub model: Option<String>,
     pub fallback_models: Option<Vec<String>>,
@@ -57,6 +57,117 @@ pub struct AgentLlmConfigFile {
 }
 
 impl AgentConfigFile {
+    /// Reconstruct an AgentConfigFile from an in-memory SubAgent.
+    /// Reverse of `into_subagent()`.
+    pub fn from_subagent(agent: &SubAgent) -> Self {
+        // Extract skills.denied from constraints.denied_capabilities
+        // that are NOT in the assigned skills list
+        let assigned: Vec<String> = agent.skills.iter().map(|s| s.name.clone()).collect();
+        let denied: Vec<String> = agent
+            .constraints
+            .denied_capabilities
+            .iter()
+            .filter(|d| !assigned.contains(d))
+            .cloned()
+            .collect();
+
+        let meta = AgentMeta {
+            id: agent.id.clone(),
+            name: agent.name.clone(),
+            description: agent.description.clone().unwrap_or_default(),
+            icon: agent.icon.clone(),
+        };
+
+        let skills = AgentSkillsConfig {
+            assigned,
+            denied: if denied.is_empty() { None } else { Some(denied) },
+        };
+
+        let preset = AgentPresetConfig {
+            persona: agent.preset.persona.clone(),
+            temperature: Some(agent.preset.temperature),
+            verbosity: Some(agent.preset.verbosity.clone()),
+        };
+
+        let constraints = {
+            let c = &agent.constraints;
+            let has_values = c.max_tool_calls.is_some()
+                || c.timeout_seconds.is_some()
+                || c.max_cost_per_task.is_some()
+                || !c.require_confirmation_for.is_empty()
+                || !c.allowed_capabilities.is_empty()
+                || !c.denied_capabilities.is_empty()
+                || !c.allowed_models.is_empty()
+                || !c.denied_models.is_empty();
+
+            if has_values {
+                Some(AgentConstraintsConfig {
+                    max_tool_calls: c.max_tool_calls,
+                    timeout_seconds: c.timeout_seconds,
+                    max_cost_per_task: c.max_cost_per_task,
+                    require_confirmation_for: if c.require_confirmation_for.is_empty() {
+                        None
+                    } else {
+                        Some(c.require_confirmation_for.clone())
+                    },
+                    allowed_capabilities: if c.allowed_capabilities.is_empty() {
+                        None
+                    } else {
+                        Some(c.allowed_capabilities.clone())
+                    },
+                    denied_capabilities: if c.denied_capabilities.is_empty() {
+                        None
+                    } else {
+                        Some(c.denied_capabilities.clone())
+                    },
+                    allowed_models: if c.allowed_models.is_empty() {
+                        None
+                    } else {
+                        Some(c.allowed_models.clone())
+                    },
+                    denied_models: if c.denied_models.is_empty() {
+                        None
+                    } else {
+                        Some(c.denied_models.clone())
+                    },
+                })
+            } else {
+                None
+            }
+        };
+
+        let llm = {
+            let l = &agent.llm_config;
+            let has_values =
+                l.model.is_some() || !l.fallback_models.is_empty() || !l.overrides.is_empty();
+            if has_values {
+                Some(AgentLlmConfigFile {
+                    model: l.model.clone(),
+                    fallback_models: if l.fallback_models.is_empty() {
+                        None
+                    } else {
+                        Some(l.fallback_models.clone())
+                    },
+                    overrides: if l.overrides.is_empty() {
+                        None
+                    } else {
+                        Some(l.overrides.clone())
+                    },
+                })
+            } else {
+                None
+            }
+        };
+
+        Self {
+            agent: meta,
+            skills,
+            preset,
+            constraints,
+            llm,
+        }
+    }
+
     /// Convert TOML config to in-memory SubAgent.
     pub fn into_subagent(self) -> SubAgent {
         let skills: Vec<Skill> = self

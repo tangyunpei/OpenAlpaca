@@ -4,6 +4,8 @@
   import { performAgentAction } from "$lib/api/agents";
   import { formatDateTime, formatDuration, getStatusColor, safeParseJson, resolveIcon } from "$lib/utils";
   import type { AgentDetailResponse, Skill } from "$lib/types";
+  import AgentConfigEditor from "./AgentConfigEditor.svelte";
+  import DeleteAgentDialog from "./DeleteAgentDialog.svelte";
 
   interface Props {
     agentId: string;
@@ -15,6 +17,8 @@
   let detail = $state<AgentDetailResponse | null>(null);
   let loading = $state(true);
   let actionLoading = $state(false);
+  let showConfigEditor = $state(false);
+  let showDeleteDialog = $state(false);
 
   const unsubDetail = selectedAgentDetail.subscribe((v) => (detail = v));
 
@@ -33,6 +37,11 @@
     } finally {
       actionLoading = false;
     }
+  }
+
+  function handleDeleted() {
+    showDeleteDialog = false;
+    onClose();
   }
 
   let skills = $derived(detail ? safeParseJson<Skill[]>(detail.agent.skills_json, []) : []);
@@ -176,12 +185,14 @@
       {/if}
 
       <div class="modal-actions">
+        <button onclick={() => (showConfigEditor = true)}>Edit Config</button>
         {#if canPause}
           <button onclick={() => handleAction("pause")} disabled={actionLoading}>Pause</button>
         {/if}
         {#if canResume}
           <button onclick={() => handleAction("resume")} disabled={actionLoading}>Resume</button>
         {/if}
+        <button class="danger-outline" onclick={() => (showDeleteDialog = true)}>Delete</button>
         <button class="secondary" onclick={onClose}>Close</button>
       </div>
     {:else}
@@ -189,6 +200,19 @@
     {/if}
   </div>
 </div>
+
+{#if showConfigEditor}
+  <AgentConfigEditor agentId={agentId} onClose={() => { showConfigEditor = false; loadAgentDetail(agentId); }} />
+{/if}
+
+{#if showDeleteDialog && detail}
+  <DeleteAgentDialog
+    agentId={agentId}
+    agentName={detail.agent.name}
+    onClose={() => (showDeleteDialog = false)}
+    onDeleted={handleDeleted}
+  />
+{/if}
 
 <style>
   .modal-backdrop {
@@ -389,6 +413,15 @@
     margin-top: 16px;
     padding-top: 16px;
     border-top: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .danger-outline {
+    background: transparent;
+    border: 1px solid var(--error);
+    color: var(--error);
+  }
+  .danger-outline:hover {
+    background: rgba(239, 68, 68, 0.15);
   }
 
   .loading {

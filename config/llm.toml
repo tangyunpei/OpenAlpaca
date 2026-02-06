@@ -1,57 +1,17 @@
-# LLM Router Configuration (multi-provider format)
-# Supports multiple providers, key rotation, fallback chains, and cost limits.
-
 [orchestrator]
-model = "llama3"
-fallback_models = []
+model = "claude-haiku-4-5-20251001"
+fallback_models = ["claude-sonnet-4-5-20250929"]
 
-# ── Providers ────────────────────────────────────────────────────────
+[providers.anthropic]
+enabled = true
+
+[[providers.anthropic.keys]]
+id = "OpenAlpaca"
+secret_encrypted = "aes256:yHv/QwI2beWMDk/NIvhRrcvdzoEitdJFJhE+iKnE8SRPPDHvqHuCC4dCQALTGeNuOnmvz+k6iIm4NQWiXCH+8Vi7UCgfA1kgmowOEKMaOX+IiE4VurIfQe+Ph0Ieqd8LPPgQLPBMycRHm6Pn1AjRoeIrCakmLg19Cn/G5G3qZfj5MyB2dquQ+w=="
+tier = "tier3"
+priority = "primary"
+source = "api_console"
 
 [providers.ollama]
 enabled = true
 base_url = "http://localhost:11434/v1"
-
-# [providers.anthropic]
-# enabled = true
-# strategy = "round_robin"
-#
-# [[providers.anthropic.keys]]
-# id = "default"
-# secret_env = "ANTHROPIC_API_KEY"
-# tier = "tier1"
-# monthly_budget = 100.0
-
-# [providers.openai]
-# enabled = true
-#
-# [[providers.openai.keys]]
-# id = "default"
-# secret_env = "OPENAI_API_KEY"
-
-# ── Custom Models (optional, built-in defaults exist) ────────────────
-
-# [models.my-custom-model]
-# provider = "openai"
-# input_price = 5.0
-# output_price = 15.0
-# context = 128000
-
-# ── Fallback Chains (optional) ──────────────────────────────────────
-
-# [fallback_chains]
-# "claude-sonnet-4-5-20250929" = ["gpt-4o", "llama3"]
-
-# ── Cost Limits (optional) ──────────────────────────────────────────
-
-# [limits]
-# max_cost_per_task = 1.0
-# max_cost_per_agent = 10.0
-
-# =====================================================================
-# Legacy single-provider format (still supported via auto-detection):
-#
-# provider = "ollama"
-# model = "llama3"
-# base_url = "http://localhost:11434/v1"
-# max_tokens = 4096
-# =====================================================================

@@ -6,7 +6,8 @@ use axum::{
     response::IntoResponse,
 };
 use openalpaca_llm::settings_service::{
-    AddKeyRequest, ReorderKeysRequest, ValidateKeyRequest,
+    AddKeyRequest, OrchestratorConfigResponse, ReorderKeysRequest,
+    UpdateOrchestratorRequest, ValidateKeyRequest,
 };
 use std::sync::Arc;
 
@@ -175,4 +176,76 @@ pub async fn get_key_status(State(state): State<Arc<AppState>>) -> impl IntoResp
 
     let health = service.key_health().await;
     (StatusCode::OK, Json(serde_json::to_value(health).unwrap())).into_response()
+}
+
+/// GET /v1/orchestrator/config
+pub async fn get_orchestrator_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let service = match &state.llm_settings_service {
+        Some(s) => s,
+        None => {
+            return settings_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LLM_NOT_CONFIGURED",
+                "LLM router is not configured",
+            )
+            .into_response();
+        }
+    };
+
+    match service.get_orchestrator_config() {
+        Ok((model, fallback_models)) => {
+            let active_agents = state.gateway.shared_context.agent_registry.count();
+            let active_tasks = state.gateway.shared_context.task_registry.list_active().len();
+            let daily_cost_usd = 0.0; // Cost tracker requires async access via LlmRouter
+
+            let resp = OrchestratorConfigResponse {
+                model,
+                fallback_models,
+                active_agents,
+                active_tasks,
+                daily_cost_usd,
+            };
+            (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response()
+        }
+        Err(e) => {
+            settings_error(StatusCode::INTERNAL_SERVER_ERROR, "CONFIG_READ_FAILED", &e)
+                .into_response()
+        }
+    }
+}
+
+/// PUT /v1/orchestrator/config
+pub async fn update_orchestrator_config(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<UpdateOrchestratorRequest>,
+) -> impl IntoResponse {
+    let service = match &state.llm_settings_service {
+        Some(s) => s,
+        None => {
+            return settings_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LLM_NOT_CONFIGURED",
+                "LLM router is not configured",
+            )
+            .into_response();
+        }
+    };
+
+    let model_name = body.model.clone();
+    match service.update_orchestrator_config(body) {
+        Ok(()) => {
+            state
+                .event_broadcaster
+                .orchestrator_config_changed(&model_name);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "status": "ok" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e)
+                .into_response()
+        }
+    }
 }

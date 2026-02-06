@@ -17,10 +17,12 @@
   import TaskPanel from "$lib/components/TaskPanel.svelte";
   import AgentPanel from "$lib/components/AgentPanel.svelte";
   import SettingsPanel from "$lib/components/SettingsPanel.svelte";
+  import ChatPanel from "$lib/components/ChatPanel.svelte";
 
   import { loadTasks, subscribeToTaskEvents } from "$lib/stores/tasks";
   import { loadAgents, subscribeToAgentEvents } from "$lib/stores/agents";
   import { loadSettings, subscribeToKeyEvents } from "$lib/stores/settings";
+  import { subscribeToChatEvents } from "$lib/stores/chat";
 
   // Reactive state from stores
   let statusState = $state("disconnected");
@@ -57,12 +59,14 @@
   let unsubTaskEvents: (() => void) | null = null;
   let unsubAgentEvents: (() => void) | null = null;
   let unsubKeyEvents: (() => void) | null = null;
+  let unsubChatEvents: (() => void) | null = null;
 
   onMount(() => {
     connectToDaemon();
     unsubTaskEvents = subscribeToTaskEvents();
     unsubAgentEvents = subscribeToAgentEvents();
     unsubKeyEvents = subscribeToKeyEvents();
+    unsubChatEvents = subscribeToChatEvents();
   });
 
   onDestroy(() => {
@@ -74,6 +78,7 @@
     unsubTaskEvents?.();
     unsubAgentEvents?.();
     unsubKeyEvents?.();
+    unsubChatEvents?.();
   });
 
   function handleTabChange(id: string) {
@@ -92,20 +97,28 @@
     <div class="error-banner">{error}</div>
   {/if}
 
-  <TabBar {activeTab} {tabs} onTabChange={handleTabChange} />
+  <div class="app-layout">
+    <aside class="chat-sidebar">
+      <ChatPanel />
+    </aside>
 
-  <div class="tab-content">
-    {#if activeTab === "events"}
-      <EventLog events={eventList} connectionState={statusState} />
-    {:else if activeTab === "connectors"}
-      <ConnectorPanel bind:this={connectorPanel} connectionState={statusState} />
-    {:else if activeTab === "tasks"}
-      <TaskPanel />
-    {:else if activeTab === "agents"}
-      <AgentPanel />
-    {:else if activeTab === "settings"}
-      <SettingsPanel bind:this={settingsPanel} />
-    {/if}
+    <div class="main-content">
+      <TabBar {activeTab} {tabs} onTabChange={handleTabChange} />
+
+      <div class="tab-content">
+        {#if activeTab === "events"}
+          <EventLog events={eventList} connectionState={statusState} />
+        {:else if activeTab === "connectors"}
+          <ConnectorPanel bind:this={connectorPanel} connectionState={statusState} />
+        {:else if activeTab === "tasks"}
+          <TaskPanel />
+        {:else if activeTab === "agents"}
+          <AgentPanel />
+        {:else if activeTab === "settings"}
+          <SettingsPanel bind:this={settingsPanel} />
+        {/if}
+      </div>
+    </div>
   </div>
 </main>
 
@@ -139,6 +152,8 @@
     width: 100%;
     box-sizing: border-box;
     min-height: 100vh;
+    display: flex;
+    flex-direction: column;
   }
 
   .error-banner {
@@ -148,6 +163,27 @@
     padding: 12px 16px;
     border-radius: 8px;
     margin-bottom: 15px;
+  }
+
+  .app-layout {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    gap: 0;
+  }
+
+  .chat-sidebar {
+    width: 380px;
+    min-width: 380px;
+    border-right: 1px solid var(--primary);
+    height: calc(100vh - 120px);
+    overflow: hidden;
+  }
+
+  .main-content {
+    flex: 1;
+    min-width: 0;
+    padding-left: 24px;
   }
 
   /* Global button base styles */
@@ -189,6 +225,25 @@
   }
 
   /* Responsive layout */
+  @media (max-width: 900px) {
+    .app-layout {
+      flex-direction: column;
+    }
+
+    .chat-sidebar {
+      width: 100%;
+      min-width: 100%;
+      height: 300px;
+      border-right: none;
+      border-bottom: 1px solid var(--primary);
+    }
+
+    .main-content {
+      padding-left: 0;
+      padding-top: 16px;
+    }
+  }
+
   @media (max-width: 640px) {
     .container {
       padding: 12px;

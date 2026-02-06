@@ -138,7 +138,7 @@ impl Orchestrator {
         let full_prompt =
             PromptAssembler::assemble(&self.system_persona, &agent_persona, query);
 
-        let response_content = if let Some(ref router) = self.llm_router {
+        let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
             // Real LLM call via routed agentic loop
             let messages = vec![
                 ChatMessage::system(&full_prompt),
@@ -155,17 +155,22 @@ impl Orchestrator {
                 None, // No task_id for simple queries
             )
             .await;
-            result.final_content
+            // LLM chat responses are free-form text, not structured JSON
+            (result.final_content, false)
         } else {
-            // Fallback: echo stub (backward compatible)
-            format!(
+            // Fallback: echo stub (backward compatible) — produces JSON
+            (format!(
                 "{{\"status\": \"ok\", \"echo\": \"Received: {}\"}}",
                 query.chars().take(50).collect::<String>()
-            )
+            ), true)
         };
 
-        // Output guard
-        let validated = OutputGuard::ensure_json(&response_content)?;
+        // Output guard: only enforce JSON for structured (non-LLM) responses
+        let validated = if is_structured {
+            OutputGuard::ensure_json(&response_content)?
+        } else {
+            response_content
+        };
 
         // Emit AgentResponse event
         self.bus.publish(SystemEvent::AgentResponse {

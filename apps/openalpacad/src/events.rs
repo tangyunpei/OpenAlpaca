@@ -165,6 +165,50 @@ impl EventBroadcaster {
                     });
                     repo.log("key_status_changed", None, Some(&detail), None)
                 }
+                // Log chat stream events
+                ServerEvent::ChatStreamStarted {
+                    stream_id,
+                    lane_key,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "stream_id": stream_id,
+                        "lane_key": lane_key
+                    });
+                    repo.log("chat_stream_started", None, Some(&detail), None)
+                }
+                ServerEvent::ChatStreamEnded {
+                    stream_id,
+                    lane_key,
+                    status,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "stream_id": stream_id,
+                        "lane_key": lane_key,
+                        "status": status
+                    });
+                    repo.log("chat_stream_ended", None, Some(&detail), None)
+                }
+                ServerEvent::AgentConfigChanged {
+                    agent_id,
+                    action,
+                    config_version,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "agent_id": agent_id,
+                        "action": action,
+                        "config_version": config_version
+                    });
+                    repo.log("agent_config_changed", None, Some(&detail), None)
+                }
+                ServerEvent::OrchestratorConfigChanged { model, .. } => {
+                    let detail = serde_json::json!({
+                        "model": model
+                    });
+                    repo.log("orchestrator_config_changed", None, Some(&detail), None)
+                }
             };
             // Error handling strategy: log errors but don't crash or block broadcast
             // For now we just ignore errors as per architecture plan
@@ -235,6 +279,59 @@ impl EventBroadcaster {
     pub fn connector_status(&self, id: &str, status: &str) {
         let event = ServerEvent::ConnectorStatus {
             id: id.to_string(),
+            status: status.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a chat stream started event and persist it
+    pub fn chat_stream_started(&self, stream_id: &str, lane_key: &str) {
+        let event = ServerEvent::ChatStreamStarted {
+            stream_id: stream_id.to_string(),
+            lane_key: lane_key.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast an agent config changed event and persist it
+    pub fn agent_config_changed(&self, agent_id: &str, action: &str, config_version: u64) {
+        let event = ServerEvent::AgentConfigChanged {
+            agent_id: agent_id.to_string(),
+            action: action.to_string(),
+            config_version,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast an orchestrator config changed event and persist it
+    pub fn orchestrator_config_changed(&self, model: &str) {
+        let event = ServerEvent::OrchestratorConfigChanged {
+            model: model.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a chat stream ended event and persist it
+    pub fn chat_stream_ended(&self, stream_id: &str, lane_key: &str, status: &str) {
+        let event = ServerEvent::ChatStreamEnded {
+            stream_id: stream_id.to_string(),
+            lane_key: lane_key.to_string(),
             status: status.to_string(),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),

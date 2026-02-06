@@ -4,9 +4,16 @@ use super::subagent::{AgentStatus, SubAgent};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+/// Internal wrapper that pairs a SubAgent with its config version
+/// for optimistic locking on config updates.
+struct RegisteredAgent {
+    agent: SubAgent,
+    config_version: u64,
+}
+
 /// Registry for tracking SubAgents in memory.
 pub struct AgentRegistry {
-    agents: Mutex<HashMap<String, SubAgent>>,
+    agents: Mutex<HashMap<String, RegisteredAgent>>,
 }
 
 impl AgentRegistry {
@@ -22,24 +29,65 @@ impl AgentRegistry {
         if agents.contains_key(&agent.id) {
             return false;
         }
-        agents.insert(agent.id.clone(), agent);
+        agents.insert(
+            agent.id.clone(),
+            RegisteredAgent {
+                agent,
+                config_version: 0,
+            },
+        );
         true
     }
 
     /// Get a SubAgent by id.
     pub fn get(&self, agent_id: &str) -> Option<SubAgent> {
-        self.agents.lock().unwrap().get(agent_id).cloned()
+        self.agents
+            .lock()
+            .unwrap()
+            .get(agent_id)
+            .map(|r| r.agent.clone())
+    }
+
+    /// Get a SubAgent and its config_version by id.
+    pub fn get_with_version(&self, agent_id: &str) -> Option<(SubAgent, u64)> {
+        self.agents
+            .lock()
+            .unwrap()
+            .get(agent_id)
+            .map(|r| (r.agent.clone(), r.config_version))
+    }
+
+    /// Update the config of a SubAgent with optimistic locking.
+    /// Returns the new config_version on success, or an error string on version mismatch.
+    pub fn update_config(
+        &self,
+        agent_id: &str,
+        new_agent: SubAgent,
+        expected_version: u64,
+    ) -> Result<u64, String> {
+        let mut agents = self.agents.lock().unwrap();
+        let entry = agents
+            .get_mut(agent_id)
+            .ok_or_else(|| "AGENT_NOT_FOUND".to_string())?;
+
+        if entry.config_version != expected_version {
+            return Err("CONFIG_CONFLICT".to_string());
+        }
+
+        entry.agent = new_agent;
+        entry.config_version += 1;
+        Ok(entry.config_version)
     }
 
     /// Update the status of a SubAgent. Returns false if not found.
     pub fn update_status(&self, agent_id: &str, status: AgentStatus) -> bool {
         let mut agents = self.agents.lock().unwrap();
-        if let Some(agent) = agents.get_mut(agent_id) {
-            agent.current_task = match &status {
+        if let Some(entry) = agents.get_mut(agent_id) {
+            entry.agent.current_task = match &status {
                 AgentStatus::Busy { task_id } => Some(task_id.clone()),
                 _ => None,
             };
-            agent.status = status;
+            entry.agent.status = status;
             true
         } else {
             false
@@ -58,7 +106,12 @@ impl AgentRegistry {
 
     /// List all registered agents.
     pub fn list_all(&self) -> Vec<SubAgent> {
-        self.agents.lock().unwrap().values().cloned().collect()
+        self.agents
+            .lock()
+            .unwrap()
+            .values()
+            .map(|r| r.agent.clone())
+            .collect()
     }
 
     /// List agents that are idle (available).
@@ -67,8 +120,8 @@ impl AgentRegistry {
             .lock()
             .unwrap()
             .values()
-            .filter(|a| a.status.is_available())
-            .cloned()
+            .filter(|r| r.agent.status.is_available())
+            .map(|r| r.agent.clone())
             .collect()
     }
 
@@ -78,8 +131,8 @@ impl AgentRegistry {
             .lock()
             .unwrap()
             .values()
-            .filter(|a| a.skills.iter().any(|s| s.name == skill_name))
-            .cloned()
+            .filter(|r| r.agent.skills.iter().any(|s| s.name == skill_name))
+            .map(|r| r.agent.clone())
             .collect()
     }
 }
@@ -209,5 +262,78 @@ mod tests {
 
         let none = reg.find_by_skill("nonexistent");
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn test_get_with_version() {
+        let reg = AgentRegistry::new();
+        reg.register(make_agent("a1", vec!["search"]));
+
+        let (agent, version) = reg.get_with_version("a1").unwrap();
+        assert_eq!(agent.id, "a1");
+        assert_eq!(version, 0);
+
+        assert!(reg.get_with_version("nope").is_none());
+    }
+
+    #[test]
+    fn test_update_config_success() {
+        let reg = AgentRegistry::new();
+        reg.register(make_agent("a1", vec!["search"]));
+
+        let mut updated = make_agent("a1", vec!["search", "summarize"]);
+        updated.name = "Updated Agent".to_string();
+
+        let new_version = reg.update_config("a1", updated, 0).unwrap();
+        assert_eq!(new_version, 1);
+
+        let (agent, version) = reg.get_with_version("a1").unwrap();
+        assert_eq!(agent.name, "Updated Agent");
+        assert_eq!(agent.skills.len(), 2);
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn test_update_config_conflict() {
+        let reg = AgentRegistry::new();
+        reg.register(make_agent("a1", vec!["search"]));
+
+        // First update succeeds
+        let updated = make_agent("a1", vec!["search", "summarize"]);
+        reg.update_config("a1", updated, 0).unwrap();
+
+        // Second update with stale version fails
+        let updated2 = make_agent("a1", vec!["write"]);
+        let err = reg.update_config("a1", updated2, 0).unwrap_err();
+        assert_eq!(err, "CONFIG_CONFLICT");
+    }
+
+    #[test]
+    fn test_update_config_not_found() {
+        let reg = AgentRegistry::new();
+        let agent = make_agent("a1", vec![]);
+        let err = reg.update_config("a1", agent, 0).unwrap_err();
+        assert_eq!(err, "AGENT_NOT_FOUND");
+    }
+
+    #[test]
+    fn test_update_config_sequential_versions() {
+        let reg = AgentRegistry::new();
+        reg.register(make_agent("a1", vec![]));
+
+        let v1 = reg
+            .update_config("a1", make_agent("a1", vec!["s1"]), 0)
+            .unwrap();
+        assert_eq!(v1, 1);
+
+        let v2 = reg
+            .update_config("a1", make_agent("a1", vec!["s2"]), 1)
+            .unwrap();
+        assert_eq!(v2, 2);
+
+        let v3 = reg
+            .update_config("a1", make_agent("a1", vec!["s3"]), 2)
+            .unwrap();
+        assert_eq!(v3, 3);
     }
 }

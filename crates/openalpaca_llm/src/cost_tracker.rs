@@ -121,6 +121,16 @@ impl CostTracker {
         let usage = self.task_usage.read().await;
         usage.get(task_id).cloned()
     }
+
+    /// Get the total cost across all agents.
+    pub async fn total_cost(&self) -> f64 {
+        self.agent_usage
+            .read()
+            .await
+            .values()
+            .map(|s| s.total_cost_usd)
+            .sum()
+    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use crate::agent::registry::AgentRegistry;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Status of a task entry in the in-memory registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,14 +121,14 @@ impl Default for TaskRegistry {
 /// Shared context holding cross-cutting state for the gateway.
 pub struct SharedContext {
     pub task_registry: TaskRegistry,
-    pub agent_registry: AgentRegistry,
+    pub agent_registry: Arc<AgentRegistry>,
 }
 
 impl SharedContext {
     pub fn new() -> Self {
         Self {
             task_registry: TaskRegistry::new(),
-            agent_registry: AgentRegistry::new(),
+            agent_registry: Arc::new(AgentRegistry::new()),
         }
     }
 }

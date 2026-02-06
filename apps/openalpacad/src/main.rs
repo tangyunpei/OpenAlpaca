@@ -24,6 +24,8 @@ use axum::{
 };
 use events::EventBroadcaster;
 use openalpaca_core::{
+    agent::AgentConfigService,
+    chat::{ChatService, ChatStreamManager},
     context::SharedContext,
     gateway::Gateway,
     lane::LaneManager,
@@ -53,6 +55,9 @@ pub struct AppState {
     pub connector_manager: managers::connector::ConnectorManager,
     pub gateway: Arc<Gateway>,
     pub llm_settings_service: Option<Arc<openalpaca_llm::LlmSettingsService>>,
+    pub agent_config_service: Option<Arc<AgentConfigService>>,
+    pub chat_service: Option<Arc<ChatService>>,
+    pub chat_stream_manager: Option<Arc<ChatStreamManager>>,
 }
 
 #[tokio::main]
@@ -325,6 +330,13 @@ async fn main() -> Result<()> {
             None
         };
 
+    // Step 5.2.4: Build AgentConfigService (Phase 5.7)
+    let agent_config_service = Arc::new(AgentConfigService::new(
+        shared_context.agent_registry.clone(),
+        config_dir.clone(),
+        db.clone(),
+    ));
+
     // Construct SecurityGate → SandboxManager → StubToolExecutor chain
     #[allow(deprecated)]
     let bus = ctx.bus.clone();
@@ -362,6 +374,14 @@ async fn main() -> Result<()> {
     );
     connector_manager.start_all().await;
 
+    // Step 5.4: Build ChatService (Phase 5.6)
+    let chat_stream_manager = Arc::new(ChatStreamManager::new());
+    let chat_service = Arc::new(ChatService::new(
+        gateway.clone(),
+        chat_stream_manager.clone(),
+        db.clone(),
+    ));
+
     let state = Arc::new(AppState {
         instance_id: instance_id.clone(),
         token,
@@ -372,6 +392,9 @@ async fn main() -> Result<()> {
         connector_manager,
         gateway,
         llm_settings_service,
+        agent_config_service: Some(agent_config_service),
+        chat_service: Some(chat_service),
+        chat_stream_manager: Some(chat_stream_manager.clone()),
     });
 
     // Public routes (no auth required)
@@ -398,11 +421,21 @@ async fn main() -> Result<()> {
         .route("/v1/tasks/{id}", get(routes::get_task_handler))
         .route("/v1/tasks/{id}/action", post(routes::task_action_handler))
         .route("/v1/agents", get(routes::list_agents_handler))
+        .route("/v1/agents", post(routes::create_agent_handler))
+        .route("/v1/agents/from-toml", post(routes::create_agent_from_toml_handler))
+        .route("/v1/agents/from-chat", post(routes::create_agent_from_chat_handler))
         .route("/v1/agents/{id}", get(routes::get_agent_handler))
+        .route("/v1/agents/{id}", delete(routes::delete_agent_handler))
+        .route("/v1/agents/{id}/config", get(routes::get_agent_config_handler))
+        .route("/v1/agents/{id}/config", put(routes::update_agent_config_handler))
         .route(
             "/v1/agents/{id}/action",
             post(routes::agent_action_handler),
         )
+        // Chat routes (Phase 5.6)
+        .route("/v1/chat", post(routes::send_chat_handler))
+        .route("/v1/chat/history", get(routes::get_chat_history_handler))
+        .route("/v1/chat/history", delete(routes::delete_chat_history_handler))
         // Settings routes (Phase 5.5)
         .route("/v1/settings/llm", get(routes::get_llm_settings))
         .route("/v1/settings/llm", put(routes::upsert_key))
@@ -416,6 +449,9 @@ async fn main() -> Result<()> {
         )
         .route("/v1/settings/llm/validate", post(routes::validate_key))
         .route("/v1/settings/llm/status", get(routes::get_key_status))
+        // Orchestrator config routes (Phase 5.7)
+        .route("/v1/orchestrator/config", get(routes::get_orchestrator_config))
+        .route("/v1/orchestrator/config", put(routes::update_orchestrator_config))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_middleware,
@@ -424,10 +460,17 @@ async fn main() -> Result<()> {
     // WebSocket routes (token validated in handler via query param)
     let websocket = Router::new().route("/v1/events", get(routes::events_handler));
 
+    // SSE chat stream route (token validated inline via query param)
+    let chat_sse = Router::new().route(
+        "/v1/chat/stream/{stream_id}",
+        get(routes::chat_stream_handler),
+    );
+
     // Merge all routes
     let app = public
         .merge(protected_routes)
         .merge(websocket)
+        .merge(chat_sse)
         .with_state(state.clone())
         .layer(CorsLayer::permissive());
 
@@ -438,6 +481,16 @@ async fn main() -> Result<()> {
         loop {
             interval.tick().await;
             heartbeat_state.event_broadcaster.heartbeat();
+        }
+    });
+
+    // Step 6.1: Spawn chat stream cleanup task (Phase 5.6)
+    let cleanup_csm = chat_stream_manager;
+    let _chat_cleanup_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_csm.cleanup_stale(std::time::Duration::from_secs(30));
         }
     });
 

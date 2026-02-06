@@ -3,10 +3,12 @@
   import type { Agent } from "$lib/types";
   import AgentCard from "./AgentCard.svelte";
   import AgentDetail from "./AgentDetail.svelte";
+  import AgentCreator from "./AgentCreator.svelte";
 
   let loading = $state(false);
   let agents = $state<Agent[]>([]);
   let selectedAgentId = $state<string | null>(null);
+  let showCreator = $state(false);
 
   const unsubAgents = agentList.subscribe((v) => (agents = v));
   const unsubLoading = agentsLoading.subscribe((v) => (loading = v));
@@ -19,6 +21,9 @@
 <div class="controls">
   <button onclick={refresh} disabled={loading}>
     {loading ? "Refreshing..." : "Refresh"}
+  </button>
+  <button class="new-agent-btn" onclick={() => (showCreator = true)}>
+    + New Agent
   </button>
 </div>
 
@@ -41,11 +46,24 @@
   <AgentDetail agentId={selectedAgentId} onClose={() => (selectedAgentId = null)} />
 {/if}
 
+{#if showCreator}
+  <AgentCreator onClose={() => (showCreator = false)} />
+{/if}
+
 <style>
   .controls {
     display: flex;
     gap: 10px;
     margin-bottom: 20px;
+  }
+
+  .new-agent-btn {
+    background: var(--accent);
+    color: white;
+    font-weight: 600;
+  }
+  .new-agent-btn:hover {
+    opacity: 0.9;
   }
 
   .view-panel {

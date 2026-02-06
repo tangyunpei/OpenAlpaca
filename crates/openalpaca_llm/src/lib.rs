@@ -15,7 +15,7 @@ pub use error::LlmError;
 pub use key_pool::{ApiKey, CallResult, KeyGuard, KeyHealthStatus, KeyPool, KeyPoolError, KeyPriority, KeySource, KeyStatus, ProviderType, SelectionStrategy, mask_secret};
 pub use model_registry::{ModelInfo, ModelRegistry, PricingInfo};
 pub use router::{LlmRouter, LlmRouterError, ProviderEntry, RequestContext, RouterRequest};
-pub use settings_service::LlmSettingsService;
+pub use settings_service::{LlmSettingsService, OrchestratorConfigResponse, UpdateOrchestratorRequest};
 pub use types::*;
 
 use async_trait::async_trait;
