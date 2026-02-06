@@ -51,6 +51,7 @@ Thumbs.db
 */.master_key
 *.pem
 *.key
+config/llm.toml
 
 # ============================================
 # Build outputs
