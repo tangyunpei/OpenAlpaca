@@ -330,6 +330,12 @@ async fn main() -> Result<()> {
             None
         };
 
+    // Step 5.2.3b: Refresh models from provider APIs at startup
+    if let Some(ref service) = llm_settings_service {
+        info!("Refreshing available models from providers...");
+        service.refresh_models().await;
+    }
+
     // Step 5.2.4: Build AgentConfigService (Phase 5.7)
     let agent_config_service = Arc::new(AgentConfigService::new(
         shared_context.agent_registry.clone(),
@@ -357,6 +363,7 @@ async fn main() -> Result<()> {
         llm_router,
         openalpaca_core::runner::LoopConfig::default(),
         security_gate,
+        Some(db.clone()),
     ));
     let handler = Arc::new(gateway_bridge::OrchestratorHandler::new(orchestrator));
     let gateway = Arc::new(Gateway::new(
@@ -449,6 +456,9 @@ async fn main() -> Result<()> {
         )
         .route("/v1/settings/llm/validate", post(routes::validate_key))
         .route("/v1/settings/llm/status", get(routes::get_key_status))
+        // Model discovery routes
+        .route("/v1/models", get(routes::list_models))
+        .route("/v1/models/refresh", post(routes::refresh_models))
         // Orchestrator config routes (Phase 5.7)
         .route("/v1/orchestrator/config", get(routes::get_orchestrator_config))
         .route("/v1/orchestrator/config", put(routes::update_orchestrator_config))

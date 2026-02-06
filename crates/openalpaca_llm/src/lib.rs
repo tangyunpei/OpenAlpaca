@@ -13,7 +13,7 @@ pub use config::{LlmConfig, LlmRouterConfig, ProviderConfig, KeyConfig, Orchestr
 pub use cost_tracker::{CallRecord, CostTracker, ModelUsageStats, UsageStats};
 pub use error::LlmError;
 pub use key_pool::{ApiKey, CallResult, KeyGuard, KeyHealthStatus, KeyPool, KeyPoolError, KeyPriority, KeySource, KeyStatus, ProviderType, SelectionStrategy, mask_secret};
-pub use model_registry::{ModelInfo, ModelRegistry, PricingInfo};
+pub use model_registry::{ModelEntry, ModelInfo, ModelRegistry, PricingInfo};
 pub use router::{LlmRouter, LlmRouterError, ProviderEntry, RequestContext, RouterRequest};
 pub use settings_service::{LlmSettingsService, OrchestratorConfigResponse, UpdateOrchestratorRequest};
 pub use types::*;
@@ -30,6 +30,12 @@ pub trait LlmProvider: Send + Sync {
     /// Providers override this to inject the key into their HTTP requests.
     async fn chat_with_key(&self, _key: &str, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         self.chat(request).await
+    }
+
+    /// List models available from this provider using the given API key.
+    /// Default returns empty. Providers override with real API calls.
+    async fn list_models_with_key(&self, _key: &str) -> Result<Vec<String>, LlmError> {
+        Ok(vec![])
     }
 }
 

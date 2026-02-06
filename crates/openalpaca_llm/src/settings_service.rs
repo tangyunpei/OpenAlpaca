@@ -323,9 +323,9 @@ impl LlmSettingsService {
         }).await
     }
 
-    /// Validate a key by detecting its format (no actual API call for now).
+    /// Validate a key by detecting its format and querying available models.
     pub async fn validate_key(&self, req: ValidateKeyRequest) -> Result<KeyValidationResult, String> {
-        let _provider_type = parse_provider_type(&req.provider)
+        let provider_type = parse_provider_type(&req.provider)
             .ok_or_else(|| format!("Unknown provider: {}", req.provider))?;
 
         // Detect source from key format
@@ -349,13 +349,33 @@ impl LlmSettingsService {
             Some("tier1".to_string())
         };
 
+        // Query available models using this key
+        let models_available = if valid {
+            self.router
+                .list_models_for_provider(provider_type, &req.secret)
+                .await
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
         Ok(KeyValidationResult {
             valid,
             tier,
             detected_source,
-            models_available: vec![],
+            models_available,
             rate_limits: None,
         })
+    }
+
+    /// List all available models from the registry.
+    pub fn available_models(&self) -> Vec<crate::model_registry::ModelEntry> {
+        self.router.available_models()
+    }
+
+    /// Refresh models by querying each configured provider's API.
+    pub async fn refresh_models(&self) {
+        self.router.refresh_models().await;
     }
 
     /// Get live key health status for all providers.

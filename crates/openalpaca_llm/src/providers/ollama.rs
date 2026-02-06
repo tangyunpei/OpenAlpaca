@@ -58,6 +58,41 @@ impl LlmProvider for OllamaProvider {
         true
     }
 
+    async fn list_models_with_key(&self, _key: &str) -> Result<Vec<String>, LlmError> {
+        // Ollama uses native /api/tags endpoint (no auth needed)
+        // Strip /v1 suffix from base_url to get native base
+        let base = self.base_url();
+        let native_base = base.trim_end_matches("/v1");
+        let url = format!("{}/api/tags", native_base);
+
+        let client = reqwest::Client::new();
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Ok(vec![]);
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| LlmError::Serialization(e.to_string()))?;
+
+        let models = body["models"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m["name"].as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(models)
+    }
+
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         #[cfg(feature = "openai")]
         {

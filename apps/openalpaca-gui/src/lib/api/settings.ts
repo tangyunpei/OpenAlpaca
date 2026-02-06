@@ -11,6 +11,7 @@ import type {
   ValidateKeyRequest,
   KeyValidationResult,
   KeyStatusMap,
+  ModelEntry,
 } from "../types";
 
 async function ensureConnection(): Promise<ConnectionInfo> {
@@ -115,6 +116,35 @@ export async function getKeyStatus(): Promise<KeyStatusMap> {
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
     throw new Error(data.error?.message || `Failed to fetch status: ${response.statusText}`);
+  }
+  return await response.json();
+}
+
+/** GET /v1/models — list all available models */
+export async function getAvailableModels(): Promise<ModelEntry[]> {
+  const conn = await ensureConnection();
+  const response = await fetch(`${conn.baseUrl}/v1/models`, {
+    headers: { Authorization: `Bearer ${conn.token}` },
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error?.message || `Failed to fetch models: ${response.statusText}`);
+  }
+  return await response.json();
+}
+
+/** POST /v1/models/refresh — refresh models from provider APIs */
+export async function refreshAvailableModels(): Promise<ModelEntry[]> {
+  const conn = await ensureConnection();
+  const response = await fetch(`${conn.baseUrl}/v1/models/refresh`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${conn.token}` },
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error?.message || `Failed to refresh models: ${response.statusText}`);
   }
   return await response.json();
 }

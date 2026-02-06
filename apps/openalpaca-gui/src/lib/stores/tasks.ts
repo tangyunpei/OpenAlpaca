@@ -33,12 +33,22 @@ export const selectedTaskDetail = writable<TaskDetailResponse | null>(null);
 /** Loading state */
 export const tasksLoading = writable(false);
 
-/** Fetch all tasks from REST and populate the map */
+/** Fetch all tasks from REST and merge into the map (preserves WebSocket-derived data) */
 export async function loadTasks(): Promise<void> {
   tasksLoading.set(true);
   try {
     const tasks = await getTasks();
-    taskMap.set(new Map(tasks.map((t) => [t.id, t])));
+    taskMap.update((existing) => {
+      // Start with REST data as the source of truth
+      const merged = new Map(tasks.map((t) => [t.id, t] as [string, Task]));
+      // Merge in any WebSocket-derived tasks not present in REST response
+      for (const [id, task] of existing) {
+        if (!merged.has(id)) {
+          merged.set(id, task);
+        }
+      }
+      return merged;
+    });
   } catch (e) {
     console.error("[tasks-store] Failed to load tasks:", e);
   } finally {

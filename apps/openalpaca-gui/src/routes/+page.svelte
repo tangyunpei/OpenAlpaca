@@ -173,15 +173,16 @@
   }
 
   .chat-sidebar {
-    width: 380px;
-    min-width: 380px;
+    flex: 1;
+    min-width: 300px;
     border-right: 1px solid var(--primary);
     height: calc(100vh - 120px);
     overflow: hidden;
   }
 
   .main-content {
-    flex: 1;
+    flex: 0 1 900px;
+    max-width: 900px;
     min-width: 0;
     padding-left: 24px;
   }
@@ -231,7 +232,6 @@
     }
 
     .chat-sidebar {
-      width: 100%;
       min-width: 100%;
       height: 300px;
       border-right: none;
@@ -239,6 +239,8 @@
     }
 
     .main-content {
+      flex-basis: auto;
+      max-width: 100%;
       padding-left: 0;
       padding-top: 16px;
     }

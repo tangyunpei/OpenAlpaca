@@ -7,24 +7,30 @@
     settingsError,
     providerList,
     orchestratorConfig,
+    availableModels,
+    modelsRefreshing,
     loadSettings,
     loadOrchestratorConfig,
+    loadAvailableModels,
+    refreshModels,
     saveOrchestratorConfig,
     subscribeToKeyEvents,
     subscribeToOrchestratorEvents,
   } from "$lib/stores/settings";
-  import type { LlmSettingsResponse, ProviderInfo, OrchestratorConfigResponse } from "$lib/types";
+  import type { LlmSettingsResponse, ProviderInfo, OrchestratorConfigResponse, ModelEntry } from "$lib/types";
 
   let settings = $state<LlmSettingsResponse | null>(null);
   let loading = $state(false);
   let error = $state<string | null>(null);
   let providers = $state<[string, ProviderInfo][]>([]);
   let orchConfig = $state<OrchestratorConfigResponse | null>(null);
+  let models = $state<ModelEntry[]>([]);
+  let refreshing = $state(false);
 
   // Edit mode state
   let editingOrchestrator = $state(false);
   let editModel = $state("");
-  let editFallbacks = $state("");
+  let editFallbackSet = $state<Set<string>>(new Set());
   let orchSaving = $state(false);
   let orchError = $state<string | null>(null);
 
@@ -36,9 +42,11 @@
     orchConfig = v;
     if (v && !editingOrchestrator) {
       editModel = v.model;
-      editFallbacks = v.fallback_models.join(", ");
+      editFallbackSet = new Set(v.fallback_models);
     }
   });
+  const unsubModels = availableModels.subscribe((v) => (models = v));
+  const unsubRefreshing = modelsRefreshing.subscribe((v) => (refreshing = v));
 
   let unsubKeyEvents: (() => void) | null = null;
   let unsubOrchEvents: (() => void) | null = null;
@@ -46,6 +54,7 @@
   onMount(() => {
     loadSettings();
     loadOrchestratorConfig();
+    loadAvailableModels();
     unsubKeyEvents = subscribeToKeyEvents();
     unsubOrchEvents = subscribeToOrchestratorEvents();
 
@@ -55,6 +64,8 @@
       unsubError();
       unsubProviders();
       unsubOrch();
+      unsubModels();
+      unsubRefreshing();
       unsubKeyEvents?.();
       unsubOrchEvents?.();
     };
@@ -63,10 +74,20 @@
   function startEditOrchestrator() {
     if (orchConfig) {
       editModel = orchConfig.model;
-      editFallbacks = orchConfig.fallback_models.join(", ");
+      editFallbackSet = new Set(orchConfig.fallback_models);
     }
     editingOrchestrator = true;
     orchError = null;
+  }
+
+  function toggleFallback(modelId: string) {
+    const next = new Set(editFallbackSet);
+    if (next.has(modelId)) {
+      next.delete(modelId);
+    } else {
+      next.add(modelId);
+    }
+    editFallbackSet = next;
   }
 
   function cancelEditOrchestrator() {
@@ -78,11 +99,7 @@
     orchSaving = true;
     orchError = null;
     try {
-      const fallbacks = editFallbacks
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      await saveOrchestratorConfig(editModel, fallbacks);
+      await saveOrchestratorConfig(editModel, [...editFallbackSet]);
       editingOrchestrator = false;
     } catch (e) {
       orchError = e instanceof Error ? e.message : String(e);
@@ -94,12 +111,16 @@
   export function refreshSettings() {
     loadSettings();
     loadOrchestratorConfig();
+    loadAvailableModels();
   }
 </script>
 
 <div class="controls">
-  <button onclick={() => { loadSettings(); loadOrchestratorConfig(); }} disabled={loading}>
+  <button onclick={() => { loadSettings(); loadOrchestratorConfig(); loadAvailableModels(); }} disabled={loading}>
     {loading ? "Loading..." : "Refresh"}
+  </button>
+  <button onclick={refreshModels} disabled={refreshing} class="secondary">
+    {refreshing ? "Refreshing..." : "Refresh Models"}
   </button>
 </div>
 
@@ -123,14 +144,40 @@
         <div class="edit-row">
           <label>
             <span class="label">Model</span>
-            <input type="text" bind:value={editModel} />
+            {#if models.length > 0}
+              <select bind:value={editModel}>
+                {#each models as m (m.id)}
+                  <option value={m.id}>{m.id} ({m.provider})</option>
+                {/each}
+                {#if editModel && !models.find((m) => m.id === editModel)}
+                  <option value={editModel}>{editModel} (current)</option>
+                {/if}
+              </select>
+            {:else}
+              <input type="text" bind:value={editModel} />
+            {/if}
           </label>
         </div>
         <div class="edit-row">
-          <label>
-            <span class="label">Fallback Models (comma-separated)</span>
-            <input type="text" bind:value={editFallbacks} placeholder="gpt-4o, llama3" />
-          </label>
+          <span class="label">Fallback Models</span>
+          {#if models.length > 0}
+            <div class="checkbox-list">
+              {#each models.filter((m) => m.id !== editModel) as m (m.id)}
+                <label class="checkbox-item">
+                  <input
+                    type="checkbox"
+                    checked={editFallbackSet.has(m.id)}
+                    onchange={() => toggleFallback(m.id)}
+                  />
+                  <span>{m.id} <span class="provider-tag">{m.provider}</span></span>
+                </label>
+              {/each}
+            </div>
+          {:else}
+            <input type="text" value={[...editFallbackSet].join(", ")} onchange={(e) => {
+              editFallbackSet = new Set(e.currentTarget.value.split(",").map((s) => s.trim()).filter(Boolean));
+            }} placeholder="gpt-4o, llama3" />
+          {/if}
         </div>
         <div class="edit-actions">
           <button onclick={handleSaveOrchestrator} disabled={orchSaving}>
@@ -283,20 +330,43 @@
   .edit-row {
     margin-bottom: 10px;
   }
-  .edit-row label {
+  .edit-row > label {
     display: flex; flex-direction: column; gap: 4px;
   }
   .edit-row .label {
     font-size: 0.75rem; color: var(--text-dim);
     text-transform: uppercase; letter-spacing: 0.3px;
   }
-  .edit-row input {
+  .edit-row input, .edit-row select {
     background: rgba(0, 0, 0, 0.3);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 6px; padding: 6px 10px;
     color: var(--text); font-size: 0.85rem;
   }
-  .edit-row input:focus { outline: none; border-color: var(--accent); }
+  .edit-row input:focus, .edit-row select:focus { outline: none; border-color: var(--accent); }
+  .edit-row select { cursor: pointer; }
+  .edit-row select option { background: var(--surface); color: var(--text); }
+
+  .checkbox-list {
+    display: flex; flex-direction: column; gap: 4px;
+    max-height: 180px; overflow-y: auto;
+    padding: 6px 0;
+  }
+  .checkbox-item {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 0.82rem; color: var(--text);
+    cursor: pointer; padding: 2px 0;
+  }
+  .checkbox-item input[type="checkbox"] {
+    width: 14px; height: 14px; cursor: pointer;
+    accent-color: var(--accent);
+  }
+  .provider-tag {
+    font-size: 0.7rem; color: var(--text-dim);
+    background: rgba(255, 255, 255, 0.06);
+    padding: 1px 6px; border-radius: 3px;
+    margin-left: 4px;
+  }
 
   .edit-actions {
     display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px;

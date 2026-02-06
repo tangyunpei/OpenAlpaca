@@ -128,17 +128,21 @@ pub async fn list_tasks_handler(
     let tasks = if let Some(ref created_by) = query.created_by {
         repo.list_by_creator(created_by, limit)
     } else if let Some(ref status_str) = query.status {
-        match status_str.parse::<TaskStatus>() {
-            Ok(status) => repo.list_by_status(status, limit),
-            Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": format!("Invalid status: {}", status_str) })),
-                );
+        if status_str == "active" {
+            repo.list_active(limit)
+        } else {
+            match status_str.parse::<TaskStatus>() {
+                Ok(status) => repo.list_by_status(status, limit),
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": format!("Invalid status: {}", status_str) })),
+                    );
+                }
             }
         }
     } else {
-        repo.list_active(limit)
+        repo.list_recent(limit)
     };
 
     match tasks {

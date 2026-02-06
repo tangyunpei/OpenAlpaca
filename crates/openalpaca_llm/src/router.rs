@@ -4,9 +4,10 @@
 use crate::cost_tracker::{CallRecord, CostTracker};
 use crate::error::LlmError;
 use crate::key_pool::{ApiKey, CallResult, KeyPool, KeyStatus, ProviderType, SelectionStrategy};
-use crate::model_registry::ModelRegistry;
+use crate::model_registry::{ModelEntry, ModelInfo, ModelRegistry};
 use crate::types::*;
 use crate::LlmProvider;
+use tracing;
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -141,6 +142,70 @@ impl LlmRouter {
         } else {
             false
         }
+    }
+
+    /// List models confirmed by provider API refresh (for GUI dropdowns).
+    /// Returns only discovered models so the dropdown reflects real availability.
+    pub fn available_models(&self) -> Vec<ModelEntry> {
+        self.model_registry.list_discovered_models()
+    }
+
+    /// Get a reference to the model registry.
+    pub fn model_registry(&self) -> &ModelRegistry {
+        &self.model_registry
+    }
+
+    /// Refresh models by querying each configured provider's API.
+    /// Discovered models are added to the registry (existing entries preserved).
+    pub async fn refresh_models(&self) {
+        for (&provider_type, entry) in &self.providers {
+            let pool = entry.key_pool.load();
+            // Try to acquire a key to query the provider
+            let key_secret = match pool.acquire().await {
+                Ok(guard) => guard.secret.clone(),
+                Err(_) => {
+                    tracing::debug!("No available key for {:?}, skipping model refresh", provider_type);
+                    continue;
+                }
+            };
+
+            match entry.provider.list_models_with_key(&key_secret).await {
+                Ok(model_ids) => {
+                    let count = model_ids.len();
+                    if count == 0 {
+                        tracing::debug!("Provider {:?} returned 0 models, skipping (preserving existing)", provider_type);
+                        continue;
+                    }
+                    for model_id in model_ids {
+                        self.model_registry.register_discovered(
+                            model_id,
+                            ModelInfo {
+                                provider: provider_type,
+                                input_price_per_million: 0.0,
+                                output_price_per_million: 0.0,
+                                context_window: 0,
+                                discovered: true,
+                            },
+                        );
+                    }
+                    tracing::info!("Refreshed {} models from {:?}", count, provider_type);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to list models from {:?}: {}", provider_type, e);
+                }
+            }
+        }
+    }
+
+    /// List models available from a specific provider using the given key.
+    /// Used during key validation to show what models the key can access.
+    pub async fn list_models_for_provider(
+        &self,
+        provider_type: ProviderType,
+        key: &str,
+    ) -> Result<Vec<String>, LlmError> {
+        let entry = self.providers.get(&provider_type).ok_or(LlmError::NotConfigured)?;
+        entry.provider.list_models_with_key(key).await
     }
 
     /// Get key statuses for a provider.

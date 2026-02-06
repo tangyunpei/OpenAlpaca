@@ -19,6 +19,7 @@ use crate::security::policy::{Principal, Scope};
 use crate::types::Capability;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter};
+use openalpaca_storage::Database;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -53,9 +54,16 @@ impl Orchestrator {
         llm_router: Option<Arc<LlmRouter>>,
         loop_config: LoopConfig,
         security_gate: Arc<SecurityGate>,
+        db: Option<Database>,
     ) -> Self {
-        let task_dispatcher =
-            TaskDispatcher::new(shared_context.clone(), lane_manager.clone(), bus.clone());
+        let task_dispatcher = TaskDispatcher::new(
+            shared_context.clone(),
+            lane_manager.clone(),
+            bus.clone(),
+            llm_router.clone(),
+            security_gate.clone(),
+            db,
+        );
         Self {
             shared_context,
             lane_manager,
@@ -335,6 +343,7 @@ mod tests {
             None,
             LoopConfig::default(),
             gate,
+            None,
         )
     }
 
@@ -354,6 +363,7 @@ mod tests {
             None,
             LoopConfig::default(),
             gate,
+            None,
         )
     }
 
@@ -567,6 +577,7 @@ mod tests {
             Some(Arc::new(router)),
             LoopConfig::default(),
             gate,
+            None,
         );
 
         let result = orch

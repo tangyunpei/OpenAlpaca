@@ -179,6 +179,16 @@ export interface KeyStatusMap {
   }>;
 }
 
+// ── Model types ────────────────────────────────────────────────────
+
+export interface ModelEntry {
+  id: string;
+  provider: string;
+  context_window: number;
+  input_price_per_million: number;
+  output_price_per_million: number;
+}
+
 // ── Agent Config types ─────────────────────────────────────────────
 
 export interface AgentConfigFile {

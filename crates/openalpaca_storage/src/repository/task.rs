@@ -114,6 +114,24 @@ impl<'a> TaskRepository<'a> {
         })
     }
 
+    /// List recent tasks of all statuses (most recent first).
+    pub fn list_recent(&self, limit: usize) -> Result<Vec<Task>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at
+                 FROM task ORDER BY created_at DESC LIMIT ?",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
+                Self::row_to_task(row)
+            })?;
+            let mut tasks = Vec::new();
+            for row in rows {
+                tasks.push(row?);
+            }
+            Ok(tasks)
+        })
+    }
+
     /// Update a task's status. Sets completed_at if the new status is terminal.
     /// Returns true if a row was updated.
     pub fn update_status(&self, id: &str, status: TaskStatus) -> Result<bool> {

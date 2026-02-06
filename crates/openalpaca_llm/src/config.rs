@@ -8,6 +8,7 @@ use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LlmConfig {
@@ -212,30 +213,54 @@ fn build_router_from_hierarchical(content: &str) -> Result<LlmRouter, LlmError> 
             let mut api_keys = Vec::new();
             if let Some(ref keys) = provider_config.keys {
                 for key_config in keys {
-                    // Resolve secret: try encrypted first, then env var
+                    // Resolve secret: try encrypted first, then env var.
+                    // On failure, skip this key so other keys/providers still work.
                     let secret = if let Some(ref encrypted) = key_config.secret_encrypted {
                         if crate::key_encryption::KeyEncryptor::is_encrypted(encrypted) {
                             match crate::key_encryption::KeyEncryptor::load_or_generate() {
-                                Ok(enc) => enc.decrypt(encrypted).ok(),
-                                Err(_) => None,
+                                Ok(enc) => match enc.decrypt(encrypted) {
+                                    Ok(s) => Some(s),
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Skipping key '{}': decryption failed: {e}. \
+                                             Re-add the key via Settings to fix.",
+                                            key_config.id
+                                        );
+                                        None
+                                    }
+                                },
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Skipping key '{}': failed to load master key: {e}",
+                                        key_config.id
+                                    );
+                                    None
+                                }
                             }
                         } else {
                             Some(encrypted.clone())
                         }
                     } else if let Some(ref env_var) = key_config.secret_env {
-                        resolve_key_secret(env_var)
+                        let resolved = resolve_key_secret(env_var);
+                        if resolved.is_none() {
+                            tracing::warn!(
+                                "Skipping key '{}': environment variable '{}' not set",
+                                key_config.id, env_var
+                            );
+                        }
+                        resolved
                     } else {
+                        tracing::warn!(
+                            "Skipping key '{}': no secret_encrypted or secret_env configured",
+                            key_config.id
+                        );
                         None
                     };
 
-                    let secret = secret.ok_or_else(|| {
-                        LlmError::Config(format!(
-                            "No secret available for key '{}' (env: {:?}, encrypted: {})",
-                            key_config.id,
-                            key_config.secret_env,
-                            key_config.secret_encrypted.is_some()
-                        ))
-                    })?;
+                    let secret = match secret {
+                        Some(s) => s,
+                        None => continue, // Skip this key, try next
+                    };
 
                     let mut api_key = ApiKey::new(
                         key_config.id.clone(),
@@ -278,44 +303,36 @@ fn build_router_from_hierarchical(content: &str) -> Result<LlmRouter, LlmError> 
                 _ => SelectionStrategy::RoundRobin,
             };
 
+            // Use first successfully resolved key for the provider's default instance
+            let first_secret = api_keys.first().map(|k| k.secret.clone());
+
             let key_pool = KeyPool::new(api_keys, strategy);
 
-            // Build the actual provider
-            // Use the first key's secret for the default provider instance
-            let first_secret = if let Some(ref keys) = provider_config.keys {
-                keys.first().and_then(|k| {
-                    // Try encrypted first, then env var
-                    if let Some(ref encrypted) = k.secret_encrypted {
-                        if crate::key_encryption::KeyEncryptor::is_encrypted(encrypted) {
-                            crate::key_encryption::KeyEncryptor::load_or_generate()
-                                .ok()
-                                .and_then(|enc| enc.decrypt(encrypted).ok())
-                        } else {
-                            Some(encrypted.clone())
-                        }
-                    } else {
-                        k.secret_env.as_deref().and_then(resolve_key_secret)
-                    }
-                })
-            } else {
-                None
-            };
-
+            // Build the actual provider.
+            // Skip providers that require keys but have none resolved.
             let provider: Box<dyn LlmProvider> = match provider_type {
                 #[cfg(feature = "anthropic")]
                 ProviderType::Anthropic => {
-                    let key = first_secret.ok_or_else(|| {
-                        LlmError::Config("No Anthropic API key configured".to_string())
-                    })?;
+                    let Some(key) = first_secret else {
+                        tracing::warn!(
+                            "Skipping Anthropic provider: no valid API keys. \
+                             Re-add your key via Settings to fix."
+                        );
+                        continue;
+                    };
                     Box::new(crate::providers::anthropic::AnthropicProvider::new(
                         key, None, None,
                     ))
                 }
                 #[cfg(feature = "openai")]
                 ProviderType::OpenAI => {
-                    let key = first_secret.ok_or_else(|| {
-                        LlmError::Config("No OpenAI API key configured".to_string())
-                    })?;
+                    let Some(key) = first_secret else {
+                        tracing::warn!(
+                            "Skipping OpenAI provider: no valid API keys. \
+                             Re-add your key via Settings to fix."
+                        );
+                        continue;
+                    };
                     Box::new(crate::providers::openai::OpenAiProvider::new(
                         key,
                         None,
@@ -347,7 +364,7 @@ fn build_router_from_hierarchical(content: &str) -> Result<LlmRouter, LlmError> 
     }
 
     // Build model registry
-    let mut model_registry = ModelRegistry::with_defaults();
+    let model_registry = ModelRegistry::with_defaults();
     if let Some(ref models) = config.models {
         for (model_id, model_config) in models {
             if let Some(pt) = parse_provider_type(&model_config.provider) {
@@ -358,6 +375,7 @@ fn build_router_from_hierarchical(content: &str) -> Result<LlmRouter, LlmError> 
                         input_price_per_million: model_config.input_price.unwrap_or(3.0),
                         output_price_per_million: model_config.output_price.unwrap_or(15.0),
                         context_window: model_config.context.unwrap_or(200_000),
+                        discovered: false,
                     },
                 );
             }

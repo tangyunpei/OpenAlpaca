@@ -202,6 +202,37 @@ impl LlmProvider for AnthropicProvider {
         self.chat_with_key(&self.api_key, request).await
     }
 
+    async fn list_models_with_key(&self, key: &str) -> Result<Vec<String>, LlmError> {
+        let response = self
+            .client
+            .get("https://api.anthropic.com/v1/models")
+            .header("x-api-key", key)
+            .header("anthropic-version", API_VERSION)
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Ok(vec![]);
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| LlmError::Serialization(e.to_string()))?;
+
+        let models = body["data"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(models)
+    }
+
     async fn chat_with_key(&self, key: &str, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         let body = self.build_request_body(&request);
 

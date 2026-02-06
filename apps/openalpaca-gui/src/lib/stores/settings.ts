@@ -4,9 +4,9 @@
 
 import { writable, derived, type Readable } from "svelte/store";
 import { events, type ServerEvent } from "../daemon";
-import { getLlmSettings } from "../api/settings";
+import { getLlmSettings, getAvailableModels, refreshAvailableModels } from "../api/settings";
 import { getOrchestratorConfig, updateOrchestratorConfig } from "../api/orchestrator";
-import type { LlmSettingsResponse, ProviderInfo, OrchestratorConfigResponse } from "../types";
+import type { LlmSettingsResponse, ProviderInfo, OrchestratorConfigResponse, ModelEntry } from "../types";
 
 /** Current LLM settings */
 export const llmSettings = writable<LlmSettingsResponse | null>(null);
@@ -19,6 +19,12 @@ export const settingsError = writable<string | null>(null);
 
 /** Orchestrator config */
 export const orchestratorConfig = writable<OrchestratorConfigResponse | null>(null);
+
+/** Available models from all providers */
+export const availableModels = writable<ModelEntry[]>([]);
+
+/** Models refreshing state */
+export const modelsRefreshing = writable(false);
 
 /** Derived: sorted list of [providerName, providerInfo] entries */
 export const providerList: Readable<[string, ProviderInfo][]> = derived(
@@ -63,6 +69,29 @@ export async function saveOrchestratorConfig(
 ): Promise<void> {
   await updateOrchestratorConfig({ model, fallback_models: fallbackModels });
   await loadOrchestratorConfig();
+}
+
+/** Fetch available models from the API */
+export async function loadAvailableModels(): Promise<void> {
+  try {
+    const models = await getAvailableModels();
+    availableModels.set(models);
+  } catch (e) {
+    console.error("[settings-store] Failed to load available models:", e);
+  }
+}
+
+/** Refresh models from provider APIs (re-queries each provider) */
+export async function refreshModels(): Promise<void> {
+  modelsRefreshing.set(true);
+  try {
+    const models = await refreshAvailableModels();
+    availableModels.set(models);
+  } catch (e) {
+    console.error("[settings-store] Failed to refresh models:", e);
+  } finally {
+    modelsRefreshing.set(false);
+  }
 }
 
 /** Subscribe to WebSocket events for key_status_changed.

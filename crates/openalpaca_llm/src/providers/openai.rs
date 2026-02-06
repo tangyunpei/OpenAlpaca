@@ -202,6 +202,40 @@ impl LlmProvider for OpenAiProvider {
         }
     }
 
+    async fn list_models_with_key(&self, key: &str) -> Result<Vec<String>, LlmError> {
+        let url = format!("{}/models", self.base_url);
+        let mut req_builder = self.client.get(&url);
+
+        if !key.is_empty() {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", key));
+        }
+
+        let response = req_builder
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Ok(vec![]);
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| LlmError::Serialization(e.to_string()))?;
+
+        let models = body["data"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(models)
+    }
+
     async fn chat_with_key(&self, key: &str, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         let body = self.build_request_body(&request);
         let url = format!("{}/chat/completions", self.base_url);

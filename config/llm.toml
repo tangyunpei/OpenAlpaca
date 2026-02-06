@@ -2,16 +2,4 @@
 model = "claude-haiku-4-5-20251001"
 fallback_models = ["claude-sonnet-4-5-20250929"]
 
-[providers.anthropic]
-enabled = true
 
-[[providers.anthropic.keys]]
-id = "OpenAlpaca"
-secret_encrypted = "aes256:yHv/QwI2beWMDk/NIvhRrcvdzoEitdJFJhE+iKnE8SRPPDHvqHuCC4dCQALTGeNuOnmvz+k6iIm4NQWiXCH+8Vi7UCgfA1kgmowOEKMaOX+IiE4VurIfQe+Ph0Ieqd8LPPgQLPBMycRHm6Pn1AjRoeIrCakmLg19Cn/G5G3qZfj5MyB2dquQ+w=="
-tier = "tier3"
-priority = "primary"
-source = "api_console"
-
-[providers.ollama]
-enabled = true
-base_url = "http://localhost:11434/v1"

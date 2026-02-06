@@ -178,6 +178,37 @@ pub async fn get_key_status(State(state): State<Arc<AppState>>) -> impl IntoResp
     (StatusCode::OK, Json(serde_json::to_value(health).unwrap())).into_response()
 }
 
+/// GET /v1/models — list all available models
+pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let service = match &state.llm_settings_service {
+        Some(s) => s,
+        None => return settings_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LLM_NOT_CONFIGURED",
+            "LLM router is not configured",
+        ).into_response(),
+    };
+
+    let models = service.available_models();
+    (StatusCode::OK, Json(serde_json::to_value(models).unwrap())).into_response()
+}
+
+/// POST /v1/models/refresh — refresh models from provider APIs
+pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let service = match &state.llm_settings_service {
+        Some(s) => s,
+        None => return settings_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LLM_NOT_CONFIGURED",
+            "LLM router is not configured",
+        ).into_response(),
+    };
+
+    service.refresh_models().await;
+    let models = service.available_models();
+    (StatusCode::OK, Json(serde_json::to_value(models).unwrap())).into_response()
+}
+
 /// GET /v1/orchestrator/config
 pub async fn get_orchestrator_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let service = match &state.llm_settings_service {

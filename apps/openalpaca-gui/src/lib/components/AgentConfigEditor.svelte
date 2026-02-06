@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { loadAgentConfig, saveAgentConfig, selectedAgentConfig } from "$lib/stores/agents";
-  import type { AgentConfigFile, AgentConfigResponse } from "$lib/types";
+  import { availableModels, loadAvailableModels } from "$lib/stores/settings";
+  import type { AgentConfigFile, AgentConfigResponse, ModelEntry } from "$lib/types";
 
   interface Props {
     agentId: string;
@@ -15,6 +16,8 @@
   let saving = $state(false);
   let conflict = $state(false);
   let error = $state<string | null>(null);
+
+  let models = $state<ModelEntry[]>([]);
 
   // Form fields
   let name = $state("");
@@ -30,7 +33,7 @@
   let maxCostPerTask = $state<string>("");
   let confirmFor = $state("");
   let llmModel = $state("");
-  let fallbackModels = $state("");
+  let fallbackSet = $state<Set<string>>(new Set());
 
   const unsubConfig = selectedAgentConfig.subscribe((v) => {
     configData = v;
@@ -52,13 +55,29 @@
     maxCostPerTask = c.constraints?.max_cost_per_task?.toString() || "";
     confirmFor = (c.constraints?.require_confirmation_for || []).join(", ");
     llmModel = c.llm?.model || "";
-    fallbackModels = (c.llm?.fallback_models || []).join(", ");
+    fallbackSet = new Set(c.llm?.fallback_models || []);
   }
+
+  const unsubModels = availableModels.subscribe((v) => (models = v));
 
   onMount(() => {
     loadAgentConfig(agentId).finally(() => (loading = false));
-    return () => unsubConfig();
+    loadAvailableModels();
+    return () => {
+      unsubConfig();
+      unsubModels();
+    };
   });
+
+  function toggleFallback(modelId: string) {
+    const next = new Set(fallbackSet);
+    if (next.has(modelId)) {
+      next.delete(modelId);
+    } else {
+      next.add(modelId);
+    }
+    fallbackSet = next;
+  }
 
   function buildConfig(): AgentConfigFile {
     const assigned = skillsText.split(",").map((s) => s.trim()).filter(Boolean);
@@ -97,17 +116,12 @@
             },
           }
         : {}),
-      ...(llmModel || fallbackModels
+      ...(llmModel || fallbackSet.size > 0
         ? {
             llm: {
               ...(llmModel ? { model: llmModel } : {}),
-              ...(fallbackModels
-                ? {
-                    fallback_models: fallbackModels
-                      .split(",")
-                      .map((s) => s.trim())
-                      .filter(Boolean),
-                  }
+              ...(fallbackSet.size > 0
+                ? { fallback_models: [...fallbackSet] }
                 : {}),
             },
           }
@@ -223,12 +237,41 @@
         <div class="section-header">LLM Override</div>
         <label>
           <span>Model</span>
-          <input type="text" bind:value={llmModel} placeholder="inherit from orchestrator" />
+          {#if models.length > 0}
+            <select bind:value={llmModel}>
+              <option value="">inherit from orchestrator</option>
+              {#each models as m (m.id)}
+                <option value={m.id}>{m.id} ({m.provider})</option>
+              {/each}
+              {#if llmModel && !models.find((m) => m.id === llmModel)}
+                <option value={llmModel}>{llmModel} (current)</option>
+              {/if}
+            </select>
+          {:else}
+            <input type="text" bind:value={llmModel} placeholder="inherit from orchestrator" />
+          {/if}
         </label>
-        <label>
-          <span>Fallback models (comma-separated)</span>
-          <input type="text" bind:value={fallbackModels} />
-        </label>
+        <div class="fallback-section">
+          <span>Fallback models</span>
+          {#if models.length > 0}
+            <div class="checkbox-list">
+              {#each models.filter((m) => m.id !== llmModel) as m (m.id)}
+                <label class="checkbox-item">
+                  <input
+                    type="checkbox"
+                    checked={fallbackSet.has(m.id)}
+                    onchange={() => toggleFallback(m.id)}
+                  />
+                  <span>{m.id} <span class="provider-tag">{m.provider}</span></span>
+                </label>
+              {/each}
+            </div>
+          {:else}
+            <input type="text" value={[...fallbackSet].join(", ")} onchange={(e) => {
+              fallbackSet = new Set(e.currentTarget.value.split(",").map((s) => s.trim()).filter(Boolean));
+            }} />
+          {/if}
+        </div>
       </div>
 
       <div class="modal-actions">
@@ -294,10 +337,10 @@
     grid-template-columns: 1fr 1fr;
     gap: 12px;
   }
-  .form-grid label {
+  .form-grid > label {
     display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem;
   }
-  .form-grid label span {
+  .form-grid > label > span {
     color: var(--text-dim); font-weight: 500; font-size: 0.75rem;
     text-transform: uppercase; letter-spacing: 0.3px;
   }
@@ -321,6 +364,35 @@
   }
   .form-grid textarea { resize: vertical; font-family: inherit; }
   .form-grid input[type="range"] { padding: 0; }
+
+  .fallback-section {
+    grid-column: 1 / -1;
+    display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem;
+  }
+  .fallback-section > span {
+    color: var(--text-dim); font-weight: 500; font-size: 0.75rem;
+    text-transform: uppercase; letter-spacing: 0.3px;
+  }
+  .checkbox-list {
+    display: flex; flex-direction: column; gap: 4px;
+    max-height: 150px; overflow-y: auto;
+    padding: 4px 0;
+  }
+  .checkbox-item {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 0.82rem; color: var(--text);
+    cursor: pointer; padding: 2px 0;
+  }
+  .checkbox-item input[type="checkbox"] {
+    width: 14px; height: 14px; cursor: pointer;
+    accent-color: var(--accent);
+  }
+  .provider-tag {
+    font-size: 0.7rem; color: var(--text-dim);
+    background: rgba(255, 255, 255, 0.06);
+    padding: 1px 6px; border-radius: 3px;
+    margin-left: 4px;
+  }
 
   .modal-actions {
     display: flex; justify-content: flex-end; gap: 10px;
