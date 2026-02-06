@@ -16,9 +16,11 @@
   import ConnectorPanel from "$lib/components/ConnectorPanel.svelte";
   import TaskPanel from "$lib/components/TaskPanel.svelte";
   import AgentPanel from "$lib/components/AgentPanel.svelte";
+  import SettingsPanel from "$lib/components/SettingsPanel.svelte";
 
   import { loadTasks, subscribeToTaskEvents } from "$lib/stores/tasks";
   import { loadAgents, subscribeToAgentEvents } from "$lib/stores/agents";
+  import { loadSettings, subscribeToKeyEvents } from "$lib/stores/settings";
 
   // Reactive state from stores
   let statusState = $state("disconnected");
@@ -29,12 +31,14 @@
   let activeTab = $state<string>("events");
 
   let connectorPanel: ConnectorPanel | undefined = $state();
+  let settingsPanel: SettingsPanel | undefined = $state();
 
   const tabs = [
     { id: "events", label: "Event Log" },
     { id: "connectors", label: "Connectors" },
     { id: "tasks", label: "Tasks" },
     { id: "agents", label: "Agents" },
+    { id: "settings", label: "Settings" },
   ];
 
   // Store subscriptions
@@ -52,11 +56,13 @@
 
   let unsubTaskEvents: (() => void) | null = null;
   let unsubAgentEvents: (() => void) | null = null;
+  let unsubKeyEvents: (() => void) | null = null;
 
   onMount(() => {
     connectToDaemon();
     unsubTaskEvents = subscribeToTaskEvents();
     unsubAgentEvents = subscribeToAgentEvents();
+    unsubKeyEvents = subscribeToKeyEvents();
   });
 
   onDestroy(() => {
@@ -67,6 +73,7 @@
     unsubError();
     unsubTaskEvents?.();
     unsubAgentEvents?.();
+    unsubKeyEvents?.();
   });
 
   function handleTabChange(id: string) {
@@ -74,6 +81,7 @@
     if (id === "connectors") connectorPanel?.refreshConnectors();
     if (id === "tasks") loadTasks();
     if (id === "agents") loadAgents();
+    if (id === "settings") settingsPanel?.refreshSettings();
   }
 </script>
 
@@ -95,6 +103,8 @@
       <TaskPanel />
     {:else if activeTab === "agents"}
       <AgentPanel />
+    {:else if activeTab === "settings"}
+      <SettingsPanel bind:this={settingsPanel} />
     {/if}
   </div>
 </main>

@@ -105,3 +105,76 @@ export interface AgentActionResponse {
   agent_id: string;
   status: string;
 }
+
+// ── Settings types ──────────────────────────────────────────────────
+
+export type KeyPriorityValue = "primary" | "fallback";
+export type KeySourceValue = "api_console" | "claude_code" | "claude_max_pro" | "environment" | "other";
+export type KeyHealthValue = "healthy" | "rate_limited" | "error" | "unknown";
+
+export interface LlmSettingsResponse {
+  orchestrator: OrchestratorInfo;
+  providers: Record<string, ProviderInfo>;
+}
+
+export interface OrchestratorInfo {
+  model: string;
+  fallback_models: string[];
+}
+
+export interface ProviderInfo {
+  enabled: boolean;
+  key_selection_strategy: string;
+  keys: KeyInfo[];
+}
+
+export interface KeyInfo {
+  id: string;
+  masked_secret: string;
+  tier: string | null;
+  priority: string;
+  source: string;
+  notes: string | null;
+  status: string;
+  monthly_usage_usd: number | null;
+}
+
+export interface AddKeyRequest {
+  provider: string;
+  key: {
+    id?: string;
+    secret: string;
+    tier?: string;
+    priority?: string;
+    source?: string;
+    notes?: string;
+  };
+}
+
+export interface ReorderKeysRequest {
+  provider: string;
+  key_order: string[];
+  primary_key_id?: string;
+}
+
+export interface ValidateKeyRequest {
+  provider: string;
+  secret: string;
+}
+
+export interface KeyValidationResult {
+  valid: boolean;
+  tier: string | null;
+  detected_source: string | null;
+  models_available: string[];
+  rate_limits: string | null;
+}
+
+export interface KeyStatusMap {
+  [provider: string]: Array<{
+    id: string;
+    health: KeyHealthValue;
+    consecutive_rate_limits: number;
+    is_available: boolean;
+  }>;
+}

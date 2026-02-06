@@ -151,6 +151,20 @@ impl EventBroadcaster {
                     });
                     repo.log("task_status", None, Some(&detail), None)
                 }
+                // Log key status changes
+                ServerEvent::KeyStatusChanged {
+                    provider,
+                    key_id,
+                    status,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "provider": provider,
+                        "key_id": key_id,
+                        "status": status
+                    });
+                    repo.log("key_status_changed", None, Some(&detail), None)
+                }
             };
             // Error handling strategy: log errors but don't crash or block broadcast
             // For now we just ignore errors as per architecture plan
@@ -195,6 +209,20 @@ impl EventBroadcaster {
             name: name.to_string(),
             status: status.to_string(),
             current_task_id,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a key status change event and persist it
+    pub fn key_status_changed(&self, provider: &str, key_id: &str, status: &str) {
+        let event = ServerEvent::KeyStatusChanged {
+            provider: provider.to_string(),
+            key_id: key_id.to_string(),
+            status: status.to_string(),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };

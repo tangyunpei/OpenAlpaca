@@ -96,6 +96,8 @@ teloxide = { version = "0.13.0", features = ["macros"] }
 async-trait = "0.1.86"
 
 openalpaca_llm = { path = "crates/openalpaca_llm" }
+arc-swap = "1"
+aes-gcm = "0.10"
 
 # Internal Crates (continued)
 openalpaca_connectors = { path = "crates/openalpaca_connectors" }

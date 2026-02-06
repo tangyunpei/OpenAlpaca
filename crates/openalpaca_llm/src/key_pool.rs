@@ -4,9 +4,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+use serde::{Deserialize, Serialize};
 
 /// Provider type for categorizing API keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderType {
     Anthropic,
     OpenAI,
@@ -23,12 +25,35 @@ impl std::fmt::Display for ProviderType {
     }
 }
 
+/// Key priority for PrimaryFallback strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyPriority {
+    #[default]
+    Primary,
+    Fallback,
+}
+
+/// Source of an API key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeySource {
+    ApiConsole,
+    ClaudeCode,
+    ClaudeMaxPro,
+    Environment,
+    #[default]
+    Other,
+}
+
 /// Key selection strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SelectionStrategy {
     #[default]
     RoundRobin,
     LeastRecentlyUsed,
+    PrimaryFallback,
 }
 
 /// Outcome of an API call, reported back to the pool.
@@ -56,6 +81,9 @@ pub struct ApiKey {
     pub rate_limit: Option<u32>,
     pub allowed_models: Vec<String>,
     pub monthly_budget: Option<f64>,
+    pub priority: KeyPriority,
+    pub source: KeySource,
+    pub notes: Option<String>,
     pub rate_state: RateLimitState,
 }
 
@@ -69,6 +97,9 @@ impl ApiKey {
             rate_limit: None,
             allowed_models: Vec::new(),
             monthly_budget: None,
+            priority: KeyPriority::default(),
+            source: KeySource::default(),
+            notes: None,
             rate_state: RateLimitState::default(),
         }
     }
@@ -98,6 +129,25 @@ pub enum KeyPoolError {
     AllKeysRateLimited,
 }
 
+/// Health status of a key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyHealthStatus {
+    Healthy,
+    RateLimited,
+    Error,
+    Unknown,
+}
+
+/// Status information for a single key (for API responses).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyStatus {
+    pub id: String,
+    pub health: KeyHealthStatus,
+    pub consecutive_rate_limits: u32,
+    pub is_available: bool,
+}
+
 /// Pool of API keys with rotation and cooldown support.
 pub struct KeyPool {
     keys: Vec<Arc<RwLock<ApiKey>>>,
@@ -115,23 +165,81 @@ impl KeyPool {
         }
     }
 
+    /// Get the current selection strategy.
+    pub fn strategy(&self) -> SelectionStrategy {
+        self.strategy
+    }
+
     /// Acquire an available key from the pool.
     pub async fn acquire(&self) -> Result<KeyGuard, KeyPoolError> {
         if self.keys.is_empty() {
             return Err(KeyPoolError::NoKeys);
         }
 
+        match self.strategy {
+            SelectionStrategy::PrimaryFallback => self.acquire_primary_fallback().await,
+            _ => self.acquire_standard().await,
+        }
+    }
+
+    /// Standard round-robin / LRU acquisition.
+    async fn acquire_standard(&self) -> Result<KeyGuard, KeyPoolError> {
         let len = self.keys.len();
         let start = match self.strategy {
             SelectionStrategy::RoundRobin => {
                 self.round_robin_index.fetch_add(1, Ordering::Relaxed) % len
             }
             SelectionStrategy::LeastRecentlyUsed => 0,
+            SelectionStrategy::PrimaryFallback => unreachable!(),
         };
 
         for i in 0..len {
             let idx = (start + i) % len;
             let key = self.keys[idx].read().await;
+            if key.is_available() {
+                return Ok(KeyGuard {
+                    id: key.id.clone(),
+                    secret: key.secret.clone(),
+                });
+            }
+        }
+
+        Err(KeyPoolError::AllKeysRateLimited)
+    }
+
+    /// PrimaryFallback: try Primary keys first (round-robin among them),
+    /// then Fallback keys if all Primary are rate-limited.
+    async fn acquire_primary_fallback(&self) -> Result<KeyGuard, KeyPoolError> {
+        // Try primary keys first
+        let mut primary_indices = Vec::new();
+        let mut fallback_indices = Vec::new();
+
+        for (i, key_lock) in self.keys.iter().enumerate() {
+            let key = key_lock.read().await;
+            match key.priority {
+                KeyPriority::Primary => primary_indices.push(i),
+                KeyPriority::Fallback => fallback_indices.push(i),
+            }
+        }
+
+        // Try primary keys with round-robin
+        if !primary_indices.is_empty() {
+            let start = self.round_robin_index.fetch_add(1, Ordering::Relaxed) % primary_indices.len();
+            for i in 0..primary_indices.len() {
+                let idx = primary_indices[(start + i) % primary_indices.len()];
+                let key = self.keys[idx].read().await;
+                if key.is_available() {
+                    return Ok(KeyGuard {
+                        id: key.id.clone(),
+                        secret: key.secret.clone(),
+                    });
+                }
+            }
+        }
+
+        // All primaries rate-limited, try fallback keys
+        for idx in &fallback_indices {
+            let key = self.keys[*idx].read().await;
             if key.is_available() {
                 return Ok(KeyGuard {
                     id: key.id.clone(),
@@ -184,6 +292,40 @@ impl KeyPool {
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
+
+    /// Get the status of all keys.
+    pub async fn key_statuses(&self) -> Vec<KeyStatus> {
+        let mut statuses = Vec::with_capacity(self.keys.len());
+        for key_lock in &self.keys {
+            let key = key_lock.read().await;
+            let health = if key.rate_state.consecutive_rate_limits > 0 {
+                if key.is_available() {
+                    KeyHealthStatus::Healthy
+                } else {
+                    KeyHealthStatus::RateLimited
+                }
+            } else {
+                KeyHealthStatus::Healthy
+            };
+            statuses.push(KeyStatus {
+                id: key.id.clone(),
+                health,
+                consecutive_rate_limits: key.rate_state.consecutive_rate_limits,
+                is_available: key.is_available(),
+            });
+        }
+        statuses
+    }
+}
+
+/// Mask a secret key for display — shows first 8 + last 4 characters.
+pub fn mask_secret(secret: &str) -> String {
+    if secret.len() <= 12 {
+        return "*".repeat(secret.len());
+    }
+    let prefix = &secret[..8];
+    let suffix = &secret[secret.len() - 4..];
+    format!("{}...{}", prefix, suffix)
 }
 
 #[cfg(test)]
@@ -192,6 +334,12 @@ mod tests {
 
     fn make_key(id: &str) -> ApiKey {
         ApiKey::new(id.to_string(), ProviderType::Anthropic, format!("sk-{}", id))
+    }
+
+    fn make_key_with_priority(id: &str, priority: KeyPriority) -> ApiKey {
+        let mut key = make_key(id);
+        key.priority = priority;
+        key
     }
 
     #[tokio::test]
@@ -284,5 +432,111 @@ mod tests {
         assert_eq!(ProviderType::Anthropic.to_string(), "anthropic");
         assert_eq!(ProviderType::OpenAI.to_string(), "openai");
         assert_eq!(ProviderType::Ollama.to_string(), "ollama");
+    }
+
+    #[tokio::test]
+    async fn test_primary_fallback_prefers_primary() {
+        let pool = KeyPool::new(
+            vec![
+                make_key_with_priority("primary1", KeyPriority::Primary),
+                make_key_with_priority("fallback1", KeyPriority::Fallback),
+                make_key_with_priority("primary2", KeyPriority::Primary),
+            ],
+            SelectionStrategy::PrimaryFallback,
+        );
+
+        // Should prefer primary keys
+        let g1 = pool.acquire().await.unwrap();
+        let g2 = pool.acquire().await.unwrap();
+        assert!(g1.id == "primary1" || g1.id == "primary2");
+        assert!(g2.id == "primary1" || g2.id == "primary2");
+    }
+
+    #[tokio::test]
+    async fn test_primary_fallback_falls_back() {
+        let pool = KeyPool::new(
+            vec![
+                make_key_with_priority("primary1", KeyPriority::Primary),
+                make_key_with_priority("fallback1", KeyPriority::Fallback),
+            ],
+            SelectionStrategy::PrimaryFallback,
+        );
+
+        // Rate-limit all primary keys
+        pool.report_result("primary1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+
+        // Should fall back to fallback key
+        let guard = pool.acquire().await.unwrap();
+        assert_eq!(guard.id, "fallback1");
+    }
+
+    #[tokio::test]
+    async fn test_primary_fallback_all_limited() {
+        let pool = KeyPool::new(
+            vec![
+                make_key_with_priority("primary1", KeyPriority::Primary),
+                make_key_with_priority("fallback1", KeyPriority::Fallback),
+            ],
+            SelectionStrategy::PrimaryFallback,
+        );
+
+        pool.report_result("primary1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+        pool.report_result("fallback1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+
+        let result = pool.acquire().await;
+        assert!(matches!(result, Err(KeyPoolError::AllKeysRateLimited)));
+    }
+
+    #[test]
+    fn test_mask_secret() {
+        // Long key
+        assert_eq!(mask_secret("sk-ant-api03-abcdefghij1234567890"), "sk-ant-a...7890");
+        // Short key (<=12 chars)
+        assert_eq!(mask_secret("sk-short"), "********");
+        // Exactly 12 chars
+        assert_eq!(mask_secret("123456789012"), "************");
+        // 13 chars - should mask
+        assert_eq!(mask_secret("1234567890123"), "12345678...0123");
+    }
+
+    #[tokio::test]
+    async fn test_key_statuses() {
+        let pool = KeyPool::new(
+            vec![make_key("k1"), make_key("k2")],
+            SelectionStrategy::RoundRobin,
+        );
+
+        pool.report_result("k1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+
+        let statuses = pool.key_statuses().await;
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].id, "k1");
+        assert_eq!(statuses[0].health, KeyHealthStatus::RateLimited);
+        assert!(!statuses[0].is_available);
+        assert_eq!(statuses[1].id, "k2");
+        assert_eq!(statuses[1].health, KeyHealthStatus::Healthy);
+        assert!(statuses[1].is_available);
+    }
+
+    #[test]
+    fn test_strategy_getter() {
+        let pool = KeyPool::new(vec![], SelectionStrategy::PrimaryFallback);
+        assert_eq!(pool.strategy(), SelectionStrategy::PrimaryFallback);
+    }
+
+    #[test]
+    fn test_key_priority_serde() {
+        let json = serde_json::to_string(&KeyPriority::Primary).unwrap();
+        assert_eq!(json, "\"primary\"");
+        let parsed: KeyPriority = serde_json::from_str("\"fallback\"").unwrap();
+        assert_eq!(parsed, KeyPriority::Fallback);
+    }
+
+    #[test]
+    fn test_key_source_serde() {
+        let json = serde_json::to_string(&KeySource::ApiConsole).unwrap();
+        assert_eq!(json, "\"api_console\"");
+        let parsed: KeySource = serde_json::from_str("\"claude_code\"").unwrap();
+        assert_eq!(parsed, KeySource::ClaudeCode);
     }
 }

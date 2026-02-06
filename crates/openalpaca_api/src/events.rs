@@ -64,6 +64,14 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// Event triggered when a key status changes (add/remove/reorder)
+    KeyStatusChanged {
+        provider: String,
+        key_id: String,
+        status: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
 }
 
 // ── Unified Event System (M3.5) ────────────────────────────────────

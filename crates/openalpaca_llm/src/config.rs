@@ -1,10 +1,11 @@
 use crate::error::LlmError;
-use crate::key_pool::{ApiKey, KeyPool, ProviderType, SelectionStrategy};
+use crate::key_pool::{ApiKey, KeyPool, KeyPriority, KeySource, ProviderType, SelectionStrategy};
 use crate::model_registry::{ModelInfo, ModelRegistry};
 use crate::cost_tracker::CostTracker;
 use crate::router::{LlmRouter, ProviderEntry};
 use crate::LlmProvider;
-use serde::Deserialize;
+use arc_swap::ArcSwap;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -80,7 +81,7 @@ pub fn build_provider(config: &LlmConfig) -> Result<Box<dyn LlmProvider>, LlmErr
 // ── Hierarchical Router Config ────────────────────────────────────────
 
 /// Top-level config for the LLM router (new hierarchical format).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmRouterConfig {
     pub orchestrator: Option<OrchestratorLlmConfig>,
     pub providers: Option<HashMap<String, ProviderConfig>>,
@@ -89,29 +90,38 @@ pub struct LlmRouterConfig {
     pub limits: Option<LimitsConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestratorLlmConfig {
     pub model: String,
     pub fallback_models: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub enabled: Option<bool>,
     pub base_url: Option<String>,
     pub strategy: Option<String>,
+    #[serde(alias = "key_selection_strategy")]
+    pub key_selection_strategy: Option<String>,
     pub keys: Option<Vec<KeyConfig>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyConfig {
     pub id: String,
-    pub secret_env: String,
+    #[serde(default)]
+    pub secret_env: Option<String>,
+    pub secret_encrypted: Option<String>,
     pub tier: Option<String>,
     pub monthly_budget: Option<f64>,
+    pub priority: Option<String>,
+    pub source: Option<String>,
+    pub notes: Option<String>,
+    pub rate_limit: Option<u32>,
+    pub allowed_models: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfigEntry {
     pub provider: String,
     pub input_price: Option<f64>,
@@ -119,7 +129,7 @@ pub struct ModelConfigEntry {
     pub context: Option<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LimitsConfig {
     pub max_cost_per_task: Option<f64>,
     pub max_cost_per_agent: Option<f64>,
@@ -202,13 +212,30 @@ fn build_router_from_hierarchical(content: &str) -> Result<LlmRouter, LlmError> 
             let mut api_keys = Vec::new();
             if let Some(ref keys) = provider_config.keys {
                 for key_config in keys {
-                    let secret = resolve_key_secret(&key_config.secret_env)
-                        .ok_or_else(|| {
-                            LlmError::Config(format!(
-                                "Missing env var '{}' for key '{}'",
-                                key_config.secret_env, key_config.id
-                            ))
-                        })?;
+                    // Resolve secret: try encrypted first, then env var
+                    let secret = if let Some(ref encrypted) = key_config.secret_encrypted {
+                        if crate::key_encryption::KeyEncryptor::is_encrypted(encrypted) {
+                            match crate::key_encryption::KeyEncryptor::load_or_generate() {
+                                Ok(enc) => enc.decrypt(encrypted).ok(),
+                                Err(_) => None,
+                            }
+                        } else {
+                            Some(encrypted.clone())
+                        }
+                    } else if let Some(ref env_var) = key_config.secret_env {
+                        resolve_key_secret(env_var)
+                    } else {
+                        None
+                    };
+
+                    let secret = secret.ok_or_else(|| {
+                        LlmError::Config(format!(
+                            "No secret available for key '{}' (env: {:?}, encrypted: {})",
+                            key_config.id,
+                            key_config.secret_env,
+                            key_config.secret_encrypted.is_some()
+                        ))
+                    })?;
 
                     let mut api_key = ApiKey::new(
                         key_config.id.clone(),
@@ -217,12 +244,37 @@ fn build_router_from_hierarchical(content: &str) -> Result<LlmRouter, LlmError> 
                     );
                     api_key.tier = key_config.tier.clone();
                     api_key.monthly_budget = key_config.monthly_budget;
+                    api_key.rate_limit = key_config.rate_limit;
+                    if let Some(ref models) = key_config.allowed_models {
+                        api_key.allowed_models = models.clone();
+                    }
+
+                    // Parse priority
+                    api_key.priority = match key_config.priority.as_deref() {
+                        Some("fallback") => KeyPriority::Fallback,
+                        _ => KeyPriority::Primary,
+                    };
+
+                    // Parse source
+                    api_key.source = match key_config.source.as_deref() {
+                        Some("api_console") => KeySource::ApiConsole,
+                        Some("claude_code") => KeySource::ClaudeCode,
+                        Some("claude_max_pro") => KeySource::ClaudeMaxPro,
+                        Some("environment") => KeySource::Environment,
+                        _ => KeySource::Other,
+                    };
+
+                    api_key.notes = key_config.notes.clone();
                     api_keys.push(api_key);
                 }
             }
 
-            let strategy = match provider_config.strategy.as_deref() {
-                Some("lru") => SelectionStrategy::LeastRecentlyUsed,
+            // Parse strategy from either field
+            let strategy_str = provider_config.key_selection_strategy.as_deref()
+                .or(provider_config.strategy.as_deref());
+            let strategy = match strategy_str {
+                Some("lru") | Some("least_recently_used") => SelectionStrategy::LeastRecentlyUsed,
+                Some("primary_fallback") => SelectionStrategy::PrimaryFallback,
                 _ => SelectionStrategy::RoundRobin,
             };
 
@@ -231,8 +283,20 @@ fn build_router_from_hierarchical(content: &str) -> Result<LlmRouter, LlmError> 
             // Build the actual provider
             // Use the first key's secret for the default provider instance
             let first_secret = if let Some(ref keys) = provider_config.keys {
-                keys.first()
-                    .and_then(|k| resolve_key_secret(&k.secret_env))
+                keys.first().and_then(|k| {
+                    // Try encrypted first, then env var
+                    if let Some(ref encrypted) = k.secret_encrypted {
+                        if crate::key_encryption::KeyEncryptor::is_encrypted(encrypted) {
+                            crate::key_encryption::KeyEncryptor::load_or_generate()
+                                .ok()
+                                .and_then(|enc| enc.decrypt(encrypted).ok())
+                        } else {
+                            Some(encrypted.clone())
+                        }
+                    } else {
+                        k.secret_env.as_deref().and_then(resolve_key_secret)
+                    }
+                })
             } else {
                 None
             };
@@ -276,7 +340,7 @@ fn build_router_from_hierarchical(content: &str) -> Result<LlmRouter, LlmError> 
                 provider_type,
                 ProviderEntry {
                     provider: Arc::from(provider),
-                    key_pool,
+                    key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
                 },
             );
         }
@@ -326,6 +390,23 @@ fn build_router_from_hierarchical(content: &str) -> Result<LlmRouter, LlmError> 
         cost_tracker,
         default_model,
     ))
+}
+
+/// Read a hierarchical LLM config from a TOML file.
+pub fn read_config(path: &std::path::Path) -> Result<LlmRouterConfig, LlmError> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| LlmError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
+    toml::from_str(&content)
+        .map_err(|e| LlmError::Config(format!("Failed to parse {}: {}", path.display(), e)))
+}
+
+/// Write a hierarchical LLM config to a TOML file.
+pub fn write_config(path: &std::path::Path, config: &LlmRouterConfig) -> Result<(), LlmError> {
+    let content = toml::to_string_pretty(config)
+        .map_err(|e| LlmError::Config(format!("Failed to serialize config: {}", e)))?;
+    std::fs::write(path, content)
+        .map_err(|e| LlmError::Config(format!("Failed to write {}: {}", path.display(), e)))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -416,6 +497,12 @@ secret_env = "ANTHROPIC_API_KEY"
 "#;
         let raw: toml::Value = toml::from_str(toml_str).unwrap();
         assert!(raw.get("providers").is_some());
+
+        // Verify it parses as LlmRouterConfig
+        let config: LlmRouterConfig = toml::from_str(toml_str).unwrap();
+        let key = &config.providers.as_ref().unwrap()["anthropic"]
+            .keys.as_ref().unwrap()[0];
+        assert_eq!(key.secret_env.as_deref(), Some("ANTHROPIC_API_KEY"));
     }
 
     #[test]

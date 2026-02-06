@@ -1,18 +1,21 @@
 pub mod config;
 pub mod cost_tracker;
 pub mod error;
+pub mod key_encryption;
 pub mod key_pool;
 pub mod model_registry;
 pub mod providers;
 pub mod router;
+pub mod settings_service;
 pub mod types;
 
-pub use config::{LlmConfig, LlmRouterConfig, build_provider, build_router};
+pub use config::{LlmConfig, LlmRouterConfig, ProviderConfig, KeyConfig, OrchestratorLlmConfig, build_provider, build_router, read_config, write_config};
 pub use cost_tracker::{CallRecord, CostTracker, ModelUsageStats, UsageStats};
 pub use error::LlmError;
-pub use key_pool::{ApiKey, CallResult, KeyGuard, KeyPool, KeyPoolError, ProviderType, SelectionStrategy};
+pub use key_pool::{ApiKey, CallResult, KeyGuard, KeyHealthStatus, KeyPool, KeyPoolError, KeyPriority, KeySource, KeyStatus, ProviderType, SelectionStrategy, mask_secret};
 pub use model_registry::{ModelInfo, ModelRegistry, PricingInfo};
-pub use router::{LlmRouter, LlmRouterError, RequestContext, RouterRequest};
+pub use router::{LlmRouter, LlmRouterError, ProviderEntry, RequestContext, RouterRequest};
+pub use settings_service::LlmSettingsService;
 pub use types::*;
 
 use async_trait::async_trait;

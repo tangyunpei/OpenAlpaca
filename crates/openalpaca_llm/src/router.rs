@@ -3,10 +3,11 @@
 
 use crate::cost_tracker::{CallRecord, CostTracker};
 use crate::error::LlmError;
-use crate::key_pool::{CallResult, KeyPool, ProviderType};
+use crate::key_pool::{ApiKey, CallResult, KeyPool, KeyStatus, ProviderType, SelectionStrategy};
 use crate::model_registry::ModelRegistry;
 use crate::types::*;
 use crate::LlmProvider;
+use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -52,10 +53,10 @@ pub enum LlmRouterError {
     Llm(#[from] LlmError),
 }
 
-/// A provider entry with its key pool.
+/// A provider entry with its key pool (swappable for hot-reload).
 pub struct ProviderEntry {
     pub provider: Arc<dyn LlmProvider>,
-    pub key_pool: KeyPool,
+    pub key_pool: Arc<ArcSwap<KeyPool>>,
 }
 
 /// The LLM Router — routes requests to providers with key rotation and fallback.
@@ -90,15 +91,19 @@ impl LlmRouter {
         provider_type: ProviderType,
         default_model: String,
     ) -> Self {
-        use crate::key_pool::{ApiKey, SelectionStrategy};
-
         let key_pool = KeyPool::new(
             vec![ApiKey::new("default".to_string(), provider_type, String::new())],
             SelectionStrategy::RoundRobin,
         );
 
         let mut providers = HashMap::new();
-        providers.insert(provider_type, ProviderEntry { provider, key_pool });
+        providers.insert(
+            provider_type,
+            ProviderEntry {
+                provider,
+                key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+            },
+        );
 
         let model_registry = ModelRegistry::with_defaults();
         let cost_tracker = Arc::new(CostTracker::new(ModelRegistry::with_defaults()));
@@ -115,6 +120,37 @@ impl LlmRouter {
     /// Get the default model.
     pub fn default_model(&self) -> &str {
         &self.default_model
+    }
+
+    /// Get fallback models for a given model.
+    pub fn fallback_models(&self, model: &str) -> Option<&Vec<String>> {
+        self.fallback_chains.get(model)
+    }
+
+    /// Get list of configured providers.
+    pub fn configured_providers(&self) -> Vec<ProviderType> {
+        self.providers.keys().copied().collect()
+    }
+
+    /// Hot-reload the key pool for a specific provider.
+    /// Returns true if the provider was found and updated.
+    pub fn reload_keys(&self, provider: ProviderType, new_pool: KeyPool) -> bool {
+        if let Some(entry) = self.providers.get(&provider) {
+            entry.key_pool.store(Arc::new(new_pool));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get key statuses for a provider.
+    pub async fn key_statuses(&self, provider: ProviderType) -> Option<Vec<KeyStatus>> {
+        if let Some(entry) = self.providers.get(&provider) {
+            let pool = entry.key_pool.load();
+            Some(pool.key_statuses().await)
+        } else {
+            None
+        }
     }
 
     /// Complete a request: resolve provider, acquire key, call, handle retries/fallbacks.
@@ -155,11 +191,11 @@ impl LlmRouter {
         model: &str,
         request: &RouterRequest,
     ) -> Result<ChatResponse, LlmRouterError> {
-        let max_retries = entry.key_pool.len().max(1);
+        let pool = entry.key_pool.load();
+        let max_retries = pool.len().max(1);
 
         for _attempt in 0..max_retries {
-            let key_guard = entry
-                .key_pool
+            let key_guard = pool
                 .acquire()
                 .await
                 .map_err(|_| LlmRouterError::AllKeysRateLimited)?;
@@ -178,9 +214,7 @@ impl LlmRouter {
                 .await
             {
                 Ok(response) => {
-                    entry
-                        .key_pool
-                        .report_result(&key_guard.id, CallResult::Success)
+                    pool.report_result(&key_guard.id, CallResult::Success)
                         .await;
 
                     // Record cost
@@ -206,20 +240,16 @@ impl LlmRouter {
                     return Ok(response);
                 }
                 Err(LlmError::RateLimited { retry_after_ms }) => {
-                    entry
-                        .key_pool
-                        .report_result(
-                            &key_guard.id,
-                            CallResult::RateLimited { retry_after_ms },
-                        )
-                        .await;
+                    pool.report_result(
+                        &key_guard.id,
+                        CallResult::RateLimited { retry_after_ms },
+                    )
+                    .await;
                     // Try next key
                     continue;
                 }
                 Err(e) => {
-                    entry
-                        .key_pool
-                        .report_result(&key_guard.id, CallResult::Error(e.to_string()))
+                    pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
                         .await;
                     return Err(LlmRouterError::Llm(e));
                 }
@@ -367,7 +397,7 @@ mod tests {
             ProviderType::Anthropic,
             ProviderEntry {
                 provider: provider,
-                key_pool,
+                key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
             },
         );
 
@@ -400,20 +430,20 @@ mod tests {
             ProviderType::Anthropic,
             ProviderEntry {
                 provider: anthropic,
-                key_pool: KeyPool::new(
+                key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                     vec![ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string())],
                     SelectionStrategy::RoundRobin,
-                ),
+                ))),
             },
         );
         providers.insert(
             ProviderType::OpenAI,
             ProviderEntry {
                 provider: openai,
-                key_pool: KeyPool::new(
+                key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
                     vec![ApiKey::new("k1".to_string(), ProviderType::OpenAI, "sk-1".to_string())],
                     SelectionStrategy::RoundRobin,
-                ),
+                ))),
             },
         );
 
@@ -490,7 +520,7 @@ mod tests {
             ProviderType::Anthropic,
             ProviderEntry {
                 provider: provider,
-                key_pool,
+                key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
             },
         );
 
@@ -504,5 +534,60 @@ mod tests {
 
         let result = router.complete(make_request(None)).await;
         assert!(matches!(result, Err(LlmRouterError::NoFallbackAvailable(_))));
+    }
+
+    #[tokio::test]
+    async fn test_hot_reload_keys() {
+        let provider = Arc::new(MockProvider::new(
+            "anthropic",
+            vec![
+                Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929")),
+                Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929")),
+            ],
+        ));
+
+        let key_pool = KeyPool::new(
+            vec![ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string())],
+            SelectionStrategy::RoundRobin,
+        );
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            ProviderType::Anthropic,
+            ProviderEntry {
+                provider: provider,
+                key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+            },
+        );
+
+        let router = LlmRouter::new(
+            providers,
+            ModelRegistry::with_defaults(),
+            HashMap::new(),
+            Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+
+        // First call works
+        let result = router.complete(make_request(None)).await;
+        assert!(result.is_ok());
+
+        // Hot-reload with new key pool
+        let new_pool = KeyPool::new(
+            vec![
+                ApiKey::new("k_new_1".to_string(), ProviderType::Anthropic, "sk-new-1".to_string()),
+                ApiKey::new("k_new_2".to_string(), ProviderType::Anthropic, "sk-new-2".to_string()),
+            ],
+            SelectionStrategy::RoundRobin,
+        );
+        assert!(router.reload_keys(ProviderType::Anthropic, new_pool));
+
+        // Second call works with new pool
+        let result = router.complete(make_request(None)).await;
+        assert!(result.is_ok());
+
+        // Verify reload returns false for unconfigured provider
+        let empty_pool = KeyPool::new(vec![], SelectionStrategy::RoundRobin);
+        assert!(!router.reload_keys(ProviderType::OpenAI, empty_pool));
     }
 }

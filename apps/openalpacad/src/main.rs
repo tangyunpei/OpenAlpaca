@@ -20,7 +20,7 @@ use axum::{
     Router,
     extract::State,
     response::Json,
-    routing::{get, post},
+    routing::{delete, get, post, put},
 };
 use events::EventBroadcaster;
 use openalpaca_core::{
@@ -52,6 +52,7 @@ pub struct AppState {
     pub core_ctx: core_ctx::CoreCtx,
     pub connector_manager: managers::connector::ConnectorManager,
     pub gateway: Arc<Gateway>,
+    pub llm_settings_service: Option<Arc<openalpaca_llm::LlmSettingsService>>,
 }
 
 #[tokio::main]
@@ -301,6 +302,29 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Step 5.2.3: Build LLM Settings Service (Phase 5.5)
+    let llm_config_path = std::env::current_dir()
+        .unwrap_or_default()
+        .join("config/llm.toml");
+    let llm_settings_service: Option<Arc<openalpaca_llm::LlmSettingsService>> =
+        if let Some(ref router) = llm_router {
+            match openalpaca_llm::LlmSettingsService::new(
+                router.clone(),
+                llm_config_path,
+            ) {
+                Ok(service) => {
+                    info!("LLM settings service initialized");
+                    Some(Arc::new(service))
+                }
+                Err(e) => {
+                    warn!("Failed to init LLM settings service: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     // Construct SecurityGate → SandboxManager → StubToolExecutor chain
     #[allow(deprecated)]
     let bus = ctx.bus.clone();
@@ -347,6 +371,7 @@ async fn main() -> Result<()> {
         core_ctx: ctx,
         connector_manager,
         gateway,
+        llm_settings_service,
     });
 
     // Public routes (no auth required)
@@ -378,6 +403,19 @@ async fn main() -> Result<()> {
             "/v1/agents/{id}/action",
             post(routes::agent_action_handler),
         )
+        // Settings routes (Phase 5.5)
+        .route("/v1/settings/llm", get(routes::get_llm_settings))
+        .route("/v1/settings/llm", put(routes::upsert_key))
+        .route(
+            "/v1/settings/llm/keys/{provider}/{key_id}",
+            delete(routes::delete_key),
+        )
+        .route(
+            "/v1/settings/llm/keys/reorder",
+            put(routes::reorder_keys),
+        )
+        .route("/v1/settings/llm/validate", post(routes::validate_key))
+        .route("/v1/settings/llm/status", get(routes::get_key_status))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_middleware,
