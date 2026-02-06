@@ -48,6 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             content: String,
             _principal: Principal,
             _scope: Scope,
+            _lane_key: String,
         ) -> Result<String, String> {
             Ok(format!("Echo: {content}"))
         }

@@ -6,6 +6,7 @@
 pub mod dispatcher;
 pub mod intent;
 pub mod skill_matcher;
+pub mod task_planner;
 
 use crate::bus::EventBus;
 use crate::context::{SharedContext, TaskEntry, TaskEntryStatus};
@@ -19,12 +20,13 @@ use crate::security::policy::{Principal, Scope};
 use crate::types::Capability;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter};
-use openalpaca_storage::Database;
+use openalpaca_storage::{ConversationRepository, Database};
 use std::sync::Arc;
 use uuid::Uuid;
 
 use dispatcher::TaskDispatcher;
 use intent::{Intent, IntentParser};
+use task_planner::TaskPlanner;
 
 /// The Orchestrator: unified message handler for all user interactions.
 ///
@@ -43,7 +45,10 @@ pub struct Orchestrator {
     pub security_gate: Arc<SecurityGate>,
     intent_parser: IntentParser,
     task_dispatcher: TaskDispatcher,
+    db: Option<Database>,
 }
+
+const MAX_HISTORY_MESSAGES: i64 = 40;
 
 impl Orchestrator {
     pub fn new(
@@ -62,7 +67,7 @@ impl Orchestrator {
             bus.clone(),
             llm_router.clone(),
             security_gate.clone(),
-            db,
+            db.clone(),
         );
         Self {
             shared_context,
@@ -74,15 +79,38 @@ impl Orchestrator {
             security_gate,
             intent_parser: IntentParser,
             task_dispatcher,
+            db,
+        }
+    }
+
+    fn load_history(&self, lane_key: &str) -> Vec<ChatMessage> {
+        let db = match &self.db {
+            Some(db) => db,
+            None => return Vec::new(),
+        };
+        let repo = ConversationRepository::new(db);
+        match repo.list_recent_by_lane(lane_key, MAX_HISTORY_MESSAGES) {
+            Ok(messages) => messages
+                .into_iter()
+                .filter_map(|msg| match msg.role.as_str() {
+                    "user" => Some(ChatMessage::user(&msg.content)),
+                    "assistant" => Some(ChatMessage::assistant(&msg.content)),
+                    _ => None,
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!("Failed to load conversation history: {e}");
+                Vec::new()
+            }
         }
     }
 
     /// Handle a user message through the full pipeline:
     /// 1. SecurityGate permission check (wraps TrustGate)
     /// 2. Input sanitization
-    /// 3. Intent classification
-    /// 4. Emit IntentClassified event
-    /// 5. Route to appropriate handler
+    /// 3. Try slash commands / task queries (cheap, no LLM)
+    /// 4. If LLM router configured: try LLM-based planning
+    /// 5. Fallback: keyword heuristic routing
     pub async fn handle_message(
         &self,
         request_id: Uuid,
@@ -90,6 +118,7 @@ impl Orchestrator {
         content: String,
         principal: Principal,
         scope: Scope,
+        lane_key: String,
     ) -> Result<String, String> {
         // 1. Permission check via SecurityGate (wraps TrustGate)
         let capability = Capability {
@@ -100,20 +129,96 @@ impl Orchestrator {
         // 2. Input sanitization
         let content = SecurityGate::sanitize_input(&content)?;
 
-        // 3. Classify intent
+        // 3. Try slash commands and task queries first (cheap, always correct)
         let intent = self.intent_parser.parse(&content);
+        match &intent {
+            Intent::TaskQuery { .. } | Intent::TaskControl { .. } => {
+                // Emit IntentClassified event
+                self.bus.publish(SystemEvent::IntentClassified {
+                    request_id,
+                    intent_type: intent.intent_type().to_string(),
+                    timestamp: Utc::now(),
+                });
+                return match intent {
+                    Intent::TaskQuery { task_id } => self.handle_task_query(task_id),
+                    Intent::TaskControl { task_id, action } => {
+                        self.handle_task_control(&task_id, &action)
+                    }
+                    _ => unreachable!(),
+                };
+            }
+            _ => {}
+        }
 
-        // 3. Emit IntentClassified event
+        // 4. If LLM router is configured, try LLM-based planning
+        if let Some(ref router) = self.llm_router {
+            let idle_agents = self.shared_context.agent_registry.list_idle();
+            let history = self.load_history(&lane_key);
+            match TaskPlanner::plan(router, &content, &idle_agents, &history).await {
+                Ok(plan) => {
+                    match plan.classification.as_str() {
+                        "simple_query" => {
+                            self.bus.publish(SystemEvent::IntentClassified {
+                                request_id,
+                                intent_type: "simple_query".to_string(),
+                                timestamp: Utc::now(),
+                            });
+                            return self
+                                .handle_simple_query(request_id, &source, &content, &lane_key)
+                                .await;
+                        }
+                        "complex_task" => {
+                            self.bus.publish(SystemEvent::IntentClassified {
+                                request_id,
+                                intent_type: "complex_task".to_string(),
+                                timestamp: Utc::now(),
+                            });
+                            return self.task_dispatcher.dispatch_planned(
+                                &content,
+                                plan,
+                                &principal_id(&principal),
+                                &lane_key,
+                            );
+                        }
+                        other => {
+                            tracing::warn!(
+                                "LLM planner returned unknown classification '{}', falling back to heuristic",
+                                other
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("LLM planning failed: {}, falling back to heuristic", e);
+                }
+            }
+        }
+
+        // 5. Fallback: keyword heuristic routing
+        self.dispatch_with_heuristic(request_id, &source, &content, &principal, &lane_key)
+            .await
+    }
+
+    /// Fallback dispatch using keyword-based intent classification and greedy skill matching.
+    async fn dispatch_with_heuristic(
+        &self,
+        request_id: Uuid,
+        source: &str,
+        content: &str,
+        principal: &Principal,
+        lane_key: &str,
+    ) -> Result<String, String> {
+        let intent = self.intent_parser.parse(content);
+
         self.bus.publish(SystemEvent::IntentClassified {
             request_id,
             intent_type: intent.intent_type().to_string(),
             timestamp: Utc::now(),
         });
 
-        // 4. Route by intent
         match intent {
             Intent::SimpleQuery { query } => {
-                self.handle_simple_query(request_id, &source, &query).await
+                self.handle_simple_query(request_id, source, &query, lane_key).await
             }
             Intent::TaskQuery { task_id } => self.handle_task_query(task_id),
             Intent::ComplexTask {
@@ -121,10 +226,11 @@ impl Orchestrator {
                 required_skills,
             } => self.task_dispatcher.dispatch(
                 request_id,
-                &source,
+                source,
                 &description,
                 &required_skills,
-                &principal_id(&principal),
+                &principal_id(principal),
+                lane_key,
             ),
             Intent::TaskControl { task_id, action } => {
                 self.handle_task_control(&task_id, &action)
@@ -137,6 +243,7 @@ impl Orchestrator {
         request_id: Uuid,
         _source: &str,
         query: &str,
+        lane_key: &str,
     ) -> Result<String, String> {
         let agent_persona = AgentPersona {
             role: "Assistant".to_string(),
@@ -148,10 +255,11 @@ impl Orchestrator {
 
         let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
             // Real LLM call via routed agentic loop
-            let messages = vec![
-                ChatMessage::system(&full_prompt),
-                ChatMessage::user(query),
-            ];
+            let history = self.load_history(lane_key);
+            let mut messages = Vec::with_capacity(2 + history.len());
+            messages.push(ChatMessage::system(&full_prompt));
+            messages.extend(history);
+            messages.push(ChatMessage::user(query));
             let result = run_agentic_loop_routed(
                 router.as_ref(),
                 messages,
@@ -399,6 +507,7 @@ mod tests {
                 "hello world".to_string(),
                 Principal::System,
                 Scope::Global,
+                "test:cli".to_string(),
             )
             .await;
         assert!(result.is_ok());
@@ -417,6 +526,7 @@ mod tests {
                 "/status".to_string(),
                 Principal::System,
                 Scope::Global,
+                "test:cli".to_string(),
             )
             .await;
         assert!(result.is_ok());
@@ -437,12 +547,13 @@ mod tests {
                 "please research and write about Rust".to_string(),
                 Principal::System,
                 Scope::Global,
+                "test:cli".to_string(),
             )
             .await;
         assert!(result.is_ok());
-        let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
-        assert_eq!(json["status"], "queued");
-        assert!(json["task_id"].as_str().is_some());
+        let text = result.unwrap();
+        // Response is now human-readable, not JSON
+        assert!(text.contains("assigned"));
     }
 
     #[tokio::test]
@@ -460,6 +571,7 @@ mod tests {
                 "/cancel t1".to_string(),
                 Principal::System,
                 Scope::Global,
+                "test:cli".to_string(),
             )
             .await;
         assert!(result.is_ok());
@@ -480,6 +592,7 @@ mod tests {
                     id: "unknown".to_string(),
                 },
                 Scope::Global,
+                "unknown:telegram".to_string(),
             )
             .await;
         assert!(result.is_err());
@@ -499,6 +612,7 @@ mod tests {
                 "can you search for Rust tutorials".to_string(),
                 Principal::System,
                 Scope::Global,
+                "test:cli".to_string(),
             )
             .await;
 
@@ -587,6 +701,7 @@ mod tests {
                 "What is Rust?".to_string(),
                 Principal::System,
                 Scope::Global,
+                "test:cli".to_string(),
             )
             .await;
         assert!(result.is_ok());
@@ -605,6 +720,7 @@ mod tests {
                 "hello\0world".to_string(),
                 Principal::System,
                 Scope::Global,
+                "test:cli".to_string(),
             )
             .await;
         assert!(result.is_err());
@@ -625,10 +741,206 @@ mod tests {
                     id: "unknown".to_string(),
                 },
                 Scope::Global,
+                "unknown:telegram".to_string(),
             )
             .await;
         assert!(result.is_err());
         // SecurityGate wraps TrustGate error as "Access denied: Permission Denied: ..."
         assert!(result.unwrap_err().contains("denied"));
+    }
+
+    // --- LLM Task Planning integration tests ---
+
+    /// Helper: create a mock LLM that returns a fixed response string.
+    fn make_planning_mock_llm(response: &str) -> Arc<LlmRouter> {
+        use async_trait::async_trait;
+        use openalpaca_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, Usage};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct PlanningMockLlm {
+            response: String,
+            call_count: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl LlmProvider for PlanningMockLlm {
+            fn name(&self) -> &str {
+                "planning-mock"
+            }
+            fn supports_tools(&self) -> bool {
+                false
+            }
+            async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                Ok(ChatResponse {
+                    content: self.response.clone(),
+                    tool_calls: vec![],
+                    model: "mock-model".to_string(),
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 20,
+                    },
+                    finish_reason: FinishReason::Stop,
+                })
+            }
+        }
+
+        let mock = PlanningMockLlm {
+            response: response.to_string(),
+            call_count: AtomicUsize::new(0),
+        };
+        let router = openalpaca_llm::LlmRouter::single_provider(
+            Arc::new(mock),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+        Arc::new(router)
+    }
+
+    fn make_orchestrator_with_llm_and_agents(
+        router: Arc<LlmRouter>,
+        agents: Vec<SubAgent>,
+    ) -> Orchestrator {
+        let ctx = Arc::new(SharedContext::new());
+        for a in agents {
+            ctx.agent_registry.register(a);
+        }
+        let lanes = Arc::new(LaneManager::new());
+        let bus = EventBus::default();
+        let gate = make_security_gate(&bus);
+        Orchestrator::new(
+            ctx,
+            lanes,
+            bus,
+            SystemPersona::default(),
+            Some(router),
+            LoopConfig::default(),
+            gate,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_llm_planning_complex_task() {
+        let plan_json = r#"{"classification": "complex_task", "title": "Research Rust patterns", "assignments": [{"agent_id": "a1", "agent_name": "Agent a1", "role_description": "Research agent", "matched_skills": ["web_search"]}], "reasoning": "User wants research"}"#;
+        let router = make_planning_mock_llm(plan_json);
+        let orch = make_orchestrator_with_llm_and_agents(
+            router,
+            vec![make_agent("a1", vec!["web_search"])],
+        );
+
+        let result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "cli".to_string(),
+                "research Rust async patterns".to_string(),
+                Principal::System,
+                Scope::Global,
+                "test:cli".to_string(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let text = result.unwrap();
+        assert!(text.contains("assigned"), "Expected 'assigned' in: {}", text);
+
+        // Verify task is registered
+        assert_eq!(orch.shared_context.task_registry.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_llm_planning_simple_query() {
+        let plan_json = r#"{"classification": "simple_query", "title": null, "assignments": [], "reasoning": "This is a greeting"}"#;
+        let router = make_planning_mock_llm(plan_json);
+        let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
+
+        let result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "cli".to_string(),
+                "hello".to_string(),
+                Principal::System,
+                Scope::Global,
+                "test:cli".to_string(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        // Should NOT dispatch a task
+        assert_eq!(orch.shared_context.task_registry.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_llm_planning_fallback_on_malformed() {
+        // LLM returns garbage — should fall back to keyword heuristic
+        let router = make_planning_mock_llm("this is not valid json at all");
+        let orch = make_orchestrator_with_llm_and_agents(
+            router,
+            vec![make_agent("a1", vec!["web_search"])],
+        );
+
+        let result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "cli".to_string(),
+                "can you search for Rust tutorials".to_string(),
+                Principal::System,
+                Scope::Global,
+                "test:cli".to_string(),
+            )
+            .await;
+
+        // Should still work via heuristic fallback
+        assert!(result.is_ok());
+        let text = result.unwrap();
+        assert!(
+            text.contains("assigned"),
+            "Expected heuristic fallback to dispatch. Got: {}",
+            text
+        );
+    }
+
+    #[tokio::test]
+    async fn test_slash_commands_bypass_llm() {
+        use async_trait::async_trait;
+        use openalpaca_llm::{ChatRequest, ChatResponse, LlmError, LlmProvider};
+
+        // Mock LLM that panics if called — slash commands must bypass it
+        struct PanickingLlm;
+
+        #[async_trait]
+        impl LlmProvider for PanickingLlm {
+            fn name(&self) -> &str {
+                "panicking"
+            }
+            fn supports_tools(&self) -> bool {
+                false
+            }
+            async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+                panic!("LLM should not be called for slash commands");
+            }
+        }
+
+        let router = openalpaca_llm::LlmRouter::single_provider(
+            Arc::new(PanickingLlm),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+        let orch = make_orchestrator_with_llm_and_agents(Arc::new(router), vec![]);
+
+        let result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "cli".to_string(),
+                "/status".to_string(),
+                Principal::System,
+                Scope::Global,
+                "test:cli".to_string(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+        assert_eq!(json["count"], 0);
     }
 }

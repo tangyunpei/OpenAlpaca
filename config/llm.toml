@@ -2,4 +2,16 @@
 model = "claude-haiku-4-5-20251001"
 fallback_models = ["claude-sonnet-4-5-20250929"]
 
+[providers.anthropic]
+enabled = true
 
+[[providers.anthropic.keys]]
+id = "Anthropic API Console"
+secret_encrypted = "aes256:Rj/zAFCxsAVXAMhAbxoTgSjmSKcqQtxwMwhQWyVaILyQYQqdyvtsjCESZAnauyYNdTvkTRscSmq9eZWEoMaUOqiTA5TWE9S8HWviuJRkvzLrXjG68+KveerjKamKxoSi/R+mXCANNiu6rMg1+t7p1yx1oVcNy93pUQSbFy+/f+Ftf5eZHdLt0g=="
+tier = "tier3"
+priority = "primary"
+source = "api_console"
+
+[providers.ollama]
+enabled = true
+base_url = "http://localhost:11434/v1"

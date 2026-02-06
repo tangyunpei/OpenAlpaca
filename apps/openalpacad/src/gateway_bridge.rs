@@ -33,6 +33,7 @@ impl MessageHandler for CoreCtxHandler {
         content: String,
         principal: Principal,
         scope: Scope,
+        _lane_key: String,
     ) -> Result<String, String> {
         let agent_persona = AgentPersona {
             role: "Assistant".to_string(),
@@ -66,9 +67,10 @@ impl MessageHandler for OrchestratorHandler {
         content: String,
         principal: Principal,
         scope: Scope,
+        lane_key: String,
     ) -> Result<String, String> {
         self.orchestrator
-            .handle_message(request_id, source, content, principal, scope)
+            .handle_message(request_id, source, content, principal, scope, lane_key)
             .await
     }
 }

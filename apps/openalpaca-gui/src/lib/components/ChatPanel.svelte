@@ -10,6 +10,7 @@
     sendChatMessage,
     clearHistory,
     subscribeToChatEvents,
+    subscribeToTaskResultEvents,
   } from "$lib/stores/chat";
   import { connectionState } from "$lib/daemon";
   import type { ChatMessage } from "$lib/types";
@@ -37,9 +38,11 @@
     }
   });
   let unsubChatEvents: (() => void) | null = null;
+  let unsubTaskEvents: (() => void) | null = null;
 
   onMount(() => {
     unsubChatEvents = subscribeToChatEvents();
+    unsubTaskEvents = subscribeToTaskResultEvents();
   });
 
   onDestroy(() => {
@@ -49,6 +52,7 @@
     unsubStreaming();
     unsubConnection();
     unsubChatEvents?.();
+    unsubTaskEvents?.();
   });
 
   async function scrollToBottom() {

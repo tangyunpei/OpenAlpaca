@@ -62,6 +62,9 @@ impl ChatService {
         let principal_owned = principal.to_string();
 
         tokio::spawn(async move {
+            // Give browser time to connect to SSE endpoint
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
             let start = Instant::now();
 
             let response = gateway

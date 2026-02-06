@@ -178,3 +178,29 @@ export function subscribeToChatEvents(): () => void {
     }
   });
 }
+
+/** Subscribe to task_status WebSocket events and inject completed/failed results as chat messages. */
+export function subscribeToTaskResultEvents(): () => void {
+  return events.subscribe(($events) => {
+    if ($events.length === 0) return;
+    const latest = $events[0] as ServerEvent;
+    if (latest.type !== "task_status") return;
+    if (latest.status !== "completed" && latest.status !== "failed") return;
+    if (!latest.result_summary) return;
+
+    const content = latest.status === "completed"
+      ? `**Task completed: ${latest.title || "Task"}**\n\n${latest.result_summary}`
+      : `**Task failed: ${latest.title || "Task"}**\n\n${latest.result_summary}`;
+
+    chatMessages.update((msgs) => [
+      ...msgs,
+      {
+        id: nextLocalId--,
+        lane_key: "gui_user:gui",
+        role: "assistant" as const,
+        content,
+        created_at: latest.ts,
+      },
+    ]);
+  });
+}

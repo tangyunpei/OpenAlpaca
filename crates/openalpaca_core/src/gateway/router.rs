@@ -20,6 +20,7 @@ pub trait MessageHandler: Send + Sync {
         content: String,
         principal: Principal,
         scope: Scope,
+        lane_key: String,
     ) -> Result<String, String>;
 }
 
@@ -83,7 +84,7 @@ impl Gateway {
         // Delegate to the handler
         match self
             .handler
-            .handle(request_id, source_name, req.content, req.principal, req.scope)
+            .handle(request_id, source_name, req.content, req.principal, req.scope, format!("{}:{}", key.user_id, key.source))
             .await
         {
             Ok(content) => GatewayResponse {
@@ -148,6 +149,7 @@ mod tests {
             content: String,
             _principal: Principal,
             _scope: Scope,
+            _lane_key: String,
         ) -> Result<String, String> {
             Ok(format!("Echo: {content}"))
         }
@@ -165,6 +167,7 @@ mod tests {
             _content: String,
             _principal: Principal,
             _scope: Scope,
+            _lane_key: String,
         ) -> Result<String, String> {
             Err("Access denied".to_string())
         }

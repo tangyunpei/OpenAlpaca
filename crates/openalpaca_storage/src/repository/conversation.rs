@@ -56,6 +56,28 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
+    /// List the most recent N messages for a lane, in chronological order.
+    pub fn list_recent_by_lane(&self, lane_key: &str, limit: i64) -> Result<Vec<ConversationMessage>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, lane_key, role, content, model, tokens_in, tokens_out, duration_ms, created_at
+                 FROM (
+                     SELECT * FROM conversation_messages
+                     WHERE lane_key = ?1
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT ?2
+                 )
+                 ORDER BY created_at ASC, id ASC",
+            )?;
+            let mut messages = Vec::new();
+            let mut rows = stmt.query(rusqlite::params![lane_key, limit])?;
+            while let Some(row) = rows.next()? {
+                messages.push(Self::row_to_message(row)?);
+            }
+            Ok(messages)
+        })
+    }
+
     /// Delete all messages for a lane. Returns the number of deleted rows.
     pub fn delete_by_lane(&self, lane_key: &str) -> Result<u64> {
         self.db.with_connection(|conn| {
@@ -209,5 +231,60 @@ mod tests {
         assert_eq!(messages[0].tokens_in, Some(100));
         assert_eq!(messages[0].tokens_out, Some(200));
         assert_eq!(messages[0].duration_ms, Some(1500));
+    }
+
+    #[test]
+    fn test_list_recent_by_lane() {
+        let db = test_db();
+        let repo = ConversationRepository::new(&db);
+
+        for i in 0..10 {
+            repo.insert(&ConversationMessage {
+                id: 0,
+                lane_key: "user:gui".to_string(),
+                role: "user".to_string(),
+                content: format!("Message {i}"),
+                model: None,
+                tokens_in: None,
+                tokens_out: None,
+                duration_ms: None,
+                created_at: String::new(),
+            })
+            .unwrap();
+        }
+
+        // Should return last 3 messages in chronological order
+        let recent = repo.list_recent_by_lane("user:gui", 3).unwrap();
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].content, "Message 7");
+        assert_eq!(recent[1].content, "Message 8");
+        assert_eq!(recent[2].content, "Message 9");
+    }
+
+    #[test]
+    fn test_list_recent_fewer_than_limit() {
+        let db = test_db();
+        let repo = ConversationRepository::new(&db);
+
+        for i in 0..2 {
+            repo.insert(&ConversationMessage {
+                id: 0,
+                lane_key: "user:gui".to_string(),
+                role: "user".to_string(),
+                content: format!("Message {i}"),
+                model: None,
+                tokens_in: None,
+                tokens_out: None,
+                duration_ms: None,
+                created_at: String::new(),
+            })
+            .unwrap();
+        }
+
+        // Limit is higher than total — should return all messages
+        let recent = repo.list_recent_by_lane("user:gui", 50).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].content, "Message 0");
+        assert_eq!(recent[1].content, "Message 1");
     }
 }

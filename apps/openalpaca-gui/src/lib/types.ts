@@ -6,6 +6,12 @@
 
 export type TaskStatusValue = "queued" | "running" | "completed" | "failed" | "cancelled" | "paused";
 
+export interface TaskAssignedAgent {
+  agent_id: string;
+  role: string;
+  status: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -20,6 +26,7 @@ export interface Task {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  assigned_agents?: TaskAssignedAgent[];
 }
 
 export type AssignmentStatusValue = "pending" | "running" | "completed" | "failed";

@@ -15,12 +15,26 @@
       return "";
     }
   }
+
+  /** Minimal markdown: **bold**, *italic*, `code`, and newlines to <br>. */
+  function renderMarkdown(text: string): string {
+    return text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/\*(.+?)\*/g, "<em>$1</em>")
+      .replace(/`(.+?)`/g, "<code>$1</code>")
+      .replace(/\n/g, "<br>");
+  }
+
+  let renderedContent = $derived(renderMarkdown(message.content));
 </script>
 
 <div class="chat-message" class:user={message.role === "user"} class:assistant={message.role === "assistant"} class:system={message.role === "system"}>
   <div class="bubble">
     <div class="content" class:thinking={message.content === "Thinking..."}>
-      {message.content}
+      {@html renderedContent}
     </div>
     <div class="meta">
       {#if message.model}

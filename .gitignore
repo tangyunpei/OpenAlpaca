@@ -92,3 +92,4 @@ apps/openalpaca-gui/src-tauri/gen/
 # ============================================
 .claude/
 .claude/*   config/.master_key
+config/llm.toml

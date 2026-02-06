@@ -146,7 +146,23 @@ pub async fn list_tasks_handler(
     };
 
     match tasks {
-        Ok(tasks) => (StatusCode::OK, Json(serde_json::to_value(tasks).unwrap())),
+        Ok(tasks) => {
+            let repo = TaskRepository::new(&state.db);
+            let enriched: Vec<serde_json::Value> = tasks.iter().map(|t| {
+                let assignments = repo.get_assignments(&t.id).unwrap_or_default();
+                let agents: Vec<serde_json::Value> = assignments.iter().map(|a| {
+                    serde_json::json!({
+                        "agent_id": a.agent_id,
+                        "role": a.role,
+                        "status": a.status.as_str()
+                    })
+                }).collect();
+                let mut v = serde_json::to_value(t).unwrap();
+                v.as_object_mut().unwrap().insert("assigned_agents".to_string(), serde_json::json!(agents));
+                v
+            }).collect();
+            (StatusCode::OK, Json(serde_json::to_value(enriched).unwrap()))
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),

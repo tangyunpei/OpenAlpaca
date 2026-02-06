@@ -28,6 +28,13 @@
     </div>
     <span class="progress-text">{task.progress_current}/{task.progress_total}</span>
   {/if}
+  {#if task.assigned_agents && task.assigned_agents.length > 0}
+    <div class="agents">
+      {#each task.assigned_agents as agent}
+        <span class="agent-badge">{agent.agent_id}</span>
+      {/each}
+    </div>
+  {/if}
   <div class="task-meta">
     <span class="task-id">{task.id.slice(0, 8)}</span>
     <span class="task-time">{formatTime(task.created_at)}</span>
@@ -125,6 +132,22 @@
     color: var(--text-dim);
     margin-bottom: 6px;
     display: block;
+  }
+
+  .agents {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+  }
+
+  .agent-badge {
+    font-size: 0.7rem;
+    padding: 1px 8px;
+    border-radius: 12px;
+    background: rgba(139, 92, 246, 0.2);
+    color: #a78bfa;
+    font-family: "Fira Code", monospace;
   }
 
   .task-meta {
