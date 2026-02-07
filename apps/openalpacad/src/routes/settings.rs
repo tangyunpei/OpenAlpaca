@@ -349,3 +349,50 @@ pub async fn get_llm_usage_daily(
         .into_response(),
     }
 }
+
+// ── LLM Pricing endpoints ──────────────────────────────────────────
+
+/// GET /v1/llm/pricing — list all models with their pricing information
+pub async fn get_llm_pricing(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let service = match &state.llm_settings_service {
+        Some(s) => s,
+        None => return settings_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LLM_NOT_CONFIGURED",
+            "LLM router is not configured",
+        ).into_response(),
+    };
+
+    let models = service.all_models_with_pricing();
+    (StatusCode::OK, Json(serde_json::to_value(models).unwrap())).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CostEstimateQuery {
+    pub model: String,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+/// GET /v1/llm/pricing/estimate — estimate cost for given model and token counts
+pub async fn estimate_cost(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CostEstimateQuery>,
+) -> impl IntoResponse {
+    let service = match &state.llm_settings_service {
+        Some(s) => s,
+        None => return settings_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LLM_NOT_CONFIGURED",
+            "LLM router is not configured",
+        ).into_response(),
+    };
+
+    let cost = service.estimate_cost(&query.model, query.input_tokens, query.output_tokens);
+    (StatusCode::OK, Json(serde_json::json!({
+        "model": query.model,
+        "input_tokens": query.input_tokens,
+        "output_tokens": query.output_tokens,
+        "estimated_cost_usd": cost,
+    }))).into_response()
+}

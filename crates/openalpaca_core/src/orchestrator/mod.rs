@@ -14,7 +14,7 @@ use crate::events::SystemEvent;
 use crate::lane::{LaneManager, TaskLaneStatus};
 use crate::middleware::guard::OutputGuard;
 use crate::middleware::prompt::{AgentPersona, PromptAssembler, SystemPersona};
-use crate::runner::{LoopConfig, run_agentic_loop_routed};
+use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::gate::SecurityGate;
 use crate::security::policy::{Principal, Scope};
 use crate::tools::ToolRegistry;
@@ -22,6 +22,7 @@ use crate::types::Capability;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter};
 use openalpaca_storage::{ConversationRepository, Database};
+use openalpaca_storage::repository::LlmUsageRepository;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -269,6 +270,7 @@ impl Orchestrator {
             messages.push(ChatMessage::system(&full_prompt));
             messages.extend(history);
             messages.push(ChatMessage::user(query));
+            let call_start = std::time::Instant::now();
             let result = run_agentic_loop_routed(
                 router.as_ref(),
                 messages,
@@ -280,6 +282,59 @@ impl Orchestrator {
                 None, // No task_id for simple queries
             )
             .await;
+            let latency_ms = call_start.elapsed().as_millis() as i64;
+
+            // Persist LLM usage and emit event
+            let actual_model = result.model_used.as_deref()
+                .or(self.loop_config.model.as_deref())
+                .unwrap_or(router.default_model());
+            let resolved_provider = router.model_registry()
+                .resolve_provider(actual_model)
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let call_cost = router.cost_tracker.calculate_cost(
+                actual_model,
+                result.total_input_tokens,
+                result.total_output_tokens,
+            );
+
+            let call_status = match &result.finish_reason {
+                LoopFinishReason::Complete | LoopFinishReason::MaxRounds => "success",
+                LoopFinishReason::CostExceeded => "cost_exceeded",
+                LoopFinishReason::Error(_) => "error",
+            };
+            let call_error = match &result.finish_reason {
+                LoopFinishReason::Error(msg) => Some(msg.as_str()),
+                _ => None,
+            };
+
+            if let Some(ref db) = self.db {
+                let usage_repo = LlmUsageRepository::new(db);
+                if let Err(e) = usage_repo.record_and_log(
+                    "orchestrator",
+                    None,
+                    &resolved_provider,
+                    actual_model,
+                    result.total_input_tokens as i32,
+                    result.total_output_tokens as i32,
+                    call_cost,
+                    latency_ms,
+                    call_status,
+                    call_error,
+                ) {
+                    tracing::warn!("Failed to persist LLM usage: {e}");
+                }
+            }
+
+            self.bus.publish(SystemEvent::LlmCallCompleted {
+                agent_id: "orchestrator".to_string(),
+                model: actual_model.to_string(),
+                input_tokens: result.total_input_tokens,
+                output_tokens: result.total_output_tokens,
+                cost_usd: call_cost,
+                timestamp: Utc::now(),
+            });
+
             // LLM chat responses are free-form text, not structured JSON
             (result.final_content, false)
         } else {
@@ -684,6 +739,7 @@ mod tests {
                     usage: Usage {
                         input_tokens: 10,
                         output_tokens: 20,
+                        ..Default::default()
                     },
                     finish_reason: FinishReason::Stop,
                 })
@@ -797,6 +853,7 @@ mod tests {
                     usage: Usage {
                         input_tokens: 10,
                         output_tokens: 20,
+                        ..Default::default()
                     },
                     finish_reason: FinishReason::Stop,
                 })

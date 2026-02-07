@@ -223,6 +223,54 @@ impl<'a> LlmUsageRepository<'a> {
         })
     }
 
+    /// Record a completed LLM call: inserts into call log and upserts daily aggregate.
+    /// Use status "success" for successful calls, "error" or "cost_exceeded" for failures.
+    pub fn record_and_log(
+        &self,
+        agent_id: &str,
+        task_id: Option<&str>,
+        provider: &str,
+        model: &str,
+        input_tokens: i32,
+        output_tokens: i32,
+        cost_usd: f64,
+        latency_ms: i64,
+        status: &str,
+        error_message: Option<&str>,
+    ) -> Result<i64> {
+        let now = Utc::now();
+        let log = LlmCallLog {
+            id: None,
+            timestamp: now,
+            agent_id: Some(agent_id.to_string()),
+            task_id: task_id.map(|s| s.to_string()),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            key_id: None,
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            status: status.to_string(),
+            latency_ms: Some(latency_ms),
+            error_message: error_message.map(|s| s.to_string()),
+        };
+        let id = self.insert_call_log(&log)?;
+
+        let today = now.format("%Y-%m-%d").to_string();
+        let daily = LlmUsageDaily {
+            date: today,
+            agent_id: agent_id.to_string(),
+            model: model.to_string(),
+            total_requests: 1,
+            total_input_tokens: input_tokens as i64,
+            total_output_tokens: output_tokens as i64,
+            total_cost_usd: cost_usd,
+        };
+        let _ = self.upsert_daily_usage(&daily);
+
+        Ok(id)
+    }
+
     fn row_to_call_log(row: &Row) -> rusqlite::Result<LlmCallLog> {
         let ts_str: String = row.get(1)?;
         Ok(LlmCallLog {
