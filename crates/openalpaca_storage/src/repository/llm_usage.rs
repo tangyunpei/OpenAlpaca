@@ -197,6 +197,24 @@ impl<'a> LlmUsageRepository<'a> {
         })
     }
 
+    /// Get usage filtered by provider.
+    pub fn get_usage_by_provider(&self, provider: &str, limit: usize) -> Result<Vec<LlmCallLog>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, timestamp, agent_id, task_id, provider, model, key_id, input_tokens, output_tokens, cost_usd, status, latency_ms, error_message
+                 FROM llm_call_log WHERE provider = ? ORDER BY timestamp DESC LIMIT ?",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![provider, limit as i64], |row| {
+                Self::row_to_call_log(row)
+            })?;
+            let mut logs = Vec::new();
+            for row in rows {
+                logs.push(row?);
+            }
+            Ok(logs)
+        })
+    }
+
     /// Get daily usage for an agent.
     pub fn get_daily_usage(&self, agent_id: &str, limit: usize) -> Result<Vec<LlmUsageDaily>> {
         self.db.with_connection(|conn| {

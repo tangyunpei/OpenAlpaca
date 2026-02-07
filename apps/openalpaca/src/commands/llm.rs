@@ -57,6 +57,24 @@ pub enum LlmCommands {
         /// Strategy name (e.g., round_robin, priority, cost_optimized)
         strategy: String,
     },
+    /// Show discovered OAuth credentials (Claude Code, Codex)
+    Credentials {
+        /// Output format
+        #[arg(long, value_enum, default_value = "table")]
+        format: OutputFormat,
+    },
+    /// Show CLI backend status (claude, codex CLI tools)
+    Backends {
+        /// Output format
+        #[arg(long, value_enum, default_value = "table")]
+        format: OutputFormat,
+    },
+    /// Show per-provider usage summaries
+    ProviderUsage {
+        /// Output format
+        #[arg(long, value_enum, default_value = "table")]
+        format: OutputFormat,
+    },
 }
 
 #[derive(Args)]
@@ -353,6 +371,9 @@ pub async fn run(args: LlmArgs) -> Result<()> {
         } => llm_usage(agent, date, key, daily, format).await,
         LlmCommands::Models { format } => llm_models(format).await,
         LlmCommands::Strategy { provider, strategy } => llm_strategy(&provider, &strategy).await,
+        LlmCommands::Credentials { format } => llm_credentials(format).await,
+        LlmCommands::Backends { format } => llm_backends(format).await,
+        LlmCommands::ProviderUsage { format } => llm_provider_usage(format).await,
     }
 }
 
@@ -569,7 +590,7 @@ async fn keys_add(
     let source = match source {
         Some(s) => s,
         None => {
-            let sources = vec!["API Console", "Claude Code", "Environment", "Other"];
+            let sources = vec!["API Console", "Claude Code", "Codex", "Environment", "Other"];
             let idx = Select::with_theme(&theme)
                 .with_prompt("Source")
                 .items(&sources)
@@ -720,6 +741,194 @@ async fn llm_models(format: OutputFormat) -> Result<()> {
     let client = DaemonClient::connect()?;
     let models: Vec<ModelEntry> = client.get("/v1/models").await?;
     print_list(&models, format);
+    Ok(())
+}
+
+// ── Deserialization structs for new commands ────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CredentialEntry {
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    expires_at: Option<i64>,
+    #[serde(default)]
+    auto_refresh: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BackendEntry {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    available: Option<bool>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ProviderUsageEntry {
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    total_cost_usd: Option<f64>,
+    #[serde(default)]
+    total_tokens: Option<i64>,
+    #[serde(default)]
+    total_requests: Option<i64>,
+    #[serde(default)]
+    health: Option<String>,
+}
+
+impl TableRow for CredentialEntry {
+    fn headers() -> Vec<(&'static str, usize)> {
+        vec![
+            ("SOURCE", 14),
+            ("PROVIDER", 12),
+            ("STATUS", 12),
+            ("EXPIRES", 22),
+            ("REFRESH", 8),
+        ]
+    }
+
+    fn table_row(&self) -> String {
+        let source = self.source.as_deref().unwrap_or("-");
+        let provider = self.provider.as_deref().unwrap_or("-");
+        let status = self.status.as_deref().unwrap_or("unknown");
+        let expires = self
+            .expires_at
+            .map(|ts| {
+                chrono::DateTime::from_timestamp(ts, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_else(|| format!("{}", ts))
+            })
+            .unwrap_or_else(|| "-".to_string());
+        let refresh = if self.auto_refresh.unwrap_or(false) {
+            "yes"
+        } else {
+            "no"
+        };
+
+        format!(
+            "{:<14} {:<12} {:<12} {:<22} {:<8}",
+            source,
+            provider,
+            status_color(status),
+            expires,
+            refresh,
+        )
+    }
+}
+
+impl TableRow for BackendEntry {
+    fn headers() -> Vec<(&'static str, usize)> {
+        vec![
+            ("NAME", 14),
+            ("AVAILABLE", 10),
+            ("PATH", 35),
+            ("ENABLED", 8),
+        ]
+    }
+
+    fn table_row(&self) -> String {
+        let name = self.name.as_deref().unwrap_or("-");
+        let available = if self.available.unwrap_or(false) {
+            "yes".green().to_string()
+        } else {
+            "no".dimmed().to_string()
+        };
+        let path = self.path.as_deref().unwrap_or("-");
+        let enabled = if self.enabled.unwrap_or(false) {
+            "yes"
+        } else {
+            "no"
+        };
+
+        format!(
+            "{:<14} {:<10} {:<35} {:<8}",
+            name,
+            available,
+            truncate(path, 33),
+            enabled,
+        )
+    }
+}
+
+impl TableRow for ProviderUsageEntry {
+    fn headers() -> Vec<(&'static str, usize)> {
+        vec![
+            ("PROVIDER", 14),
+            ("COST", 12),
+            ("TOKENS", 12),
+            ("REQUESTS", 10),
+            ("HEALTH", 10),
+        ]
+    }
+
+    fn table_row(&self) -> String {
+        let provider = self.provider.as_deref().unwrap_or("-");
+        let cost = format!("${:.4}", self.total_cost_usd.unwrap_or(0.0));
+        let tokens = self.total_tokens.unwrap_or(0);
+        let requests = self.total_requests.unwrap_or(0);
+        let health = self.health.as_deref().unwrap_or("unknown");
+
+        format!(
+            "{:<14} {:<12} {:<12} {:<10} {:<10}",
+            provider,
+            cost,
+            tokens,
+            requests,
+            status_color(health),
+        )
+    }
+}
+
+async fn llm_credentials(format: OutputFormat) -> Result<()> {
+    let client = DaemonClient::connect()?;
+    let creds: Vec<CredentialEntry> = client.get("/v1/settings/llm/credentials").await?;
+
+    if creds.is_empty() {
+        println!(
+            "{}",
+            "No discovered credentials. Install Claude Code or Codex CLI to auto-detect.".dimmed()
+        );
+        return Ok(());
+    }
+
+    print_list(&creds, format);
+    Ok(())
+}
+
+async fn llm_backends(format: OutputFormat) -> Result<()> {
+    let client = DaemonClient::connect()?;
+    let backends: Vec<BackendEntry> = client.get("/v1/settings/llm/cli-backends").await?;
+
+    if backends.is_empty() {
+        println!("{}", "No CLI backends configured.".dimmed());
+        return Ok(());
+    }
+
+    print_list(&backends, format);
+    Ok(())
+}
+
+async fn llm_provider_usage(format: OutputFormat) -> Result<()> {
+    let client = DaemonClient::connect()?;
+    let usage: Vec<ProviderUsageEntry> =
+        client.get("/v1/settings/llm/providers/usage").await?;
+
+    if usage.is_empty() {
+        println!("{}", "No provider usage data available.".dimmed());
+        return Ok(());
+    }
+
+    print_list(&usage, format);
     Ok(())
 }
 

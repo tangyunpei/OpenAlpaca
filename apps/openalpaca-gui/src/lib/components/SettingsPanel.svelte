@@ -13,6 +13,8 @@
     loadSettings,
     loadOrchestratorConfig,
     loadAvailableModels,
+    loadDiscoveredCredentials,
+    loadCliBackends,
     refreshModels,
     saveOrchestratorConfig,
     subscribeToKeyEvents,
@@ -59,6 +61,8 @@
     loadSettings();
     loadOrchestratorConfig();
     loadAvailableModels();
+    loadDiscoveredCredentials();
+    loadCliBackends();
     unsubKeyEvents = subscribeToKeyEvents();
     unsubOrchEvents = subscribeToOrchestratorEvents();
 
@@ -116,6 +120,8 @@
     loadSettings();
     loadOrchestratorConfig();
     loadAvailableModels();
+    loadDiscoveredCredentials();
+    loadCliBackends();
   }
 </script>
 

@@ -91,6 +91,8 @@ tempfile = "3.16.0"
 # config
 toml = "0.8"
 dashmap = "6"
+which = "7"
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # middleware
 regex = "1.11.1"

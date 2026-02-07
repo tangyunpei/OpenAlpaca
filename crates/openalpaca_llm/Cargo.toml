@@ -29,3 +29,8 @@ uuid.workspace = true
 
 # Optional: HTTP client (only when a provider feature is enabled)
 reqwest = { workspace = true, optional = true }
+
+# Credential discovery + CLI backends
+which.workspace = true
+dashmap.workspace = true
+tokio-util.workspace = true

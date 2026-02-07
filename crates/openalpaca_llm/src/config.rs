@@ -89,6 +89,8 @@ pub struct LlmRouterConfig {
     pub models: Option<HashMap<String, ModelConfigEntry>>,
     pub fallback_chains: Option<HashMap<String, Vec<String>>>,
     pub limits: Option<LimitsConfig>,
+    pub credential_discovery: Option<crate::credential_discovery::CredentialDiscoveryConfig>,
+    pub cli_backends: Option<crate::cli_backend::CliBackendsConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,6 +287,7 @@ fn build_router_from_hierarchical(content: &str) -> Result<LlmRouter, LlmError> 
                         Some("api_console") => KeySource::ApiConsole,
                         Some("claude_code") => KeySource::ClaudeCode,
                         Some("claude_max_pro") => KeySource::ClaudeMaxPro,
+                        Some("codex") => KeySource::Codex,
                         Some("environment") => KeySource::Environment,
                         _ => KeySource::Other,
                     };
@@ -401,13 +404,46 @@ fn build_router_from_hierarchical(content: &str) -> Result<LlmRouter, LlmError> 
 
     let cost_tracker = Arc::new(CostTracker::new(ModelRegistry::with_defaults()));
 
-    Ok(LlmRouter::new(
+    let router = LlmRouter::new(
         providers_map,
         model_registry,
         fallback_chains,
         cost_tracker,
         default_model,
-    ))
+    );
+
+    // Register CLI backends if detected
+    let cli_config = config.cli_backends.unwrap_or_default();
+
+    if let Some(ref cc_config) = cli_config.claude_code {
+        if let Some(provider) = crate::cli_backend::ClaudeCodeCliProvider::from_config(cc_config) {
+            tracing::info!("Registered Claude Code CLI backend at {:?}", provider.binary_path());
+            router.register_cli_backend(ProviderType::Anthropic, Arc::new(provider));
+        }
+    } else if let Some(path) = crate::cli_backend::ClaudeCodeCliProvider::detect() {
+        tracing::info!("Auto-detected Claude Code CLI at {:?}", path);
+        let provider = crate::cli_backend::ClaudeCodeCliProvider::new(
+            path,
+            std::time::Duration::from_secs(120),
+        );
+        router.register_cli_backend(ProviderType::Anthropic, Arc::new(provider));
+    }
+
+    if let Some(ref codex_config) = cli_config.codex {
+        if let Some(provider) = crate::cli_backend::CodexCliProvider::from_config(codex_config) {
+            tracing::info!("Registered Codex CLI backend at {:?}", provider.binary_path());
+            router.register_cli_backend(ProviderType::OpenAI, Arc::new(provider));
+        }
+    } else if let Some(path) = crate::cli_backend::CodexCliProvider::detect() {
+        tracing::info!("Auto-detected Codex CLI at {:?}", path);
+        let provider = crate::cli_backend::CodexCliProvider::new(
+            path,
+            std::time::Duration::from_secs(120),
+        );
+        router.register_cli_backend(ProviderType::OpenAI, Arc::new(provider));
+    }
+
+    Ok(router)
 }
 
 /// Read a hierarchical LLM config from a TOML file.

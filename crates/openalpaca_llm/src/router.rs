@@ -9,6 +9,7 @@ use crate::types::*;
 use crate::LlmProvider;
 use tracing;
 use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -62,11 +63,13 @@ pub struct ProviderEntry {
 
 /// The LLM Router — routes requests to providers with key rotation and fallback.
 pub struct LlmRouter {
-    providers: HashMap<ProviderType, ProviderEntry>,
+    providers: DashMap<ProviderType, ProviderEntry>,
     model_registry: ModelRegistry,
     fallback_chains: HashMap<String, Vec<String>>,
     pub cost_tracker: Arc<CostTracker>,
     default_model: String,
+    /// CLI backend providers for fallback (e.g. `claude` CLI, `codex` CLI).
+    cli_backends: DashMap<ProviderType, Arc<dyn LlmProvider>>,
 }
 
 impl LlmRouter {
@@ -77,12 +80,17 @@ impl LlmRouter {
         cost_tracker: Arc<CostTracker>,
         default_model: String,
     ) -> Self {
+        let dm = DashMap::new();
+        for (k, v) in providers {
+            dm.insert(k, v);
+        }
         Self {
-            providers,
+            providers: dm,
             model_registry,
             fallback_chains,
             cost_tracker,
             default_model,
+            cli_backends: DashMap::new(),
         }
     }
 
@@ -97,7 +105,7 @@ impl LlmRouter {
             SelectionStrategy::RoundRobin,
         );
 
-        let mut providers = HashMap::new();
+        let providers = DashMap::new();
         providers.insert(
             provider_type,
             ProviderEntry {
@@ -115,6 +123,7 @@ impl LlmRouter {
             fallback_chains: HashMap::new(),
             cost_tracker,
             default_model,
+            cli_backends: DashMap::new(),
         }
     }
 
@@ -130,7 +139,7 @@ impl LlmRouter {
 
     /// Get list of configured providers.
     pub fn configured_providers(&self) -> Vec<ProviderType> {
-        self.providers.keys().copied().collect()
+        self.providers.iter().map(|entry| *entry.key()).collect()
     }
 
     /// Hot-reload the key pool for a specific provider.
@@ -142,6 +151,43 @@ impl LlmRouter {
         } else {
             false
         }
+    }
+
+    /// Register a provider that was not in the original config.
+    /// Used when auto-discovered credentials exist but no provider was configured.
+    pub fn register_provider(
+        &self,
+        provider_type: ProviderType,
+        provider: Arc<dyn LlmProvider>,
+        pool: KeyPool,
+    ) -> bool {
+        self.providers.insert(
+            provider_type,
+            ProviderEntry {
+                provider,
+                key_pool: Arc::new(ArcSwap::from_pointee(pool)),
+            },
+        );
+        true
+    }
+
+    /// Register a CLI backend for fallback.
+    pub fn register_cli_backend(
+        &self,
+        provider_type: ProviderType,
+        backend: Arc<dyn LlmProvider>,
+    ) {
+        self.cli_backends.insert(provider_type, backend);
+    }
+
+    /// Get registered CLI backend provider types.
+    pub fn cli_backend_providers(&self) -> Vec<ProviderType> {
+        self.cli_backends.iter().map(|e| *e.key()).collect()
+    }
+
+    /// Check if a CLI backend is registered for a provider type.
+    pub fn has_cli_backend(&self, provider_type: ProviderType) -> bool {
+        self.cli_backends.contains_key(&provider_type)
     }
 
     /// List models confirmed by provider API refresh (for GUI dropdowns).
@@ -158,8 +204,10 @@ impl LlmRouter {
     /// Refresh models by querying each configured provider's API.
     /// Discovered models are added to the registry (existing entries preserved).
     pub async fn refresh_models(&self) {
-        for (&provider_type, entry) in &self.providers {
-            let pool = entry.key_pool.load();
+        for entry in self.providers.iter() {
+            let provider_type = *entry.key();
+            let prov_entry = entry.value();
+            let pool = prov_entry.key_pool.load();
             // Try to acquire a key to query the provider
             let key_secret = match pool.acquire().await {
                 Ok(guard) => guard.secret.clone(),
@@ -169,7 +217,7 @@ impl LlmRouter {
                 }
             };
 
-            match entry.provider.list_models_with_key(&key_secret).await {
+            match prov_entry.provider.list_models_with_key(&key_secret).await {
                 Ok(model_ids) => {
                     let count = model_ids.len();
                     if count == 0 {
@@ -205,13 +253,13 @@ impl LlmRouter {
         key: &str,
     ) -> Result<Vec<String>, LlmError> {
         let entry = self.providers.get(&provider_type).ok_or(LlmError::NotConfigured)?;
-        entry.provider.list_models_with_key(key).await
+        entry.value().provider.list_models_with_key(key).await
     }
 
     /// Get key statuses for a provider.
     pub async fn key_statuses(&self, provider: ProviderType) -> Option<Vec<KeyStatus>> {
         if let Some(entry) = self.providers.get(&provider) {
-            let pool = entry.key_pool.load();
+            let pool = entry.value().key_pool.load();
             Some(pool.key_statuses().await)
         } else {
             None
@@ -247,7 +295,7 @@ impl LlmRouter {
             .get(&provider_type)
             .ok_or_else(|| LlmRouterError::ProviderNotConfigured(provider_type.to_string()))?;
 
-        self.execute_with_retry(entry, model, request).await
+        self.execute_with_retry(entry.value(), model, request).await
     }
 
     async fn execute_with_retry(
@@ -329,20 +377,70 @@ impl LlmRouter {
         original_model: &str,
         request: &RouterRequest,
     ) -> Result<ChatResponse, LlmRouterError> {
-        let fallback_chain = self
-            .fallback_chains
-            .get(original_model)
-            .ok_or_else(|| LlmRouterError::NoFallbackAvailable(original_model.to_string()))?;
+        // 1. Try model-level fallback chains (existing behavior)
+        if let Some(fallback_chain) = self.fallback_chains.get(original_model) {
+            for fallback_model in fallback_chain {
+                match self.try_model(fallback_model, request).await {
+                    Ok(response) => return Ok(response),
+                    Err(_) => continue,
+                }
+            }
+        }
 
-        for fallback_model in fallback_chain {
-            match self.try_model(fallback_model, request).await {
-                Ok(response) => return Ok(response),
-                Err(_) => continue,
+        // 2. Try CLI backend fallback
+        let provider_type = self.model_registry.resolve_provider(original_model);
+        if let Some(pt) = provider_type {
+            if let Some(cli_backend) = self.cli_backends.get(&pt) {
+                tracing::info!("Falling back to CLI backend for {:?}", pt);
+                let flattened = flatten_messages(&request.messages);
+                let cli_request = ChatRequest {
+                    messages: vec![ChatMessage::user(&flattened)],
+                    tools: vec![],
+                    model: Some(original_model.to_string()),
+                    temperature: request.temperature,
+                    max_tokens: request.max_tokens,
+                };
+                match cli_backend.chat(cli_request).await {
+                    Ok(response) => {
+                        // Record with zero cost (CLI fallback)
+                        let record = CallRecord {
+                            agent_id: request
+                                .context
+                                .agent_id
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            task_id: request.context.task_id.clone(),
+                            model: format!("{}_cli", original_model),
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            cost_usd: 0.0,
+                        };
+                        self.cost_tracker.record(&record).await;
+                        return Ok(response);
+                    }
+                    Err(e) => {
+                        tracing::warn!("CLI backend fallback failed for {:?}: {}", pt, e);
+                    }
+                }
             }
         }
 
         Err(LlmRouterError::AllFallbacksFailed)
     }
+}
+
+/// Flatten messages into a single prompt string for CLI backends.
+pub fn flatten_messages(messages: &[ChatMessage]) -> String {
+    let mut parts = Vec::new();
+    for msg in messages {
+        match msg.role {
+            Role::System => parts.push(format!("[System] {}", msg.content)),
+            Role::User => parts.push(msg.content.clone()),
+            Role::Assistant => parts.push(format!("[Assistant] {}", msg.content)),
+            Role::Tool => parts.push(format!("[Tool] {}", msg.content)),
+        }
+    }
+    parts.join("\n")
 }
 
 #[cfg(test)]
@@ -599,7 +697,7 @@ mod tests {
         );
 
         let result = router.complete(make_request(None)).await;
-        assert!(matches!(result, Err(LlmRouterError::NoFallbackAvailable(_))));
+        assert!(matches!(result, Err(LlmRouterError::AllFallbacksFailed)));
     }
 
     #[tokio::test]
@@ -655,5 +753,105 @@ mod tests {
         // Verify reload returns false for unconfigured provider
         let empty_pool = KeyPool::new(vec![], SelectionStrategy::RoundRobin);
         assert!(!router.reload_keys(ProviderType::OpenAI, empty_pool));
+    }
+
+    #[tokio::test]
+    async fn test_register_provider_new() {
+        let provider = Arc::new(MockProvider::new(
+            "openai",
+            vec![Ok(MockProvider::ok_response("gpt-4o"))],
+        ));
+        let pool = KeyPool::new(
+            vec![ApiKey::new("k1".to_string(), ProviderType::OpenAI, "sk-1".to_string())],
+            SelectionStrategy::RoundRobin,
+        );
+
+        let router = LlmRouter::new(
+            HashMap::new(),
+            ModelRegistry::with_defaults(),
+            HashMap::new(),
+            Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+            "gpt-4o".to_string(),
+        );
+
+        assert!(!router.reload_keys(ProviderType::OpenAI, KeyPool::new(vec![], SelectionStrategy::RoundRobin)));
+        assert!(router.register_provider(ProviderType::OpenAI, provider, pool));
+        assert!(router.configured_providers().contains(&ProviderType::OpenAI));
+    }
+
+    #[tokio::test]
+    async fn test_try_fallback_to_cli() {
+        // API provider always rate-limits
+        let api_provider = Arc::new(MockProvider::new(
+            "anthropic",
+            vec![Err(LlmError::RateLimited { retry_after_ms: 1000 })],
+        ));
+        let cli_provider = Arc::new(MockProvider::new(
+            "claude_cli",
+            vec![Ok(MockProvider::ok_response("claude_cli"))],
+        ));
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            ProviderType::Anthropic,
+            ProviderEntry {
+                provider: api_provider,
+                key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
+                    vec![ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string())],
+                    SelectionStrategy::RoundRobin,
+                ))),
+            },
+        );
+
+        let router = LlmRouter::new(
+            providers,
+            ModelRegistry::with_defaults(),
+            HashMap::new(), // No model-level fallback chains
+            Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+
+        router.register_cli_backend(ProviderType::Anthropic, cli_provider);
+
+        let result = router.complete(make_request(None)).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().model, "claude_cli");
+    }
+
+    #[tokio::test]
+    async fn test_cli_fallback_not_called_when_api_succeeds() {
+        let api_provider = Arc::new(MockProvider::new(
+            "anthropic",
+            vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+        ));
+        let cli_provider = Arc::new(MockProvider::new(
+            "claude_cli",
+            vec![Ok(MockProvider::ok_response("claude_cli"))],
+        ));
+
+        let router = LlmRouter::single_provider(
+            api_provider,
+            ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+        router.register_cli_backend(ProviderType::Anthropic, cli_provider);
+
+        let result = router.complete(make_request(None)).await;
+        assert!(result.is_ok());
+        // Should use API, not CLI
+        assert_eq!(result.unwrap().model, "claude-sonnet-4-5-20250929");
+    }
+
+    #[test]
+    fn test_flatten_messages() {
+        let messages = vec![
+            ChatMessage { role: Role::System, content: "You are helpful.".to_string(), tool_calls: None, tool_call_id: None },
+            ChatMessage::user("Hello"),
+            ChatMessage { role: Role::Assistant, content: "Hi!".to_string(), tool_calls: None, tool_call_id: None },
+        ];
+        let flattened = flatten_messages(&messages);
+        assert!(flattened.contains("[System] You are helpful."));
+        assert!(flattened.contains("Hello"));
+        assert!(flattened.contains("[Assistant] Hi!"));
     }
 }

@@ -12,6 +12,9 @@ import type {
   KeyValidationResult,
   KeyStatusMap,
   ModelEntry,
+  DiscoveredCredentialInfo,
+  CliBackendStatus,
+  ProviderUsageSummary,
 } from "../types";
 
 async function ensureConnection(): Promise<ConnectionInfo> {
@@ -145,6 +148,63 @@ export async function refreshAvailableModels(): Promise<ModelEntry[]> {
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
     throw new Error(data.error?.message || `Failed to refresh models: ${response.statusText}`);
+  }
+  return await response.json();
+}
+
+/** GET /v1/settings/llm/credentials — list discovered OAuth credentials */
+export async function getDiscoveredCredentials(): Promise<DiscoveredCredentialInfo[]> {
+  const conn = await ensureConnection();
+  const response = await fetch(`${conn.baseUrl}/v1/settings/llm/credentials`, {
+    headers: { Authorization: `Bearer ${conn.token}` },
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error?.message || `Failed to fetch credentials: ${response.statusText}`);
+  }
+  return await response.json();
+}
+
+/** POST /v1/settings/llm/credentials/rescan — rescan for OAuth credentials */
+export async function rescanCredentials(): Promise<DiscoveredCredentialInfo[]> {
+  const conn = await ensureConnection();
+  const response = await fetch(`${conn.baseUrl}/v1/settings/llm/credentials/rescan`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${conn.token}` },
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error?.message || `Failed to rescan credentials: ${response.statusText}`);
+  }
+  return await response.json();
+}
+
+/** GET /v1/settings/llm/cli-backends — list CLI backend status */
+export async function getCliBackends(): Promise<CliBackendStatus[]> {
+  const conn = await ensureConnection();
+  const response = await fetch(`${conn.baseUrl}/v1/settings/llm/cli-backends`, {
+    headers: { Authorization: `Bearer ${conn.token}` },
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error?.message || `Failed to fetch CLI backends: ${response.statusText}`);
+  }
+  return await response.json();
+}
+
+/** GET /v1/settings/llm/providers/usage — provider-level usage summaries */
+export async function getProviderUsage(): Promise<ProviderUsageSummary[]> {
+  const conn = await ensureConnection();
+  const response = await fetch(`${conn.baseUrl}/v1/settings/llm/providers/usage`, {
+    headers: { Authorization: `Bearer ${conn.token}` },
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error?.message || `Failed to fetch provider usage: ${response.statusText}`);
   }
   return await response.json();
 }

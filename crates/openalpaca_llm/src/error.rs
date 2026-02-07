@@ -20,4 +20,13 @@ pub enum LlmError {
 
     #[error("Unknown provider: {0}")]
     UnknownProvider(String),
+
+    #[error("Credential discovery error: {0}")]
+    CredentialDiscovery(String),
+
+    #[error("Token refresh error: {0}")]
+    TokenRefresh(String),
+
+    #[error("CLI backend error: {0}")]
+    CliBackend(String),
 }

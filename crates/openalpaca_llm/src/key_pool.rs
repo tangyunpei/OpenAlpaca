@@ -48,6 +48,7 @@ pub enum KeySource {
     ApiConsole,
     ClaudeCode,
     ClaudeMaxPro,
+    Codex,
     Environment,
     #[default]
     Other,

@@ -30,3 +30,4 @@ rand.workspace = true
 async-trait.workspace = true
 openalpaca_llm = { workspace = true, features = ["anthropic", "openai", "ollama"] }
 teloxide = { workspace = true }
+tokio-util.workspace = true

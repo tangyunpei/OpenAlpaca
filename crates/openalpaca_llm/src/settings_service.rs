@@ -49,6 +49,14 @@ pub struct KeyInfo {
     pub notes: Option<String>,
     pub status: String,
     pub monthly_usage_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub managed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_expires_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_usage: Option<crate::provider_usage::ExternalUsage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,6 +209,10 @@ impl LlmSettingsService {
                             notes: k.notes.clone(),
                             status: status.to_string(),
                             monthly_usage_usd: None,
+                            managed: None,
+                            credential_status: None,
+                            credential_expires_at: None,
+                            external_usage: None,
                         }
                     }).collect()
                 })
@@ -447,6 +459,27 @@ impl LlmSettingsService {
         Ok(())
     }
 
+    /// Build a KeyPool from config file for a specific provider.
+    /// Used by TokenManager to create merged pools (config keys + discovered keys).
+    pub fn build_key_pool_for_provider(&self, provider_type: ProviderType) -> Result<KeyPool, String> {
+        let config = read_config(&self.config_path)
+            .map_err(|e| format!("Failed to read config: {e}"))?;
+        self.build_key_pool_from_config(&config, provider_type)
+    }
+
+    /// Build a Vec<ApiKey> from config file for a specific provider.
+    /// Used by TokenManager to merge config keys with discovered keys.
+    pub fn build_key_pool_keys_for_provider(&self, provider_type: ProviderType) -> Result<Vec<ApiKey>, String> {
+        let config = read_config(&self.config_path)
+            .map_err(|e| format!("Failed to read config: {e}"))?;
+        self.build_api_keys_from_config(&config, provider_type)
+    }
+
+    /// Get a reference to the router.
+    pub fn router(&self) -> &Arc<LlmRouter> {
+        &self.router
+    }
+
     /// Internal: apply a mutation to the config, persist, and hot-reload.
     async fn persist_and_reload<F>(&self, provider_type: ProviderType, mutate: F) -> Result<(), String>
     where
@@ -480,6 +513,30 @@ impl LlmSettingsService {
         config: &LlmRouterConfig,
         provider_type: ProviderType,
     ) -> Result<KeyPool, String> {
+        let api_keys = self.build_api_keys_from_config(config, provider_type)?;
+
+        let provider_name = provider_type.to_string();
+        let provider_config = config.providers.as_ref()
+            .and_then(|p| p.get(&provider_name));
+
+        let strategy_str = provider_config.and_then(|p|
+            p.key_selection_strategy.as_deref().or(p.strategy.as_deref())
+        );
+        let strategy = match strategy_str {
+            Some("lru") | Some("least_recently_used") => SelectionStrategy::LeastRecentlyUsed,
+            Some("primary_fallback") => SelectionStrategy::PrimaryFallback,
+            _ => SelectionStrategy::RoundRobin,
+        };
+
+        Ok(KeyPool::new(api_keys, strategy))
+    }
+
+    /// Build a Vec<ApiKey> from config for a specific provider.
+    fn build_api_keys_from_config(
+        &self,
+        config: &LlmRouterConfig,
+        provider_type: ProviderType,
+    ) -> Result<Vec<ApiKey>, String> {
         let provider_name = provider_type.to_string();
 
         let provider_config = config.providers.as_ref()
@@ -519,6 +576,7 @@ impl LlmSettingsService {
                         Some("api_console") => KeySource::ApiConsole,
                         Some("claude_code") => KeySource::ClaudeCode,
                         Some("claude_max_pro") => KeySource::ClaudeMaxPro,
+                        Some("codex") => KeySource::Codex,
                         Some("environment") => KeySource::Environment,
                         _ => KeySource::Other,
                     };
@@ -528,16 +586,7 @@ impl LlmSettingsService {
             }
         }
 
-        let strategy_str = provider_config.and_then(|p|
-            p.key_selection_strategy.as_deref().or(p.strategy.as_deref())
-        );
-        let strategy = match strategy_str {
-            Some("lru") | Some("least_recently_used") => SelectionStrategy::LeastRecentlyUsed,
-            Some("primary_fallback") => SelectionStrategy::PrimaryFallback,
-            _ => SelectionStrategy::RoundRobin,
-        };
-
-        Ok(KeyPool::new(api_keys, strategy))
+        Ok(api_keys)
     }
 }
 

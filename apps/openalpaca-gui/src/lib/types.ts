@@ -117,7 +117,7 @@ export interface AgentActionResponse {
 // ── Settings types ──────────────────────────────────────────────────
 
 export type KeyPriorityValue = "primary" | "fallback";
-export type KeySourceValue = "api_console" | "claude_code" | "claude_max_pro" | "environment" | "other";
+export type KeySourceValue = "api_console" | "claude_code" | "claude_max_pro" | "codex" | "environment" | "other";
 export type KeyHealthValue = "healthy" | "rate_limited" | "error" | "unknown";
 
 export interface LlmSettingsResponse {
@@ -145,6 +145,43 @@ export interface KeyInfo {
   notes: string | null;
   status: string;
   monthly_usage_usd: number | null;
+  managed?: boolean;
+  credential_status?: string | null;
+  credential_expires_at?: number | null;
+  external_usage?: ExternalUsage | null;
+}
+
+export interface ExternalUsage {
+  period: string;
+  cost_usd: number;
+  token_count: number;
+  rate_limit_remaining: number | null;
+  fetched_at: string;
+  approximate: boolean;
+}
+
+export interface DiscoveredCredentialInfo {
+  source: "claude_code" | "codex";
+  provider: string;
+  status: string;
+  expires_at: number | null;
+  auto_refresh: boolean;
+}
+
+export interface CliBackendStatus {
+  name: string;
+  available: boolean;
+  path: string | null;
+  enabled: boolean;
+}
+
+export interface ProviderUsageSummary {
+  provider: string;
+  total_cost_usd: number;
+  total_tokens: number;
+  total_requests: number;
+  health: string;
+  external_usage: ExternalUsage | null;
 }
 
 export interface AddKeyRequest {
