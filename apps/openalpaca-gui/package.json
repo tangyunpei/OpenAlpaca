@@ -11,12 +11,13 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
     "bun:dev": "bun run dev",
-    "bun:tauri:dev": "bunx tauri dev"
+    "bun:tauri:dev": "bunx tauri dev",
+    "prepare:sidecar:dev": "bun run scripts/prepare-sidecar.ts",
+    "prepare:sidecar:release": "bun run scripts/prepare-sidecar.ts --release"
   },
   "license": "MIT",
   "dependencies": {
     "@tauri-apps/api": "^2.9.1",
-    "@tauri-apps/plugin-opener": "^2.5.3",
     "rollup": "^4.57.1"
   },
   "devDependencies": {

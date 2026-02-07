@@ -24,7 +24,6 @@ tracing.workspace = true
 directories.workspace = true
 
 tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
 openalpaca_api = { workspace = true }
 openalpaca_storage = { workspace = true }
 

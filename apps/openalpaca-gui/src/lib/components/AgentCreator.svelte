@@ -210,7 +210,7 @@
   }
   .full-width { grid-column: 1 / -1; }
 
-  .form-grid input, .form-grid select, .form-grid textarea,
+  .form-grid input, .form-grid textarea,
   .toml-editor {
     background: rgba(0, 0, 0, 0.3);
     border: 1px solid rgba(255, 255, 255, 0.1);

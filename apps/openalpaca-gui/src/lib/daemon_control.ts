@@ -1,9 +1,10 @@
 import { invoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
-import { connectionInfo, type ConnectionInfo } from './daemon';
+import { connectionInfo, disconnect, type ConnectionInfo } from './daemon';
 
 /**
  * Sends a shutdown command to the OpenAlpaca Daemon.
+ * Disconnects the WebSocket first to prevent reconnect-after-quit.
  */
 export async function shutdownDaemon(): Promise<void> {
     // Get current connection info
@@ -12,15 +13,7 @@ export async function shutdownDaemon(): Promise<void> {
     // If not connected in store, try to fetch fresh connection info via Tauri
     if (!conn) {
         try {
-            // Note: the return type in Rust is snake_case (base_url), 
-            // but we might need to verify if Tauri converts it or if we handle it.
-            // Based on previous fixes, we use camelCase in frontend.
-            const rawConn = await invoke<{base_url: string, token: string, instance_id: string}>('get_connection_info');
-            conn = {
-                baseUrl: rawConn.base_url,
-                token: rawConn.token,
-                instanceId: rawConn.instance_id
-            };
+            conn = await invoke<ConnectionInfo>('get_connection_info');
         } catch (e) {
             console.error("Cannot shutdown: Failed to get connection info", e);
             throw new Error("Daemon not reachable or connection info missing");
@@ -31,8 +24,8 @@ export async function shutdownDaemon(): Promise<void> {
          throw new Error("No connection info available");
     }
 
-    const start = Date.now();
-    console.log("Creating shutdown request...");
+    // Disconnect WS first so onclose won't trigger reconnect → respawn
+    disconnect();
 
     try {
         const response = await fetch(`${conn.baseUrl}/v1/command`, {
@@ -52,10 +45,10 @@ export async function shutdownDaemon(): Promise<void> {
 
         const data = await response.json();
         console.log("Shutdown command response:", data);
-        
+
     } catch (e) {
         // If the daemon shuts down very quickly, the fetch might fail with a network error.
-        // We consider "Network request failed" a potential success if it happened quickly.
+        // We consider this a potential success if the daemon exits fast.
         console.warn("Shutdown request might have been interrupted (expected if daemon exits fast):", e);
     }
 }

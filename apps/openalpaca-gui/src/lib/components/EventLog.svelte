@@ -46,7 +46,7 @@
     <h2>Events ({events.length})</h2>
   </div>
   <ul class="events">
-    {#each events as event (event.ts)}
+    {#each events as event (event._id)}
       <li class="event {event.type}">
         <span class="icon">{@html getEventIcon(event.type)}</span>
         <span class="time">{formatTime(event.ts)}</span>

@@ -85,10 +85,39 @@ The `tasks` subcommand is used to view and manage tasks within the system.
 
 ---
 
-## 6. GUI Control
+## 6. Desktop GUI (`openalpaca-gui`)
 
-- **Open GUI**: `openalpaca gui start` (Opens the management dashboard in your default browser)
-- **Stop GUI Backend**: `openalpaca gui stop`
+OpenAlpaca includes a native desktop application built with Tauri. The GUI automatically manages the daemon as a bundled sidecar — no manual daemon setup is required.
+
+### Running in Development
+
+```bash
+cd apps/openalpaca-gui
+bun install
+bunx tauri dev
+```
+
+The `tauri dev` command automatically:
+1. Builds the `openalpacad` daemon binary and copies it to the sidecar directory.
+2. Starts the Vite dev server for the frontend.
+3. Launches the native window.
+
+### Building for Release
+
+```bash
+cd apps/openalpaca-gui
+bunx tauri build
+```
+
+This produces a distributable application bundle (`.dmg` on macOS, `.msi` on Windows, `.deb`/`.AppImage` on Linux) with the daemon binary included.
+
+### Architecture Notes
+
+- The GUI spawns the daemon as a detached background process on launch and connects via WebSocket (`/v1/events`).
+- Clicking **Quit OpenAlpaca** in the Events panel cleanly disconnects the WebSocket and sends a shutdown command to the daemon.
+- WebSocket reconnection uses exponential backoff (1s base, 30s max) with jitter.
+- In release builds, the daemon binary must be co-located with the application — there is no PATH fallback.
+- A Content Security Policy restricts the renderer to local-only network access (`127.0.0.1`, `localhost`).
 
 ---
 
