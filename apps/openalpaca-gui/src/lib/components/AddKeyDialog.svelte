@@ -107,7 +107,9 @@
       <div class="radio-group">
         <label class="radio"><input type="radio" bind:group={source} value="api_console" /> API Console</label>
         <label class="radio"><input type="radio" bind:group={source} value="claude_code" /> Claude Code</label>
+        <label class="radio"><input type="radio" bind:group={source} value="codex" /> Codex</label>
         <label class="radio"><input type="radio" bind:group={source} value="claude_max_pro" /> Max/Pro</label>
+        <label class="radio"><input type="radio" bind:group={source} value="environment" /> Environment</label>
         <label class="radio"><input type="radio" bind:group={source} value="other" /> Other</label>
       </div>
     </div>

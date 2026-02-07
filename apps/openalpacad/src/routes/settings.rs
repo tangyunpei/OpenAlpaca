@@ -350,6 +350,128 @@ pub async fn get_llm_usage_daily(
     }
 }
 
+// ── Credential Discovery endpoints ──────────────────────────────────
+
+/// GET /v1/settings/llm/credentials — list discovered credentials
+pub async fn get_discovered_credentials(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let tm = match &state.token_manager {
+        Some(tm) => tm,
+        None => {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!([])),
+            ).into_response();
+        }
+    };
+
+    let creds = tm.discovered_sources().await;
+    (StatusCode::OK, Json(serde_json::to_value(creds).unwrap())).into_response()
+}
+
+/// POST /v1/settings/llm/credentials/rescan — rescan credentials
+pub async fn rescan_credentials(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let tm = match &state.token_manager {
+        Some(tm) => tm,
+        None => {
+            return settings_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "CREDENTIAL_DISCOVERY_NOT_CONFIGURED",
+                "Credential discovery is not enabled",
+            ).into_response();
+        }
+    };
+
+    let service = match &state.llm_settings_service {
+        Some(s) => s,
+        None => {
+            return settings_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LLM_NOT_CONFIGURED",
+                "LLM router is not configured",
+            ).into_response();
+        }
+    };
+
+    let router = service.router();
+    let creds = tm.rescan(service, router).await;
+    (StatusCode::OK, Json(serde_json::to_value(creds).unwrap())).into_response()
+}
+
+/// GET /v1/settings/llm/cli-backends — list CLI backend status
+pub async fn get_cli_backends(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    // Read CLI backends config from llm.toml
+    let llm_config_path = std::env::current_dir()
+        .unwrap_or_default()
+        .join("config/llm.toml");
+
+    let cli_config = if llm_config_path.exists() {
+        openalpaca_llm::read_config(&llm_config_path)
+            .ok()
+            .and_then(|c| c.cli_backends)
+            .unwrap_or_default()
+    } else {
+        openalpaca_llm::CliBackendsConfig::default()
+    };
+
+    let statuses = openalpaca_llm::detect_cli_backends(&cli_config);
+    let _ = &state; // acknowledge state usage
+    (StatusCode::OK, Json(serde_json::to_value(statuses).unwrap())).into_response()
+}
+
+/// GET /v1/settings/llm/providers/usage — provider-level usage summaries
+pub async fn get_provider_usage(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let service = match &state.llm_settings_service {
+        Some(s) => s,
+        None => {
+            return settings_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LLM_NOT_CONFIGURED",
+                "LLM router is not configured",
+            ).into_response();
+        }
+    };
+
+    let router = service.router();
+    let provider_usage = router.cost_tracker.all_provider_usage().await;
+
+    let mut summaries: Vec<openalpaca_llm::ProviderUsageSummary> = Vec::new();
+    for (provider_name, stats) in &provider_usage {
+        summaries.push(openalpaca_llm::ProviderUsageSummary {
+            provider: provider_name.clone(),
+            total_cost_usd: stats.total_cost_usd,
+            total_tokens: stats.total_input_tokens + stats.total_output_tokens,
+            total_requests: stats.total_requests,
+            health: "healthy".to_string(),
+            external_usage: None,
+        });
+    }
+
+    // Add providers with no usage yet
+    for provider_type in router.configured_providers() {
+        let name = provider_type.to_string();
+        if !provider_usage.contains_key(&name) {
+            summaries.push(openalpaca_llm::ProviderUsageSummary {
+                provider: name,
+                total_cost_usd: 0.0,
+                total_tokens: 0,
+                total_requests: 0,
+                health: "healthy".to_string(),
+                external_usage: None,
+            });
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::to_value(summaries).unwrap())).into_response()
+}
+
 // ── LLM Pricing endpoints ──────────────────────────────────────────
 
 /// GET /v1/llm/pricing — list all models with their pricing information

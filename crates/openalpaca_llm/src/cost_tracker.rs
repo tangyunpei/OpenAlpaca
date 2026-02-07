@@ -34,11 +34,12 @@ pub struct ModelUsageStats {
     pub cost_usd: f64,
 }
 
-/// Tracks costs across agents and tasks.
+/// Tracks costs across agents, tasks, and providers.
 pub struct CostTracker {
     model_registry: ModelRegistry,
     agent_usage: RwLock<HashMap<String, UsageStats>>,
     task_usage: RwLock<HashMap<String, UsageStats>>,
+    provider_usage: RwLock<HashMap<String, UsageStats>>,
 }
 
 impl CostTracker {
@@ -47,6 +48,7 @@ impl CostTracker {
             model_registry,
             agent_usage: RwLock::new(HashMap::new()),
             task_usage: RwLock::new(HashMap::new()),
+            provider_usage: RwLock::new(HashMap::new()),
         }
     }
 
@@ -99,6 +101,25 @@ impl CostTracker {
             model_stats.output_tokens += record.output_tokens as u64;
             model_stats.cost_usd += record.cost_usd;
         }
+
+        // Update provider usage (resolve model → provider)
+        {
+            let provider_name = self.model_registry.resolve_provider_name(&record.model)
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let mut usage = self.provider_usage.write().await;
+            let stats = usage.entry(provider_name).or_default();
+            stats.total_requests += 1;
+            stats.total_input_tokens += record.input_tokens as u64;
+            stats.total_output_tokens += record.output_tokens as u64;
+            stats.total_cost_usd += record.cost_usd;
+
+            let model_stats = stats.by_model.entry(record.model.clone()).or_default();
+            model_stats.requests += 1;
+            model_stats.input_tokens += record.input_tokens as u64;
+            model_stats.output_tokens += record.output_tokens as u64;
+            model_stats.cost_usd += record.cost_usd;
+        }
     }
 
     /// Check if a task is still within budget.
@@ -120,6 +141,17 @@ impl CostTracker {
     pub async fn get_task_usage(&self, task_id: &str) -> Option<UsageStats> {
         let usage = self.task_usage.read().await;
         usage.get(task_id).cloned()
+    }
+
+    /// Get usage stats for a provider.
+    pub async fn get_provider_usage(&self, provider: &str) -> Option<UsageStats> {
+        let usage = self.provider_usage.read().await;
+        usage.get(provider).cloned()
+    }
+
+    /// Get usage stats for all providers.
+    pub async fn all_provider_usage(&self) -> HashMap<String, UsageStats> {
+        self.provider_usage.read().await.clone()
     }
 
     /// Get the total cost across all agents.

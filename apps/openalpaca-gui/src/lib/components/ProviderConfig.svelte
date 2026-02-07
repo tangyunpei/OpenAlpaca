@@ -1,7 +1,8 @@
 <script lang="ts">
   import ApiKeyManager from "./ApiKeyManager.svelte";
   import AddKeyDialog from "./AddKeyDialog.svelte";
-  import type { ProviderInfo } from "$lib/types";
+  import { cliBackends } from "$lib/stores/settings";
+  import type { ProviderInfo, CliBackendStatus } from "$lib/types";
 
   interface Props {
     providerName: string;
@@ -12,6 +13,9 @@
   let { providerName, provider, onRefresh }: Props = $props();
 
   let showAddDialog = $state(false);
+  let backends = $state<CliBackendStatus[]>([]);
+
+  const unsubBackends = cliBackends.subscribe((v) => (backends = v));
 
   function providerDisplayName(name: string): string {
     switch (name) {
@@ -26,6 +30,17 @@
     showAddDialog = false;
     onRefresh();
   }
+
+  /** Match provider name to relevant CLI backend */
+  function relevantBackend(providerName: string): CliBackendStatus | null {
+    if (providerName === "anthropic") return backends.find(b => b.name === "claude_code") ?? null;
+    if (providerName === "openai") return backends.find(b => b.name === "codex") ?? null;
+    return null;
+  }
+
+  $effect(() => {
+    return () => unsubBackends();
+  });
 </script>
 
 <div class="provider-section">
@@ -47,6 +62,24 @@
     keys={provider.keys}
     {onRefresh}
   />
+
+  {#if relevantBackend(providerName)}
+    {@const backend = relevantBackend(providerName)}
+    {#if backend}
+      <div class="cli-fallback-row">
+        <span class="cli-dot" class:cli-available={backend.available} class:cli-unavailable={!backend.available}></span>
+        <span class="cli-label">CLI Fallback:</span>
+        {#if backend.available}
+          <span class="cli-path">{backend.name} detected{backend.path ? ` at ${backend.path}` : ""}</span>
+          {#if !backend.enabled}
+            <span class="cli-disabled-badge">disabled</span>
+          {/if}
+        {:else}
+          <span class="cli-not-found">{backend.name} not found</span>
+        {/if}
+      </div>
+    {/if}
+  {/if}
 </div>
 
 {#if showAddDialog}
@@ -123,5 +156,49 @@
     font-size: 0.8rem !important;
     border-radius: 6px !important;
     white-space: nowrap;
+  }
+
+  .cli-fallback-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    font-size: 0.75rem;
+  }
+
+  .cli-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .cli-available { background: var(--success); }
+  .cli-unavailable { background: var(--text-dim); }
+
+  .cli-label {
+    color: var(--text-dim);
+  }
+
+  .cli-path {
+    color: var(--text);
+    font-family: monospace;
+    font-size: 0.7rem;
+  }
+
+  .cli-not-found {
+    color: var(--text-dim);
+    opacity: 0.6;
+  }
+
+  .cli-disabled-badge {
+    font-size: 0.6rem;
+    padding: 0px 4px;
+    border-radius: 2px;
+    background: rgba(245, 158, 11, 0.15);
+    color: #f59e0b;
+    text-transform: uppercase;
   }
 </style>

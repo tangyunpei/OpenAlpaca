@@ -25,8 +25,9 @@ pub use connectors::{connector_action_handler, connector_config_handler, list_co
 pub use events::events_handler;
 pub use events_history::events_history_handler;
 pub use settings::{
-    delete_key, estimate_cost, get_key_status, get_llm_pricing, get_llm_settings, get_llm_usage,
-    get_llm_usage_daily, get_orchestrator_config, list_models, refresh_models, reorder_keys,
-    update_orchestrator_config, upsert_key, validate_key,
+    delete_key, estimate_cost, get_cli_backends, get_discovered_credentials, get_key_status,
+    get_llm_pricing, get_llm_settings, get_llm_usage, get_llm_usage_daily,
+    get_orchestrator_config, get_provider_usage, list_models, refresh_models, reorder_keys,
+    rescan_credentials, update_orchestrator_config, upsert_key, validate_key,
 };
 pub use tasks::{create_task_handler, get_task_handler, list_tasks_handler, task_action_handler};

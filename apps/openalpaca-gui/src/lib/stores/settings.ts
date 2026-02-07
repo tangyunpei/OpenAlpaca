@@ -4,9 +4,9 @@
 
 import { writable, derived, type Readable } from "svelte/store";
 import { events, type ServerEvent } from "../daemon";
-import { getLlmSettings, getAvailableModels, refreshAvailableModels } from "../api/settings";
+import { getLlmSettings, getAvailableModels, refreshAvailableModels, getDiscoveredCredentials, getCliBackends } from "../api/settings";
 import { getOrchestratorConfig, updateOrchestratorConfig } from "../api/orchestrator";
-import type { LlmSettingsResponse, ProviderInfo, OrchestratorConfigResponse, ModelEntry } from "../types";
+import type { LlmSettingsResponse, ProviderInfo, OrchestratorConfigResponse, ModelEntry, DiscoveredCredentialInfo, CliBackendStatus } from "../types";
 
 /** Current LLM settings */
 export const llmSettings = writable<LlmSettingsResponse | null>(null);
@@ -25,6 +25,12 @@ export const availableModels = writable<ModelEntry[]>([]);
 
 /** Models refreshing state */
 export const modelsRefreshing = writable(false);
+
+/** Discovered OAuth credentials (Claude Code, Codex) */
+export const discoveredCredentials = writable<DiscoveredCredentialInfo[]>([]);
+
+/** CLI backend status (claude, codex CLI tools) */
+export const cliBackends = writable<CliBackendStatus[]>([]);
 
 /** Derived: sorted list of [providerName, providerInfo] entries */
 export const providerList: Readable<[string, ProviderInfo][]> = derived(
@@ -91,6 +97,26 @@ export async function refreshModels(): Promise<void> {
     console.error("[settings-store] Failed to refresh models:", e);
   } finally {
     modelsRefreshing.set(false);
+  }
+}
+
+/** Fetch discovered OAuth credentials */
+export async function loadDiscoveredCredentials(): Promise<void> {
+  try {
+    const creds = await getDiscoveredCredentials();
+    discoveredCredentials.set(creds);
+  } catch (e) {
+    console.error("[settings-store] Failed to load discovered credentials:", e);
+  }
+}
+
+/** Fetch CLI backend status */
+export async function loadCliBackends(): Promise<void> {
+  try {
+    const backends = await getCliBackends();
+    cliBackends.set(backends);
+  } catch (e) {
+    console.error("[settings-store] Failed to load CLI backends:", e);
   }
 }
 

@@ -59,6 +59,8 @@ pub struct AppState {
     pub agent_config_service: Option<Arc<AgentConfigService>>,
     pub chat_service: Option<Arc<ChatService>>,
     pub chat_stream_manager: Option<Arc<ChatStreamManager>>,
+    pub token_manager: Option<Arc<openalpaca_llm::TokenManager>>,
+    pub provider_usage_tracker: Option<Arc<openalpaca_llm::ProviderUsageTracker>>,
 }
 
 #[tokio::main]
@@ -337,6 +339,52 @@ async fn main() -> Result<()> {
         service.refresh_models().await;
     }
 
+    // Step 5.2.3c: Credential Discovery & Token Manager
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+
+    let llm_config: Option<openalpaca_llm::LlmRouterConfig> = {
+        let p = std::env::current_dir()
+            .unwrap_or_default()
+            .join("config/llm.toml");
+        if p.exists() {
+            openalpaca_llm::read_config(&p).ok()
+        } else {
+            None
+        }
+    };
+
+    let cred_config = llm_config.as_ref()
+        .and_then(|c| c.credential_discovery.clone())
+        .unwrap_or_default();
+
+    let token_manager: Option<Arc<openalpaca_llm::TokenManager>> =
+        if cred_config.claude_code.unwrap_or(true) || cred_config.codex.unwrap_or(true) {
+            let tm = Arc::new(openalpaca_llm::TokenManager::new(cred_config.clone()).await);
+            if let (Some(router), Some(svc)) = (&llm_router, &llm_settings_service) {
+                tm.rescan(svc, router).await;
+            }
+            if let (Some(router), Some(svc)) = (&llm_router, &llm_settings_service) {
+                let _refresh_handle = tm.start_refresh_loop(
+                    svc.clone(),
+                    router.clone(),
+                    cancel_token.clone(),
+                );
+            }
+            info!("TokenManager initialized with credential discovery");
+            Some(tm)
+        } else {
+            None
+        };
+
+    // Step 5.2.3d: Provider Usage Tracker
+    let provider_usage_tracker: Option<Arc<openalpaca_llm::ProviderUsageTracker>> =
+        if cred_config.fetch_external_usage.unwrap_or(false) {
+            info!("Provider usage tracker enabled");
+            Some(Arc::new(openalpaca_llm::ProviderUsageTracker::new()))
+        } else {
+            None
+        };
+
     // Step 5.2.4: Build AgentConfigService (Phase 5.7)
     let agent_config_service = Arc::new(AgentConfigService::new(
         shared_context.agent_registry.clone(),
@@ -441,6 +489,8 @@ async fn main() -> Result<()> {
         agent_config_service: Some(agent_config_service),
         chat_service: Some(chat_service),
         chat_stream_manager: Some(chat_stream_manager.clone()),
+        token_manager,
+        provider_usage_tracker,
     });
 
     // Public routes (no auth required)
@@ -507,6 +557,13 @@ async fn main() -> Result<()> {
         // Model discovery routes
         .route("/v1/models", get(routes::list_models))
         .route("/v1/models/refresh", post(routes::refresh_models))
+        // Credential discovery routes
+        .route("/v1/settings/llm/credentials", get(routes::get_discovered_credentials))
+        .route("/v1/settings/llm/credentials/rescan", post(routes::rescan_credentials))
+        // CLI backend routes
+        .route("/v1/settings/llm/cli-backends", get(routes::get_cli_backends))
+        // Provider usage routes
+        .route("/v1/settings/llm/providers/usage", get(routes::get_provider_usage))
         // Orchestrator config routes (Phase 5.7)
         .route("/v1/orchestrator/config", get(routes::get_orchestrator_config))
         .route("/v1/orchestrator/config", put(routes::update_orchestrator_config))
@@ -566,9 +623,11 @@ async fn main() -> Result<()> {
         }
         _ = shutdown_signal() => {
             info!("Shutdown signal received (OS)");
+            cancel_token.cancel();
         }
         _ = shutdown_rx.recv() => {
             info!("Shutdown signal received (API)");
+            cancel_token.cancel();
         }
     }
 

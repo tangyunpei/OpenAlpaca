@@ -115,6 +115,11 @@ impl ModelRegistry {
             .map(|info| info.provider)
     }
 
+    /// Resolve provider name as a string for a model ID.
+    pub fn resolve_provider_name(&self, model_id: &str) -> Option<String> {
+        self.resolve_provider(model_id).map(|p| p.to_string())
+    }
+
     /// Get pricing info for a model.
     pub fn get_pricing(&self, model_id: &str) -> Option<PricingInfo> {
         self.models.read().unwrap().get(model_id).map(|info| PricingInfo {
