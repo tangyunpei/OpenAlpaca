@@ -67,7 +67,7 @@ pub fn status_color(status: &str) -> ColoredString {
     match status.to_lowercase().as_str() {
         "running" | "active" | "ok" | "idle" | "success" | "completed" => status.green(),
         "failed" | "error" | "disabled" | "cancelled" => status.red(),
-        "paused" | "waiting" | "queued" => status.yellow(),
+        "paused" | "waiting" | "queued" | "pending" => status.yellow(),
         _ => status.dimmed(),
     }
 }

@@ -15,6 +15,22 @@
   let detail = $state<TaskDetailResponse | null>(null);
   let loading = $state(true);
   let actionLoading = $state(false);
+  let expandedAssignment = $state<string | null>(null);
+
+  function toggleAssignment(id: string) {
+    expandedAssignment = expandedAssignment === id ? null : id;
+  }
+
+  let hasDetailProgress = $derived(
+    detail?.task.progress_current != null &&
+      detail?.task.progress_total != null &&
+      detail.task.progress_total > 0,
+  );
+  let detailProgressPercent = $derived(
+    hasDetailProgress
+      ? Math.round((detail!.task.progress_current! / detail!.task.progress_total!) * 100)
+      : 0,
+  );
 
   const unsubDetail = selectedTaskDetail.subscribe((v) => (detail = v));
 
@@ -89,10 +105,15 @@
           <span class="label">Source lane</span>
           <span>{detail.task.source_lane}</span>
         </div>
-        {#if detail.task.progress_current != null && detail.task.progress_total != null}
+        {#if hasDetailProgress}
           <div class="detail-row">
             <span class="label">Progress</span>
-            <span>{detail.task.progress_current} / {detail.task.progress_total}</span>
+            <div class="progress-inline">
+              <div class="progress-bar-detail">
+                <div class="progress-fill-detail" style="width: {detailProgressPercent}%"></div>
+              </div>
+              <span class="progress-text-detail">{detail.task.progress_current}/{detail.task.progress_total}</span>
+            </div>
           </div>
         {/if}
       </div>
@@ -117,20 +138,41 @@
           <table class="assignments-table">
             <thead>
               <tr>
+                <th>Step</th>
                 <th>Agent</th>
                 <th>Role</th>
                 <th>Status</th>
-                <th>Order</th>
+                <th>Output</th>
               </tr>
             </thead>
             <tbody>
               {#each detail.assignments as a}
                 <tr>
+                  <td>{a.step_order ?? "-"}</td>
                   <td class="mono">{a.agent_id.slice(0, 8)}</td>
                   <td>{a.role}</td>
                   <td><span class="status-badge small {getStatusColor(a.status)}">{a.status}</span></td>
-                  <td>{a.step_order ?? "-"}</td>
+                  <td>
+                    {#if a.result_output?.trim()}
+                      <button
+                        class="expand-btn"
+                        onclick={() => toggleAssignment(a.id)}
+                        aria-expanded={expandedAssignment === a.id}
+                      >
+                        {expandedAssignment === a.id ? "Hide" : "View"}
+                      </button>
+                    {:else}
+                      <span class="dim-text">-</span>
+                    {/if}
+                  </td>
                 </tr>
+                {#if expandedAssignment === a.id && a.result_output?.trim()}
+                  <tr class="output-row">
+                    <td colspan="5">
+                      <pre class="agent-output">{a.result_output}</pre>
+                    </td>
+                  </tr>
+                {/if}
               {/each}
             </tbody>
           </table>
@@ -301,5 +343,74 @@
     text-align: center;
     color: var(--text-dim);
     padding: 40px;
+  }
+
+  /* Progress bar (inline within detail-row) */
+  .progress-inline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    max-width: 200px;
+  }
+
+  .progress-bar-detail {
+    flex: 1;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .progress-fill-detail {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+
+  .progress-text-detail {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+
+  /* Expand button */
+  .expand-btn {
+    background: rgba(139, 92, 246, 0.2);
+    border: none;
+    color: #a78bfa;
+    font-size: 0.7rem;
+    padding: 1px 8px;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+
+  .expand-btn:hover {
+    background: rgba(139, 92, 246, 0.35);
+  }
+
+  /* Expanded output row */
+  .assignments-table .output-row td {
+    padding: 0 8px 8px 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  }
+
+  .agent-output {
+    margin: 0;
+    padding: 10px 14px;
+    background: rgba(0, 0, 0, 0.25);
+    border-radius: 8px;
+    font-size: 0.8rem;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 200px;
+    overflow-y: auto;
+    line-height: 1.5;
+  }
+
+  .dim-text {
+    color: var(--text-dim);
   }
 </style>

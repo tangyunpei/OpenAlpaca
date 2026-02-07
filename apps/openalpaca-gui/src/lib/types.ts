@@ -40,6 +40,7 @@ export interface TaskAgentAssignment {
   step_order: number | null;
   started_at: string | null;
   completed_at: string | null;
+  result_output: string | null;
 }
 
 export interface TaskDetailResponse {

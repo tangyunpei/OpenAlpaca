@@ -119,11 +119,15 @@ struct TaskInner {
     completed_at: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AssignmentDetail {
     agent_id: String,
     role: String,
     status: String,
+    #[serde(default)]
+    step_order: Option<i64>,
+    #[serde(default)]
+    result_output: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -244,7 +248,17 @@ async fn task_status(task_id: &str, format: OutputFormat) -> Result<()> {
             println!("{} {}", "Status:".dimmed(), status_color(&t.status));
             println!("{} {}", "Priority:".dimmed(), t.priority);
             if let (Some(cur), Some(total)) = (t.progress_current, t.progress_total) {
-                println!("{} {}/{}", "Progress:".dimmed(), cur, total);
+                let pct = if total > 0 { (cur * 100) / total } else { 0 };
+                let filled = (pct as usize) / 5; // 20-char bar
+                let empty = 20_usize.saturating_sub(filled);
+                println!(
+                    "{} [{}{}] {}/{}",
+                    "Progress:".dimmed(),
+                    "█".repeat(filled).green(),
+                    "░".repeat(empty),
+                    cur,
+                    total
+                );
             }
             if let Some(ref summary) = t.result_summary {
                 println!("{} {}", "Result:".dimmed(), summary);
@@ -260,14 +274,35 @@ async fn task_status(task_id: &str, format: OutputFormat) -> Result<()> {
             if let Some(ref assignments) = detail.assignments {
                 if !assignments.is_empty() {
                     println!();
-                    println!("{}", "Assigned Agents:".dimmed());
-                    for a in assignments {
+                    println!("{}", "Pipeline Steps:".dimmed());
+                    let mut sorted = assignments.clone();
+                    sorted.sort_by_key(|a| a.step_order.unwrap_or(0));
+                    for a in &sorted {
+                        let step_label = a
+                            .step_order
+                            .map(|s| format!("[{}]", s))
+                            .unwrap_or_else(|| "[-]".to_string());
                         println!(
-                            "  {} {} ({})",
+                            "  {} {} {} ({})",
+                            step_label.dimmed(),
                             status_color(&a.status),
                             a.agent_id,
                             a.role
                         );
+                        if let Some(ref output) = a.result_output {
+                            let mut lines = output.lines();
+                            let first_three: Vec<&str> = lines.by_ref().take(3).collect();
+                            let has_more = lines.next().is_some();
+                            let preview: String = first_three
+                                .iter()
+                                .map(|l| format!("    {}", l))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            println!("{}", preview.dimmed());
+                            if has_more {
+                                println!("    {}", "...".dimmed());
+                            }
+                        }
                     }
                 }
             }
