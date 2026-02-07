@@ -12,10 +12,12 @@
 //! - llm: Manage LLM settings, keys, and usage
 //! - chat: Chat with the Orchestrator
 
+mod chat_stream;
 mod client;
 mod commands;
 mod manager;
 mod output;
+mod repl;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
