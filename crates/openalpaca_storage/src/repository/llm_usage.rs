@@ -135,6 +135,68 @@ impl<'a> LlmUsageRepository<'a> {
         })
     }
 
+    /// Get all usage (no agent filter).
+    pub fn get_all_usage(&self, limit: usize) -> Result<Vec<LlmCallLog>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, timestamp, agent_id, task_id, provider, model, key_id, input_tokens, output_tokens, cost_usd, status, latency_ms, error_message
+                 FROM llm_call_log ORDER BY timestamp DESC LIMIT ?",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
+                Self::row_to_call_log(row)
+            })?;
+            let mut logs = Vec::new();
+            for row in rows {
+                logs.push(row?);
+            }
+            Ok(logs)
+        })
+    }
+
+    /// Get all daily usage (no agent filter).
+    pub fn get_all_daily_usage(&self, limit: usize) -> Result<Vec<LlmUsageDaily>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT date, agent_id, model, total_requests, total_input_tokens, total_output_tokens, total_cost_usd
+                 FROM llm_usage_daily ORDER BY date DESC LIMIT ?",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
+                Ok(LlmUsageDaily {
+                    date: row.get(0)?,
+                    agent_id: row.get(1)?,
+                    model: row.get(2)?,
+                    total_requests: row.get(3)?,
+                    total_input_tokens: row.get(4)?,
+                    total_output_tokens: row.get(5)?,
+                    total_cost_usd: row.get(6)?,
+                })
+            })?;
+            let mut usage = Vec::new();
+            for row in rows {
+                usage.push(row?);
+            }
+            Ok(usage)
+        })
+    }
+
+    /// Get usage filtered by key_id.
+    pub fn get_usage_by_key(&self, key_id: &str, limit: usize) -> Result<Vec<LlmCallLog>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, timestamp, agent_id, task_id, provider, model, key_id, input_tokens, output_tokens, cost_usd, status, latency_ms, error_message
+                 FROM llm_call_log WHERE key_id = ? ORDER BY timestamp DESC LIMIT ?",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![key_id, limit as i64], |row| {
+                Self::row_to_call_log(row)
+            })?;
+            let mut logs = Vec::new();
+            for row in rows {
+                logs.push(row?);
+            }
+            Ok(logs)
+        })
+    }
+
     /// Get daily usage for an agent.
     pub fn get_daily_usage(&self, agent_id: &str, limit: usize) -> Result<Vec<LlmUsageDaily>> {
         self.db.with_connection(|conn| {

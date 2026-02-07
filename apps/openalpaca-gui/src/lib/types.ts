@@ -285,3 +285,53 @@ export interface ChatStreamDoneData {
   tokens_out: number;
   duration_ms: number;
 }
+
+// ── Conversation types ────────────────────────────────────────────
+
+export interface Conversation {
+  id: string;
+  lane_key: string;
+  source: string;
+  title: string;
+  message_count: number;
+  last_message_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationsResponse {
+  conversations: Conversation[];
+}
+
+export interface ConversationMessagesResponse {
+  messages: ChatMessage[];
+  total: number;
+}
+
+// ── LLM Usage types ──────────────────────────────────────────────
+
+export interface LlmCallLog {
+  id: number;
+  timestamp: string;
+  agent_id: string | null;
+  task_id: string | null;
+  provider: string;
+  model: string;
+  key_id: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  status: string;
+  latency_ms: number | null;
+  error_message: string | null;
+}
+
+export interface LlmUsageDaily {
+  date: string;
+  agent_id: string;
+  model: string;
+  total_requests: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cost_usd: number;
+}

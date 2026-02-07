@@ -344,14 +344,36 @@ async fn main() -> Result<()> {
         db.clone(),
     ));
 
-    // Construct SecurityGate → SandboxManager → StubToolExecutor chain
+    // Build ToolRegistry with built-in tools + user-defined tools
+    let mut tool_registry = openalpaca_core::tools::ToolRegistry::new();
+
+    // Register built-in tools
+    for tool in openalpaca_core::tools::builtins::builtin_tools() {
+        tool_registry.register(tool);
+    }
+
+    // Load user tools from config/tools/*.toml
+    let tools_config_dir = std::env::current_dir()
+        .unwrap_or_default()
+        .join("config/tools");
+    for tool in openalpaca_core::tools::config::load_tools_from_dir(&tools_config_dir) {
+        info!("Registered custom tool: {}", tool.definition.name);
+        tool_registry.register(tool);
+    }
+    info!("Tool registry: {} tools loaded", tool_registry.count());
+
+    let tool_registry = Arc::new(tool_registry);
+
+    // Construct SecurityGate → SandboxManager → RegistryToolExecutor chain
     #[allow(deprecated)]
     let bus = ctx.bus.clone();
-    let stub_executor = std::sync::Arc::new(openalpaca_core::runner::StubToolExecutor);
-    let sandbox_manager = std::sync::Arc::new(
-        openalpaca_core::security::sandbox::SandboxManager::new(stub_executor, bus.clone()),
+    let registry_executor = Arc::new(
+        openalpaca_core::tools::RegistryToolExecutor::new(tool_registry.clone()),
     );
-    let security_gate = std::sync::Arc::new(
+    let sandbox_manager = Arc::new(
+        openalpaca_core::security::sandbox::SandboxManager::new(registry_executor, bus.clone()),
+    );
+    let security_gate = Arc::new(
         openalpaca_core::security::gate::SecurityGate::new(sandbox_manager),
     );
 
@@ -364,6 +386,7 @@ async fn main() -> Result<()> {
         llm_router,
         openalpaca_core::runner::LoopConfig::default(),
         security_gate,
+        tool_registry,
         Some(db.clone()),
     ));
     let handler = Arc::new(gateway_bridge::OrchestratorHandler::new(orchestrator));
@@ -475,6 +498,9 @@ async fn main() -> Result<()> {
         )
         .route("/v1/settings/llm/validate", post(routes::validate_key))
         .route("/v1/settings/llm/status", get(routes::get_key_status))
+        // LLM Usage routes (Phase 5.5.5)
+        .route("/v1/llm/usage", get(routes::get_llm_usage))
+        .route("/v1/llm/usage/daily", get(routes::get_llm_usage_daily))
         // Model discovery routes
         .route("/v1/models", get(routes::list_models))
         .route("/v1/models/refresh", post(routes::refresh_models))

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import ProviderConfig from "./ProviderConfig.svelte";
+  import UsagePanel from "./UsagePanel.svelte";
   import {
     llmSettings,
     settingsLoading,
@@ -26,6 +27,9 @@
   let orchConfig = $state<OrchestratorConfigResponse | null>(null);
   let models = $state<ModelEntry[]>([]);
   let refreshing = $state(false);
+
+  // Sub-tab: Config vs Usage
+  let settingsTab = $state<"config" | "usage">("config");
 
   // Edit mode state
   let editingOrchestrator = $state(false);
@@ -115,20 +119,36 @@
   }
 </script>
 
-<div class="controls">
-  <button onclick={() => { loadSettings(); loadOrchestratorConfig(); loadAvailableModels(); }} disabled={loading}>
-    {loading ? "Loading..." : "Refresh"}
-  </button>
-  <button onclick={refreshModels} disabled={refreshing} class="secondary">
-    {refreshing ? "Refreshing..." : "Refresh Models"}
-  </button>
+<div class="settings-tabs">
+  <button
+    class="filter-btn"
+    class:active={settingsTab === "config"}
+    onclick={() => (settingsTab = "config")}
+  >Configuration</button>
+  <button
+    class="filter-btn"
+    class:active={settingsTab === "usage"}
+    onclick={() => (settingsTab = "usage")}
+  >Usage</button>
 </div>
 
-{#if error}
-  <div class="settings-error">{error}</div>
-{/if}
+{#if settingsTab === "usage"}
+  <UsagePanel />
+{:else}
+  <div class="controls">
+    <button onclick={() => { loadSettings(); loadOrchestratorConfig(); loadAvailableModels(); }} disabled={loading}>
+      {loading ? "Loading..." : "Refresh"}
+    </button>
+    <button onclick={refreshModels} disabled={refreshing} class="secondary">
+      {refreshing ? "Refreshing..." : "Refresh Models"}
+    </button>
+  </div>
 
-{#if settings}
+  {#if error}
+    <div class="settings-error">{error}</div>
+  {/if}
+
+  {#if settings}
   <div class="orchestrator-info">
     <div class="panel-header">
       <h2>Orchestrator</h2>
@@ -232,8 +252,36 @@
     LLM not configured. Add a <code>config/llm.toml</code> file to get started.
   </div>
 {/if}
+{/if}
 
 <style>
+  .settings-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 16px;
+  }
+
+  .settings-tabs .filter-btn {
+    padding: 6px 20px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .settings-tabs .filter-btn.active {
+    background: var(--primary);
+    color: var(--text);
+    border-color: var(--accent);
+  }
+
+  .settings-tabs .filter-btn:hover:not(.active) {
+    background: rgba(255, 255, 255, 0.05);
+  }
+
   .controls {
     display: flex;
     gap: 10px;

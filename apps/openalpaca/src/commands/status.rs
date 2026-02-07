@@ -25,7 +25,7 @@ pub async fn run() -> Result<()> {
     // Get connection info
     let info = discovery::ConnectionInfo::from(&disc);
 
-    // Call health endpoint
+    // Call health endpoint (unauthenticated)
     let health_url = format!("{}/v1/health", info.base_url);
     let client = reqwest::Client::new();
 

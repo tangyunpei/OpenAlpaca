@@ -37,11 +37,12 @@ export async function sendMessage(req: ChatSendRequest): Promise<ChatSendRespons
 }
 
 /** GET /v1/chat/history — fetch conversation history */
-export async function getChatHistory(limit?: number, offset?: number): Promise<ChatHistoryResponse> {
+export async function getChatHistory(limit?: number, offset?: number, laneKey?: string): Promise<ChatHistoryResponse> {
   const conn = await ensureConnection();
   const params = new URLSearchParams();
   if (limit !== undefined) params.set("limit", String(limit));
   if (offset !== undefined) params.set("offset", String(offset));
+  if (laneKey !== undefined) params.set("lane_key", laneKey);
   const qs = params.toString();
 
   const response = await fetch(

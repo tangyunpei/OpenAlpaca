@@ -2,9 +2,10 @@ use crate::AppState;
 use axum::http::StatusCode;
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::IntoResponse,
 };
+use serde::Deserialize;
 use openalpaca_llm::settings_service::{
     AddKeyRequest, OrchestratorConfigResponse, ReorderKeysRequest,
     UpdateOrchestratorRequest, ValidateKeyRequest,
@@ -278,5 +279,73 @@ pub async fn update_orchestrator_config(
             settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e)
                 .into_response()
         }
+    }
+}
+
+// ── LLM Usage endpoints ──────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct LlmUsageQuery {
+    pub agent_id: Option<String>,
+    pub key_id: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LlmUsageDailyQuery {
+    pub agent_id: Option<String>,
+    pub date: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// GET /v1/llm/usage — query LLM call logs
+pub async fn get_llm_usage(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<LlmUsageQuery>,
+) -> impl IntoResponse {
+    let repo = openalpaca_storage::repository::LlmUsageRepository::new(&state.db);
+    let limit = query.limit.unwrap_or(50).min(1000);
+
+    let result = if let Some(ref agent_id) = query.agent_id {
+        repo.get_agent_usage(agent_id, limit)
+    } else if let Some(ref key_id) = query.key_id {
+        repo.get_usage_by_key(key_id, limit)
+    } else {
+        repo.get_all_usage(limit)
+    };
+
+    match result {
+        Ok(logs) => (StatusCode::OK, Json(serde_json::to_value(logs).unwrap())).into_response(),
+        Err(e) => settings_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "USAGE_QUERY_FAILED",
+            &e.to_string(),
+        )
+        .into_response(),
+    }
+}
+
+/// GET /v1/llm/usage/daily — query daily usage aggregates
+pub async fn get_llm_usage_daily(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<LlmUsageDailyQuery>,
+) -> impl IntoResponse {
+    let repo = openalpaca_storage::repository::LlmUsageRepository::new(&state.db);
+    let limit = query.limit.unwrap_or(30).min(365);
+
+    let result = if let Some(ref agent_id) = query.agent_id {
+        repo.get_daily_usage(agent_id, limit)
+    } else {
+        repo.get_all_daily_usage(limit)
+    };
+
+    match result {
+        Ok(usage) => (StatusCode::OK, Json(serde_json::to_value(usage).unwrap())).into_response(),
+        Err(e) => settings_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "USAGE_QUERY_FAILED",
+            &e.to_string(),
+        )
+        .into_response(),
     }
 }

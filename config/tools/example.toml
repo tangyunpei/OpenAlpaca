@@ -1,0 +1,21 @@
+# Example custom tool configuration.
+# Uncomment and modify to add your own tools.
+# Add the tool's name to an agent's [skills].assigned list to enable it.
+
+# [[tools]]
+# name = "weather_lookup"
+# description = "Get current weather for a city or coordinates"
+#
+# [tools.parameters]
+# type = "object"
+# required = ["location"]
+#
+# [tools.parameters.properties.location]
+# type = "string"
+# description = "City name or lat,lon coordinates"
+#
+# [tools.backend]
+# type = "http"
+# url = "https://api.weatherapi.com/v1/current.json?q={location}"
+# method = "GET"
+# timeout_secs = 10

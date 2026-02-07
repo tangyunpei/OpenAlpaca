@@ -15,6 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::tools::ToolRegistry;
+
 use super::skill_matcher::{SkillMatch, SkillMatcher};
 use super::task_planner::TaskPlan;
 
@@ -26,6 +28,7 @@ pub struct TaskDispatcher {
     skill_matcher: SkillMatcher,
     llm_router: Option<Arc<LlmRouter>>,
     security_gate: Arc<SecurityGate>,
+    tool_registry: Arc<ToolRegistry>,
     db: Option<Database>,
 }
 
@@ -36,6 +39,7 @@ impl TaskDispatcher {
         bus: EventBus,
         llm_router: Option<Arc<LlmRouter>>,
         security_gate: Arc<SecurityGate>,
+        tool_registry: Arc<ToolRegistry>,
         db: Option<Database>,
     ) -> Self {
         Self {
@@ -45,6 +49,7 @@ impl TaskDispatcher {
             skill_matcher: SkillMatcher,
             llm_router,
             security_gate,
+            tool_registry,
             db,
         }
     }
@@ -244,6 +249,7 @@ impl TaskDispatcher {
         let ctx = self.shared_context.clone();
         let db = self.db.clone();
         let security_gate = self.security_gate.clone();
+        let tool_registry = self.tool_registry.clone();
         let agent_id = agent.id.clone();
 
         tokio::spawn(async move {
@@ -290,7 +296,15 @@ impl TaskDispatcher {
                 ChatMessage::user(&description),
             ];
 
-            // 5. Run agentic loop
+            // 5. Resolve tool definitions from agent's assigned skills
+            let skill_names: Vec<String> = agent.skills.iter().map(|s| s.name.clone()).collect();
+            let tools = tool_registry.definitions_for_skills(&skill_names);
+            tracing::info!(
+                "Agent '{}' loaded {} tool definitions for skills: {:?}",
+                agent_id, tools.len(), skill_names
+            );
+
+            // 6. Run agentic loop
             tracing::info!(
                 "Starting agentic loop for agent '{}' on task '{}'",
                 agent_id, task_id
@@ -299,7 +313,7 @@ impl TaskDispatcher {
             let result = run_agentic_loop_routed(
                 router.as_ref(),
                 messages,
-                vec![], // Tools will be provided by the sandbox
+                tools,
                 &loop_config,
                 Some(security_gate.sandbox()),
                 &agent_id,
@@ -519,10 +533,11 @@ mod tests {
         }
         let lane_mgr = Arc::new(LaneManager::new());
         let bus = EventBus::default();
-        let stub_executor = Arc::new(crate::runner::StubToolExecutor);
-        let sandbox = Arc::new(crate::security::sandbox::SandboxManager::new(stub_executor, bus.clone()));
+        let tool_registry = Arc::new(crate::tools::ToolRegistry::new());
+        let executor = Arc::new(crate::tools::RegistryToolExecutor::new(tool_registry.clone()));
+        let sandbox = Arc::new(crate::security::sandbox::SandboxManager::new(executor, bus.clone()));
         let gate = Arc::new(crate::security::gate::SecurityGate::new(sandbox));
-        TaskDispatcher::new(ctx, lane_mgr, bus, None, gate, None)
+        TaskDispatcher::new(ctx, lane_mgr, bus, None, gate, tool_registry, None)
     }
 
     #[test]

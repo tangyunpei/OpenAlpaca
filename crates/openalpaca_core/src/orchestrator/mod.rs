@@ -17,6 +17,7 @@ use crate::middleware::prompt::{AgentPersona, PromptAssembler, SystemPersona};
 use crate::runner::{LoopConfig, run_agentic_loop_routed};
 use crate::security::gate::SecurityGate;
 use crate::security::policy::{Principal, Scope};
+use crate::tools::ToolRegistry;
 use crate::types::Capability;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter};
@@ -43,6 +44,7 @@ pub struct Orchestrator {
     pub llm_router: Option<Arc<LlmRouter>>,
     pub loop_config: LoopConfig,
     pub security_gate: Arc<SecurityGate>,
+    pub tool_registry: Arc<ToolRegistry>,
     intent_parser: IntentParser,
     task_dispatcher: TaskDispatcher,
     db: Option<Database>,
@@ -59,6 +61,7 @@ impl Orchestrator {
         llm_router: Option<Arc<LlmRouter>>,
         loop_config: LoopConfig,
         security_gate: Arc<SecurityGate>,
+        tool_registry: Arc<ToolRegistry>,
         db: Option<Database>,
     ) -> Self {
         let task_dispatcher = TaskDispatcher::new(
@@ -67,6 +70,7 @@ impl Orchestrator {
             bus.clone(),
             llm_router.clone(),
             security_gate.clone(),
+            tool_registry.clone(),
             db.clone(),
         );
         Self {
@@ -77,6 +81,7 @@ impl Orchestrator {
             llm_router,
             loop_config,
             security_gate,
+            tool_registry,
             intent_parser: IntentParser,
             task_dispatcher,
             db,
@@ -427,14 +432,17 @@ fn task_entry_to_json(entry: &TaskEntry) -> String {
 mod tests {
     use super::*;
     use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent};
-    use crate::runner::StubToolExecutor;
     use crate::security::sandbox::SandboxManager;
+    use crate::tools::{RegistryToolExecutor, ToolRegistry};
+
+    fn make_tool_registry() -> Arc<ToolRegistry> {
+        Arc::new(ToolRegistry::new())
+    }
 
     fn make_security_gate(bus: &EventBus) -> Arc<SecurityGate> {
-        let sandbox = Arc::new(SandboxManager::new(
-            Arc::new(StubToolExecutor),
-            bus.clone(),
-        ));
+        let registry = make_tool_registry();
+        let executor = Arc::new(RegistryToolExecutor::new(registry));
+        let sandbox = Arc::new(SandboxManager::new(executor, bus.clone()));
         Arc::new(SecurityGate::new(sandbox))
     }
 
@@ -443,6 +451,7 @@ mod tests {
         let lanes = Arc::new(LaneManager::new());
         let bus = EventBus::default();
         let gate = make_security_gate(&bus);
+        let registry = make_tool_registry();
         Orchestrator::new(
             ctx,
             lanes,
@@ -451,6 +460,7 @@ mod tests {
             None,
             LoopConfig::default(),
             gate,
+            registry,
             None,
         )
     }
@@ -463,6 +473,7 @@ mod tests {
         let lanes = Arc::new(LaneManager::new());
         let bus = EventBus::default();
         let gate = make_security_gate(&bus);
+        let registry = make_tool_registry();
         Orchestrator::new(
             ctx,
             lanes,
@@ -471,6 +482,7 @@ mod tests {
             None,
             LoopConfig::default(),
             gate,
+            registry,
             None,
         )
     }
@@ -678,6 +690,7 @@ mod tests {
         let lanes = Arc::new(LaneManager::new());
         let bus = EventBus::default();
         let gate = make_security_gate(&bus);
+        let registry = make_tool_registry();
         let router = LlmRouter::single_provider(
             Arc::new(MockLlm),
             ProviderType::Anthropic,
@@ -691,6 +704,7 @@ mod tests {
             Some(Arc::new(router)),
             LoopConfig::default(),
             gate,
+            registry,
             None,
         );
 
@@ -808,6 +822,7 @@ mod tests {
         let lanes = Arc::new(LaneManager::new());
         let bus = EventBus::default();
         let gate = make_security_gate(&bus);
+        let registry = make_tool_registry();
         Orchestrator::new(
             ctx,
             lanes,
@@ -816,6 +831,7 @@ mod tests {
             Some(router),
             LoopConfig::default(),
             gate,
+            registry,
             None,
         )
     }

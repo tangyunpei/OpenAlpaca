@@ -6,9 +6,16 @@
 //! - daemon: Manage daemon process (start/stop/status/tail)
 //! - config: Manage system configuration
 //! - gui: Manage GUI process
+//! - connector: Manage platform connectors
+//! - tasks: Manage tasks (list, status, create, cancel, pause, resume)
+//! - agents: Manage agents (list, status, config, create, remove)
+//! - llm: Manage LLM settings, keys, and usage
+//! - chat: Chat with the Orchestrator
 
+mod client;
 mod commands;
 mod manager;
+mod output;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -34,6 +41,18 @@ enum Commands {
 
     /// Manage platform connectors (Telegram, etc.)
     Connector(commands::connector::ConnectorArgs),
+
+    /// Manage tasks (list, status, create, cancel, pause, resume)
+    Tasks(commands::tasks::TasksArgs),
+
+    /// Manage agents (list, status, config, create, remove)
+    Agents(commands::agents::AgentsArgs),
+
+    /// Manage LLM settings, keys, and usage
+    Llm(commands::llm::LlmArgs),
+
+    /// Chat with the Orchestrator
+    Chat(commands::chat::ChatArgs),
 }
 
 #[tokio::main]
@@ -45,5 +64,9 @@ async fn main() -> Result<()> {
         Commands::Config(args) => commands::config::run(args).await,
         Commands::Gui(args) => commands::gui::run(args).await,
         Commands::Connector(args) => commands::connector::run(args).await,
+        Commands::Tasks(args) => commands::tasks::run(args).await,
+        Commands::Agents(args) => commands::agents::run(args).await,
+        Commands::Llm(args) => commands::llm::run(args).await,
+        Commands::Chat(args) => commands::chat::run(args).await,
     }
 }

@@ -1,6 +1,10 @@
+pub mod agents;
+pub mod chat;
 pub mod config;
 pub mod connector;
 pub mod daemon;
 pub mod gui;
+pub mod llm;
 pub mod status;
 pub mod tail;
+pub mod tasks;

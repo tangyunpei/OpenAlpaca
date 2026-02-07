@@ -17,6 +17,7 @@
   import TaskPanel from "$lib/components/TaskPanel.svelte";
   import AgentPanel from "$lib/components/AgentPanel.svelte";
   import SettingsPanel from "$lib/components/SettingsPanel.svelte";
+  import ConversationsPanel from "$lib/components/ConversationsPanel.svelte";
   import ChatPanel from "$lib/components/ChatPanel.svelte";
 
   import { loadTasks, subscribeToTaskEvents } from "$lib/stores/tasks";
@@ -40,6 +41,7 @@
     { id: "connectors", label: "Connectors" },
     { id: "tasks", label: "Tasks" },
     { id: "agents", label: "Agents" },
+    { id: "conversations", label: "Conversations" },
     { id: "settings", label: "Settings" },
   ];
 
@@ -114,6 +116,8 @@
           <TaskPanel />
         {:else if activeTab === "agents"}
           <AgentPanel />
+        {:else if activeTab === "conversations"}
+          <ConversationsPanel />
         {:else if activeTab === "settings"}
           <SettingsPanel bind:this={settingsPanel} />
         {/if}

@@ -12,6 +12,7 @@ pub mod runner;
 pub mod runtime;
 pub mod security;
 pub mod supervisor;
+pub mod tools;
 pub mod types;
 
 // Placeholder to ensure compilation while modules are empty

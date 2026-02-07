@@ -3196,6 +3196,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tokio",
+ "tokio-stream",
  "tokio-tungstenite 0.26.2",
  "urlencoding",
 ]
@@ -3242,6 +3243,7 @@ dependencies = [
  "openalpaca_llm",
  "openalpaca_storage",
  "regex",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",
