@@ -93,6 +93,7 @@ toml = "0.8"
 dashmap = "6"
 which = "7"
 tokio-util = { version = "0.7", features = ["rt"] }
+rustyline = "17"
 
 # middleware
 regex = "1.11.1"

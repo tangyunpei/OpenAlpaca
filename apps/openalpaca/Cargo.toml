@@ -27,6 +27,7 @@ nix.workspace = true
 sysinfo.workspace = true
 log.workspace = true
 env_logger.workspace = true
+rustyline.workspace = true
 
 # Workspace crates
 openalpaca_storage = { workspace = true }
