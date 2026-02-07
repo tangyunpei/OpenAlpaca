@@ -104,8 +104,13 @@ pub struct ChatResponse {
 
 #[derive(Debug, Clone, Default)]
 pub struct Usage {
+    /// Total input tokens (includes cache tokens for Anthropic).
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Anthropic: tokens used to create a new prompt cache entry (subset of input_tokens).
+    pub cache_creation_input_tokens: u32,
+    /// Anthropic: tokens served from an existing prompt cache (subset of input_tokens).
+    pub cache_read_input_tokens: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]

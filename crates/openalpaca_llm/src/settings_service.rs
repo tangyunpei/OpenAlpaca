@@ -373,6 +373,18 @@ impl LlmSettingsService {
         self.router.available_models()
     }
 
+    /// List ALL registered models with pricing (not just API-discovered ones).
+    /// Returns defaults + discovered models. Useful for pricing/billing UI.
+    pub fn all_models_with_pricing(&self) -> Vec<crate::model_registry::ModelEntry> {
+        self.router.model_registry().list_models()
+    }
+
+    /// Estimate cost for a given model and token count.
+    /// Returns estimated USD cost. Falls back to Sonnet-like pricing for unknown models.
+    pub fn estimate_cost(&self, model: &str, input_tokens: u32, output_tokens: u32) -> f64 {
+        self.router.cost_tracker.calculate_cost(model, input_tokens, output_tokens)
+    }
+
     /// Refresh models by querying each configured provider's API.
     pub async fn refresh_models(&self) {
         self.router.refresh_models().await;

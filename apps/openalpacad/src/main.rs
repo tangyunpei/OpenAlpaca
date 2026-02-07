@@ -206,7 +206,7 @@ async fn main() -> Result<()> {
                 openalpaca_core::events::SystemEvent::LlmCallCompleted {
                     agent_id, model, input_tokens, output_tokens, cost_usd, ..
                 } => {
-                    tracing::debug!(
+                    tracing::info!(
                         "LLM call: agent={}, model={}, tokens={}/{}, cost=${:.6}",
                         agent_id, model, input_tokens, output_tokens, cost_usd
                     );
@@ -501,6 +501,9 @@ async fn main() -> Result<()> {
         // LLM Usage routes (Phase 5.5.5)
         .route("/v1/llm/usage", get(routes::get_llm_usage))
         .route("/v1/llm/usage/daily", get(routes::get_llm_usage_daily))
+        // Pricing routes
+        .route("/v1/llm/pricing", get(routes::get_llm_pricing))
+        .route("/v1/llm/pricing/estimate", get(routes::estimate_cost))
         // Model discovery routes
         .route("/v1/models", get(routes::list_models))
         .route("/v1/models/refresh", post(routes::refresh_models))

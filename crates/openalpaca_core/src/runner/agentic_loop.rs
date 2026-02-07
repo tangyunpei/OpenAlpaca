@@ -38,6 +38,8 @@ pub struct LoopResult {
     pub total_output_tokens: u32,
     pub tool_calls_made: usize,
     pub finish_reason: LoopFinishReason,
+    /// Actual model from API response (may differ from requested due to fallback).
+    pub model_used: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,6 +70,7 @@ pub async fn run_agentic_loop(
     let mut total_output = 0u32;
     let mut tool_calls_made = 0usize;
     let mut last_assistant_content = String::new();
+    let mut last_model: Option<String> = None;
 
     loop {
         if rounds >= config.max_rounds {
@@ -78,6 +81,7 @@ pub async fn run_agentic_loop(
                 total_output_tokens: total_output,
                 tool_calls_made,
                 finish_reason: LoopFinishReason::MaxRounds,
+                model_used: last_model.clone(),
             };
         }
 
@@ -90,6 +94,7 @@ pub async fn run_agentic_loop(
                 total_output_tokens: total_output,
                 tool_calls_made,
                 finish_reason: LoopFinishReason::CostExceeded,
+                model_used: last_model.clone(),
             };
         }
 
@@ -106,6 +111,7 @@ pub async fn run_agentic_loop(
                 total_input += response.usage.input_tokens;
                 total_output += response.usage.output_tokens;
                 rounds += 1;
+                last_model = Some(response.model.clone());
 
                 // Capture last content before any branching
                 if !response.content.is_empty() {
@@ -159,6 +165,7 @@ pub async fn run_agentic_loop(
                     total_output_tokens: total_output,
                     tool_calls_made,
                     finish_reason: LoopFinishReason::Complete,
+                    model_used: last_model.clone(),
                 };
             }
             Err(e) => {
@@ -169,6 +176,7 @@ pub async fn run_agentic_loop(
                     total_output_tokens: total_output,
                     tool_calls_made,
                     finish_reason: LoopFinishReason::Error(e.to_string()),
+                    model_used: last_model.clone(),
                 };
             }
         }
@@ -196,6 +204,7 @@ pub async fn run_agentic_loop_routed(
     let mut total_output = 0u32;
     let mut tool_calls_made = 0usize;
     let mut last_assistant_content = String::new();
+    let mut last_model: Option<String> = None;
 
     let context = RequestContext {
         agent_id: Some(agent_id.to_string()),
@@ -211,6 +220,7 @@ pub async fn run_agentic_loop_routed(
                 total_output_tokens: total_output,
                 tool_calls_made,
                 finish_reason: LoopFinishReason::MaxRounds,
+                model_used: last_model.clone(),
             };
         }
 
@@ -225,6 +235,7 @@ pub async fn run_agentic_loop_routed(
                 total_output_tokens: total_output,
                 tool_calls_made,
                 finish_reason: LoopFinishReason::CostExceeded,
+                model_used: last_model.clone(),
             };
         }
 
@@ -238,6 +249,7 @@ pub async fn run_agentic_loop_routed(
                 total_output_tokens: total_output,
                 tool_calls_made,
                 finish_reason: LoopFinishReason::CostExceeded,
+                model_used: last_model.clone(),
             };
         }
 
@@ -255,6 +267,7 @@ pub async fn run_agentic_loop_routed(
                 total_input += response.usage.input_tokens;
                 total_output += response.usage.output_tokens;
                 rounds += 1;
+                last_model = Some(response.model.clone());
 
                 // Capture last content before any branching
                 if !response.content.is_empty() {
@@ -303,6 +316,7 @@ pub async fn run_agentic_loop_routed(
                     total_output_tokens: total_output,
                     tool_calls_made,
                     finish_reason: LoopFinishReason::Complete,
+                    model_used: last_model.clone(),
                 };
             }
             Err(e) => {
@@ -313,6 +327,7 @@ pub async fn run_agentic_loop_routed(
                     total_output_tokens: total_output,
                     tool_calls_made,
                     finish_reason: LoopFinishReason::Error(e.to_string()),
+                    model_used: last_model.clone(),
                 };
             }
         }
@@ -353,6 +368,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    ..Default::default()
                 },
                 finish_reason: FinishReason::Stop,
             }
@@ -370,6 +386,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 20,
                     output_tokens: 15,
+                    ..Default::default()
                 },
                 finish_reason: FinishReason::ToolUse,
             }
@@ -387,6 +404,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 100_000,
                     output_tokens: 50_000,
+                    ..Default::default()
                 },
                 finish_reason: FinishReason::ToolUse,
             }
@@ -645,6 +663,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 20,
                 output_tokens: 15,
+                ..Default::default()
             },
             finish_reason: FinishReason::ToolUse,
         };

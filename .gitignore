@@ -93,3 +93,10 @@ apps/openalpaca-gui/src-tauri/gen/
 .claude/
 .claude/*   config/.master_key
 config/llm.toml
+
+# ============================================
+# Markdown Documentation (Except Manuals)
+# ============================================
+*.md
+!docs/CLI_Manual.md
+!docs/GUI_Manual.md

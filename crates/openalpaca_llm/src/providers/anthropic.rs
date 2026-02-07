@@ -133,9 +133,15 @@ impl AnthropicProvider {
             .unwrap_or(&self.model)
             .to_string();
 
+        let base_input = body["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
+        let cache_creation = body["usage"]["cache_creation_input_tokens"].as_u64().unwrap_or(0) as u32;
+        let cache_read = body["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0) as u32;
+
         let usage = Usage {
-            input_tokens: body["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32,
+            input_tokens: base_input + cache_creation + cache_read,
             output_tokens: body["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32,
+            cache_creation_input_tokens: cache_creation,
+            cache_read_input_tokens: cache_read,
         };
 
         let stop_reason = body["stop_reason"].as_str().unwrap_or("end_turn");
@@ -371,6 +377,59 @@ mod tests {
         assert_eq!(response.tool_calls[0].name, "web_search");
         assert_eq!(response.tool_calls[0].arguments["query"], "Rust programming");
         assert_eq!(response.finish_reason, FinishReason::ToolUse);
+    }
+
+    #[test]
+    fn test_cache_tokens_included_in_total() {
+        let provider = AnthropicProvider::new("test-key".to_string(), None, None);
+        let response_json = serde_json::json!({
+            "id": "msg_cache",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5-20250929",
+            "content": [
+                {"type": "text", "text": "Cached response"}
+            ],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 50,
+                "output_tokens": 20,
+                "cache_creation_input_tokens": 1500,
+                "cache_read_input_tokens": 300
+            }
+        });
+
+        let response = provider.parse_response(response_json).unwrap();
+        // input_tokens should include base + cache_creation + cache_read
+        assert_eq!(response.usage.input_tokens, 50 + 1500 + 300);
+        assert_eq!(response.usage.output_tokens, 20);
+        assert_eq!(response.usage.cache_creation_input_tokens, 1500);
+        assert_eq!(response.usage.cache_read_input_tokens, 300);
+    }
+
+    #[test]
+    fn test_no_cache_tokens_unchanged() {
+        let provider = AnthropicProvider::new("test-key".to_string(), None, None);
+        let response_json = serde_json::json!({
+            "id": "msg_nocache",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5-20250929",
+            "content": [
+                {"type": "text", "text": "No cache"}
+            ],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 30
+            }
+        });
+
+        let response = provider.parse_response(response_json).unwrap();
+        // Without cache tokens, input_tokens stays as-is
+        assert_eq!(response.usage.input_tokens, 100);
+        assert_eq!(response.usage.cache_creation_input_tokens, 0);
+        assert_eq!(response.usage.cache_read_input_tokens, 0);
     }
 
     #[test]

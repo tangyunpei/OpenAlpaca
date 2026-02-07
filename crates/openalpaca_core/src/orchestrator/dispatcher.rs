@@ -11,6 +11,7 @@ use crate::security::sandbox::SandboxPolicy;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter};
 use openalpaca_storage::{ConversationMessage, ConversationRepository, Database};
+use openalpaca_storage::repository::LlmUsageRepository;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -466,6 +467,58 @@ impl TaskDispatcher {
                 // Accumulate token metrics
                 total_input_tokens += result.total_input_tokens;
                 total_output_tokens += result.total_output_tokens;
+
+                // Persist LLM usage to DB and emit event (regardless of success/failure)
+                let actual_model = result.model_used.as_deref()
+                    .or(loop_config.model.as_deref())
+                    .unwrap_or(router.default_model());
+                let resolved_provider = router.model_registry()
+                    .resolve_provider(actual_model)
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let call_cost = router.cost_tracker.calculate_cost(
+                    actual_model,
+                    result.total_input_tokens,
+                    result.total_output_tokens,
+                );
+                let call_latency_ms = agent_start.elapsed().as_millis() as i64;
+
+                let call_status = match &result.finish_reason {
+                    LoopFinishReason::Complete | LoopFinishReason::MaxRounds => "success",
+                    LoopFinishReason::CostExceeded => "cost_exceeded",
+                    LoopFinishReason::Error(_) => "error",
+                };
+                let call_error = match &result.finish_reason {
+                    LoopFinishReason::Error(msg) => Some(msg.as_str()),
+                    _ => None,
+                };
+
+                if let Some(ref db) = db {
+                    let usage_repo = LlmUsageRepository::new(db);
+                    if let Err(e) = usage_repo.record_and_log(
+                        agent_id,
+                        Some(&task_id),
+                        &resolved_provider,
+                        actual_model,
+                        result.total_input_tokens as i32,
+                        result.total_output_tokens as i32,
+                        call_cost,
+                        call_latency_ms,
+                        call_status,
+                        call_error,
+                    ) {
+                        tracing::warn!("Failed to persist LLM usage: {e}");
+                    }
+                }
+
+                bus.publish(SystemEvent::LlmCallCompleted {
+                    agent_id: agent_id.clone(),
+                    model: actual_model.to_string(),
+                    input_tokens: result.total_input_tokens,
+                    output_tokens: result.total_output_tokens,
+                    cost_usd: call_cost,
+                    timestamp: Utc::now(),
+                });
 
                 // Assignment → Completed or Failed
                 if let (Some(db), Some(assign_id)) = (&db, assignment_id) {
