@@ -9,33 +9,21 @@
   let displayedTasks = $state<Task[]>([]);
   let selectedTaskId = $state<string | null>(null);
 
-  const unsubActive = activeTasks.subscribe((v) => {
-    if (filter === "active") displayedTasks = v;
+  // Single $effect manages subscription lifecycle — cleans up on filter change or destroy
+  $effect(() => {
+    const store = filter === "active" ? activeTasks : completedTasks;
+    const unsub = store.subscribe((v) => (displayedTasks = v));
+    return unsub;
   });
-  const unsubCompleted = completedTasks.subscribe((v) => {
-    if (filter === "completed") displayedTasks = v;
+
+  $effect(() => {
+    const unsub = tasksLoading.subscribe((v) => (loading = v));
+    return unsub;
   });
-  const unsubLoading = tasksLoading.subscribe((v) => (loading = v));
 
   function setFilter(f: "active" | "completed") {
     filter = f;
-    if (f === "active") {
-      activeTasks.subscribe((v) => (displayedTasks = v))();
-    } else {
-      completedTasks.subscribe((v) => (displayedTasks = v))();
-    }
   }
-
-  // Reactively update displayedTasks when filter changes or store updates
-  $effect(() => {
-    if (filter === "active") {
-      const unsub = activeTasks.subscribe((v) => (displayedTasks = v));
-      return unsub;
-    } else {
-      const unsub = completedTasks.subscribe((v) => (displayedTasks = v));
-      return unsub;
-    }
-  });
 
   async function refresh() {
     await loadTasks();

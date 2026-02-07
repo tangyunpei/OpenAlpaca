@@ -75,8 +75,18 @@ fn spawn_daemon() -> anyhow::Result<()> {
     let path_to_use = if daemon_path.exists() {
         daemon_path
     } else {
-        // Fallback: assume it's in PATH
-        std::path::PathBuf::from(daemon_name)
+        #[cfg(debug_assertions)]
+        {
+            // Dev convenience: fall back to PATH
+            std::path::PathBuf::from(daemon_name)
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            anyhow::bail!(
+                "Daemon binary not found at {}. The application may be incorrectly installed.",
+                daemon_path.display()
+            );
+        }
     };
 
     tracing::info!("Spawning daemon: {}", path_to_use.display());
@@ -126,7 +136,6 @@ fn spawn_daemon() -> anyhow::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_connection_info,
             ensure_daemon_running

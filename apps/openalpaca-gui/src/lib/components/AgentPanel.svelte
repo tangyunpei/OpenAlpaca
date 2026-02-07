@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { agentList, loadAgents, agentsLoading } from "$lib/stores/agents";
   import type { Agent } from "$lib/types";
   import AgentCard from "./AgentCard.svelte";
@@ -12,6 +13,11 @@
 
   const unsubAgents = agentList.subscribe((v) => (agents = v));
   const unsubLoading = agentsLoading.subscribe((v) => (loading = v));
+
+  onDestroy(() => {
+    unsubAgents();
+    unsubLoading();
+  });
 
   async function refresh() {
     await loadAgents();

@@ -161,7 +161,7 @@
       <h3>Configure {configTargetId}</h3>
       <p>Enter the authentication token for this connector.</p>
       <input
-        type="text"
+        type="password"
         bind:value={configToken}
         placeholder="Token (e.g. 12345:ABC...)"
         class="token-input"

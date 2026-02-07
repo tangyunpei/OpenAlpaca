@@ -17,18 +17,18 @@ export interface ConnectionInfo {
 
 /** Server event types from daemon — discriminated union matching Rust ServerEvent enum */
 export type ServerEvent =
-  | { type: "heartbeat"; ts: string; instance_id: string }
-  | { type: "log"; level: string; message: string; ts: string; instance_id: string }
-  | { type: "command_received"; request_id: string; command: string; ts: string; instance_id: string }
-  | { type: "wake"; wake: unknown; ts: string; instance_id: string }
-  | { type: "connector_status"; id: string; status: string; ts: string; instance_id: string }
-  | { type: "task_status"; task_id: string; title: string; status: string; progress_current: number | null; progress_total: number | null; result_summary: string | null; ts: string; instance_id: string }
-  | { type: "agent_status"; agent_id: string; name: string; status: string; current_task_id: string | null; ts: string; instance_id: string }
-  | { type: "key_status_changed"; provider: string; key_id: string; status: string; ts: string; instance_id: string }
-  | { type: "chat_stream_started"; stream_id: string; lane_key: string; ts: string; instance_id: string }
-  | { type: "chat_stream_ended"; stream_id: string; lane_key: string; status: string; ts: string; instance_id: string }
-  | { type: "agent_config_changed"; agent_id: string; action: string; config_version: number; ts: string; instance_id: string }
-  | { type: "orchestrator_config_changed"; model: string; ts: string; instance_id: string };
+  | { type: "heartbeat"; ts: string; instance_id: string; _id: number }
+  | { type: "log"; level: string; message: string; ts: string; instance_id: string; _id: number }
+  | { type: "command_received"; request_id: string; command: string; ts: string; instance_id: string; _id: number }
+  | { type: "wake"; wake: unknown; ts: string; instance_id: string; _id: number }
+  | { type: "connector_status"; id: string; status: string; ts: string; instance_id: string; _id: number }
+  | { type: "task_status"; task_id: string; title: string; status: string; progress_current: number | null; progress_total: number | null; result_summary: string | null; ts: string; instance_id: string; _id: number }
+  | { type: "agent_status"; agent_id: string; name: string; status: string; current_task_id: string | null; ts: string; instance_id: string; _id: number }
+  | { type: "key_status_changed"; provider: string; key_id: string; status: string; ts: string; instance_id: string; _id: number }
+  | { type: "chat_stream_started"; stream_id: string; lane_key: string; ts: string; instance_id: string; _id: number }
+  | { type: "chat_stream_ended"; stream_id: string; lane_key: string; status: string; ts: string; instance_id: string; _id: number }
+  | { type: "agent_config_changed"; agent_id: string; action: string; config_version: number; ts: string; instance_id: string; _id: number }
+  | { type: "orchestrator_config_changed"; model: string; ts: string; instance_id: string; _id: number };
 
 /** Connection state */
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "error";
@@ -48,108 +48,147 @@ export const errorMessage: Writable<string | null> = writable(null);
 let ws: WebSocket | null = null;
 let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 let currentInstanceId: string | null = null;
+let reconnectEnabled = true;
+let backoffMs = 1000;
+let nextEventId = 0;
+
+const BACKOFF_BASE = 1000;
+const BACKOFF_MAX = 30000;
+
+/**
+ * Tear down the current WebSocket connection.
+ * Nulls handlers BEFORE calling close() to prevent onclose → scheduleReconnect.
+ */
+function teardownWebSocket(): void {
+  if (ws) {
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onerror = null;
+    ws.onclose = null;
+    ws.close();
+    ws = null;
+  }
+}
+
+/**
+ * Set up standard WS event handlers on the given WebSocket.
+ */
+function setupWsHandlers(socket: WebSocket): void {
+  socket.onopen = () => {
+    connectionState.set("connected");
+    errorMessage.set(null);
+    backoffMs = BACKOFF_BASE; // reset backoff on successful connect
+    console.log("[daemon] WebSocket connected");
+  };
+
+  socket.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      data._id = nextEventId++;
+      events.update((list) => {
+        const updated = [data as ServerEvent, ...list];
+        return updated.slice(0, 100);
+      });
+    } catch (e) {
+      console.error("[daemon] Failed to parse event:", e);
+    }
+  };
+
+  socket.onerror = () => {
+    connectionState.set("error");
+    errorMessage.set("WebSocket connection error");
+  };
+
+  socket.onclose = () => {
+    connectionState.set("disconnected");
+    console.log("[daemon] WebSocket closed");
+    if (reconnectEnabled) {
+      scheduleReconnect();
+    }
+  };
+}
 
 /**
  * Connect to daemon's WebSocket events endpoint
  */
 export async function connectToDaemon(): Promise<void> {
-  connectionState.set("connecting");
-  errorMessage.set(null);
-
-  try {
-    // Ensure daemon is running and get connection info
-    const info: ConnectionInfo = await invoke("ensure_daemon_running");
-    connectionInfo.set(info);
-    currentInstanceId = info.instanceId;
-
-    // Connect to WebSocket
-    const wsUrl = info.baseUrl.replace("http", "ws");
-    ws = new WebSocket(`${wsUrl}/v1/events?token=${encodeURIComponent(info.token)}`);
-
-    ws.onopen = () => {
-      connectionState.set("connected");
-      errorMessage.set(null);
-      console.log("[daemon] WebSocket connected");
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const data: ServerEvent = JSON.parse(event.data);
-        events.update((list) => {
-          const updated = [data, ...list];
-          // Keep last 100 events
-          return updated.slice(0, 100);
-        });
-      } catch (e) {
-        console.error("[daemon] Failed to parse event:", e);
-      }
-    };
-
-    ws.onerror = () => {
-      connectionState.set("error");
-      errorMessage.set("WebSocket connection error");
-    };
-
-    ws.onclose = async () => {
-      connectionState.set("disconnected");
-      console.log("[daemon] WebSocket closed");
-      scheduleReconnect();
-    };
-  } catch (e) {
-    connectionState.set("error");
-    errorMessage.set(String(e));
-    scheduleReconnect();
-  }
-}
-
-/**
- * Disconnect from daemon
- */
-export function disconnect(): void {
+  teardownWebSocket();
   if (reconnectTimeout) {
     clearTimeout(reconnectTimeout);
     reconnectTimeout = null;
   }
-  if (ws) {
-    ws.close();
-    ws = null;
+  reconnectEnabled = true;
+  backoffMs = BACKOFF_BASE;
+  connectionState.set("connecting");
+  errorMessage.set(null);
+
+  try {
+    const info: ConnectionInfo = await invoke("ensure_daemon_running");
+    connectionInfo.set(info);
+    currentInstanceId = info.instanceId;
+
+    const wsUrl = info.baseUrl.replace("http", "ws");
+    ws = new WebSocket(`${wsUrl}/v1/events?token=${encodeURIComponent(info.token)}`);
+    setupWsHandlers(ws);
+  } catch (e) {
+    connectionState.set("error");
+    errorMessage.set(String(e));
+    if (reconnectEnabled) {
+      scheduleReconnect();
+    }
   }
+}
+
+/**
+ * Disconnect from daemon. Prevents reconnection.
+ */
+export function disconnect(): void {
+  reconnectEnabled = false;
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+  }
+  teardownWebSocket();
   connectionState.set("disconnected");
 }
 
 /**
- * Schedule reconnection attempt
+ * Schedule reconnection attempt with exponential backoff and jitter.
+ * Base 1s, max 30s, +/-20% jitter. Resets on successful onopen.
  */
 function scheduleReconnect(): void {
   if (reconnectTimeout) return;
+  if (!reconnectEnabled) return;
+
+  // Apply jitter: +/-20%
+  const jitter = backoffMs * (0.8 + Math.random() * 0.4);
+  const delay = Math.min(jitter, BACKOFF_MAX);
 
   reconnectTimeout = setTimeout(async () => {
     reconnectTimeout = null;
+    if (!reconnectEnabled) return;
 
     try {
-      // Check if instance changed
       const info: ConnectionInfo = await invoke("get_connection_info");
       if (info.instanceId !== currentInstanceId) {
         console.log("[daemon] Instance changed, re-bootstrapping");
         await connectToDaemon();
       } else {
         // Same instance, just reconnect WS
+        teardownWebSocket();
         const wsUrl = info.baseUrl.replace("http", "ws");
         ws = new WebSocket(`${wsUrl}/v1/events?token=${encodeURIComponent(info.token)}`);
-        ws.onopen = () => connectionState.set("connected");
-        ws.onmessage = (event) => {
-          const data: ServerEvent = JSON.parse(event.data);
-          events.update((list) => [data, ...list].slice(0, 100));
-        };
-        ws.onclose = () => {
-          connectionState.set("disconnected");
-          scheduleReconnect();
-        };
+        setupWsHandlers(ws);
       }
     } catch {
-      scheduleReconnect();
+      if (reconnectEnabled) {
+        scheduleReconnect();
+      }
     }
-  }, 1000);
+
+    // Increase backoff for next attempt
+    backoffMs = Math.min(backoffMs * 2, BACKOFF_MAX);
+  }, delay);
 }
 
 /**
