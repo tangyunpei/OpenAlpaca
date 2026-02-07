@@ -66,4 +66,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "unified_conversations",
         sql: include_str!("011_unified_conversations.sql"),
     },
+    Migration {
+        version: 12,
+        name: "assignment_output",
+        sql: include_str!("012_assignment_output.sql"),
+    },
 ];

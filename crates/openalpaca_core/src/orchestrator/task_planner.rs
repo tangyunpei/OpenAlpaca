@@ -122,6 +122,10 @@ Complex task:  {"classification": "complex_task", "title": "Concise title", "ass
 - Use exact agent_id values from the list above
 - Title: imperative, max 50 chars (e.g. "Research Rust async patterns")
 - Only classify as complex_task if agent work is needed
+- **Agents run as a sequential pipeline**: agent 1 runs first, then agent 2 receives agent 1's output as context, and so on. Order matters — list them in execution order.
+- Use multiple agents when the task has distinct stages requiring different skills (e.g. agent with file_read reads a file → agent with text_generate writes a polished summary using the file content).
+- Use a single agent when one agent can handle the entire task alone (e.g. a file_read agent can also summarize what it reads via its LLM).
+- Casual messages, greetings, short phrases, numbers, or anything that doesn't require agent tools should be "simple_query".
 "#,
         );
 

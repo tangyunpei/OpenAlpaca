@@ -195,8 +195,8 @@ impl<'a> TaskRepository<'a> {
     pub fn create_assignment(&self, assignment: &TaskAgentAssignment) -> Result<()> {
         self.db.with_connection(|conn| {
             conn.execute(
-                "INSERT INTO task_agent_assignment (id, task_id, agent_id, role, status, step_order, started_at, completed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO task_agent_assignment (id, task_id, agent_id, role, status, step_order, started_at, completed_at, result_output)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 rusqlite::params![
                     assignment.id,
                     assignment.task_id,
@@ -206,6 +206,7 @@ impl<'a> TaskRepository<'a> {
                     assignment.step_order,
                     assignment.started_at.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
                     assignment.completed_at.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+                    assignment.result_output,
                 ],
             )
             .context("Failed to create assignment")?;
@@ -217,7 +218,7 @@ impl<'a> TaskRepository<'a> {
     pub fn get_assignments(&self, task_id: &str) -> Result<Vec<TaskAgentAssignment>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, task_id, agent_id, role, status, step_order, started_at, completed_at
+                "SELECT id, task_id, agent_id, role, status, step_order, started_at, completed_at, result_output
                  FROM task_agent_assignment WHERE task_id = ? ORDER BY step_order ASC",
             )?;
             let rows = stmt.query_map([task_id], Self::row_to_assignment)?;
@@ -248,6 +249,20 @@ impl<'a> TaskRepository<'a> {
 
             let rows = conn.execute(&sql, rusqlite::params![status.as_str(), id, now])
                 .context("Failed to update assignment status")?;
+            Ok(rows > 0)
+        })
+    }
+
+    /// Set an assignment's result output.
+    /// Returns true if a row was updated.
+    pub fn set_assignment_output(&self, id: &str, output: &str) -> Result<bool> {
+        self.db.with_connection(|conn| {
+            let rows = conn
+                .execute(
+                    "UPDATE task_agent_assignment SET result_output = ?1 WHERE id = ?2",
+                    rusqlite::params![output, id],
+                )
+                .context("Failed to set assignment output")?;
             Ok(rows > 0)
         })
     }
@@ -291,6 +306,7 @@ impl<'a> TaskRepository<'a> {
             step_order: row.get(5)?,
             started_at: started_str.as_deref().map(parse_datetime),
             completed_at: completed_str.as_deref().map(parse_datetime),
+            result_output: row.get(8)?,
         })
     }
 }
@@ -481,6 +497,7 @@ mod tests {
             step_order: Some(1),
             started_at: None,
             completed_at: None,
+            result_output: None,
         };
         repo.create_assignment(&assignment).unwrap();
 
@@ -513,6 +530,7 @@ mod tests {
             step_order: None,
             started_at: None,
             completed_at: None,
+            result_output: None,
         };
         repo.create_assignment(&assignment).unwrap();
 

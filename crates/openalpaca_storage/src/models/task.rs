@@ -125,4 +125,5 @@ pub struct TaskAgentAssignment {
     pub step_order: Option<i32>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub result_output: Option<String>,
 }

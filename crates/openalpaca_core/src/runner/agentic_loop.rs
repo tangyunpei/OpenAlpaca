@@ -67,11 +67,12 @@ pub async fn run_agentic_loop(
     let mut total_input = 0u32;
     let mut total_output = 0u32;
     let mut tool_calls_made = 0usize;
+    let mut last_assistant_content = String::new();
 
     loop {
         if rounds >= config.max_rounds {
             return LoopResult {
-                final_content: String::new(),
+                final_content: last_assistant_content,
                 rounds_used: rounds,
                 total_input_tokens: total_input,
                 total_output_tokens: total_output,
@@ -83,7 +84,7 @@ pub async fn run_agentic_loop(
         let estimated_cost = estimate_cost(total_input, total_output);
         if estimated_cost > config.max_cost {
             return LoopResult {
-                final_content: String::new(),
+                final_content: last_assistant_content,
                 rounds_used: rounds,
                 total_input_tokens: total_input,
                 total_output_tokens: total_output,
@@ -105,6 +106,11 @@ pub async fn run_agentic_loop(
                 total_input += response.usage.input_tokens;
                 total_output += response.usage.output_tokens;
                 rounds += 1;
+
+                // Capture last content before any branching
+                if !response.content.is_empty() {
+                    last_assistant_content = response.content.clone();
+                }
 
                 if response.finish_reason == FinishReason::ToolUse
                     && !response.tool_calls.is_empty()
@@ -157,7 +163,7 @@ pub async fn run_agentic_loop(
             }
             Err(e) => {
                 return LoopResult {
-                    final_content: String::new(),
+                    final_content: last_assistant_content,
                     rounds_used: rounds,
                     total_input_tokens: total_input,
                     total_output_tokens: total_output,
@@ -189,6 +195,7 @@ pub async fn run_agentic_loop_routed(
     let mut total_input = 0u32;
     let mut total_output = 0u32;
     let mut tool_calls_made = 0usize;
+    let mut last_assistant_content = String::new();
 
     let context = RequestContext {
         agent_id: Some(agent_id.to_string()),
@@ -198,7 +205,7 @@ pub async fn run_agentic_loop_routed(
     loop {
         if rounds >= config.max_rounds {
             return LoopResult {
-                final_content: String::new(),
+                final_content: last_assistant_content,
                 rounds_used: rounds,
                 total_input_tokens: total_input,
                 total_output_tokens: total_output,
@@ -212,7 +219,7 @@ pub async fn run_agentic_loop_routed(
             && usage.total_cost_usd > config.max_cost
         {
             return LoopResult {
-                final_content: String::new(),
+                final_content: last_assistant_content,
                 rounds_used: rounds,
                 total_input_tokens: total_input,
                 total_output_tokens: total_output,
@@ -225,7 +232,7 @@ pub async fn run_agentic_loop_routed(
         let estimated_cost = estimate_cost(total_input, total_output);
         if estimated_cost > config.max_cost {
             return LoopResult {
-                final_content: String::new(),
+                final_content: last_assistant_content,
                 rounds_used: rounds,
                 total_input_tokens: total_input,
                 total_output_tokens: total_output,
@@ -248,6 +255,11 @@ pub async fn run_agentic_loop_routed(
                 total_input += response.usage.input_tokens;
                 total_output += response.usage.output_tokens;
                 rounds += 1;
+
+                // Capture last content before any branching
+                if !response.content.is_empty() {
+                    last_assistant_content = response.content.clone();
+                }
 
                 if response.finish_reason == FinishReason::ToolUse
                     && !response.tool_calls.is_empty()
@@ -295,7 +307,7 @@ pub async fn run_agentic_loop_routed(
             }
             Err(e) => {
                 return LoopResult {
-                    final_content: String::new(),
+                    final_content: last_assistant_content,
                     rounds_used: rounds,
                     total_input_tokens: total_input,
                     total_output_tokens: total_output,
@@ -435,6 +447,7 @@ mod tests {
 
         assert_eq!(result.finish_reason, LoopFinishReason::MaxRounds);
         assert_eq!(result.rounds_used, 3);
+        assert_eq!(result.final_content, "Using tool.");
     }
 
     #[tokio::test]

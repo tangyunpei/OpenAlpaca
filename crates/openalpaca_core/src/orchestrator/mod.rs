@@ -252,11 +252,15 @@ impl Orchestrator {
     ) -> Result<String, String> {
         let agent_persona = AgentPersona {
             role: "Assistant".to_string(),
-            tone: "Friendly".to_string(),
+            tone: "Concise and professional".to_string(),
             domain_knowledge: vec![],
         };
-        let full_prompt =
+        let mut full_prompt =
             PromptAssembler::assemble(&self.system_persona, &agent_persona, query);
+        full_prompt.push_str("\n\n### STYLE RULES ###\n");
+        full_prompt.push_str("- Be concise and direct. Avoid filler words.\n");
+        full_prompt.push_str("- Do NOT use emojis.\n");
+        full_prompt.push_str("- If the message is casual (greeting, number, short phrase), respond briefly and naturally.\n");
 
         let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
             // Real LLM call via routed agentic loop
