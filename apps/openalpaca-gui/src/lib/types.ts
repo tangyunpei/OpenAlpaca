@@ -140,8 +140,8 @@ export interface KeyInfo {
   id: string;
   masked_secret: string;
   tier: string | null;
-  priority: string;
-  source: string;
+  priority: KeyPriorityValue;
+  source: KeySourceValue;
   notes: string | null;
   status: string;
   monthly_usage_usd: number | null;
@@ -202,6 +202,12 @@ export interface ReorderKeysRequest {
   primary_key_id?: string;
 }
 
+export interface SetKeyPriorityRequest {
+  provider: string;
+  key_id: string;
+  priority: KeyPriorityValue;
+}
+
 export interface ValidateKeyRequest {
   provider: string;
   secret: string;
@@ -213,6 +219,7 @@ export interface KeyValidationResult {
   detected_source: string | null;
   models_available: string[];
   rate_limits: string | null;
+  format_error: string | null;
 }
 
 export interface KeyStatusMap {

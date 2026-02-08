@@ -18,9 +18,48 @@
   let tier = $state<string | null>(null);
 
   let validationResult = $state<KeyValidationResult | null>(null);
+  let validatedSecret = $state(""); // the secret that was last validated
   let isValidating = $state(false);
   let isSubmitting = $state(false);
   let errorMsg = $state<string | null>(null);
+
+  // Clear stale validation when secret changes
+  $effect(() => {
+    const _ = secret; // subscribe to secret changes
+    if (secret.trim() !== validatedSecret) {
+      validationResult = null;
+      validatedSecret = "";
+    }
+  });
+
+  // Auto-set source when sk-ant-oat* is detected
+  $effect(() => {
+    if (provider === "anthropic" && secret.trim().startsWith("sk-ant-oat")) {
+      source = "claude_code";
+    }
+  });
+
+  // Reactive client-side format check
+  let formatWarning = $derived.by(() => {
+    const trimmed = secret.trim();
+    if (!trimmed) return null;
+    if (provider === "anthropic") {
+      if (trimmed.startsWith("sk-ant-oat")) {
+        if (trimmed.length < 80) return `Setup token too short (${trimmed.length} chars, expected >= 80).`;
+        return null; // well-formed setup token
+      }
+      if (!trimmed.startsWith("sk-ant-")) return "Anthropic API keys start with 'sk-ant-'. Setup tokens start with 'sk-ant-oat'.";
+      if (trimmed.length < 40) return `Key too short (${trimmed.length} chars, expected >= 40).`;
+    } else if (provider === "openai") {
+      if (trimmed.startsWith("sk-ant-")) return "This looks like an Anthropic key, not an OpenAI key.";
+      if (!trimmed.startsWith("sk-")) return "OpenAI API keys start with 'sk-'.";
+      if (trimmed.length < 20) return `Key too short (${trimmed.length} chars, expected >= 20).`;
+    }
+    return null;
+  });
+
+  let needsValidation = $derived(provider === "anthropic" || provider === "openai");
+  let isValidated = $derived(validatedSecret === secret.trim() && validationResult?.valid === true);
 
   async function handleValidate() {
     if (!secret.trim()) return;
@@ -28,6 +67,7 @@
     errorMsg = null;
     try {
       validationResult = await validateKey({ provider, secret: secret.trim() });
+      validatedSecret = secret.trim(); // record what we validated
       if (validationResult.tier) {
         tier = validationResult.tier;
       }
@@ -36,6 +76,7 @@
       }
     } catch (e) {
       errorMsg = e instanceof Error ? e.message : String(e);
+      validatedSecret = "";
     } finally {
       isValidating = false;
     }
@@ -71,214 +112,109 @@
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-<div class="modal-backdrop" onclick={handleBackdropClick}>
-  <div class="modal">
-    <h3>Add API Key — {provider}</h3>
+<div class="fixed inset-0 z-[1000] flex items-center justify-center bg-black/60" onclick={handleBackdropClick}>
+  <div class="w-[90%] max-w-[480px] max-h-[90vh] overflow-y-auto rounded-xl border border-border bg-surface p-6 shadow-[0_4px_20px_rgba(0,0,0,0.3)]">
+    <h3 class="m-0 mb-4 text-foreground text-[1.1rem] font-semibold">Add API Key — {provider}</h3>
 
-    <div class="form-group">
-      <label for="key-id">Key ID (optional)</label>
-      <input id="key-id" type="text" bind:value={keyId} placeholder="e.g. my_key_1" />
+    <div class="mb-3.5">
+      <label for="key-id" class="block text-[0.8rem] text-muted-foreground mb-1 font-medium">Key ID (optional)</label>
+      <input
+        id="key-id"
+        type="text"
+        bind:value={keyId}
+        placeholder="e.g. my_key_1"
+        class="w-full px-2.5 py-2 bg-background border border-border text-foreground rounded-md text-[0.9rem] placeholder:text-muted-foreground focus:outline-none focus:border-accent"
+      />
     </div>
 
-    <div class="form-group">
-      <label for="key-secret">Secret</label>
-      <div class="secret-row">
-        <input id="key-secret" type="password" bind:value={secret} placeholder="sk-..." />
-        <button class="validate-btn" onclick={handleValidate} disabled={isValidating || !secret.trim()}>
+    <div class="mb-3.5">
+      <label for="key-secret" class="block text-[0.8rem] text-muted-foreground mb-1 font-medium">Secret</label>
+      <div class="flex gap-2">
+        <input
+          id="key-secret"
+          type="password"
+          bind:value={secret}
+          placeholder="sk-..."
+          class="flex-1 px-2.5 py-2 bg-background border border-border text-foreground rounded-md text-[0.9rem] placeholder:text-muted-foreground focus:outline-none focus:border-accent"
+        />
+        <button
+          class="px-3.5 py-2 text-[0.8rem] rounded-md bg-primary text-primary-foreground hover:bg-primary/80 disabled:opacity-50 cursor-pointer whitespace-nowrap"
+          onclick={handleValidate}
+          disabled={isValidating || !secret.trim() || !!formatWarning}
+        >
           {isValidating ? "..." : "Validate"}
         </button>
       </div>
     </div>
 
+    {#if formatWarning}
+      <div class="flex items-center gap-2 px-3 py-2 rounded-md mb-3 text-[0.8rem] bg-warning/15 border border-warning/30 text-warning">
+        <span>{formatWarning}</span>
+      </div>
+    {/if}
+
     {#if validationResult}
-      <div class="validation-result" class:valid={validationResult.valid} class:invalid={!validationResult.valid}>
+      <div class="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md mb-3 text-[0.8rem] {validationResult.valid ? 'bg-success/15 border border-success/30 text-success' : 'bg-danger/15 border border-danger/30 text-danger'}">
         <span>{validationResult.valid ? "Valid" : "Invalid"}</span>
+        {#if validationResult.format_error}
+          <span class="text-[0.75rem]">— {validationResult.format_error}</span>
+        {/if}
         {#if validationResult.tier}
-          <span class="tag">Tier: {validationResult.tier}</span>
+          <span class="bg-white/10 px-1.5 rounded text-xs">{validationResult.tier}</span>
         {/if}
         {#if validationResult.detected_source}
-          <span class="tag">Source: {validationResult.detected_source}</span>
+          <span class="bg-white/10 px-1.5 rounded text-xs">Source: {validationResult.detected_source}</span>
         {/if}
       </div>
     {/if}
 
-    <div class="form-group">
-      <label>Source</label>
-      <div class="radio-group">
-        <label class="radio"><input type="radio" bind:group={source} value="api_console" /> API Console</label>
-        <label class="radio"><input type="radio" bind:group={source} value="claude_code" /> Claude Code</label>
-        <label class="radio"><input type="radio" bind:group={source} value="codex" /> Codex</label>
-        <label class="radio"><input type="radio" bind:group={source} value="claude_max_pro" /> Max/Pro</label>
-        <label class="radio"><input type="radio" bind:group={source} value="environment" /> Environment</label>
-        <label class="radio"><input type="radio" bind:group={source} value="other" /> Other</label>
+    <div class="mb-3.5">
+      <label class="block text-[0.8rem] text-muted-foreground mb-1 font-medium">Source</label>
+      <div class="flex flex-wrap gap-3">
+        <label class="flex items-center gap-1 text-[0.85rem] text-foreground cursor-pointer"><input type="radio" bind:group={source} value="api_console" class="accent-accent" /> API Console</label>
+        <label class="flex items-center gap-1 text-[0.85rem] text-foreground cursor-pointer"><input type="radio" bind:group={source} value="claude_code" class="accent-accent" /> Claude Code</label>
+        <label class="flex items-center gap-1 text-[0.85rem] text-foreground cursor-pointer"><input type="radio" bind:group={source} value="codex" class="accent-accent" /> Codex</label>
+        <label class="flex items-center gap-1 text-[0.85rem] text-foreground cursor-pointer"><input type="radio" bind:group={source} value="claude_max_pro" class="accent-accent" /> Max/Pro</label>
+        <label class="flex items-center gap-1 text-[0.85rem] text-foreground cursor-pointer"><input type="radio" bind:group={source} value="environment" class="accent-accent" /> Environment</label>
+        <label class="flex items-center gap-1 text-[0.85rem] text-foreground cursor-pointer"><input type="radio" bind:group={source} value="other" class="accent-accent" /> Other</label>
       </div>
     </div>
 
-    <div class="form-group">
-      <label>Priority</label>
-      <div class="radio-group">
-        <label class="radio"><input type="radio" bind:group={priority} value="primary" /> Primary</label>
-        <label class="radio"><input type="radio" bind:group={priority} value="fallback" /> Fallback</label>
+    <div class="mb-3.5">
+      <label class="block text-[0.8rem] text-muted-foreground mb-1 font-medium">Priority</label>
+      <div class="flex flex-wrap gap-3">
+        <label class="flex items-center gap-1 text-[0.85rem] text-foreground cursor-pointer"><input type="radio" bind:group={priority} value="primary" class="accent-accent" /> Primary</label>
+        <label class="flex items-center gap-1 text-[0.85rem] text-foreground cursor-pointer"><input type="radio" bind:group={priority} value="fallback" class="accent-accent" /> Fallback</label>
       </div>
     </div>
 
-    <div class="form-group">
-      <label for="key-notes">Notes (optional)</label>
-      <textarea id="key-notes" bind:value={notes} rows="2" placeholder="Any notes about this key..."></textarea>
+    <div class="mb-3.5">
+      <label for="key-notes" class="block text-[0.8rem] text-muted-foreground mb-1 font-medium">Notes (optional)</label>
+      <textarea
+        id="key-notes"
+        bind:value={notes}
+        rows="2"
+        placeholder="Any notes about this key..."
+        class="w-full px-2.5 py-2 bg-background border border-border text-foreground rounded-md text-[0.9rem] resize-y font-sans placeholder:text-muted-foreground focus:outline-none focus:border-accent"
+      ></textarea>
     </div>
 
     {#if errorMsg}
-      <div class="error-msg">{errorMsg}</div>
+      <div class="text-danger text-[0.8rem] mb-3 px-2.5 py-1.5 bg-danger/10 rounded">{errorMsg}</div>
     {/if}
 
-    <div class="modal-actions">
-      <button class="secondary" onclick={onclose}>Cancel</button>
-      <button onclick={handleSubmit} disabled={isSubmitting || !secret.trim()}>
+    <div class="flex justify-end gap-2.5 mt-4">
+      <button
+        class="px-4 py-2 rounded-lg bg-white/5 border border-border text-muted-foreground text-sm hover:bg-white/10 cursor-pointer"
+        onclick={onclose}
+      >Cancel</button>
+      <button
+        class="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/80 disabled:opacity-50 cursor-pointer"
+        onclick={handleSubmit}
+        disabled={isSubmitting || !secret.trim() || !!formatWarning || (needsValidation && !isValidated)}
+      >
         {isSubmitting ? "Adding..." : "Add Key"}
       </button>
     </div>
   </div>
 </div>
-
-<style>
-  .modal-backdrop {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0, 0, 0, 0.6);
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    z-index: 1000;
-  }
-
-  .modal {
-    background: var(--surface);
-    padding: 24px;
-    border-radius: 12px;
-    width: 90%;
-    max-width: 480px;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    max-height: 90vh;
-    overflow-y: auto;
-  }
-
-  .modal h3 {
-    margin: 0 0 16px;
-    color: var(--text);
-    font-size: 1.1rem;
-  }
-
-  .form-group {
-    margin-bottom: 14px;
-  }
-
-  .form-group label {
-    display: block;
-    font-size: 0.8rem;
-    color: var(--text-dim);
-    margin-bottom: 4px;
-    font-weight: 500;
-  }
-
-  .form-group input[type="text"],
-  .form-group input[type="password"],
-  .form-group textarea {
-    width: 100%;
-    padding: 8px 10px;
-    background: var(--bg);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    color: var(--text);
-    border-radius: 6px;
-    box-sizing: border-box;
-    font-size: 0.9rem;
-  }
-
-  .form-group textarea {
-    resize: vertical;
-    font-family: inherit;
-  }
-
-  .secret-row {
-    display: flex;
-    gap: 8px;
-  }
-
-  .secret-row input {
-    flex: 1;
-  }
-
-  .validate-btn {
-    padding: 8px 14px !important;
-    font-size: 0.8rem !important;
-    white-space: nowrap;
-  }
-
-  .radio-group {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-  }
-
-  .radio {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 0.85rem;
-    color: var(--text);
-    cursor: pointer;
-  }
-
-  .radio input[type="radio"] {
-    accent-color: var(--accent);
-  }
-
-  .validation-result {
-    padding: 8px 12px;
-    border-radius: 6px;
-    font-size: 0.8rem;
-    margin-bottom: 12px;
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    flex-wrap: wrap;
-  }
-
-  .validation-result.valid {
-    background: rgba(16, 185, 129, 0.15);
-    border: 1px solid rgba(16, 185, 129, 0.3);
-    color: var(--success);
-  }
-
-  .validation-result.invalid {
-    background: rgba(239, 68, 68, 0.15);
-    border: 1px solid rgba(239, 68, 68, 0.3);
-    color: var(--error);
-  }
-
-  .tag {
-    background: rgba(255, 255, 255, 0.1);
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 0.75rem;
-  }
-
-  .error-msg {
-    color: var(--error);
-    font-size: 0.8rem;
-    margin-bottom: 12px;
-    padding: 6px 10px;
-    background: rgba(239, 68, 68, 0.1);
-    border-radius: 4px;
-  }
-
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-    margin-top: 16px;
-  }
-</style>

@@ -28,6 +28,6 @@ pub use settings::{
     delete_key, estimate_cost, get_cli_backends, get_discovered_credentials, get_key_status,
     get_llm_pricing, get_llm_settings, get_llm_usage, get_llm_usage_daily,
     get_orchestrator_config, get_provider_usage, list_models, refresh_models, reorder_keys,
-    rescan_credentials, update_orchestrator_config, upsert_key, validate_key,
+    rescan_credentials, set_key_priority, update_orchestrator_config, upsert_key, validate_key,
 };
 pub use tasks::{create_task_handler, get_task_handler, list_tasks_handler, task_action_handler};

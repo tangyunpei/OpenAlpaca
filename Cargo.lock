@@ -3017,6 +3017,7 @@ dependencies = [
  "futures-util",
  "log",
  "nix 0.29.0",
+ "openalpaca_llm",
  "openalpaca_storage",
  "reqwest 0.12.28",
  "rustyline",

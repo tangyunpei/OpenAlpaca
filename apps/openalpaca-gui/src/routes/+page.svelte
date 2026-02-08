@@ -92,24 +92,26 @@
   }
 </script>
 
-<main class="container">
+<main class="w-full min-h-screen flex flex-col px-8 py-5 max-sm:px-3">
   <AppHeader {statusState} {info} />
 
   {#if error}
-    <div class="error-banner">{error}</div>
+    <div class="mb-4 rounded-lg border border-danger bg-danger/20 px-4 py-3 text-sm text-danger">
+      {error}
+    </div>
   {/if}
 
-  <div class="app-layout">
-    <aside class="chat-sidebar">
+  <div class="flex flex-1 min-h-0 max-[900px]:flex-col">
+    <aside class="flex-1 min-w-[300px] border-r border-primary h-[calc(100vh-120px)] overflow-hidden max-[900px]:min-w-full max-[900px]:h-[300px] max-[900px]:border-r-0 max-[900px]:border-b max-[900px]:border-primary">
       <ChatPanel />
     </aside>
 
-    <div class="main-content">
+    <div class="flex-[0_1_900px] max-w-[900px] min-w-0 pl-6 max-[900px]:flex-auto max-[900px]:max-w-full max-[900px]:pl-0 max-[900px]:pt-4">
       <TabBar {activeTab} {tabs} onTabChange={handleTabChange} />
 
-      <div class="tab-content">
+      <div>
         {#if activeTab === "events"}
-          <EventLog events={eventList} connectionState={statusState} />
+          <EventLog events={eventList} />
         {:else if activeTab === "connectors"}
           <ConnectorPanel bind:this={connectorPanel} connectionState={statusState} />
         {:else if activeTab === "tasks"}
@@ -125,134 +127,3 @@
     </div>
   </div>
 </main>
-
-<style>
-  :root {
-    --bg: #1a1a2e;
-    --surface: #16213e;
-    --primary: #0f3460;
-    --accent: #e94560;
-    --text: #eaeaea;
-    --text-dim: #8892b0;
-    --success: #10b981;
-    --error: #ef4444;
-  }
-
-  :global(body) {
-    margin: 0;
-    padding: 0;
-    background: var(--bg);
-    color: var(--text);
-    font-family:
-      "Inter",
-      -apple-system,
-      BlinkMacSystemFont,
-      sans-serif;
-    min-height: 100vh;
-  }
-
-  .container {
-    padding: 20px 32px;
-    width: 100%;
-    box-sizing: border-box;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .error-banner {
-    background: rgba(239, 68, 68, 0.2);
-    border: 1px solid var(--error);
-    color: var(--error);
-    padding: 12px 16px;
-    border-radius: 8px;
-    margin-bottom: 15px;
-  }
-
-  .app-layout {
-    display: flex;
-    flex: 1;
-    min-height: 0;
-    gap: 0;
-  }
-
-  .chat-sidebar {
-    flex: 1;
-    min-width: 300px;
-    border-right: 1px solid var(--primary);
-    height: calc(100vh - 120px);
-    overflow: hidden;
-  }
-
-  .main-content {
-    flex: 0 1 900px;
-    max-width: 900px;
-    min-width: 0;
-    padding-left: 24px;
-  }
-
-  /* Global button base styles */
-  :global(button:not(.action-btn):not(.tab-btn):not(.filter-btn):not(.close-btn)) {
-    padding: 10px 20px;
-    border: none;
-    border-radius: 8px;
-    background: var(--primary);
-    color: var(--text);
-    font-size: 0.9rem;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-
-  :global(button:not(.action-btn):not(.tab-btn):not(.filter-btn):not(.close-btn):hover:not(:disabled)) {
-    background: var(--accent);
-    transform: translateY(-1px);
-  }
-
-  :global(button:disabled) {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  :global(button.danger:not(.action-btn)) {
-    background: rgba(239, 68, 68, 0.2);
-    border: 1px solid var(--error);
-    color: var(--error);
-  }
-
-  :global(button.danger:not(.action-btn):hover:not(:disabled)) {
-    background: var(--error);
-    color: #fff;
-  }
-
-  :global(button.secondary) {
-    background: rgba(255, 255, 255, 0.05);
-    color: var(--text-dim);
-  }
-
-  /* Responsive layout */
-  @media (max-width: 900px) {
-    .app-layout {
-      flex-direction: column;
-    }
-
-    .chat-sidebar {
-      min-width: 100%;
-      height: 300px;
-      border-right: none;
-      border-bottom: 1px solid var(--primary);
-    }
-
-    .main-content {
-      flex-basis: auto;
-      max-width: 100%;
-      padding-left: 0;
-      padding-top: 16px;
-    }
-  }
-
-  @media (max-width: 640px) {
-    .container {
-      padding: 12px;
-    }
-  }
-</style>

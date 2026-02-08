@@ -546,6 +546,10 @@ async fn main() -> Result<()> {
             "/v1/settings/llm/keys/reorder",
             put(routes::reorder_keys),
         )
+        .route(
+            "/v1/settings/llm/keys/priority",
+            put(routes::set_key_priority),
+        )
         .route("/v1/settings/llm/validate", post(routes::validate_key))
         .route("/v1/settings/llm/status", get(routes::get_key_status))
         // LLM Usage routes (Phase 5.5.5)

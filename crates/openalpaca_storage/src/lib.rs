@@ -3,6 +3,7 @@
 //! Provides unified app directory management, discovery mechanism,
 //! singleton lock, and SQLite database for daemon/GUI/CLI coordination.
 
+pub mod config_schema;
 pub mod database;
 pub mod discovery;
 pub mod migrations;

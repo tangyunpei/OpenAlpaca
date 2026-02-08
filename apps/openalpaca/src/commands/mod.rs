@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod ai_config;
 pub mod chat;
 pub mod config;
 pub mod connector;

@@ -61,98 +61,99 @@
 
   function statusColor(status: string): string {
     switch (status) {
-      case "success": return "var(--success)";
-      case "error": return "var(--error)";
-      default: return "var(--text-dim)";
+      case "success": return "text-success";
+      case "error": return "text-danger";
+      default: return "text-muted-foreground";
     }
   }
 
-  /** Compute summary stats from daily data */
   let totalCost = $derived(daily.reduce((sum, d) => sum + d.total_cost_usd, 0));
   let totalRequests = $derived(daily.reduce((sum, d) => sum + d.total_requests, 0));
   let totalTokens = $derived(daily.reduce((sum, d) => sum + d.total_input_tokens + d.total_output_tokens, 0));
 </script>
 
-<div class="usage-panel">
-  <div class="usage-header">
-    <h3>LLM Usage</h3>
-    <div class="header-actions">
+<div class="flex flex-col gap-3">
+  <div class="flex items-center justify-between">
+    <h3 class="m-0 text-base font-semibold text-foreground">LLM Usage</h3>
+    <div class="flex items-center gap-2">
       <input
         type="text"
-        class="filter-input"
         bind:value={filterAgent}
         placeholder="Filter by agent..."
+        class="bg-surface border border-input rounded-md text-foreground px-3 py-1.5 text-[0.8rem] w-40 placeholder:text-muted-foreground focus:outline-none focus:border-accent"
       />
-      <button onclick={handleRefresh} disabled={logsLoading || dailyLoading}>
+      <button
+        class="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/80 disabled:opacity-50 cursor-pointer"
+        onclick={handleRefresh}
+        disabled={logsLoading || dailyLoading}
+      >
         {logsLoading || dailyLoading ? "Loading..." : "Refresh"}
       </button>
     </div>
   </div>
 
   {#if error}
-    <div class="usage-error">{error}</div>
+    <div class="bg-danger/20 border border-danger text-danger px-3 py-2 rounded-lg text-[0.85rem]">{error}</div>
   {/if}
 
   <!-- Summary stats -->
-  <div class="stats-row">
-    <div class="stat">
-      <span class="stat-value">{totalRequests}</span>
-      <span class="stat-label">Total Requests</span>
+  <div class="flex gap-4 bg-card/70 backdrop-blur-xl rounded-[10px] border border-border px-5 py-3.5">
+    <div class="text-center flex-1">
+      <span class="block text-[1.1rem] font-bold text-foreground">{totalRequests}</span>
+      <span class="text-[0.65rem] text-muted-foreground uppercase">Total Requests</span>
     </div>
-    <div class="stat">
-      <span class="stat-value">{(totalTokens / 1000).toFixed(1)}k</span>
-      <span class="stat-label">Total Tokens</span>
+    <div class="text-center flex-1">
+      <span class="block text-[1.1rem] font-bold text-foreground">{(totalTokens / 1000).toFixed(1)}k</span>
+      <span class="text-[0.65rem] text-muted-foreground uppercase">Total Tokens</span>
     </div>
-    <div class="stat">
-      <span class="stat-value">{formatCost(totalCost)}</span>
-      <span class="stat-label">Total Cost</span>
+    <div class="text-center flex-1">
+      <span class="block text-[1.1rem] font-bold text-foreground">{formatCost(totalCost)}</span>
+      <span class="text-[0.65rem] text-muted-foreground uppercase">Total Cost</span>
     </div>
   </div>
 
   <!-- View toggle -->
-  <div class="view-toggle">
+  <div class="flex gap-1">
     <button
-      class="filter-btn"
-      class:active={viewMode === "daily"}
+      class="px-4 py-1.5 border border-input rounded-md text-[0.8rem] cursor-pointer transition-all {viewMode === 'daily' ? 'bg-primary text-foreground border-accent' : 'bg-transparent text-muted-foreground hover:bg-white/5'}"
       onclick={() => (viewMode = "daily")}
     >Daily</button>
     <button
-      class="filter-btn"
-      class:active={viewMode === "logs"}
+      class="px-4 py-1.5 border border-input rounded-md text-[0.8rem] cursor-pointer transition-all {viewMode === 'logs' ? 'bg-primary text-foreground border-accent' : 'bg-transparent text-muted-foreground hover:bg-white/5'}"
       onclick={() => (viewMode = "logs")}
     >Call Log</button>
   </div>
 
   {#if viewMode === "daily"}
     <!-- Daily aggregate table -->
-    <div class="table-wrapper">
+    <div class="overflow-x-auto rounded-[10px] border border-border bg-card/50">
       {#if dailyLoading && daily.length === 0}
-        <div class="loading">Loading daily usage...</div>
+        <div class="text-muted-foreground text-center py-8 text-[0.9rem]">Loading daily usage...</div>
       {:else if daily.length === 0}
-        <div class="empty">No usage data yet.</div>
+        <div class="text-muted-foreground text-center py-8 text-[0.9rem]">No usage data yet.</div>
       {:else}
-        <table class="usage-table">
+        <table class="w-full border-collapse text-[0.78rem]">
           <thead>
             <tr>
-              <th>Date</th>
-              <th>Agent</th>
-              <th>Model</th>
-              <th class="num">Requests</th>
-              <th class="num">In Tokens</th>
-              <th class="num">Out Tokens</th>
-              <th class="num">Cost</th>
+              <th class="text-left px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Date</th>
+              <th class="text-left px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Agent</th>
+              <th class="text-left px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Model</th>
+              <th class="text-right px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Requests</th>
+              <th class="text-right px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">In Tokens</th>
+              <th class="text-right px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Out Tokens</th>
+              <th class="text-right px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Cost</th>
             </tr>
           </thead>
           <tbody>
             {#each daily as row (row.date + row.agent_id + row.model)}
-              <tr>
-                <td class="mono">{row.date}</td>
-                <td>{row.agent_id}</td>
-                <td class="mono">{row.model}</td>
-                <td class="num">{row.total_requests}</td>
-                <td class="num">{row.total_input_tokens.toLocaleString()}</td>
-                <td class="num">{row.total_output_tokens.toLocaleString()}</td>
-                <td class="num cost">{formatCost(row.total_cost_usd)}</td>
+              <tr class="hover:bg-white/3">
+                <td class="px-2.5 py-1.5 border-b border-white/3 text-foreground whitespace-nowrap font-mono text-xs">{row.date}</td>
+                <td class="px-2.5 py-1.5 border-b border-white/3 text-foreground whitespace-nowrap">{row.agent_id}</td>
+                <td class="px-2.5 py-1.5 border-b border-white/3 text-foreground whitespace-nowrap font-mono text-xs">{row.model}</td>
+                <td class="px-2.5 py-1.5 border-b border-white/3 text-foreground whitespace-nowrap text-right font-mono">{row.total_requests}</td>
+                <td class="px-2.5 py-1.5 border-b border-white/3 text-foreground whitespace-nowrap text-right font-mono">{row.total_input_tokens.toLocaleString()}</td>
+                <td class="px-2.5 py-1.5 border-b border-white/3 text-foreground whitespace-nowrap text-right font-mono">{row.total_output_tokens.toLocaleString()}</td>
+                <td class="px-2.5 py-1.5 border-b border-white/3 text-accent whitespace-nowrap text-right font-mono">{formatCost(row.total_cost_usd)}</td>
               </tr>
             {/each}
           </tbody>
@@ -161,37 +162,37 @@
     </div>
   {:else}
     <!-- Call log table -->
-    <div class="table-wrapper">
+    <div class="overflow-x-auto rounded-[10px] border border-border bg-card/50">
       {#if logsLoading && logs.length === 0}
-        <div class="loading">Loading call logs...</div>
+        <div class="text-muted-foreground text-center py-8 text-[0.9rem]">Loading call logs...</div>
       {:else if logs.length === 0}
-        <div class="empty">No call logs yet.</div>
+        <div class="text-muted-foreground text-center py-8 text-[0.9rem]">No call logs yet.</div>
       {:else}
-        <table class="usage-table">
+        <table class="w-full border-collapse text-[0.78rem]">
           <thead>
             <tr>
-              <th>Time</th>
-              <th>Agent</th>
-              <th>Model</th>
-              <th class="num">In</th>
-              <th class="num">Out</th>
-              <th class="num">Cost</th>
-              <th class="num">Latency</th>
-              <th>Status</th>
+              <th class="text-left px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Time</th>
+              <th class="text-left px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Agent</th>
+              <th class="text-left px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Model</th>
+              <th class="text-right px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">In</th>
+              <th class="text-right px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Out</th>
+              <th class="text-right px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Cost</th>
+              <th class="text-right px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Latency</th>
+              <th class="text-left px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Status</th>
             </tr>
           </thead>
           <tbody>
             {#each logs as log (log.id)}
-              <tr>
-                <td class="mono">{formatTime(log.timestamp)}</td>
-                <td>{log.agent_id || "-"}</td>
-                <td class="mono">{log.model}</td>
-                <td class="num">{log.input_tokens.toLocaleString()}</td>
-                <td class="num">{log.output_tokens.toLocaleString()}</td>
-                <td class="num cost">{formatCost(log.cost_usd)}</td>
-                <td class="num">{log.latency_ms ?? "-"}ms</td>
-                <td>
-                  <span class="status-dot" style="color: {statusColor(log.status)}">{log.status}</span>
+              <tr class="hover:bg-white/3">
+                <td class="px-2.5 py-1.5 border-b border-white/3 text-foreground whitespace-nowrap font-mono text-xs">{formatTime(log.timestamp)}</td>
+                <td class="px-2.5 py-1.5 border-b border-white/3 text-foreground whitespace-nowrap">{log.agent_id || "-"}</td>
+                <td class="px-2.5 py-1.5 border-b border-white/3 text-foreground whitespace-nowrap font-mono text-xs">{log.model}</td>
+                <td class="px-2.5 py-1.5 border-b border-white/3 text-foreground whitespace-nowrap text-right font-mono">{log.input_tokens.toLocaleString()}</td>
+                <td class="px-2.5 py-1.5 border-b border-white/3 text-foreground whitespace-nowrap text-right font-mono">{log.output_tokens.toLocaleString()}</td>
+                <td class="px-2.5 py-1.5 border-b border-white/3 text-accent whitespace-nowrap text-right font-mono">{formatCost(log.cost_usd)}</td>
+                <td class="px-2.5 py-1.5 border-b border-white/3 text-foreground whitespace-nowrap text-right font-mono">{log.latency_ms ?? "-"}ms</td>
+                <td class="px-2.5 py-1.5 border-b border-white/3 whitespace-nowrap">
+                  <span class="text-xs font-medium {statusColor(log.status)}">{log.status}</span>
                 </td>
               </tr>
             {/each}
@@ -201,167 +202,3 @@
     </div>
   {/if}
 </div>
-
-<style>
-  .usage-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .usage-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-
-  .usage-header h3 {
-    margin: 0;
-    font-size: 1rem;
-    font-weight: 600;
-  }
-
-  .header-actions {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
-
-  .filter-input {
-    background: var(--surface);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 6px;
-    color: var(--text);
-    padding: 6px 12px;
-    font-size: 0.8rem;
-    width: 160px;
-  }
-  .filter-input:focus { outline: none; border-color: var(--accent); }
-  .filter-input::placeholder { color: var(--text-dim); }
-
-  .usage-error {
-    background: rgba(239, 68, 68, 0.2);
-    border: 1px solid var(--error);
-    color: var(--error);
-    padding: 8px 12px;
-    border-radius: 8px;
-    font-size: 0.85rem;
-  }
-
-  .stats-row {
-    display: flex;
-    gap: 16px;
-    background: rgba(30, 30, 50, 0.7);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
-    border-radius: 10px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    padding: 14px 20px;
-  }
-
-  .stat {
-    text-align: center;
-    flex: 1;
-  }
-
-  .stat-value {
-    display: block;
-    font-size: 1.1rem;
-    font-weight: 700;
-    color: var(--text);
-  }
-
-  .stat-label {
-    font-size: 0.65rem;
-    color: var(--text-dim);
-    text-transform: uppercase;
-  }
-
-  .view-toggle {
-    display: flex;
-    gap: 4px;
-  }
-
-  .view-toggle .filter-btn {
-    padding: 6px 16px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 0.8rem;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-
-  .view-toggle .filter-btn.active {
-    background: var(--primary);
-    color: var(--text);
-    border-color: var(--accent);
-  }
-
-  .view-toggle .filter-btn:hover:not(.active) {
-    background: rgba(255, 255, 255, 0.05);
-  }
-
-  .table-wrapper {
-    overflow-x: auto;
-    border-radius: 10px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(30, 30, 50, 0.5);
-  }
-
-  .usage-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.78rem;
-  }
-
-  .usage-table th {
-    text-align: left;
-    padding: 8px 10px;
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
-    color: var(--text-dim);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.02);
-    white-space: nowrap;
-  }
-
-  .usage-table td {
-    padding: 6px 10px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-    color: var(--text);
-    white-space: nowrap;
-  }
-
-  .usage-table tbody tr:hover {
-    background: rgba(255, 255, 255, 0.03);
-  }
-
-  .usage-table .num {
-    text-align: right;
-    font-family: "Fira Code", monospace;
-  }
-
-  .usage-table .mono {
-    font-family: "Fira Code", monospace;
-    font-size: 0.75rem;
-  }
-
-  .cost {
-    color: var(--accent);
-  }
-
-  .status-dot {
-    font-size: 0.75rem;
-    font-weight: 500;
-  }
-
-  .loading, .empty {
-    color: var(--text-dim);
-    text-align: center;
-    padding: 30px;
-    font-size: 0.9rem;
-  }
-</style>

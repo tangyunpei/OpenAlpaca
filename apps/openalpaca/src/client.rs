@@ -42,6 +42,7 @@ impl DaemonClient {
         })
     }
 
+    #[allow(dead_code)]
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -59,6 +60,7 @@ impl DaemonClient {
     }
 
     /// GET returning raw Response.
+    #[allow(dead_code)]
     pub async fn get_raw(&self, path: &str) -> Result<Response> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self.http.get(&url).send().await?;

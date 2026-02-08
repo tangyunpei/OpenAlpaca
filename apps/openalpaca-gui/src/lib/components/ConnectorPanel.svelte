@@ -17,7 +17,6 @@
   let linkToken = $state<string | null>(null);
   let isLoadingConnectors = $state(false);
 
-  // Configuration modal state
   let showConfigModal = $state(false);
   let configTargetId = $state<string | null>(null);
   let configToken = $state("");
@@ -82,43 +81,57 @@
       default: return status;
     }
   }
+
+  const statusBadgeClass: Record<string, string> = {
+    active: "bg-success/20 text-success",
+    error: "bg-danger/20 text-danger",
+    disabled: "bg-gray-500/20 text-gray-400",
+    unconfigured: "bg-white/5 text-muted-foreground",
+  };
 </script>
 
-<div class="controls">
-  <button onclick={refreshConnectors} disabled={isLoadingConnectors}>
+<div class="flex flex-wrap gap-2.5 mb-5 max-[480px]:flex-wrap">
+  <button
+    class="inline-flex items-center justify-center px-5 py-2 text-sm font-medium rounded-lg bg-primary text-foreground hover:bg-accent hover:text-accent-foreground transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+    onclick={refreshConnectors}
+    disabled={isLoadingConnectors}
+  >
     {isLoadingConnectors ? "Refreshing..." : "Refresh"}
   </button>
-  <button onclick={handleGenerateToken}>Generate Bind Token</button>
+  <button
+    class="inline-flex items-center justify-center px-5 py-2 text-sm font-medium rounded-lg bg-primary text-foreground hover:bg-accent hover:text-accent-foreground transition-all cursor-pointer"
+    onclick={handleGenerateToken}
+  >Generate Bind Token</button>
 </div>
 
 {#if linkToken}
-  <div class="token-panel">
-    <p>Binding Code (expires in 5m):</p>
-    <div class="token-box">
+  <div class="bg-gradient-to-br from-primary to-[#1a3a5f] p-5 rounded-xl mb-5 text-center border border-accent">
+    <p class="text-foreground">Binding Code (expires in 5m):</p>
+    <div class="bg-black/30 p-4 rounded-lg text-3xl tracking-widest my-2.5 text-accent font-extrabold">
       <code>{linkToken}</code>
     </div>
-    <p class="hint">
-      Send <code>/link {linkToken}</code> to your Telegram bot.
+    <p class="text-sm text-muted-foreground">
+      Send <code class="bg-white/10 px-1.5 rounded">/link {linkToken}</code> to your Telegram bot.
     </p>
   </div>
 {/if}
 
-<div class="view-panel">
-  <div class="panel-header">
+<div class="oa-panel">
+  <div class="oa-panel-header">
     <h2>Platform Connectors</h2>
   </div>
-  <div class="connector-list">
+  <div class="p-2.5">
     {#each connectorsList as connector}
-      <div class="connector-card">
-        <div class="connector-info">
-          <h3>{connector.name}</h3>
-          <span class="status-badge {connector.status}">
+      <div class="flex justify-between items-center px-5 py-4 bg-white/3 rounded-[10px] mb-2.5 border border-white/5 transition-all hover:bg-white/6 hover:translate-x-1 hover:border-primary flex-wrap gap-2.5">
+        <div>
+          <h3 class="m-0 mb-1 text-lg text-foreground">{connector.name}</h3>
+          <span class="text-xs px-2 py-0.5 rounded-full uppercase font-bold {statusBadgeClass[connector.status] || 'bg-white/5 text-muted-foreground'}">
             {getStatusLabel(connector.status)}
           </span>
         </div>
-        <div class="connector-actions">
+        <div class="flex items-center gap-4">
           <button
-            class="action-btn icon"
+            class="action-btn w-8 h-8 flex items-center justify-center bg-white/3 border border-white/8 rounded-lg text-muted-foreground cursor-pointer transition-all hover:bg-card hover:border-primary hover:text-primary hover:-translate-y-px"
             title="Configure"
             onclick={() => openConfigModal(connector.id)}
           >
@@ -128,16 +141,19 @@
             </svg>
           </button>
 
-          <label class="switch">
+          <label class="relative inline-block w-11 h-6 shrink-0">
             <input
               type="checkbox"
               checked={connector.status === "active"}
               onchange={() => handleToggle(connector.id, connector.status === "active")}
+              class="peer sr-only"
             />
-            <span class="slider"></span>
+            <span class="block h-6 w-11 rounded-full bg-primary cursor-pointer transition-colors duration-300 peer-checked:bg-success"></span>
+            <span class="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white transition-transform duration-300 peer-checked:translate-x-5"></span>
           </label>
+
           <button
-            class="action-btn danger icon"
+            class="action-btn w-8 h-8 flex items-center justify-center bg-danger/10 border border-white/8 rounded-lg text-danger cursor-pointer transition-all hover:bg-danger hover:text-white hover:-translate-y-px"
             title="Clear Config"
             onclick={() => handleAction(connector.id, "delete")}
           >
@@ -148,7 +164,7 @@
         </div>
       </div>
     {:else}
-      <div class="empty">
+      <div class="text-muted-foreground text-center py-15 px-10">
         No connectors found. Check your configuration.
       </div>
     {/each}
@@ -156,294 +172,26 @@
 </div>
 
 {#if showConfigModal}
-  <div class="modal-backdrop">
-    <div class="modal">
-      <h3>Configure {configTargetId}</h3>
-      <p>Enter the authentication token for this connector.</p>
+  <div class="fixed inset-0 bg-black/60 flex justify-center items-center z-50">
+    <div class="bg-card p-6 rounded-xl w-[90%] max-w-[400px] shadow-2xl border border-border">
+      <h3 class="mt-0 text-primary text-lg">Configure {configTargetId}</h3>
+      <p class="text-sm text-muted-foreground">Enter the authentication token for this connector.</p>
       <input
         type="password"
         bind:value={configToken}
         placeholder="Token (e.g. 12345:ABC...)"
-        class="token-input"
+        class="w-full p-2.5 my-4 bg-background border border-border text-foreground rounded-md"
       />
-      <div class="modal-actions">
-        <button class="secondary" onclick={() => (showConfigModal = false)}>Cancel</button>
-        <button onclick={handleConfigSubmit}>Save & Enable</button>
+      <div class="flex justify-end gap-2.5">
+        <button
+          class="px-5 py-2 text-sm rounded-lg bg-white/5 text-muted-foreground cursor-pointer hover:bg-white/10 transition-colors"
+          onclick={() => (showConfigModal = false)}
+        >Cancel</button>
+        <button
+          class="px-5 py-2 text-sm rounded-lg bg-primary text-foreground cursor-pointer hover:bg-accent hover:text-accent-foreground transition-colors"
+          onclick={handleConfigSubmit}
+        >Save & Enable</button>
       </div>
     </div>
   </div>
 {/if}
-
-<style>
-  .controls {
-    display: flex;
-    gap: 10px;
-    margin-bottom: 20px;
-  }
-
-  .view-panel {
-    background: rgba(30, 30, 50, 0.7);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
-    border-radius: 16px;
-    padding: 0;
-    overflow: hidden;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-  }
-
-  .panel-header {
-    padding: 15px 20px;
-    background: rgba(255, 255, 255, 0.02);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  }
-
-  .view-panel h2 {
-    margin: 0;
-    font-size: 1rem;
-    font-weight: 600;
-    color: var(--text);
-  }
-
-  .connector-list {
-    padding: 10px;
-  }
-
-  .connector-card {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 16px 20px;
-    background: rgba(255, 255, 255, 0.03);
-    border-radius: 10px;
-    margin-bottom: 10px;
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    transition: all 0.2s;
-    flex-wrap: wrap;
-    gap: 10px;
-  }
-
-  .connector-card:hover {
-    background: rgba(255, 255, 255, 0.06);
-    transform: translateX(4px);
-    border-color: var(--primary);
-  }
-
-  .connector-info h3 {
-    margin: 0 0 4px 0;
-    font-size: 1.1rem;
-  }
-
-  .status-badge {
-    font-size: 0.75rem;
-    padding: 2px 8px;
-    border-radius: 20px;
-    text-transform: uppercase;
-    font-weight: 700;
-  }
-
-  .status-badge.active {
-    background: rgba(16, 185, 129, 0.2);
-    color: var(--success);
-  }
-  .status-badge.error {
-    background: rgba(239, 68, 68, 0.2);
-    color: var(--error);
-  }
-  .status-badge.disabled {
-    background: rgba(107, 114, 128, 0.2);
-    color: #9ca3af;
-  }
-  .status-badge.unconfigured {
-    background: rgba(255, 255, 255, 0.05);
-    color: var(--text-dim);
-  }
-
-  .connector-actions {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-  }
-
-  .action-btn {
-    padding: 8px 14px;
-    font-size: 0.8rem;
-    border-radius: 6px;
-    cursor: pointer;
-    border: none;
-    transition: all 0.2s;
-  }
-
-  .action-btn.icon {
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    padding: 6px;
-    width: 32px;
-    height: 32px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    border-radius: 8px;
-    color: var(--text-dim);
-    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
-  }
-
-  .action-btn.icon:hover {
-    background: var(--surface);
-    border-color: var(--primary);
-    color: var(--primary);
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  }
-
-  .action-btn.danger {
-    background: rgba(239, 68, 68, 0.1);
-    color: var(--error);
-  }
-  .action-btn.danger:hover {
-    background: var(--error);
-    color: white;
-  }
-  .action-btn.danger.icon:hover {
-    border-color: var(--error);
-    color: var(--error);
-    background: rgba(239, 68, 68, 0.1);
-  }
-
-  /* Toggle Switch */
-  .switch {
-    position: relative;
-    display: inline-block;
-    width: 44px;
-    height: 24px;
-    flex-shrink: 0;
-  }
-
-  .switch input {
-    opacity: 0;
-    width: 0;
-    height: 0;
-  }
-
-  .slider {
-    position: absolute;
-    cursor: pointer;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background-color: var(--primary);
-    transition: 0.4s;
-    border-radius: 24px;
-  }
-
-  .slider:before {
-    position: absolute;
-    content: "";
-    height: 18px;
-    width: 18px;
-    left: 3px;
-    bottom: 3px;
-    background-color: white;
-    transition: 0.4s;
-    border-radius: 50%;
-  }
-
-  input:checked + .slider {
-    background-color: var(--success);
-  }
-
-  input:checked + .slider:before {
-    transform: translateX(20px);
-  }
-
-  .token-panel {
-    background: linear-gradient(135deg, var(--primary), #1a3a5f);
-    padding: 20px;
-    border-radius: 12px;
-    margin-bottom: 20px;
-    text-align: center;
-    border: 1px solid var(--accent);
-  }
-
-  .token-box {
-    background: rgba(0, 0, 0, 0.3);
-    padding: 15px;
-    border-radius: 8px;
-    font-size: 2rem;
-    letter-spacing: 4px;
-    margin: 10px 0;
-    color: var(--accent);
-    font-weight: 800;
-  }
-
-  .hint {
-    font-size: 0.85rem;
-    color: var(--text-dim);
-  }
-
-  .empty {
-    color: var(--text-dim);
-    text-align: center;
-    padding: 60px 40px;
-  }
-
-  /* Modal */
-  .modal-backdrop {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0, 0, 0, 0.6);
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    z-index: 1000;
-  }
-
-  .modal {
-    background: var(--surface);
-    padding: 24px;
-    border-radius: 12px;
-    width: 90%;
-    max-width: 400px;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-  }
-
-  .modal h3 {
-    margin-top: 0;
-    color: var(--primary);
-  }
-
-  .token-input {
-    width: 100%;
-    padding: 10px;
-    margin: 15px 0;
-    background: var(--bg);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    color: var(--text);
-    border-radius: 6px;
-    box-sizing: border-box;
-  }
-
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-  }
-
-  @media (max-width: 480px) {
-    .controls {
-      flex-wrap: wrap;
-    }
-
-    .token-box {
-      font-size: 1.3rem;
-      letter-spacing: 2px;
-    }
-  }
-</style>
