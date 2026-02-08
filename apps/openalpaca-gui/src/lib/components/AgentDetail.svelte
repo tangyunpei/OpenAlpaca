@@ -53,104 +53,134 @@
   );
   let canPause = $derived(detail?.agent.status === "idle" || detail?.agent.status === "busy");
   let canResume = $derived(detail?.agent.status === "waiting");
+
+  function statusBadgeClass(status: string): string {
+    const key = getStatusColor(status);
+    switch (key) {
+      case "status-success":
+        return "bg-success/20 text-success";
+      case "status-warning":
+        return "bg-amber-400/20 text-amber-400";
+      case "status-paused":
+        return "bg-blue-400/20 text-blue-400";
+      case "status-error":
+        return "bg-danger/20 text-danger";
+      case "status-dim":
+      default:
+        return "bg-muted-foreground/20 text-muted-foreground";
+    }
+  }
 </script>
 
-<div class="modal-backdrop" onclick={onClose} role="presentation">
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<div class="fixed inset-0 bg-black/60 flex justify-center items-center z-[1000]" onclick={onClose} role="presentation">
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_interactive_supports_focus -->
-  <div class="modal" onclick={(e) => e.stopPropagation()} role="dialog">
+  <div
+    class="bg-surface p-6 rounded-xl w-[90%] max-w-[560px] max-h-[80vh] overflow-y-auto shadow-[0_4px_20px_rgba(0,0,0,0.3)] border border-border"
+    onclick={(e) => e.stopPropagation()}
+    role="dialog"
+  >
     {#if loading}
-      <div class="loading">Loading...</div>
+      <div class="text-center text-muted-foreground py-10">Loading...</div>
     {:else if detail}
-      <div class="modal-header">
-        <div class="agent-header-info">
-          <div class="agent-icon">
-            <span class="icon-text">{resolveIcon(detail.agent.icon)}</span>
+      <!-- Header -->
+      <div class="flex justify-between items-start mb-4">
+        <div class="flex gap-3 items-center flex-1">
+          <div class="w-11 h-11 flex items-center justify-center bg-white/5 rounded-[10px] shrink-0 text-muted-foreground">
+            <span class="text-2xl">{resolveIcon(detail.agent.icon)}</span>
           </div>
           <div>
-            <h3>{detail.agent.name}</h3>
+            <h3 class="m-0 text-[1.2rem] text-foreground">{detail.agent.name}</h3>
             {#if detail.agent.description}
-              <p class="agent-desc">{detail.agent.description}</p>
+              <p class="mt-0.5 mb-0 text-xs text-muted-foreground">{detail.agent.description}</p>
             {/if}
           </div>
         </div>
-        <button class="close-btn" onclick={onClose}>×</button>
+        <button
+          class="bg-transparent border-none text-muted-foreground text-2xl cursor-pointer p-0 leading-none hover:text-foreground"
+          onclick={onClose}
+        >&times;</button>
       </div>
 
-      <div class="detail-grid">
-        <div class="detail-row">
-          <span class="label">Status</span>
-          <span class="status-badge {getStatusColor(detail.agent.status)}">{detail.agent.status}</span>
+      <!-- Detail grid -->
+      <div class="flex flex-col gap-2 mb-4">
+        <div class="flex justify-between items-center text-[0.85rem]">
+          <span class="text-muted-foreground font-medium">Status</span>
+          <span class="text-[0.7rem] px-2 py-0.5 rounded-[20px] uppercase font-bold {statusBadgeClass(detail.agent.status)}">{detail.agent.status}</span>
         </div>
-        <div class="detail-row">
-          <span class="label">ID</span>
-          <span class="mono">{detail.agent.id}</span>
+        <div class="flex justify-between items-center text-[0.85rem]">
+          <span class="text-muted-foreground font-medium">ID</span>
+          <span class="font-mono text-xs text-muted-foreground">{detail.agent.id}</span>
         </div>
         {#if detail.agent.current_task_id}
-          <div class="detail-row">
-            <span class="label">Current Task</span>
-            <span class="mono">{detail.agent.current_task_id}</span>
+          <div class="flex justify-between items-center text-[0.85rem]">
+            <span class="text-muted-foreground font-medium">Current Task</span>
+            <span class="font-mono text-xs text-muted-foreground">{detail.agent.current_task_id}</span>
           </div>
         {/if}
-        <div class="detail-row">
-          <span class="label">Created</span>
+        <div class="flex justify-between items-center text-[0.85rem]">
+          <span class="text-muted-foreground font-medium">Created</span>
           <span>{formatDateTime(detail.agent.created_at)}</span>
         </div>
       </div>
 
+      <!-- Skills -->
       {#if skills.length > 0}
-        <div class="section">
-          <h4>Skills</h4>
-          <div class="skill-tags">
+        <div class="mb-4">
+          <h4 class="m-0 mb-2 text-[0.85rem] text-muted-foreground uppercase tracking-wide">Skills</h4>
+          <div class="flex flex-wrap gap-1.5">
             {#each skills as skill}
-              <span class="skill-tag">{skill.name}</span>
+              <span class="text-[0.7rem] px-2 py-0.5 rounded-xl bg-accent/12 text-accent font-medium">{skill.name}</span>
             {/each}
           </div>
         </div>
       {/if}
 
+      <!-- Metrics -->
       {#if detail.metrics}
-        <div class="section">
-          <h4>Metrics</h4>
-          <div class="metrics-grid">
-            <div class="metric">
-              <span class="metric-value">{detail.metrics.tasks_completed}</span>
-              <span class="metric-label">Completed</span>
+        <div class="mb-4">
+          <h4 class="m-0 mb-2 text-[0.85rem] text-muted-foreground uppercase tracking-wide">Metrics</h4>
+          <div class="grid grid-cols-[repeat(auto-fit,minmax(100px,1fr))] gap-2.5 mb-2">
+            <div class="text-center py-2.5 px-1.5 bg-black/20 rounded-lg">
+              <span class="block text-[1.1rem] font-bold text-foreground mb-0.5">{detail.metrics.tasks_completed}</span>
+              <span class="text-[0.65rem] text-muted-foreground uppercase">Completed</span>
             </div>
-            <div class="metric">
-              <span class="metric-value">{detail.metrics.tasks_failed}</span>
-              <span class="metric-label">Failed</span>
+            <div class="text-center py-2.5 px-1.5 bg-black/20 rounded-lg">
+              <span class="block text-[1.1rem] font-bold text-foreground mb-0.5">{detail.metrics.tasks_failed}</span>
+              <span class="text-[0.65rem] text-muted-foreground uppercase">Failed</span>
             </div>
-            <div class="metric">
-              <span class="metric-value">{Math.round(detail.metrics.success_rate * 100)}%</span>
-              <span class="metric-label">Success Rate</span>
+            <div class="text-center py-2.5 px-1.5 bg-black/20 rounded-lg">
+              <span class="block text-[1.1rem] font-bold text-foreground mb-0.5">{Math.round(detail.metrics.success_rate * 100)}%</span>
+              <span class="text-[0.65rem] text-muted-foreground uppercase">Success Rate</span>
             </div>
-            <div class="metric">
-              <span class="metric-value">{formatDuration(detail.metrics.average_runtime_seconds)}</span>
-              <span class="metric-label">Avg Runtime</span>
+            <div class="text-center py-2.5 px-1.5 bg-black/20 rounded-lg">
+              <span class="block text-[1.1rem] font-bold text-foreground mb-0.5">{formatDuration(detail.metrics.average_runtime_seconds)}</span>
+              <span class="text-[0.65rem] text-muted-foreground uppercase">Avg Runtime</span>
             </div>
           </div>
           {#if detail.metrics.success_rate >= 0}
-            <div class="success-bar">
-              <div class="success-fill" style="width: {detail.metrics.success_rate * 100}%"></div>
+            <div class="h-1 bg-white/8 rounded-sm overflow-hidden">
+              <div class="h-full bg-success rounded-sm transition-[width] duration-300 ease-out" style="width: {detail.metrics.success_rate * 100}%"></div>
             </div>
           {/if}
         </div>
       {/if}
 
+      <!-- LLM Config -->
       {#if Object.keys(llmConfig).length > 0}
-        <div class="section">
-          <h4>LLM Config</h4>
-          <div class="config-block">
+        <div class="mb-4">
+          <h4 class="m-0 mb-2 text-[0.85rem] text-muted-foreground uppercase tracking-wide">LLM Config</h4>
+          <div class="flex flex-col gap-1.5 bg-black/20 px-3.5 py-2.5 rounded-lg">
             {#if llmConfig.model}
-              <div class="config-row">
-                <span class="label">Model</span>
+              <div class="flex justify-between items-center text-[0.85rem]">
+                <span class="text-muted-foreground font-medium">Model</span>
                 <span>{llmConfig.model}</span>
               </div>
             {/if}
             {#if Array.isArray(llmConfig.fallback_models) && llmConfig.fallback_models.length > 0}
-              <div class="config-row">
-                <span class="label">Fallbacks</span>
+              <div class="flex justify-between items-center text-[0.85rem]">
+                <span class="text-muted-foreground font-medium">Fallbacks</span>
                 <span>{(llmConfig.fallback_models as string[]).join(", ")}</span>
               </div>
             {/if}
@@ -158,25 +188,26 @@
         </div>
       {/if}
 
+      <!-- Constraints -->
       {#if Object.keys(constraints).length > 0}
-        <div class="section">
-          <h4>Constraints</h4>
-          <div class="config-block">
+        <div class="mb-4">
+          <h4 class="m-0 mb-2 text-[0.85rem] text-muted-foreground uppercase tracking-wide">Constraints</h4>
+          <div class="flex flex-col gap-1.5 bg-black/20 px-3.5 py-2.5 rounded-lg">
             {#if Array.isArray(constraints.allowed_models) && constraints.allowed_models.length > 0}
-              <div class="config-row">
-                <span class="label">Allowed models</span>
+              <div class="flex justify-between items-center text-[0.85rem]">
+                <span class="text-muted-foreground font-medium">Allowed models</span>
                 <span>{(constraints.allowed_models as string[]).join(", ")}</span>
               </div>
             {/if}
             {#if Array.isArray(constraints.denied_models) && constraints.denied_models.length > 0}
-              <div class="config-row">
-                <span class="label">Denied models</span>
+              <div class="flex justify-between items-center text-[0.85rem]">
+                <span class="text-muted-foreground font-medium">Denied models</span>
                 <span>{(constraints.denied_models as string[]).join(", ")}</span>
               </div>
             {/if}
             {#if constraints.max_cost_per_task != null}
-              <div class="config-row">
-                <span class="label">Max cost/task</span>
+              <div class="flex justify-between items-center text-[0.85rem]">
+                <span class="text-muted-foreground font-medium">Max cost/task</span>
                 <span>${constraints.max_cost_per_task}</span>
               </div>
             {/if}
@@ -184,19 +215,37 @@
         </div>
       {/if}
 
-      <div class="modal-actions">
-        <button onclick={() => (showConfigEditor = true)}>Edit Config</button>
+      <!-- Actions -->
+      <div class="flex justify-end gap-2.5 mt-4 pt-4 border-t border-border">
+        <button
+          class="px-4 py-2 text-sm bg-white/5 text-foreground border border-input rounded-lg cursor-pointer hover:bg-white/10 transition-colors"
+          onclick={() => (showConfigEditor = true)}
+        >Edit Config</button>
         {#if canPause}
-          <button onclick={() => handleAction("pause")} disabled={actionLoading}>Pause</button>
+          <button
+            class="px-4 py-2 text-sm bg-white/5 text-foreground border border-input rounded-lg cursor-pointer hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            onclick={() => handleAction("pause")}
+            disabled={actionLoading}
+          >Pause</button>
         {/if}
         {#if canResume}
-          <button onclick={() => handleAction("resume")} disabled={actionLoading}>Resume</button>
+          <button
+            class="px-4 py-2 text-sm bg-white/5 text-foreground border border-input rounded-lg cursor-pointer hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            onclick={() => handleAction("resume")}
+            disabled={actionLoading}
+          >Resume</button>
         {/if}
-        <button class="danger-outline" onclick={() => (showDeleteDialog = true)}>Delete</button>
-        <button class="secondary" onclick={onClose}>Close</button>
+        <button
+          class="px-4 py-2 text-sm bg-transparent text-danger border border-danger rounded-lg cursor-pointer hover:bg-danger/15 transition-colors"
+          onclick={() => (showDeleteDialog = true)}
+        >Delete</button>
+        <button
+          class="px-4 py-2 text-sm bg-white/5 text-muted-foreground border border-input rounded-lg cursor-pointer hover:bg-white/10 transition-colors"
+          onclick={onClose}
+        >Close</button>
       </div>
     {:else}
-      <div class="loading">Agent not found.</div>
+      <div class="text-center text-muted-foreground py-10">Agent not found.</div>
     {/if}
   </div>
 </div>
@@ -213,220 +262,3 @@
     onDeleted={handleDeleted}
   />
 {/if}
-
-<style>
-  .modal-backdrop {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0, 0, 0, 0.6);
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    z-index: 1000;
-  }
-
-  .modal {
-    background: var(--surface);
-    padding: 24px;
-    border-radius: 12px;
-    width: 90%;
-    max-width: 560px;
-    max-height: 80vh;
-    overflow-y: auto;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-  }
-
-  .modal-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 16px;
-  }
-
-  .agent-header-info {
-    display: flex;
-    gap: 12px;
-    align-items: center;
-    flex: 1;
-  }
-
-  .agent-icon {
-    width: 44px;
-    height: 44px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 10px;
-    flex-shrink: 0;
-    color: var(--text-dim);
-  }
-
-  .icon-text {
-    font-size: 1.5rem;
-  }
-
-  .modal-header h3 {
-    margin: 0;
-    font-size: 1.2rem;
-    color: var(--text);
-  }
-
-  .agent-desc {
-    margin: 2px 0 0;
-    font-size: 0.8rem;
-    color: var(--text-dim);
-  }
-
-  .close-btn {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font-size: 1.5rem;
-    cursor: pointer;
-    padding: 0;
-    line-height: 1;
-  }
-  .close-btn:hover {
-    color: var(--text);
-  }
-
-  .detail-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-bottom: 16px;
-  }
-
-  .detail-row, .config-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 0.85rem;
-  }
-
-  .label {
-    color: var(--text-dim);
-    font-weight: 500;
-  }
-
-  .mono {
-    font-family: "Fira Code", monospace;
-    font-size: 0.8rem;
-    color: var(--text-dim);
-  }
-
-  .section {
-    margin-bottom: 16px;
-  }
-
-  .section h4 {
-    margin: 0 0 8px 0;
-    font-size: 0.85rem;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-
-  .skill-tags {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-
-  .skill-tag {
-    font-size: 0.7rem;
-    padding: 2px 8px;
-    border-radius: 12px;
-    background: rgba(233, 69, 96, 0.12);
-    color: var(--accent);
-    font-weight: 500;
-  }
-
-  .metrics-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
-    gap: 10px;
-    margin-bottom: 8px;
-  }
-
-  .metric {
-    text-align: center;
-    padding: 10px 6px;
-    background: rgba(0, 0, 0, 0.2);
-    border-radius: 8px;
-  }
-
-  .metric-value {
-    display: block;
-    font-size: 1.1rem;
-    font-weight: 700;
-    color: var(--text);
-    margin-bottom: 2px;
-  }
-
-  .metric-label {
-    font-size: 0.65rem;
-    color: var(--text-dim);
-    text-transform: uppercase;
-  }
-
-  .success-bar {
-    height: 4px;
-    background: rgba(255, 255, 255, 0.08);
-    border-radius: 2px;
-    overflow: hidden;
-  }
-
-  .success-fill {
-    height: 100%;
-    background: var(--success);
-    border-radius: 2px;
-    transition: width 0.3s ease;
-  }
-
-  .config-block {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    background: rgba(0, 0, 0, 0.2);
-    padding: 10px 14px;
-    border-radius: 8px;
-  }
-
-  .status-badge {
-    font-size: 0.7rem;
-    padding: 2px 8px;
-    border-radius: 20px;
-    text-transform: uppercase;
-    font-weight: 700;
-  }
-
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-    margin-top: 16px;
-    padding-top: 16px;
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
-  }
-
-  .danger-outline {
-    background: transparent;
-    border: 1px solid var(--error);
-    color: var(--error);
-  }
-  .danger-outline:hover {
-    background: rgba(239, 68, 68, 0.15);
-  }
-
-  .loading {
-    text-align: center;
-    color: var(--text-dim);
-    padding: 40px;
-  }
-</style>

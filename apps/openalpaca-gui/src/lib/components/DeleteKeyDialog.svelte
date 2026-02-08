@@ -1,14 +1,14 @@
 <script lang="ts">
-  import { removeAgent } from "$lib/stores/agents";
+  import { removeKey } from "$lib/api/settings";
 
   interface Props {
-    agentId: string;
-    agentName: string;
+    keyId: string;
+    provider: string;
     onClose: () => void;
     onDeleted: () => void;
   }
 
-  let { agentId, agentName, onClose, onDeleted }: Props = $props();
+  let { keyId, provider, onClose, onDeleted }: Props = $props();
 
   let deleting = $state(false);
   let error = $state<string | null>(null);
@@ -17,7 +17,7 @@
     deleting = true;
     error = null;
     try {
-      await removeAgent(agentId);
+      await removeKey(provider, keyId);
       onDeleted();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -36,10 +36,9 @@
     onclick={(e) => e.stopPropagation()}
     role="dialog"
   >
-    <h3 class="m-0 mb-3 text-[1.1rem] text-foreground">Archive Agent</h3>
+    <h3 class="m-0 mb-3 text-[1.1rem] text-foreground">Remove API Key</h3>
     <p class="text-sm text-muted-foreground m-0 mb-4 leading-relaxed">
-      Archive agent <strong class="text-foreground">'{agentName}'</strong>?
-      The config file will be moved to <code class="bg-white/10 px-1.5 rounded text-[0.85rem]">.archived/</code>.
+      Remove key <strong class="text-foreground">'{keyId}'</strong> from <strong class="text-foreground">{provider}</strong>?
     </p>
 
     {#if error}
@@ -52,7 +51,7 @@
         onclick={handleConfirm}
         disabled={deleting}
       >
-        {deleting ? "Archiving..." : "Archive"}
+        {deleting ? "Removing..." : "Remove"}
       </button>
       <button
         class="px-4 py-2 text-sm bg-white/5 text-muted-foreground border border-input rounded-lg cursor-pointer hover:bg-white/10 transition-colors"

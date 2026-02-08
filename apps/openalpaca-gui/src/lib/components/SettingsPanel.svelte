@@ -30,10 +30,8 @@
   let models = $state<ModelEntry[]>([]);
   let refreshing = $state(false);
 
-  // Sub-tab: Config vs Usage
   let settingsTab = $state<"config" | "usage">("config");
 
-  // Edit mode state
   let editingOrchestrator = $state(false);
   let editModel = $state("");
   let editFallbackSet = $state<Set<string>>(new Set());
@@ -125,15 +123,13 @@
   }
 </script>
 
-<div class="settings-tabs">
+<div class="flex gap-1 mb-4">
   <button
-    class="filter-btn"
-    class:active={settingsTab === "config"}
+    class="px-5 py-1.5 border border-input rounded-md text-[0.85rem] cursor-pointer transition-all {settingsTab === 'config' ? 'bg-primary text-foreground border-accent' : 'bg-transparent text-muted-foreground hover:bg-white/5'}"
     onclick={() => (settingsTab = "config")}
   >Configuration</button>
   <button
-    class="filter-btn"
-    class:active={settingsTab === "usage"}
+    class="px-5 py-1.5 border border-input rounded-md text-[0.85rem] cursor-pointer transition-all {settingsTab === 'usage' ? 'bg-primary text-foreground border-accent' : 'bg-transparent text-muted-foreground hover:bg-white/5'}"
     onclick={() => (settingsTab = "usage")}
   >Usage</button>
 </div>
@@ -141,37 +137,48 @@
 {#if settingsTab === "usage"}
   <UsagePanel />
 {:else}
-  <div class="controls">
-    <button onclick={() => { loadSettings(); loadOrchestratorConfig(); loadAvailableModels(); }} disabled={loading}>
+  <div class="flex gap-2.5 mb-5">
+    <button
+      class="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/80 disabled:opacity-50 cursor-pointer"
+      onclick={() => { loadSettings(); loadOrchestratorConfig(); loadAvailableModels(); }}
+      disabled={loading}
+    >
       {loading ? "Loading..." : "Refresh"}
     </button>
-    <button onclick={refreshModels} disabled={refreshing} class="secondary">
+    <button
+      class="px-4 py-2 rounded-lg bg-white/5 border border-border text-muted-foreground text-sm hover:bg-white/10 cursor-pointer disabled:opacity-50"
+      onclick={refreshModels}
+      disabled={refreshing}
+    >
       {refreshing ? "Refreshing..." : "Refresh Models"}
     </button>
   </div>
 
   {#if error}
-    <div class="settings-error">{error}</div>
+    <div class="bg-danger/20 border border-danger text-danger px-3.5 py-2.5 rounded-lg mb-4 text-[0.9rem]">{error}</div>
   {/if}
 
   {#if settings}
-  <div class="orchestrator-info">
-    <div class="panel-header">
-      <h2>Orchestrator</h2>
+  <div class="bg-card/70 backdrop-blur-xl rounded-xl overflow-hidden border border-border shadow-[0_4px_16px_rgba(0,0,0,0.2)] mb-5">
+    <div class="flex items-center justify-between px-4 py-3 bg-white/2 border-b border-border">
+      <h2 class="m-0 text-base font-semibold text-foreground">Orchestrator</h2>
       {#if !editingOrchestrator}
-        <button class="edit-btn" onclick={startEditOrchestrator}>Edit</button>
+        <button
+          class="text-xs px-3 py-1 rounded-md bg-white/5 border border-border text-muted-foreground hover:bg-white/10 cursor-pointer"
+          onclick={startEditOrchestrator}
+        >Edit</button>
       {/if}
     </div>
-    <div class="orchestrator-body">
+    <div class="px-4 py-3">
       {#if editingOrchestrator}
         {#if orchError}
-          <div class="orch-error">{orchError}</div>
+          <div class="bg-danger/20 border border-danger text-danger px-3 py-2 rounded-md mb-2.5 text-[0.8rem]">{orchError}</div>
         {/if}
-        <div class="edit-row">
-          <label>
-            <span class="label">Model</span>
+        <div class="mb-2.5">
+          <label class="flex flex-col gap-1">
+            <span class="text-xs text-muted-foreground uppercase tracking-wide">Model</span>
             {#if models.length > 0}
-              <select bind:value={editModel}>
+              <select bind:value={editModel} class="bg-black/30 border border-input rounded-md px-2.5 py-1.5 text-foreground text-[0.85rem] cursor-pointer focus:outline-none focus:border-accent">
                 {#each models as m (m.id)}
                   <option value={m.id}>{m.id} ({m.provider})</option>
                 {/each}
@@ -180,61 +187,69 @@
                 {/if}
               </select>
             {:else}
-              <input type="text" bind:value={editModel} />
+              <input type="text" bind:value={editModel} class="bg-black/30 border border-input rounded-md px-2.5 py-1.5 text-foreground text-[0.85rem] focus:outline-none focus:border-accent" />
             {/if}
           </label>
         </div>
-        <div class="edit-row">
-          <span class="label">Fallback Models</span>
+        <div class="mb-2.5">
+          <span class="text-xs text-muted-foreground uppercase tracking-wide">Fallback Models</span>
           {#if models.length > 0}
-            <div class="checkbox-list">
+            <div class="flex flex-col gap-1 max-h-[180px] overflow-y-auto py-1.5">
               {#each models.filter((m) => m.id !== editModel) as m (m.id)}
-                <label class="checkbox-item">
+                <label class="flex items-center gap-2 text-[0.82rem] text-foreground cursor-pointer py-0.5">
                   <input
                     type="checkbox"
                     checked={editFallbackSet.has(m.id)}
                     onchange={() => toggleFallback(m.id)}
+                    class="w-3.5 h-3.5 cursor-pointer accent-accent"
                   />
-                  <span>{m.id} <span class="provider-tag">{m.provider}</span></span>
+                  <span>{m.id} <span class="text-[0.7rem] text-muted-foreground bg-white/5 px-1.5 rounded ml-1">{m.provider}</span></span>
                 </label>
               {/each}
             </div>
           {:else}
             <input type="text" value={[...editFallbackSet].join(", ")} onchange={(e) => {
               editFallbackSet = new Set(e.currentTarget.value.split(",").map((s) => s.trim()).filter(Boolean));
-            }} placeholder="gpt-4o, llama3" />
+            }} placeholder="gpt-4o, llama3" class="bg-black/30 border border-input rounded-md px-2.5 py-1.5 text-foreground text-[0.85rem] placeholder:text-muted-foreground focus:outline-none focus:border-accent w-full" />
           {/if}
         </div>
-        <div class="edit-actions">
-          <button onclick={handleSaveOrchestrator} disabled={orchSaving}>
+        <div class="flex gap-2 justify-end mt-2.5">
+          <button
+            class="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/80 disabled:opacity-50 cursor-pointer"
+            onclick={handleSaveOrchestrator}
+            disabled={orchSaving}
+          >
             {orchSaving ? "Saving..." : "Save"}
           </button>
-          <button class="secondary" onclick={cancelEditOrchestrator}>Cancel</button>
+          <button
+            class="px-4 py-2 rounded-lg bg-white/5 border border-border text-muted-foreground text-sm hover:bg-white/10 cursor-pointer"
+            onclick={cancelEditOrchestrator}
+          >Cancel</button>
         </div>
       {:else}
-        <div class="info-row">
-          <span class="label">Default Model</span>
-          <span class="value">{orchConfig?.model || settings.orchestrator.model}</span>
+        <div class="flex items-center justify-between py-1.5">
+          <span class="text-[0.85rem] text-muted-foreground">Default Model</span>
+          <span class="text-[0.85rem] text-foreground font-medium font-mono">{orchConfig?.model || settings.orchestrator.model}</span>
         </div>
         {#if (orchConfig?.fallback_models || settings.orchestrator.fallback_models).length > 0}
-          <div class="info-row">
-            <span class="label">Fallback Models</span>
-            <span class="value">{(orchConfig?.fallback_models || settings.orchestrator.fallback_models).join(', ')}</span>
+          <div class="flex items-center justify-between py-1.5">
+            <span class="text-[0.85rem] text-muted-foreground">Fallback Models</span>
+            <span class="text-[0.85rem] text-foreground font-medium font-mono">{(orchConfig?.fallback_models || settings.orchestrator.fallback_models).join(', ')}</span>
           </div>
         {/if}
         {#if orchConfig}
-          <div class="stats-row">
-            <div class="stat">
-              <span class="stat-value">{orchConfig.active_agents}</span>
-              <span class="stat-label">Agents</span>
+          <div class="flex gap-4 mt-2.5 pt-2.5 border-t border-border">
+            <div class="text-center flex-1">
+              <span class="block text-base font-bold text-foreground">{orchConfig.active_agents}</span>
+              <span class="text-[0.65rem] text-muted-foreground uppercase">Agents</span>
             </div>
-            <div class="stat">
-              <span class="stat-value">{orchConfig.active_tasks}</span>
-              <span class="stat-label">Active Tasks</span>
+            <div class="text-center flex-1">
+              <span class="block text-base font-bold text-foreground">{orchConfig.active_tasks}</span>
+              <span class="text-[0.65rem] text-muted-foreground uppercase">Active Tasks</span>
             </div>
-            <div class="stat">
-              <span class="stat-value">${orchConfig.daily_cost_usd.toFixed(4)}</span>
-              <span class="stat-label">Cost</span>
+            <div class="text-center flex-1">
+              <span class="block text-base font-bold text-foreground">${orchConfig.daily_cost_usd.toFixed(4)}</span>
+              <span class="text-[0.65rem] text-muted-foreground uppercase">Cost</span>
             </div>
           </div>
         {/if}
@@ -242,7 +257,7 @@
     </div>
   </div>
 
-  <div class="providers-grid">
+  <div class="flex flex-col gap-4">
     {#each providers as [name, prov] (name)}
       <ProviderConfig
         providerName={name}
@@ -250,206 +265,12 @@
         onRefresh={() => loadSettings()}
       />
     {:else}
-      <div class="empty">No LLM providers configured.</div>
+      <div class="text-muted-foreground text-center py-10 text-[0.95rem]">No LLM providers configured.</div>
     {/each}
   </div>
 {:else if !loading}
-  <div class="empty">
-    LLM not configured. Add a <code>config/llm.toml</code> file to get started.
+  <div class="text-muted-foreground text-center py-10 text-[0.95rem]">
+    LLM not configured. Add a <code class="bg-white/10 px-1.5 rounded">config/llm.toml</code> file to get started.
   </div>
 {/if}
 {/if}
-
-<style>
-  .settings-tabs {
-    display: flex;
-    gap: 4px;
-    margin-bottom: 16px;
-  }
-
-  .settings-tabs .filter-btn {
-    padding: 6px 20px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 0.85rem;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-
-  .settings-tabs .filter-btn.active {
-    background: var(--primary);
-    color: var(--text);
-    border-color: var(--accent);
-  }
-
-  .settings-tabs .filter-btn:hover:not(.active) {
-    background: rgba(255, 255, 255, 0.05);
-  }
-
-  .controls {
-    display: flex;
-    gap: 10px;
-    margin-bottom: 20px;
-  }
-
-  .settings-error {
-    background: rgba(239, 68, 68, 0.2);
-    border: 1px solid var(--error);
-    color: var(--error);
-    padding: 10px 14px;
-    border-radius: 8px;
-    margin-bottom: 16px;
-    font-size: 0.9rem;
-  }
-
-  .orchestrator-info {
-    background: rgba(30, 30, 50, 0.7);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
-    border-radius: 12px;
-    overflow: hidden;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
-    margin-bottom: 20px;
-  }
-
-  .panel-header {
-    padding: 12px 16px;
-    background: rgba(255, 255, 255, 0.02);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-
-  .panel-header h2 {
-    margin: 0;
-    font-size: 1rem;
-    font-weight: 600;
-  }
-
-  .edit-btn {
-    font-size: 0.75rem;
-    padding: 4px 12px;
-  }
-
-  .orchestrator-body {
-    padding: 12px 16px;
-  }
-
-  .info-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 6px 0;
-  }
-
-  .info-row .label {
-    font-size: 0.85rem;
-    color: var(--text-dim);
-  }
-
-  .info-row .value {
-    font-size: 0.85rem;
-    color: var(--text);
-    font-weight: 500;
-    font-family: monospace;
-  }
-
-  .stats-row {
-    display: flex;
-    gap: 16px;
-    margin-top: 10px;
-    padding-top: 10px;
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
-  }
-  .stat {
-    text-align: center;
-    flex: 1;
-  }
-  .stat-value {
-    display: block;
-    font-size: 1rem;
-    font-weight: 700;
-    color: var(--text);
-  }
-  .stat-label {
-    font-size: 0.65rem;
-    color: var(--text-dim);
-    text-transform: uppercase;
-  }
-
-  .edit-row {
-    margin-bottom: 10px;
-  }
-  .edit-row > label {
-    display: flex; flex-direction: column; gap: 4px;
-  }
-  .edit-row .label {
-    font-size: 0.75rem; color: var(--text-dim);
-    text-transform: uppercase; letter-spacing: 0.3px;
-  }
-  .edit-row input, .edit-row select {
-    background: rgba(0, 0, 0, 0.3);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 6px; padding: 6px 10px;
-    color: var(--text); font-size: 0.85rem;
-  }
-  .edit-row input:focus, .edit-row select:focus { outline: none; border-color: var(--accent); }
-  .edit-row select { cursor: pointer; }
-  .edit-row select option { background: var(--surface); color: var(--text); }
-
-  .checkbox-list {
-    display: flex; flex-direction: column; gap: 4px;
-    max-height: 180px; overflow-y: auto;
-    padding: 6px 0;
-  }
-  .checkbox-item {
-    display: flex; align-items: center; gap: 8px;
-    font-size: 0.82rem; color: var(--text);
-    cursor: pointer; padding: 2px 0;
-  }
-  .checkbox-item input[type="checkbox"] {
-    width: 14px; height: 14px; cursor: pointer;
-    accent-color: var(--accent);
-  }
-  .provider-tag {
-    font-size: 0.7rem; color: var(--text-dim);
-    background: rgba(255, 255, 255, 0.06);
-    padding: 1px 6px; border-radius: 3px;
-    margin-left: 4px;
-  }
-
-  .edit-actions {
-    display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px;
-  }
-
-  .orch-error {
-    background: rgba(239, 68, 68, 0.2);
-    border: 1px solid var(--error);
-    color: var(--error);
-    padding: 8px 12px; border-radius: 6px; margin-bottom: 10px;
-    font-size: 0.8rem;
-  }
-
-  .providers-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }
-
-  .empty {
-    color: var(--text-dim);
-    text-align: center;
-    padding: 40px;
-    font-size: 0.95rem;
-  }
-
-  .empty code {
-    background: rgba(255, 255, 255, 0.1);
-    padding: 2px 6px;
-    border-radius: 3px;
-  }
-</style>

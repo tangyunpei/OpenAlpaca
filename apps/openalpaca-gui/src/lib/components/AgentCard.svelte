@@ -10,166 +10,58 @@
   let { agent, onclick }: Props = $props();
 
   let skills = $derived(safeParseJson<Skill[]>(agent.skills_json, []));
+
+  function statusDotClass(status: string): string {
+    const key = getStatusColor(status);
+    switch (key) {
+      case "status-success":
+        return "bg-success";
+      case "status-warning":
+        return "bg-amber-400";
+      case "status-paused":
+        return "bg-blue-400";
+      case "status-error":
+        return "bg-danger";
+      case "status-dim":
+      default:
+        return "bg-muted-foreground";
+    }
+  }
 </script>
 
-<button class="agent-card" {onclick}>
-  <div class="agent-header">
-    <div class="agent-icon">
-      <span class="icon-text">{resolveIcon(agent.icon)}</span>
+<button
+  class="block w-full text-left px-5 py-4 bg-white/3 rounded-[10px] mb-2.5 border border-white/5 transition-all duration-200 cursor-pointer text-foreground font-[inherit] text-[inherit] hover:bg-white/6 hover:translate-x-1 hover:border-primary"
+  {onclick}
+>
+  <div class="flex items-center gap-3 mb-2">
+    <div class="w-9 h-9 flex items-center justify-center bg-white/5 rounded-lg shrink-0 text-muted-foreground">
+      <span class="text-[1.3rem]">{resolveIcon(agent.icon)}</span>
     </div>
-    <div class="agent-info">
-      <h3 class="agent-name">{agent.name}</h3>
+    <div class="flex-1 min-w-0">
+      <h3 class="m-0 text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap">{agent.name}</h3>
       {#if agent.description}
-        <p class="agent-desc">{agent.description}</p>
+        <p class="mt-0.5 mb-0 text-xs text-muted-foreground overflow-hidden text-ellipsis whitespace-nowrap">{agent.description}</p>
       {/if}
     </div>
-    <span class="status-dot {getStatusColor(agent.status)}" title={agent.status}></span>
+    <span
+      class="w-2.5 h-2.5 rounded-full shrink-0 {statusDotClass(agent.status)}"
+      title={agent.status}
+    ></span>
   </div>
   {#if agent.current_task_id}
-    <div class="current-task">
-      <span class="label">Task:</span>
-      <span class="mono">{agent.current_task_id.slice(0, 8)}</span>
+    <div class="text-xs text-muted-foreground mb-2">
+      <span class="mr-1">Task:</span>
+      <span class="font-mono bg-primary px-1 rounded text-foreground">{agent.current_task_id.slice(0, 8)}</span>
     </div>
   {/if}
   {#if skills.length > 0}
-    <div class="skill-tags">
+    <div class="flex flex-wrap gap-1.5">
       {#each skills.slice(0, 4) as skill}
-        <span class="skill-tag">{skill.name}</span>
+        <span class="text-[0.7rem] px-2 py-0.5 rounded-xl bg-accent/12 text-accent font-medium">{skill.name}</span>
       {/each}
       {#if skills.length > 4}
-        <span class="skill-tag more">+{skills.length - 4}</span>
+        <span class="text-[0.7rem] px-2 py-0.5 rounded-xl bg-white/5 text-muted-foreground font-medium">+{skills.length - 4}</span>
       {/if}
     </div>
   {/if}
 </button>
-
-<style>
-  .agent-card {
-    display: block;
-    width: 100%;
-    text-align: left;
-    padding: 16px 20px;
-    background: rgba(255, 255, 255, 0.03);
-    border-radius: 10px;
-    margin-bottom: 10px;
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    transition: all 0.2s;
-    cursor: pointer;
-    color: var(--text);
-    font-family: inherit;
-    font-size: inherit;
-  }
-
-  .agent-card:hover {
-    background: rgba(255, 255, 255, 0.06);
-    transform: translateX(4px);
-    border-color: var(--primary);
-  }
-
-  .agent-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 8px;
-  }
-
-  .agent-icon {
-    width: 36px;
-    height: 36px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 8px;
-    flex-shrink: 0;
-    color: var(--text-dim);
-  }
-
-  .icon-text {
-    font-size: 1.3rem;
-  }
-
-  .agent-info {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .agent-name {
-    margin: 0;
-    font-size: 1rem;
-    font-weight: 600;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .agent-desc {
-    margin: 2px 0 0;
-    font-size: 0.8rem;
-    color: var(--text-dim);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .status-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .status-dot.status-success {
-    background: var(--success);
-  }
-  .status-dot.status-warning {
-    background: #fbbf24;
-  }
-  .status-dot.status-paused {
-    background: #60a5fa;
-  }
-  .status-dot.status-error {
-    background: var(--error);
-  }
-  .status-dot.status-dim {
-    background: var(--text-dim);
-  }
-
-  .current-task {
-    font-size: 0.75rem;
-    color: var(--text-dim);
-    margin-bottom: 8px;
-  }
-
-  .current-task .label {
-    margin-right: 4px;
-  }
-
-  .mono {
-    font-family: "Fira Code", monospace;
-    background: var(--primary);
-    padding: 0 4px;
-    border-radius: 3px;
-    color: var(--text);
-  }
-
-  .skill-tags {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-
-  .skill-tag {
-    font-size: 0.7rem;
-    padding: 2px 8px;
-    border-radius: 12px;
-    background: rgba(233, 69, 96, 0.12);
-    color: var(--accent);
-    font-weight: 500;
-  }
-
-  .skill-tag.more {
-    background: rgba(255, 255, 255, 0.05);
-    color: var(--text-dim);
-  }
-</style>

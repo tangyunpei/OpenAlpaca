@@ -35,7 +35,7 @@ impl GatewayPersistence {
         Ok(id)
     }
 
-    /// Persist an assistant message.
+    /// Persist an assistant message. Skips empty content to avoid polluting history.
     pub fn persist_assistant_message(
         &self,
         lane_key: &str,
@@ -43,6 +43,10 @@ impl GatewayPersistence {
         duration_ms: Option<i64>,
         _source: &str,
     ) -> Result<i64> {
+        if content.trim().is_empty() {
+            tracing::debug!("Skipping empty assistant message for lane {}", lane_key);
+            return Ok(0);
+        }
         let repo = ConversationRepository::new(&self.db);
         let id = repo.insert(&ConversationMessage {
             id: 0,

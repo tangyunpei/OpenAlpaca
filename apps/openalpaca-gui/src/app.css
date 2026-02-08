@@ -1,0 +1,110 @@
+@import "tailwindcss";
+
+/* ── Design Tokens ─────────────────────────────────────────────────── */
+
+@theme {
+  --color-background: hsl(233 33% 14%);
+  --color-foreground: hsl(0 0% 92%);
+  --color-card: hsl(219 44% 16%);
+  --color-muted: hsl(219 44% 16%);
+  --color-muted-foreground: hsl(223 16% 60%);
+  --color-border: hsl(0 0% 100% / 0.08);
+  --color-input: hsl(0 0% 100% / 0.1);
+  --color-primary: hsl(214 73% 22%);
+  --color-primary-foreground: hsl(0 0% 92%);
+  --color-accent: hsl(349 79% 59%);
+  --color-accent-foreground: hsl(0 0% 100%);
+  --color-danger: hsl(0 84% 60%);
+  --color-danger-foreground: hsl(0 0% 100%);
+  --color-success: hsl(160 60% 45%);
+  --color-ring: hsl(349 79% 59%);
+  --color-surface: hsl(219 44% 16%);
+
+  --radius-lg: 0.5rem;
+  --radius-md: calc(0.5rem - 2px);
+  --radius-sm: calc(0.5rem - 4px);
+
+  --font-sans: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --animate-pulse: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-thinking: thinking 1.5s ease-in-out infinite;
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  @keyframes thinking {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+}
+
+/* ── Font Faces ────────────────────────────────────────────────────── */
+
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("/fonts/SpaceGrotesk-Variable.woff2") format("woff2");
+  font-weight: 300 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/JetBrainsMono-Variable.woff2") format("woff2");
+  font-weight: 100 800;
+  font-display: swap;
+}
+
+/* ── Base Layer ────────────────────────────────────────────────────── */
+
+@layer base {
+  html, body {
+    height: 100%;
+    min-height: 100vh;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    margin: 0;
+    padding: 0;
+  }
+
+  *:focus-visible {
+    @apply outline-2 outline-offset-2 outline-ring;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-primary);
+    border-radius: 3px;
+  }
+}
+
+/* ── Component Helpers ─────────────────────────────────────────────── */
+
+@layer components {
+  .oa-panel {
+    @apply rounded-2xl border border-border bg-card/70 shadow-lg backdrop-blur-xl overflow-hidden;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  }
+
+  .oa-panel-header {
+    @apply px-5 py-3.5 border-b border-border bg-white/2;
+  }
+
+  .oa-panel-header h2 {
+    @apply m-0 text-base font-semibold text-foreground;
+  }
+
+  .oa-divider {
+    @apply border-t border-border;
+  }
+}

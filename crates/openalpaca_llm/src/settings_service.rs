@@ -83,6 +83,13 @@ pub struct ReorderKeysRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetKeyPriorityRequest {
+    pub provider: String,
+    pub key_id: String,
+    pub priority: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidateKeyRequest {
     pub provider: String,
     pub secret: String,
@@ -95,6 +102,7 @@ pub struct KeyValidationResult {
     pub detected_source: Option<String>,
     pub models_available: Vec<String>,
     pub rate_limits: Option<String>,
+    pub format_error: Option<String>,
 }
 
 // ── Orchestrator Config Types ────────────────────────────────────────
@@ -287,16 +295,24 @@ impl LlmSettingsService {
 
         let provider_name = provider.to_string();
         let kid = key_id.to_string();
+        let mut found = false;
 
         self.persist_and_reload(provider_type, |config| {
             if let Some(ref mut providers) = config.providers {
                 if let Some(ref mut pc) = providers.get_mut(&provider_name) {
                     if let Some(ref mut keys) = pc.keys {
+                        let before = keys.len();
                         keys.retain(|k| k.id != kid);
+                        found = keys.len() < before;
                     }
                 }
             }
-        }).await
+        }).await?;
+
+        if !found {
+            return Err(format!("Key '{}' not found in provider '{}'", key_id, provider));
+        }
+        Ok(())
     }
 
     /// Reorder keys and optionally set a new primary.
@@ -335,13 +351,53 @@ impl LlmSettingsService {
         }).await
     }
 
+    /// Set a single key's priority (primary/fallback) without changing other keys.
+    pub async fn set_key_priority(&self, req: SetKeyPriorityRequest) -> Result<(), String> {
+        let provider_type = parse_provider_type(&req.provider)
+            .ok_or_else(|| format!("Unknown provider: {}", req.provider))?;
+
+        if req.priority != "primary" && req.priority != "fallback" {
+            return Err(format!("Invalid key priority: {}", req.priority));
+        }
+
+        let provider_name = req.provider.clone();
+        let kid = req.key_id.clone();
+        let new_priority = req.priority.clone();
+        let mut found = false;
+
+        self.persist_and_reload(provider_type, |config| {
+            if let Some(ref mut providers) = config.providers {
+                if let Some(ref mut pc) = providers.get_mut(&provider_name) {
+                    if let Some(ref mut keys) = pc.keys {
+                        if let Some(k) = keys.iter_mut().find(|k| k.id == kid) {
+                            k.priority = Some(new_priority.clone());
+                            found = true;
+                        }
+                    }
+                }
+            }
+        })
+        .await?;
+
+        if !found {
+            return Err(format!(
+                "Key '{}' not found in provider '{}'",
+                req.key_id, req.provider
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Validate a key by detecting its format and querying available models.
     pub async fn validate_key(&self, req: ValidateKeyRequest) -> Result<KeyValidationResult, String> {
         let provider_type = parse_provider_type(&req.provider)
             .ok_or_else(|| format!("Unknown provider: {}", req.provider))?;
 
         // Detect source from key format
-        let detected_source = if req.secret.starts_with("sk-ant-") {
+        let detected_source = if req.secret.starts_with("sk-ant-oat") {
+            Some("claude_code".to_string())
+        } else if req.secret.starts_with("sk-ant-") {
             Some("api_console".to_string())
         } else if req.secret.starts_with("sk-") {
             Some("api_console".to_string())
@@ -349,8 +405,38 @@ impl LlmSettingsService {
             None
         };
 
-        // Basic format validation
-        let valid = !req.secret.is_empty() && req.secret.len() > 10;
+        // Inline format validation (no cross-crate dep on openalpaca_storage)
+        let (format_error, is_api_compatible) = match req.provider.as_str() {
+            "anthropic" => {
+                if req.secret.starts_with("sk-ant-oat") {
+                    // Setup token — validate as setup-token
+                    if req.secret.len() < 80 {
+                        (Some(format!("Setup token too short ({} chars, expected >= 80).", req.secret.len())), false)
+                    } else {
+                        (None, false) // valid setup token, NOT API-compatible
+                    }
+                } else if !req.secret.starts_with("sk-ant-") {
+                    (Some("Anthropic API keys start with 'sk-ant-'.".to_string()), false)
+                } else if req.secret.len() < 40 {
+                    (Some(format!("API key too short ({} chars, expected >= 40).", req.secret.len())), false)
+                } else {
+                    (None, true) // valid API key
+                }
+            }
+            "openai" => {
+                if req.secret.starts_with("sk-ant-") {
+                    (Some("This looks like an Anthropic key, not an OpenAI key.".to_string()), false)
+                } else if !req.secret.starts_with("sk-") {
+                    (Some("OpenAI API keys start with 'sk-'.".to_string()), false)
+                } else if req.secret.len() < 20 {
+                    (Some(format!("Key too short ({} chars, expected >= 20).", req.secret.len())), false)
+                } else {
+                    (None, true)
+                }
+            }
+            _ => (None, true),
+        };
+        let valid = format_error.is_none();
 
         // Detect tier from key prefix
         let tier = if req.secret.contains("api03") {
@@ -361,8 +447,8 @@ impl LlmSettingsService {
             Some("tier1".to_string())
         };
 
-        // Query available models using this key
-        let models_available = if valid {
+        // Only call list_models_for_provider for API-compatible keys
+        let models_available = if valid && is_api_compatible {
             self.router
                 .list_models_for_provider(provider_type, &req.secret)
                 .await
@@ -377,6 +463,7 @@ impl LlmSettingsService {
             detected_source,
             models_available,
             rate_limits: None,
+            format_error,
         })
     }
 
@@ -499,12 +586,65 @@ impl LlmSettingsService {
         // 4. Build new KeyPool from updated config
         let new_pool = self.build_key_pool_from_config(&config, provider_type)?;
 
-        // 5. Hot-reload via ArcSwap
+        // 5. Hot-reload via ArcSwap — register provider if not yet in router
         if !self.router.reload_keys(provider_type, new_pool) {
-            tracing::warn!("Provider {:?} not found in router for hot-reload", provider_type);
+            tracing::info!("Provider {:?} not in router, registering now", provider_type);
+            self.register_provider_from_config(&config, provider_type)?;
         }
 
         Ok(())
+    }
+
+    /// Build and register a provider that wasn't in the router at startup.
+    #[allow(unused_variables)]
+    fn register_provider_from_config(
+        &self,
+        config: &LlmRouterConfig,
+        provider_type: ProviderType,
+    ) -> Result<(), String> {
+        let api_keys = self.build_api_keys_from_config(config, provider_type)?;
+        let first_key = api_keys.first()
+            .ok_or_else(|| format!("No keys for {:?}, cannot register provider", provider_type))?
+            .secret.clone();
+
+        let pool = self.build_key_pool_from_config(config, provider_type)?;
+
+        let provider_name = provider_type.to_string();
+        let base_url = config.providers.as_ref()
+            .and_then(|p| p.get(&provider_name))
+            .and_then(|pc| pc.base_url.clone());
+
+        let provider: Option<Arc<dyn crate::LlmProvider>> = match provider_type {
+            #[cfg(feature = "anthropic")]
+            ProviderType::Anthropic => {
+                Some(Arc::new(crate::providers::anthropic::AnthropicProvider::new(
+                    first_key, None, None,
+                )))
+            }
+            #[cfg(feature = "openai")]
+            ProviderType::OpenAI => {
+                Some(Arc::new(crate::providers::openai::OpenAiProvider::new(
+                    first_key, None, base_url, None,
+                )))
+            }
+            #[cfg(feature = "ollama")]
+            ProviderType::Ollama => {
+                Some(Arc::new(crate::providers::ollama::OllamaProvider::new(
+                    "llama3".to_string(), base_url,
+                )))
+            }
+            #[allow(unreachable_patterns)]
+            _ => None,
+        };
+
+        match provider {
+            Some(p) => {
+                self.router.register_provider(provider_type, p, pool);
+                tracing::info!("Registered provider {:?} in router", provider_type);
+                Ok(())
+            }
+            None => Err(format!("Provider {:?} not available (feature not enabled)", provider_type)),
+        }
     }
 
     /// Build a KeyPool from the current config for a specific provider.

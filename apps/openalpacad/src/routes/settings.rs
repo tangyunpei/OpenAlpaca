@@ -7,7 +7,7 @@ use axum::{
 };
 use serde::Deserialize;
 use openalpaca_llm::settings_service::{
-    AddKeyRequest, OrchestratorConfigResponse, ReorderKeysRequest,
+    AddKeyRequest, OrchestratorConfigResponse, ReorderKeysRequest, SetKeyPriorityRequest,
     UpdateOrchestratorRequest, ValidateKeyRequest,
 };
 use std::sync::Arc;
@@ -103,6 +103,9 @@ pub async fn delete_key(
             );
             (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
         }
+        Err(e) if e.contains("not found") => {
+            settings_error(StatusCode::NOT_FOUND, "KEY_NOT_FOUND", &e).into_response()
+        }
         Err(e) => {
             settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e).into_response()
         }
@@ -129,6 +132,47 @@ pub async fn reorder_keys(
                 "", "", "reordered",
             );
             (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
+        }
+        Err(e) => {
+            settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e).into_response()
+        }
+    }
+}
+
+/// PUT /v1/settings/llm/keys/priority — set per-key priority
+pub async fn set_key_priority(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SetKeyPriorityRequest>,
+) -> impl IntoResponse {
+    let service = match &state.llm_settings_service {
+        Some(s) => s,
+        None => return settings_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LLM_NOT_CONFIGURED",
+            "LLM router is not configured",
+        ).into_response(),
+    };
+
+    if body.priority != "primary" && body.priority != "fallback" {
+        return settings_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_PRIORITY",
+            "Priority must be 'primary' or 'fallback'",
+        ).into_response();
+    }
+
+    let provider = body.provider.clone();
+    let key_id = body.key_id.clone();
+
+    match service.set_key_priority(body).await {
+        Ok(()) => {
+            state.event_broadcaster.key_status_changed(
+                &provider, &key_id, "priority_changed",
+            );
+            (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
+        }
+        Err(e) if e.contains("not found") => {
+            settings_error(StatusCode::NOT_FOUND, "KEY_NOT_FOUND", &e).into_response()
         }
         Err(e) => {
             settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e).into_response()

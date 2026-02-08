@@ -82,7 +82,7 @@ pub fn build_provider(config: &LlmConfig) -> Result<Box<dyn LlmProvider>, LlmErr
 // ── Hierarchical Router Config ────────────────────────────────────────
 
 /// Top-level config for the LLM router (new hierarchical format).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LlmRouterConfig {
     pub orchestrator: Option<OrchestratorLlmConfig>,
     pub providers: Option<HashMap<String, ProviderConfig>>,
@@ -99,7 +99,7 @@ pub struct OrchestratorLlmConfig {
     pub fallback_models: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub enabled: Option<bool>,
     pub base_url: Option<String>,
@@ -182,7 +182,7 @@ fn build_router_from_legacy(content: &str) -> Result<LlmRouter, LlmError> {
 
     let default_model = config.model.unwrap_or_else(|| match provider_type {
         ProviderType::Anthropic => "claude-sonnet-4-5-20250929".to_string(),
-        ProviderType::OpenAI => "gpt-4o".to_string(),
+        ProviderType::OpenAI => "gpt-5.2".to_string(),
         ProviderType::Ollama => "llama3".to_string(),
     });
 

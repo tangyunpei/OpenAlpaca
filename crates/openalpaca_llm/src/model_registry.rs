@@ -79,24 +79,31 @@ impl ModelRegistry {
         }
         models.insert("claude-haiku-4-5-20251001".to_string(), ModelInfo {
             provider: ProviderType::Anthropic,
-            input_price_per_million: 0.80,
-            output_price_per_million: 4.0,
+            input_price_per_million: 1.0,
+            output_price_per_million: 5.0,
             context_window: 200_000,
             discovered: false,
         });
 
         // OpenAI models
-        models.insert("gpt-4o".to_string(), ModelInfo {
+        models.insert("gpt-5.2".to_string(), ModelInfo {
             provider: ProviderType::OpenAI,
-            input_price_per_million: 2.50,
-            output_price_per_million: 10.0,
+            input_price_per_million: 1.75,
+            output_price_per_million: 14.0,
             context_window: 128_000,
             discovered: false,
         });
-        models.insert("gpt-4o-mini".to_string(), ModelInfo {
+        models.insert("gpt-5-mini".to_string(), ModelInfo {
             provider: ProviderType::OpenAI,
-            input_price_per_million: 0.15,
-            output_price_per_million: 0.60,
+            input_price_per_million: 0.25,
+            output_price_per_million: 2.0,
+            context_window: 128_000,
+            discovered: false,
+        });
+        models.insert("gpt-5-nano".to_string(), ModelInfo {
+            provider: ProviderType::OpenAI,
+            input_price_per_million: 0.05,
+            output_price_per_million: 0.40,
             context_window: 128_000,
             discovered: false,
         });
@@ -161,6 +168,20 @@ impl ModelRegistry {
         }
     }
 
+    /// Mark all default models for a provider as discovered.
+    /// Fallback for providers with only managed keys.
+    pub fn mark_defaults_discovered_for_provider(&self, provider: ProviderType) -> usize {
+        let mut models = self.models.write().unwrap();
+        let mut count = 0;
+        for info in models.values_mut() {
+            if info.provider == provider && !info.discovered {
+                info.discovered = true;
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// List all registered model IDs.
     pub fn model_ids(&self) -> Vec<String> {
         self.models.read().unwrap().keys().cloned().collect()
@@ -221,7 +242,7 @@ mod tests {
     fn test_resolve_provider_openai() {
         let registry = ModelRegistry::with_defaults();
         assert_eq!(
-            registry.resolve_provider("gpt-4o"),
+            registry.resolve_provider("gpt-5.2"),
             Some(ProviderType::OpenAI)
         );
     }
@@ -252,7 +273,7 @@ mod tests {
         });
         let registry = ModelRegistry::new(models);
         assert_eq!(registry.resolve_provider("my-model"), Some(ProviderType::Ollama));
-        assert_eq!(registry.resolve_provider("gpt-4o"), None);
+        assert_eq!(registry.resolve_provider("gpt-5.2"), None);
     }
 
     #[test]
@@ -272,14 +293,14 @@ mod tests {
     fn test_register_if_absent() {
         let registry = ModelRegistry::with_defaults();
         // Should not overwrite existing
-        registry.register_if_absent("gpt-4o".to_string(), ModelInfo {
+        registry.register_if_absent("gpt-5.2".to_string(), ModelInfo {
             provider: ProviderType::Ollama,
             input_price_per_million: 0.0,
             output_price_per_million: 0.0,
             context_window: 0,
             discovered: false,
         });
-        assert_eq!(registry.resolve_provider("gpt-4o"), Some(ProviderType::OpenAI));
+        assert_eq!(registry.resolve_provider("gpt-5.2"), Some(ProviderType::OpenAI));
 
         // Should add new
         registry.register_if_absent("new-model".to_string(), ModelInfo {
@@ -297,21 +318,21 @@ mod tests {
         let registry = ModelRegistry::with_defaults();
 
         // Existing default model should not be discovered
-        let info = registry.get_model_info("gpt-4o").unwrap();
+        let info = registry.get_model_info("gpt-5.2").unwrap();
         assert!(!info.discovered);
 
         // register_discovered marks existing model as discovered, preserves pricing
-        registry.register_discovered("gpt-4o".to_string(), ModelInfo {
+        registry.register_discovered("gpt-5.2".to_string(), ModelInfo {
             provider: ProviderType::OpenAI,
             input_price_per_million: 0.0,
             output_price_per_million: 0.0,
             context_window: 0,
             discovered: true,
         });
-        let info = registry.get_model_info("gpt-4o").unwrap();
+        let info = registry.get_model_info("gpt-5.2").unwrap();
         assert!(info.discovered);
         // Pricing preserved from defaults
-        assert!((info.input_price_per_million - 2.50).abs() < 0.01);
+        assert!((info.input_price_per_million - 1.75).abs() < 0.01);
 
         // register_discovered inserts new model with discovered=true
         registry.register_discovered("new-api-model".to_string(), ModelInfo {
@@ -334,7 +355,7 @@ mod tests {
         assert!(discovered.is_empty());
 
         // Mark one model as discovered
-        registry.register_discovered("gpt-4o".to_string(), ModelInfo {
+        registry.register_discovered("gpt-5.2".to_string(), ModelInfo {
             provider: ProviderType::OpenAI,
             input_price_per_million: 0.0,
             output_price_per_million: 0.0,
@@ -344,7 +365,7 @@ mod tests {
 
         let discovered = registry.list_discovered_models();
         assert_eq!(discovered.len(), 1);
-        assert_eq!(discovered[0].id, "gpt-4o");
+        assert_eq!(discovered[0].id, "gpt-5.2");
 
         // list_models still returns all
         let all = registry.list_models();

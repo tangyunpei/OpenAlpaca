@@ -6,12 +6,27 @@ fallback_models = ["claude-sonnet-4-5-20250929"]
 enabled = true
 
 [[providers.anthropic.keys]]
-id = "Anthropic API Console"
-secret_encrypted = "aes256:Rj/zAFCxsAVXAMhAbxoTgSjmSKcqQtxwMwhQWyVaILyQYQqdyvtsjCESZAnauyYNdTvkTRscSmq9eZWEoMaUOqiTA5TWE9S8HWviuJRkvzLrXjG68+KveerjKamKxoSi/R+mXCANNiu6rMg1+t7p1yx1oVcNy93pUQSbFy+/f+Ftf5eZHdLt0g=="
+id = "Claude Code Token"
+secret_encrypted = "aes256:z0pzlYsaP82khr8Ks1ds9oOCgMe8z4eblu+AAG08YBhZOLF6UWLPKluaoPiG6d9kF0YIcAef+940xFcrLNUjwfP/pYebb/fpeJmPPmQuw17MxYZcyUSCmPXsXzbEWvyle9gwu1SBbUaOYLgfikDWbQXfwaFBcM/GXfl26w+KKVyq2mpJqSUaXw=="
+priority = "fallback"
+source = "claude_code"
+
+[[providers.anthropic.keys]]
+id = "Anthropic API Key"
+secret_encrypted = "aes256:rwsCvc/S0OtPZcftoW14leV16T93uyPqZq60Z0Q12/L76s6d9MWlaPyx8i4qhisOwtHxIK/Q+QfaBChUuYAVYYN0DE2LH0MNbjyAUuEJnc5qg+JpZ7DoFnumGlaxdD30EAqw5Ma1E+qErG9Ui4v9H+p72PB2ZpRvaTvJHKQRD83+Wf8+Zqkg/g=="
 tier = "tier3"
 priority = "primary"
 source = "api_console"
 
 [providers.ollama]
-enabled = true
+enabled = false
 base_url = "http://localhost:11434/v1"
+
+[providers.openai]
+enabled = false
+
+[credential_discovery]
+claude_code = true
+
+[cli_backends.claude_code]
+enabled = false

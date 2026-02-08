@@ -29,4 +29,7 @@ pub enum LlmError {
 
     #[error("CLI backend error: {0}")]
     CliBackend(String),
+
+    #[error("Authentication failed: {0}")]
+    AuthenticationFailed(String),
 }

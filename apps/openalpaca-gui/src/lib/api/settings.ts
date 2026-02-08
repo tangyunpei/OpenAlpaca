@@ -8,6 +8,7 @@ import type {
   LlmSettingsResponse,
   AddKeyRequest,
   ReorderKeysRequest,
+  SetKeyPriorityRequest,
   ValidateKeyRequest,
   KeyValidationResult,
   KeyStatusMap,
@@ -87,6 +88,26 @@ export async function reorderKeys(req: ReorderKeysRequest): Promise<void> {
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
     throw new Error(data.error?.message || `Failed to reorder keys: ${response.statusText}`);
+  }
+}
+
+/** PUT /v1/settings/llm/keys/priority — update a key's priority */
+export async function setKeyPriority(req: SetKeyPriorityRequest): Promise<void> {
+  const conn = await ensureConnection();
+  const response = await fetch(`${conn.baseUrl}/v1/settings/llm/keys/priority`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${conn.token}`,
+    },
+    body: JSON.stringify(req),
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(
+      data.error?.message || `Failed to set key priority: ${response.statusText}`,
+    );
   }
 }
 

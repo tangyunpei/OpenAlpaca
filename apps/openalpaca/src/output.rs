@@ -44,6 +44,7 @@ pub fn print_list<T: Serialize + TableRow>(items: &[T], format: OutputFormat) {
 }
 
 /// Print a single item detail in the chosen format.
+#[allow(dead_code)]
 pub fn print_detail<T: Serialize>(item: &T, format: OutputFormat) {
     match format {
         OutputFormat::Json => {

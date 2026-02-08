@@ -99,8 +99,8 @@ impl Orchestrator {
             Ok(messages) => messages
                 .into_iter()
                 .filter_map(|msg| match msg.role.as_str() {
-                    "user" => Some(ChatMessage::user(&msg.content)),
-                    "assistant" => Some(ChatMessage::assistant(&msg.content)),
+                    "user" if !msg.content.is_empty() => Some(ChatMessage::user(&msg.content)),
+                    "assistant" if !msg.content.is_empty() => Some(ChatMessage::assistant(&msg.content)),
                     _ => None,
                 })
                 .collect(),
@@ -334,6 +334,14 @@ impl Orchestrator {
                 cost_usd: call_cost,
                 timestamp: Utc::now(),
             });
+
+            // If LLM failed and produced no content, propagate as error
+            // so the Gateway doesn't persist an empty assistant message.
+            if let LoopFinishReason::Error(ref err) = result.finish_reason {
+                if result.final_content.trim().is_empty() {
+                    return Err(format!("LLM error: {}", err));
+                }
+            }
 
             // LLM chat responses are free-form text, not structured JSON
             (result.final_content, false)

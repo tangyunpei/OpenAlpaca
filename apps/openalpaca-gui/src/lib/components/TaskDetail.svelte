@@ -56,120 +56,146 @@
   );
   let canPause = $derived(detail?.task.status === "running");
   let canResume = $derived(detail?.task.status === "paused");
+
+  function statusBadgeClass(status: string): string {
+    const key = getStatusColor(status);
+    switch (key) {
+      case "status-success":
+        return "bg-success/20 text-success";
+      case "status-warning":
+        return "bg-amber-400/20 text-amber-400";
+      case "status-paused":
+        return "bg-blue-400/20 text-blue-400";
+      case "status-error":
+        return "bg-danger/20 text-danger";
+      case "status-dim":
+      default:
+        return "bg-white/5 text-muted-foreground";
+    }
+  }
 </script>
 
-<div class="modal-backdrop" onclick={onClose} role="presentation">
+<div class="fixed inset-0 bg-black/60 flex justify-center items-center z-[1000]" onclick={onClose} role="presentation">
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_interactive_supports_focus -->
-  <div class="modal" onclick={(e) => e.stopPropagation()} role="dialog">
+  <div
+    class="bg-surface p-6 rounded-xl w-[90%] max-w-[560px] max-h-[80vh] overflow-y-auto shadow-[0_4px_20px_rgba(0,0,0,0.3)] border border-white/[0.08]"
+    onclick={(e) => e.stopPropagation()}
+    role="dialog"
+  >
     {#if loading}
-      <div class="loading">Loading...</div>
+      <div class="text-center text-muted-foreground py-10">Loading...</div>
     {:else if detail}
-      <div class="modal-header">
-        <h3>{detail.task.title}</h3>
-        <button class="close-btn" onclick={onClose}>×</button>
+      <div class="flex justify-between items-start mb-4">
+        <h3 class="m-0 text-xl text-foreground flex-1 mr-3">{detail.task.title}</h3>
+        <button
+          class="bg-transparent border-none text-muted-foreground text-2xl cursor-pointer p-0 leading-none hover:text-foreground"
+          onclick={onClose}
+        >&times;</button>
       </div>
 
-      <div class="detail-grid">
-        <div class="detail-row">
-          <span class="label">Status</span>
-          <span class="status-badge {getStatusColor(detail.task.status)}">{detail.task.status}</span>
+      <div class="flex flex-col gap-2 mb-4">
+        <div class="flex justify-between items-center text-[0.85rem]">
+          <span class="text-muted-foreground font-medium">Status</span>
+          <span class="text-[0.7rem] px-2 py-0.5 rounded-full uppercase font-bold {statusBadgeClass(detail.task.status)}">{detail.task.status}</span>
         </div>
-        <div class="detail-row">
-          <span class="label">ID</span>
-          <span class="mono">{detail.task.id}</span>
+        <div class="flex justify-between items-center text-[0.85rem]">
+          <span class="text-muted-foreground font-medium">ID</span>
+          <span class="font-mono text-[0.8rem] text-muted-foreground">{detail.task.id}</span>
         </div>
-        <div class="detail-row">
-          <span class="label">Priority</span>
+        <div class="flex justify-between items-center text-[0.85rem]">
+          <span class="text-muted-foreground font-medium">Priority</span>
           <span>{detail.task.priority}</span>
         </div>
-        <div class="detail-row">
-          <span class="label">Created</span>
+        <div class="flex justify-between items-center text-[0.85rem]">
+          <span class="text-muted-foreground font-medium">Created</span>
           <span>{formatDateTime(detail.task.created_at)}</span>
         </div>
-        <div class="detail-row">
-          <span class="label">Updated</span>
+        <div class="flex justify-between items-center text-[0.85rem]">
+          <span class="text-muted-foreground font-medium">Updated</span>
           <span>{formatDateTime(detail.task.updated_at)}</span>
         </div>
         {#if detail.task.completed_at}
-          <div class="detail-row">
-            <span class="label">Completed</span>
+          <div class="flex justify-between items-center text-[0.85rem]">
+            <span class="text-muted-foreground font-medium">Completed</span>
             <span>{formatDateTime(detail.task.completed_at)}</span>
           </div>
         {/if}
-        <div class="detail-row">
-          <span class="label">Created by</span>
+        <div class="flex justify-between items-center text-[0.85rem]">
+          <span class="text-muted-foreground font-medium">Created by</span>
           <span>{detail.task.created_by}</span>
         </div>
-        <div class="detail-row">
-          <span class="label">Source lane</span>
+        <div class="flex justify-between items-center text-[0.85rem]">
+          <span class="text-muted-foreground font-medium">Source lane</span>
           <span>{detail.task.source_lane}</span>
         </div>
         {#if hasDetailProgress}
-          <div class="detail-row">
-            <span class="label">Progress</span>
-            <div class="progress-inline">
-              <div class="progress-bar-detail">
-                <div class="progress-fill-detail" style="width: {detailProgressPercent}%"></div>
+          <div class="flex justify-between items-center text-[0.85rem]">
+            <span class="text-muted-foreground font-medium">Progress</span>
+            <div class="flex items-center gap-2 flex-1 max-w-[200px]">
+              <div class="flex-1 h-1 bg-white/[0.08] rounded-sm overflow-hidden">
+                <div class="h-full bg-accent rounded-sm transition-[width] duration-300 ease-in-out" style="width: {detailProgressPercent}%"></div>
               </div>
-              <span class="progress-text-detail">{detail.task.progress_current}/{detail.task.progress_total}</span>
+              <span class="text-xs text-muted-foreground whitespace-nowrap">{detail.task.progress_current}/{detail.task.progress_total}</span>
             </div>
           </div>
         {/if}
       </div>
 
       {#if detail.task.description}
-        <div class="section">
-          <h4>Description</h4>
-          <p class="description">{detail.task.description}</p>
+        <div class="mb-4">
+          <h4 class="m-0 mb-2 text-[0.85rem] text-muted-foreground uppercase tracking-[0.5px]">Description</h4>
+          <p class="m-0 text-[0.9rem] text-foreground bg-black/20 px-3.5 py-2.5 rounded-lg leading-relaxed">{detail.task.description}</p>
         </div>
       {/if}
 
       {#if detail.task.result_summary}
-        <div class="section">
-          <h4>Result</h4>
-          <p class="description">{detail.task.result_summary}</p>
+        <div class="mb-4">
+          <h4 class="m-0 mb-2 text-[0.85rem] text-muted-foreground uppercase tracking-[0.5px]">Result</h4>
+          <p class="m-0 text-[0.9rem] text-foreground bg-black/20 px-3.5 py-2.5 rounded-lg leading-relaxed">{detail.task.result_summary}</p>
         </div>
       {/if}
 
       {#if detail.assignments && detail.assignments.length > 0}
-        <div class="section">
-          <h4>Assignments</h4>
-          <table class="assignments-table">
+        <div class="mb-4">
+          <h4 class="m-0 mb-2 text-[0.85rem] text-muted-foreground uppercase tracking-[0.5px]">Assignments</h4>
+          <table class="w-full border-collapse text-[0.85rem]">
             <thead>
               <tr>
-                <th>Step</th>
-                <th>Agent</th>
-                <th>Role</th>
-                <th>Status</th>
-                <th>Output</th>
+                <th class="text-left text-muted-foreground font-medium px-2 py-1.5 border-b border-white/[0.08]">Step</th>
+                <th class="text-left text-muted-foreground font-medium px-2 py-1.5 border-b border-white/[0.08]">Agent</th>
+                <th class="text-left text-muted-foreground font-medium px-2 py-1.5 border-b border-white/[0.08]">Role</th>
+                <th class="text-left text-muted-foreground font-medium px-2 py-1.5 border-b border-white/[0.08]">Status</th>
+                <th class="text-left text-muted-foreground font-medium px-2 py-1.5 border-b border-white/[0.08]">Output</th>
               </tr>
             </thead>
             <tbody>
               {#each detail.assignments as a}
                 <tr>
-                  <td>{a.step_order ?? "-"}</td>
-                  <td class="mono">{a.agent_id.slice(0, 8)}</td>
-                  <td>{a.role}</td>
-                  <td><span class="status-badge small {getStatusColor(a.status)}">{a.status}</span></td>
-                  <td>
+                  <td class="px-2 py-1.5 border-b border-white/[0.04]">{a.step_order ?? "-"}</td>
+                  <td class="px-2 py-1.5 border-b border-white/[0.04] font-mono text-[0.8rem]">{a.agent_id.slice(0, 8)}</td>
+                  <td class="px-2 py-1.5 border-b border-white/[0.04]">{a.role}</td>
+                  <td class="px-2 py-1.5 border-b border-white/[0.04]">
+                    <span class="text-[0.65rem] px-1.5 py-px rounded-full uppercase font-bold {statusBadgeClass(a.status)}">{a.status}</span>
+                  </td>
+                  <td class="px-2 py-1.5 border-b border-white/[0.04]">
                     {#if a.result_output?.trim()}
                       <button
-                        class="expand-btn"
+                        class="bg-violet-500/20 border-none text-violet-400 text-[0.7rem] px-2 py-px rounded-lg cursor-pointer hover:bg-violet-500/35"
                         onclick={() => toggleAssignment(a.id)}
                         aria-expanded={expandedAssignment === a.id}
                       >
                         {expandedAssignment === a.id ? "Hide" : "View"}
                       </button>
                     {:else}
-                      <span class="dim-text">-</span>
+                      <span class="text-muted-foreground">-</span>
                     {/if}
                   </td>
                 </tr>
                 {#if expandedAssignment === a.id && a.result_output?.trim()}
-                  <tr class="output-row">
-                    <td colspan="5">
-                      <pre class="agent-output">{a.result_output}</pre>
+                  <tr>
+                    <td colspan="5" class="px-2 pb-2 border-b border-white/[0.04]">
+                      <pre class="m-0 px-3.5 py-2.5 bg-black/25 rounded-lg text-[0.8rem] text-foreground whitespace-pre-wrap break-words max-h-[200px] overflow-y-auto leading-relaxed">{a.result_output}</pre>
                     </td>
                   </tr>
                 {/if}
@@ -179,238 +205,35 @@
         </div>
       {/if}
 
-      <div class="modal-actions">
+      <div class="flex justify-end gap-2.5 mt-4 pt-4 border-t border-white/5">
         {#if canCancel}
-          <button class="danger" onclick={() => handleAction("cancel")} disabled={actionLoading}>Cancel</button>
+          <button
+            class="px-4 py-2 rounded-lg border border-danger bg-danger/20 text-danger text-sm font-medium cursor-pointer transition-all duration-200 hover:bg-danger/30 disabled:opacity-50 disabled:cursor-not-allowed"
+            onclick={() => handleAction("cancel")}
+            disabled={actionLoading}
+          >Cancel</button>
         {/if}
         {#if canPause}
-          <button onclick={() => handleAction("pause")} disabled={actionLoading}>Pause</button>
+          <button
+            class="px-4 py-2 rounded-lg border border-border bg-card text-sm font-medium text-foreground cursor-pointer transition-all duration-200 hover:bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed"
+            onclick={() => handleAction("pause")}
+            disabled={actionLoading}
+          >Pause</button>
         {/if}
         {#if canResume}
-          <button onclick={() => handleAction("resume")} disabled={actionLoading}>Resume</button>
+          <button
+            class="px-4 py-2 rounded-lg border border-border bg-card text-sm font-medium text-foreground cursor-pointer transition-all duration-200 hover:bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed"
+            onclick={() => handleAction("resume")}
+            disabled={actionLoading}
+          >Resume</button>
         {/if}
-        <button class="secondary" onclick={onClose}>Close</button>
+        <button
+          class="px-4 py-2 rounded-lg border border-border bg-white/5 text-sm font-medium text-muted-foreground cursor-pointer transition-all duration-200 hover:bg-white/10 hover:text-foreground"
+          onclick={onClose}
+        >Close</button>
       </div>
     {:else}
-      <div class="loading">Task not found.</div>
+      <div class="text-center text-muted-foreground py-10">Task not found.</div>
     {/if}
   </div>
 </div>
-
-<style>
-  .modal-backdrop {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0, 0, 0, 0.6);
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    z-index: 1000;
-  }
-
-  .modal {
-    background: var(--surface);
-    padding: 24px;
-    border-radius: 12px;
-    width: 90%;
-    max-width: 560px;
-    max-height: 80vh;
-    overflow-y: auto;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-  }
-
-  .modal-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 16px;
-  }
-
-  .modal-header h3 {
-    margin: 0;
-    font-size: 1.2rem;
-    color: var(--text);
-    flex: 1;
-    margin-right: 12px;
-  }
-
-  .close-btn {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font-size: 1.5rem;
-    cursor: pointer;
-    padding: 0;
-    line-height: 1;
-  }
-  .close-btn:hover {
-    color: var(--text);
-  }
-
-  .detail-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-bottom: 16px;
-  }
-
-  .detail-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 0.85rem;
-  }
-
-  .label {
-    color: var(--text-dim);
-    font-weight: 500;
-  }
-
-  .mono {
-    font-family: "Fira Code", monospace;
-    font-size: 0.8rem;
-    color: var(--text-dim);
-  }
-
-  .section {
-    margin-bottom: 16px;
-  }
-
-  .section h4 {
-    margin: 0 0 8px 0;
-    font-size: 0.85rem;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-
-  .description {
-    margin: 0;
-    font-size: 0.9rem;
-    color: var(--text);
-    background: rgba(0, 0, 0, 0.2);
-    padding: 10px 14px;
-    border-radius: 8px;
-    line-height: 1.5;
-  }
-
-  .assignments-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.85rem;
-  }
-
-  .assignments-table th {
-    text-align: left;
-    color: var(--text-dim);
-    font-weight: 500;
-    padding: 6px 8px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  }
-
-  .assignments-table td {
-    padding: 6px 8px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-  }
-
-  .status-badge {
-    font-size: 0.7rem;
-    padding: 2px 8px;
-    border-radius: 20px;
-    text-transform: uppercase;
-    font-weight: 700;
-  }
-
-  .status-badge.small {
-    font-size: 0.65rem;
-    padding: 1px 6px;
-  }
-
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-    margin-top: 16px;
-    padding-top: 16px;
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
-  }
-
-  .loading {
-    text-align: center;
-    color: var(--text-dim);
-    padding: 40px;
-  }
-
-  /* Progress bar (inline within detail-row) */
-  .progress-inline {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex: 1;
-    max-width: 200px;
-  }
-
-  .progress-bar-detail {
-    flex: 1;
-    height: 4px;
-    background: rgba(255, 255, 255, 0.08);
-    border-radius: 2px;
-    overflow: hidden;
-  }
-
-  .progress-fill-detail {
-    height: 100%;
-    background: var(--accent);
-    border-radius: 2px;
-    transition: width 0.3s ease;
-  }
-
-  .progress-text-detail {
-    font-size: 0.75rem;
-    color: var(--text-dim);
-    white-space: nowrap;
-  }
-
-  /* Expand button */
-  .expand-btn {
-    background: rgba(139, 92, 246, 0.2);
-    border: none;
-    color: #a78bfa;
-    font-size: 0.7rem;
-    padding: 1px 8px;
-    border-radius: 8px;
-    cursor: pointer;
-  }
-
-  .expand-btn:hover {
-    background: rgba(139, 92, 246, 0.35);
-  }
-
-  /* Expanded output row */
-  .assignments-table .output-row td {
-    padding: 0 8px 8px 8px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-  }
-
-  .agent-output {
-    margin: 0;
-    padding: 10px 14px;
-    background: rgba(0, 0, 0, 0.25);
-    border-radius: 8px;
-    font-size: 0.8rem;
-    color: var(--text);
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 200px;
-    overflow-y: auto;
-    line-height: 1.5;
-  }
-
-  .dim-text {
-    color: var(--text-dim);
-  }
-</style>

@@ -54,6 +54,14 @@ pub enum KeySource {
     Other,
 }
 
+impl KeySource {
+    /// Whether this key can authenticate against a provider's standard HTTP API.
+    /// Managed keys (ClaudeCode, Codex, ClaudeMaxPro) are session/OAuth tokens.
+    pub fn is_api_compatible(&self) -> bool {
+        matches!(self, KeySource::ApiConsole | KeySource::Environment | KeySource::Other)
+    }
+}
+
 /// Key selection strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,6 +126,21 @@ impl ApiKey {
             None => true,
         }
     }
+
+    /// Whether this key can authenticate against a provider's standard HTTP API.
+    /// Checks both the source metadata AND the secret format (defense-in-depth).
+    fn is_api_compatible_key(&self) -> bool {
+        if !self.source.is_api_compatible() {
+            return false;
+        }
+        // Secret-format guard: sk-ant-oat* tokens are never API-compatible
+        if self.provider == ProviderType::Anthropic
+            && self.secret.starts_with("sk-ant-oat")
+        {
+            return false;
+        }
+        true
+    }
 }
 
 /// Guard returned by `acquire()` — holds the key id and secret for use.
@@ -135,6 +158,9 @@ pub enum KeyPoolError {
 
     #[error("All keys are currently rate-limited")]
     AllKeysRateLimited,
+
+    #[error("No API-compatible keys available (only managed/OAuth keys configured)")]
+    NoApiCompatibleKeys,
 }
 
 /// Health status of a key.
@@ -178,7 +204,8 @@ impl KeyPool {
         self.strategy
     }
 
-    /// Acquire an available key from the pool.
+    /// Acquire an available API-compatible key from the pool.
+    /// Skips managed/OAuth keys (e.g. Claude Code setup-tokens).
     pub async fn acquire(&self) -> Result<KeyGuard, KeyPoolError> {
         if self.keys.is_empty() {
             return Err(KeyPoolError::NoKeys);
@@ -190,8 +217,64 @@ impl KeyPool {
         }
     }
 
-    /// Standard round-robin / LRU acquisition.
+    /// Acquire any available key (including managed/OAuth keys).
+    /// Use this only when you don't need HTTP API compatibility.
+    pub async fn acquire_any(&self) -> Result<KeyGuard, KeyPoolError> {
+        if self.keys.is_empty() {
+            return Err(KeyPoolError::NoKeys);
+        }
+
+        match self.strategy {
+            SelectionStrategy::PrimaryFallback => self.acquire_primary_fallback_any().await,
+            _ => self.acquire_standard_any().await,
+        }
+    }
+
+    /// Acquire a key suitable for standard API calls (delegates to `acquire()`).
+    pub async fn acquire_api_compatible(&self) -> Result<KeyGuard, KeyPoolError> {
+        self.acquire().await
+    }
+
+    /// Standard round-robin / LRU acquisition (API-compatible keys only).
     async fn acquire_standard(&self) -> Result<KeyGuard, KeyPoolError> {
+        let len = self.keys.len();
+        let start = match self.strategy {
+            SelectionStrategy::RoundRobin => {
+                self.round_robin_index.fetch_add(1, Ordering::Relaxed) % len
+            }
+            SelectionStrategy::LeastRecentlyUsed => 0,
+            SelectionStrategy::PrimaryFallback => unreachable!(),
+        };
+
+        for i in 0..len {
+            let idx = (start + i) % len;
+            let key = self.keys[idx].read().await;
+            if key.is_available() && key.is_api_compatible_key() {
+                return Ok(KeyGuard {
+                    id: key.id.clone(),
+                    secret: key.secret.clone(),
+                });
+            }
+        }
+
+        // Distinguish: no API-compatible keys at all vs all rate-limited
+        let mut has_any_api_compatible = false;
+        for key_lock in &self.keys {
+            let key = key_lock.read().await;
+            if key.is_api_compatible_key() {
+                has_any_api_compatible = true;
+                break;
+            }
+        }
+        if has_any_api_compatible {
+            Err(KeyPoolError::AllKeysRateLimited)
+        } else {
+            Err(KeyPoolError::NoApiCompatibleKeys)
+        }
+    }
+
+    /// Standard round-robin / LRU acquisition (any key, including managed).
+    async fn acquire_standard_any(&self) -> Result<KeyGuard, KeyPoolError> {
         let len = self.keys.len();
         let start = match self.strategy {
             SelectionStrategy::RoundRobin => {
@@ -217,8 +300,60 @@ impl KeyPool {
 
     /// PrimaryFallback: try Primary keys first (round-robin among them),
     /// then Fallback keys if all Primary are rate-limited.
+    /// Only considers API-compatible keys.
     async fn acquire_primary_fallback(&self) -> Result<KeyGuard, KeyPoolError> {
-        // Try primary keys first
+        let mut primary_indices = Vec::new();
+        let mut fallback_indices = Vec::new();
+        let mut has_any_api_compatible = false;
+
+        for (i, key_lock) in self.keys.iter().enumerate() {
+            let key = key_lock.read().await;
+            // Only include API-compatible keys in the candidate lists
+            if !key.is_api_compatible_key() {
+                continue;
+            }
+            has_any_api_compatible = true;
+            match key.priority {
+                KeyPriority::Primary => primary_indices.push(i),
+                KeyPriority::Fallback => fallback_indices.push(i),
+            }
+        }
+
+        // Try primary keys with round-robin
+        if !primary_indices.is_empty() {
+            let start = self.round_robin_index.fetch_add(1, Ordering::Relaxed) % primary_indices.len();
+            for i in 0..primary_indices.len() {
+                let idx = primary_indices[(start + i) % primary_indices.len()];
+                let key = self.keys[idx].read().await;
+                if key.is_available() {
+                    return Ok(KeyGuard {
+                        id: key.id.clone(),
+                        secret: key.secret.clone(),
+                    });
+                }
+            }
+        }
+
+        // All primaries rate-limited, try fallback keys
+        for idx in &fallback_indices {
+            let key = self.keys[*idx].read().await;
+            if key.is_available() {
+                return Ok(KeyGuard {
+                    id: key.id.clone(),
+                    secret: key.secret.clone(),
+                });
+            }
+        }
+
+        if has_any_api_compatible {
+            Err(KeyPoolError::AllKeysRateLimited)
+        } else {
+            Err(KeyPoolError::NoApiCompatibleKeys)
+        }
+    }
+
+    /// PrimaryFallback acquisition for any key (including managed).
+    async fn acquire_primary_fallback_any(&self) -> Result<KeyGuard, KeyPoolError> {
         let mut primary_indices = Vec::new();
         let mut fallback_indices = Vec::new();
 
@@ -546,5 +681,118 @@ mod tests {
         assert_eq!(json, "\"api_console\"");
         let parsed: KeySource = serde_json::from_str("\"claude_code\"").unwrap();
         assert_eq!(parsed, KeySource::ClaudeCode);
+    }
+
+    // ── API-compatible key filtering tests ────────────────────────────
+
+    fn make_managed_key(id: &str) -> ApiKey {
+        let mut key = ApiKey::new(
+            id.to_string(),
+            ProviderType::Anthropic,
+            "sk-ant-oat01-managed-token-placeholder-very-long-secret".to_string(),
+        );
+        key.source = KeySource::ClaudeCode;
+        key
+    }
+
+    fn make_mislabeled_oat_key(id: &str) -> ApiKey {
+        // Source says ApiConsole, but secret is a setup-token
+        let mut key = ApiKey::new(
+            id.to_string(),
+            ProviderType::Anthropic,
+            "sk-ant-oat01-mislabeled-secret-value-placeholder".to_string(),
+        );
+        key.source = KeySource::ApiConsole;
+        key
+    }
+
+    fn make_api_key(id: &str) -> ApiKey {
+        let mut key = ApiKey::new(
+            id.to_string(),
+            ProviderType::Anthropic,
+            format!("sk-ant-api03-{}", "x".repeat(30)),
+        );
+        key.source = KeySource::ApiConsole;
+        key
+    }
+
+    #[tokio::test]
+    async fn test_acquire_skips_claude_code_source() {
+        let pool = KeyPool::new(
+            vec![make_managed_key("managed1")],
+            SelectionStrategy::RoundRobin,
+        );
+        let result = pool.acquire().await;
+        assert!(matches!(result, Err(KeyPoolError::NoApiCompatibleKeys)));
+    }
+
+    #[tokio::test]
+    async fn test_acquire_skips_mislabeled_oat_key() {
+        let pool = KeyPool::new(
+            vec![make_mislabeled_oat_key("mislabeled1")],
+            SelectionStrategy::RoundRobin,
+        );
+        let result = pool.acquire().await;
+        assert!(matches!(result, Err(KeyPoolError::NoApiCompatibleKeys)));
+    }
+
+    #[tokio::test]
+    async fn test_acquire_mixed_pool() {
+        let pool = KeyPool::new(
+            vec![make_managed_key("managed1"), make_api_key("api1")],
+            SelectionStrategy::RoundRobin,
+        );
+        let guard = pool.acquire().await.unwrap();
+        assert_eq!(guard.id, "api1");
+    }
+
+    #[tokio::test]
+    async fn test_primary_fallback_filters_at_index_build() {
+        let mut api_primary = make_api_key("api_primary");
+        api_primary.priority = KeyPriority::Primary;
+
+        let mut api_fallback = make_api_key("api_fallback");
+        api_fallback.priority = KeyPriority::Fallback;
+
+        let mut managed_primary = make_managed_key("managed_primary");
+        managed_primary.priority = KeyPriority::Primary;
+
+        let pool = KeyPool::new(
+            vec![managed_primary, api_primary, api_fallback],
+            SelectionStrategy::PrimaryFallback,
+        );
+
+        // Should get the API primary key (managed key excluded from indices)
+        let guard = pool.acquire().await.unwrap();
+        assert_eq!(guard.id, "api_primary");
+    }
+
+    #[tokio::test]
+    async fn test_acquire_api_compatible_delegates() {
+        let pool = KeyPool::new(
+            vec![make_api_key("api1")],
+            SelectionStrategy::RoundRobin,
+        );
+        let guard1 = pool.acquire().await.unwrap();
+        // Reset index for comparison
+        let pool2 = KeyPool::new(
+            vec![make_api_key("api1")],
+            SelectionStrategy::RoundRobin,
+        );
+        let guard2 = pool2.acquire_api_compatible().await.unwrap();
+        assert_eq!(guard1.id, guard2.id);
+    }
+
+    #[tokio::test]
+    async fn test_acquire_any_returns_managed_keys() {
+        let pool = KeyPool::new(
+            vec![make_managed_key("managed1")],
+            SelectionStrategy::RoundRobin,
+        );
+        // acquire() should fail
+        assert!(matches!(pool.acquire().await, Err(KeyPoolError::NoApiCompatibleKeys)));
+        // acquire_any() should succeed
+        let guard = pool.acquire_any().await.unwrap();
+        assert_eq!(guard.id, "managed1");
     }
 }

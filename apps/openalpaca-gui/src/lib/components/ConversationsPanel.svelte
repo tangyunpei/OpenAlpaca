@@ -88,22 +88,25 @@
   }
 </script>
 
-<div class="conversations-panel">
+<div class="flex flex-col gap-3">
   {#if selectedId}
     <!-- Message detail view -->
-    <div class="detail-header">
-      <button class="back-btn" onclick={handleBack}>Back</button>
-      <span class="detail-title">
+    <div class="flex items-center gap-3 pb-3 border-b border-border">
+      <button
+        class="px-3 py-1 text-[0.8rem] bg-white/5 border border-input rounded-md text-muted-foreground hover:bg-primary hover:text-foreground cursor-pointer transition-colors"
+        onclick={handleBack}
+      >Back</button>
+      <span class="text-[0.95rem] font-semibold text-foreground flex-1">
         {convList.find((c) => c.id === selectedId)?.title || convList.find((c) => c.id === selectedId)?.lane_key || "Conversation"}
       </span>
-      <span class="detail-count">{messagesTotal} messages</span>
+      <span class="text-xs text-muted-foreground">{messagesTotal} messages</span>
     </div>
 
-    <div class="messages-list">
+    <div class="max-h-[60vh] overflow-y-auto py-2">
       {#if msgLoading}
-        <div class="loading">Loading messages...</div>
+        <div class="text-muted-foreground text-center py-10 text-[0.9rem]">Loading messages...</div>
       {:else if messages.length === 0}
-        <div class="empty">No messages in this conversation.</div>
+        <div class="text-muted-foreground text-center py-10 text-[0.9rem]">No messages in this conversation.</div>
       {:else}
         {#each messages as msg (msg.id)}
           <ChatMessageComponent message={msg} />
@@ -112,11 +115,19 @@
     </div>
   {:else}
     <!-- Conversations list view -->
-    <div class="controls">
-      <button onclick={() => loadConversations(filterSource === "all" ? undefined : filterSource)} disabled={loading}>
+    <div class="flex items-center gap-2.5">
+      <button
+        class="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/80 disabled:opacity-50 cursor-pointer"
+        onclick={() => loadConversations(filterSource === "all" ? undefined : filterSource)}
+        disabled={loading}
+      >
         {loading ? "Loading..." : "Refresh"}
       </button>
-      <select bind:value={filterSource} onchange={handleFilterChange}>
+      <select
+        bind:value={filterSource}
+        onchange={handleFilterChange}
+        class="bg-surface border border-input rounded-md text-foreground px-3 py-2 text-[0.85rem] cursor-pointer focus:outline-none focus:border-accent"
+      >
         <option value="all">All Sources</option>
         <option value="gui">GUI</option>
         <option value="telegram">Telegram</option>
@@ -125,28 +136,34 @@
     </div>
 
     {#if error}
-      <div class="panel-error">{error}</div>
+      <div class="bg-danger/20 border border-danger text-danger px-3.5 py-2.5 rounded-lg text-[0.9rem]">{error}</div>
     {/if}
 
-    <div class="conv-list">
+    <div class="flex flex-col gap-2">
       {#if loading && convList.length === 0}
-        <div class="loading">Loading conversations...</div>
+        <div class="text-muted-foreground text-center py-10 text-[0.9rem]">Loading conversations...</div>
       {:else if convList.length === 0}
-        <div class="empty">No conversations found.</div>
+        <div class="text-muted-foreground text-center py-10 text-[0.9rem]">No conversations found.</div>
       {:else}
         {#each convList as conv (conv.id)}
-          <button class="conv-card" onclick={() => selectConversation(conv)}>
-            <div class="conv-header">
-              <span class="source-badge" style="background: {sourceColor(conv.source)}">
+          <button
+            class="block w-full text-left bg-card/70 backdrop-blur-xl border border-border rounded-[10px] px-4 py-3 cursor-pointer transition-all hover:border-accent hover:bg-card/90 hover:-translate-y-px"
+            onclick={() => selectConversation(conv)}
+          >
+            <div class="flex items-center gap-2 mb-1">
+              <span
+                class="inline-block px-2 py-0.5 rounded text-[0.65rem] font-bold text-white uppercase tracking-wide"
+                style="background: {sourceColor(conv.source)}"
+              >
                 {sourceIcon(conv.source)}
               </span>
-              <span class="conv-lane">{conv.lane_key}</span>
-              <span class="conv-count">{conv.message_count} msgs</span>
+              <span class="text-[0.85rem] text-foreground font-mono flex-1">{conv.lane_key}</span>
+              <span class="text-xs text-muted-foreground">{conv.message_count} msgs</span>
             </div>
             {#if conv.title}
-              <div class="conv-title">{conv.title}</div>
+              <div class="text-[0.85rem] text-foreground mb-1 font-medium">{conv.title}</div>
             {/if}
-            <div class="conv-meta">
+            <div class="flex gap-4 text-[0.72rem] text-muted-foreground">
               <span>Last: {formatTime(conv.last_message_at)}</span>
               <span>Created: {formatTime(conv.created_at)}</span>
             </div>
@@ -156,152 +173,3 @@
     </div>
   {/if}
 </div>
-
-<style>
-  .conversations-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .controls {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-  }
-
-  .controls select {
-    background: var(--surface);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 6px;
-    color: var(--text);
-    padding: 8px 12px;
-    font-size: 0.85rem;
-    cursor: pointer;
-  }
-  .controls select:focus { outline: none; border-color: var(--accent); }
-  .controls select option { background: var(--surface); color: var(--text); }
-
-  .panel-error {
-    background: rgba(239, 68, 68, 0.2);
-    border: 1px solid var(--error);
-    color: var(--error);
-    padding: 10px 14px;
-    border-radius: 8px;
-    font-size: 0.9rem;
-  }
-
-  .conv-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .conv-card {
-    display: block;
-    width: 100%;
-    text-align: left;
-    background: rgba(30, 30, 50, 0.7) !important;
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.08) !important;
-    border-radius: 10px !important;
-    padding: 12px 16px !important;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-
-  .conv-card:hover {
-    border-color: var(--accent) !important;
-    background: rgba(30, 30, 50, 0.9) !important;
-    transform: translateY(-1px) !important;
-  }
-
-  .conv-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 4px;
-  }
-
-  .source-badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 0.65rem;
-    font-weight: 700;
-    color: #fff;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-
-  .conv-lane {
-    font-size: 0.85rem;
-    color: var(--text);
-    font-family: monospace;
-    flex: 1;
-  }
-
-  .conv-count {
-    font-size: 0.75rem;
-    color: var(--text-dim);
-  }
-
-  .conv-title {
-    font-size: 0.85rem;
-    color: var(--text);
-    margin-bottom: 4px;
-    font-weight: 500;
-  }
-
-  .conv-meta {
-    display: flex;
-    gap: 16px;
-    font-size: 0.72rem;
-    color: var(--text-dim);
-  }
-
-  /* Detail view */
-  .detail-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding-bottom: 12px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  }
-
-  .back-btn {
-    padding: 4px 12px !important;
-    font-size: 0.8rem !important;
-    background: rgba(255, 255, 255, 0.05) !important;
-    border: 1px solid rgba(255, 255, 255, 0.1) !important;
-    border-radius: 6px !important;
-    color: var(--text-dim) !important;
-  }
-  .back-btn:hover { background: var(--primary) !important; color: var(--text) !important; }
-
-  .detail-title {
-    font-size: 0.95rem;
-    font-weight: 600;
-    color: var(--text);
-    flex: 1;
-  }
-
-  .detail-count {
-    font-size: 0.75rem;
-    color: var(--text-dim);
-  }
-
-  .messages-list {
-    max-height: 60vh;
-    overflow-y: auto;
-    padding: 8px 0;
-  }
-
-  .loading, .empty {
-    color: var(--text-dim);
-    text-align: center;
-    padding: 40px;
-    font-size: 0.9rem;
-  }
-</style>

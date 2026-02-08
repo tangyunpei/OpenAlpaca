@@ -3,7 +3,7 @@
 
 use crate::cost_tracker::{CallRecord, CostTracker};
 use crate::error::LlmError;
-use crate::key_pool::{ApiKey, CallResult, KeyPool, KeyStatus, ProviderType, SelectionStrategy};
+use crate::key_pool::{ApiKey, CallResult, KeyPool, KeyPoolError, KeyStatus, ProviderType, SelectionStrategy};
 use crate::model_registry::{ModelEntry, ModelInfo, ModelRegistry};
 use crate::types::*;
 use crate::LlmProvider;
@@ -41,6 +41,9 @@ pub enum LlmRouterError {
 
     #[error("All keys are rate-limited for provider")]
     AllKeysRateLimited,
+
+    #[error("No API-compatible keys configured for provider (only managed/OAuth keys found)")]
+    NoApiCompatibleKeys,
 
     #[error("Max retries exceeded")]
     MaxRetriesExceeded,
@@ -203,16 +206,26 @@ impl LlmRouter {
 
     /// Refresh models by querying each configured provider's API.
     /// Discovered models are added to the registry (existing entries preserved).
+    /// Falls back to hardcoded defaults when no API-compatible key is available
+    /// or when the provider returns 0 models (e.g. managed/OAuth keys only).
     pub async fn refresh_models(&self) {
         for entry in self.providers.iter() {
             let provider_type = *entry.key();
             let prov_entry = entry.value();
             let pool = prov_entry.key_pool.load();
-            // Try to acquire a key to query the provider
-            let key_secret = match pool.acquire().await {
+
+            let key_secret = match pool.acquire_api_compatible().await {
                 Ok(guard) => guard.secret.clone(),
                 Err(_) => {
-                    tracing::debug!("No available key for {:?}, skipping model refresh", provider_type);
+                    // No API-compatible key — fall back to hardcoded defaults
+                    let count = self.model_registry
+                        .mark_defaults_discovered_for_provider(provider_type);
+                    if count > 0 {
+                        tracing::info!(
+                            "No API key for {:?}, marked {} default models as discovered",
+                            provider_type, count
+                        );
+                    }
                     continue;
                 }
             };
@@ -221,7 +234,12 @@ impl LlmRouter {
                 Ok(model_ids) => {
                     let count = model_ids.len();
                     if count == 0 {
-                        tracing::debug!("Provider {:?} returned 0 models, skipping (preserving existing)", provider_type);
+                        let dc = self.model_registry
+                            .mark_defaults_discovered_for_provider(provider_type);
+                        tracing::info!(
+                            "Provider {:?} returned 0 models, marked {} defaults",
+                            provider_type, dc
+                        );
                         continue;
                     }
                     for model_id in model_ids {
@@ -240,6 +258,8 @@ impl LlmRouter {
                 }
                 Err(e) => {
                     tracing::warn!("Failed to list models from {:?}: {}", provider_type, e);
+                    self.model_registry
+                        .mark_defaults_discovered_for_provider(provider_type);
                 }
             }
         }
@@ -272,7 +292,9 @@ impl LlmRouter {
 
         match self.try_model(model, &request).await {
             Ok(response) => Ok(response),
-            Err(LlmRouterError::AllKeysRateLimited) | Err(LlmRouterError::MaxRetriesExceeded) => {
+            Err(LlmRouterError::AllKeysRateLimited)
+            | Err(LlmRouterError::MaxRetriesExceeded)
+            | Err(LlmRouterError::NoApiCompatibleKeys) => {
                 self.try_fallback(model, &request).await
             }
             Err(e) => Err(e),
@@ -311,7 +333,10 @@ impl LlmRouter {
             let key_guard = pool
                 .acquire()
                 .await
-                .map_err(|_| LlmRouterError::AllKeysRateLimited)?;
+                .map_err(|e| match e {
+                    KeyPoolError::NoApiCompatibleKeys => LlmRouterError::NoApiCompatibleKeys,
+                    _ => LlmRouterError::AllKeysRateLimited,
+                })?;
 
             let chat_request = ChatRequest {
                 messages: request.messages.clone(),
@@ -586,7 +611,7 @@ mod tests {
         ));
         let openai = Arc::new(MockProvider::new(
             "openai",
-            vec![Ok(MockProvider::ok_response("gpt-4o"))],
+            vec![Ok(MockProvider::ok_response("gpt-5.2"))],
         ));
 
         let mut providers = HashMap::new();
@@ -614,7 +639,7 @@ mod tests {
         let mut fallback_chains = HashMap::new();
         fallback_chains.insert(
             "claude-sonnet-4-5-20250929".to_string(),
-            vec!["gpt-4o".to_string()],
+            vec!["gpt-5.2".to_string()],
         );
 
         let router = LlmRouter::new(
@@ -627,7 +652,7 @@ mod tests {
 
         let result = router.complete(make_request(None)).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().model, "gpt-4o");
+        assert_eq!(result.unwrap().model, "gpt-5.2");
     }
 
     #[tokio::test]
@@ -759,7 +784,7 @@ mod tests {
     async fn test_register_provider_new() {
         let provider = Arc::new(MockProvider::new(
             "openai",
-            vec![Ok(MockProvider::ok_response("gpt-4o"))],
+            vec![Ok(MockProvider::ok_response("gpt-5.2"))],
         ));
         let pool = KeyPool::new(
             vec![ApiKey::new("k1".to_string(), ProviderType::OpenAI, "sk-1".to_string())],
@@ -771,7 +796,7 @@ mod tests {
             ModelRegistry::with_defaults(),
             HashMap::new(),
             Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-            "gpt-4o".to_string(),
+            "gpt-5.2".to_string(),
         );
 
         assert!(!router.reload_keys(ProviderType::OpenAI, KeyPool::new(vec![], SelectionStrategy::RoundRobin)));
@@ -840,6 +865,120 @@ mod tests {
         assert!(result.is_ok());
         // Should use API, not CLI
         assert_eq!(result.unwrap().model, "claude-sonnet-4-5-20250929");
+    }
+
+    // ── Key-aware mock provider ────────────────────────────────────
+
+    struct KeyAwareMockProvider;
+
+    #[async_trait]
+    impl LlmProvider for KeyAwareMockProvider {
+        fn name(&self) -> &str { "key_aware_mock" }
+        fn supports_tools(&self) -> bool { false }
+        async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
+            Err(LlmError::NotConfigured)
+        }
+        async fn chat_with_key(&self, key: &str, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
+            if key.starts_with("sk-ant-oat") {
+                Err(LlmError::AuthenticationFailed("managed token cannot auth against HTTP API".into()))
+            } else {
+                Ok(MockProvider::ok_response("claude-haiku"))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_no_api_keys_triggers_cli_fallback() {
+        // Pool with only a managed key (source=ClaudeCode)
+        let mut managed_key = ApiKey::new(
+            "managed1".to_string(),
+            ProviderType::Anthropic,
+            "sk-ant-oat01-managed-token-placeholder-very-long".to_string(),
+        );
+        managed_key.source = crate::key_pool::KeySource::ClaudeCode;
+
+        let key_pool = KeyPool::new(
+            vec![managed_key],
+            SelectionStrategy::RoundRobin,
+        );
+
+        let key_aware = Arc::new(KeyAwareMockProvider);
+        let cli_provider = Arc::new(MockProvider::new(
+            "claude_cli",
+            vec![Ok(MockProvider::ok_response("claude_cli"))],
+        ));
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            ProviderType::Anthropic,
+            ProviderEntry {
+                provider: key_aware,
+                key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+            },
+        );
+
+        let router = LlmRouter::new(
+            providers,
+            ModelRegistry::with_defaults(),
+            HashMap::new(),
+            Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+
+        router.register_cli_backend(ProviderType::Anthropic, cli_provider);
+
+        // Should fall through to CLI backend since no API-compatible keys
+        let result = router.complete(make_request(None)).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().model, "claude_cli");
+    }
+
+    #[tokio::test]
+    async fn test_mixed_pool_uses_api_key_only() {
+        // Pool with managed key + real API key
+        let mut managed_key = ApiKey::new(
+            "managed1".to_string(),
+            ProviderType::Anthropic,
+            "sk-ant-oat01-managed-token-placeholder-very-long".to_string(),
+        );
+        managed_key.source = crate::key_pool::KeySource::ClaudeCode;
+
+        let mut api_key = ApiKey::new(
+            "api1".to_string(),
+            ProviderType::Anthropic,
+            format!("sk-ant-api03-{}", "x".repeat(30)),
+        );
+        api_key.source = crate::key_pool::KeySource::ApiConsole;
+
+        let key_pool = KeyPool::new(
+            vec![managed_key, api_key],
+            SelectionStrategy::RoundRobin,
+        );
+
+        let key_aware = Arc::new(KeyAwareMockProvider);
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            ProviderType::Anthropic,
+            ProviderEntry {
+                provider: key_aware,
+                key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+            },
+        );
+
+        let router = LlmRouter::new(
+            providers,
+            ModelRegistry::with_defaults(),
+            HashMap::new(),
+            Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+
+        // Should succeed using the API key, not the managed key
+        let result = router.complete(make_request(None)).await;
+        assert!(result.is_ok());
+        // KeyAwareMockProvider returns "claude-haiku" for valid API keys
+        assert_eq!(result.unwrap().model, "claude-haiku");
     }
 
     #[test]

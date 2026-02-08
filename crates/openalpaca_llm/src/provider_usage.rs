@@ -184,6 +184,7 @@ impl ProviderUsageTracker {
 }
 
 /// Parse Anthropic usage response.
+#[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama", test))]
 fn parse_anthropic_usage_response(body: &str) -> Result<ExternalUsage, String> {
     #[derive(Deserialize)]
     struct AnthropicUsage {
@@ -208,6 +209,7 @@ fn parse_anthropic_usage_response(body: &str) -> Result<ExternalUsage, String> {
 }
 
 /// Parse OpenAI usage response.
+#[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama", test))]
 fn parse_openai_usage_response(body: &str) -> Result<ExternalUsage, String> {
     #[derive(Deserialize)]
     struct OpenAIUsage {
@@ -231,6 +233,7 @@ fn parse_openai_usage_response(body: &str) -> Result<ExternalUsage, String> {
 }
 
 /// Get current period string (YYYY-MM).
+#[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama", test))]
 fn current_period() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -245,6 +248,7 @@ fn current_period() -> String {
 }
 
 /// Get ISO-8601 timestamp string without chrono.
+#[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama", test))]
 fn chrono_like_now() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

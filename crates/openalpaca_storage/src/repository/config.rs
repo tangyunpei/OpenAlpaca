@@ -88,4 +88,32 @@ impl<'a> ConfigRepository<'a> {
             Ok(())
         })
     }
+
+    /// Set a config value after validating against the schema.
+    /// Use this for CLI/TUI writes. For daemon internal writes, use `set()` directly.
+    pub fn set_checked(&self, key: &str, value: &str) -> Result<()> {
+        use crate::config_schema;
+        config_schema::lookup(key).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown config key '{}'. Run 'openalpaca config list --all' to see valid keys.",
+                key
+            )
+        })?;
+        config_schema::validate(key, value)
+            .map_err(|e| anyhow::anyhow!("Invalid value for '{}': {}", key, e))?;
+        let normalized = config_schema::normalize(key, value);
+        let kind = config_schema::lookup(key)
+            .map(|def| def.kind.as_db_kind())
+            .unwrap_or("string");
+        self.set(key, &normalized, kind)
+    }
+
+    /// Get a config value, falling back to schema default if not in DB.
+    pub fn get_or_default(&self, key: &str) -> Result<Option<String>> {
+        if let Some(val) = self.get(key)? {
+            return Ok(Some(val));
+        }
+        use crate::config_schema;
+        Ok(config_schema::lookup(key).and_then(|def| def.default.map(|d| d.to_string())))
+    }
 }

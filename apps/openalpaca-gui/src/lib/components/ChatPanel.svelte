@@ -81,21 +81,25 @@
   }
 </script>
 
-<div class="chat-panel">
-  <div class="chat-header">
-    <h3>Chat</h3>
-    <button class="clear-btn" onclick={handleClear} disabled={messages.length === 0}>
+<div class="flex flex-col h-full bg-background">
+  <div class="flex justify-between items-center px-4 py-3 border-b border-primary shrink-0">
+    <h3 class="m-0 text-base font-semibold text-foreground">Chat</h3>
+    <button
+      class="px-3 py-1 text-xs bg-white/5 text-muted-foreground border border-input rounded-md cursor-pointer hover:bg-danger/20 hover:text-danger hover:border-danger transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+      onclick={handleClear}
+      disabled={messages.length === 0}
+    >
       Clear
     </button>
   </div>
 
   {#if error}
-    <div class="chat-error">{error}</div>
+    <div class="bg-danger/15 text-danger px-4 py-2 text-xs shrink-0">{error}</div>
   {/if}
 
-  <div class="messages-area" bind:this={messagesContainer}>
+  <div class="flex-1 overflow-y-auto py-3 min-h-0" bind:this={messagesContainer}>
     {#if messages.length === 0 && !loading}
-      <div class="empty-state">
+      <div class="flex items-center justify-center h-full text-muted-foreground text-sm px-5 text-center">
         <p>Send a message to start chatting with OpenAlpaca.</p>
       </div>
     {:else}
@@ -105,16 +109,17 @@
     {/if}
   </div>
 
-  <div class="input-area">
+  <div class="flex gap-2 px-4 py-3 border-t border-primary shrink-0">
     <textarea
       bind:value={inputText}
       onkeydown={handleKeydown}
       placeholder="Type a message..."
       disabled={streaming}
       rows={1}
+      class="flex-1 bg-card border border-input rounded-lg text-foreground px-3 py-2 text-sm font-[inherit] resize-none min-h-[36px] max-h-[120px] outline-none focus:border-accent disabled:opacity-50 transition-colors"
     ></textarea>
     <button
-      class="send-btn"
+      class="px-4 py-2 text-sm bg-accent text-accent-foreground border-none rounded-lg cursor-pointer whitespace-nowrap self-end hover:brightness-115 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
       onclick={handleSend}
       disabled={!inputText.trim() || streaming}
     >
@@ -126,122 +131,3 @@
     </button>
   </div>
 </div>
-
-<style>
-  .chat-panel {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    background: var(--bg);
-  }
-
-  .chat-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--primary);
-    flex-shrink: 0;
-  }
-
-  .chat-header h3 {
-    margin: 0;
-    font-size: 1rem;
-    font-weight: 600;
-    color: var(--text);
-  }
-
-  .clear-btn {
-    padding: 4px 12px !important;
-    font-size: 0.75rem !important;
-    background: rgba(255, 255, 255, 0.05) !important;
-    color: var(--text-dim) !important;
-    border: 1px solid rgba(255, 255, 255, 0.1) !important;
-    border-radius: 6px !important;
-    cursor: pointer;
-  }
-
-  .clear-btn:hover:not(:disabled) {
-    background: rgba(239, 68, 68, 0.2) !important;
-    color: var(--error) !important;
-    border-color: var(--error) !important;
-  }
-
-  .chat-error {
-    background: rgba(239, 68, 68, 0.15);
-    color: var(--error);
-    padding: 8px 16px;
-    font-size: 0.8rem;
-    flex-shrink: 0;
-  }
-
-  .messages-area {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px 0;
-    min-height: 0;
-  }
-
-  .empty-state {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    color: var(--text-dim);
-    font-size: 0.85rem;
-    padding: 20px;
-    text-align: center;
-  }
-
-  .input-area {
-    display: flex;
-    gap: 8px;
-    padding: 12px 16px;
-    border-top: 1px solid var(--primary);
-    flex-shrink: 0;
-  }
-
-  textarea {
-    flex: 1;
-    background: var(--surface);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
-    color: var(--text);
-    padding: 8px 12px;
-    font-size: 0.85rem;
-    font-family: inherit;
-    resize: none;
-    min-height: 36px;
-    max-height: 120px;
-    outline: none;
-  }
-
-  textarea:focus {
-    border-color: var(--accent);
-  }
-
-  textarea:disabled {
-    opacity: 0.5;
-  }
-
-  .send-btn {
-    padding: 8px 16px !important;
-    font-size: 0.85rem !important;
-    background: var(--accent) !important;
-    color: #fff !important;
-    border: none !important;
-    border-radius: 8px !important;
-    cursor: pointer;
-    white-space: nowrap;
-    align-self: flex-end;
-  }
-
-  .send-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
-  .send-btn:hover:not(:disabled) {
-    filter: brightness(1.15);
-  }
-</style>
