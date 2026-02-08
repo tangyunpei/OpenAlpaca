@@ -105,15 +105,19 @@
       isSubmitting = false;
     }
   }
-
-  function handleBackdropClick(e: MouseEvent) {
-    if (e.target === e.currentTarget) onclose();
-  }
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-<div class="fixed inset-0 z-[1000] flex items-center justify-center bg-black/60" onclick={handleBackdropClick}>
-  <div class="w-[90%] max-w-[480px] max-h-[90vh] overflow-y-auto rounded-xl border border-border bg-surface p-6 shadow-[0_4px_20px_rgba(0,0,0,0.3)]">
+<div class="fixed inset-0 z-[1000] flex items-center justify-center bg-black/60" role="presentation">
+  <!-- Backdrop: button is inherently accessible; dialog stays above it via z-index. -->
+  <button
+    type="button"
+    class="absolute inset-0 z-0 cursor-default"
+    aria-label="Close dialog"
+    tabindex="-1"
+    onclick={onclose}
+  ></button>
+
+  <div class="relative z-10 w-[90%] max-w-[480px] max-h-[90vh] overflow-y-auto rounded-xl border border-border bg-surface p-6 shadow-[0_4px_20px_rgba(0,0,0,0.3)]">
     <h3 class="m-0 mb-4 text-foreground text-[1.1rem] font-semibold">Add API Key — {provider}</h3>
 
     <div class="mb-3.5">
@@ -168,8 +172,8 @@
       </div>
     {/if}
 
-    <div class="mb-3.5">
-      <label class="block text-[0.8rem] text-muted-foreground mb-1 font-medium">Source</label>
+    <fieldset class="mb-3.5 border-0 p-0 m-0">
+      <legend class="block text-[0.8rem] text-muted-foreground mb-1 font-medium">Source</legend>
       <div class="flex flex-wrap gap-3">
         <label class="flex items-center gap-1 text-[0.85rem] text-foreground cursor-pointer"><input type="radio" bind:group={source} value="api_console" class="accent-accent" /> API Console</label>
         <label class="flex items-center gap-1 text-[0.85rem] text-foreground cursor-pointer"><input type="radio" bind:group={source} value="claude_code" class="accent-accent" /> Claude Code</label>
@@ -178,15 +182,15 @@
         <label class="flex items-center gap-1 text-[0.85rem] text-foreground cursor-pointer"><input type="radio" bind:group={source} value="environment" class="accent-accent" /> Environment</label>
         <label class="flex items-center gap-1 text-[0.85rem] text-foreground cursor-pointer"><input type="radio" bind:group={source} value="other" class="accent-accent" /> Other</label>
       </div>
-    </div>
+    </fieldset>
 
-    <div class="mb-3.5">
-      <label class="block text-[0.8rem] text-muted-foreground mb-1 font-medium">Priority</label>
+    <fieldset class="mb-3.5 border-0 p-0 m-0">
+      <legend class="block text-[0.8rem] text-muted-foreground mb-1 font-medium">Priority</legend>
       <div class="flex flex-wrap gap-3">
         <label class="flex items-center gap-1 text-[0.85rem] text-foreground cursor-pointer"><input type="radio" bind:group={priority} value="primary" class="accent-accent" /> Primary</label>
         <label class="flex items-center gap-1 text-[0.85rem] text-foreground cursor-pointer"><input type="radio" bind:group={priority} value="fallback" class="accent-accent" /> Fallback</label>
       </div>
-    </div>
+    </fieldset>
 
     <div class="mb-3.5">
       <label for="key-notes" class="block text-[0.8rem] text-muted-foreground mb-1 font-medium">Notes (optional)</label>
