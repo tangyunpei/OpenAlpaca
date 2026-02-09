@@ -32,3 +32,4 @@ rustyline.workspace = true
 # Workspace crates
 openalpaca_storage = { workspace = true }
 openalpaca_llm = { workspace = true }
+uuid.workspace = true

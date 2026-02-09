@@ -25,6 +25,7 @@ impl GatewayPersistence {
             lane_key: lane_key.to_string(),
             role: "user".to_string(),
             content: content.to_string(),
+            source: Some(source.to_string()),
             model: None,
             tokens_in: None,
             tokens_out: None,
@@ -41,7 +42,7 @@ impl GatewayPersistence {
         lane_key: &str,
         content: &str,
         duration_ms: Option<i64>,
-        _source: &str,
+        source: &str,
     ) -> Result<i64> {
         if content.trim().is_empty() {
             tracing::debug!("Skipping empty assistant message for lane {}", lane_key);
@@ -53,6 +54,7 @@ impl GatewayPersistence {
             lane_key: lane_key.to_string(),
             role: "assistant".to_string(),
             content: content.to_string(),
+            source: Some(source.to_string()),
             model: None,
             tokens_in: None,
             tokens_out: None,

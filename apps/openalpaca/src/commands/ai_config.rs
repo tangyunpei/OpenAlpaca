@@ -1,7 +1,7 @@
 //! Bridge between the `config` CLI subcommand and `config/llm.toml`.
 //!
 //! Reads/writes AI configuration directly via `openalpaca_llm` config helpers
-//! and `KeyEncryptor`, without requiring a running daemon.
+//! and OS keychain (`SecretStore`), without requiring a running daemon.
 
 use anyhow::{Context, Result};
 use openalpaca_llm::cli_backend::{CliBackendConfig, CliBackendsConfig};
@@ -10,33 +10,69 @@ use openalpaca_llm::config::{
 };
 use openalpaca_llm::credential_discovery::CredentialDiscoveryConfig;
 use openalpaca_llm::key_encryption::KeyEncryptor;
+use openalpaca_llm::secret_store::{KeyringSecretStore, SecretStore};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Returns the path to `config/llm.toml` (relative to cwd, matching daemon).
+/// Ensure master key exists at canonical app_dir before any crypto operations.
+fn ensure_master_key() {
+    if let Ok(app_dir) = openalpaca_storage::paths::app_dir() {
+        let _ = KeyEncryptor::ensure_at(&app_dir);
+    }
+}
+
+/// Get the default secret store (OS keychain).
+fn secret_store() -> KeyringSecretStore {
+    KeyringSecretStore
+}
+
+/// Returns the path to `config/llm.toml`.
+///
+/// Resolution order:
+/// 1. `OPENALPACA_CONFIG_DIR` env var override
+/// 2. `app_dir()/config/llm.toml` (writable, created if needed)
+/// 3. Walk up from CWD looking for `config/llm.toml` (dev/repo fallback)
 pub fn llm_config_path() -> Result<PathBuf> {
+    // 1. OPENALPACA_CONFIG_DIR override
+    if let Ok(dir) = std::env::var("OPENALPACA_CONFIG_DIR") {
+        let p = PathBuf::from(&dir);
+        if p.is_dir() {
+            return Ok(p.join("llm.toml"));
+        }
+    }
+    // 2. Writable app_dir/config/
+    if let Ok(app) = openalpaca_storage::paths::app_dir() {
+        let p = app.join("config").join("llm.toml");
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    // 3. Walk up from CWD (dev/repo)
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
     Ok(cwd.join("config").join("llm.toml"))
 }
 
 /// Get a single AI config value by key. Decrypts api_keys.
 pub fn get_ai_value(key: &str) -> Result<Option<String>> {
+    ensure_master_key();
     let path = llm_config_path()?;
     if !path.exists() {
         return Ok(None);
     }
     let config = read_config(&path).map_err(|e| anyhow::anyhow!("{}", e))?;
     let encryptor = KeyEncryptor::load_or_generate().map_err(|e| anyhow::anyhow!("{}", e))?;
-    Ok(read_from_config(key, &config, &encryptor))
+    let store = secret_store();
+    Ok(read_from_config(key, &config, &encryptor, &store))
 }
 
-/// Set a single AI config value. Encrypts api_keys. Creates llm.toml if missing.
+/// Set a single AI config value. Stores api_keys in OS keychain. Creates llm.toml if missing.
 pub fn set_ai_value(key: &str, value: &str) -> Result<()> {
+    ensure_master_key();
     let path = llm_config_path()?;
     let mut config = load_or_default(&path)?;
-    let encryptor = KeyEncryptor::load_or_generate().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let store = secret_store();
 
-    apply_to_config(key, value, &mut config, &encryptor, None)?;
+    apply_to_config(key, value, &mut config, &store, None)?;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context("Failed to create config directory")?;
@@ -53,9 +89,10 @@ pub fn set_ai_values_batch(entries: &[(&str, &str)]) -> Result<()> {
     if entries.is_empty() {
         return Ok(());
     }
+    ensure_master_key();
     let path = llm_config_path()?;
     let mut config = load_or_default(&path)?;
-    let encryptor = KeyEncryptor::load_or_generate().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let store = secret_store();
 
     // Build a source-hint lookup from companion entries
     let source_hints: HashMap<&str, &str> = entries
@@ -69,7 +106,7 @@ pub fn set_ai_values_batch(entries: &[(&str, &str)]) -> Result<()> {
             continue;
         }
         let source: Option<&str> = source_hints.get(*key).copied();
-        apply_to_config(key, value, &mut config, &encryptor, source)?;
+        apply_to_config(key, value, &mut config, &store, source)?;
     }
 
     if let Some(parent) = path.parent() {
@@ -90,6 +127,7 @@ pub fn delete_ai_value(key: &str) -> Result<()> {
         return Ok(());
     }
     let mut config = read_config(&path).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let store = secret_store();
 
     match key {
         "ai.default_model" => {
@@ -154,6 +192,14 @@ pub fn delete_ai_value(key: &str) -> Result<()> {
                 if let Some(entry) = providers.get_mut(&provider) {
                     if let Some(ref mut keys) = entry.keys {
                         let cli_id = format!("{}_cli", provider);
+                        // Delete keychain secrets for removed keys
+                        for k in keys.iter() {
+                            if k.id == cli_id || keys.len() == 1 {
+                                if let Some(ref sref) = k.secret_ref {
+                                    let _ = store.delete(sref);
+                                }
+                            }
+                        }
                         // 1. Try to remove {provider}_cli key
                         let before = keys.len();
                         keys.retain(|k| k.id != cli_id);
@@ -161,14 +207,18 @@ pub fn delete_ai_value(key: &str) -> Result<()> {
                             // Removed cli key — done
                         } else if keys.len() == 1 {
                             // 2. Migration fallback: exactly one key (legacy) → remove it
+                            if let Some(ref sref) = keys[0].secret_ref {
+                                let _ = store.delete(sref);
+                            }
                             keys.remove(0);
                         } else if !keys.is_empty() {
                             // 3. Multiple keys, no cli key → remove first primary, else first
-                            if let Some(pos) = keys.iter().position(|k| k.priority.as_deref() == Some("primary")) {
-                                keys.remove(pos);
-                            } else {
-                                keys.remove(0);
+                            let pos = keys.iter().position(|k| k.priority.as_deref() == Some("primary"))
+                                .unwrap_or(0);
+                            if let Some(ref sref) = keys[pos].secret_ref {
+                                let _ = store.delete(sref);
                             }
+                            keys.remove(pos);
                         }
                         if !keys.is_empty() {
                             eprintln!(
@@ -198,12 +248,14 @@ pub fn delete_ai_value(key: &str) -> Result<()> {
 /// List all currently-set AI values. Returns `(key, value, kind)`.
 /// API keys are returned decrypted.
 pub fn list_ai_entries() -> Result<Vec<(String, String, String)>> {
+    ensure_master_key();
     let path = llm_config_path()?;
     if !path.exists() {
         return Ok(Vec::new());
     }
     let config = read_config(&path).map_err(|e| anyhow::anyhow!("{}", e))?;
     let encryptor = KeyEncryptor::load_or_generate().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let store = secret_store();
 
     let keys = [
         "ai.default_model",
@@ -224,7 +276,7 @@ pub fn list_ai_entries() -> Result<Vec<(String, String, String)>> {
 
     let mut entries = Vec::new();
     for key in &keys {
-        if let Some(val) = read_from_config(key, &config, &encryptor) {
+        if let Some(val) = read_from_config(key, &config, &encryptor, &store) {
             let kind = if key.ends_with(".enabled") || key.ends_with(".discovery") || key.ends_with(".cli_enabled") {
                 "bool"
             } else {
@@ -248,7 +300,16 @@ pub fn clear_ai_config() -> Result<()> {
     config.orchestrator = None;
 
     if let Some(ref mut providers) = config.providers {
+        let store = secret_store();
         for (_name, prov) in providers.iter_mut() {
+            // Delete keychain secrets before clearing
+            if let Some(ref keys) = prov.keys {
+                for k in keys {
+                    if let Some(ref sref) = k.secret_ref {
+                        let _ = store.delete(sref);
+                    }
+                }
+            }
             prov.enabled = None;
             prov.base_url = None;
             prov.keys = None;
@@ -283,6 +344,7 @@ fn mask_key_value(secret: &str) -> String {
 }
 
 /// Upsert (add or update) a single provider key. Writes to disk immediately.
+/// Stores secret in OS keychain via `secret_ref`, NOT as `secret_encrypted`.
 pub fn upsert_provider_key(
     provider: &str,
     key_id: &str,
@@ -292,12 +354,15 @@ pub fn upsert_provider_key(
     tier: Option<&str>,
     notes: Option<&str>,
 ) -> Result<()> {
+    ensure_master_key();
     let path = llm_config_path()?;
     let mut config = load_or_default(&path)?;
-    let encryptor = KeyEncryptor::load_or_generate().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let store = secret_store();
 
-    let encrypted = encryptor
-        .encrypt(secret)
+    // Store secret in OS keychain
+    let sref = format!("llm/{}/{}", provider, uuid::Uuid::new_v4());
+    store
+        .set(&sref, secret)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let providers = config.providers.get_or_insert_with(HashMap::new);
@@ -307,7 +372,12 @@ pub fn upsert_provider_key(
     let keys = entry.keys.get_or_insert_with(Vec::new);
 
     if let Some(existing) = keys.iter_mut().find(|k| k.id == key_id) {
-        existing.secret_encrypted = Some(encrypted);
+        // Delete old keychain secret
+        if let Some(ref old_ref) = existing.secret_ref {
+            let _ = store.delete(old_ref);
+        }
+        existing.secret_ref = Some(sref);
+        existing.secret_encrypted = None;
         if let Some(s) = source {
             existing.source = Some(s.to_string());
         }
@@ -324,7 +394,8 @@ pub fn upsert_provider_key(
         keys.push(KeyConfig {
             id: key_id.to_string(),
             secret_env: None,
-            secret_encrypted: Some(encrypted),
+            secret_ref: Some(sref),
+            secret_encrypted: None,
             tier: tier.map(|t| t.to_string()),
             monthly_budget: None,
             priority: Some(priority.unwrap_or("primary").to_string()),
@@ -344,12 +415,14 @@ pub fn upsert_provider_key(
 
 /// List all keys for a provider from disk.
 pub fn list_provider_keys(provider: &str) -> Result<Vec<ProviderKeyInfo>> {
+    ensure_master_key();
     let path = llm_config_path()?;
     if !path.exists() {
         return Ok(Vec::new());
     }
     let config = read_config(&path).map_err(|e| anyhow::anyhow!("{}", e))?;
     let encryptor = KeyEncryptor::load_or_generate().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let store = secret_store();
 
     let keys = match config
         .providers
@@ -363,7 +436,13 @@ pub fn list_provider_keys(provider: &str) -> Result<Vec<ProviderKeyInfo>> {
 
     let mut result = Vec::new();
     for k in keys {
-        let display_secret = if let Some(ref enc) = k.secret_encrypted {
+        let display_secret = if let Some(ref sref) = k.secret_ref {
+            match store.get(sref) {
+                Ok(Some(plain)) => mask_key_value(&plain),
+                Ok(None) => "(not in keychain)".to_string(),
+                Err(_) => "(keychain error)".to_string(),
+            }
+        } else if let Some(ref enc) = k.secret_encrypted {
             match encryptor.decrypt(enc) {
                 Ok(plain) => mask_key_value(&plain),
                 Err(_) => "(decrypt error)".to_string(),
@@ -392,10 +471,19 @@ pub fn remove_provider_key(provider: &str, key_id: &str) -> Result<()> {
         return Err(anyhow::anyhow!("Config file not found"));
     }
     let mut config = read_config(&path).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let store = secret_store();
 
     if let Some(ref mut providers) = config.providers {
         if let Some(entry) = providers.get_mut(provider) {
             if let Some(ref mut keys) = entry.keys {
+                // Delete keychain secret before removing
+                for k in keys.iter() {
+                    if k.id == key_id {
+                        if let Some(ref sref) = k.secret_ref {
+                            let _ = store.delete(sref);
+                        }
+                    }
+                }
                 let before = keys.len();
                 keys.retain(|k| k.id != key_id);
                 if keys.len() == before {
@@ -434,7 +522,7 @@ fn apply_to_config(
     key: &str,
     value: &str,
     config: &mut LlmRouterConfig,
-    encryptor: &KeyEncryptor,
+    store: &dyn SecretStore,
     source_hint: Option<&str>,
 ) -> Result<()> {
     match key {
@@ -533,16 +621,25 @@ fn apply_to_config(
             let provider = extract_provider(k)?;
             let cli_id = format!("{}_cli", provider);
             let source = source_hint.unwrap_or("api_console").to_string();
-            let encrypted = encryptor
-                .encrypt(value)
+
+            // Store secret in OS keychain
+            let sref = format!("llm/{}/{}", provider, uuid::Uuid::new_v4());
+            store
+                .set(&sref, value)
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
+
             let providers = config.providers.get_or_insert_with(HashMap::new);
             let entry = providers
                 .entry(provider)
                 .or_insert_with(ProviderConfig::default);
             let keys = entry.keys.get_or_insert_with(Vec::new);
             if let Some(existing) = keys.iter_mut().find(|k| k.id == cli_id) {
-                existing.secret_encrypted = Some(encrypted);
+                // Delete old keychain secret
+                if let Some(ref old_ref) = existing.secret_ref {
+                    let _ = store.delete(old_ref);
+                }
+                existing.secret_ref = Some(sref);
+                existing.secret_encrypted = None;
                 existing.source = Some(source);
                 existing.priority = Some("primary".to_string());
             } else {
@@ -550,9 +647,9 @@ fn apply_to_config(
                 // already stored under a different key ID (avoids duplicates
                 // when save_and_exit round-trips a value read from disk).
                 let already_stored = keys.iter().any(|k| {
-                    k.secret_encrypted
+                    k.secret_ref
                         .as_ref()
-                        .and_then(|enc| encryptor.decrypt(enc).ok())
+                        .and_then(|sr| store.get(sr).ok().flatten())
                         .map(|decrypted| decrypted == value)
                         .unwrap_or(false)
                 });
@@ -560,7 +657,8 @@ fn apply_to_config(
                     keys.push(KeyConfig {
                         id: cli_id,
                         secret_env: None,
-                        secret_encrypted: Some(encrypted),
+                        secret_ref: Some(sref),
+                        secret_encrypted: None,
                         tier: None,
                         monthly_budget: None,
                         priority: Some("primary".to_string()),
@@ -569,6 +667,9 @@ fn apply_to_config(
                         rate_limit: None,
                         allowed_models: None,
                     });
+                } else {
+                    // Clean up the unused keychain entry
+                    let _ = store.delete(&sref);
                 }
             }
         }
@@ -598,6 +699,7 @@ fn read_from_config(
     key: &str,
     config: &LlmRouterConfig,
     encryptor: &KeyEncryptor,
+    store: &dyn SecretStore,
 ) -> Option<String> {
     match key {
         "ai.default_model" => config.orchestrator.as_ref().map(|o| o.model.clone()),
@@ -664,8 +766,17 @@ fn read_from_config(
                 .or_else(|| keys.iter().find(|k| k.priority.as_deref() == Some("primary")))
                 // 4. Fallback: first key
                 .or_else(|| keys.first())?;
-            let encrypted = key.secret_encrypted.as_ref()?;
-            encryptor.decrypt(encrypted).ok()
+            // Resolve: secret_ref > secret_encrypted > secret_env
+            if let Some(ref sref) = key.secret_ref {
+                return store.get(sref).ok().flatten();
+            }
+            if let Some(ref encrypted) = key.secret_encrypted {
+                return encryptor.decrypt(encrypted).ok();
+            }
+            if let Some(ref env_var) = key.secret_env {
+                return std::env::var(env_var).ok();
+            }
+            None
         }
         k if k.ends_with(".base_url") => {
             let provider = extract_provider(k).ok()?;

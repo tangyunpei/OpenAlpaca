@@ -298,6 +298,7 @@ export interface ChatMessage {
   lane_key: string;
   role: "user" | "assistant" | "system";
   content: string;
+  source?: string;
   model?: string;
   tokens_in?: number;
   tokens_out?: number;
@@ -317,6 +318,7 @@ export interface ChatSendResponse {
 export interface ChatHistoryResponse {
   messages: ChatMessage[];
   total: number;
+  lane_key: string;
 }
 
 export interface ChatDeleteResponse {

@@ -114,6 +114,11 @@ pub struct KeyConfig {
     pub id: String,
     #[serde(default)]
     pub secret_env: Option<String>,
+    /// OS keychain pointer (e.g. "llm/anthropic/<uuid>").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_ref: Option<String>,
+    /// Legacy encrypted secret (read-only after migration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_encrypted: Option<String>,
     pub tier: Option<String>,
     pub monthly_budget: Option<f64>,
@@ -157,6 +162,14 @@ fn resolve_key_secret(env_var: &str) -> Option<String> {
 /// - If `providers` key is present → new hierarchical format
 /// - Otherwise → legacy flat format (wraps in single-provider router)
 pub fn build_router(path: &std::path::Path) -> Result<LlmRouter, LlmError> {
+    build_router_with_secret_store(path, None)
+}
+
+/// Build an LlmRouter with an optional OS secret store for `secret_ref` resolution.
+pub fn build_router_with_secret_store(
+    path: &std::path::Path,
+    secret_store: Option<&dyn crate::secret_store::SecretStore>,
+) -> Result<LlmRouter, LlmError> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| LlmError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
 
@@ -165,7 +178,7 @@ pub fn build_router(path: &std::path::Path) -> Result<LlmRouter, LlmError> {
         .map_err(|e| LlmError::Config(format!("Failed to parse {}: {}", path.display(), e)))?;
 
     if raw.get("providers").is_some() {
-        build_router_from_hierarchical(&content)
+        build_router_from_hierarchical(&content, secret_store)
     } else {
         build_router_from_legacy(&content)
     }
@@ -195,7 +208,10 @@ fn build_router_from_legacy(content: &str) -> Result<LlmRouter, LlmError> {
 
 /// Build router from new hierarchical format.
 #[allow(unused_variables, unused_mut, unreachable_code)]
-fn build_router_from_hierarchical(content: &str) -> Result<LlmRouter, LlmError> {
+fn build_router_from_hierarchical(
+    content: &str,
+    secret_store: Option<&dyn crate::secret_store::SecretStore>,
+) -> Result<LlmRouter, LlmError> {
     let config: LlmRouterConfig = toml::from_str(content)
         .map_err(|e| LlmError::Config(format!("Failed to parse router config: {}", e)))?;
 
@@ -215,9 +231,46 @@ fn build_router_from_hierarchical(content: &str) -> Result<LlmRouter, LlmError> 
             let mut api_keys = Vec::new();
             if let Some(ref keys) = provider_config.keys {
                 for key_config in keys {
-                    // Resolve secret: try encrypted first, then env var.
-                    // On failure, skip this key so other keys/providers still work.
-                    let secret = if let Some(ref encrypted) = key_config.secret_encrypted {
+                    // Resolution order: secret_env > secret_ref > secret_encrypted
+                    let secret = if let Some(ref env_var) = key_config.secret_env {
+                        // 1. Environment variable (highest priority, explicit)
+                        let resolved = resolve_key_secret(env_var);
+                        if resolved.is_none() {
+                            tracing::warn!(
+                                "Skipping key '{}': environment variable '{}' not set",
+                                key_config.id, env_var
+                            );
+                        }
+                        resolved
+                    } else if let Some(ref sref) = key_config.secret_ref {
+                        // 2. OS keychain via secret_ref
+                        if let Some(store) = secret_store {
+                            match store.get(sref) {
+                                Ok(Some(s)) => Some(s),
+                                Ok(None) => {
+                                    tracing::warn!(
+                                        "Skipping key '{}': secret_ref '{}' not found in keychain",
+                                        key_config.id, sref
+                                    );
+                                    None
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Skipping key '{}': keychain error: {e}",
+                                        key_config.id
+                                    );
+                                    None
+                                }
+                            }
+                        } else {
+                            tracing::warn!(
+                                "Skipping key '{}': secret_ref set but no secret store available",
+                                key_config.id
+                            );
+                            None
+                        }
+                    } else if let Some(ref encrypted) = key_config.secret_encrypted {
+                        // 3. Legacy encrypted (read-only, for pre-migration compat)
                         if crate::key_encryption::KeyEncryptor::is_encrypted(encrypted) {
                             match crate::key_encryption::KeyEncryptor::load_or_generate() {
                                 Ok(enc) => match enc.decrypt(encrypted) {
@@ -242,18 +295,9 @@ fn build_router_from_hierarchical(content: &str) -> Result<LlmRouter, LlmError> 
                         } else {
                             Some(encrypted.clone())
                         }
-                    } else if let Some(ref env_var) = key_config.secret_env {
-                        let resolved = resolve_key_secret(env_var);
-                        if resolved.is_none() {
-                            tracing::warn!(
-                                "Skipping key '{}': environment variable '{}' not set",
-                                key_config.id, env_var
-                            );
-                        }
-                        resolved
                     } else {
                         tracing::warn!(
-                            "Skipping key '{}': no secret_encrypted or secret_env configured",
+                            "Skipping key '{}': no secret configured",
                             key_config.id
                         );
                         None
@@ -461,6 +505,133 @@ pub fn write_config(path: &std::path::Path, config: &LlmRouterConfig) -> Result<
     std::fs::write(path, content)
         .map_err(|e| LlmError::Config(format!("Failed to write {}: {}", path.display(), e)))?;
     Ok(())
+}
+
+/// Resolve a secret from a `KeyConfig` using the given secret store.
+///
+/// Resolution order: `secret_env` > `secret_ref` (keychain) > `secret_encrypted` (legacy).
+pub fn resolve_key_from_config(
+    key_config: &KeyConfig,
+    secret_store: Option<&dyn crate::secret_store::SecretStore>,
+) -> Option<String> {
+    if let Some(ref env_var) = key_config.secret_env {
+        return resolve_key_secret(env_var);
+    }
+    if let Some(ref sref) = key_config.secret_ref {
+        if let Some(store) = secret_store {
+            if let Ok(Some(s)) = store.get(sref) {
+                return Some(s);
+            }
+        }
+    }
+    if let Some(ref encrypted) = key_config.secret_encrypted {
+        if crate::key_encryption::KeyEncryptor::is_encrypted(encrypted) {
+            if let Ok(enc) = crate::key_encryption::KeyEncryptor::load_or_generate() {
+                return enc.decrypt(encrypted).ok();
+            }
+        } else {
+            return Some(encrypted.clone());
+        }
+    }
+    None
+}
+
+/// Auto-migrate `secret_encrypted` → OS keychain (`secret_ref`).
+///
+/// For each key with `secret_encrypted`, decrypts the secret and stores it
+/// in the OS keychain via `SecretStore`, then replaces `secret_encrypted`
+/// with `secret_ref` in the config. Writes the updated config to disk.
+///
+/// Returns the number of secrets migrated.
+pub fn migrate_llm_secrets(
+    config_path: &std::path::Path,
+    secret_store: &dyn crate::secret_store::SecretStore,
+) -> Result<u32, String> {
+    // Check path is writable
+    if config_path.exists() {
+        let metadata = std::fs::metadata(config_path)
+            .map_err(|e| format!("Cannot stat {}: {e}", config_path.display()))?;
+        if metadata.permissions().readonly() {
+            tracing::warn!(
+                "Config at {} is read-only; skipping secret migration",
+                config_path.display()
+            );
+            return Ok(0);
+        }
+    } else {
+        return Ok(0);
+    }
+
+    let mut config = read_config(config_path)
+        .map_err(|e| format!("Failed to read config for migration: {e}"))?;
+
+    let encryptor = match crate::key_encryption::KeyEncryptor::load_or_generate() {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("Cannot load master key for migration: {e}");
+            return Ok(0);
+        }
+    };
+
+    let mut migrated = 0u32;
+
+    if let Some(ref mut providers) = config.providers {
+        for (provider_name, provider) in providers.iter_mut() {
+            if let Some(ref mut keys) = provider.keys {
+                for key in keys.iter_mut() {
+                    // Skip if already has secret_ref or no secret_encrypted
+                    if key.secret_ref.is_some() {
+                        continue;
+                    }
+                    let Some(ref encrypted) = key.secret_encrypted else {
+                        continue;
+                    };
+                    if !crate::key_encryption::KeyEncryptor::is_encrypted(encrypted) {
+                        continue;
+                    }
+
+                    let plaintext = match encryptor.decrypt(encrypted) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Migration: cannot decrypt key '{}' for {}: {e}",
+                                key.id, provider_name
+                            );
+                            continue;
+                        }
+                    };
+
+                    let sref = format!(
+                        "llm/{}/{}",
+                        provider_name,
+                        uuid::Uuid::new_v4()
+                    );
+
+                    if let Err(e) = secret_store.set(&sref, &plaintext) {
+                        tracing::warn!(
+                            "Migration: cannot store key '{}' in keychain: {e}",
+                            key.id
+                        );
+                        continue;
+                    }
+
+                    key.secret_ref = Some(sref);
+                    key.secret_encrypted = None;
+                    migrated += 1;
+                }
+            }
+        }
+    }
+
+    if migrated > 0 {
+        let _lock = crate::key_encryption::acquire_config_write_lock()
+            .map_err(|e| format!("Failed to acquire config lock for migration: {e}"))?;
+        write_config(config_path, &config)
+            .map_err(|e| format!("Failed to write migrated config: {e}"))?;
+        tracing::info!("Migrated {migrated} secret(s) from llm.toml to OS keychain");
+    }
+
+    Ok(migrated)
 }
 
 #[cfg(test)]

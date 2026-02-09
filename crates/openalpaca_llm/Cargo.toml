@@ -26,6 +26,9 @@ aes-gcm.workspace = true
 base64.workspace = true
 rand.workspace = true
 uuid.workspace = true
+keyring.workspace = true
+directories.workspace = true
+file-lock.workspace = true
 
 # Optional: HTTP client (only when a provider feature is enabled)
 reqwest = { workspace = true, optional = true }
@@ -34,3 +37,6 @@ reqwest = { workspace = true, optional = true }
 which.workspace = true
 dashmap.workspace = true
 tokio-util.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

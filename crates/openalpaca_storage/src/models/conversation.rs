@@ -9,6 +9,7 @@ pub struct ConversationMessage {
     pub lane_key: String,
     pub role: String,
     pub content: String,
+    pub source: Option<String>,
     pub model: Option<String>,
     pub tokens_in: Option<i64>,
     pub tokens_out: Option<i64>,

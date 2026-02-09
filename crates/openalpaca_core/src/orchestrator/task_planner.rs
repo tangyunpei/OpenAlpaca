@@ -48,6 +48,7 @@ impl TaskPlanner {
         user_message: &str,
         idle_agents: &[SubAgent],
         history: &[ChatMessage],
+        session_summary: Option<&str>,
     ) -> Result<TaskPlan, PlanError> {
         let system_prompt = Self::build_system_prompt(idle_agents);
 
@@ -56,8 +57,17 @@ impl TaskPlanner {
         } else {
             history
         };
-        let mut messages = Vec::with_capacity(2 + history_tail.len());
+        let mut messages = Vec::with_capacity(3 + history_tail.len());
         messages.push(ChatMessage::system(&system_prompt));
+
+        // Inject summary before history
+        if let Some(summary) = session_summary {
+            messages.push(ChatMessage::system(&format!(
+                "### SESSION SUMMARY ###\n{}",
+                summary
+            )));
+        }
+
         messages.extend_from_slice(history_tail);
         messages.push(ChatMessage::user(user_message));
 

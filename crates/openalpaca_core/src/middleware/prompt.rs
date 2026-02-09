@@ -39,9 +39,10 @@ pub struct AgentPersona {
 pub struct PromptAssembler;
 
 impl PromptAssembler {
-    /// Combines System Persona, Agent Persona, and User Context into a final prompt.
-    /// This ensures the System Persona is always present and prioritized.
-    pub fn assemble(system: &SystemPersona, agent: &AgentPersona, user_content: &str) -> String {
+    /// Combines System Persona and Agent Persona into a system prompt.
+    /// User input is NOT included — it is sent as a separate user message
+    /// to avoid duplication in the LLM context.
+    pub fn assemble(system: &SystemPersona, agent: &AgentPersona) -> String {
         let mut prompt = String::new();
 
         // 1. System Block (Immutable)
@@ -70,11 +71,6 @@ impl PromptAssembler {
                 prompt.push_str(&format!("- {}\n", domain));
             }
         }
-        prompt.push('\n');
-
-        // 3. User Context (Dynamic)
-        prompt.push_str("### USER INPUT ###\n");
-        prompt.push_str(user_content);
 
         prompt
     }
@@ -92,15 +88,14 @@ mod tests {
             tone: "Concise".to_string(),
             domain_knowledge: vec!["Rust".to_string(), "Systems Programming".to_string()],
         };
-        let user_input = "Write a hello world in Rust";
 
-        let prompt = PromptAssembler::assemble(&system, &agent, user_input);
+        let prompt = PromptAssembler::assemble(&system, &agent);
 
         assert!(prompt.contains("### SYSTEM INSTRUCTIONS ###"));
         assert!(prompt.contains("Identity: OpenAlpaca"));
         assert!(prompt.contains("### AGENT ROLE ###"));
         assert!(prompt.contains("Role: Coder"));
-        assert!(prompt.contains("### USER INPUT ###"));
-        assert!(prompt.contains("Write a hello world in Rust"));
+        // User input should NOT be in the system prompt (Bug B fix)
+        assert!(!prompt.contains("### USER INPUT ###"));
     }
 }

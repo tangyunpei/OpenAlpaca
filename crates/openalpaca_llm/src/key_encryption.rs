@@ -5,7 +5,7 @@ use aes_gcm::{
     aead::{Aead, KeyInit, OsRng, rand_core::RngCore},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const PREFIX: &str = "aes256:";
 
@@ -28,7 +28,7 @@ impl KeyEncryptor {
             return Ok(Self { key });
         }
 
-        // 2. Try config file
+        // 2. Try key file at canonical location (app_dir)
         let key_path = Self::key_file_path()?;
         if key_path.exists() {
             let hex_key = std::fs::read_to_string(&key_path)
@@ -43,31 +43,100 @@ impl KeyEncryptor {
             return Ok(Self { key });
         }
 
-        // 3. Auto-generate
+        // 3. Auto-generate via ensure_at
+        let dir = key_path.parent()
+            .ok_or_else(|| "Cannot determine parent directory for master key".to_string())?;
+        let hex_key = Self::ensure_at(dir)?;
+        let bytes = hex::decode(&hex_key)
+            .map_err(|e| format!("Invalid generated key hex: {e}"))?;
+        let key = Key::<Aes256Gcm>::from_slice(&bytes).clone();
+        Ok(Self { key })
+    }
+
+    /// Race-safe master key generation at a specific directory.
+    ///
+    /// 1. Try read first (common path — key already exists)
+    /// 2. On NotFound: generate + atomic `create_new(true)` write
+    /// 3. On AlreadyExists (another process won the race): re-read and validate
+    ///
+    /// Returns the 64-char hex-encoded master key.
+    pub fn ensure_at(dir: &Path) -> Result<String, String> {
+        let key_path = dir.join(".master_key");
+
+        // 1. Try read first (common path)
+        match std::fs::read_to_string(&key_path) {
+            Ok(contents) => {
+                let hex_key = contents.trim().to_string();
+                let bytes = hex::decode(&hex_key)
+                    .map_err(|e| format!("Invalid master key hex at {}: {e}", key_path.display()))?;
+                if bytes.len() != 32 {
+                    return Err(format!(
+                        "Master key at {} must be 32 bytes, got {}",
+                        key_path.display(),
+                        bytes.len()
+                    ));
+                }
+                return Ok(hex_key);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Fall through to generate
+            }
+            Err(e) => {
+                return Err(format!("Failed to read {}: {e}", key_path.display()));
+            }
+        }
+
+        // 2. Generate + atomic write
         let mut key_bytes = [0u8; 32];
         OsRng.fill_bytes(&mut key_bytes);
         let hex_key = hex::encode(&key_bytes);
 
-        // Ensure parent directory exists
         if let Some(parent) = key_path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create config dir: {e}"))?;
+                .map_err(|e| format!("Failed to create dir {}: {e}", parent.display()))?;
         }
 
-        std::fs::write(&key_path, &hex_key)
-            .map_err(|e| format!("Failed to write master key file: {e}"))?;
-
-        // Set file permissions to 0o600 on Unix
-        #[cfg(unix)]
+        use std::io::Write;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&key_path)
         {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&key_path, perms)
-                .map_err(|e| format!("Failed to set key file permissions: {e}"))?;
-        }
+            Ok(mut f) => {
+                f.write_all(hex_key.as_bytes())
+                    .map_err(|e| format!("Failed to write {}: {e}", key_path.display()))?;
+                f.flush()
+                    .map_err(|e| format!("Failed to flush {}: {e}", key_path.display()))?;
+                f.sync_all()
+                    .map_err(|e| format!("Failed to sync {}: {e}", key_path.display()))?;
 
-        let key = Key::<Aes256Gcm>::from_slice(&key_bytes).clone();
-        Ok(Self { key })
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let perms = std::fs::Permissions::from_mode(0o600);
+                    let _ = std::fs::set_permissions(&key_path, perms);
+                }
+
+                Ok(hex_key)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Another process won the race — re-read and validate
+                let contents = std::fs::read_to_string(&key_path)
+                    .map_err(|e| format!("Failed to re-read {}: {e}", key_path.display()))?;
+                let hex_key = contents.trim().to_string();
+                let bytes = hex::decode(&hex_key)
+                    .map_err(|e| format!("Invalid master key hex at {}: {e}", key_path.display()))?;
+                if bytes.len() != 32 {
+                    return Err(format!(
+                        "Master key at {} must be 32 bytes, got {}",
+                        key_path.display(),
+                        bytes.len()
+                    ));
+                }
+                Ok(hex_key)
+            }
+            Err(e) => Err(format!("Failed to create {}: {e}", key_path.display())),
+        }
     }
 
     /// Encrypt a plaintext secret. Returns `"aes256:<base64(nonce+ciphertext)>"`.
@@ -120,11 +189,36 @@ impl KeyEncryptor {
         value.starts_with(PREFIX)
     }
 
+    /// Canonical master key file path.
+    ///
+    /// Defaults to `app_dir()/.master_key` (always writable, CWD-independent).
+    /// Only `OPENALPACA_MASTER_KEY` env var overrides (checked in `load_or_generate()`).
     fn key_file_path() -> Result<PathBuf, String> {
+        use directories::ProjectDirs;
+        if let Some(proj) = ProjectDirs::from("com", "openalpaca", "OpenAlpaca") {
+            return Ok(proj.data_dir().join(".master_key"));
+        }
+        // Fallback to CWD (should not happen on supported platforms)
         let cwd = std::env::current_dir()
             .map_err(|e| format!("Failed to get current dir: {e}"))?;
         Ok(cwd.join("config").join(".master_key"))
     }
+}
+
+/// Acquire a file lock for writing llm.toml. Returns guard that releases on drop.
+pub fn acquire_config_write_lock() -> Result<file_lock::FileLock, String> {
+    use directories::ProjectDirs;
+    let lock_dir = if let Some(proj) = ProjectDirs::from("com", "openalpaca", "OpenAlpaca") {
+        proj.data_dir().to_path_buf()
+    } else {
+        std::env::current_dir().map_err(|e| format!("Failed to get current dir: {e}"))?
+    };
+    std::fs::create_dir_all(&lock_dir)
+        .map_err(|e| format!("Failed to create lock dir: {e}"))?;
+    let lock_path = lock_dir.join("llm.toml.lock");
+    let opts = file_lock::FileOptions::new().write(true).create(true);
+    file_lock::FileLock::lock(&lock_path, true, opts)
+        .map_err(|e| format!("Failed to acquire config write lock at {}: {e}", lock_path.display()))
 }
 
 /// Simple hex encoding/decoding (avoids pulling in the `hex` crate).
@@ -224,5 +318,34 @@ mod tests {
         assert_eq!(encoded, "0001ffabcd");
         let decoded = hex::decode(&encoded).unwrap();
         assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_ensure_at_creates_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hex_key = KeyEncryptor::ensure_at(tmp.path()).unwrap();
+        assert_eq!(hex_key.len(), 64); // 32 bytes = 64 hex chars
+        // Reading again returns the same key
+        let hex_key2 = KeyEncryptor::ensure_at(tmp.path()).unwrap();
+        assert_eq!(hex_key, hex_key2);
+    }
+
+    #[test]
+    fn test_ensure_at_validates_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Write a valid key manually
+        let valid_hex = "00".repeat(32);
+        std::fs::write(tmp.path().join(".master_key"), &valid_hex).unwrap();
+        let result = KeyEncryptor::ensure_at(tmp.path()).unwrap();
+        assert_eq!(result, valid_hex);
+    }
+
+    #[test]
+    fn test_ensure_at_rejects_invalid() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Write invalid key (too short)
+        std::fs::write(tmp.path().join(".master_key"), "abcd").unwrap();
+        let result = KeyEncryptor::ensure_at(tmp.path());
+        assert!(result.is_err());
     }
 }

@@ -18,12 +18,13 @@ impl<'a> ConversationRepository<'a> {
     pub fn insert(&self, msg: &ConversationMessage) -> Result<i64> {
         self.db.with_connection(|conn| {
             conn.execute(
-                "INSERT INTO conversation_messages (lane_key, role, content, model, tokens_in, tokens_out, duration_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO conversation_messages (lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 (
                     &msg.lane_key,
                     &msg.role,
                     &msg.content,
+                    &msg.source,
                     &msg.model,
                     msg.tokens_in,
                     msg.tokens_out,
@@ -38,10 +39,10 @@ impl<'a> ConversationRepository<'a> {
     pub fn list_by_lane(&self, lane_key: &str, limit: i64, offset: i64) -> Result<Vec<ConversationMessage>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, lane_key, role, content, model, tokens_in, tokens_out, duration_ms, created_at
+                "SELECT id, lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, created_at
                  FROM conversation_messages
                  WHERE lane_key = ?1
-                 ORDER BY created_at ASC
+                 ORDER BY created_at ASC, id ASC
                  LIMIT ?2 OFFSET ?3",
             )?;
 
@@ -60,7 +61,7 @@ impl<'a> ConversationRepository<'a> {
     pub fn list_recent_by_lane(&self, lane_key: &str, limit: i64) -> Result<Vec<ConversationMessage>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, lane_key, role, content, model, tokens_in, tokens_out, duration_ms, created_at
+                "SELECT id, lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, created_at
                  FROM (
                      SELECT * FROM conversation_messages
                      WHERE lane_key = ?1
@@ -227,11 +228,12 @@ impl<'a> ConversationRepository<'a> {
             lane_key: row.get(1)?,
             role: row.get(2)?,
             content: row.get(3)?,
-            model: row.get(4)?,
-            tokens_in: row.get(5)?,
-            tokens_out: row.get(6)?,
-            duration_ms: row.get(7)?,
-            created_at: row.get(8)?,
+            source: row.get(4)?,
+            model: row.get(5)?,
+            tokens_in: row.get(6)?,
+            tokens_out: row.get(7)?,
+            duration_ms: row.get(8)?,
+            created_at: row.get(9)?,
         })
     }
 }
@@ -256,6 +258,7 @@ mod tests {
             lane_key: "user:gui".to_string(),
             role: "user".to_string(),
             content: "Hello world".to_string(),
+            source: None,
             model: None,
             tokens_in: None,
             tokens_out: None,
@@ -283,6 +286,7 @@ mod tests {
                 lane_key: "user:gui".to_string(),
                 role: "user".to_string(),
                 content: format!("Message {i}"),
+                source: None,
                 model: None,
                 tokens_in: None,
                 tokens_out: None,
@@ -311,6 +315,7 @@ mod tests {
                 lane_key: "user:gui".to_string(),
                 role: "user".to_string(),
                 content: format!("Message {i}"),
+                source: None,
                 model: None,
                 tokens_in: None,
                 tokens_out: None,
@@ -336,6 +341,7 @@ mod tests {
             lane_key: "user:gui".to_string(),
             role: "assistant".to_string(),
             content: "Response text".to_string(),
+            source: None,
             model: Some("claude-3".to_string()),
             tokens_in: Some(100),
             tokens_out: Some(200),
@@ -364,6 +370,7 @@ mod tests {
                 lane_key: "user:gui".to_string(),
                 role: "user".to_string(),
                 content: format!("Message {i}"),
+                source: None,
                 model: None,
                 tokens_in: None,
                 tokens_out: None,
@@ -442,6 +449,7 @@ mod tests {
                 lane_key: "user:gui".to_string(),
                 role: "user".to_string(),
                 content: format!("Message {i}"),
+                source: None,
                 model: None,
                 tokens_in: None,
                 tokens_out: None,

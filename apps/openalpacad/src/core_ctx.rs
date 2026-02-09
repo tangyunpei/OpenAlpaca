@@ -57,6 +57,7 @@ impl CoreCtx {
         TrustGate::check(&principal, &capability, &scope)?;
 
         // Step 2: Assemble Prompt
+
         let _full_prompt = PromptAssembler::assemble(&self.system_persona, agent_persona, &content);
 
         // Step 3: Agent/LLM Call (STUBBED for now)
