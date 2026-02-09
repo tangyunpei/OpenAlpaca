@@ -2,6 +2,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+// Re-export WakeEvent from API so downstream code can still use
+// `openalpaca_core::events::WakeEvent` without breaking.
+pub use openalpaca_api::events::WakeEvent;
+
 /// Examples of system-wide events that flow through the EventBus.
 /// This replaces the loose JSON and separate API types for internal logic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,9 +126,3 @@ pub enum SystemEvent {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WakeEvent {
-    Timer { job_id: String, tag: String },
-    FileChanged { path: String, change_type: String },
-}

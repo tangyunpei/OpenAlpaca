@@ -113,13 +113,35 @@ async fn main() -> Result<()> {
     // Step 5: Create event broadcaster for WebSocket streaming
     let event_broadcaster = EventBroadcaster::new(64, instance_id.clone(), Some(db.clone()));
 
-    // Step 5.1: Initialize WakeManager and integration
+    // Step 5.1: Compute config base dir (shared by agent loader + wake watcher) (D6)
+    let config_base_dir = std::env::current_dir()
+        .unwrap_or_default()
+        .join("config");
+
+    // Step 5.1.1: Initialize WakeManager
     let (wake_tx, mut wake_rx) = mpsc::channel(256);
-    let wake_manager = WakeManager::new(wake_tx)
+    let mut wake_manager = WakeManager::new(wake_tx)
         .await
         .context("Failed to init WakeManager")?;
 
-    // Start WakeManager (spawns internal scheduler/watchers)
+    // Register filesystem watchers for specific config paths BEFORE start (D4, D9)
+    // Watch config/agents/ for agent config hot-reload, and config/llm.toml for LLM config changes.
+    // We do NOT watch all of config/ to avoid persisting noisy events for .DS_Store, .master_key, etc.
+    let mut watch_paths = Vec::new();
+    let agents_dir = config_base_dir.join("agents");
+    if agents_dir.exists() {
+        watch_paths.push(agents_dir.clone());
+    }
+    let llm_config = config_base_dir.join("llm.toml");
+    if llm_config.exists() {
+        watch_paths.push(llm_config);
+    }
+    if !watch_paths.is_empty() {
+        info!("Wake: watching paths: {:?}", watch_paths);
+        wake_manager.add_filesystem_watcher(watch_paths);
+    }
+
+    // Start WakeManager (starts scheduler + watchers)
     wake_manager
         .start()
         .await
@@ -221,6 +243,10 @@ async fn main() -> Result<()> {
                         agent_id, model_id, reason
                     );
                 }
+                // Wake events are forwarded via the dedicated wake_rx channel (lines 130-135),
+                // not through the Core EventBus. If a future Core component publishes
+                // SystemEvent::Wake to the bus, add an explicit arm here — but remove
+                // the wake_rx pipeline first to avoid double-broadcast.
                 _ => {}
             }
         }
@@ -230,9 +256,7 @@ async fn main() -> Result<()> {
     let shared_context = Arc::new(SharedContext::new());
 
     // Step 5.2.1: Load agent configs from TOML files (Phase 4.5)
-    let config_dir = std::env::current_dir()
-        .unwrap_or_default()
-        .join("config/agents");
+    let config_dir = config_base_dir.join("agents");
     if config_dir.exists()
         && let Ok(entries) = std::fs::read_dir(&config_dir)
     {
@@ -287,9 +311,7 @@ async fn main() -> Result<()> {
 
     // Step 5.2.2: Load LLM config (Phase 5.1 → 5.2.5 LlmRouter)
     let llm_router: Option<Arc<openalpaca_llm::LlmRouter>> = {
-        let llm_config_path = std::env::current_dir()
-            .unwrap_or_default()
-            .join("config/llm.toml");
+        let llm_config_path = config_base_dir.join("llm.toml");
         if llm_config_path.exists() {
             match openalpaca_llm::build_router(&llm_config_path) {
                 Ok(router) => {
@@ -311,9 +333,7 @@ async fn main() -> Result<()> {
     };
 
     // Step 5.2.3: Build LLM Settings Service (Phase 5.5)
-    let llm_config_path = std::env::current_dir()
-        .unwrap_or_default()
-        .join("config/llm.toml");
+    let llm_config_path = config_base_dir.join("llm.toml");
     let llm_settings_service: Option<Arc<openalpaca_llm::LlmSettingsService>> =
         if let Some(ref router) = llm_router {
             match openalpaca_llm::LlmSettingsService::new(
@@ -343,9 +363,7 @@ async fn main() -> Result<()> {
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
     let llm_config: Option<openalpaca_llm::LlmRouterConfig> = {
-        let p = std::env::current_dir()
-            .unwrap_or_default()
-            .join("config/llm.toml");
+        let p = config_base_dir.join("llm.toml");
         if p.exists() {
             openalpaca_llm::read_config(&p).ok()
         } else {
@@ -633,6 +651,11 @@ async fn main() -> Result<()> {
             info!("Shutdown signal received (API)");
             cancel_token.cancel();
         }
+    }
+
+    // Shutdown WakeManager (stops watchers + scheduler)
+    if let Err(e) = wake_manager.shutdown().await {
+        warn!("Failed to shut down WakeManager: {e}");
     }
 
     // Cleanup: remove discovery file
