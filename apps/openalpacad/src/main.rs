@@ -7,7 +7,6 @@
 //! - HTTP API for health checks and commands
 //! - WebSocket for real-time event streaming
 
-mod core_ctx;
 mod events;
 mod gateway_bridge;
 mod managers;
@@ -26,6 +25,7 @@ use axum::{
 use events::EventBroadcaster;
 use openalpaca_core::{
     agent::AgentConfigService,
+    bus::EventBus,
     chat::{ChatService, ChatStreamManager},
     context::SharedContext,
     gateway::Gateway,
@@ -44,7 +44,6 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 /// Shared application state
-#[allow(deprecated)]
 #[derive(Clone)]
 pub struct AppState {
     pub instance_id: String,
@@ -52,7 +51,6 @@ pub struct AppState {
     pub event_broadcaster: EventBroadcaster,
     pub db: Database,
     pub shutdown_tx: mpsc::Sender<()>,
-    pub core_ctx: core_ctx::CoreCtx,
     pub connector_manager: managers::connector::ConnectorManager,
     pub gateway: Arc<Gateway>,
     pub llm_settings_service: Option<Arc<openalpaca_llm::LlmSettingsService>>,
@@ -321,16 +319,14 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     // Shutdown channel for API-triggered shutdown
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
 
-    // Create CoreCtx early so we can share the EventBus with connectors
-    #[allow(deprecated)]
-    let ctx = core_ctx::CoreCtx::new();
+    // Single EventBus for system-wide event distribution
+    let bus = EventBus::default();
 
     // Spawn bridge: SystemEvent (Core) -> ServerEvent (API)
     let eb_bridge = event_broadcaster.clone();
-    #[allow(deprecated)]
-    let mut core_rx = ctx.bus.subscribe();
+    let mut system_rx = bus.subscribe();
     tokio::spawn(async move {
-        while let Ok(event) = core_rx.recv().await {
+        while let Ok(event) = system_rx.recv().await {
             match event {
                 openalpaca_core::events::SystemEvent::ConnectorStatus { id, status, .. } => {
                     eb_bridge.connector_status(&id, &status);
@@ -604,8 +600,6 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let tool_registry = Arc::new(tool_registry);
 
     // Construct SecurityGate → SandboxManager → RegistryToolExecutor chain
-    #[allow(deprecated)]
-    let bus = ctx.bus.clone();
     let registry_executor = Arc::new(
         openalpaca_core::tools::RegistryToolExecutor::new(tool_registry.clone()),
     );
@@ -673,7 +667,6 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         event_broadcaster,
         db,
         shutdown_tx,
-        core_ctx: ctx,
         connector_manager,
         gateway,
         llm_settings_service,

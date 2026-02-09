@@ -1,4 +1,4 @@
-//! Orchestrator module: the central message handler replacing CoreCtx.
+//! Orchestrator module: the central message handler.
 //!
 //! Routes user messages through intent classification, skill matching,
 //! and task dispatch pipelines.
@@ -32,7 +32,7 @@ use task_planner::TaskPlanner;
 
 /// The Orchestrator: unified message handler for all user interactions.
 ///
-/// Replaces CoreCtx with intent-based routing:
+/// Intent-based routing:
 /// - SimpleQuery → LLM call (or echo stub if no LLM configured)
 /// - TaskQuery → query task registry
 /// - ComplexTask → dispatch to agents via TaskDispatcher
