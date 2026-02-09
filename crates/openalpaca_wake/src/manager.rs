@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
+use crate::models::ScheduledTask;
 use crate::scheduler::WakeScheduler;
 use crate::watcher::{EventWatcher, filesystem::FilesystemWatcher};
 use openalpaca_api::events::WakeEvent;
@@ -39,6 +40,16 @@ impl WakeManager {
         self.watchers.push(Box::new(watcher));
     }
 
+    /// Add a filesystem watcher with a custom poll interval
+    pub fn add_filesystem_watcher_with_interval(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        poll_interval: std::time::Duration,
+    ) {
+        let watcher = FilesystemWatcher::with_poll_interval(paths, poll_interval);
+        self.watchers.push(Box::new(watcher));
+    }
+
     /// Start all components
     pub async fn start(&self) -> Result<()> {
         info!("Starting WakeManager...");
@@ -51,10 +62,6 @@ impl WakeManager {
 
         // Start Watchers
         for watcher in &self.watchers {
-            // Watchers run asynchronously and send events to the shared tx
-            // We shouldn't block here, but watcher.start() is async.
-            // Assuming watcher.start() initializes and returns quickly (spawns internal task).
-            // Our FilesystemWatcher implementation does exactly that.
             if let Err(e) = watcher.start(self.event_tx.clone()).await {
                 error!("Failed to start watcher: {:?}", e);
             }
@@ -64,19 +71,59 @@ impl WakeManager {
         Ok(())
     }
 
-    /// Shutdown all components
+    /// Shutdown all components (watchers + scheduler)
     pub async fn shutdown(&self) -> Result<()> {
         info!("Stopping WakeManager...");
         for watcher in &self.watchers {
             let _ = watcher.stop().await;
         }
-        // Scheduler in tokio-cron-scheduler doesn't have explicit async stop needed usually,
-        // or it stops when dropped/runtime ends.
+        if let Err(e) = self.scheduler.shutdown().await {
+            error!("Failed to shut down WakeScheduler: {:?}", e);
+        }
         Ok(())
+    }
+
+    /// Schedule a recurring cron task (passthrough to scheduler)
+    pub async fn schedule_cron(&self, task: ScheduledTask) -> Result<uuid::Uuid> {
+        self.scheduler.schedule_cron(task).await
+    }
+
+    /// Remove a scheduled job by task ID (passthrough to scheduler)
+    pub async fn remove_job(&self, task_id: &str) -> Result<()> {
+        self.scheduler.remove_job(task_id).await
+    }
+
+    /// List all scheduled jobs (passthrough to scheduler)
+    pub async fn list_jobs(&self) -> Vec<ScheduledTask> {
+        self.scheduler.list_jobs().await
     }
 
     // accessors for testing or dynamic scheduling
     pub fn scheduler(&self) -> &WakeScheduler {
         &self.scheduler
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_manager_shutdown_stops_scheduler() {
+        let (tx, _rx) = mpsc::channel::<WakeEvent>(16);
+        let wake_manager = WakeManager::new(tx).await.unwrap();
+        wake_manager.start().await.unwrap();
+
+        let task = ScheduledTask {
+            id: "mgr_test".to_string(),
+            cron: "0 0 * * * *".to_string(),
+            tag: "mgr".to_string(),
+            job_uuid: None,
+        };
+        wake_manager.schedule_cron(task).await.unwrap();
+
+        // Shutdown should not error
+        let result = wake_manager.shutdown().await;
+        assert!(result.is_ok(), "Manager shutdown should succeed");
     }
 }

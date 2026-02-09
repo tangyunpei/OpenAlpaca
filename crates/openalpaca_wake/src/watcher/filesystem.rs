@@ -1,29 +1,41 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, Event, PollWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use super::EventWatcher;
 use openalpaca_api::events::WakeEvent;
 
 /// Debounce window in milliseconds
 const DEBOUNCE_MS: u128 = 100;
+/// Poll interval for `notify::PollWatcher`.
+///
+/// We prefer polling here because native backends (e.g. FSEvents) can be unavailable or blocked
+/// under sandboxed environments. Polling is slower but predictable and testable.
+const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Watcher for filesystem changes
 pub struct FilesystemWatcher {
     paths: Vec<PathBuf>,
-    watcher: Arc<Mutex<Option<RecommendedWatcher>>>,
+    poll_interval: Duration,
+    watcher: Arc<Mutex<Option<PollWatcher>>>,
 }
 
 impl FilesystemWatcher {
     pub fn new(paths: Vec<PathBuf>) -> Self {
+        Self::with_poll_interval(paths, POLL_INTERVAL)
+    }
+
+    pub fn with_poll_interval(paths: Vec<PathBuf>, poll_interval: Duration) -> Self {
         Self {
             paths,
+            poll_interval,
             watcher: Arc::new(Mutex::new(None)),
         }
     }
@@ -38,21 +50,22 @@ impl EventWatcher for FilesystemWatcher {
         let last_event_clone = last_event.clone();
 
         // Setup notify watcher
-        let mut watcher = RecommendedWatcher::new(
+        let mut watcher = PollWatcher::new(
             move |res: Result<Event, notify::Error>| {
                 match res {
                     Ok(event) => {
-                        // Filter: Only handle Create/Modify/Remove events
-                        let is_relevant = matches!(
-                            event.kind,
-                            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                        );
+                        let Event { kind, paths, .. } = event;
 
-                        if !is_relevant {
+                        // Ignore access-only events (open/close). For wake purposes we treat
+                        // everything else (including `Any`) as a relevant change signal.
+                        if kind.is_access() {
                             return;
                         }
 
-                        if let Some(path) = event.paths.first() {
+                        // `notify` can return multiple paths for a single event (e.g., renames),
+                        // and on some platforms the "interesting" path is not necessarily first.
+                        let change_type = format!("{:?}", kind);
+                        for path in paths {
                             let path_str = path.to_string_lossy().to_string();
 
                             // Simple debounce: skip if same path within DEBOUNCE_MS
@@ -63,38 +76,42 @@ impl EventWatcher for FilesystemWatcher {
                                     && now.duration_since(*last_time).as_millis() < DEBOUNCE_MS
                                 {
                                     debug!("Debounced event for: {}", path_str);
-                                    return;
+                                    continue;
                                 }
                                 last.insert(path_str.clone(), now);
                             }
 
-                            let change_type = format!("{:?}", event.kind);
-
                             let wake_event = WakeEvent::FileChanged {
                                 path: path_str,
-                                change_type,
+                                change_type: change_type.clone(),
                             };
 
                             // Use try_send to avoid blocking the watcher thread
-                            if let Err(_e) = tx_clone.try_send(wake_event) {
+                            if let Err(e) = tx_clone.try_send(wake_event) {
                                 // Drop if channel full (backpressure)
+                                debug!("Filesystem wake event dropped (channel full or closed): {e}");
                             }
                         }
                     }
                     Err(e) => error!("Watch error: {:?}", e),
                 }
             },
-            Config::default(),
+            Config::default().with_poll_interval(self.poll_interval),
         )?;
 
         // Add paths to watch
         for path in &self.paths {
             if path.exists() {
-                watcher.watch(path, RecursiveMode::NonRecursive)?;
+                let mode = if path.is_dir() {
+                    RecursiveMode::Recursive
+                } else {
+                    RecursiveMode::NonRecursive
+                };
+                watcher.watch(path, mode)?;
                 info!("Watching path: {:?}", path);
             } else {
                 // Try creating if implementation allows, but here we just warn or skip
-                error!("Path does not exist, cannot watch: {:?}", path);
+                warn!("Path does not exist, cannot watch: {:?}", path);
             }
         }
 
@@ -158,6 +175,43 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "Timed out waiting for file event");
+        assert!(result.unwrap(), "Stream closed or event not found");
+
+        watcher.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_custom_poll_interval() {
+        let dir = tempdir().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        let file_path = dir_path.join("custom_poll_trigger.txt");
+
+        let (tx, mut rx) = mpsc::channel(10);
+        let watcher =
+            FilesystemWatcher::with_poll_interval(vec![dir_path.clone()], Duration::from_millis(500));
+
+        watcher.start(tx).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _f = File::create(&file_path).unwrap();
+
+        // Longer timeout since poll interval is 500ms
+        let result = timeout(Duration::from_secs(3), async {
+            loop {
+                match rx.recv().await {
+                    Some(WakeEvent::FileChanged { path, .. }) => {
+                        if path.contains("custom_poll_trigger.txt") {
+                            return true;
+                        }
+                    }
+                    None => return false,
+                    _ => continue,
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok(), "Timed out waiting for file event with custom poll interval");
         assert!(result.unwrap(), "Stream closed or event not found");
 
         watcher.stop().await.unwrap();
