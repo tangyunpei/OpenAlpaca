@@ -1559,7 +1559,7 @@ fn configure_key(
             let sel = Select::with_theme(&ColorfulTheme::default())
                 .with_prompt(def.description)
                 .default(idx)
-                .items(choices)
+                .items(*choices)
                 .interact()?;
             choices[sel].to_string()
         }
