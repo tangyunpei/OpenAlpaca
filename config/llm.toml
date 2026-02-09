@@ -7,13 +7,13 @@ enabled = true
 
 [[providers.anthropic.keys]]
 id = "Claude Code Token"
-secret_encrypted = "aes256:z0pzlYsaP82khr8Ks1ds9oOCgMe8z4eblu+AAG08YBhZOLF6UWLPKluaoPiG6d9kF0YIcAef+940xFcrLNUjwfP/pYebb/fpeJmPPmQuw17MxYZcyUSCmPXsXzbEWvyle9gwu1SBbUaOYLgfikDWbQXfwaFBcM/GXfl26w+KKVyq2mpJqSUaXw=="
+secret_ref = "llm/anthropic/9fd9c2c1-0e14-40f9-87f4-9da8116b0a8c"
 priority = "fallback"
 source = "claude_code"
 
 [[providers.anthropic.keys]]
 id = "Anthropic API Key"
-secret_encrypted = "aes256:rwsCvc/S0OtPZcftoW14leV16T93uyPqZq60Z0Q12/L76s6d9MWlaPyx8i4qhisOwtHxIK/Q+QfaBChUuYAVYYN0DE2LH0MNbjyAUuEJnc5qg+JpZ7DoFnumGlaxdD30EAqw5Ma1E+qErG9Ui4v9H+p72PB2ZpRvaTvJHKQRD83+Wf8+Zqkg/g=="
+secret_ref = "llm/anthropic/daa163be-9933-4f49-a066-06ec61e08953"
 tier = "tier3"
 priority = "primary"
 source = "api_console"

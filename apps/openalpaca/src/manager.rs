@@ -53,8 +53,9 @@ pub fn stop_daemon() -> Result<()> {
 pub fn is_daemon_running() -> bool {
     if let Ok(Some(d)) = discovery::read_discovery() {
         // Verify PID existence
-        let s = System::new_all();
-        if s.processes().get(&sysinfo::Pid::from(d.pid as usize)).is_some() {
+        let mut s = System::new();
+        s.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        if s.process(sysinfo::Pid::from_u32(d.pid as u32)).is_some() {
             return true;
         }
     }
@@ -91,7 +92,8 @@ pub fn start_gui() -> Result<()> {
 /// We might need to find "openalpaca-gui" process.
 pub fn stop_gui() -> Result<()> {
     println!("🛑 Stopping GUI...");
-    let s = System::new_all();
+    let mut s = System::new();
+    s.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     let mut killed = false;
 
     for (pid, process) in s.processes() {

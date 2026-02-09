@@ -73,7 +73,7 @@ pub struct Build {
 /// Returns 32 bytes encoded as base64url (no padding) = 43 characters.
 /// Uses rand::rng() which provides a secure, OS-seeded random generator.
 pub fn generate_token() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     let bytes: [u8; 32] = rand::rng().random();
     URL_SAFE_NO_PAD.encode(bytes)
 }

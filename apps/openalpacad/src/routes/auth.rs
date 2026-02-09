@@ -2,7 +2,7 @@ use crate::AppState;
 use axum::http::StatusCode;
 use axum::{Json, extract::State, response::IntoResponse};
 use openalpaca_storage::IdentityRepository;
-use rand::Rng;
+use rand::RngExt;
 use rand::distr::Alphanumeric;
 use serde::Serialize;
 use std::sync::Arc;

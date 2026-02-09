@@ -5,9 +5,29 @@
 use crate::migrations::{self, Migration};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
+use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use tracing::{debug, info};
+
+static VEC_INIT: Once = Once::new();
+
+/// Register sqlite-vec extension globally (process-wide, idempotent).
+///
+/// Uses `sqlite3_auto_extension` so every `Connection::open()` gets vec functions.
+/// The `transmute` converts `sqlite3_vec_init` (which has the sqlite3 extension
+/// entry point signature) into the `Option<unsafe extern "C" fn()>` that
+/// `sqlite3_auto_extension` expects. This is the documented pattern from
+/// the sqlite-vec crate.
+fn ensure_vec_extension() {
+    VEC_INIT.call_once(|| {
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+                sqlite3_vec_init as *const (),
+            )));
+        }
+    });
+}
 
 /// Database manager wrapping a SQLite connection
 #[derive(Clone)]
@@ -18,6 +38,8 @@ pub struct Database {
 impl Database {
     /// Open or create a database at the given path, running any pending migrations.
     pub fn open(path: &Path) -> Result<Self> {
+        ensure_vec_extension();
+
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
@@ -187,7 +209,7 @@ mod tests {
 
         let db = Database::open(&db_path).unwrap();
         assert!(db_path.exists());
-        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(db.schema_version().unwrap(), 13);
     }
 
     #[test]
@@ -199,7 +221,7 @@ mod tests {
         let _db1 = Database::open(&db_path).unwrap();
         let db2 = Database::open(&db_path).unwrap();
 
-        assert_eq!(db2.schema_version().unwrap(), 12);
+        assert_eq!(db2.schema_version().unwrap(), 13);
     }
 
     #[test]
@@ -217,6 +239,40 @@ mod tests {
         });
 
         assert!(result.is_err(), "Expected foreign key constraint error");
+    }
+
+    #[test]
+    fn test_sqlite_vec_available() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.db")).unwrap();
+        db.with_connection(|conn| {
+            // 1. Verify extension loaded
+            let version: String = conn.query_row(
+                "SELECT vec_version()", [], |row| row.get(0)
+            )?;
+            assert!(!version.is_empty(), "vec_version() should return a version string");
+
+            // 2. Verify migration created the table
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_vec')",
+                [], |row| row.get(0),
+            )?;
+            assert!(exists, "memory_vec table should exist after migration");
+
+            // 3. Insert a zero vector (384 floats x 4 bytes = 1536 bytes of zeroblob)
+            conn.execute(
+                "INSERT INTO memory_vec(memory_id, embedding) VALUES (1, vec_f32(zeroblob(1536)))",
+                [],
+            )?;
+
+            // 4. Verify round-trip
+            let count: i64 = conn.query_row(
+                "SELECT count(*) FROM memory_vec", [], |row| row.get(0)
+            )?;
+            assert_eq!(count, 1);
+
+            Ok(())
+        }).unwrap();
     }
 
     #[test]

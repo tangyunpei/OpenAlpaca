@@ -123,7 +123,7 @@ pub async fn command_handler(
                 .unwrap_or_else(|| Uuid::new_v4().to_string());
 
             // Generate a 6-character alphanumeric token
-            use rand::Rng;
+            use rand::RngExt;
             let mut rng = rand::rng();
             let token: String = (0..6)
                 .map(|_| {
