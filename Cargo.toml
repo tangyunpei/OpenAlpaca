@@ -105,6 +105,7 @@ async-trait = "0.1.86"
 openalpaca_llm = { path = "crates/openalpaca_llm" }
 arc-swap = "1"
 aes-gcm = "0.10"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
 # Internal Crates (continued)
 openalpaca_connectors = { path = "crates/openalpaca_connectors" }

@@ -64,6 +64,12 @@ pub struct ConversationMessagesResponse {
 pub struct ChatHistoryResponse {
     pub messages: Vec<openalpaca_storage::ConversationMessage>,
     pub total: i64,
+    pub lane_key: String,
+}
+
+#[derive(Deserialize)]
+pub struct DeleteHistoryQuery {
+    pub lane_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -112,7 +118,7 @@ pub async fn send_chat_handler(
         }
     };
 
-    let principal = "gui_user";
+    let principal = &state.local_user_id;
 
     match chat_service.send_message(body.content, principal) {
         Ok(resp) => {
@@ -242,10 +248,10 @@ pub async fn get_chat_history_handler(
 
     let limit = query.limit.unwrap_or(50);
     let offset = query.offset.unwrap_or(0);
-    let lane_key = query.lane_key.as_deref().unwrap_or("gui_user:gui");
+    let lane_key = query.lane_key.as_deref().unwrap_or(&state.default_lane_key);
 
     match chat_service.get_history(lane_key, limit, offset) {
-        Ok((messages, total)) => Json(ChatHistoryResponse { messages, total }).into_response(),
+        Ok((messages, total)) => Json(ChatHistoryResponse { messages, total, lane_key: lane_key.to_string() }).into_response(),
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "HISTORY_NOT_FOUND",
@@ -259,6 +265,7 @@ pub async fn get_chat_history_handler(
 
 pub async fn delete_chat_history_handler(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<DeleteHistoryQuery>,
 ) -> impl IntoResponse {
     let chat_service = match &state.chat_service {
         Some(svc) => svc,
@@ -272,10 +279,15 @@ pub async fn delete_chat_history_handler(
         }
     };
 
-    let lane_key = "gui_user:gui";
+    let lane_key = query.lane_key.as_deref().unwrap_or(&state.default_lane_key);
 
     match chat_service.clear_history(lane_key) {
-        Ok(deleted) => Json(ChatDeleteResponse { deleted }).into_response(),
+        Ok(deleted) => {
+            // Also clear the conversation summary
+            let pref_repo = openalpaca_storage::PreferenceRepository::new(&state.db);
+            let _ = pref_repo.delete(lane_key, "conversation_summary");
+            Json(ChatDeleteResponse { deleted }).into_response()
+        }
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "GATEWAY_ERROR",

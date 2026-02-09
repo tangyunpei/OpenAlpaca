@@ -20,8 +20,8 @@ use crate::security::policy::{Principal, Scope};
 use crate::tools::ToolRegistry;
 use crate::types::Capability;
 use chrono::Utc;
-use openalpaca_llm::{ChatMessage, LlmRouter};
-use openalpaca_storage::{ConversationRepository, Database};
+use openalpaca_llm::{ChatMessage, LlmRouter, RequestContext, Role, RouterRequest};
+use openalpaca_storage::{ConversationRepository, Database, PreferenceRepository};
 use openalpaca_storage::repository::LlmUsageRepository;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -51,7 +51,35 @@ pub struct Orchestrator {
     db: Option<Database>,
 }
 
-const MAX_HISTORY_MESSAGES: i64 = 40;
+const SUMMARY_LOAD_LIMIT: i64 = 120;
+const PROMPT_RECENT_MESSAGES: usize = 40;
+const SUMMARY_MIN_NEW_OLDER_MESSAGES: usize = 12;
+const SUMMARY_MAX_CHARS: usize = 4000;
+const MSG_TRUNC_CHARS: usize = 1500;
+const SUMMARY_MAX_DAILY_COST_USD: f64 = 0.50;
+
+/// Full conversation context for prompt building and summary update.
+struct ConversationContext {
+    summary: Option<String>,
+    recent_messages: Vec<ChatMessage>,
+    /// Raw (id, role, content) tuples for the "older" window — used by maybe_update_summary().
+    older_window: Vec<(i64, String, String)>,
+    /// Current summary state from preference (for optimistic locking in update).
+    summary_pref_version: Option<i64>,
+    /// Last message ID that was summarized.
+    last_summarized_id: i64,
+    /// Previous summary text (for incremental update).
+    old_summary_text: String,
+}
+
+fn role_label(role: &Role) -> &'static str {
+    match role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::System => "system",
+        Role::Tool => "tool",
+    }
+}
 
 impl Orchestrator {
     pub fn new(
@@ -89,25 +117,279 @@ impl Orchestrator {
         }
     }
 
-    fn load_history(&self, lane_key: &str) -> Vec<ChatMessage> {
+    /// Build the full conversation context for a turn: loads history, deduplicates
+    /// the current user message (Bug A fix, D6), splits into older/recent windows,
+    /// and loads any existing summary from the preference table.
+    fn build_context(&self, lane_key: &str, current_query: &str) -> ConversationContext {
+        let empty = ConversationContext {
+            summary: None,
+            recent_messages: Vec::new(),
+            older_window: Vec::new(),
+            summary_pref_version: None,
+            last_summarized_id: 0,
+            old_summary_text: String::new(),
+        };
         let db = match &self.db {
             Some(db) => db,
-            None => return Vec::new(),
+            None => return empty,
         };
+
         let repo = ConversationRepository::new(db);
-        match repo.list_recent_by_lane(lane_key, MAX_HISTORY_MESSAGES) {
-            Ok(messages) => messages
-                .into_iter()
-                .filter_map(|msg| match msg.role.as_str() {
-                    "user" if !msg.content.is_empty() => Some(ChatMessage::user(&msg.content)),
-                    "assistant" if !msg.content.is_empty() => Some(ChatMessage::assistant(&msg.content)),
-                    _ => None,
-                })
-                .collect(),
-            Err(e) => {
-                tracing::warn!("Failed to load conversation history: {e}");
-                Vec::new()
+        let raw_messages = match repo.list_recent_by_lane(lane_key, SUMMARY_LOAD_LIMIT) {
+            Ok(msgs) => msgs,
+            Err(_) => return empty,
+        };
+
+        // Step 1: Build ONE canonical list of (id, role_string, content) in chronological order.
+        let mut chat_rows: Vec<(i64, String, String)> = raw_messages
+            .iter()
+            .filter(|msg| {
+                (msg.role == "user" || msg.role == "assistant") && !msg.content.is_empty()
+            })
+            .map(|msg| (msg.id, msg.role.clone(), msg.content.clone()))
+            .collect();
+
+        // Step 2: Dedup (D6) — if the last row matches current_query, drop it (Bug A fix).
+        if let Some((_, role, content)) = chat_rows.last() {
+            if role == "user" && content == current_query {
+                chat_rows.pop();
             }
+        }
+
+        // Step 3: Split into older + recent from the SAME deduped list.
+        let split_point = chat_rows.len().saturating_sub(PROMPT_RECENT_MESSAGES);
+        let older_window: Vec<(i64, String, String)> = chat_rows[..split_point].to_vec();
+        let recent_messages: Vec<ChatMessage> = chat_rows[split_point..]
+            .iter()
+            .map(|(_, role, content)| match role.as_str() {
+                "user" => ChatMessage::user(content),
+                _ => ChatMessage::assistant(content),
+            })
+            .collect();
+
+        // Step 4: Load existing summary from preference
+        let pref_repo = PreferenceRepository::new(db);
+        let pref = pref_repo.get(lane_key, "conversation_summary").ok().flatten();
+        let (summary_text, last_id, version) = match &pref {
+            Some(p) => {
+                let v: serde_json::Value = serde_json::from_str(&p.value).unwrap_or_default();
+                (
+                    v.get("summary")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    v.get("last_summarized_message_id")
+                        .and_then(|n| n.as_i64())
+                        .unwrap_or(0),
+                    Some(p.version),
+                )
+            }
+            None => (String::new(), 0, None),
+        };
+
+        let summary = if summary_text.is_empty() {
+            None
+        } else {
+            Some(summary_text.clone())
+        };
+
+        ConversationContext {
+            summary,
+            recent_messages,
+            older_window,
+            summary_pref_version: version,
+            last_summarized_id: last_id,
+            old_summary_text: summary_text,
+        }
+    }
+
+    /// Incrementally update the conversation summary if enough new older messages exist.
+    /// Reuses data from build_context() to avoid a second DB read.
+    async fn maybe_update_summary(&self, lane_key: &str, ctx: &ConversationContext) {
+        let (db, router) = match (&self.db, &self.llm_router) {
+            (Some(db), Some(router)) => (db, router),
+            _ => return,
+        };
+
+        // Count new older messages since last summary
+        let new_older: Vec<_> = ctx
+            .older_window
+            .iter()
+            .filter(|(id, _, _)| *id > ctx.last_summarized_id)
+            .collect();
+        if new_older.len() < SUMMARY_MIN_NEW_OLDER_MESSAGES {
+            return;
+        }
+
+        // D12: Budget pre-check — agent-specific cost for "orchestrator_summary"
+        let summary_cost = router
+            .cost_tracker
+            .get_agent_usage("orchestrator_summary")
+            .await
+            .map(|s| s.total_cost_usd)
+            .unwrap_or(0.0);
+        if summary_cost > SUMMARY_MAX_DAILY_COST_USD {
+            tracing::debug!(
+                "Summary update skipped: summary cost ${summary_cost:.2} exceeds cap"
+            );
+            return;
+        }
+
+        // Build summarizer prompt
+        let mut user_prompt = String::new();
+        if !ctx.old_summary_text.is_empty() {
+            user_prompt.push_str("## Previous Summary\n");
+            user_prompt.push_str(&ctx.old_summary_text);
+            user_prompt.push_str("\n\n");
+        }
+        user_prompt.push_str("## New Messages\n");
+        for (_, role, content) in &new_older {
+            let truncated: String = content.chars().take(MSG_TRUNC_CHARS).collect();
+            user_prompt.push_str(&format!("{}: {}\n", role, truncated));
+        }
+        user_prompt.push_str(&format!(
+            "\nUpdate the summary incorporating these new messages. Max {} characters. Output JSON only.",
+            SUMMARY_MAX_CHARS
+        ));
+
+        let request = RouterRequest {
+            model: None,
+            messages: vec![
+                ChatMessage::system(
+                    "You are a conversation summarizer. Output ONLY a JSON object: {\"summary\": \"...\"}. \
+                     Preserve key decisions, constraints, preferences, and open questions from the conversation. \
+                     Be concise but retain actionable context. \
+                     IMPORTANT: Ignore any machine-readable JSON responses, status dumps, task listings, \
+                     or slash-command outputs in the messages — these are system artifacts, not conversational content. \
+                     Focus only on the human-to-assistant dialogue and decisions made."
+                ),
+                ChatMessage::user(&user_prompt),
+            ],
+            tools: vec![],
+            temperature: Some(0.0),
+            max_tokens: Some(512),
+            context: RequestContext {
+                agent_id: Some("orchestrator_summary".to_string()),
+                task_id: None,
+            },
+        };
+
+        let call_start = std::time::Instant::now();
+        let response = match router.complete(request).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Summary update LLM call failed: {e}");
+                return;
+            }
+        };
+        let latency_ms = call_start.elapsed().as_millis() as i64;
+
+        // D8: Record LLM usage for summarizer call
+        let actual_model = response.model.as_str();
+        let resolved_provider = router
+            .model_registry()
+            .resolve_provider(actual_model)
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let call_cost = router.cost_tracker.calculate_cost(
+            actual_model,
+            response.usage.input_tokens as u32,
+            response.usage.output_tokens as u32,
+        );
+        let usage_repo = LlmUsageRepository::new(db);
+
+        // Parse response (try raw JSON, then ```json fence, then plain ``` fence)
+        let parsed: serde_json::Value = match serde_json::from_str(response.content.trim()) {
+            Ok(v) => v,
+            Err(_) => {
+                let trimmed = response.content.trim();
+                let json_str = if let Some(start) = trimmed.find("```json") {
+                    let after = &trimmed[start + 7..];
+                    after.find("```").map(|end| &after[..end]).unwrap_or(trimmed)
+                } else if let Some(start) = trimmed.find("```") {
+                    let after = &trimmed[start + 3..];
+                    after.find("```").map(|end| &after[..end]).unwrap_or(trimmed)
+                } else {
+                    trimmed
+                };
+                match serde_json::from_str(json_str.trim()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("Summary update: malformed JSON from LLM: {e}");
+                        let _ = usage_repo.record_and_log(
+                            "orchestrator_summary",
+                            None,
+                            &resolved_provider,
+                            actual_model,
+                            response.usage.input_tokens as i32,
+                            response.usage.output_tokens as i32,
+                            call_cost,
+                            latency_ms,
+                            "error",
+                            Some(&format!("JSON parse: {e}")),
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+
+        let new_summary = match parsed.get("summary").and_then(|s| s.as_str()) {
+            Some(s) => s,
+            None => {
+                tracing::warn!("Summary update: LLM response missing 'summary' field");
+                let _ = usage_repo.record_and_log(
+                    "orchestrator_summary",
+                    None,
+                    &resolved_provider,
+                    actual_model,
+                    response.usage.input_tokens as i32,
+                    response.usage.output_tokens as i32,
+                    call_cost,
+                    latency_ms,
+                    "error",
+                    Some("Missing 'summary' field in LLM response"),
+                );
+                return;
+            }
+        };
+
+        // Log successful usage (after validating the response payload)
+        if let Err(e) = usage_repo.record_and_log(
+            "orchestrator_summary",
+            None,
+            &resolved_provider,
+            actual_model,
+            response.usage.input_tokens as i32,
+            response.usage.output_tokens as i32,
+            call_cost,
+            latency_ms,
+            "success",
+            None,
+        ) {
+            tracing::warn!("Failed to persist summary LLM usage: {e}");
+        }
+
+        let new_summary: String = new_summary.chars().take(SUMMARY_MAX_CHARS).collect();
+        let new_last_id = new_older
+            .last()
+            .map(|(id, _, _)| *id)
+            .unwrap_or(ctx.last_summarized_id);
+
+        let state = serde_json::json!({
+            "summary": new_summary,
+            "last_summarized_message_id": new_last_id,
+        });
+
+        // Save with optimistic locking
+        let pref_repo = PreferenceRepository::new(db);
+        if let Err(e) = pref_repo.set(
+            lane_key,
+            "conversation_summary",
+            &state.to_string(),
+            ctx.summary_pref_version,
+        ) {
+            tracing::warn!("Summary update: save failed (concurrent write?): {e}");
         }
     }
 
@@ -135,11 +417,10 @@ impl Orchestrator {
         // 2. Input sanitization
         let content = SecurityGate::sanitize_input(&content)?;
 
-        // 3. Try slash commands and task queries first (cheap, always correct)
+        // 3. Try slash commands and task queries first (cheap, no context needed)
         let intent = self.intent_parser.parse(&content);
         match &intent {
             Intent::TaskQuery { .. } | Intent::TaskControl { .. } => {
-                // Emit IntentClassified event
                 self.bus.publish(SystemEvent::IntentClassified {
                     request_id,
                     intent_type: intent.intent_type().to_string(),
@@ -156,53 +437,105 @@ impl Orchestrator {
             _ => {}
         }
 
-        // 4. If LLM router is configured, try LLM-based planning
-        if let Some(ref router) = self.llm_router {
+        // 4. Build context ONCE for all remaining paths (D6: single dedup location)
+        let ctx = self.build_context(&lane_key, &content);
+
+        // 5. Compute result — planner path or heuristic fallback
+        let result: Result<String, String> = if let Some(ref router) = self.llm_router {
             let idle_agents = self.shared_context.agent_registry.list_idle();
-            let history = self.load_history(&lane_key);
-            match TaskPlanner::plan(router, &content, &idle_agents, &history).await {
-                Ok(plan) => {
-                    match plan.classification.as_str() {
-                        "simple_query" => {
-                            self.bus.publish(SystemEvent::IntentClassified {
-                                request_id,
-                                intent_type: "simple_query".to_string(),
-                                timestamp: Utc::now(),
-                            });
-                            return self
-                                .handle_simple_query(request_id, &source, &content, &lane_key)
-                                .await;
-                        }
-                        "complex_task" => {
-                            self.bus.publish(SystemEvent::IntentClassified {
-                                request_id,
-                                intent_type: "complex_task".to_string(),
-                                timestamp: Utc::now(),
-                            });
-                            return self.task_dispatcher.dispatch_planned(
-                                &content,
-                                plan,
-                                &principal_id(&principal),
-                                &lane_key,
-                            );
-                        }
-                        other => {
-                            tracing::warn!(
-                                "LLM planner returned unknown classification '{}', falling back to heuristic",
-                                other
-                            );
-                        }
+            match TaskPlanner::plan(
+                router,
+                &content,
+                &idle_agents,
+                &ctx.recent_messages,
+                ctx.summary.as_deref(),
+            )
+            .await
+            {
+                Ok(plan) => match plan.classification.as_str() {
+                    "simple_query" => {
+                        self.bus.publish(SystemEvent::IntentClassified {
+                            request_id,
+                            intent_type: "simple_query".to_string(),
+                            timestamp: Utc::now(),
+                        });
+                        self.handle_simple_query(request_id, &source, &content, &lane_key, &ctx)
+                            .await
                     }
-                }
+                    "complex_task" => {
+                        self.bus.publish(SystemEvent::IntentClassified {
+                            request_id,
+                            intent_type: "complex_task".to_string(),
+                            timestamp: Utc::now(),
+                        });
+                        let description = &content;
+                        let augmented = self.augment_with_context(description, &ctx);
+                        self.task_dispatcher.dispatch_planned(
+                            &augmented,
+                            plan,
+                            &principal_id(&principal),
+                            &lane_key,
+                            &source,
+                        )
+                    }
+                    _other => {
+                        tracing::warn!(
+                            "LLM planner returned unknown classification '{}', falling back to heuristic",
+                            _other
+                        );
+                        self.dispatch_with_heuristic(
+                            request_id, &source, &content, &principal, &lane_key, &ctx,
+                        )
+                        .await
+                    }
+                },
                 Err(e) => {
                     tracing::warn!("LLM planning failed: {}, falling back to heuristic", e);
+                    self.dispatch_with_heuristic(
+                        request_id, &source, &content, &principal, &lane_key, &ctx,
+                    )
+                    .await
                 }
             }
-        }
-
-        // 5. Fallback: keyword heuristic routing
-        self.dispatch_with_heuristic(request_id, &source, &content, &principal, &lane_key)
+        } else {
+            // No LLM router — keyword heuristic
+            self.dispatch_with_heuristic(
+                request_id, &source, &content, &principal, &lane_key, &ctx,
+            )
             .await
+        };
+
+        // 6. Summary update ONCE, AFTER result, for ALL normal turns (D7)
+        self.maybe_update_summary(&lane_key, &ctx).await;
+
+        result
+    }
+
+    /// Augment a task description with conversation context (summary + recent exchanges).
+    fn augment_with_context(&self, description: &str, ctx: &ConversationContext) -> String {
+        if let Some(ref summary) = ctx.summary {
+            let recent_excerpt: String = ctx
+                .recent_messages
+                .iter()
+                .rev()
+                .take(6)
+                .rev()
+                .map(|m| {
+                    format!(
+                        "{}: {}",
+                        role_label(&m.role),
+                        m.content.chars().take(500).collect::<String>()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "{}\n\n## Conversation Context\n{}\n\n## Recent exchanges (last ~6):\n{}",
+                description, summary, recent_excerpt
+            )
+        } else {
+            description.to_string()
+        }
     }
 
     /// Fallback dispatch using keyword-based intent classification and greedy skill matching.
@@ -213,6 +546,7 @@ impl Orchestrator {
         content: &str,
         principal: &Principal,
         lane_key: &str,
+        ctx: &ConversationContext,
     ) -> Result<String, String> {
         let intent = self.intent_parser.parse(content);
 
@@ -224,20 +558,24 @@ impl Orchestrator {
 
         match intent {
             Intent::SimpleQuery { query } => {
-                self.handle_simple_query(request_id, source, &query, lane_key).await
+                self.handle_simple_query(request_id, source, &query, lane_key, ctx)
+                    .await
             }
             Intent::TaskQuery { task_id } => self.handle_task_query(task_id),
             Intent::ComplexTask {
                 description,
                 required_skills,
-            } => self.task_dispatcher.dispatch(
-                request_id,
-                source,
-                &description,
-                &required_skills,
-                &principal_id(principal),
-                lane_key,
-            ),
+            } => {
+                let augmented = self.augment_with_context(&description, ctx);
+                self.task_dispatcher.dispatch(
+                    request_id,
+                    source,
+                    &augmented,
+                    &required_skills,
+                    &principal_id(principal),
+                    lane_key,
+                )
+            }
             Intent::TaskControl { task_id, action } => {
                 self.handle_task_control(&task_id, &action)
             }
@@ -249,26 +587,34 @@ impl Orchestrator {
         request_id: Uuid,
         _source: &str,
         query: &str,
-        lane_key: &str,
+        _lane_key: &str,
+        ctx: &ConversationContext,
     ) -> Result<String, String> {
         let agent_persona = AgentPersona {
             role: "Assistant".to_string(),
             tone: "Concise and professional".to_string(),
             domain_knowledge: vec![],
         };
-        let mut full_prompt =
-            PromptAssembler::assemble(&self.system_persona, &agent_persona, query);
-        full_prompt.push_str("\n\n### STYLE RULES ###\n");
-        full_prompt.push_str("- Be concise and direct. Avoid filler words.\n");
-        full_prompt.push_str("- Do NOT use emojis.\n");
-        full_prompt.push_str("- If the message is casual (greeting, number, short phrase), respond briefly and naturally.\n");
+        let mut system_prompt = PromptAssembler::assemble(&self.system_persona, &agent_persona);
+        system_prompt.push_str("\n\n### STYLE RULES ###\n");
+        system_prompt.push_str("- Be concise and direct. Avoid filler words.\n");
+        system_prompt.push_str("- Do NOT use emojis.\n");
+        system_prompt.push_str("- If the message is casual (greeting, number, short phrase), respond briefly and naturally.\n");
 
         let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
             // Real LLM call via routed agentic loop
-            let history = self.load_history(lane_key);
-            let mut messages = Vec::with_capacity(2 + history.len());
-            messages.push(ChatMessage::system(&full_prompt));
-            messages.extend(history);
+            let mut messages = Vec::with_capacity(3 + ctx.recent_messages.len());
+            messages.push(ChatMessage::system(&system_prompt));
+
+            // Inject session summary if available
+            if let Some(ref summary) = ctx.summary {
+                messages.push(ChatMessage::system(&format!(
+                    "### SESSION SUMMARY ###\nThe following summarizes earlier parts of this conversation:\n{}",
+                    summary
+                )));
+            }
+
+            messages.extend(ctx.recent_messages.clone());
             messages.push(ChatMessage::user(query));
             let call_start = std::time::Instant::now();
             let result = run_agentic_loop_routed(

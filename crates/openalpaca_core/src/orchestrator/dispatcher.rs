@@ -61,7 +61,7 @@ impl TaskDispatcher {
     pub fn dispatch(
         &self,
         _request_id: Uuid,
-        _source: &str,
+        source: &str,
         description: &str,
         required_skills: &[String],
         created_by: &str,
@@ -71,7 +71,7 @@ impl TaskDispatcher {
             .skill_matcher
             .match_skills(required_skills, &self.shared_context.agent_registry)?;
         let title = generate_title(description);
-        self.dispatch_core(description, title, matches, created_by, lane_key)
+        self.dispatch_core(description, title, matches, created_by, lane_key, source)
     }
 
     /// Dispatch a complex task using an LLM-generated plan.
@@ -82,6 +82,7 @@ impl TaskDispatcher {
         plan: TaskPlan,
         created_by: &str,
         lane_key: &str,
+        source: &str,
     ) -> Result<String, String> {
         if plan.assignments.is_empty() {
             return Err("No agents assigned by planner".to_string());
@@ -127,7 +128,7 @@ impl TaskDispatcher {
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| generate_title(description));
 
-        self.dispatch_core(description, title, matches, created_by, lane_key)
+        self.dispatch_core(description, title, matches, created_by, lane_key, source)
     }
 
     /// Core dispatch logic shared by both heuristic and LLM-planned paths.
@@ -138,6 +139,7 @@ impl TaskDispatcher {
         matches: Vec<SkillMatch>,
         created_by: &str,
         lane_key: &str,
+        source: &str,
     ) -> Result<String, String> {
         let task_id = Uuid::new_v4().to_string();
 
@@ -275,6 +277,7 @@ impl TaskDispatcher {
             description.to_string(),
             agents_with_assignments,
             lane_key.to_string(),
+            source.to_string(),
         );
 
         // Build human-readable response for chat
@@ -300,6 +303,7 @@ impl TaskDispatcher {
         description: String,
         agents_with_assignments: Vec<(SubAgent, Option<String>, String)>,
         lane_key: String,
+        source: String,
     ) {
         let router = match &self.llm_router {
             Some(r) => r.clone(),
@@ -673,17 +677,22 @@ impl TaskDispatcher {
                 let content =
                     format_task_result(&task_title, &chat_text, pipeline_success);
                 let conv_repo = ConversationRepository::new(db);
+                // Ensure conversation master row exists and update counters
+                // (mirrors Gateway persistence pattern)
+                let _ = conv_repo.get_or_create_conversation(&lane_key, &source);
                 let _ = conv_repo.insert(&ConversationMessage {
                     id: 0,
                     lane_key: lane_key.clone(),
                     role: "assistant".to_string(),
                     content,
+                    source: Some(source.clone()),
                     model: None,
                     tokens_in: Some(total_input_tokens as i64),
                     tokens_out: Some(total_output_tokens as i64),
                     duration_ms: Some(runtime_secs * 1000),
                     created_at: String::new(),
                 });
+                let _ = conv_repo.increment_message_count(&lane_key);
             }
         });
     }

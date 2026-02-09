@@ -2,7 +2,7 @@
  * Chat store — reactive state for the chat panel.
  */
 
-import { writable } from "svelte/store";
+import { writable, get } from "svelte/store";
 import { events, type ServerEvent } from "../daemon";
 import {
   sendMessage as apiSendMessage,
@@ -17,6 +17,7 @@ export const chatLoading = writable(false);
 export const chatError = writable<string | null>(null);
 export const chatStreaming = writable(false);
 export const currentStreamId = writable<string | null>(null);
+export const activeLaneKey = writable<string | null>(null);
 
 let nextLocalId = -1;
 
@@ -25,6 +26,7 @@ export async function loadHistory(): Promise<void> {
   try {
     const resp = await getChatHistory(100, 0);
     chatMessages.set(resp.messages);
+    activeLaneKey.set(resp.lane_key);
   } catch (e) {
     console.error("[chat-store] Failed to load history:", e);
   }
@@ -38,7 +40,7 @@ export async function sendChatMessage(content: string): Promise<void> {
   // Optimistic user message
   const userMsg: ChatMessage = {
     id: nextLocalId--,
-    lane_key: "gui_user:gui",
+    lane_key: get(activeLaneKey) ?? "(pending)",
     role: "user",
     content,
     created_at: new Date().toISOString(),
@@ -49,6 +51,12 @@ export async function sendChatMessage(content: string): Promise<void> {
     const resp = await apiSendMessage({ content });
     currentStreamId.set(resp.stream_id);
     chatStreaming.set(true);
+
+    // Update lane key from server response and patch optimistic message
+    activeLaneKey.set(resp.lane_key);
+    chatMessages.update((msgs) =>
+      msgs.map((m) => m.id === userMsg.id ? { ...m, lane_key: resp.lane_key } : m)
+    );
 
     const es = createChatStream(resp.stream_id);
     if (!es) {
@@ -196,7 +204,7 @@ export function subscribeToTaskResultEvents(): () => void {
       ...msgs,
       {
         id: nextLocalId--,
-        lane_key: "gui_user:gui",
+        lane_key: get(activeLaneKey) ?? "unknown",
         role: "assistant" as const,
         content,
         created_at: latest.ts,

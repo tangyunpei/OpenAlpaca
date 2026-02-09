@@ -33,7 +33,7 @@ use openalpaca_core::{
     middleware::prompt::SystemPersona,
     orchestrator::Orchestrator,
 };
-use openalpaca_storage::{Database, discovery, paths};
+use openalpaca_storage::{ConfigRepository, ConversationRepository, Database, IdentityRepository, discovery, paths};
 use openalpaca_wake::manager::WakeManager;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -61,11 +61,105 @@ pub struct AppState {
     pub chat_stream_manager: Option<Arc<ChatStreamManager>>,
     pub token_manager: Option<Arc<openalpaca_llm::TokenManager>>,
     pub provider_usage_tracker: Option<Arc<openalpaca_llm::ProviderUsageTracker>>,
+    pub local_user_id: String,
+    pub default_lane_key: String,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Initialize logging
+/// Resolve the config base directory.
+///
+/// Priority order:
+/// 1. `OPENALPACA_CONFIG_DIR` env var (explicit override, e.g. set by Tauri)
+/// 2. Walk upward from `current_exe()` looking for a parent that contains `config/llm.toml`
+///    (handles `target/debug/openalpacad` in dev builds)
+/// 3. Walk upward from `current_dir()` looking for the same sentinel
+/// 4. Fallback: `current_dir()/config`
+fn resolve_config_base_dir() -> std::path::PathBuf {
+    use std::path::{Path, PathBuf};
+
+    // 1. Explicit env var override
+    if let Ok(dir) = std::env::var("OPENALPACA_CONFIG_DIR") {
+        let p = PathBuf::from(dir);
+        if p.exists() {
+            return p;
+        }
+        tracing::warn!(
+            "OPENALPACA_CONFIG_DIR={} does not exist, ignoring",
+            p.display()
+        );
+    }
+
+    // Helper: walk up from `start` looking for a dir that contains config/llm.toml
+    fn find_config_upward(start: &Path) -> Option<PathBuf> {
+        let mut dir = start;
+        loop {
+            let candidate = dir.join("config");
+            if candidate.join("llm.toml").exists() {
+                return Some(candidate);
+            }
+            dir = dir.parent()?;
+        }
+    }
+
+    // 2. Walk up from exe directory (handles target/debug/)
+    if let Some(found) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().and_then(find_config_upward))
+    {
+        return found;
+    }
+
+    // 3. Walk up from CWD
+    if let Some(found) = std::env::current_dir()
+        .ok()
+        .and_then(|p| find_config_upward(&p))
+    {
+        return found;
+    }
+
+    // 4. Last resort fallback
+    std::env::current_dir().unwrap_or_default().join("config")
+}
+
+/// Resolve the stable local user ID from the database. On first run, if legacy
+/// `gui_user:gui` messages exist, adopt `"gui_user"` to preserve history continuity.
+/// Otherwise generate a UUID.
+fn resolve_local_user_id(db: &Database) -> String {
+    let config_repo = ConfigRepository::new(db);
+
+    // Check if we already have a persisted local user ID
+    if let Ok(Some(id)) = config_repo.get("identity.local_user_id") {
+        return id;
+    }
+
+    // Check for legacy gui_user:gui history
+    let conv_repo = ConversationRepository::new(db);
+    let local_user_id = if conv_repo.count_by_lane("gui_user:gui").unwrap_or(0) > 0 {
+        "gui_user".to_string() // Preserve existing history
+    } else {
+        uuid::Uuid::new_v4().to_string()
+    };
+
+    // Persist for future runs
+    let _ = config_repo.set("identity.local_user_id", &local_user_id, "string");
+
+    // Ensure global_user row exists
+    let identity_repo = IdentityRepository::new(db);
+    if identity_repo
+        .get_global_user(&local_user_id)
+        .unwrap_or(None)
+        .is_none()
+    {
+        let display_name = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "Local User".to_string());
+        let _ = identity_repo.create_global_user(&local_user_id, Some(&display_name));
+    }
+
+    local_user_id
+}
+
+fn main() -> Result<()> {
+    // Initialize logging (before tokio, so resolve_config_base_dir() can use tracing)
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -74,7 +168,8 @@ async fn main() -> Result<()> {
 
     info!("OpenAlpaca Daemon starting...");
 
-    // Step 1: Acquire singleton lock (non-blocking)
+    // D3: Singleton lock FIRST — prevents all multi-process races.
+    // Acquired before any config I/O or key generation.
     let _lock_guard = match discovery::acquire_single_instance_lock(false) {
         Ok(guard) => {
             info!("Acquired singleton lock");
@@ -85,6 +180,71 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     };
+
+    // Resolve config dir and set master key BEFORE spawning any threads.
+    // std::env::set_var is unsafe in multi-threaded contexts (Rust 2024 edition),
+    // so we do it here in the single-threaded preamble.
+    let config_base_dir = resolve_config_base_dir();
+    info!("Config base dir: {}", config_base_dir.display());
+    if !config_base_dir.join("llm.toml").exists() {
+        warn!(
+            "config/llm.toml not found under {}. LLM routing and summary generation will be disabled (echo stub).",
+            config_base_dir.display()
+        );
+    }
+
+    // D1: Master key always at app_dir (canonical, CWD-independent).
+    let app_dir = paths::app_dir().context("Failed to get app dir")?;
+
+    // Legacy migration: if config_base_dir/.master_key exists but app_dir/.master_key doesn't,
+    // copy legacy key to app_dir using atomic create-new.
+    let legacy_key_path = config_base_dir.join(".master_key");
+    if legacy_key_path.exists()
+        && !app_dir.join(".master_key").exists()
+        && let Ok(hex) = std::fs::read_to_string(&legacy_key_path)
+    {
+        std::fs::create_dir_all(&app_dir).ok();
+        // Atomic copy: if another process beat us, that's fine
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(app_dir.join(".master_key"))
+        {
+            use std::io::Write;
+            let _ = f.write_all(hex.trim().as_bytes());
+            let _ = f.flush();
+            let _ = f.sync_all();
+        }
+        info!(
+            "Migrated legacy master key from {} to {}",
+            legacy_key_path.display(),
+            app_dir.join(".master_key").display()
+        );
+    }
+
+    // D6+D7: ensure_at is race-safe; on failure, fail fast.
+    match openalpaca_llm::key_encryption::KeyEncryptor::ensure_at(&app_dir) {
+        Ok(hex_key) => {
+            // SAFETY: No other threads exist yet — tokio runtime has not started.
+            unsafe { std::env::set_var("OPENALPACA_MASTER_KEY", &hex_key); }
+            info!("Master key loaded from {}", app_dir.join(".master_key").display());
+        }
+        Err(e) => {
+            error!("FATAL: Cannot ensure master key at {}: {e}", app_dir.display());
+            std::process::exit(1);
+        }
+    }
+
+    // Start the tokio runtime AFTER env vars are safely set.
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("Failed to build tokio runtime")?
+        .block_on(async_main(config_base_dir))
+}
+
+async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
+    // Note: Singleton lock was already acquired in sync fn main() (D3).
 
     // Step 2: Bind to dynamic port (127.0.0.1:0 -> OS assigns port)
     let listener = TcpListener::bind(("127.0.0.1", 0))
@@ -110,13 +270,13 @@ async fn main() -> Result<()> {
     let db = Database::open(&db_path).context("Failed to initialize database")?;
     info!("Database initialized: {}", db_path.display());
 
+    // Step 4.1: Resolve stable local user ID
+    let local_user_id = resolve_local_user_id(&db);
+    let default_lane_key = format!("{local_user_id}:gui");
+    info!("Local user ID: {local_user_id}, default lane: {default_lane_key}");
+
     // Step 5: Create event broadcaster for WebSocket streaming
     let event_broadcaster = EventBroadcaster::new(64, instance_id.clone(), Some(db.clone()));
-
-    // Step 5.1: Compute config base dir (shared by agent loader + wake watcher) (D6)
-    let config_base_dir = std::env::current_dir()
-        .unwrap_or_default()
-        .join("config");
 
     // Step 5.1.1: Initialize WakeManager
     let (wake_tx, mut wake_rx) = mpsc::channel(256);
@@ -309,11 +469,26 @@ async fn main() -> Result<()> {
 
     let lane_manager = Arc::new(LaneManager::new());
 
-    // Step 5.2.2: Load LLM config (Phase 5.1 → 5.2.5 LlmRouter)
+    // Step 5.2.2: Initialize OS secret store + auto-migrate secrets
+    let secret_store: Arc<dyn openalpaca_llm::SecretStore> =
+        Arc::new(openalpaca_llm::KeyringSecretStore);
+
+    let llm_config_path = config_base_dir.join("llm.toml");
+
+    // Auto-migrate secret_encrypted → OS keychain (Step 5)
+    if llm_config_path.exists() {
+        match openalpaca_llm::migrate_llm_secrets(&llm_config_path, &*secret_store) {
+            Ok(0) => {}
+            Ok(n) => info!("Migrated {n} secret(s) to OS keychain"),
+            Err(e) => warn!("Secret migration failed: {e}. Legacy secrets will still work."),
+        }
+    }
+
+    // Step 5.2.2b: Load LLM config (Phase 5.1 → 5.2.5 LlmRouter)
+    // Note: OPENALPACA_MASTER_KEY was set in the sync main() preamble before tokio started.
     let llm_router: Option<Arc<openalpaca_llm::LlmRouter>> = {
-        let llm_config_path = config_base_dir.join("llm.toml");
         if llm_config_path.exists() {
-            match openalpaca_llm::build_router(&llm_config_path) {
+            match openalpaca_llm::build_router_with_secret_store(&llm_config_path, Some(&*secret_store)) {
                 Ok(router) => {
                     info!(
                         "LLM router loaded (default model: {})",
@@ -333,12 +508,12 @@ async fn main() -> Result<()> {
     };
 
     // Step 5.2.3: Build LLM Settings Service (Phase 5.5)
-    let llm_config_path = config_base_dir.join("llm.toml");
     let llm_settings_service: Option<Arc<openalpaca_llm::LlmSettingsService>> =
         if let Some(ref router) = llm_router {
-            match openalpaca_llm::LlmSettingsService::new(
+            match openalpaca_llm::LlmSettingsService::new_with_secret_store(
                 router.clone(),
-                llm_config_path,
+                llm_config_path.clone(),
+                secret_store.clone(),
             ) {
                 Ok(service) => {
                     info!("LLM settings service initialized");
@@ -418,10 +593,8 @@ async fn main() -> Result<()> {
         tool_registry.register(tool);
     }
 
-    // Load user tools from config/tools/*.toml
-    let tools_config_dir = std::env::current_dir()
-        .unwrap_or_default()
-        .join("config/tools");
+    // Load user tools from config/tools/*.toml (D11: use resolved config_base_dir)
+    let tools_config_dir = config_base_dir.join("tools");
     for tool in openalpaca_core::tools::config::load_tools_from_dir(&tools_config_dir) {
         info!("Registered custom tool: {}", tool.definition.name);
         tool_registry.register(tool);
@@ -509,6 +682,8 @@ async fn main() -> Result<()> {
         chat_stream_manager: Some(chat_stream_manager.clone()),
         token_manager,
         provider_usage_tracker,
+        local_user_id,
+        default_lane_key,
     });
 
     // Public routes (no auth required)

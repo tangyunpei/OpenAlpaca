@@ -9,11 +9,12 @@ pub mod model_registry;
 pub mod provider_usage;
 pub mod providers;
 pub mod router;
+pub mod secret_store;
 pub mod settings_service;
 pub mod types;
 
 pub use cli_backend::{CliBackendsConfig, CliBackendConfig, CliBackendStatus, ClaudeCodeCliProvider, CodexCliProvider, detect_cli_backends};
-pub use config::{LlmConfig, LlmRouterConfig, ProviderConfig, KeyConfig, OrchestratorLlmConfig, build_provider, build_router, read_config, write_config};
+pub use config::{LlmConfig, LlmRouterConfig, ProviderConfig, KeyConfig, OrchestratorLlmConfig, build_provider, build_router, build_router_with_secret_store, read_config, write_config, resolve_key_from_config, migrate_llm_secrets};
 pub use cost_tracker::{CallRecord, CostTracker, ModelUsageStats, UsageStats};
 pub use credential_discovery::{CredentialDiscoveryConfig, CredentialSource, DiscoveredCredential, DiscoveredCredentialInfo, OAuthToken, TokenManager};
 pub use error::LlmError;
@@ -21,6 +22,7 @@ pub use key_pool::{ApiKey, CallResult, KeyGuard, KeyHealthStatus, KeyPool, KeyPo
 pub use model_registry::{ModelEntry, ModelInfo, ModelRegistry, PricingInfo};
 pub use provider_usage::{ExternalUsage, ProviderUsageSummary, ProviderUsageTracker};
 pub use router::{LlmRouter, LlmRouterError, ProviderEntry, RequestContext, RouterRequest};
+pub use secret_store::{KeyringSecretStore, MemorySecretStore, SecretStore};
 pub use settings_service::{LlmSettingsService, OrchestratorConfigResponse, UpdateOrchestratorRequest};
 pub use types::*;
 

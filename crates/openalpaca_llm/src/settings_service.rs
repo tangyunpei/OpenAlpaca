@@ -13,6 +13,7 @@ use crate::key_pool::{
     ProviderType, SelectionStrategy, mask_secret,
 };
 use crate::router::LlmRouter;
+use crate::secret_store::SecretStore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -130,6 +131,7 @@ pub struct LlmSettingsService {
     router: Arc<LlmRouter>,
     config_path: PathBuf,
     encryptor: KeyEncryptor,
+    secret_store: Arc<dyn SecretStore>,
 }
 
 impl LlmSettingsService {
@@ -138,10 +140,26 @@ impl LlmSettingsService {
         config_path: PathBuf,
     ) -> Result<Self, String> {
         let encryptor = KeyEncryptor::load_or_generate()?;
+        let secret_store: Arc<dyn SecretStore> = Arc::new(crate::secret_store::KeyringSecretStore);
         Ok(Self {
             router,
             config_path,
             encryptor,
+            secret_store,
+        })
+    }
+
+    pub fn new_with_secret_store(
+        router: Arc<LlmRouter>,
+        config_path: PathBuf,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Result<Self, String> {
+        let encryptor = KeyEncryptor::load_or_generate()?;
+        Ok(Self {
+            router,
+            config_path,
+            encryptor,
+            secret_store,
         })
     }
 
@@ -197,16 +215,22 @@ impl LlmSettingsService {
                             })
                             .unwrap_or("unknown");
 
-                        // Mask the secret: try to get actual secret for masking
-                        let masked = k.secret_encrypted.as_ref()
-                            .and_then(|enc| self.encryptor.decrypt(enc).ok())
-                            .map(|s| mask_secret(&s))
-                            .or_else(|| k.secret_env.as_ref().map(|env| {
-                                std::env::var(env)
-                                    .map(|s| mask_secret(&s))
-                                    .unwrap_or_else(|_| format!("${}", env))
-                            }))
-                            .unwrap_or_else(|| "***".to_string());
+                        // Mask the secret: resolve via keychain > encrypted > env var
+                        let masked = if let Some(ref sref) = k.secret_ref {
+                            self.secret_store.get(sref).ok().flatten()
+                                .map(|s| mask_secret(&s))
+                                .unwrap_or_else(|| "*** (keychain)".to_string())
+                        } else if let Some(ref enc) = k.secret_encrypted {
+                            self.encryptor.decrypt(enc).ok()
+                                .map(|s| mask_secret(&s))
+                                .unwrap_or_else(|| "*** (encrypted)".to_string())
+                        } else if let Some(ref env) = k.secret_env {
+                            std::env::var(env)
+                                .map(|s| mask_secret(&s))
+                                .unwrap_or_else(|_| format!("${}", env))
+                        } else {
+                            "***".to_string()
+                        };
 
                         KeyInfo {
                             id: k.id.clone(),
@@ -247,18 +271,19 @@ impl LlmSettingsService {
         let provider_type = parse_provider_type(&req.provider)
             .ok_or_else(|| format!("Unknown provider: {}", req.provider))?;
 
-        // Encrypt the secret
-        let encrypted = self.encryptor.encrypt(&req.key.secret)
-            .map_err(|e| format!("Encryption failed: {e}"))?;
-
         let key_id = req.key.id.unwrap_or_else(|| {
             format!("key_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"))
         });
 
+        // Store secret in OS keychain
+        let sref = format!("llm/{}/{}", req.provider, uuid::Uuid::new_v4());
+        self.secret_store.set(&sref, &req.key.secret)?;
+
         let new_key_config = KeyConfig {
             id: key_id.clone(),
             secret_env: None,
-            secret_encrypted: Some(encrypted),
+            secret_ref: Some(sref),
+            secret_encrypted: None,
             tier: req.key.tier.clone(),
             monthly_budget: None,
             priority: req.key.priority.clone(),
@@ -279,8 +304,11 @@ impl LlmSettingsService {
             });
             let keys = provider.keys.get_or_insert_with(Vec::new);
 
-            // Update existing or append
+            // If updating existing key, delete old secret_ref from keychain
             if let Some(existing) = keys.iter_mut().find(|k| k.id == key_id) {
+                if let Some(ref old_ref) = existing.secret_ref {
+                    let _ = self.secret_store.delete(old_ref);
+                }
                 *existing = new_key_config;
             } else {
                 keys.push(new_key_config);
@@ -301,6 +329,14 @@ impl LlmSettingsService {
             if let Some(ref mut providers) = config.providers {
                 if let Some(ref mut pc) = providers.get_mut(&provider_name) {
                     if let Some(ref mut keys) = pc.keys {
+                        // Delete secret_ref from keychain before removing
+                        for k in keys.iter() {
+                            if k.id == kid {
+                                if let Some(ref sref) = k.secret_ref {
+                                    let _ = self.secret_store.delete(sref);
+                                }
+                            }
+                        }
                         let before = keys.len();
                         keys.retain(|k| k.id != kid);
                         found = keys.len() < before;
@@ -572,6 +608,9 @@ impl LlmSettingsService {
     where
         F: FnOnce(&mut LlmRouterConfig),
     {
+        // D4: Acquire config write lock
+        let _lock = crate::key_encryption::acquire_config_write_lock()?;
+
         // 1. Read current config
         let mut config = read_config(&self.config_path)
             .map_err(|e| format!("Failed to read config: {e}"))?;
@@ -686,17 +725,20 @@ impl LlmSettingsService {
         if let Some(pc) = provider_config {
             if let Some(ref keys) = pc.keys {
                 for key_config in keys {
-                    // Resolve secret
-                    let secret = if let Some(ref encrypted) = key_config.secret_encrypted {
+                    // Resolve secret: secret_env > secret_ref > secret_encrypted
+                    let secret = if let Some(ref env_var) = key_config.secret_env {
+                        std::env::var(env_var)
+                            .map_err(|_| format!("Missing env var '{}' for key '{}'", env_var, key_config.id))?
+                    } else if let Some(ref sref) = key_config.secret_ref {
+                        self.secret_store.get(sref)?
+                            .ok_or_else(|| format!("Secret '{}' not found in keychain for key '{}'", sref, key_config.id))?
+                    } else if let Some(ref encrypted) = key_config.secret_encrypted {
                         if KeyEncryptor::is_encrypted(encrypted) {
                             self.encryptor.decrypt(encrypted)
                                 .map_err(|e| format!("Failed to decrypt key '{}': {e}", key_config.id))?
                         } else {
                             encrypted.clone()
                         }
-                    } else if let Some(ref env_var) = key_config.secret_env {
-                        std::env::var(env_var)
-                            .map_err(|_| format!("Missing env var '{}' for key '{}'", env_var, key_config.id))?
                     } else {
                         return Err(format!("No secret for key '{}'", key_config.id));
                     };
@@ -727,6 +769,11 @@ impl LlmSettingsService {
         }
 
         Ok(api_keys)
+    }
+
+    /// Get a reference to the secret store.
+    pub fn secret_store(&self) -> &Arc<dyn SecretStore> {
+        &self.secret_store
     }
 }
 
