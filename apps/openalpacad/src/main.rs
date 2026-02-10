@@ -474,18 +474,31 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let lane_manager = Arc::new(LaneManager::new());
 
     // Step 5.2.2: Initialize OS secret store + auto-migrate secrets
-    // Wrap KeyringSecretStore in CachingSecretStore so each secret_ref
-    // triggers at most one OS keychain access (avoids repeated macOS
-    // password prompts during startup).
-    let secret_store: Arc<dyn openalpaca_llm::SecretStore> =
+    // Probe keychain availability first. On headless/Docker systems where
+    // the OS keychain is unavailable, fall back to MemorySecretStore so the
+    // daemon starts cleanly. Keys using secret_env or secret_encrypted still
+    // work; only secret_ref keys (which require keychain) are unavailable.
+    let keyring_available = openalpaca_llm::probe_keyring();
+    let secret_store: Arc<dyn openalpaca_llm::SecretStore> = if keyring_available {
+        info!("OS keychain available");
         Arc::new(openalpaca_llm::CachingSecretStore::new(
             Box::new(openalpaca_llm::KeyringSecretStore),
-        ));
+        ))
+    } else {
+        warn!(
+            "OS keychain unavailable (headless/Docker?). Using in-memory secret store. \
+             Keys stored via secret_ref will not be available — \
+             use secret_env or secret_encrypted instead."
+        );
+        Arc::new(openalpaca_llm::MemorySecretStore::new())
+    };
 
     let llm_config_path = config_base_dir.join("llm.toml");
 
-    // Auto-migrate secret_encrypted → OS keychain (Step 5)
-    if llm_config_path.exists() {
+    // Auto-migrate secret_encrypted → OS keychain (skip when keychain
+    // unavailable to prevent stripping secret_encrypted from config with
+    // no durable replacement)
+    if keyring_available && llm_config_path.exists() {
         match openalpaca_llm::migrate_llm_secrets(&llm_config_path, &*secret_store) {
             Ok(0) => {}
             Ok(n) => info!("Migrated {n} secret(s) to OS keychain"),
