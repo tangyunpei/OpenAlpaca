@@ -12,7 +12,7 @@ const ORG: &str = "openalpaca";
 const APP: &str = "OpenAlpaca";
 
 /// Returns the application data directory.
-/// - macOS: ~/Library/Application Support/OpenAlpaca/
+/// - macOS: ~/Library/Application Support/com.openalpaca.OpenAlpaca/
 /// - Linux: ~/.local/share/OpenAlpaca/
 /// - Windows: C:\Users\<User>\AppData\Roaming\OpenAlpaca\
 pub fn app_dir() -> anyhow::Result<PathBuf> {

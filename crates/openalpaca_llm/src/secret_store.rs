@@ -3,9 +3,12 @@
 //! Provides a `SecretStore` trait with a `KeyringSecretStore` implementation
 //! that delegates to the OS keychain (macOS Keychain, Linux Secret Service,
 //! Windows Credential Manager) via the `keyring` crate.
+//!
+//! [`CachingSecretStore`] wraps any `SecretStore` with an in-memory cache so
+//! that each unique `secret_ref` triggers at most one OS keychain access.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 const SERVICE: &str = "OpenAlpaca";
 
@@ -52,6 +55,68 @@ impl SecretStore for KeyringSecretStore {
             Err(keyring::Error::NoEntry) => Ok(()), // already gone
             Err(e) => Err(format!("Keyring delete error for '{}': {e}", secret_ref)),
         }
+    }
+}
+
+/// Caching wrapper around any [`SecretStore`] implementation.
+///
+/// Caches `get()` results in an in-memory `HashMap` so each unique
+/// `secret_ref` hits the underlying store (e.g. OS keychain) at most once.
+/// `set()` and `delete()` are write-through: they update the underlying
+/// store first, then synchronize the cache.
+///
+/// This avoids repeated macOS Keychain password prompts during daemon
+/// startup when multiple subsystems resolve the same API keys.
+pub struct CachingSecretStore {
+    inner: Box<dyn SecretStore>,
+    cache: RwLock<HashMap<String, Option<String>>>,
+}
+
+impl CachingSecretStore {
+    /// Create a new caching wrapper around the given secret store.
+    pub fn new(inner: Box<dyn SecretStore>) -> Self {
+        Self {
+            inner,
+            cache: RwLock::new(HashMap::new()),
+        }
+    }
+}
+
+impl SecretStore for CachingSecretStore {
+    fn get(&self, secret_ref: &str) -> Result<Option<String>, String> {
+        // Fast path: check cache with read lock
+        {
+            let cache = self.cache.read().unwrap();
+            if let Some(cached) = cache.get(secret_ref) {
+                return Ok(cached.clone());
+            }
+        }
+        // Cache miss: fetch from underlying store
+        let result = self.inner.get(secret_ref)?;
+        // Populate cache (also caches None to avoid repeated misses)
+        {
+            let mut cache = self.cache.write().unwrap();
+            cache.insert(secret_ref.to_string(), result.clone());
+        }
+        Ok(result)
+    }
+
+    fn set(&self, secret_ref: &str, secret: &str) -> Result<(), String> {
+        // Write-through: update underlying store first
+        self.inner.set(secret_ref, secret)?;
+        // Then update cache
+        let mut cache = self.cache.write().unwrap();
+        cache.insert(secret_ref.to_string(), Some(secret.to_string()));
+        Ok(())
+    }
+
+    fn delete(&self, secret_ref: &str) -> Result<(), String> {
+        // Delete-through: remove from underlying store first
+        self.inner.delete(secret_ref)?;
+        // Remove from cache so next get() re-checks the store
+        let mut cache = self.cache.write().unwrap();
+        cache.remove(secret_ref);
+        Ok(())
     }
 }
 
@@ -179,6 +244,91 @@ mod tests {
         );
         assert_eq!(
             store.get("llm/openai/bbb").unwrap(),
+            Some("secret-b".to_string())
+        );
+    }
+
+    // ── CachingSecretStore tests ──────────────────────────────────────
+
+    #[test]
+    fn test_caching_store_caches_gets() {
+        let inner = MemorySecretStore::new();
+        inner.set("key1", "value1").unwrap();
+        let caching = CachingSecretStore::new(Box::new(inner));
+
+        assert_eq!(caching.get("key1").unwrap(), Some("value1".to_string()));
+        // Second get returns cached value
+        assert_eq!(caching.get("key1").unwrap(), Some("value1".to_string()));
+    }
+
+    #[test]
+    fn test_caching_store_caches_none() {
+        let caching = CachingSecretStore::new(Box::new(MemorySecretStore::new()));
+        // First get: miss → returns None and caches it
+        assert_eq!(caching.get("nonexistent").unwrap(), None);
+        // Second get: cache hit → still None without hitting inner store
+        assert_eq!(caching.get("nonexistent").unwrap(), None);
+    }
+
+    #[test]
+    fn test_caching_store_write_through() {
+        let caching = CachingSecretStore::new(Box::new(MemorySecretStore::new()));
+        caching.set("key1", "value1").unwrap();
+        assert_eq!(caching.get("key1").unwrap(), Some("value1".to_string()));
+        // Overwrite updates cache
+        caching.set("key1", "value2").unwrap();
+        assert_eq!(caching.get("key1").unwrap(), Some("value2".to_string()));
+    }
+
+    #[test]
+    fn test_caching_store_delete_through() {
+        let caching = CachingSecretStore::new(Box::new(MemorySecretStore::new()));
+        caching.set("key1", "value1").unwrap();
+        assert_eq!(caching.get("key1").unwrap(), Some("value1".to_string()));
+        caching.delete("key1").unwrap();
+        // After delete, get() re-checks inner (which returns None)
+        assert_eq!(caching.get("key1").unwrap(), None);
+    }
+
+    #[test]
+    fn test_caching_store_delete_missing_is_ok() {
+        let caching = CachingSecretStore::new(Box::new(MemorySecretStore::new()));
+        caching.delete("nonexistent").unwrap();
+    }
+
+    #[test]
+    fn test_caching_store_set_after_cached_none() {
+        let caching = CachingSecretStore::new(Box::new(MemorySecretStore::new()));
+        // Cache a None result
+        assert_eq!(caching.get("key1").unwrap(), None);
+        // set() should update the cache from None → Some
+        caching.set("key1", "now-exists").unwrap();
+        assert_eq!(
+            caching.get("key1").unwrap(),
+            Some("now-exists".to_string())
+        );
+    }
+
+    #[test]
+    fn test_caching_store_multiple_keys_independent() {
+        let caching = CachingSecretStore::new(Box::new(MemorySecretStore::new()));
+        caching.set("llm/anthropic/aaa", "secret-a").unwrap();
+        caching.set("llm/openai/bbb", "secret-b").unwrap();
+
+        assert_eq!(
+            caching.get("llm/anthropic/aaa").unwrap(),
+            Some("secret-a".to_string())
+        );
+        assert_eq!(
+            caching.get("llm/openai/bbb").unwrap(),
+            Some("secret-b".to_string())
+        );
+
+        // Delete one, other unaffected
+        caching.delete("llm/anthropic/aaa").unwrap();
+        assert_eq!(caching.get("llm/anthropic/aaa").unwrap(), None);
+        assert_eq!(
+            caching.get("llm/openai/bbb").unwrap(),
             Some("secret-b".to_string())
         );
     }
