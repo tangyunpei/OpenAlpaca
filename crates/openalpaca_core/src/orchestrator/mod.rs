@@ -13,10 +13,11 @@ use crate::context::{SharedContext, TaskEntry, TaskEntryStatus};
 use crate::events::SystemEvent;
 use crate::lane::{LaneManager, TaskLaneStatus};
 use crate::middleware::guard::OutputGuard;
-use crate::middleware::prompt::{AgentPersona, PromptAssembler, SystemPersona};
+use crate::middleware::prompt::{AgentPersona, PromptAssembler, SystemPersona, format_tool_guidance};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::gate::SecurityGate;
 use crate::security::policy::{Principal, Scope};
+use crate::security::sandbox::SandboxPolicy;
 use crate::tools::ToolRegistry;
 use crate::types::Capability;
 use chrono::Utc;
@@ -470,13 +471,19 @@ impl Orchestrator {
                         });
                         let description = &content;
                         let augmented = self.augment_with_context(description, &ctx);
-                        self.task_dispatcher.dispatch_planned(
+                        match self.task_dispatcher.dispatch_planned(
                             &augmented,
                             plan,
                             &principal_id(&principal),
                             &lane_key,
                             &source,
-                        )
+                        ) {
+                            Ok(response) => Ok(response),
+                            Err(e) => {
+                                tracing::warn!("Dispatch planned failed: {e}, falling back to simple_query");
+                                self.handle_simple_query(request_id, &source, &content, &lane_key, &ctx).await
+                            }
+                        }
                     }
                     _other => {
                         tracing::warn!(
@@ -567,14 +574,20 @@ impl Orchestrator {
                 required_skills,
             } => {
                 let augmented = self.augment_with_context(&description, ctx);
-                self.task_dispatcher.dispatch(
+                match self.task_dispatcher.dispatch(
                     request_id,
                     source,
                     &augmented,
                     &required_skills,
                     &principal_id(principal),
                     lane_key,
-                )
+                ) {
+                    Ok(response) => Ok(response),
+                    Err(e) => {
+                        tracing::warn!("Heuristic dispatch failed: {e}, falling back to simple_query");
+                        self.handle_simple_query(request_id, source, &description, lane_key, ctx).await
+                    }
+                }
             }
             Intent::TaskControl { task_id, action } => {
                 self.handle_task_control(&task_id, &action)
@@ -601,6 +614,33 @@ impl Orchestrator {
         system_prompt.push_str("- Do NOT use emojis.\n");
         system_prompt.push_str("- If the message is casual (greeting, number, short phrase), respond briefly and naturally.\n");
 
+        // Resolve tools based on intent analysis
+        let tool_names = self.intent_parser.suggest_tools(query);
+        let tool_defs: Vec<_> = tool_names.iter()
+            .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
+            .collect();
+
+        let (tools_for_loop, policy_opt, config_for_loop);
+        if !tool_defs.is_empty() {
+            tracing::info!("Simple query upgraded with {} tools: {:?}", tool_defs.len(), tool_names);
+            system_prompt.push_str(&format_tool_guidance(&tool_defs));
+            let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
+            policy_opt = Some(SandboxPolicy {
+                agent_id: "orchestrator".to_string(),
+                allowed_capabilities: resolved,
+                denied_capabilities: vec![],
+                require_confirmation_for: vec![],
+                max_tool_calls: None,
+                max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
+            });
+            config_for_loop = LoopConfig { max_rounds: 4, max_tools_per_round: 2, ..self.loop_config.clone() };
+            tools_for_loop = tool_defs;
+        } else {
+            tools_for_loop = vec![];
+            policy_opt = None;
+            config_for_loop = self.loop_config.clone();
+        }
+
         let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
             // Real LLM call via routed agentic loop
             let mut messages = Vec::with_capacity(3 + ctx.recent_messages.len());
@@ -620,12 +660,12 @@ impl Orchestrator {
             let result = run_agentic_loop_routed(
                 router.as_ref(),
                 messages,
-                vec![], // No tools for simple queries
-                &self.loop_config,
+                tools_for_loop,
+                &config_for_loop,
                 Some(self.security_gate.sandbox()),
                 "orchestrator",
-                None, // No policy for simple queries (no tools)
-                None, // No task_id for simple queries
+                policy_opt.as_ref(),
+                None,
             )
             .await;
             let latency_ms = call_start.elapsed().as_millis() as i64;
@@ -1373,5 +1413,242 @@ mod tests {
         assert!(result.is_ok());
         let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
         assert_eq!(json["count"], 0);
+    }
+
+    // --- Tool-capable simple_query + dispatch fallback tests ---
+
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+
+    fn make_security_gate_with_registry(bus: &EventBus, registry: Arc<ToolRegistry>) -> Arc<SecurityGate> {
+        let executor = Arc::new(RegistryToolExecutor::new(registry));
+        let sandbox = Arc::new(SandboxManager::new(executor, bus.clone()));
+        Arc::new(SecurityGate::new(sandbox))
+    }
+
+    struct MockBuiltInTool;
+
+    #[async_trait::async_trait]
+    impl BuiltInTool for MockBuiltInTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Ok("mock tool result".to_string())
+        }
+    }
+
+    fn make_mock_tool(name: &str) -> RegisteredTool {
+        RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: name.to_string(),
+                description: format!("{} tool", name),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(MockBuiltInTool)),
+        }
+    }
+
+    fn make_orchestrator_with_tools_and_llm(
+        router: Arc<LlmRouter>,
+        tool_names: &[&str],
+    ) -> Orchestrator {
+        let mut registry = ToolRegistry::new();
+        for name in tool_names {
+            registry.register(make_mock_tool(name));
+        }
+        let registry = Arc::new(registry);
+        let ctx = Arc::new(SharedContext::new());
+        let lanes = Arc::new(LaneManager::new());
+        let bus = EventBus::default();
+        let gate = make_security_gate_with_registry(&bus, registry.clone());
+        Orchestrator::new(
+            ctx,
+            lanes,
+            bus,
+            SystemPersona::default(),
+            Some(router),
+            LoopConfig::default(),
+            gate,
+            registry,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_tool_intent_detected_and_executes() {
+        use openalpaca_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, Usage, ToolCall as LlmToolCall};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ToolMockLlm {
+            call_count: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl LlmProvider for ToolMockLlm {
+            fn name(&self) -> &str { "tool-mock" }
+            fn supports_tools(&self) -> bool { true }
+            async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+                let n = self.call_count.fetch_add(1, Ordering::SeqCst);
+                match n {
+                    // Call 0: planner call — return simple_query classification
+                    0 => Ok(ChatResponse {
+                        content: r#"{"classification": "simple_query", "title": null, "assignments": [], "reasoning": "User wants to fetch a URL"}"#.to_string(),
+                        tool_calls: vec![],
+                        model: "mock-model".to_string(),
+                        usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
+                        finish_reason: FinishReason::Stop,
+                    }),
+                    // Call 1: agentic loop — return tool use
+                    1 => Ok(ChatResponse {
+                        content: String::new(),
+                        tool_calls: vec![LlmToolCall {
+                            id: "tc_1".to_string(),
+                            name: "web_fetch".to_string(),
+                            arguments: serde_json::json!({"url": "https://example.com"}),
+                        }],
+                        model: "mock-model".to_string(),
+                        usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
+                        finish_reason: FinishReason::ToolUse,
+                    }),
+                    // Call 2+: return final answer with Stop
+                    _ => Ok(ChatResponse {
+                        content: "Here is the fetched content from example.com.".to_string(),
+                        tool_calls: vec![],
+                        model: "mock-model".to_string(),
+                        usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
+                        finish_reason: FinishReason::Stop,
+                    }),
+                }
+            }
+        }
+
+        let mock = ToolMockLlm { call_count: AtomicUsize::new(0) };
+        let router = openalpaca_llm::LlmRouter::single_provider(
+            Arc::new(mock),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+        let orch = make_orchestrator_with_tools_and_llm(
+            Arc::new(router),
+            &["web_fetch"],
+        );
+
+        let result = orch.handle_message(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "fetch https://example.com".to_string(),
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+        ).await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+        let content = result.unwrap();
+        assert!(!content.is_empty(), "Expected non-empty response");
+    }
+
+    #[tokio::test]
+    async fn test_tool_max_rounds_enforcement() {
+        use openalpaca_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, Usage, ToolCall as LlmToolCall};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct AlwaysToolUseLlm {
+            call_count: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl LlmProvider for AlwaysToolUseLlm {
+            fn name(&self) -> &str { "always-tool" }
+            fn supports_tools(&self) -> bool { true }
+            async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+                let n = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    // Planner call
+                    return Ok(ChatResponse {
+                        content: r#"{"classification": "simple_query", "title": null, "assignments": [], "reasoning": "simple"}"#.to_string(),
+                        tool_calls: vec![],
+                        model: "mock-model".to_string(),
+                        usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
+                        finish_reason: FinishReason::Stop,
+                    });
+                }
+                // Always return ToolUse
+                Ok(ChatResponse {
+                    content: String::new(),
+                    tool_calls: vec![LlmToolCall {
+                        id: format!("tc_{}", n),
+                        name: "web_fetch".to_string(),
+                        arguments: serde_json::json!({"url": "https://example.com"}),
+                    }],
+                    model: "mock-model".to_string(),
+                    usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
+                    finish_reason: FinishReason::ToolUse,
+                })
+            }
+        }
+
+        let mock = AlwaysToolUseLlm { call_count: AtomicUsize::new(0) };
+        let router = openalpaca_llm::LlmRouter::single_provider(
+            Arc::new(mock),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+        let orch = make_orchestrator_with_tools_and_llm(
+            Arc::new(router),
+            &["web_fetch"],
+        );
+
+        let result = orch.handle_message(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "fetch https://example.com".to_string(),
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+        ).await;
+
+        // Should complete without hanging (max_rounds=4 cap kicks in)
+        assert!(result.is_ok(), "Expected Ok (max_rounds should cap), got: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_tool_intent_but_not_in_registry() {
+        // Query triggers web_fetch suggestion but registry is empty — graceful degradation
+        let plan_json = r#"{"classification": "simple_query", "title": null, "assignments": [], "reasoning": "simple"}"#;
+        let router = make_planning_mock_llm(plan_json);
+        // Build orchestrator with NO tools in registry
+        let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
+
+        let result = orch.handle_message(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "fetch https://example.com".to_string(),
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+        ).await;
+
+        // Should succeed without error — just proceeds tool-less
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_error_falls_back_to_simple_query() {
+        // Planner returns complex_task with nonexistent agent → dispatch fails → fallback to simple_query
+        let plan_json = r#"{"classification": "complex_task", "title": "Do something", "assignments": [{"agent_id": "nonexistent_agent", "agent_name": "Ghost", "role_description": "Ghost role", "matched_skills": ["web_search"]}], "reasoning": "complex"}"#;
+        let router = make_planning_mock_llm(plan_json);
+        // No agents registered → dispatch_planned will fail
+        let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
+
+        let result = orch.handle_message(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "do something complex".to_string(),
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+        ).await;
+
+        // Should succeed via fallback to simple_query (echo stub since mock LLM returns plan JSON)
+        assert!(result.is_ok(), "Expected Ok via fallback, got: {:?}", result);
+        // No tasks should be registered (dispatch failed)
+        assert_eq!(orch.shared_context.task_registry.count(), 0);
     }
 }

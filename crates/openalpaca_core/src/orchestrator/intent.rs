@@ -2,6 +2,9 @@
 //!
 //! Keyword-based heuristics (LLM integration planned for Phase 5.1).
 
+use regex::Regex;
+use std::sync::OnceLock;
+
 /// Classified intent from a user message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Intent {
@@ -57,6 +60,42 @@ const SKILL_KEYWORDS: &[(&[&str], &str)] = &[
 
 /// Complexity signal words that promote a single-skill match to ComplexTask.
 const COMPLEXITY_SIGNALS: &[&str] = &["please", "can you", "could you", "help me", "i need"];
+
+static REL_PATH_WITH_EXT_RE: OnceLock<Regex> = OnceLock::new();
+static FILE_NAMED_RE: OnceLock<Regex> = OnceLock::new();
+
+fn rel_path_regex() -> &'static Regex {
+    REL_PATH_WITH_EXT_RE.get_or_init(|| {
+        Regex::new(r"(?i)(?:^|[^A-Za-z0-9._/\-])((?:\./)?(?:[A-Za-z0-9._\-]+/)*[A-Za-z0-9._\-]+\.[A-Za-z]{2,10})(?:$|[^A-Za-z0-9._/\-])").unwrap()
+    })
+}
+
+fn file_named_regex() -> &'static Regex {
+    FILE_NAMED_RE.get_or_init(|| {
+        Regex::new(r"(?i)\bfile\s+(?:named|called)\s+([A-Za-z0-9][A-Za-z0-9._/\-]{0,200})\b").unwrap()
+    })
+}
+
+#[derive(Default)]
+struct ToolFlags {
+    web_fetch: bool,
+    web_search: bool,
+    file_read: bool,
+    file_write: bool,
+    shell_execute: bool,
+}
+
+impl ToolFlags {
+    fn to_vec(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.web_fetch { out.push("web_fetch".to_string()); }
+        if self.web_search { out.push("web_search".to_string()); }
+        if self.file_read { out.push("file_read".to_string()); }
+        if self.file_write { out.push("file_write".to_string()); }
+        if self.shell_execute { out.push("shell_execute".to_string()); }
+        out
+    }
+}
 
 /// Parses user messages into intents using keyword heuristics.
 pub struct IntentParser;
@@ -160,6 +199,45 @@ impl IntentParser {
     fn has_complexity_signal(lower: &str) -> bool {
         COMPLEXITY_SIGNALS.iter().any(|s| lower.contains(s))
     }
+
+    pub fn suggest_tools(&self, content: &str) -> Vec<String> {
+        let lower = content.to_lowercase();
+
+        let flags = ToolFlags {
+            file_write: Self::has_write_verb(&lower) && Self::mentions_filename(content),
+
+            web_fetch: content.contains("http://") || content.contains("https://")
+                || lower.contains("fetch ") || lower.contains("download ")
+                || lower.contains("open url"),
+
+            web_search: lower.contains("search for")
+                || lower.contains("look up")
+                || lower.contains("find information"),
+
+            file_read: lower.contains("read file")
+                || lower.contains("open file")
+                || lower.contains("show file")
+                || lower.contains("cat "),
+
+            shell_execute: lower.contains("run command")
+                || lower.contains("execute")
+                || lower.contains("in terminal")
+                || lower.contains("in shell")
+                || lower.contains("bash")
+                || lower.contains("zsh"),
+        };
+
+        flags.to_vec()
+    }
+
+    fn has_write_verb(lower: &str) -> bool {
+        const WRITE_VERBS: &[&str] = &["write", "save", "create", "update", "edit", "append", "overwrite"];
+        WRITE_VERBS.iter().any(|v| lower.contains(v))
+    }
+
+    fn mentions_filename(content: &str) -> bool {
+        rel_path_regex().is_match(content) || file_named_regex().is_match(content)
+    }
 }
 
 #[cfg(test)]
@@ -262,5 +340,66 @@ mod tests {
             }
             _ => panic!("Expected ComplexTask, got {:?}", intent),
         }
+    }
+
+    // --- suggest_tools tests ---
+
+    #[test]
+    fn test_suggest_tools_write_readme() {
+        let tools = parser().suggest_tools("write README.md with installation instructions");
+        assert!(tools.contains(&"file_write".to_string()), "Expected file_write, got: {:?}", tools);
+    }
+
+    #[test]
+    fn test_suggest_tools_write_file_named() {
+        let tools = parser().suggest_tools("write a file named README with docs");
+        assert!(tools.contains(&"file_write".to_string()), "Expected file_write, got: {:?}", tools);
+    }
+
+    #[test]
+    fn test_suggest_tools_write_story_no_file() {
+        let tools = parser().suggest_tools("write me a story about files");
+        assert!(!tools.contains(&"file_write".to_string()), "Should NOT have file_write: {:?}", tools);
+    }
+
+    #[test]
+    fn test_suggest_tools_version_no_file_write() {
+        let tools = parser().suggest_tools("support v1.x series");
+        assert!(!tools.contains(&"file_write".to_string()), "Should NOT have file_write: {:?}", tools);
+    }
+
+    #[test]
+    fn test_suggest_tools_update_version_no_file_write() {
+        let tools = parser().suggest_tools("update to v1.2 and ship it");
+        assert!(!tools.contains(&"file_write".to_string()), "Should NOT have file_write: {:?}", tools);
+    }
+
+    #[test]
+    fn test_suggest_tools_fetch_url() {
+        let tools = parser().suggest_tools("fetch https://example.com");
+        assert!(tools.contains(&"web_fetch".to_string()), "Expected web_fetch, got: {:?}", tools);
+    }
+
+    #[test]
+    fn test_suggest_tools_hello_world_empty() {
+        let tools = parser().suggest_tools("hello world");
+        assert!(tools.is_empty(), "Expected empty, got: {:?}", tools);
+    }
+
+    #[test]
+    fn test_suggest_tools_run_command() {
+        let tools = parser().suggest_tools("run command ls -la");
+        assert!(tools.contains(&"shell_execute".to_string()), "Expected shell_execute, got: {:?}", tools);
+    }
+
+    #[test]
+    fn test_suggest_tools_multi_tool_ordering() {
+        let tools = parser().suggest_tools("fetch https://example.com and search for docs");
+        assert!(tools.contains(&"web_fetch".to_string()));
+        assert!(tools.contains(&"web_search".to_string()));
+        // web_fetch comes before web_search in ToolFlags::to_vec
+        let fetch_idx = tools.iter().position(|t| t == "web_fetch").unwrap();
+        let search_idx = tools.iter().position(|t| t == "web_search").unwrap();
+        assert!(fetch_idx < search_idx, "web_fetch should come before web_search");
     }
 }

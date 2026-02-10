@@ -76,6 +76,22 @@ impl PromptAssembler {
     }
 }
 
+pub fn format_tool_guidance(tools: &[openalpaca_llm::ToolDefinition]) -> String {
+    if tools.is_empty() {
+        return String::new();
+    }
+    let tool_list: String = tools.iter()
+        .map(|t| format!("- {}: {}", t.name, t.description))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\n\nYou have access to the following tools:\n{}\n\n\
+         Use these tools when they help complete the task. \
+         Do NOT say you cannot access files or the internet \u{2014} use the provided tools instead.",
+        tool_list
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +113,44 @@ mod tests {
         assert!(prompt.contains("Role: Coder"));
         // User input should NOT be in the system prompt (Bug B fix)
         assert!(!prompt.contains("### USER INPUT ###"));
+    }
+
+    #[test]
+    fn test_format_tool_guidance_empty() {
+        let result = format_tool_guidance(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_format_tool_guidance_single() {
+        let tools = vec![openalpaca_llm::ToolDefinition {
+            name: "web_fetch".to_string(),
+            description: "Fetch a URL".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+        let result = format_tool_guidance(&tools);
+        assert!(result.contains("web_fetch"));
+        assert!(result.contains("Fetch a URL"));
+    }
+
+    #[test]
+    fn test_format_tool_guidance_multiple() {
+        let tools = vec![
+            openalpaca_llm::ToolDefinition {
+                name: "web_fetch".to_string(),
+                description: "Fetch a URL".to_string(),
+                parameters: serde_json::json!({}),
+            },
+            openalpaca_llm::ToolDefinition {
+                name: "file_read".to_string(),
+                description: "Read a file".to_string(),
+                parameters: serde_json::json!({}),
+            },
+        ];
+        let result = format_tool_guidance(&tools);
+        assert!(result.contains("web_fetch"));
+        assert!(result.contains("file_read"));
+        assert!(result.contains("Fetch a URL"));
+        assert!(result.contains("Read a file"));
     }
 }
