@@ -12,7 +12,7 @@ use openalpaca_core::{
     security::policy::Scope,
     types::Capability,
 };
-use openalpaca_storage::{Database, IdentityRepository};
+use openalpaca_storage::{Database, IdentityRepository, PreferenceRepository};
 use std::sync::Arc;
 use teloxide::prelude::*;
 use tracing::{error, info, warn};
@@ -156,6 +156,12 @@ impl TelegramConnector {
             return Ok(());
         }
 
+        // Extract global_id before principal is consumed by gateway
+        let global_id_for_pref = match &principal {
+            openalpaca_core::security::policy::Principal::User { global_id } => Some(global_id.clone()),
+            _ => None,
+        };
+
         // Step 4: Route through Gateway (replaces manual pipeline)
         let response = gateway.handle_event(GatewayRequest {
             source: EventSource::Telegram {
@@ -177,6 +183,14 @@ impl TelegramConnector {
             &lane_key,
         ) {
             warn!("Failed to update conversation_map lane_key: {e}");
+        }
+
+        // Step 5.2: Persist telegram.last_chat_id for cross-channel delivery
+        if let Some(ref gid) = global_id_for_pref {
+            let pref_repo = PreferenceRepository::new(&db);
+            if let Err(e) = pref_repo.set(gid, "telegram.last_chat_id", &chat_id.0.to_string(), None) {
+                warn!("Failed to persist telegram.last_chat_id: {e}");
+            }
         }
 
         // Step 5: Send response back to Telegram
