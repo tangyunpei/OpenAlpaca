@@ -22,7 +22,7 @@ use crate::tools::ToolRegistry;
 use crate::types::Capability;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter, RequestContext, Role, RouterRequest};
-use openalpaca_storage::{ConversationRepository, Database, PreferenceRepository};
+use openalpaca_storage::{ConversationRepository, Database};
 use openalpaca_storage::repository::LlmUsageRepository;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -52,7 +52,6 @@ pub struct Orchestrator {
     db: Option<Database>,
 }
 
-const SUMMARY_LOAD_LIMIT: i64 = 120;
 const PROMPT_RECENT_MESSAGES: usize = 40;
 const SUMMARY_MIN_NEW_OLDER_MESSAGES: usize = 12;
 const SUMMARY_MAX_CHARS: usize = 4000;
@@ -65,8 +64,8 @@ struct ConversationContext {
     recent_messages: Vec<ChatMessage>,
     /// Raw (id, role, content) tuples for the "older" window — used by maybe_update_summary().
     older_window: Vec<(i64, String, String)>,
-    /// Current summary state from preference (for optimistic locking in update).
-    summary_pref_version: Option<i64>,
+    /// Current summary version from conversations table (for optimistic locking in update).
+    summary_version: i64,
     /// Last message ID that was summarized.
     last_summarized_id: i64,
     /// Previous summary text (for incremental update).
@@ -119,14 +118,15 @@ impl Orchestrator {
     }
 
     /// Build the full conversation context for a turn: loads history, deduplicates
-    /// the current user message (Bug A fix, D6), splits into older/recent windows,
-    /// and loads any existing summary from the preference table.
+    /// the current user message (Bug A fix, D6), loads unsummarized older messages
+    /// via ID-range query (fixes 120-window bug), and loads the summary from the
+    /// conversations table.
     fn build_context(&self, lane_key: &str, current_query: &str) -> ConversationContext {
         let empty = ConversationContext {
             summary: None,
             recent_messages: Vec::new(),
             older_window: Vec::new(),
-            summary_pref_version: None,
+            summary_version: 0,
             last_summarized_id: 0,
             old_summary_text: String::new(),
         };
@@ -136,12 +136,21 @@ impl Orchestrator {
         };
 
         let repo = ConversationRepository::new(db);
-        let raw_messages = match repo.list_recent_by_lane(lane_key, SUMMARY_LOAD_LIMIT) {
+
+        // Step 1: Load summary from conversations table
+        let (summary_text, summary_version, last_summarized_id) =
+            match repo.get_summary(lane_key) {
+                Ok(tuple) => tuple,
+                Err(_) => (String::new(), 0, 0),
+            };
+
+        // Step 2: Load recent messages (40, not 120)
+        let raw_messages = match repo.list_recent_by_lane(lane_key, PROMPT_RECENT_MESSAGES as i64) {
             Ok(msgs) => msgs,
             Err(_) => return empty,
         };
 
-        // Step 1: Build ONE canonical list of (id, role_string, content) in chronological order.
+        // Step 3: Build canonical list and dedup current query
         let mut chat_rows: Vec<(i64, String, String)> = raw_messages
             .iter()
             .filter(|msg| {
@@ -150,43 +159,40 @@ impl Orchestrator {
             .map(|msg| (msg.id, msg.role.clone(), msg.content.clone()))
             .collect();
 
-        // Step 2: Dedup (D6) — if the last row matches current_query, drop it (Bug A fix).
+        // Dedup (D6) — if the last row matches current_query, drop it (Bug A fix).
         if let Some((_, role, content)) = chat_rows.last() {
             if role == "user" && content == current_query {
                 chat_rows.pop();
             }
         }
 
-        // Step 3: Split into older + recent from the SAME deduped list.
-        let split_point = chat_rows.len().saturating_sub(PROMPT_RECENT_MESSAGES);
-        let older_window: Vec<(i64, String, String)> = chat_rows[..split_point].to_vec();
-        let recent_messages: Vec<ChatMessage> = chat_rows[split_point..]
+        // Step 4: Get first_recent_id for the ID-range query
+        let first_recent_id = chat_rows.first().map(|(id, _, _)| *id).unwrap_or(i64::MAX);
+
+        // Step 5: Load unsummarized older messages via ID-range query (fixes 120-window bug)
+        let older_window = if last_summarized_id < first_recent_id {
+            match repo.list_by_lane_id_range(lane_key, last_summarized_id, first_recent_id, 500) {
+                Ok(msgs) => msgs
+                    .into_iter()
+                    .filter(|msg| {
+                        (msg.role == "user" || msg.role == "assistant") && !msg.content.is_empty()
+                    })
+                    .map(|msg| (msg.id, msg.role, msg.content))
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Step 6: Convert recent chat_rows to ChatMessage
+        let recent_messages: Vec<ChatMessage> = chat_rows
             .iter()
             .map(|(_, role, content)| match role.as_str() {
                 "user" => ChatMessage::user(content),
                 _ => ChatMessage::assistant(content),
             })
             .collect();
-
-        // Step 4: Load existing summary from preference
-        let pref_repo = PreferenceRepository::new(db);
-        let pref = pref_repo.get(lane_key, "conversation_summary").ok().flatten();
-        let (summary_text, last_id, version) = match &pref {
-            Some(p) => {
-                let v: serde_json::Value = serde_json::from_str(&p.value).unwrap_or_default();
-                (
-                    v.get("summary")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    v.get("last_summarized_message_id")
-                        .and_then(|n| n.as_i64())
-                        .unwrap_or(0),
-                    Some(p.version),
-                )
-            }
-            None => (String::new(), 0, None),
-        };
 
         let summary = if summary_text.is_empty() {
             None
@@ -198,8 +204,8 @@ impl Orchestrator {
             summary,
             recent_messages,
             older_window,
-            summary_pref_version: version,
-            last_summarized_id: last_id,
+            summary_version,
+            last_summarized_id,
             old_summary_text: summary_text,
         }
     }
@@ -377,20 +383,12 @@ impl Orchestrator {
             .map(|(id, _, _)| *id)
             .unwrap_or(ctx.last_summarized_id);
 
-        let state = serde_json::json!({
-            "summary": new_summary,
-            "last_summarized_message_id": new_last_id,
-        });
-
-        // Save with optimistic locking
-        let pref_repo = PreferenceRepository::new(db);
-        if let Err(e) = pref_repo.set(
-            lane_key,
-            "conversation_summary",
-            &state.to_string(),
-            ctx.summary_pref_version,
-        ) {
-            tracing::warn!("Summary update: save failed (concurrent write?): {e}");
+        // Save with optimistic locking to conversations table
+        let repo = ConversationRepository::new(db);
+        match repo.update_summary_optimistic(lane_key, ctx.summary_version, &new_summary, new_last_id) {
+            Ok(true) => tracing::debug!("Summary updated successfully"),
+            Ok(false) => tracing::warn!("Summary update: concurrent write, version mismatch"),
+            Err(e) => tracing::warn!("Summary update: save failed: {e}"),
         }
     }
 

@@ -76,4 +76,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "vec_search",
         sql: include_str!("013_vec_search.sql"),
     },
+    Migration {
+        version: 14,
+        name: "conversation_summary",
+        sql: include_str!("014_conversation_summary.sql"),
+    },
 ];

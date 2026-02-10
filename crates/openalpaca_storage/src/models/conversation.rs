@@ -28,4 +28,8 @@ pub struct Conversation {
     pub last_message_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub summary: String,
+    pub summary_version: i64,
+    pub last_summarized_message_id: i64,
+    pub summary_updated_at: Option<String>,
 }
