@@ -167,6 +167,10 @@ fn main() -> Result<()> {
 
     info!("OpenAlpaca Daemon starting...");
 
+    // Migrate legacy app dir (com.openalpaca.OpenAlpaca → OpenAlpaca) before
+    // acquiring the singleton lock, since the lock file lives inside app_dir.
+    paths::migrate_legacy_app_dir();
+
     // D3: Singleton lock FIRST — prevents all multi-process races.
     // Acquired before any config I/O or key generation.
     let _lock_guard = match discovery::acquire_single_instance_lock(false) {

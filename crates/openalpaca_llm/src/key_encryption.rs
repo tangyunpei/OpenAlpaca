@@ -195,7 +195,7 @@ impl KeyEncryptor {
     /// Only `OPENALPACA_MASTER_KEY` env var overrides (checked in `load_or_generate()`).
     fn key_file_path() -> Result<PathBuf, String> {
         use directories::ProjectDirs;
-        if let Some(proj) = ProjectDirs::from("com", "openalpaca", "OpenAlpaca") {
+        if let Some(proj) = ProjectDirs::from("", "", "OpenAlpaca") {
             return Ok(proj.data_dir().join(".master_key"));
         }
         // Fallback to CWD (should not happen on supported platforms)
@@ -208,7 +208,7 @@ impl KeyEncryptor {
 /// Acquire a file lock for writing llm.toml. Returns guard that releases on drop.
 pub fn acquire_config_write_lock() -> Result<file_lock::FileLock, String> {
     use directories::ProjectDirs;
-    let lock_dir = if let Some(proj) = ProjectDirs::from("com", "openalpaca", "OpenAlpaca") {
+    let lock_dir = if let Some(proj) = ProjectDirs::from("", "", "OpenAlpaca") {
         proj.data_dir().to_path_buf()
     } else {
         std::env::current_dir().map_err(|e| format!("Failed to get current dir: {e}"))?
