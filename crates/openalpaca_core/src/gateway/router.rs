@@ -70,9 +70,15 @@ impl Gateway {
 
     /// Handle an inbound event from any source.
     pub async fn handle_event(&self, req: GatewayRequest) -> GatewayResponse {
-        let (user_id, source_name) = derive_user_and_source(&req.source);
+        let (mut user_id, source_name) = derive_user_and_source(&req.source);
+
+        // Principal-aware: linked users use their global_id as lane user
+        if let Principal::User { ref global_id } = req.principal {
+            user_id = global_id.clone();
+        }
+
         let key = LaneKey::new(&user_id, &source_name);
-        let lane_key_str = format!("{}:{}", key.user_id, key.source);
+        let lane_key_str = key.to_string();
         let lane = self.lane_manager.get_or_create_conversation(key.clone());
 
         let request_id = Uuid::new_v4();
@@ -342,6 +348,61 @@ mod tests {
         let key = LaneKey::new("u1", "telegram");
         let lane = gw.lane_manager.get_or_create_conversation(key);
         assert_eq!(lane.message_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_principal_aware_lane_derivation() {
+        let gw = make_gateway();
+
+        // Linked user (Principal::User) should get lane keyed by global_id
+        let resp = gw
+            .handle_event(GatewayRequest {
+                source: EventSource::Telegram {
+                    chat_id: "c1".to_string(),
+                    user_id: "tg_user_123".to_string(),
+                },
+                content: "hello".to_string(),
+                principal: Principal::User {
+                    global_id: "global1".to_string(),
+                },
+                scope: Scope::Global,
+            })
+            .await;
+        assert_eq!(resp.lane_key.user_id, "global1");
+        assert_eq!(resp.lane_key.source, "telegram");
+        assert_eq!(resp.lane_key.to_string(), "global1:telegram");
+
+        // Unlinked user (Principal::External) should keep provider user_id
+        let resp2 = gw
+            .handle_event(GatewayRequest {
+                source: EventSource::Telegram {
+                    chat_id: "c2".to_string(),
+                    user_id: "tg_user_456".to_string(),
+                },
+                content: "hi".to_string(),
+                principal: Principal::External {
+                    provider: "telegram".to_string(),
+                    id: "tg_user_456".to_string(),
+                },
+                scope: Scope::Global,
+            })
+            .await;
+        assert_eq!(resp2.lane_key.user_id, "tg_user_456");
+        assert_eq!(resp2.lane_key.source, "telegram");
+
+        // System principal should also keep the source-derived user_id
+        let resp3 = gw
+            .handle_event(GatewayRequest {
+                source: EventSource::Telegram {
+                    chat_id: "c3".to_string(),
+                    user_id: "tg_user_789".to_string(),
+                },
+                content: "yo".to_string(),
+                principal: Principal::System,
+                scope: Scope::Global,
+            })
+            .await;
+        assert_eq!(resp3.lane_key.user_id, "tg_user_789");
     }
 
     #[tokio::test]

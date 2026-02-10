@@ -25,19 +25,7 @@ pub async fn generate_link_token_handler(State(state): State<Arc<AppState>>) -> 
         .collect();
     let token = token.to_uppercase();
 
-    // For now, we use a default "admin" user or similar if not specified
-    // In a real system, this would come from the verified session user
-    let global_user_id = "admin"; // Mock default user
-
-    // Ensure admin user exists to satisfy foreign key constraints
-    if repo
-        .get_global_user(global_user_id)
-        .ok()
-        .flatten()
-        .is_none()
-    {
-        let _ = repo.create_global_user(global_user_id, Some("Administrator"));
-    }
+    let global_user_id = state.local_user_id.as_str();
 
     match repo.create_link_token(global_user_id, &token) {
         Ok(_) => (StatusCode::OK, Json(LinkTokenResponse { token })).into_response(),
