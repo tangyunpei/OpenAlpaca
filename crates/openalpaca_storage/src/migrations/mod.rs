@@ -81,4 +81,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "conversation_summary",
         sql: include_str!("014_conversation_summary.sql"),
     },
+    Migration {
+        version: 15,
+        name: "memory_v2",
+        sql: include_str!("015_memory_v2.sql"),
+    },
 ];

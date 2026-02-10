@@ -588,7 +588,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let mut tool_registry = openalpaca_core::tools::ToolRegistry::new();
 
     // Register built-in tools
-    for tool in openalpaca_core::tools::builtins::builtin_tools() {
+    for tool in openalpaca_core::tools::builtins::builtin_tools(Some(db.clone())) {
         tool_registry.register(tool);
     }
 
