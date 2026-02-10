@@ -36,6 +36,7 @@ pub struct ConversationMap {
     pub provider: String,
     pub provider_conversation_id: String,
     pub global_user_id: Option<String>,
+    pub lane_key: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

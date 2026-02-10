@@ -170,7 +170,7 @@ impl TelegramConnector {
         }).await;
 
         // Step 4.5: Map external Telegram chat_id to internal lane_key
-        let lane_key = format!("{}:telegram", user_id);
+        let lane_key = response.lane_key.to_string();
         if let Err(e) = identity_repo.update_conversation_map_lane_key(
             "telegram",
             &chat_id.0.to_string(),
@@ -209,6 +209,17 @@ impl TelegramConnector {
                     "Successfully linked telegram:{} -> global_user:{}",
                     user_id, global_user_id
                 );
+
+                // Migrate old lane to global lane
+                if let Err(e) = identity_repo.migrate_lane_on_link(
+                    user_id,
+                    &global_user_id,
+                    "telegram",
+                    &chat_id.0.to_string(),
+                ) {
+                    warn!("Lane migration failed: {e}");
+                }
+
                 bot.send_message(
                     chat_id,
                     format!(
