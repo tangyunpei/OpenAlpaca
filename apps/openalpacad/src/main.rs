@@ -470,8 +470,13 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let lane_manager = Arc::new(LaneManager::new());
 
     // Step 5.2.2: Initialize OS secret store + auto-migrate secrets
+    // Wrap KeyringSecretStore in CachingSecretStore so each secret_ref
+    // triggers at most one OS keychain access (avoids repeated macOS
+    // password prompts during startup).
     let secret_store: Arc<dyn openalpaca_llm::SecretStore> =
-        Arc::new(openalpaca_llm::KeyringSecretStore);
+        Arc::new(openalpaca_llm::CachingSecretStore::new(
+            Box::new(openalpaca_llm::KeyringSecretStore),
+        ));
 
     let llm_config_path = config_base_dir.join("llm.toml");
 
