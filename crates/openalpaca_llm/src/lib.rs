@@ -24,7 +24,7 @@ pub use key_pool::{ApiKey, CallResult, KeyGuard, KeyHealthStatus, KeyPool, KeyPo
 pub use model_registry::{ModelEntry, ModelInfo, ModelRegistry, PricingInfo};
 pub use provider_usage::{ExternalUsage, ProviderUsageSummary, ProviderUsageTracker};
 pub use router::{LlmRouter, LlmRouterError, ProviderEntry, RequestContext, RouterRequest};
-pub use secret_store::{CachingSecretStore, KeyringSecretStore, MemorySecretStore, SecretStore};
+pub use secret_store::{CachingSecretStore, KeyringSecretStore, MemorySecretStore, SecretStore, probe_keyring};
 pub use settings_service::{LlmSettingsService, OrchestratorConfigResponse, UpdateOrchestratorRequest};
 pub use types::*;
 

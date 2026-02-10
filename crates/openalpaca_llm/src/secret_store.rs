@@ -58,6 +58,24 @@ impl SecretStore for KeyringSecretStore {
     }
 }
 
+/// Probe whether the OS keychain is functional.
+///
+/// Performs a read-only `get_password()` on a non-existent key.
+/// Returns `true` if the keychain infrastructure is available (even though
+/// the probe key doesn't exist), `false` if unavailable
+/// (e.g. headless Linux, Docker, no GUI session, no D-Bus secret service).
+pub fn probe_keyring() -> bool {
+    let entry = match keyring::Entry::new(SERVICE, "__openalpaca_probe__") {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    match entry.get_password() {
+        Ok(_) => true,                         // key exists (unlikely but fine)
+        Err(keyring::Error::NoEntry) => true,  // keychain works, key just missing
+        Err(_) => false,                       // infrastructure error
+    }
+}
+
 /// Caching wrapper around any [`SecretStore`] implementation.
 ///
 /// Caches `get()` results in an in-memory `HashMap` so each unique

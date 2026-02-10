@@ -123,12 +123,11 @@ pub struct LocalEmbedder {
 #[cfg(feature = "local-embeddings")]
 impl LocalEmbedder {
     pub fn new() -> Result<Self, EmbedError> {
-        let model = fastembed::TextEmbedding::try_new(fastembed::InitOptions {
-            model_name: fastembed::EmbeddingModel::AllMiniLML6V2,
-            show_download_progress: false,
-            ..Default::default()
-        })
-        .map_err(|e| EmbedError::Config(format!("Failed to load local embedding model: {e}")))?;
+        let mut opts = fastembed::InitOptions::default();
+        opts.model_name = fastembed::EmbeddingModel::AllMiniLML6V2;
+        opts.show_download_progress = false;
+        let model = fastembed::TextEmbedding::try_new(opts)
+            .map_err(|e| EmbedError::Config(format!("Failed to load local embedding model: {e}")))?;
         Ok(Self { model })
     }
 }
