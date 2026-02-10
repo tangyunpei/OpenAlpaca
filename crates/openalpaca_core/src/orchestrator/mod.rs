@@ -19,11 +19,13 @@ use crate::security::gate::SecurityGate;
 use crate::security::policy::{Principal, Scope};
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::ToolRegistry;
+use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
+use crate::security::sandbox::SandboxManager;
 use crate::types::Capability;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter, RequestContext, Role, RouterRequest};
 use openalpaca_storage::{ConversationRepository, Database};
-use openalpaca_storage::repository::LlmUsageRepository;
+use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -439,6 +441,13 @@ impl Orchestrator {
         // 4. Build context ONCE for all remaining paths (D6: single dedup location)
         let ctx = self.build_context(&lane_key, &content);
 
+        // Extract owner_id from principal for memory scoping
+        let owner_id_str = principal_id(&principal);
+        let owner_id = match &principal {
+            Principal::User { .. } => Some(owner_id_str.as_str()),
+            _ => None,
+        };
+
         // 5. Compute result — planner path or heuristic fallback
         let result: Result<String, String> = if let Some(ref router) = self.llm_router {
             let idle_agents = self.shared_context.agent_registry.list_idle();
@@ -458,7 +467,7 @@ impl Orchestrator {
                             intent_type: "simple_query".to_string(),
                             timestamp: Utc::now(),
                         });
-                        self.handle_simple_query(request_id, &source, &content, &lane_key, &ctx)
+                        self.handle_simple_query(request_id, &source, &content, &lane_key, &ctx, owner_id)
                             .await
                     }
                     "complex_task" => {
@@ -479,7 +488,7 @@ impl Orchestrator {
                             Ok(response) => Ok(response),
                             Err(e) => {
                                 tracing::warn!("Dispatch planned failed: {e}, falling back to simple_query");
-                                self.handle_simple_query(request_id, &source, &content, &lane_key, &ctx).await
+                                self.handle_simple_query(request_id, &source, &content, &lane_key, &ctx, owner_id).await
                             }
                         }
                     }
@@ -489,7 +498,7 @@ impl Orchestrator {
                             _other
                         );
                         self.dispatch_with_heuristic(
-                            request_id, &source, &content, &principal, &lane_key, &ctx,
+                            request_id, &source, &content, &principal, &lane_key, &ctx, owner_id,
                         )
                         .await
                     }
@@ -497,7 +506,7 @@ impl Orchestrator {
                 Err(e) => {
                     tracing::warn!("LLM planning failed: {}, falling back to heuristic", e);
                     self.dispatch_with_heuristic(
-                        request_id, &source, &content, &principal, &lane_key, &ctx,
+                        request_id, &source, &content, &principal, &lane_key, &ctx, owner_id,
                     )
                     .await
                 }
@@ -505,7 +514,7 @@ impl Orchestrator {
         } else {
             // No LLM router — keyword heuristic
             self.dispatch_with_heuristic(
-                request_id, &source, &content, &principal, &lane_key, &ctx,
+                request_id, &source, &content, &principal, &lane_key, &ctx, owner_id,
             )
             .await
         };
@@ -552,6 +561,7 @@ impl Orchestrator {
         principal: &Principal,
         lane_key: &str,
         ctx: &ConversationContext,
+        owner_id: Option<&str>,
     ) -> Result<String, String> {
         let intent = self.intent_parser.parse(content);
 
@@ -563,7 +573,7 @@ impl Orchestrator {
 
         match intent {
             Intent::SimpleQuery { query } => {
-                self.handle_simple_query(request_id, source, &query, lane_key, ctx)
+                self.handle_simple_query(request_id, source, &query, lane_key, ctx, owner_id)
                     .await
             }
             Intent::TaskQuery { task_id } => self.handle_task_query(task_id),
@@ -583,7 +593,7 @@ impl Orchestrator {
                     Ok(response) => Ok(response),
                     Err(e) => {
                         tracing::warn!("Heuristic dispatch failed: {e}, falling back to simple_query");
-                        self.handle_simple_query(request_id, source, &description, lane_key, ctx).await
+                        self.handle_simple_query(request_id, source, &description, lane_key, ctx, owner_id).await
                     }
                 }
             }
@@ -600,6 +610,7 @@ impl Orchestrator {
         query: &str,
         _lane_key: &str,
         ctx: &ConversationContext,
+        owner_id: Option<&str>,
     ) -> Result<String, String> {
         let agent_persona = AgentPersona {
             role: "Assistant".to_string(),
@@ -652,15 +663,43 @@ impl Orchestrator {
                 )));
             }
 
+            // Retrieval injection: FTS-query user's memories and inject into prompt
+            if let (Some(db), Some(oid)) = (&self.db, owner_id) {
+                let repo = MemoryRepository::new(db);
+                let top_k = if !tools_for_loop.is_empty() { 5 } else { 10 };
+                if let Ok(memories) = repo.search_fts(oid, query, top_k, None, None, None) {
+                    if !memories.is_empty() {
+                        let mut block = String::from("### RETRIEVED MEMORY ###\n");
+                        let mut budget = 2000usize;
+                        for m in &memories {
+                            let entry = format!("- [{}] {}\n", m.kind.as_str(),
+                                m.content.chars().take(300).collect::<String>());
+                            if entry.len() > budget { break; }
+                            budget -= entry.len();
+                            block.push_str(&entry);
+                        }
+                        messages.push(ChatMessage::system(&block));
+                    }
+                }
+            }
+
             messages.extend(ctx.recent_messages.clone());
             messages.push(ChatMessage::user(query));
+
+            // Per-request sandbox with ContextualToolExecutor for owner-scoped tools
+            let ctx_exec = ToolExecutionContext { owner_id: owner_id.map(|s| s.to_string()) };
+            let contextual_executor = Arc::new(ContextualToolExecutor::new(
+                self.tool_registry.clone(), ctx_exec,
+            ));
+            let per_request_sandbox = SandboxManager::new(contextual_executor, self.bus.clone());
+
             let call_start = std::time::Instant::now();
             let result = run_agentic_loop_routed(
                 router.as_ref(),
                 messages,
                 tools_for_loop,
                 &config_for_loop,
-                Some(self.security_gate.sandbox()),
+                Some(&per_request_sandbox),
                 "orchestrator",
                 policy_opt.as_ref(),
                 None,

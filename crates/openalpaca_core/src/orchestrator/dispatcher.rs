@@ -7,7 +7,7 @@ use crate::events::SystemEvent;
 use crate::lane::LaneManager;
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::gate::SecurityGate;
-use crate::security::sandbox::SandboxPolicy;
+use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter};
 use openalpaca_storage::{ConversationMessage, ConversationRepository, Database};
@@ -18,6 +18,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::tools::ToolRegistry;
+use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 
 use crate::middleware::prompt::format_tool_guidance;
 use super::skill_matcher::{SkillMatch, SkillMatcher};
@@ -30,7 +31,7 @@ pub struct TaskDispatcher {
     bus: EventBus,
     skill_matcher: SkillMatcher,
     llm_router: Option<Arc<LlmRouter>>,
-    security_gate: Arc<SecurityGate>,
+    _security_gate: Arc<SecurityGate>,
     tool_registry: Arc<ToolRegistry>,
     db: Option<Database>,
 }
@@ -51,7 +52,7 @@ impl TaskDispatcher {
             bus,
             skill_matcher: SkillMatcher,
             llm_router,
-            security_gate,
+            _security_gate: security_gate,
             tool_registry,
             db,
         }
@@ -279,6 +280,7 @@ impl TaskDispatcher {
             agents_with_assignments,
             lane_key.to_string(),
             source.to_string(),
+            created_by.to_string(),
         );
 
         // Build human-readable response for chat
@@ -305,6 +307,7 @@ impl TaskDispatcher {
         agents_with_assignments: Vec<(SubAgent, Option<String>, String)>,
         lane_key: String,
         source: String,
+        created_by: String,
     ) {
         let router = match &self.llm_router {
             Some(r) => r.clone(),
@@ -320,10 +323,16 @@ impl TaskDispatcher {
         let bus = self.bus.clone();
         let ctx = self.shared_context.clone();
         let db = self.db.clone();
-        let security_gate = self.security_gate.clone();
         let tool_registry = self.tool_registry.clone();
+        let bus_for_sandbox = self.bus.clone();
 
         tokio::spawn(async move {
+            // Per-request sandbox with ContextualToolExecutor for owner-scoped tools
+            let ctx_exec = ToolExecutionContext { owner_id: Some(created_by.clone()) };
+            let contextual_executor = Arc::new(ContextualToolExecutor::new(
+                tool_registry.clone(), ctx_exec,
+            ));
+            let per_request_sandbox = SandboxManager::new(contextual_executor, bus_for_sandbox);
             let start_time = std::time::Instant::now();
             let total_agents = agents_with_assignments.len();
 
@@ -436,7 +445,7 @@ impl TaskDispatcher {
                     messages,
                     tools,
                     &loop_config,
-                    Some(security_gate.sandbox()),
+                    Some(&per_request_sandbox),
                     agent_id,
                     Some(&sandbox_policy),
                     Some(&task_id),

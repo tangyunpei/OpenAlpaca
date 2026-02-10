@@ -17,6 +17,7 @@ pub use models::{Agent, EventLog, Memory, MemoryRole};
 pub use models::{AgentMetrics, AgentTaskHistory, SubAgentConfig};
 pub use models::{AssignmentStatus, Task, TaskAgentAssignment, TaskStatus};
 pub use models::{ConversationMap, ExternalIdentity, GlobalUser, LinkToken};
+pub use models::{MemoryKind, MemoryScope, MemorySource, MemoryV2};
 pub use repository::{
     AgentRepository, ConfigRepository, ConversationRepository, EventLogRepository,
     IdentityRepository, LlmUsageRepository, MemoryRepository, PreferenceRepository,

@@ -281,7 +281,7 @@ initialize state_json with objective, agent steps, constraints, timestamps.
 After each agent completes:
 
 append step result summary, artifact pointers, progress; bump state_version.
-4.3 Planner sees more context + active tasks
+### 4.3 Planner sees more context + active tasks
 File: task_planner.rs
 
 Increase history tail 6 → 12.
