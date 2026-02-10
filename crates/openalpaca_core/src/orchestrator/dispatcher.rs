@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::tools::ToolRegistry;
 
+use crate::middleware::prompt::format_tool_guidance;
 use super::skill_matcher::{SkillMatch, SkillMatcher};
 use super::task_planner::TaskPlan;
 
@@ -406,23 +407,11 @@ impl TaskDispatcher {
                 );
 
                 // Build system prompt with role description and tool awareness
-                let tool_list: String = tools
-                    .iter()
-                    .map(|t| format!("- {}: {}", t.name, t.description))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                let system_prompt = if tool_list.is_empty() {
-                    format!(
-                        "{}\n\nYour role: {}\n\nComplete your assigned role to the best of your ability.",
-                        agent.preset.persona, role_description
-                    )
-                } else {
-                    format!(
-                        "{}\n\nYour role: {}\n\nYou have access to the following tools:\n{}\n\nUse these tools to complete your role. Do NOT say you cannot access files or the internet — use the provided tools instead.",
-                        agent.preset.persona, role_description, tool_list
-                    )
-                };
+                let tool_guidance = format_tool_guidance(&tools);
+                let system_prompt = format!(
+                    "{}\n\nYour role: {}\n\nComplete your assigned role to the best of your ability.{}",
+                    agent.preset.persona, role_description, tool_guidance
+                );
 
                 // Build messages: system + task + optional previous output
                 let mut messages = vec![
