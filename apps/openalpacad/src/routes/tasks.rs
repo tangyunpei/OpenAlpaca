@@ -79,6 +79,8 @@ pub async fn create_task_handler(
         created_at: now,
         updated_at: now,
         completed_at: None,
+        state_json: None,
+        state_version: 0,
     };
 
     // 1. Persist to DB

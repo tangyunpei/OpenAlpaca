@@ -49,15 +49,16 @@ impl TaskPlanner {
         idle_agents: &[SubAgent],
         history: &[ChatMessage],
         session_summary: Option<&str>,
+        active_tasks_block: Option<&str>,
     ) -> Result<TaskPlan, PlanError> {
         let system_prompt = Self::build_system_prompt(idle_agents);
 
-        let history_tail = if history.len() > 6 {
-            &history[history.len() - 6..]
+        let history_tail = if history.len() > 12 {
+            &history[history.len() - 12..]
         } else {
             history
         };
-        let mut messages = Vec::with_capacity(3 + history_tail.len());
+        let mut messages = Vec::with_capacity(4 + history_tail.len());
         messages.push(ChatMessage::system(&system_prompt));
 
         // Inject summary before history
@@ -66,6 +67,11 @@ impl TaskPlanner {
                 "### SESSION SUMMARY ###\n{}",
                 summary
             )));
+        }
+
+        // Inject active tasks block
+        if let Some(tasks_block) = active_tasks_block {
+            messages.push(ChatMessage::system(tasks_block));
         }
 
         messages.extend_from_slice(history_tail);
@@ -136,6 +142,7 @@ Complex task:  {"classification": "complex_task", "title": "Concise title", "ass
 - Use multiple agents when the task has distinct stages requiring different skills (e.g. agent with file_read reads a file → agent with text_generate writes a polished summary using the file content).
 - Use a single agent when one agent can handle the entire task alone (e.g. a file_read agent can also summarize what it reads via its LLM).
 - Casual messages, greetings, short phrases, numbers, or anything that doesn't require agent tools should be "simple_query".
+- If an active task already covers the user's request, classify as "simple_query" and explain the existing task in your reasoning.
 "#,
         );
 
@@ -275,6 +282,7 @@ mod tests {
         assert!(prompt.contains("Research agent"));
         assert!(prompt.contains("web_search (0.9)"));
         assert!(prompt.contains("summarize (0.8)"));
+        assert!(prompt.contains("If an active task already covers"));
     }
 
     #[test]

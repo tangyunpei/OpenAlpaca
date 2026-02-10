@@ -358,6 +358,8 @@ mod tests {
             created_at: now,
             updated_at: now,
             completed_at: None,
+            state_json: None,
+            state_version: 0,
         }
     }
 

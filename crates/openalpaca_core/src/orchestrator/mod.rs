@@ -7,6 +7,7 @@ pub mod dispatcher;
 pub mod intent;
 pub mod skill_matcher;
 pub mod task_planner;
+pub mod task_state;
 
 use crate::bus::EventBus;
 use crate::context::{SharedContext, TaskEntry, TaskEntryStatus};
@@ -24,8 +25,8 @@ use crate::security::sandbox::SandboxManager;
 use crate::types::Capability;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter, RequestContext, Role, RouterRequest};
-use openalpaca_storage::{ConversationRepository, Database};
-use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
+use openalpaca_storage::{ConversationRepository, Database, Task};
+use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository, TaskRepository};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -418,6 +419,13 @@ impl Orchestrator {
         // 2. Input sanitization
         let content = SecurityGate::sanitize_input(&content)?;
 
+        // Extract owner_id from principal (before slash-command early return)
+        let owner_id_str = principal_id(&principal);
+        let owner_id = match &principal {
+            Principal::User { .. } => Some(owner_id_str.as_str()),
+            _ => None,
+        };
+
         // 3. Try slash commands and task queries first (cheap, no context needed)
         let intent = self.intent_parser.parse(&content);
         match &intent {
@@ -428,7 +436,7 @@ impl Orchestrator {
                     timestamp: Utc::now(),
                 });
                 return match intent {
-                    Intent::TaskQuery { task_id } => self.handle_task_query(task_id),
+                    Intent::TaskQuery { task_id } => self.handle_task_query(task_id, &owner_id_str),
                     Intent::TaskControl { task_id, action } => {
                         self.handle_task_control(&task_id, &action)
                     }
@@ -441,11 +449,28 @@ impl Orchestrator {
         // 4. Build context ONCE for all remaining paths (D6: single dedup location)
         let ctx = self.build_context(&lane_key, &content);
 
-        // Extract owner_id from principal for memory scoping
-        let owner_id_str = principal_id(&principal);
-        let owner_id = match &principal {
-            Principal::User { .. } => Some(owner_id_str.as_str()),
-            _ => None,
+        // Build active tasks block for planner
+        let active_tasks_block = if let Some(ref db) = self.db {
+            let task_repo = TaskRepository::new(db);
+            match task_repo.list_active_by_creator(&owner_id_str, 10) {
+                Ok(tasks) if !tasks.is_empty() => {
+                    let mut block = String::from("### ACTIVE TASKS ###\n");
+                    for t in &tasks {
+                        let progress = match (t.progress_current, t.progress_total) {
+                            (Some(c), Some(total)) => format!(" [{}/{}]", c, total),
+                            _ => String::new(),
+                        };
+                        block.push_str(&format!(
+                            "- [{}] {} ({}{})\n",
+                            &t.id[..8.min(t.id.len())], t.title, t.status.as_str(), progress
+                        ));
+                    }
+                    Some(block)
+                }
+                _ => None,
+            }
+        } else {
+            None
         };
 
         // 5. Compute result — planner path or heuristic fallback
@@ -457,6 +482,7 @@ impl Orchestrator {
                 &idle_agents,
                 &ctx.recent_messages,
                 ctx.summary.as_deref(),
+                active_tasks_block.as_deref(),
             )
             .await
             {
@@ -576,7 +602,7 @@ impl Orchestrator {
                 self.handle_simple_query(request_id, source, &query, lane_key, ctx, owner_id)
                     .await
             }
-            Intent::TaskQuery { task_id } => self.handle_task_query(task_id),
+            Intent::TaskQuery { task_id } => self.handle_task_query(task_id, &principal_id(principal)),
             Intent::ComplexTask {
                 description,
                 required_skills,
@@ -794,9 +820,16 @@ impl Orchestrator {
         Ok(validated)
     }
 
-    fn handle_task_query(&self, task_id: Option<String>) -> Result<String, String> {
+    fn handle_task_query(&self, task_id: Option<String>, created_by: &str) -> Result<String, String> {
         match task_id {
             Some(id) => {
+                // Try DB first, fall back to in-memory registry
+                if let Some(ref db) = self.db {
+                    let repo = TaskRepository::new(db);
+                    if let Ok(Some(task)) = repo.get(&id) {
+                        return Ok(db_task_to_json(&task));
+                    }
+                }
                 match self.shared_context.task_registry.get(&id) {
                     Some(entry) => Ok(task_entry_to_json(&entry)),
                     None => Ok(serde_json::json!({
@@ -807,6 +840,27 @@ impl Orchestrator {
                 }
             }
             None => {
+                // Try DB first, fall back to in-memory registry
+                if let Some(ref db) = self.db {
+                    let repo = TaskRepository::new(db);
+                    if let Ok(tasks) = repo.list_active_by_creator(created_by, 20) {
+                        let task_list: Vec<serde_json::Value> = tasks.iter().map(|t| {
+                            serde_json::json!({
+                                "task_id": t.id,
+                                "title": t.title,
+                                "status": t.status.as_str(),
+                                "progress_current": t.progress_current,
+                                "progress_total": t.progress_total,
+                                "created_at": t.created_at.to_rfc3339(),
+                            })
+                        }).collect();
+                        return Ok(serde_json::json!({
+                            "tasks": task_list,
+                            "count": task_list.len(),
+                        })
+                        .to_string());
+                    }
+                }
                 let active = self.shared_context.task_registry.list_active();
                 let tasks: Vec<serde_json::Value> =
                     active.iter().map(|e| serde_json::json!({
@@ -914,6 +968,20 @@ fn task_entry_to_json(entry: &TaskEntry) -> String {
         "status": entry.status.as_str(),
         "created_at": entry.created_at.to_rfc3339(),
         "updated_at": entry.updated_at.to_rfc3339(),
+    })
+    .to_string()
+}
+
+fn db_task_to_json(task: &Task) -> String {
+    serde_json::json!({
+        "task_id": task.id,
+        "title": task.title,
+        "status": task.status.as_str(),
+        "progress_current": task.progress_current,
+        "progress_total": task.progress_total,
+        "result_summary": task.result_summary,
+        "created_at": task.created_at.to_rfc3339(),
+        "updated_at": task.updated_at.to_rfc3339(),
     })
     .to_string()
 }

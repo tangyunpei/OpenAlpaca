@@ -112,6 +112,8 @@ pub struct Task {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub state_json: Option<String>,
+    pub state_version: i32,
 }
 
 /// An agent assignment within a task
