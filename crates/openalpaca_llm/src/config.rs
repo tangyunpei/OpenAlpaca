@@ -91,6 +91,17 @@ pub struct LlmRouterConfig {
     pub limits: Option<LimitsConfig>,
     pub credential_discovery: Option<crate::credential_discovery::CredentialDiscoveryConfig>,
     pub cli_backends: Option<crate::cli_backend::CliBackendsConfig>,
+    pub embeddings: Option<EmbeddingsConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub provider: String,
+    pub model: Option<String>,
+    pub dimensions: Option<u32>,
+    pub batch_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

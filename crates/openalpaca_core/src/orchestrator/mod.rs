@@ -53,6 +53,7 @@ pub struct Orchestrator {
     intent_parser: IntentParser,
     task_dispatcher: TaskDispatcher,
     db: Option<Database>,
+    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
 }
 
 const PROMPT_RECENT_MESSAGES: usize = 40;
@@ -95,6 +96,7 @@ impl Orchestrator {
         security_gate: Arc<SecurityGate>,
         tool_registry: Arc<ToolRegistry>,
         db: Option<Database>,
+        embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     ) -> Self {
         let task_dispatcher = TaskDispatcher::new(
             shared_context.clone(),
@@ -117,6 +119,7 @@ impl Orchestrator {
             intent_parser: IntentParser,
             task_dispatcher,
             db,
+            embedder,
         }
     }
 
@@ -689,23 +692,33 @@ impl Orchestrator {
                 )));
             }
 
-            // Retrieval injection: FTS-query user's memories and inject into prompt
+            // Retrieval injection: hybrid FTS+vector search for user memories
             if let (Some(db), Some(oid)) = (&self.db, owner_id) {
                 let repo = MemoryRepository::new(db);
                 let top_k = if !tools_for_loop.is_empty() { 5 } else { 10 };
-                if let Ok(memories) = repo.search_fts(oid, query, top_k, None, None, None) {
-                    if !memories.is_empty() {
-                        let mut block = String::from("### RETRIEVED MEMORY ###\n");
-                        let mut budget = 2000usize;
-                        for m in &memories {
-                            let entry = format!("- [{}] {}\n", m.kind.as_str(),
-                                m.content.chars().take(300).collect::<String>());
-                            if entry.len() > budget { break; }
-                            budget -= entry.len();
-                            block.push_str(&entry);
-                        }
-                        messages.push(ChatMessage::system(&block));
+
+                // Generate query embedding if embedder is available
+                let query_embedding = if let Some(ref embedder) = self.embedder {
+                    embedder.embed(&[query]).await.ok().and_then(|v| v.into_iter().next())
+                } else {
+                    None
+                };
+
+                let memories = repo.search_hybrid(
+                    oid, query, query_embedding.as_deref(), top_k, None, None, None
+                ).unwrap_or_default();
+
+                if !memories.is_empty() {
+                    let mut block = String::from("### RETRIEVED MEMORY ###\n");
+                    let mut budget = 2000usize;
+                    for m in &memories {
+                        let entry = format!("- [{}] {}\n", m.kind.as_str(),
+                            m.content.chars().take(300).collect::<String>());
+                        if entry.len() > budget { break; }
+                        budget -= entry.len();
+                        block.push_str(&entry);
                     }
+                    messages.push(ChatMessage::system(&block));
                 }
             }
 
@@ -1020,6 +1033,7 @@ mod tests {
             gate,
             registry,
             None,
+            None,
         )
     }
 
@@ -1041,6 +1055,7 @@ mod tests {
             LoopConfig::default(),
             gate,
             registry,
+            None,
             None,
         )
     }
@@ -1265,6 +1280,7 @@ mod tests {
             gate,
             registry,
             None,
+            None,
         );
 
         let result = orch
@@ -1392,6 +1408,7 @@ mod tests {
             LoopConfig::default(),
             gate,
             registry,
+            None,
             None,
         )
     }
@@ -1572,6 +1589,7 @@ mod tests {
             LoopConfig::default(),
             gate,
             registry,
+            None,
             None,
         )
     }
