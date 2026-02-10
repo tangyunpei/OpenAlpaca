@@ -86,4 +86,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "memory_v2",
         sql: include_str!("015_memory_v2.sql"),
     },
+    Migration {
+        version: 16,
+        name: "task_state",
+        sql: include_str!("016_task_state.sql"),
+    },
 ];
