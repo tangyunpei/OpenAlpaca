@@ -284,8 +284,8 @@ pub async fn delete_chat_history_handler(
     match chat_service.clear_history(lane_key) {
         Ok(deleted) => {
             // Also clear the conversation summary
-            let pref_repo = openalpaca_storage::PreferenceRepository::new(&state.db);
-            let _ = pref_repo.delete(lane_key, "conversation_summary");
+            let conv_repo = openalpaca_storage::ConversationRepository::new(&state.db);
+            let _ = conv_repo.clear_summary(lane_key);
             Json(ChatDeleteResponse { deleted }).into_response()
         }
         Err(e) => error_response(
