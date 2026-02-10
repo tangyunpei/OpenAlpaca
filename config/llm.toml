@@ -30,3 +30,9 @@ claude_code = true
 
 [cli_backends.claude_code]
 enabled = false
+
+[embeddings]
+enabled = false
+provider = "openai"
+model = "text-embedding-3-small"
+dimensions = 384

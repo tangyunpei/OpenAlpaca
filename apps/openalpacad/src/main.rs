@@ -59,6 +59,7 @@ pub struct AppState {
     pub chat_stream_manager: Option<Arc<ChatStreamManager>>,
     pub token_manager: Option<Arc<openalpaca_llm::TokenManager>>,
     pub provider_usage_tracker: Option<Arc<openalpaca_llm::ProviderUsageTracker>>,
+    pub embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     pub local_user_id: String,
     pub default_lane_key: String,
 }
@@ -545,6 +546,23 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         }
     };
 
+    // Step 5.2.3c-pre: Build Embedder (Phase 6)
+    let embedder: Option<Arc<dyn openalpaca_llm::Embedder>> = {
+        let emb_config = llm_config.as_ref().and_then(|c| c.embeddings.clone());
+        match emb_config {
+            Some(ref cfg) if cfg.enabled => {
+                let provider_config = llm_config.as_ref()
+                    .and_then(|c| c.providers.as_ref())
+                    .and_then(|p| p.get(&cfg.provider));
+                match openalpaca_llm::build_embedder(cfg, Some(&*secret_store), provider_config) {
+                    Ok(e) => { info!("Embedder initialized: {} ({}d)", cfg.provider, e.dimensions()); Some(e) }
+                    Err(e) => { warn!("Failed to build embedder: {e}"); None }
+                }
+            }
+            _ => { info!("Embeddings disabled"); None }
+        }
+    };
+
     let cred_config = llm_config.as_ref()
         .and_then(|c| c.credential_discovery.clone())
         .unwrap_or_default();
@@ -588,7 +606,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let mut tool_registry = openalpaca_core::tools::ToolRegistry::new();
 
     // Register built-in tools
-    for tool in openalpaca_core::tools::builtins::builtin_tools(Some(db.clone())) {
+    for tool in openalpaca_core::tools::builtins::builtin_tools(Some(db.clone()), embedder.clone()) {
         tool_registry.register(tool);
     }
 
@@ -624,6 +642,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         security_gate,
         tool_registry,
         Some(db.clone()),
+        embedder.clone(),
     ));
     let handler = Arc::new(gateway_bridge::OrchestratorHandler::new(orchestrator));
     let gateway = Arc::new(Gateway::new(
@@ -664,6 +683,42 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         db.clone(),
     ));
 
+    // Step 6.4: Spawn background embedding indexer
+    if let Some(ref emb) = embedder {
+        let idx_emb = emb.clone();
+        let idx_db = db.clone();
+        let idx_uid = local_user_id.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                let repo = openalpaca_storage::MemoryRepository::new(&idx_db);
+                let missing = match repo.list_missing_embeddings(&idx_uid, 50) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if missing.is_empty() { continue; }
+
+                let texts: Vec<&str> = missing.iter().map(|(_, c)| c.as_str()).collect();
+                match idx_emb.embed(&texts).await {
+                    Ok(embeddings) => {
+                        let mut count = 0usize;
+                        for ((id, _), embedding) in missing.iter().zip(embeddings.iter()) {
+                            if embedding.len() == 384 {
+                                let _ = repo.insert_embedding(*id, embedding);
+                                count += 1;
+                            }
+                        }
+                        if count > 0 {
+                            tracing::info!("Indexed {count} embeddings");
+                        }
+                    }
+                    Err(e) => tracing::warn!("Embedding batch failed: {e}"),
+                }
+            }
+        });
+    }
+
     let state = Arc::new(AppState {
         instance_id: instance_id.clone(),
         token,
@@ -678,6 +733,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         chat_stream_manager: Some(chat_stream_manager.clone()),
         token_manager,
         provider_usage_tracker,
+        embedder,
         local_user_id,
         default_lane_key,
     });
@@ -765,6 +821,10 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         // Orchestrator config routes (Phase 5.7)
         .route("/v1/orchestrator/config", get(routes::get_orchestrator_config))
         .route("/v1/orchestrator/config", put(routes::update_orchestrator_config))
+        // Memory admin routes (Phase 6)
+        .route("/v1/memory/reindex", post(routes::reindex_handler))
+        .route("/v1/memory/status", get(routes::index_status_handler))
+        .route("/v1/memory/kb/ingest", post(routes::kb_ingest_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_middleware,

@@ -67,7 +67,7 @@ impl<'a> MemoryRepository<'a> {
     }
 
     /// Add a memory entry. Uses INSERT OR IGNORE on (owner_id, content_hash)
-    /// unique index. Returns the row id, or 0 if deduped.
+    /// unique index. Returns the row id if inserted, or 0 if deduped.
     #[allow(clippy::too_many_arguments)]
     pub fn add(
         &self,
@@ -99,9 +99,12 @@ impl<'a> MemoryRepository<'a> {
                     metadata.map(|v| v.to_string()),
                 ],
             )?;
-            let last_id = conn.last_insert_rowid();
-            // INSERT OR IGNORE returns 0 for last_insert_rowid when the row is ignored
-            Ok(last_id)
+            // changes() returns 0 when INSERT OR IGNORE ignores the row (deduped)
+            if conn.changes() == 0 {
+                Ok(0)
+            } else {
+                Ok(conn.last_insert_rowid())
+            }
         })
     }
 
@@ -163,14 +166,112 @@ impl<'a> MemoryRepository<'a> {
         })
     }
 
-    /// Vector search stub for Phase 6 integration.
+    /// Insert a vector embedding for a memory entry.
+    pub fn insert_embedding(&self, memory_id: i64, embedding: &[f32]) -> Result<()> {
+        assert_eq!(embedding.len(), 384, "Embedding must be 384-dim");
+        self.db.with_connection(|conn| {
+            let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+            conn.execute(
+                "INSERT OR REPLACE INTO memory_vec(memory_id, embedding) VALUES (?1, ?2)",
+                rusqlite::params![memory_id, blob],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// List memory IDs that are missing vector embeddings.
+    pub fn list_missing_embeddings(&self, owner_id: &str, limit: usize) -> Result<Vec<(i64, String)>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT m.id, m.content FROM memory m
+                 LEFT JOIN memory_vec v ON m.id = v.memory_id
+                 WHERE m.owner_id = ?1 AND v.memory_id IS NULL
+                 LIMIT ?2"
+            )?;
+            let rows = stmt.query_map(rusqlite::params![owner_id, limit as i64], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        })
+    }
+
+    /// Count total memories and embedded memories for an owner.
+    pub fn embedding_stats(&self, owner_id: &str) -> Result<(i64, i64)> {
+        self.db.with_connection(|conn| {
+            let total: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM memory WHERE owner_id = ?1", [owner_id], |r| r.get(0)
+            )?;
+            let embedded: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM memory m JOIN memory_vec v ON m.id = v.memory_id
+                 WHERE m.owner_id = ?1", [owner_id], |r| r.get(0)
+            )?;
+            Ok((total, embedded))
+        })
+    }
+
+    /// Vector similarity search using sqlite-vec.
     pub fn search_vec(
         &self,
-        _owner_id: &str,
-        _embedding: &[f32],
-        _limit: usize,
+        owner_id: &str,
+        embedding: &[f32],
+        limit: usize,
     ) -> Result<Vec<MemoryV2>> {
-        Ok(vec![])
+        if embedding.len() != 384 {
+            anyhow::bail!("Embedding must be 384-dim, got {}", embedding.len());
+        }
+        self.db.with_connection(|conn| {
+            let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+            // sqlite-vec KNN: MATCH + k. Owner filtering happens post-KNN since
+            // vec0 doesn't support compound WHERE during MATCH. Over-fetch then filter.
+            let k = (limit * 5) as i64;
+            let sql = format!(
+                "SELECT {ALL_COLUMNS} FROM memory m
+                 WHERE m.id IN (
+                     SELECT memory_id FROM memory_vec
+                     WHERE embedding MATCH ?1 AND k = ?2
+                 ) AND m.owner_id = ?3"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mut rows = stmt.query(rusqlite::params![blob, k, owner_id])?;
+            let mut results = Vec::new();
+            while let Some(row) = rows.next()? {
+                if results.len() >= limit { break; }
+                results.push(row_to_memory_v2(row)?);
+            }
+            Ok(results)
+        })
+    }
+
+    /// Hybrid search: combine FTS + vector results, dedup by memory_id.
+    pub fn search_hybrid(
+        &self,
+        owner_id: &str,
+        query: &str,
+        embedding: Option<&[f32]>,
+        limit: usize,
+        kind_filter: Option<MemoryKind>,
+        scope_filter: Option<MemoryScope>,
+        scope_id_filter: Option<&str>,
+    ) -> Result<Vec<MemoryV2>> {
+        // 1. FTS results (always available)
+        let fts_results = self.search_fts(owner_id, query, limit, kind_filter, scope_filter, scope_id_filter)?;
+
+        // 2. Vec results (only if embedding provided)
+        let vec_results = match embedding {
+            Some(emb) => self.search_vec(owner_id, emb, limit).unwrap_or_default(),
+            None => vec![],
+        };
+
+        // 3. Merge + dedup by id, FTS results first (keyword match is high-signal)
+        let mut seen = std::collections::HashSet::new();
+        let mut merged = Vec::with_capacity(limit);
+        for m in fts_results.into_iter().chain(vec_results.into_iter()) {
+            if seen.insert(m.id) {
+                merged.push(m);
+                if merged.len() >= limit { break; }
+            }
+        }
+        Ok(merged)
     }
 
     /// Get recent memories for an owner, ordered by created_at DESC.
@@ -452,6 +553,207 @@ mod tests {
 
         let remaining = repo.recent("owner-1", 100).unwrap();
         assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_insert_and_search_vec() {
+        let db = test_db();
+        let repo = MemoryRepository::new(&db);
+
+        let id = repo
+            .add(
+                "owner-1",
+                MemoryKind::Fact,
+                MemoryScope::Global,
+                "",
+                MemorySource::Conversation,
+                "Rust is a systems programming language",
+                None,
+                0.8,
+                0.9,
+            )
+            .unwrap();
+
+        // Create a dummy 384-dim embedding
+        let mut embedding = vec![0.0f32; 384];
+        embedding[0] = 1.0;
+        embedding[1] = 0.5;
+        repo.insert_embedding(id, &embedding).unwrap();
+
+        // Search with a similar embedding
+        let mut query_emb = vec![0.0f32; 384];
+        query_emb[0] = 0.9;
+        query_emb[1] = 0.4;
+
+        let results = repo.search_vec("owner-1", &query_emb, 5).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, id);
+        assert!(results[0].content.contains("Rust"));
+    }
+
+    #[test]
+    fn test_search_vec_owner_isolation() {
+        let db = test_db();
+        let repo = MemoryRepository::new(&db);
+
+        let id_a = repo
+            .add(
+                "owner-A",
+                MemoryKind::Fact,
+                MemoryScope::Global,
+                "",
+                MemorySource::Conversation,
+                "Secret A",
+                None,
+                0.5,
+                0.7,
+            )
+            .unwrap();
+
+        let id_b = repo
+            .add(
+                "owner-B",
+                MemoryKind::Fact,
+                MemoryScope::Global,
+                "",
+                MemorySource::Conversation,
+                "Secret B",
+                None,
+                0.5,
+                0.7,
+            )
+            .unwrap();
+
+        let emb = vec![0.1f32; 384];
+        repo.insert_embedding(id_a, &emb).unwrap();
+        repo.insert_embedding(id_b, &emb).unwrap();
+
+        let query = vec![0.1f32; 384];
+        let a_results = repo.search_vec("owner-A", &query, 10).unwrap();
+        assert_eq!(a_results.len(), 1);
+        assert!(a_results[0].content.contains("Secret A"));
+
+        let b_results = repo.search_vec("owner-B", &query, 10).unwrap();
+        assert_eq!(b_results.len(), 1);
+        assert!(b_results[0].content.contains("Secret B"));
+    }
+
+    #[test]
+    fn test_embedding_stats() {
+        let db = test_db();
+        let repo = MemoryRepository::new(&db);
+
+        let id1 = repo
+            .add(
+                "owner-1",
+                MemoryKind::Fact,
+                MemoryScope::Global,
+                "",
+                MemorySource::Conversation,
+                "Memory one",
+                None,
+                0.5,
+                0.7,
+            )
+            .unwrap();
+        repo.add(
+            "owner-1",
+            MemoryKind::Fact,
+            MemoryScope::Global,
+            "",
+            MemorySource::Conversation,
+            "Memory two",
+            None,
+            0.5,
+            0.7,
+        )
+        .unwrap();
+
+        let (total, embedded) = repo.embedding_stats("owner-1").unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(embedded, 0);
+
+        let emb = vec![0.1f32; 384];
+        repo.insert_embedding(id1, &emb).unwrap();
+
+        let (total, embedded) = repo.embedding_stats("owner-1").unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(embedded, 1);
+    }
+
+    #[test]
+    fn test_list_missing_embeddings() {
+        let db = test_db();
+        let repo = MemoryRepository::new(&db);
+
+        let id1 = repo
+            .add(
+                "owner-1",
+                MemoryKind::Fact,
+                MemoryScope::Global,
+                "",
+                MemorySource::Conversation,
+                "Embedded memory",
+                None,
+                0.5,
+                0.7,
+            )
+            .unwrap();
+        let _id2 = repo
+            .add(
+                "owner-1",
+                MemoryKind::Fact,
+                MemoryScope::Global,
+                "",
+                MemorySource::Conversation,
+                "Not embedded memory",
+                None,
+                0.5,
+                0.7,
+            )
+            .unwrap();
+
+        let emb = vec![0.1f32; 384];
+        repo.insert_embedding(id1, &emb).unwrap();
+
+        let missing = repo.list_missing_embeddings("owner-1", 10).unwrap();
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].1.contains("Not embedded"));
+    }
+
+    #[test]
+    fn test_search_hybrid_dedup() {
+        let db = test_db();
+        let repo = MemoryRepository::new(&db);
+
+        let id = repo
+            .add(
+                "owner-1",
+                MemoryKind::Fact,
+                MemoryScope::Global,
+                "",
+                MemorySource::Conversation,
+                "Rust programming language",
+                None,
+                0.8,
+                0.9,
+            )
+            .unwrap();
+
+        // Add embedding so it shows in both FTS and vec
+        let emb = vec![0.1f32; 384];
+        repo.insert_embedding(id, &emb).unwrap();
+
+        let query_emb = vec![0.1f32; 384];
+        let results = repo
+            .search_hybrid("owner-1", "Rust", Some(&query_emb), 10, None, None, None)
+            .unwrap();
+
+        // Should appear only once despite matching both FTS and vec
+        let ids: Vec<i64> = results.iter().map(|m| m.id).collect();
+        let unique: std::collections::HashSet<i64> = ids.iter().copied().collect();
+        assert_eq!(ids.len(), unique.len(), "Hybrid search should dedup results");
+        assert!(results.iter().any(|m| m.id == id));
     }
 
     #[test]

@@ -5,7 +5,11 @@ use std::sync::Arc;
 
 /// Return all built-in tool definitions and implementations.
 /// When `db` is provided, memory-backed tools (memory_search) are included.
-pub fn builtin_tools(db: Option<openalpaca_storage::Database>) -> Vec<RegisteredTool> {
+/// When `embedder` is provided, memory_search uses hybrid (FTS + vector) search.
+pub fn builtin_tools(
+    db: Option<openalpaca_storage::Database>,
+    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+) -> Vec<RegisteredTool> {
     let mut tools = vec![
         web_search_tool(),
         web_fetch_tool(),
@@ -16,7 +20,7 @@ pub fn builtin_tools(db: Option<openalpaca_storage::Database>) -> Vec<Registered
         shell_execute_tool(),
     ];
     if let Some(db) = db {
-        tools.push(memory_search_tool(db));
+        tools.push(memory_search_tool(db, embedder));
     }
     tools
 }
@@ -357,6 +361,7 @@ fn shell_execute_tool() -> RegisteredTool {
 
 struct MemorySearchTool {
     db: openalpaca_storage::Database,
+    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
 }
 
 #[async_trait]
@@ -377,9 +382,16 @@ impl BuiltInTool for MemorySearchTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing owner_id (should be injected by executor)".to_string())?;
 
+        // Generate query embedding if embedder available
+        let query_embedding = if let Some(ref embedder) = self.embedder {
+            embedder.embed(&[query]).await.ok().and_then(|v| v.into_iter().next())
+        } else {
+            None
+        };
+
         let repo = openalpaca_storage::repository::MemoryRepository::new(&self.db);
         let memories = repo
-            .search_fts(owner_id, query, limit, None, None, None)
+            .search_hybrid(owner_id, query, query_embedding.as_deref(), limit, None, None, None)
             .map_err(|e| format!("Memory search failed: {}", e))?;
 
         let results: Vec<serde_json::Value> = memories
@@ -400,7 +412,10 @@ impl BuiltInTool for MemorySearchTool {
     }
 }
 
-fn memory_search_tool(db: openalpaca_storage::Database) -> RegisteredTool {
+fn memory_search_tool(
+    db: openalpaca_storage::Database,
+    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+) -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "memory_search".to_string(),
@@ -420,7 +435,7 @@ fn memory_search_tool(db: openalpaca_storage::Database) -> RegisteredTool {
                 "required": ["query"]
             }),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MemorySearchTool { db })),
+        backend: ToolBackend::BuiltIn(Arc::new(MemorySearchTool { db, embedder })),
     }
 }
 
@@ -442,7 +457,7 @@ mod tests {
 
     #[test]
     fn test_builtin_tools_count_without_db() {
-        let tools = builtin_tools(None);
+        let tools = builtin_tools(None, None);
         assert_eq!(tools.len(), 7);
     }
 
@@ -450,13 +465,13 @@ mod tests {
     fn test_builtin_tools_count_with_db() {
         let dir = tempfile::tempdir().unwrap();
         let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
-        let tools = builtin_tools(Some(db));
+        let tools = builtin_tools(Some(db), None);
         assert_eq!(tools.len(), 8);
     }
 
     #[test]
     fn test_all_tools_have_valid_definitions() {
-        for tool in builtin_tools(None) {
+        for tool in builtin_tools(None, None) {
             assert!(!tool.definition.name.is_empty());
             assert!(!tool.definition.description.is_empty());
             assert!(tool.definition.parameters.is_object());

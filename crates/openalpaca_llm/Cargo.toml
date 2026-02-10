@@ -11,6 +11,7 @@ default = []
 anthropic = ["dep:reqwest"]
 openai = ["dep:reqwest"]
 ollama = ["dep:reqwest"]
+local-embeddings = ["dep:fastembed"]
 
 [dependencies]
 async-trait.workspace = true
@@ -32,6 +33,9 @@ file-lock.workspace = true
 
 # Optional: HTTP client (only when a provider feature is enabled)
 reqwest = { workspace = true, optional = true }
+
+# Optional: local embedding model (only when local-embeddings feature is enabled)
+fastembed = { workspace = true, optional = true }
 
 # Credential discovery + CLI backends
 which.workspace = true
