@@ -59,6 +59,7 @@ pub struct AppState {
     pub chat_stream_manager: Option<Arc<ChatStreamManager>>,
     pub token_manager: Option<Arc<openalpaca_llm::TokenManager>>,
     pub provider_usage_tracker: Option<Arc<openalpaca_llm::ProviderUsageTracker>>,
+    pub embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     pub local_user_id: String,
     pub default_lane_key: String,
 }
@@ -166,6 +167,10 @@ fn main() -> Result<()> {
 
     info!("OpenAlpaca Daemon starting...");
 
+    // Migrate legacy app dir (com.openalpaca.OpenAlpaca → OpenAlpaca) before
+    // acquiring the singleton lock, since the lock file lives inside app_dir.
+    paths::migrate_legacy_app_dir();
+
     // D3: Singleton lock FIRST — prevents all multi-process races.
     // Acquired before any config I/O or key generation.
     let _lock_guard = match discovery::acquire_single_instance_lock(false) {
@@ -267,6 +272,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let db_path = paths::database_path()?;
     let db = Database::open(&db_path).context("Failed to initialize database")?;
     info!("Database initialized: {}", db_path.display());
+
+    // One-time migration: move conversation summaries from preference → conversations table
+    migrate_preference_summaries(&db);
 
     // Step 4.1: Resolve stable local user ID
     let local_user_id = resolve_local_user_id(&db);
@@ -466,13 +474,31 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let lane_manager = Arc::new(LaneManager::new());
 
     // Step 5.2.2: Initialize OS secret store + auto-migrate secrets
-    let secret_store: Arc<dyn openalpaca_llm::SecretStore> =
-        Arc::new(openalpaca_llm::KeyringSecretStore);
+    // Probe keychain availability first. On headless/Docker systems where
+    // the OS keychain is unavailable, fall back to MemorySecretStore so the
+    // daemon starts cleanly. Keys using secret_env or secret_encrypted still
+    // work; only secret_ref keys (which require keychain) are unavailable.
+    let keyring_available = openalpaca_llm::probe_keyring();
+    let secret_store: Arc<dyn openalpaca_llm::SecretStore> = if keyring_available {
+        info!("OS keychain available");
+        Arc::new(openalpaca_llm::CachingSecretStore::new(
+            Box::new(openalpaca_llm::KeyringSecretStore),
+        ))
+    } else {
+        warn!(
+            "OS keychain unavailable (headless/Docker?). Using in-memory secret store. \
+             Keys stored via secret_ref will not be available — \
+             use secret_env or secret_encrypted instead."
+        );
+        Arc::new(openalpaca_llm::MemorySecretStore::new())
+    };
 
     let llm_config_path = config_base_dir.join("llm.toml");
 
-    // Auto-migrate secret_encrypted → OS keychain (Step 5)
-    if llm_config_path.exists() {
+    // Auto-migrate secret_encrypted → OS keychain (skip when keychain
+    // unavailable to prevent stripping secret_encrypted from config with
+    // no durable replacement)
+    if keyring_available && llm_config_path.exists() {
         match openalpaca_llm::migrate_llm_secrets(&llm_config_path, &*secret_store) {
             Ok(0) => {}
             Ok(n) => info!("Migrated {n} secret(s) to OS keychain"),
@@ -542,6 +568,23 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         }
     };
 
+    // Step 5.2.3c-pre: Build Embedder (Phase 6)
+    let embedder: Option<Arc<dyn openalpaca_llm::Embedder>> = {
+        let emb_config = llm_config.as_ref().and_then(|c| c.embeddings.clone());
+        match emb_config {
+            Some(ref cfg) if cfg.enabled => {
+                let provider_config = llm_config.as_ref()
+                    .and_then(|c| c.providers.as_ref())
+                    .and_then(|p| p.get(&cfg.provider));
+                match openalpaca_llm::build_embedder(cfg, Some(&*secret_store), provider_config) {
+                    Ok(e) => { info!("Embedder initialized: {} ({}d)", cfg.provider, e.dimensions()); Some(e) }
+                    Err(e) => { warn!("Failed to build embedder: {e}"); None }
+                }
+            }
+            _ => { info!("Embeddings disabled"); None }
+        }
+    };
+
     let cred_config = llm_config.as_ref()
         .and_then(|c| c.credential_discovery.clone())
         .unwrap_or_default();
@@ -585,7 +628,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let mut tool_registry = openalpaca_core::tools::ToolRegistry::new();
 
     // Register built-in tools
-    for tool in openalpaca_core::tools::builtins::builtin_tools() {
+    for tool in openalpaca_core::tools::builtins::builtin_tools(Some(db.clone()), embedder.clone()) {
         tool_registry.register(tool);
     }
 
@@ -621,6 +664,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         security_gate,
         tool_registry,
         Some(db.clone()),
+        embedder.clone(),
     ));
     let handler = Arc::new(gateway_bridge::OrchestratorHandler::new(orchestrator));
     let gateway = Arc::new(Gateway::new(
@@ -661,6 +705,42 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         db.clone(),
     ));
 
+    // Step 6.4: Spawn background embedding indexer
+    if let Some(ref emb) = embedder {
+        let idx_emb = emb.clone();
+        let idx_db = db.clone();
+        let idx_uid = local_user_id.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                let repo = openalpaca_storage::MemoryRepository::new(&idx_db);
+                let missing = match repo.list_missing_embeddings(&idx_uid, 50) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if missing.is_empty() { continue; }
+
+                let texts: Vec<&str> = missing.iter().map(|(_, c)| c.as_str()).collect();
+                match idx_emb.embed(&texts).await {
+                    Ok(embeddings) => {
+                        let mut count = 0usize;
+                        for ((id, _), embedding) in missing.iter().zip(embeddings.iter()) {
+                            if embedding.len() == idx_emb.dimensions() as usize {
+                                let _ = repo.insert_embedding(*id, embedding);
+                                count += 1;
+                            }
+                        }
+                        if count > 0 {
+                            tracing::info!("Indexed {count} embeddings");
+                        }
+                    }
+                    Err(e) => tracing::warn!("Embedding batch failed: {e}"),
+                }
+            }
+        });
+    }
+
     let state = Arc::new(AppState {
         instance_id: instance_id.clone(),
         token,
@@ -675,6 +755,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         chat_stream_manager: Some(chat_stream_manager.clone()),
         token_manager,
         provider_usage_tracker,
+        embedder,
         local_user_id,
         default_lane_key,
     });
@@ -702,6 +783,11 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         .route("/v1/tasks", get(routes::list_tasks_handler))
         .route("/v1/tasks/{id}", get(routes::get_task_handler))
         .route("/v1/tasks/{id}/action", post(routes::task_action_handler))
+        // Preferences routes (Phase 5)
+        .route("/v1/preferences", get(routes::list_preferences_handler))
+        .route("/v1/preferences/{key}", get(routes::get_preference_handler))
+        .route("/v1/preferences/{key}", put(routes::set_preference_handler))
+        .route("/v1/preferences/{key}", delete(routes::delete_preference_handler))
         .route("/v1/agents", get(routes::list_agents_handler))
         .route("/v1/agents", post(routes::create_agent_handler))
         .route("/v1/agents/from-toml", post(routes::create_agent_from_toml_handler))
@@ -757,6 +843,10 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         // Orchestrator config routes (Phase 5.7)
         .route("/v1/orchestrator/config", get(routes::get_orchestrator_config))
         .route("/v1/orchestrator/config", put(routes::update_orchestrator_config))
+        // Memory admin routes (Phase 6)
+        .route("/v1/memory/reindex", post(routes::reindex_handler))
+        .route("/v1/memory/status", get(routes::index_status_handler))
+        .route("/v1/memory/kb/ingest", post(routes::kb_ingest_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_middleware,
@@ -853,6 +943,58 @@ async fn root_handler() -> Json<serde_json::Value> {
         "name": "OpenAlpaca Daemon",
         "version": env!("CARGO_PKG_VERSION")
     }))
+}
+
+/// Migrate conversation summaries from the preference table to the conversations table.
+/// Idempotent: runs every startup but does nothing if no preference rows remain.
+/// Non-fatal: failure is logged but doesn't prevent daemon startup.
+fn migrate_preference_summaries(db: &Database) {
+    if let Err(e) = db.with_connection(|conn| {
+        // Find all preference rows with conversation_summary
+        let mut stmt = conn.prepare(
+            "SELECT user_id, value, version FROM preference WHERE key = 'conversation_summary'"
+        )?;
+        let rows: Vec<(String, String, i64)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .filter_map(Result::ok)
+            .collect();
+
+        if rows.is_empty() { return Ok(()); }
+
+        let tx = conn.unchecked_transaction()?;
+        let mut migrated = 0usize;
+        for (lane_key, value, pref_version) in &rows {
+            let parsed: serde_json::Value = match serde_json::from_str(value) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let summary = parsed.get("summary").and_then(|s| s.as_str()).unwrap_or("");
+            let last_id = parsed.get("last_summarized_message_id").and_then(|n| n.as_i64()).unwrap_or(0);
+
+            // Only update if conversation row exists
+            let updated = tx.execute(
+                "UPDATE conversations SET summary = ?1, summary_version = ?2,
+                 last_summarized_message_id = ?3, summary_updated_at = datetime('now')
+                 WHERE lane_key = ?4",
+                (summary, pref_version, last_id, lane_key.as_str()),
+            )?;
+
+            if updated > 0 {
+                tx.execute(
+                    "DELETE FROM preference WHERE user_id = ?1 AND key = 'conversation_summary'",
+                    [lane_key],
+                )?;
+                migrated += 1;
+            }
+        }
+        tx.commit()?;
+        if migrated > 0 {
+            tracing::info!("Migrated {migrated} conversation summaries from preference -> conversations");
+        }
+        Ok(())
+    }) {
+        tracing::warn!("Summary migration failed (non-fatal): {e}");
+    }
 }
 
 /// Wait for shutdown signals (SIGINT or SIGTERM)

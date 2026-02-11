@@ -7,6 +7,7 @@ pub mod dispatcher;
 pub mod intent;
 pub mod skill_matcher;
 pub mod task_planner;
+pub mod task_state;
 
 use crate::bus::EventBus;
 use crate::context::{SharedContext, TaskEntry, TaskEntryStatus};
@@ -19,11 +20,13 @@ use crate::security::gate::SecurityGate;
 use crate::security::policy::{Principal, Scope};
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::ToolRegistry;
+use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
+use crate::security::sandbox::SandboxManager;
 use crate::types::Capability;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter, RequestContext, Role, RouterRequest};
-use openalpaca_storage::{ConversationRepository, Database, PreferenceRepository};
-use openalpaca_storage::repository::LlmUsageRepository;
+use openalpaca_storage::{ConversationRepository, Database, Task};
+use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository, TaskRepository};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -50,9 +53,9 @@ pub struct Orchestrator {
     intent_parser: IntentParser,
     task_dispatcher: TaskDispatcher,
     db: Option<Database>,
+    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
 }
 
-const SUMMARY_LOAD_LIMIT: i64 = 120;
 const PROMPT_RECENT_MESSAGES: usize = 40;
 const SUMMARY_MIN_NEW_OLDER_MESSAGES: usize = 12;
 const SUMMARY_MAX_CHARS: usize = 4000;
@@ -65,8 +68,8 @@ struct ConversationContext {
     recent_messages: Vec<ChatMessage>,
     /// Raw (id, role, content) tuples for the "older" window — used by maybe_update_summary().
     older_window: Vec<(i64, String, String)>,
-    /// Current summary state from preference (for optimistic locking in update).
-    summary_pref_version: Option<i64>,
+    /// Current summary version from conversations table (for optimistic locking in update).
+    summary_version: i64,
     /// Last message ID that was summarized.
     last_summarized_id: i64,
     /// Previous summary text (for incremental update).
@@ -93,6 +96,7 @@ impl Orchestrator {
         security_gate: Arc<SecurityGate>,
         tool_registry: Arc<ToolRegistry>,
         db: Option<Database>,
+        embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     ) -> Self {
         let task_dispatcher = TaskDispatcher::new(
             shared_context.clone(),
@@ -115,18 +119,20 @@ impl Orchestrator {
             intent_parser: IntentParser,
             task_dispatcher,
             db,
+            embedder,
         }
     }
 
     /// Build the full conversation context for a turn: loads history, deduplicates
-    /// the current user message (Bug A fix, D6), splits into older/recent windows,
-    /// and loads any existing summary from the preference table.
+    /// the current user message (Bug A fix, D6), loads unsummarized older messages
+    /// via ID-range query (fixes 120-window bug), and loads the summary from the
+    /// conversations table.
     fn build_context(&self, lane_key: &str, current_query: &str) -> ConversationContext {
         let empty = ConversationContext {
             summary: None,
             recent_messages: Vec::new(),
             older_window: Vec::new(),
-            summary_pref_version: None,
+            summary_version: 0,
             last_summarized_id: 0,
             old_summary_text: String::new(),
         };
@@ -136,12 +142,21 @@ impl Orchestrator {
         };
 
         let repo = ConversationRepository::new(db);
-        let raw_messages = match repo.list_recent_by_lane(lane_key, SUMMARY_LOAD_LIMIT) {
+
+        // Step 1: Load summary from conversations table
+        let (summary_text, summary_version, last_summarized_id) =
+            match repo.get_summary(lane_key) {
+                Ok(tuple) => tuple,
+                Err(_) => (String::new(), 0, 0),
+            };
+
+        // Step 2: Load recent messages (40, not 120)
+        let raw_messages = match repo.list_recent_by_lane(lane_key, PROMPT_RECENT_MESSAGES as i64) {
             Ok(msgs) => msgs,
             Err(_) => return empty,
         };
 
-        // Step 1: Build ONE canonical list of (id, role_string, content) in chronological order.
+        // Step 3: Build canonical list and dedup current query
         let mut chat_rows: Vec<(i64, String, String)> = raw_messages
             .iter()
             .filter(|msg| {
@@ -150,43 +165,40 @@ impl Orchestrator {
             .map(|msg| (msg.id, msg.role.clone(), msg.content.clone()))
             .collect();
 
-        // Step 2: Dedup (D6) — if the last row matches current_query, drop it (Bug A fix).
+        // Dedup (D6) — if the last row matches current_query, drop it (Bug A fix).
         if let Some((_, role, content)) = chat_rows.last() {
             if role == "user" && content == current_query {
                 chat_rows.pop();
             }
         }
 
-        // Step 3: Split into older + recent from the SAME deduped list.
-        let split_point = chat_rows.len().saturating_sub(PROMPT_RECENT_MESSAGES);
-        let older_window: Vec<(i64, String, String)> = chat_rows[..split_point].to_vec();
-        let recent_messages: Vec<ChatMessage> = chat_rows[split_point..]
+        // Step 4: Get first_recent_id for the ID-range query
+        let first_recent_id = chat_rows.first().map(|(id, _, _)| *id).unwrap_or(i64::MAX);
+
+        // Step 5: Load unsummarized older messages via ID-range query (fixes 120-window bug)
+        let older_window = if last_summarized_id < first_recent_id {
+            match repo.list_by_lane_id_range(lane_key, last_summarized_id, first_recent_id, 500) {
+                Ok(msgs) => msgs
+                    .into_iter()
+                    .filter(|msg| {
+                        (msg.role == "user" || msg.role == "assistant") && !msg.content.is_empty()
+                    })
+                    .map(|msg| (msg.id, msg.role, msg.content))
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Step 6: Convert recent chat_rows to ChatMessage
+        let recent_messages: Vec<ChatMessage> = chat_rows
             .iter()
             .map(|(_, role, content)| match role.as_str() {
                 "user" => ChatMessage::user(content),
                 _ => ChatMessage::assistant(content),
             })
             .collect();
-
-        // Step 4: Load existing summary from preference
-        let pref_repo = PreferenceRepository::new(db);
-        let pref = pref_repo.get(lane_key, "conversation_summary").ok().flatten();
-        let (summary_text, last_id, version) = match &pref {
-            Some(p) => {
-                let v: serde_json::Value = serde_json::from_str(&p.value).unwrap_or_default();
-                (
-                    v.get("summary")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    v.get("last_summarized_message_id")
-                        .and_then(|n| n.as_i64())
-                        .unwrap_or(0),
-                    Some(p.version),
-                )
-            }
-            None => (String::new(), 0, None),
-        };
 
         let summary = if summary_text.is_empty() {
             None
@@ -198,8 +210,8 @@ impl Orchestrator {
             summary,
             recent_messages,
             older_window,
-            summary_pref_version: version,
-            last_summarized_id: last_id,
+            summary_version,
+            last_summarized_id,
             old_summary_text: summary_text,
         }
     }
@@ -377,20 +389,12 @@ impl Orchestrator {
             .map(|(id, _, _)| *id)
             .unwrap_or(ctx.last_summarized_id);
 
-        let state = serde_json::json!({
-            "summary": new_summary,
-            "last_summarized_message_id": new_last_id,
-        });
-
-        // Save with optimistic locking
-        let pref_repo = PreferenceRepository::new(db);
-        if let Err(e) = pref_repo.set(
-            lane_key,
-            "conversation_summary",
-            &state.to_string(),
-            ctx.summary_pref_version,
-        ) {
-            tracing::warn!("Summary update: save failed (concurrent write?): {e}");
+        // Save with optimistic locking to conversations table
+        let repo = ConversationRepository::new(db);
+        match repo.update_summary_optimistic(lane_key, ctx.summary_version, &new_summary, new_last_id) {
+            Ok(true) => tracing::debug!("Summary updated successfully"),
+            Ok(false) => tracing::warn!("Summary update: concurrent write, version mismatch"),
+            Err(e) => tracing::warn!("Summary update: save failed: {e}"),
         }
     }
 
@@ -418,6 +422,13 @@ impl Orchestrator {
         // 2. Input sanitization
         let content = SecurityGate::sanitize_input(&content)?;
 
+        // Extract owner_id from principal (before slash-command early return)
+        let owner_id_str = principal_id(&principal);
+        let owner_id = match &principal {
+            Principal::User { .. } => Some(owner_id_str.as_str()),
+            _ => None,
+        };
+
         // 3. Try slash commands and task queries first (cheap, no context needed)
         let intent = self.intent_parser.parse(&content);
         match &intent {
@@ -428,7 +439,7 @@ impl Orchestrator {
                     timestamp: Utc::now(),
                 });
                 return match intent {
-                    Intent::TaskQuery { task_id } => self.handle_task_query(task_id),
+                    Intent::TaskQuery { task_id } => self.handle_task_query(task_id, &owner_id_str),
                     Intent::TaskControl { task_id, action } => {
                         self.handle_task_control(&task_id, &action)
                     }
@@ -441,6 +452,30 @@ impl Orchestrator {
         // 4. Build context ONCE for all remaining paths (D6: single dedup location)
         let ctx = self.build_context(&lane_key, &content);
 
+        // Build active tasks block for planner
+        let active_tasks_block = if let Some(ref db) = self.db {
+            let task_repo = TaskRepository::new(db);
+            match task_repo.list_active_by_creator(&owner_id_str, 10) {
+                Ok(tasks) if !tasks.is_empty() => {
+                    let mut block = String::from("### ACTIVE TASKS ###\n");
+                    for t in &tasks {
+                        let progress = match (t.progress_current, t.progress_total) {
+                            (Some(c), Some(total)) => format!(" [{}/{}]", c, total),
+                            _ => String::new(),
+                        };
+                        block.push_str(&format!(
+                            "- [{}] {} ({}{})\n",
+                            &t.id[..8.min(t.id.len())], t.title, t.status.as_str(), progress
+                        ));
+                    }
+                    Some(block)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         // 5. Compute result — planner path or heuristic fallback
         let result: Result<String, String> = if let Some(ref router) = self.llm_router {
             let idle_agents = self.shared_context.agent_registry.list_idle();
@@ -450,6 +485,7 @@ impl Orchestrator {
                 &idle_agents,
                 &ctx.recent_messages,
                 ctx.summary.as_deref(),
+                active_tasks_block.as_deref(),
             )
             .await
             {
@@ -460,7 +496,7 @@ impl Orchestrator {
                             intent_type: "simple_query".to_string(),
                             timestamp: Utc::now(),
                         });
-                        self.handle_simple_query(request_id, &source, &content, &lane_key, &ctx)
+                        self.handle_simple_query(request_id, &source, &content, &lane_key, &ctx, owner_id)
                             .await
                     }
                     "complex_task" => {
@@ -481,7 +517,7 @@ impl Orchestrator {
                             Ok(response) => Ok(response),
                             Err(e) => {
                                 tracing::warn!("Dispatch planned failed: {e}, falling back to simple_query");
-                                self.handle_simple_query(request_id, &source, &content, &lane_key, &ctx).await
+                                self.handle_simple_query(request_id, &source, &content, &lane_key, &ctx, owner_id).await
                             }
                         }
                     }
@@ -491,7 +527,7 @@ impl Orchestrator {
                             _other
                         );
                         self.dispatch_with_heuristic(
-                            request_id, &source, &content, &principal, &lane_key, &ctx,
+                            request_id, &source, &content, &principal, &lane_key, &ctx, owner_id,
                         )
                         .await
                     }
@@ -499,7 +535,7 @@ impl Orchestrator {
                 Err(e) => {
                     tracing::warn!("LLM planning failed: {}, falling back to heuristic", e);
                     self.dispatch_with_heuristic(
-                        request_id, &source, &content, &principal, &lane_key, &ctx,
+                        request_id, &source, &content, &principal, &lane_key, &ctx, owner_id,
                     )
                     .await
                 }
@@ -507,7 +543,7 @@ impl Orchestrator {
         } else {
             // No LLM router — keyword heuristic
             self.dispatch_with_heuristic(
-                request_id, &source, &content, &principal, &lane_key, &ctx,
+                request_id, &source, &content, &principal, &lane_key, &ctx, owner_id,
             )
             .await
         };
@@ -554,6 +590,7 @@ impl Orchestrator {
         principal: &Principal,
         lane_key: &str,
         ctx: &ConversationContext,
+        owner_id: Option<&str>,
     ) -> Result<String, String> {
         let intent = self.intent_parser.parse(content);
 
@@ -565,10 +602,10 @@ impl Orchestrator {
 
         match intent {
             Intent::SimpleQuery { query } => {
-                self.handle_simple_query(request_id, source, &query, lane_key, ctx)
+                self.handle_simple_query(request_id, source, &query, lane_key, ctx, owner_id)
                     .await
             }
-            Intent::TaskQuery { task_id } => self.handle_task_query(task_id),
+            Intent::TaskQuery { task_id } => self.handle_task_query(task_id, &principal_id(principal)),
             Intent::ComplexTask {
                 description,
                 required_skills,
@@ -585,7 +622,7 @@ impl Orchestrator {
                     Ok(response) => Ok(response),
                     Err(e) => {
                         tracing::warn!("Heuristic dispatch failed: {e}, falling back to simple_query");
-                        self.handle_simple_query(request_id, source, &description, lane_key, ctx).await
+                        self.handle_simple_query(request_id, source, &description, lane_key, ctx, owner_id).await
                     }
                 }
             }
@@ -602,6 +639,7 @@ impl Orchestrator {
         query: &str,
         _lane_key: &str,
         ctx: &ConversationContext,
+        owner_id: Option<&str>,
     ) -> Result<String, String> {
         let agent_persona = AgentPersona {
             role: "Assistant".to_string(),
@@ -654,15 +692,53 @@ impl Orchestrator {
                 )));
             }
 
+            // Retrieval injection: hybrid FTS+vector search for user memories
+            if let (Some(db), Some(oid)) = (&self.db, owner_id) {
+                let repo = MemoryRepository::new(db);
+                let top_k = if !tools_for_loop.is_empty() { 5 } else { 10 };
+
+                // Generate query embedding if embedder is available
+                let query_embedding = if let Some(ref embedder) = self.embedder {
+                    embedder.embed(&[query]).await.ok().and_then(|v| v.into_iter().next())
+                } else {
+                    None
+                };
+
+                let memories = repo.search_hybrid(
+                    oid, query, query_embedding.as_deref(), top_k, None, None, None
+                ).unwrap_or_default();
+
+                if !memories.is_empty() {
+                    let mut block = String::from("### RETRIEVED MEMORY ###\n");
+                    let mut budget = 2000usize;
+                    for m in &memories {
+                        let entry = format!("- [{}] {}\n", m.kind.as_str(),
+                            m.content.chars().take(300).collect::<String>());
+                        if entry.len() > budget { break; }
+                        budget -= entry.len();
+                        block.push_str(&entry);
+                    }
+                    messages.push(ChatMessage::system(&block));
+                }
+            }
+
             messages.extend(ctx.recent_messages.clone());
             messages.push(ChatMessage::user(query));
+
+            // Per-request sandbox with ContextualToolExecutor for owner-scoped tools
+            let ctx_exec = ToolExecutionContext { owner_id: owner_id.map(|s| s.to_string()) };
+            let contextual_executor = Arc::new(ContextualToolExecutor::new(
+                self.tool_registry.clone(), ctx_exec,
+            ));
+            let per_request_sandbox = SandboxManager::new(contextual_executor, self.bus.clone());
+
             let call_start = std::time::Instant::now();
             let result = run_agentic_loop_routed(
                 router.as_ref(),
                 messages,
                 tools_for_loop,
                 &config_for_loop,
-                Some(self.security_gate.sandbox()),
+                Some(&per_request_sandbox),
                 "orchestrator",
                 policy_opt.as_ref(),
                 None,
@@ -757,9 +833,16 @@ impl Orchestrator {
         Ok(validated)
     }
 
-    fn handle_task_query(&self, task_id: Option<String>) -> Result<String, String> {
+    fn handle_task_query(&self, task_id: Option<String>, created_by: &str) -> Result<String, String> {
         match task_id {
             Some(id) => {
+                // Try DB first, fall back to in-memory registry
+                if let Some(ref db) = self.db {
+                    let repo = TaskRepository::new(db);
+                    if let Ok(Some(task)) = repo.get(&id) {
+                        return Ok(db_task_to_json(&task));
+                    }
+                }
                 match self.shared_context.task_registry.get(&id) {
                     Some(entry) => Ok(task_entry_to_json(&entry)),
                     None => Ok(serde_json::json!({
@@ -770,6 +853,27 @@ impl Orchestrator {
                 }
             }
             None => {
+                // Try DB first, fall back to in-memory registry
+                if let Some(ref db) = self.db {
+                    let repo = TaskRepository::new(db);
+                    if let Ok(tasks) = repo.list_active_by_creator(created_by, 20) {
+                        let task_list: Vec<serde_json::Value> = tasks.iter().map(|t| {
+                            serde_json::json!({
+                                "task_id": t.id,
+                                "title": t.title,
+                                "status": t.status.as_str(),
+                                "progress_current": t.progress_current,
+                                "progress_total": t.progress_total,
+                                "created_at": t.created_at.to_rfc3339(),
+                            })
+                        }).collect();
+                        return Ok(serde_json::json!({
+                            "tasks": task_list,
+                            "count": task_list.len(),
+                        })
+                        .to_string());
+                    }
+                }
                 let active = self.shared_context.task_registry.list_active();
                 let tasks: Vec<serde_json::Value> =
                     active.iter().map(|e| serde_json::json!({
@@ -881,6 +985,20 @@ fn task_entry_to_json(entry: &TaskEntry) -> String {
     .to_string()
 }
 
+fn db_task_to_json(task: &Task) -> String {
+    serde_json::json!({
+        "task_id": task.id,
+        "title": task.title,
+        "status": task.status.as_str(),
+        "progress_current": task.progress_current,
+        "progress_total": task.progress_total,
+        "result_summary": task.result_summary,
+        "created_at": task.created_at.to_rfc3339(),
+        "updated_at": task.updated_at.to_rfc3339(),
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -915,6 +1033,7 @@ mod tests {
             gate,
             registry,
             None,
+            None,
         )
     }
 
@@ -936,6 +1055,7 @@ mod tests {
             LoopConfig::default(),
             gate,
             registry,
+            None,
             None,
         )
     }
@@ -1160,6 +1280,7 @@ mod tests {
             gate,
             registry,
             None,
+            None,
         );
 
         let result = orch
@@ -1287,6 +1408,7 @@ mod tests {
             LoopConfig::default(),
             gate,
             registry,
+            None,
             None,
         )
     }
@@ -1467,6 +1589,7 @@ mod tests {
             LoopConfig::default(),
             gate,
             registry,
+            None,
             None,
         )
     }

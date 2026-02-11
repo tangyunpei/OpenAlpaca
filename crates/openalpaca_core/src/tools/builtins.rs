@@ -4,8 +4,13 @@ use openalpaca_llm::ToolDefinition;
 use std::sync::Arc;
 
 /// Return all built-in tool definitions and implementations.
-pub fn builtin_tools() -> Vec<RegisteredTool> {
-    vec![
+/// When `db` is provided, memory-backed tools (memory_search) are included.
+/// When `embedder` is provided, memory_search uses hybrid (FTS + vector) search.
+pub fn builtin_tools(
+    db: Option<openalpaca_storage::Database>,
+    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+) -> Vec<RegisteredTool> {
+    let mut tools = vec![
         web_search_tool(),
         web_fetch_tool(),
         summarize_tool(),
@@ -13,7 +18,11 @@ pub fn builtin_tools() -> Vec<RegisteredTool> {
         file_read_tool(),
         file_write_tool(),
         shell_execute_tool(),
-    ]
+    ];
+    if let Some(db) = db {
+        tools.push(memory_search_tool(db, embedder));
+    }
+    tools
 }
 
 // --- web_search ---
@@ -348,6 +357,88 @@ fn shell_execute_tool() -> RegisteredTool {
     }
 }
 
+// --- memory_search ---
+
+struct MemorySearchTool {
+    db: openalpaca_storage::Database,
+    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+}
+
+#[async_trait]
+impl BuiltInTool for MemorySearchTool {
+    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        let query = arguments
+            .get("query")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Missing required parameter: query".to_string())?;
+
+        let limit = arguments
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5) as usize;
+
+        let owner_id = arguments
+            .get("owner_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Missing owner_id (should be injected by executor)".to_string())?;
+
+        // Generate query embedding if embedder available
+        let query_embedding = if let Some(ref embedder) = self.embedder {
+            embedder.embed(&[query]).await.ok().and_then(|v| v.into_iter().next())
+        } else {
+            None
+        };
+
+        let repo = openalpaca_storage::repository::MemoryRepository::new(&self.db);
+        let memories = repo
+            .search_hybrid(owner_id, query, query_embedding.as_deref(), limit, None, None, None)
+            .map_err(|e| format!("Memory search failed: {}", e))?;
+
+        let results: Vec<serde_json::Value> = memories
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "id": m.id,
+                    "kind": m.kind.as_str(),
+                    "scope": m.scope.as_str(),
+                    "content": m.content,
+                    "importance": m.importance,
+                    "created_at": m.created_at,
+                })
+            })
+            .collect();
+
+        serde_json::to_string(&results).map_err(|e| format!("JSON serialization failed: {}", e))
+    }
+}
+
+fn memory_search_tool(
+    db: openalpaca_storage::Database,
+    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+) -> RegisteredTool {
+    RegisteredTool {
+        definition: ToolDefinition {
+            name: "memory_search".to_string(),
+            description: "Search the user's memory for relevant facts, preferences, and knowledge. Use this when you need to recall something the user told you previously.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query to find relevant memories"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return (default: 5)"
+                    }
+                },
+                "required": ["query"]
+            }),
+        },
+        backend: ToolBackend::BuiltIn(Arc::new(MemorySearchTool { db, embedder })),
+    }
+}
+
 /// Validate that a path is safe for workspace-scoped file operations.
 /// Rejects absolute paths and paths containing `..` components.
 fn validate_workspace_path(path: &str) -> Result<(), String> {
@@ -365,14 +456,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_builtin_tools_count() {
-        let tools = builtin_tools();
+    fn test_builtin_tools_count_without_db() {
+        let tools = builtin_tools(None, None);
         assert_eq!(tools.len(), 7);
     }
 
     #[test]
+    fn test_builtin_tools_count_with_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+        let tools = builtin_tools(Some(db), None);
+        assert_eq!(tools.len(), 8);
+    }
+
+    #[test]
     fn test_all_tools_have_valid_definitions() {
-        for tool in builtin_tools() {
+        for tool in builtin_tools(None, None) {
             assert!(!tool.definition.name.is_empty());
             assert!(!tool.definition.description.is_empty());
             assert!(tool.definition.parameters.is_object());

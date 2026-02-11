@@ -18,6 +18,12 @@ impl LaneKey {
     }
 }
 
+impl std::fmt::Display for LaneKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.user_id, self.source)
+    }
+}
+
 /// The type of lane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaneType {
@@ -180,6 +186,12 @@ mod tests {
         lane.record_message();
 
         assert!(lane.last_active_at() >= initial);
+    }
+
+    #[test]
+    fn test_lane_key_display() {
+        assert_eq!(LaneKey::new("user1", "telegram").to_string(), "user1:telegram");
+        assert_eq!(LaneKey::new("abc", "gui").to_string(), "abc:gui");
     }
 
     #[test]

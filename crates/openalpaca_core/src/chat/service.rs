@@ -71,7 +71,7 @@ impl ChatService {
                         connection_id: principal_owned.clone(),
                     },
                     content: user_content.clone(),
-                    principal: Principal::System,
+                    principal: Principal::User { global_id: principal_owned.clone() },
                     scope: Scope::Global,
                 })
                 .await;

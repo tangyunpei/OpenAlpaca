@@ -30,3 +30,9 @@ claude_code = true
 
 [cli_backends.claude_code]
 enabled = false
+
+[embeddings]
+enabled = false
+provider = "local"
+model = "intfloat/multilingual-e5-base"
+dimensions = 768
