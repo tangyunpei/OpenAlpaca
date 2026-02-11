@@ -12,7 +12,7 @@ ChatService signature mismatch for principal handling
 LaneKey string conversion (Display impl)
 memory_search tool DB access + per-request owner scoping
 Exact callsite to persist telegram.last_chat_id
-OpenAI embeddings must produce 384-dim vectors to fit existing memory_vec
+Embeddings use 768-dim vectors (intfloat/multilingual-e5-base) via configurable llm.toml
 Definitions (Locked)
 global_user_id: canonical user identity (global_user.id). In current daemon, this is state.local_user_id (single-user).
 lane_key: "{lane_user_id}:{source}".
@@ -199,9 +199,9 @@ metadata TEXT
 Create memory_fts with UNINDEXED columns for filters:
 content, owner_id UNINDEXED, kind UNINDEXED, scope UNINDEXED, scope_id UNINDEXED, source UNINDEXED
 Triggers must use COALESCE(NEW.scope_id,'') (gap already identified).
-Recreate memory_vec (still 384-dim, compatible with existing sqlite-vec integration):
+Recreate memory_vec (768-dim, intfloat/multilingual-e5-base via local fastembed):
 memory_id INTEGER PRIMARY KEY
-embedding float[384]
+embedding float[768]
 ### 3.2 Storage models: be explicit where Memory types live (Gap fix)
 Decision (locked):
 
@@ -348,18 +348,17 @@ Start task from Telegram, still receive completion message even if preference di
 Estimate: 5–8 days
 
 ## Phase 6 — Embeddings + Vector Search + KB/RAG (hybrid retrieval)
-### 6.1 Embedder trait + backends (with 384-dim constraint)
-Gap fix: OpenAI must produce 384 dims.
-
+### 6.1 Embedder trait + backends (configurable dimensions)
 Decision (locked):
 
-OpenAI backend must use text-embedding-3-small with dimensions: 384.
-Runtime guard: reject any embedding length != 384.
-Add config keys (new):
+Default: local fastembed with intfloat/multilingual-e5-base (768 dims).
+OpenAI backend also supported with configurable dimensions.
+Dimensions are embedder-owned (via `Embedder::dimensions()`) — no hardcoded constants.
+Config keys in llm.toml:
 
-embeddings.provider = "openai" | "local"
-embeddings.model = "text-embedding-3-small" (OpenAI)
-embeddings.dimensions = 384 (must match memory_vec)
+embeddings.provider = "local" | "openai"
+embeddings.model = "intfloat/multilingual-e5-base" (local) or "text-embedding-3-small" (OpenAI)
+embeddings.dimensions = 768 (must match memory_vec migration)
 embeddings.enabled = true|false
 ### 6.2 Vector indexing + reindex endpoints
 Implement:
@@ -385,4 +384,4 @@ Summary does not permanently fall behind after the conversation surpasses 120 me
 Clear history resets messages + conversation counters + summary fields.
 Retrieval injection appears as a dedicated block between summary and tail messages.
 memory_search tool can run and is owner-scoped even if the LLM attempts to pass a different owner_id.
-Vector embeddings reindex works and enforces 384 dims (OpenAI with dimensions=384).
+Vector embeddings reindex works and enforces configured dimensions (768 default via embedder.dimensions()).

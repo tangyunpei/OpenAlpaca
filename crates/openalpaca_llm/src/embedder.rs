@@ -12,8 +12,8 @@ pub enum EmbedError {
     Config(String),
     #[error("API error: {0}")]
     Api(String),
-    #[error("Dimension mismatch: expected 384, got {0}")]
-    DimensionMismatch(usize),
+    #[error("Dimension mismatch: expected {expected}, got {actual}")]
+    DimensionMismatch { expected: u32, actual: usize },
 }
 
 #[async_trait]
@@ -35,11 +35,6 @@ pub struct OpenAiEmbedder {
 #[cfg(feature = "openai")]
 impl OpenAiEmbedder {
     pub fn new(api_key: String, model: String, dimensions: u32) -> Result<Self, EmbedError> {
-        if dimensions != 384 {
-            return Err(EmbedError::Config(format!(
-                "Dimensions must be 384 to match memory_vec, got {dimensions}"
-            )));
-        }
         Ok(Self {
             client: reqwest::Client::new(),
             api_key,
@@ -99,8 +94,11 @@ impl Embedder for OpenAiEmbedder {
                 .map(|v| v.as_f64().unwrap_or(0.0) as f32)
                 .collect();
 
-            if embedding.len() != 384 {
-                return Err(EmbedError::DimensionMismatch(embedding.len()));
+            if embedding.len() != self.dimensions as usize {
+                return Err(EmbedError::DimensionMismatch {
+                    expected: self.dimensions,
+                    actual: embedding.len(),
+                });
             }
             embeddings.push(embedding);
         }
@@ -118,17 +116,24 @@ impl Embedder for OpenAiEmbedder {
 #[cfg(feature = "local-embeddings")]
 pub struct LocalEmbedder {
     model: fastembed::TextEmbedding,
+    dims: u32,
 }
 
 #[cfg(feature = "local-embeddings")]
 impl LocalEmbedder {
-    pub fn new() -> Result<Self, EmbedError> {
+    pub fn new(model_name: Option<&str>, dimensions: u32) -> Result<Self, EmbedError> {
+        let default_model = "intfloat/multilingual-e5-base";
+        let name = model_name.unwrap_or(default_model);
+        let model_enum: fastembed::EmbeddingModel = name
+            .parse()
+            .map_err(|_| EmbedError::Config(format!("Unknown local embedding model: '{name}'")))?;
+
         let mut opts = fastembed::InitOptions::default();
-        opts.model_name = fastembed::EmbeddingModel::AllMiniLML6V2;
-        opts.show_download_progress = false;
+        opts.model_name = model_enum;
+        opts.show_download_progress = true;
         let model = fastembed::TextEmbedding::try_new(opts)
             .map_err(|e| EmbedError::Config(format!("Failed to load local embedding model: {e}")))?;
-        Ok(Self { model })
+        Ok(Self { model, dims: dimensions })
     }
 }
 
@@ -147,8 +152,11 @@ impl Embedder for LocalEmbedder {
             .map_err(|e| EmbedError::Api(format!("Local embedding failed: {e}")))?;
 
         for emb in &embeddings {
-            if emb.len() != 384 {
-                return Err(EmbedError::DimensionMismatch(emb.len()));
+            if emb.len() != self.dims as usize {
+                return Err(EmbedError::DimensionMismatch {
+                    expected: self.dims,
+                    actual: emb.len(),
+                });
             }
         }
 
@@ -156,7 +164,7 @@ impl Embedder for LocalEmbedder {
     }
 
     fn dimensions(&self) -> u32 {
-        384
+        self.dims
     }
 }
 
@@ -167,12 +175,7 @@ pub fn build_embedder(
     secret_store: Option<&dyn crate::secret_store::SecretStore>,
     provider_config: Option<&crate::config::ProviderConfig>,
 ) -> Result<Arc<dyn Embedder>, EmbedError> {
-    let dimensions = config.dimensions.unwrap_or(384);
-    if dimensions != 384 {
-        return Err(EmbedError::Config(format!(
-            "Dimensions must be 384 to match memory_vec, got {dimensions}"
-        )));
-    }
+    let dimensions = config.dimensions.unwrap_or(768);
 
     match config.provider.as_str() {
         #[cfg(feature = "openai")]
@@ -193,7 +196,8 @@ pub fn build_embedder(
         }
         #[cfg(feature = "local-embeddings")]
         "local" => {
-            let embedder = LocalEmbedder::new()?;
+            let model_name = config.model.as_deref();
+            let embedder = LocalEmbedder::new(model_name, dimensions)?;
             Ok(Arc::new(embedder))
         }
         other => Err(EmbedError::Config(format!(
@@ -233,18 +237,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_dimensions_guard() {
+    fn test_default_dimensions_is_768() {
+        // When dimensions is None, the factory should default to 768
         let config = EmbeddingsConfig {
             enabled: true,
-            provider: "openai".to_string(),
+            provider: "nonexistent".to_string(),
             model: None,
-            dimensions: Some(512),
+            dimensions: None,
             batch_size: None,
         };
         let result = build_embedder(&config, None, None);
+        // Should fail because provider is unknown, not because of dimensions
         assert!(result.is_err());
         match result {
-            Err(e) => assert!(e.to_string().contains("384")),
+            Err(e) => assert!(e.to_string().contains("Unknown")),
             Ok(_) => panic!("Expected error"),
         }
     }
@@ -256,7 +262,7 @@ mod tests {
             enabled: true,
             provider: "openai".to_string(),
             model: Some("text-embedding-3-small".to_string()),
-            dimensions: Some(384),
+            dimensions: Some(768),
             batch_size: None,
         };
         // Without any key source, should fail
@@ -273,7 +279,7 @@ mod tests {
             enabled: true,
             provider: "nonexistent".to_string(),
             model: None,
-            dimensions: Some(384),
+            dimensions: Some(768),
             batch_size: None,
         };
         let result = build_embedder(&config, None, None);

@@ -91,4 +91,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "task_state",
         sql: include_str!("016_task_state.sql"),
     },
+    Migration {
+        version: 17,
+        name: "vec_768",
+        sql: include_str!("017_vec_768.sql"),
+    },
 ];

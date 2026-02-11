@@ -726,7 +726,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     Ok(embeddings) => {
                         let mut count = 0usize;
                         for ((id, _), embedding) in missing.iter().zip(embeddings.iter()) {
-                            if embedding.len() == 384 {
+                            if embedding.len() == idx_emb.dimensions() as usize {
                                 let _ = repo.insert_embedding(*id, embedding);
                                 count += 1;
                             }
