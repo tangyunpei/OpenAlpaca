@@ -33,6 +33,6 @@ enabled = false
 
 [embeddings]
 enabled = false
-provider = "openai"
-model = "text-embedding-3-small"
-dimensions = 384
+provider = "local"
+model = "intfloat/multilingual-e5-base"
+dimensions = 768

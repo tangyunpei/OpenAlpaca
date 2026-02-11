@@ -168,7 +168,7 @@ impl<'a> MemoryRepository<'a> {
 
     /// Insert a vector embedding for a memory entry.
     pub fn insert_embedding(&self, memory_id: i64, embedding: &[f32]) -> Result<()> {
-        assert_eq!(embedding.len(), 384, "Embedding must be 384-dim");
+        // Dimension is enforced by the sqlite-vec table schema at insert time.
         self.db.with_connection(|conn| {
             let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
             conn.execute(
@@ -216,9 +216,7 @@ impl<'a> MemoryRepository<'a> {
         embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<MemoryV2>> {
-        if embedding.len() != 384 {
-            anyhow::bail!("Embedding must be 384-dim, got {}", embedding.len());
-        }
+        // Dimension is enforced by the sqlite-vec table schema at query time.
         self.db.with_connection(|conn| {
             let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
             // sqlite-vec KNN: MATCH + k. Owner filtering happens post-KNN since
@@ -574,14 +572,14 @@ mod tests {
             )
             .unwrap();
 
-        // Create a dummy 384-dim embedding
-        let mut embedding = vec![0.0f32; 384];
+        // Create a dummy 768-dim embedding
+        let mut embedding = vec![0.0f32; 768];
         embedding[0] = 1.0;
         embedding[1] = 0.5;
         repo.insert_embedding(id, &embedding).unwrap();
 
         // Search with a similar embedding
-        let mut query_emb = vec![0.0f32; 384];
+        let mut query_emb = vec![0.0f32; 768];
         query_emb[0] = 0.9;
         query_emb[1] = 0.4;
 
@@ -624,11 +622,11 @@ mod tests {
             )
             .unwrap();
 
-        let emb = vec![0.1f32; 384];
+        let emb = vec![0.1f32; 768];
         repo.insert_embedding(id_a, &emb).unwrap();
         repo.insert_embedding(id_b, &emb).unwrap();
 
-        let query = vec![0.1f32; 384];
+        let query = vec![0.1f32; 768];
         let a_results = repo.search_vec("owner-A", &query, 10).unwrap();
         assert_eq!(a_results.len(), 1);
         assert!(a_results[0].content.contains("Secret A"));
@@ -673,7 +671,7 @@ mod tests {
         assert_eq!(total, 2);
         assert_eq!(embedded, 0);
 
-        let emb = vec![0.1f32; 384];
+        let emb = vec![0.1f32; 768];
         repo.insert_embedding(id1, &emb).unwrap();
 
         let (total, embedded) = repo.embedding_stats("owner-1").unwrap();
@@ -713,7 +711,7 @@ mod tests {
             )
             .unwrap();
 
-        let emb = vec![0.1f32; 384];
+        let emb = vec![0.1f32; 768];
         repo.insert_embedding(id1, &emb).unwrap();
 
         let missing = repo.list_missing_embeddings("owner-1", 10).unwrap();
@@ -741,10 +739,10 @@ mod tests {
             .unwrap();
 
         // Add embedding so it shows in both FTS and vec
-        let emb = vec![0.1f32; 384];
+        let emb = vec![0.1f32; 768];
         repo.insert_embedding(id, &emb).unwrap();
 
-        let query_emb = vec![0.1f32; 384];
+        let query_emb = vec![0.1f32; 768];
         let results = repo
             .search_hybrid("owner-1", "Rust", Some(&query_emb), 10, None, None, None)
             .unwrap();

@@ -65,7 +65,7 @@ pub async fn reindex_handler(
         Ok(embeddings) => {
             let mut indexed = 0usize;
             for ((id, _), embedding) in missing.iter().zip(embeddings.iter()) {
-                if embedding.len() == 384 {
+                if embedding.len() == embedder.dimensions() as usize {
                     if repo.insert_embedding(*id, embedding).is_ok() {
                         indexed += 1;
                     }

@@ -210,7 +210,7 @@ mod tests {
 
         let db = Database::open(&db_path).unwrap();
         assert!(db_path.exists());
-        assert_eq!(db.schema_version().unwrap(), 16);
+        assert_eq!(db.schema_version().unwrap(), 17);
     }
 
     #[test]
@@ -222,7 +222,7 @@ mod tests {
         let _db1 = Database::open(&db_path).unwrap();
         let db2 = Database::open(&db_path).unwrap();
 
-        assert_eq!(db2.schema_version().unwrap(), 16);
+        assert_eq!(db2.schema_version().unwrap(), 17);
     }
 
     #[test]
@@ -261,9 +261,9 @@ mod tests {
             )?;
             assert!(exists, "memory_vec table should exist after migration");
 
-            // 3. Insert a zero vector (384 floats x 4 bytes = 1536 bytes of zeroblob)
+            // 3. Insert a zero vector (768 floats x 4 bytes = 3072 bytes of zeroblob)
             conn.execute(
-                "INSERT INTO memory_vec(memory_id, embedding) VALUES (1, vec_f32(zeroblob(1536)))",
+                "INSERT INTO memory_vec(memory_id, embedding) VALUES (1, vec_f32(zeroblob(3072)))",
                 [],
             )?;
 
