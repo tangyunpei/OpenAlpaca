@@ -76,4 +76,24 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "vec_search",
         sql: include_str!("013_vec_search.sql"),
     },
+    Migration {
+        version: 14,
+        name: "conversation_summary",
+        sql: include_str!("014_conversation_summary.sql"),
+    },
+    Migration {
+        version: 15,
+        name: "memory_v2",
+        sql: include_str!("015_memory_v2.sql"),
+    },
+    Migration {
+        version: 16,
+        name: "task_state",
+        sql: include_str!("016_task_state.sql"),
+    },
+    Migration {
+        version: 17,
+        name: "vec_768",
+        sql: include_str!("017_vec_768.sql"),
+    },
 ];

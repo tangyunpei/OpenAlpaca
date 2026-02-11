@@ -286,6 +286,7 @@ impl<'a> IdentityRepository<'a> {
                 provider: provider.to_string(),
                 provider_conversation_id: provider_conversation_id.to_string(),
                 global_user_id: global_user_id.map(|s| s.to_string()),
+                lane_key: None,
                 created_at: now,
             })
         })
@@ -299,7 +300,7 @@ impl<'a> IdentityRepository<'a> {
     ) -> Result<Option<ConversationMap>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, provider, provider_conversation_id, global_user_id, created_at 
+                "SELECT id, provider, provider_conversation_id, global_user_id, lane_key, created_at
                  FROM conversation_map WHERE provider = ?1 AND provider_conversation_id = ?2",
             )?;
             let mut rows = stmt.query([provider, provider_conversation_id])?;
@@ -310,7 +311,8 @@ impl<'a> IdentityRepository<'a> {
                     let provider: String = row.get(1)?;
                     let provider_conversation_id: String = row.get(2)?;
                     let global_user_id: Option<String> = row.get(3)?;
-                    let created_at_str: String = row.get(4)?;
+                    let lane_key: Option<String> = row.get(4)?;
+                    let created_at_str: String = row.get(5)?;
 
                     let created_at = DateTime::parse_from_rfc3339(&created_at_str)
                         .map(|dt| dt.with_timezone(&Utc))
@@ -321,6 +323,7 @@ impl<'a> IdentityRepository<'a> {
                         provider,
                         provider_conversation_id,
                         global_user_id,
+                        lane_key,
                         created_at,
                     }))
                 }
@@ -376,6 +379,110 @@ impl<'a> IdentityRepository<'a> {
         })
     }
 
+    /// Migrate all lane data from old provider-keyed lane to new global-user-keyed lane.
+    /// Called after a successful /link to ensure messages, tasks, and preferences
+    /// follow the canonical identity.
+    pub fn migrate_lane_on_link(
+        &self,
+        provider_user_id: &str,
+        global_user_id: &str,
+        provider: &str,
+        provider_conversation_id: &str,
+    ) -> Result<()> {
+        let old_lane = format!("{provider_user_id}:{provider}");
+        let new_lane = format!("{global_user_id}:{provider}");
+
+        if old_lane == new_lane {
+            return Ok(());
+        }
+
+        self.db.with_connection(|conn| {
+            let tx = conn.unchecked_transaction()?;
+
+            // 1. Move conversation_messages
+            tx.execute(
+                "UPDATE conversation_messages SET lane_key = ?1 WHERE lane_key = ?2",
+                rusqlite::params![new_lane, old_lane],
+            )?;
+
+            // 2. Move tasks
+            tx.execute(
+                "UPDATE task SET source_lane = ?1 WHERE source_lane = ?2",
+                rusqlite::params![new_lane, old_lane],
+            )?;
+
+            // 3. Update conversation_map
+            tx.execute(
+                "UPDATE conversation_map SET lane_key = ?1 WHERE provider = ?2 AND provider_conversation_id = ?3",
+                rusqlite::params![new_lane, provider, provider_conversation_id],
+            )?;
+
+            // 4. Move conversation_summary preference
+            tx.execute(
+                "UPDATE OR IGNORE preference SET user_id = ?1 WHERE user_id = ?2 AND key = 'conversation_summary'",
+                rusqlite::params![new_lane, old_lane],
+            )?;
+            // Clean up old row if OR IGNORE skipped due to UNIQUE conflict
+            tx.execute(
+                "DELETE FROM preference WHERE user_id = ?1 AND key = 'conversation_summary'",
+                rusqlite::params![old_lane],
+            )?;
+
+            // 5. MERGE conversations table
+            let old_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM conversations WHERE lane_key = ?1)",
+                rusqlite::params![old_lane],
+                |row| row.get(0),
+            )?;
+            let new_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM conversations WHERE lane_key = ?1)",
+                rusqlite::params![new_lane],
+                |row| row.get(0),
+            )?;
+
+            match (old_exists, new_exists) {
+                (true, false) => {
+                    // Only old exists: rename
+                    tx.execute(
+                        "UPDATE conversations SET lane_key = ?1 WHERE lane_key = ?2",
+                        rusqlite::params![new_lane, old_lane],
+                    )?;
+                }
+                (true, true) => {
+                    // Both exist: delete old (messages already moved in step 1)
+                    tx.execute(
+                        "DELETE FROM conversations WHERE lane_key = ?1",
+                        rusqlite::params![old_lane],
+                    )?;
+                }
+                _ => {
+                    // old doesn't exist: nothing to merge
+                }
+            }
+
+            // 6. Recompute conversations stats from actual messages
+            if old_exists || new_exists {
+                let msg_count: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM conversation_messages WHERE lane_key = ?1",
+                    rusqlite::params![new_lane],
+                    |row| row.get(0),
+                )?;
+                let last_msg_at: Option<String> = tx.query_row(
+                    "SELECT MAX(created_at) FROM conversation_messages WHERE lane_key = ?1",
+                    rusqlite::params![new_lane],
+                    |row| row.get(0),
+                )?;
+                tx.execute(
+                    "UPDATE conversations SET message_count = ?1, last_message_at = ?2, updated_at = ?3 WHERE lane_key = ?4",
+                    rusqlite::params![msg_count, last_msg_at, Utc::now().to_rfc3339(), new_lane],
+                )?;
+            }
+
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
     /// Delete all data associated with a provider (Factory Reset for single connector)
     pub fn delete_data_for_provider(&self, provider: &str) -> Result<()> {
         self.db.with_connection(|conn| {
@@ -399,6 +506,8 @@ impl<'a> IdentityRepository<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::conversation::ConversationMessage;
+    use crate::repository::ConversationRepository;
     use tempfile::tempdir;
 
     fn test_db() -> Database {
@@ -467,5 +576,120 @@ mod tests {
         // Consume again (should fail - already used)
         let result2 = repo.consume_link_token("ABC123").unwrap();
         assert!(result2.is_none());
+    }
+
+    #[test]
+    fn test_migrate_lane_on_link() {
+        let db = test_db();
+        let identity_repo = IdentityRepository::new(&db);
+        let conv_repo = ConversationRepository::new(&db);
+
+        // Seed: create messages under old lane (provider_user_id:telegram)
+        let old_lane = "tg123:telegram";
+        let new_lane = "global1:telegram";
+
+        let msg = ConversationMessage {
+            id: 0,
+            lane_key: old_lane.to_string(),
+            role: "user".to_string(),
+            content: "hello".to_string(),
+            source: Some("telegram".to_string()),
+            model: None,
+            tokens_in: None,
+            tokens_out: None,
+            duration_ms: None,
+            created_at: String::new(),
+        };
+        conv_repo.insert(&msg).unwrap();
+        conv_repo.insert(&ConversationMessage {
+            content: "world".to_string(),
+            role: "assistant".to_string(),
+            ..msg.clone()
+        }).unwrap();
+
+        // Verify messages exist under old lane
+        let before = conv_repo.list_by_lane(old_lane, 50, 0).unwrap();
+        assert_eq!(before.len(), 2);
+
+        // Setup conversation_map entry
+        identity_repo
+            .update_conversation_map_lane_key("telegram", "999", old_lane)
+            .unwrap();
+
+        // Run migration
+        identity_repo
+            .migrate_lane_on_link("tg123", "global1", "telegram", "999")
+            .unwrap();
+
+        // Verify messages moved to new lane
+        let after_old = conv_repo.list_by_lane(old_lane, 50, 0).unwrap();
+        assert_eq!(after_old.len(), 0);
+
+        let after_new = conv_repo.list_by_lane(new_lane, 50, 0).unwrap();
+        assert_eq!(after_new.len(), 2);
+        assert_eq!(after_new[0].content, "hello");
+
+        // Verify conversation_map updated
+        let cmap = identity_repo
+            .get_conversation_map("telegram", "999")
+            .unwrap()
+            .unwrap();
+        assert_eq!(cmap.lane_key, Some(new_lane.to_string()));
+    }
+
+    #[test]
+    fn test_migrate_lane_noop_when_same() {
+        let db = test_db();
+        let repo = IdentityRepository::new(&db);
+
+        // Same provider_user_id and global_user_id => no-op
+        repo.migrate_lane_on_link("user1", "user1", "telegram", "123")
+            .unwrap();
+    }
+
+    #[test]
+    fn test_migrate_lane_relink_no_unique_violation() {
+        let db = test_db();
+        let identity_repo = IdentityRepository::new(&db);
+        let conv_repo = ConversationRepository::new(&db);
+
+        // First link: create messages under old lane, migrate
+        let msg = ConversationMessage {
+            id: 0,
+            lane_key: "tg456:telegram".to_string(),
+            role: "user".to_string(),
+            content: "first".to_string(),
+            source: Some("telegram".to_string()),
+            model: None,
+            tokens_in: None,
+            tokens_out: None,
+            duration_ms: None,
+            created_at: String::new(),
+        };
+        conv_repo.insert(&msg).unwrap();
+
+        identity_repo
+            .update_conversation_map_lane_key("telegram", "888", "tg456:telegram")
+            .unwrap();
+
+        identity_repo
+            .migrate_lane_on_link("tg456", "global2", "telegram", "888")
+            .unwrap();
+
+        // Now add more messages under the new provider lane (simulating unlink + new messages)
+        conv_repo.insert(&ConversationMessage {
+            lane_key: "tg456:telegram".to_string(),
+            content: "second".to_string(),
+            ..msg.clone()
+        }).unwrap();
+
+        // Re-link: should not cause UNIQUE violation
+        identity_repo
+            .migrate_lane_on_link("tg456", "global2", "telegram", "888")
+            .unwrap();
+
+        // All messages under global lane
+        let msgs = conv_repo.list_by_lane("global2:telegram", 50, 0).unwrap();
+        assert_eq!(msgs.len(), 2);
     }
 }

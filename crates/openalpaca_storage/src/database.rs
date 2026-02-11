@@ -189,6 +189,7 @@ impl Database {
             // 2. Connector & Agent data
             // Triggers on memory should clean up memory_fts automatically
             conn.execute("DELETE FROM memory", [])?;
+            conn.execute("DELETE FROM memory_vec", [])?;
             conn.execute("DELETE FROM event_log", [])?;
             conn.execute("DELETE FROM agent", [])?;
 
@@ -209,7 +210,7 @@ mod tests {
 
         let db = Database::open(&db_path).unwrap();
         assert!(db_path.exists());
-        assert_eq!(db.schema_version().unwrap(), 13);
+        assert_eq!(db.schema_version().unwrap(), 17);
     }
 
     #[test]
@@ -221,7 +222,7 @@ mod tests {
         let _db1 = Database::open(&db_path).unwrap();
         let db2 = Database::open(&db_path).unwrap();
 
-        assert_eq!(db2.schema_version().unwrap(), 13);
+        assert_eq!(db2.schema_version().unwrap(), 17);
     }
 
     #[test]
@@ -229,10 +230,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let db = Database::open(&dir.path().join("test.db")).unwrap();
 
-        // Insert memory without agent should fail (foreign key constraint)
+        // Insert task_agent_assignment with nonexistent task_id should fail (FK)
         let result = db.with_connection(|c| {
             c.execute(
-                "INSERT INTO memory(agent_id, role, content) VALUES ('no-agent', 'user', 'hi')",
+                "INSERT INTO task_agent_assignment(id, task_id, agent_id, role, status)
+                 VALUES ('a1', 'nonexistent-task', 'agent-1', 'test', 'pending')",
                 [],
             )?;
             Ok(())
@@ -259,9 +261,9 @@ mod tests {
             )?;
             assert!(exists, "memory_vec table should exist after migration");
 
-            // 3. Insert a zero vector (384 floats x 4 bytes = 1536 bytes of zeroblob)
+            // 3. Insert a zero vector (768 floats x 4 bytes = 3072 bytes of zeroblob)
             conn.execute(
-                "INSERT INTO memory_vec(memory_id, embedding) VALUES (1, vec_f32(zeroblob(1536)))",
+                "INSERT INTO memory_vec(memory_id, embedding) VALUES (1, vec_f32(zeroblob(3072)))",
                 [],
             )?;
 
@@ -281,11 +283,10 @@ mod tests {
         let db = Database::open(&dir.path().join("test.db")).unwrap();
 
         db.with_connection(|c| {
-            // Create agent
-            c.execute("INSERT INTO agent(id, name) VALUES ('a1', 'Test')", [])?;
-            // Insert memory with "old" keyword
+            // Insert v2 memory with "old" keyword
             c.execute(
-                "INSERT INTO memory(agent_id, role, content) VALUES ('a1', 'user', 'old keyword here')",
+                "INSERT INTO memory(owner_id, kind, scope, scope_id, source, content, content_hash)
+                 VALUES ('owner-1', 'fact', 'global', '', 'conversation', 'old keyword here', 'hash1')",
                 [],
             )?;
             Ok(())
@@ -294,7 +295,7 @@ mod tests {
         // Update content to "new" keyword
         db.with_connection(|c| {
             c.execute(
-                "UPDATE memory SET content = 'new keyword here' WHERE agent_id='a1'",
+                "UPDATE memory SET content = 'new keyword here', content_hash = 'hash2' WHERE owner_id='owner-1'",
                 [],
             )?;
             Ok(())

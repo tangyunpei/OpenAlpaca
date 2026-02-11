@@ -100,3 +100,4 @@ config/llm.toml
 *.md
 !docs/CLI_Manual.md
 !docs/GUI_Manual.md
+!docs/plans/Unified_Memory_System.md

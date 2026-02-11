@@ -22,8 +22,8 @@ impl<'a> TaskRepository<'a> {
     pub fn create(&self, task: &Task) -> Result<()> {
         self.db.with_connection(|conn| {
             conn.execute(
-                "INSERT INTO task (id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                "INSERT INTO task (id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 rusqlite::params![
                     task.id,
                     task.title,
@@ -38,6 +38,8 @@ impl<'a> TaskRepository<'a> {
                     task.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
                     task.updated_at.format("%Y-%m-%d %H:%M:%S").to_string(),
                     task.completed_at.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+                    task.state_json,
+                    task.state_version,
                 ],
             )
             .context("Failed to create task")?;
@@ -49,7 +51,7 @@ impl<'a> TaskRepository<'a> {
     pub fn get(&self, id: &str) -> Result<Option<Task>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at
+                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version
                  FROM task WHERE id = ?",
             )?;
             let task = stmt
@@ -64,7 +66,7 @@ impl<'a> TaskRepository<'a> {
     pub fn list_by_creator(&self, created_by: &str, limit: usize) -> Result<Vec<Task>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at
+                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version
                  FROM task WHERE created_by = ? ORDER BY created_at DESC LIMIT ?",
             )?;
             let rows = stmt.query_map(rusqlite::params![created_by, limit as i64], |row| {
@@ -82,7 +84,7 @@ impl<'a> TaskRepository<'a> {
     pub fn list_by_status(&self, status: TaskStatus, limit: usize) -> Result<Vec<Task>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at
+                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version
                  FROM task WHERE status = ? ORDER BY created_at DESC LIMIT ?",
             )?;
             let rows = stmt.query_map(rusqlite::params![status.as_str(), limit as i64], |row| {
@@ -100,7 +102,7 @@ impl<'a> TaskRepository<'a> {
     pub fn list_active(&self, limit: usize) -> Result<Vec<Task>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at
+                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version
                  FROM task WHERE status IN ('queued', 'running', 'paused') ORDER BY priority DESC, created_at ASC LIMIT ?",
             )?;
             let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
@@ -114,11 +116,31 @@ impl<'a> TaskRepository<'a> {
         })
     }
 
+    /// List active tasks (queued/running/paused) filtered by creator.
+    pub fn list_active_by_creator(&self, created_by: &str, limit: usize) -> Result<Vec<Task>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, description, status, priority, progress_current, progress_total,
+                        result_summary, created_by, source_lane, created_at, updated_at, completed_at,
+                        state_json, state_version
+                 FROM task
+                 WHERE created_by = ? AND status IN ('queued', 'running', 'paused')
+                 ORDER BY priority DESC, created_at ASC LIMIT ?",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![created_by, limit as i64], |row| {
+                Self::row_to_task(row)
+            })?;
+            let mut tasks = Vec::new();
+            for row in rows { tasks.push(row?); }
+            Ok(tasks)
+        })
+    }
+
     /// List recent tasks of all statuses (most recent first).
     pub fn list_recent(&self, limit: usize) -> Result<Vec<Task>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at
+                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version
                  FROM task ORDER BY created_at DESC LIMIT ?",
             )?;
             let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
@@ -176,6 +198,20 @@ impl<'a> TaskRepository<'a> {
                 rusqlite::params![result_summary, now, id],
             )
             .context("Failed to set task result")?;
+            Ok(rows > 0)
+        })
+    }
+
+    /// Update state_json with optimistic locking on state_version.
+    /// Returns true if updated, false if version mismatch.
+    pub fn update_state(&self, id: &str, state_json: &str, expected_version: i32) -> Result<bool> {
+        self.db.with_connection(|conn| {
+            let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            let rows = conn.execute(
+                "UPDATE task SET state_json = ?1, state_version = ?2, updated_at = ?3
+                 WHERE id = ?4 AND state_version = ?5",
+                rusqlite::params![state_json, expected_version + 1, now, id, expected_version],
+            ).context("Failed to update task state")?;
             Ok(rows > 0)
         })
     }
@@ -289,6 +325,8 @@ impl<'a> TaskRepository<'a> {
             created_at: parse_datetime(&created_str),
             updated_at: parse_datetime(&updated_str),
             completed_at: completed_str.as_deref().map(parse_datetime),
+            state_json: row.get(13)?,
+            state_version: row.get(14)?,
         })
     }
 
@@ -344,6 +382,8 @@ mod tests {
             created_at: now,
             updated_at: now,
             completed_at: None,
+            state_json: None,
+            state_version: 0,
         }
     }
 
@@ -513,6 +553,60 @@ mod tests {
         let assignments = repo.get_assignments("t1").unwrap();
         assert_eq!(assignments[0].status, AssignmentStatus::Running);
         assert!(assignments[0].started_at.is_some());
+    }
+
+    #[test]
+    fn test_update_state_optimistic_locking() {
+        let db = setup_db();
+        let repo = TaskRepository::new(&db);
+
+        repo.create(&make_task("t1", "Task")).unwrap();
+
+        // Version 0 → 1 should succeed
+        assert!(repo.update_state("t1", r#"{"objective":"test"}"#, 0).unwrap());
+
+        let task = repo.get("t1").unwrap().unwrap();
+        assert_eq!(task.state_version, 1);
+        assert_eq!(task.state_json.as_deref(), Some(r#"{"objective":"test"}"#));
+
+        // Stale version 0 should fail (current is 1)
+        assert!(!repo.update_state("t1", r#"{"objective":"stale"}"#, 0).unwrap());
+
+        // Version 1 → 2 should succeed
+        assert!(repo.update_state("t1", r#"{"objective":"updated"}"#, 1).unwrap());
+        let task = repo.get("t1").unwrap().unwrap();
+        assert_eq!(task.state_version, 2);
+        assert_eq!(task.state_json.as_deref(), Some(r#"{"objective":"updated"}"#));
+    }
+
+    #[test]
+    fn test_list_active_by_creator() {
+        let db = setup_db();
+        let repo = TaskRepository::new(&db);
+
+        // user1: queued + running (should appear)
+        repo.create(&make_task("t1", "Queued")).unwrap();
+
+        let mut running = make_task("t2", "Running");
+        running.status = TaskStatus::Running;
+        repo.create(&running).unwrap();
+
+        // user1: completed (should NOT appear)
+        let mut completed = make_task("t3", "Completed");
+        completed.status = TaskStatus::Completed;
+        repo.create(&completed).unwrap();
+
+        // user2: queued (should NOT appear for user1)
+        let mut other = make_task("t4", "Other User");
+        other.created_by = "user2".to_string();
+        repo.create(&other).unwrap();
+
+        let active = repo.list_active_by_creator("user1", 10).unwrap();
+        assert_eq!(active.len(), 2);
+        // Should be user1's tasks only
+        assert!(active.iter().all(|t| t.created_by == "user1"));
+        // Should be active statuses only
+        assert!(active.iter().all(|t| !t.status.is_terminal()));
     }
 
     #[test]

@@ -49,15 +49,16 @@ impl TaskPlanner {
         idle_agents: &[SubAgent],
         history: &[ChatMessage],
         session_summary: Option<&str>,
+        active_tasks_block: Option<&str>,
     ) -> Result<TaskPlan, PlanError> {
         let system_prompt = Self::build_system_prompt(idle_agents);
 
-        let history_tail = if history.len() > 6 {
-            &history[history.len() - 6..]
+        let history_tail = if history.len() > 12 {
+            &history[history.len() - 12..]
         } else {
             history
         };
-        let mut messages = Vec::with_capacity(3 + history_tail.len());
+        let mut messages = Vec::with_capacity(4 + history_tail.len());
         messages.push(ChatMessage::system(&system_prompt));
 
         // Inject summary before history
@@ -66,6 +67,11 @@ impl TaskPlanner {
                 "### SESSION SUMMARY ###\n{}",
                 summary
             )));
+        }
+
+        // Inject active tasks block
+        if let Some(tasks_block) = active_tasks_block {
+            messages.push(ChatMessage::system(tasks_block));
         }
 
         messages.extend_from_slice(history_tail);
@@ -124,11 +130,19 @@ impl TaskPlanner {
 
         prompt.push_str(
             r#"
-## Response Format (JSON only, no other text)
-Simple query: {"classification": "simple_query", "title": null, "assignments": [], "reasoning": "..."}
-Complex task:  {"classification": "complex_task", "title": "Concise title", "assignments": [{"agent_id": "...", "agent_name": "...", "role_description": "...", "matched_skills": ["..."]}], "reasoning": "..."}
+## Response Format
+Respond with ONLY a single JSON object. No markdown, no explanation, no other text.
+The JSON object MUST contain exactly these four keys: "classification", "title", "assignments", "reasoning".
+Do NOT include keys like "available_agents" or repeat the agent list.
+
+Simple query example:
+{"classification": "simple_query", "title": null, "assignments": [], "reasoning": "This is a casual greeting"}
+
+Complex task example:
+{"classification": "complex_task", "title": "Research Rust async patterns", "assignments": [{"agent_id": "...", "agent_name": "...", "role_description": "...", "matched_skills": ["..."]}], "reasoning": "User needs research done"}
 
 ## Rules
+- "classification" MUST be either "simple_query" or "complex_task"
 - Use exact agent_id values from the list above
 - Title: imperative, max 50 chars (e.g. "Research Rust async patterns")
 - Only classify as complex_task if agent work is needed
@@ -136,6 +150,7 @@ Complex task:  {"classification": "complex_task", "title": "Concise title", "ass
 - Use multiple agents when the task has distinct stages requiring different skills (e.g. agent with file_read reads a file → agent with text_generate writes a polished summary using the file content).
 - Use a single agent when one agent can handle the entire task alone (e.g. a file_read agent can also summarize what it reads via its LLM).
 - Casual messages, greetings, short phrases, numbers, or anything that doesn't require agent tools should be "simple_query".
+- If an active task already covers the user's request, classify as "simple_query" and explain the existing task in your reasoning.
 "#,
         );
 
@@ -145,13 +160,32 @@ Complex task:  {"classification": "complex_task", "title": "Concise title", "ass
     /// Parse the LLM response into a TaskPlan.
     fn parse_response(content: &str) -> Result<TaskPlan, PlanError> {
         let json_str = Self::extract_json(content);
-        serde_json::from_str::<TaskPlan>(json_str).map_err(|e| {
-            PlanError::MalformedResponse(format!(
-                "Failed to parse JSON: {} (input: {})",
-                e,
-                &content.chars().take(200).collect::<String>()
-            ))
-        })
+
+        // Primary: direct parse
+        if let Ok(plan) = serde_json::from_str::<TaskPlan>(json_str) {
+            return Ok(plan);
+        }
+
+        // Fallback: LLM may have wrapped the plan in a parent object (e.g. {"available_agents": ..., "classification": ...})
+        // Try extracting known fields from a loose Value
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(json_str) {
+            if let Some(classification) = obj.get("classification").and_then(|v| v.as_str()) {
+                return Ok(TaskPlan {
+                    classification: classification.to_string(),
+                    title: obj.get("title").and_then(|v| v.as_str()).map(String::from),
+                    assignments: obj
+                        .get("assignments")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default(),
+                    reasoning: obj.get("reasoning").and_then(|v| v.as_str()).map(String::from),
+                });
+            }
+        }
+
+        Err(PlanError::MalformedResponse(format!(
+            "Failed to parse JSON: missing field `classification` (input: {})",
+            &content.chars().take(200).collect::<String>()
+        )))
     }
 
     /// Extract JSON from a response that may be wrapped in markdown code fences.
@@ -275,6 +309,7 @@ mod tests {
         assert!(prompt.contains("Research agent"));
         assert!(prompt.contains("web_search (0.9)"));
         assert!(prompt.contains("summarize (0.8)"));
+        assert!(prompt.contains("If an active task already covers"));
     }
 
     #[test]
@@ -296,5 +331,33 @@ mod tests {
             TaskPlanner::extract_json(input),
             "{\"classification\": \"simple_query\"}"
         );
+    }
+
+    #[test]
+    fn test_parse_response_with_extra_fields() {
+        // LLM sometimes echoes back agent info alongside the classification
+        let json = r#"{
+            "available_agents": [{"agent_id": "writing_agent", "name": "Writer"}],
+            "classification": "simple_query",
+            "title": null,
+            "assignments": [],
+            "reasoning": "Greeting detected"
+        }"#;
+        let plan = TaskPlanner::parse_response(json).unwrap();
+        assert_eq!(plan.classification, "simple_query");
+        assert!(plan.assignments.is_empty());
+    }
+
+    #[test]
+    fn test_parse_response_no_classification_at_all() {
+        let json = r#"{"available_agents": [{"agent_id": "writing_agent"}]}"#;
+        let result = TaskPlanner::parse_response(json);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PlanError::MalformedResponse(msg) => {
+                assert!(msg.contains("missing field `classification`"));
+            }
+            _ => panic!("Expected MalformedResponse"),
+        }
     }
 }

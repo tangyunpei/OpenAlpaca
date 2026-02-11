@@ -7,7 +7,7 @@ use crate::events::SystemEvent;
 use crate::lane::LaneManager;
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::gate::SecurityGate;
-use crate::security::sandbox::SandboxPolicy;
+use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter};
 use openalpaca_storage::{ConversationMessage, ConversationRepository, Database};
@@ -18,10 +18,12 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::tools::ToolRegistry;
+use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 
 use crate::middleware::prompt::format_tool_guidance;
 use super::skill_matcher::{SkillMatch, SkillMatcher};
 use super::task_planner::TaskPlan;
+use super::task_state::TaskState;
 
 /// Dispatches complex tasks by matching skills to agents and creating task lanes.
 pub struct TaskDispatcher {
@@ -30,7 +32,7 @@ pub struct TaskDispatcher {
     bus: EventBus,
     skill_matcher: SkillMatcher,
     llm_router: Option<Arc<LlmRouter>>,
-    security_gate: Arc<SecurityGate>,
+    _security_gate: Arc<SecurityGate>,
     tool_registry: Arc<ToolRegistry>,
     db: Option<Database>,
 }
@@ -51,7 +53,7 @@ impl TaskDispatcher {
             bus,
             skill_matcher: SkillMatcher,
             llm_router,
-            security_gate,
+            _security_gate: security_gate,
             tool_registry,
             db,
         }
@@ -209,6 +211,8 @@ impl TaskDispatcher {
                 created_at: now,
                 updated_at: now,
                 completed_at: None,
+                state_json: None,
+                state_version: 0,
             };
             if let Err(e) = repo.create(&task) {
                 tracing::warn!("Failed to persist task to DB: {e}");
@@ -231,6 +235,16 @@ impl TaskDispatcher {
                 }
                 assignment_ids.insert(skill_match.agent_id.clone(), assignment.id.clone());
             }
+        }
+
+        // Initialize state_json for working memory
+        if let Some(ref db) = self.db {
+            let repo = openalpaca_storage::repository::TaskRepository::new(db);
+            let step_info: Vec<(String, String, String)> = matches.iter()
+                .map(|m| (m.agent_id.clone(), m.agent_name.clone(), m.role_description.clone()))
+                .collect();
+            let initial_state = TaskState::initial(description, &step_info);
+            let _ = repo.update_state(&task_id, &initial_state.to_json(), 0);
         }
 
         // Collect agents with their assignment IDs and role descriptions for the pipeline
@@ -279,6 +293,7 @@ impl TaskDispatcher {
             agents_with_assignments,
             lane_key.to_string(),
             source.to_string(),
+            created_by.to_string(),
         );
 
         // Build human-readable response for chat
@@ -305,6 +320,7 @@ impl TaskDispatcher {
         agents_with_assignments: Vec<(SubAgent, Option<String>, String)>,
         lane_key: String,
         source: String,
+        created_by: String,
     ) {
         let router = match &self.llm_router {
             Some(r) => r.clone(),
@@ -320,10 +336,16 @@ impl TaskDispatcher {
         let bus = self.bus.clone();
         let ctx = self.shared_context.clone();
         let db = self.db.clone();
-        let security_gate = self.security_gate.clone();
         let tool_registry = self.tool_registry.clone();
+        let bus_for_sandbox = self.bus.clone();
 
         tokio::spawn(async move {
+            // Per-request sandbox with ContextualToolExecutor for owner-scoped tools
+            let ctx_exec = ToolExecutionContext { owner_id: Some(created_by.clone()) };
+            let contextual_executor = Arc::new(ContextualToolExecutor::new(
+                tool_registry.clone(), ctx_exec,
+            ));
+            let per_request_sandbox = SandboxManager::new(contextual_executor, bus_for_sandbox);
             let start_time = std::time::Instant::now();
             let total_agents = agents_with_assignments.len();
 
@@ -367,6 +389,19 @@ impl TaskDispatcher {
                         assign_id,
                         openalpaca_storage::AssignmentStatus::Running,
                     );
+                }
+
+                // Update state_json: mark step running
+                if let Some(ref db) = db {
+                    let repo = openalpaca_storage::repository::TaskRepository::new(db);
+                    if let Ok(Some(existing)) = repo.get(&task_id) {
+                        if let Some(ref sj) = existing.state_json {
+                            if let Ok(mut state) = serde_json::from_str::<TaskState>(sj) {
+                                state.mark_step_running(step as i32);
+                                let _ = repo.update_state(&task_id, &state.to_json(), existing.state_version);
+                            }
+                        }
+                    }
                 }
 
                 // Emit progress event for this step
@@ -436,7 +471,7 @@ impl TaskDispatcher {
                     messages,
                     tools,
                     &loop_config,
-                    Some(security_gate.sandbox()),
+                    Some(&per_request_sandbox),
                     agent_id,
                     Some(&sandbox_policy),
                     Some(&task_id),
@@ -578,6 +613,20 @@ impl TaskDispatcher {
                         raw_content.clone()
                     };
 
+                    // Update state_json: mark step completed (before raw_content is moved)
+                    if let Some(ref db) = db {
+                        let repo = openalpaca_storage::repository::TaskRepository::new(db);
+                        if let Ok(Some(existing)) = repo.get(&task_id) {
+                            if let Some(ref sj) = existing.state_json {
+                                if let Ok(mut state) = serde_json::from_str::<TaskState>(sj) {
+                                    let summary: String = raw_content.chars().take(500).collect();
+                                    state.mark_step_completed(step as i32, &summary);
+                                    let _ = repo.update_state(&task_id, &state.to_json(), existing.state_version);
+                                }
+                            }
+                        }
+                    }
+
                     // Only pass actual content to next agent (not synthetic metadata)
                     if !raw_content.is_empty() {
                         previous_output = Some(raw_content);
@@ -586,6 +635,24 @@ impl TaskDispatcher {
 
                     final_content = display_content;
                 } else {
+                    // Update state_json: mark step failed
+                    if let Some(ref db) = db {
+                        let repo = openalpaca_storage::repository::TaskRepository::new(db);
+                        if let Ok(Some(existing)) = repo.get(&task_id) {
+                            if let Some(ref sj) = existing.state_json {
+                                if let Ok(mut state) = serde_json::from_str::<TaskState>(sj) {
+                                    let error_msg = match &result.finish_reason {
+                                        LoopFinishReason::CostExceeded => "Agent cost limit exceeded".to_string(),
+                                        LoopFinishReason::Error(err) => err.clone(),
+                                        _ => "Agent failed".to_string(),
+                                    };
+                                    state.mark_step_failed(step as i32, &error_msg);
+                                    let _ = repo.update_state(&task_id, &state.to_json(), existing.state_version);
+                                }
+                            }
+                        }
+                    }
+
                     pipeline_success = false;
                     pipeline_error = Some(match &result.finish_reason {
                         LoopFinishReason::CostExceeded => {
