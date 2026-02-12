@@ -209,6 +209,22 @@ impl EventBroadcaster {
                     });
                     repo.log("orchestrator_config_changed", None, Some(&detail), None)
                 }
+                // Log SOUL.md personality updates with actor attribution
+                ServerEvent::SoulUpdated {
+                    actor,
+                    mode,
+                    content_sha256,
+                    backup_path,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "actor": actor,
+                        "mode": mode,
+                        "content_sha256": content_sha256,
+                        "backup_path": backup_path
+                    });
+                    repo.log("soul_updated", None, Some(&detail), None)
+                }
             };
             // Error handling strategy: log errors but don't crash or block broadcast
             // For now we just ignore errors as per architecture plan
@@ -333,6 +349,27 @@ impl EventBroadcaster {
             stream_id: stream_id.to_string(),
             lane_key: lane_key.to_string(),
             status: status.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a SOUL.md update event and persist it
+    pub fn soul_updated(
+        &self,
+        actor: &str,
+        mode: &str,
+        content_sha256: &str,
+        backup_path: Option<String>,
+    ) {
+        let event = ServerEvent::SoulUpdated {
+            actor: actor.to_string(),
+            mode: mode.to_string(),
+            content_sha256: content_sha256.to_string(),
+            backup_path,
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };
