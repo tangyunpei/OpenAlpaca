@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 /// Tools whose arguments need owner_id injection.
-const OWNER_SCOPED_TOOLS: &[&str] = &["memory_search"];
+const OWNER_SCOPED_TOOLS: &[&str] = &["memory_search", "update_user"];
 
 /// Per-request execution context carrying the authenticated owner.
 pub struct ToolExecutionContext {

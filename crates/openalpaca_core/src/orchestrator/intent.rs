@@ -19,6 +19,10 @@ pub enum Intent {
     },
     /// A task control command (cancel, pause, resume).
     TaskControl { task_id: String, action: String },
+    /// User wants to remember something (store in profile or memory).
+    RememberCommand { content: String },
+    /// User wants to forget something (remove from profile or memory).
+    ForgetCommand { content: String },
 }
 
 impl Intent {
@@ -28,6 +32,8 @@ impl Intent {
             Intent::TaskQuery { .. } => "task_query",
             Intent::ComplexTask { .. } => "complex_task",
             Intent::TaskControl { .. } => "task_control",
+            Intent::RememberCommand { .. } => "remember_command",
+            Intent::ForgetCommand { .. } => "forget_command",
         }
     }
 }
@@ -85,6 +91,7 @@ struct ToolFlags {
     file_write: bool,
     shell_execute: bool,
     update_soul: bool,
+    update_user: bool,
 }
 
 impl ToolFlags {
@@ -99,9 +106,11 @@ impl ToolFlags {
         if self.file_read {
             out.push("file_read".to_string());
         }
-        // Precedence: update_soul suppresses file_write for SOUL targets
+        // Precedence: update_soul/update_user suppress file_write for their targets
         if self.update_soul {
             out.push("update_soul".to_string());
+        } else if self.update_user {
+            out.push("update_user".to_string());
         } else if self.file_write {
             out.push("file_write".to_string());
         }
@@ -134,6 +143,14 @@ impl IntentParser {
         // 3. Natural language task query
         if Self::is_natural_task_query(&lower) {
             return Intent::TaskQuery { task_id: None };
+        }
+
+        // 3.5. Remember / Forget commands
+        if let Some(content) = Self::parse_remember_command(&lower, trimmed) {
+            return Intent::RememberCommand { content };
+        }
+        if let Some(content) = Self::parse_forget_command(&lower, trimmed) {
+            return Intent::ForgetCommand { content };
         }
 
         // 4. Skill matching
@@ -213,6 +230,47 @@ impl IntentParser {
         COMPLEXITY_SIGNALS.iter().any(|s| lower.contains(s))
     }
 
+    /// Detect "remember X" style commands.
+    fn parse_remember_command(lower: &str, original: &str) -> Option<String> {
+        // "remember that ...", "remember my ...", "remember I ..."
+        if let Some(rest) = lower.strip_prefix("remember ") {
+            let content = rest.trim();
+            if !content.is_empty() {
+                // Use the original casing for the content
+                let start = original.len() - original.trim_start().len() + "remember ".len();
+                return Some(original[start..].trim().to_string());
+            }
+        }
+        // "please remember ..."
+        if let Some(idx) = lower.find("please remember ") {
+            let start = idx + "please remember ".len();
+            let content = original[start..].trim();
+            if !content.is_empty() {
+                return Some(content.to_string());
+            }
+        }
+        None
+    }
+
+    /// Detect "forget X" style commands.
+    fn parse_forget_command(lower: &str, original: &str) -> Option<String> {
+        if let Some(rest) = lower.strip_prefix("forget ") {
+            let content = rest.trim();
+            if !content.is_empty() {
+                let start = original.len() - original.trim_start().len() + "forget ".len();
+                return Some(original[start..].trim().to_string());
+            }
+        }
+        if let Some(idx) = lower.find("please forget ") {
+            let start = idx + "please forget ".len();
+            let content = original[start..].trim();
+            if !content.is_empty() {
+                return Some(content.to_string());
+            }
+        }
+        None
+    }
+
     pub fn suggest_tools(&self, content: &str) -> Vec<String> {
         let lower = content.to_lowercase();
 
@@ -220,6 +278,8 @@ impl IntentParser {
             file_write: Self::has_write_verb(&lower) && Self::mentions_filename(content),
 
             update_soul: Self::has_soul_target(&lower),
+
+            update_user: Self::has_user_target(&lower),
 
             web_fetch: content.contains("http://")
                 || content.contains("https://")
@@ -260,6 +320,22 @@ impl IntentParser {
         // Noun + verb combination
         let has_noun = SOUL_NOUNS.iter().any(|n| lower.contains(n));
         let has_verb = SOUL_VERBS.iter().any(|v| lower.contains(v));
+        has_noun && has_verb
+    }
+
+    /// Detect if the user is targeting the USER profile.
+    fn has_user_target(lower: &str) -> bool {
+        const USER_NOUNS: &[&str] = &["user.md", "user profile", "my profile"];
+        const USER_VERBS: &[&str] = &["update", "change", "edit", "modify", "set"];
+
+        // Direct file mention
+        if lower.contains("user.md") {
+            return true;
+        }
+
+        // Noun + verb combination
+        let has_noun = USER_NOUNS.iter().any(|n| lower.contains(n));
+        let has_verb = USER_VERBS.iter().any(|v| lower.contains(v));
         has_noun && has_verb
     }
 
