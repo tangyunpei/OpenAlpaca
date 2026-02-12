@@ -597,6 +597,10 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     if user_path.exists() {
         watch_paths.push(user_path.clone());
     }
+    let skills_dir = config_base_dir.join("skills");
+    if skills_dir.exists() {
+        watch_paths.push(skills_dir.clone());
+    }
     if !watch_paths.is_empty() {
         info!("Wake: watching paths: {:?}", watch_paths);
         wake_manager.add_filesystem_watcher(watch_paths);
@@ -1099,6 +1103,17 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         sandbox_manager,
     ));
 
+    // Build SkillCatalog by scanning config/skills/
+    let skill_catalog = {
+        let catalog = openalpaca_core::orchestrator::skill_catalog::SkillCatalog::new();
+        let skills_dir = config_base_dir.join("skills");
+        if skills_dir.exists() {
+            let count = catalog.scan_directory(&skills_dir);
+            info!("Skill catalog: loaded {} skill(s) from {}", count, skills_dir.display());
+        }
+        Arc::new(catalog)
+    };
+
     // Construct Orchestrator as the new message handler
     let orchestrator = Arc::new(Orchestrator::new(
         shared_context.clone(),
@@ -1111,6 +1126,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         tool_registry,
         Some(db.clone()),
         embedder.clone(),
+        skill_catalog.clone(),
     ));
 
     // Set the initial user document (loaded from USER.md bootstrap)
@@ -1135,6 +1151,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let hashes_for_watcher = recent_soul_hashes.clone();
     let user_hashes_for_watcher = recent_user_hashes.clone();
     let orchestrator_for_user_reload = orchestrator.clone();
+    let skills_dir_for_watcher = skills_dir.clone();
+    let skill_catalog_for_watcher = skill_catalog.clone();
+    let bus_for_watcher = bus.clone();
     tokio::spawn(async move {
         while let Some(event) = wake_rx.recv().await {
             info!("Received WakeEvent: {:?}", event);
@@ -1216,6 +1235,32 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                                     "USER parse/validation failed for {}: {e}; keeping last active profile",
                                     user_path_for_reload.display()
                                 );
+                            }
+                        }
+                    }
+                }
+
+                // Skills directory hot-reload
+                if changed_path.starts_with(&skills_dir_for_watcher) {
+                    // Determine which skill folder changed
+                    if let Ok(relative) = changed_path.strip_prefix(&skills_dir_for_watcher) {
+                        if let Some(skill_folder) = relative.components().next() {
+                            let skill_dir = skills_dir_for_watcher.join(skill_folder);
+                            match skill_catalog_for_watcher.reload_skill(&skill_dir) {
+                                Ok(()) => {
+                                    let skill_name = skill_folder.as_os_str().to_string_lossy().to_string();
+                                    info!("Skill hot-reloaded: {}", skill_dir.display());
+                                    bus_for_watcher.publish(openalpaca_core::events::SystemEvent::SkillCatalogUpdated {
+                                        skill_name,
+                                        action: "reloaded".to_string(),
+                                        timestamp: chrono::Utc::now(),
+                                    });
+                                }
+                                Err(e) => warn!(
+                                    "Skill reload failed for {}: {}",
+                                    skill_dir.display(),
+                                    e
+                                ),
                             }
                         }
                     }

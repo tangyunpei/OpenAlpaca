@@ -5,6 +5,7 @@
 
 pub mod dispatcher;
 pub mod intent;
+pub mod skill_catalog;
 pub mod skill_matcher;
 pub mod task_planner;
 pub mod task_state;
@@ -17,6 +18,7 @@ use crate::middleware::guard::OutputGuard;
 use crate::middleware::prompt::{
     AgentPersona, PromptAssembler, SystemPersona, format_tool_guidance,
 };
+use crate::middleware::skill::skill_to_prompt_block;
 use crate::middleware::user::{
     UserDocument, parse_user_markdown, render_user_markdown, user_to_prompt_block,
 };
@@ -65,6 +67,8 @@ pub struct Orchestrator {
     extraction_turn_counter: Mutex<HashMap<String, usize>>,
     /// Path to USER.md for writing extraction results. Set via `set_user_path()`.
     user_path: RwLock<Option<std::path::PathBuf>>,
+    /// Skill catalog for progressive skill loading and invocation.
+    pub skill_catalog: Arc<skill_catalog::SkillCatalog>,
 }
 
 const PROMPT_RECENT_MESSAGES: usize = 40;
@@ -111,6 +115,7 @@ impl Orchestrator {
         tool_registry: Arc<ToolRegistry>,
         db: Option<Database>,
         embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+        skill_catalog: Arc<skill_catalog::SkillCatalog>,
     ) -> Self {
         let task_dispatcher = TaskDispatcher::new(
             shared_context.clone(),
@@ -137,6 +142,7 @@ impl Orchestrator {
             embedder,
             extraction_turn_counter: Mutex::new(HashMap::new()),
             user_path: RwLock::new(None),
+            skill_catalog,
         }
     }
 
@@ -920,8 +926,8 @@ impl Orchestrator {
             _ => None,
         };
 
-        // 3. Try slash commands and task queries first (cheap, no context needed)
-        let intent = self.intent_parser.parse(&content);
+        // 3. Try slash commands, task queries, and skill invocations first
+        let intent = self.intent_parser.parse_with_skills(&content, &self.skill_catalog);
         match &intent {
             Intent::TaskQuery { .. } | Intent::TaskControl { .. } => {
                 self.bus.publish(SystemEvent::IntentClassified {
@@ -1099,7 +1105,7 @@ impl Orchestrator {
         ctx: &ConversationContext,
         owner_id: Option<&str>,
     ) -> Result<String, String> {
-        let intent = self.intent_parser.parse(content);
+        let intent = self.intent_parser.parse_with_skills(content, &self.skill_catalog);
 
         self.bus.publish(SystemEvent::IntentClassified {
             request_id,
@@ -1152,6 +1158,12 @@ impl Orchestrator {
             Intent::ForgetCommand { content } => {
                 self.handle_forget_command(&content, owner_id).await
             }
+            Intent::SkillInvocation { skill_name, query } => {
+                self.handle_skill_invocation(
+                    request_id, source, &skill_name, &query, lane_key, ctx, owner_id,
+                )
+                .await
+            }
         }
     }
 
@@ -1178,6 +1190,13 @@ impl Orchestrator {
             domain_knowledge: vec![],
         };
         let mut system_prompt = PromptAssembler::assemble(&system_persona, &agent_persona);
+
+        // Inject available skills catalog so the LLM knows what skills exist
+        let skills_catalog_block = self.build_skills_catalog_block();
+        if !skills_catalog_block.is_empty() {
+            system_prompt.push('\n');
+            system_prompt.push_str(&skills_catalog_block);
+        }
 
         // Resolve tools based on intent analysis
         let tool_names = self.intent_parser.suggest_tools(query);
@@ -1388,6 +1407,302 @@ impl Orchestrator {
         };
 
         // Output guard: only enforce JSON for structured (non-LLM) responses
+        let validated = if is_structured {
+            OutputGuard::ensure_json(&response_content)?
+        } else {
+            response_content
+        };
+
+        // Emit AgentResponse event
+        self.bus.publish(SystemEvent::AgentResponse {
+            request_id,
+            agent_id: "orchestrator".to_string(),
+            content: validated.clone(),
+            timestamp: Utc::now(),
+        });
+
+        Ok(validated)
+    }
+
+    /// Build a lightweight `### AVAILABLE SKILLS ###` block for system prompt injection.
+    ///
+    /// Lists all registered skills with their slash commands and descriptions.
+    /// Budget: ~500 chars. Returns empty string if no skills are loaded.
+    fn build_skills_catalog_block(&self) -> String {
+        let summaries = self.skill_catalog.catalog_summary();
+        if summaries.is_empty() {
+            return String::new();
+        }
+
+        let mut block = String::from("### AVAILABLE SKILLS ###\nThe user can invoke these specialized skills with slash commands:\n");
+        let mut budget = 500usize;
+        for (name, description, command) in &summaries {
+            let line = if let Some(cmd) = command {
+                format!("- {} (/{}): {}\n", name, cmd, description)
+            } else {
+                format!("- {}: {}\n", name, description)
+            };
+            if line.len() > budget {
+                break;
+            }
+            budget -= line.len();
+            block.push_str(&line);
+        }
+        block
+    }
+
+    /// Handle a skill invocation: load full SKILL.md, inject as context, run agentic loop.
+    ///
+    /// Mirrors `handle_simple_query()` with an extra `### SKILL CONTEXT ###` block.
+    async fn handle_skill_invocation(
+        &self,
+        request_id: Uuid,
+        _source: &str,
+        skill_name: &str,
+        query: &str,
+        _lane_key: &str,
+        ctx: &ConversationContext,
+        owner_id: Option<&str>,
+    ) -> Result<String, String> {
+        // Load full skill (Level 2)
+        let skill_doc = self.skill_catalog.load_full(skill_name)
+            .map_err(|e| format!("Failed to load skill '{}': {}", skill_name, e))?;
+
+        let system_persona = match self.system_persona.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("System persona lock poisoned during read; recovering");
+                poisoned.into_inner().clone()
+            }
+        };
+
+        let agent_persona = AgentPersona {
+            role: "Assistant".to_string(),
+            tone: "Concise and professional".to_string(),
+            domain_knowledge: vec![],
+        };
+        let mut system_prompt = PromptAssembler::assemble(&system_persona, &agent_persona);
+
+        // Inject skill context block
+        let skill_block = skill_to_prompt_block(&skill_doc);
+        if !skill_block.is_empty() {
+            system_prompt.push('\n');
+            system_prompt.push_str(&skill_block);
+        }
+
+        // Resolve tools: merge skill.tools_required with intent-suggested tools
+        let mut tool_names: Vec<String> = skill_doc.frontmatter.tools_required.clone();
+        let intent_tools = self.intent_parser.suggest_tools(query);
+        for t in intent_tools {
+            if !tool_names.contains(&t) {
+                tool_names.push(t);
+            }
+        }
+
+        let tool_defs: Vec<_> = tool_names
+            .iter()
+            .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
+            .collect();
+
+        let (tools_for_loop, policy_opt, config_for_loop);
+        if !tool_defs.is_empty() {
+            tracing::info!(
+                "Skill invocation '{}' with {} tools: {:?}",
+                skill_name,
+                tool_defs.len(),
+                tool_names
+            );
+            system_prompt.push_str(&format_tool_guidance(&tool_defs));
+            let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
+            policy_opt = Some(SandboxPolicy {
+                agent_id: "orchestrator".to_string(),
+                allowed_capabilities: resolved,
+                denied_capabilities: vec![],
+                require_confirmation_for: vec![],
+                max_tool_calls: None,
+                max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
+            });
+            config_for_loop = LoopConfig {
+                max_rounds: 6, // Skills may need more rounds than simple queries
+                max_tools_per_round: 3,
+                ..self.loop_config.clone()
+            };
+            tools_for_loop = tool_defs;
+        } else {
+            tools_for_loop = vec![];
+            policy_opt = None;
+            config_for_loop = self.loop_config.clone();
+        }
+
+        let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
+            let mut messages = Vec::with_capacity(4 + ctx.recent_messages.len());
+            messages.push(ChatMessage::system(&system_prompt));
+
+            // Inject user profile if available
+            if let Ok(guard) = self.user_document.read() {
+                if let Some(ref doc) = *guard {
+                    let profile_block = user_to_prompt_block(doc);
+                    if !profile_block.is_empty() {
+                        messages.push(ChatMessage::system(&profile_block));
+                    }
+                }
+            }
+
+            // Inject session summary if available
+            if let Some(ref summary) = ctx.summary {
+                messages.push(ChatMessage::system(&format!(
+                    "### SESSION SUMMARY ###\nThe following summarizes earlier parts of this conversation:\n{}",
+                    summary
+                )));
+            }
+
+            // Retrieval injection: hybrid FTS+vector search for user memories
+            if let (Some(db), Some(oid)) = (&self.db, owner_id) {
+                let repo = MemoryRepository::new(db);
+                let top_k = if !tools_for_loop.is_empty() { 5 } else { 10 };
+
+                let query_embedding = if let Some(ref embedder) = self.embedder {
+                    embedder
+                        .embed(&[query])
+                        .await
+                        .ok()
+                        .and_then(|v| v.into_iter().next())
+                } else {
+                    None
+                };
+
+                let memories = repo
+                    .search_hybrid(
+                        oid,
+                        query,
+                        query_embedding.as_deref(),
+                        top_k,
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap_or_default();
+
+                if !memories.is_empty() {
+                    let mut block = String::from("### RETRIEVED MEMORY ###\n");
+                    let mut budget = 2000usize;
+                    for m in &memories {
+                        let entry = format!(
+                            "- [{}] {}\n",
+                            m.kind.as_str(),
+                            m.content.chars().take(300).collect::<String>()
+                        );
+                        if entry.len() > budget {
+                            break;
+                        }
+                        budget -= entry.len();
+                        block.push_str(&entry);
+                    }
+                    messages.push(ChatMessage::system(&block));
+                }
+            }
+
+            messages.extend(ctx.recent_messages.clone());
+            messages.push(ChatMessage::user(query));
+
+            // Per-request sandbox with ContextualToolExecutor
+            let ctx_exec = ToolExecutionContext {
+                owner_id: owner_id.map(|s| s.to_string()),
+            };
+            let contextual_executor = Arc::new(ContextualToolExecutor::new(
+                self.tool_registry.clone(),
+                ctx_exec,
+            ));
+            let per_request_sandbox = SandboxManager::new(contextual_executor, self.bus.clone());
+
+            let call_start = std::time::Instant::now();
+            let result = run_agentic_loop_routed(
+                router.as_ref(),
+                messages,
+                tools_for_loop,
+                &config_for_loop,
+                Some(&per_request_sandbox),
+                "orchestrator",
+                policy_opt.as_ref(),
+                None,
+            )
+            .await;
+            let latency_ms = call_start.elapsed().as_millis() as i64;
+
+            // Persist LLM usage and emit event
+            let actual_model = result
+                .model_used
+                .as_deref()
+                .or(self.loop_config.model.as_deref())
+                .unwrap_or(router.default_model());
+            let resolved_provider = router
+                .model_registry()
+                .resolve_provider(actual_model)
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let call_cost = router.cost_tracker.calculate_cost(
+                actual_model,
+                result.total_input_tokens,
+                result.total_output_tokens,
+            );
+
+            let call_status = match &result.finish_reason {
+                LoopFinishReason::Complete | LoopFinishReason::MaxRounds => "success",
+                LoopFinishReason::CostExceeded => "cost_exceeded",
+                LoopFinishReason::Error(_) => "error",
+            };
+            let call_error = match &result.finish_reason {
+                LoopFinishReason::Error(msg) => Some(msg.as_str()),
+                _ => None,
+            };
+
+            if let Some(ref db) = self.db {
+                let usage_repo = LlmUsageRepository::new(db);
+                if let Err(e) = usage_repo.record_and_log(
+                    "orchestrator",
+                    None,
+                    &resolved_provider,
+                    actual_model,
+                    result.total_input_tokens as i32,
+                    result.total_output_tokens as i32,
+                    call_cost,
+                    latency_ms,
+                    call_status,
+                    call_error,
+                ) {
+                    tracing::warn!("Failed to persist LLM usage: {e}");
+                }
+            }
+
+            self.bus.publish(SystemEvent::LlmCallCompleted {
+                agent_id: "orchestrator".to_string(),
+                model: actual_model.to_string(),
+                input_tokens: result.total_input_tokens,
+                output_tokens: result.total_output_tokens,
+                cost_usd: call_cost,
+                timestamp: Utc::now(),
+            });
+
+            if let LoopFinishReason::Error(ref err) = result.finish_reason {
+                if result.final_content.trim().is_empty() {
+                    return Err(format!("LLM error: {}", err));
+                }
+            }
+
+            (result.final_content, false)
+        } else {
+            // Fallback: echo stub with skill info
+            (
+                format!(
+                    "{{\"status\": \"ok\", \"skill\": \"{}\", \"echo\": \"Skill invocation: {}\"}}",
+                    skill_name,
+                    query.chars().take(50).collect::<String>()
+                ),
+                true,
+            )
+        };
+
+        // Output guard
         let validated = if is_structured {
             OutputGuard::ensure_json(&response_content)?
         } else {
@@ -1704,6 +2019,7 @@ mod tests {
             registry,
             None,
             None,
+            Arc::new(skill_catalog::SkillCatalog::new()),
         )
     }
 
@@ -1727,6 +2043,7 @@ mod tests {
             registry,
             None,
             None,
+            Arc::new(skill_catalog::SkillCatalog::new()),
         )
     }
 
@@ -1970,6 +2287,7 @@ mod tests {
             registry,
             None,
             None,
+            Arc::new(skill_catalog::SkillCatalog::new()),
         );
 
         let result = orch
@@ -2101,6 +2419,7 @@ mod tests {
             registry,
             None,
             None,
+            Arc::new(skill_catalog::SkillCatalog::new()),
         )
     }
 
@@ -2289,6 +2608,7 @@ mod tests {
             registry,
             None,
             None,
+            Arc::new(skill_catalog::SkillCatalog::new()),
         )
     }
 

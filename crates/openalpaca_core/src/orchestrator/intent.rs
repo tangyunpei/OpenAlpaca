@@ -2,6 +2,7 @@
 //!
 //! Keyword-based heuristics (LLM integration planned for Phase 5.1).
 
+use crate::orchestrator::skill_catalog::SkillCatalog;
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -23,6 +24,8 @@ pub enum Intent {
     RememberCommand { content: String },
     /// User wants to forget something (remove from profile or memory).
     ForgetCommand { content: String },
+    /// A skill was invoked (via slash command or trigger pattern match).
+    SkillInvocation { skill_name: String, query: String },
 }
 
 impl Intent {
@@ -34,6 +37,7 @@ impl Intent {
             Intent::TaskControl { .. } => "task_control",
             Intent::RememberCommand { .. } => "remember_command",
             Intent::ForgetCommand { .. } => "forget_command",
+            Intent::SkillInvocation { .. } => "skill_invocation",
         }
     }
 }
@@ -269,6 +273,58 @@ impl IntentParser {
             }
         }
         None
+    }
+
+    /// Parse a user message into an Intent, checking the SkillCatalog first.
+    ///
+    /// Priority:
+    /// 1. Slash-command skill invocation: `/review some code`
+    /// 2. Trigger pattern matching against catalog
+    /// 3. Fall through to standard `parse()` logic
+    pub fn parse_with_skills(&self, content: &str, catalog: &SkillCatalog) -> Intent {
+        let trimmed = content.trim();
+        let lower = trimmed.to_lowercase();
+
+        // 1. Slash-command skill invocation: "/review some code"
+        if trimmed.starts_with('/') {
+            let without_slash = &trimmed[1..];
+            let parts: Vec<&str> = without_slash.splitn(2, ' ').collect();
+            let command = parts[0];
+            let query = parts.get(1).map(|s| s.trim()).unwrap_or("");
+
+            if let Some(entry) = catalog.get_by_command(command) {
+                return Intent::SkillInvocation {
+                    skill_name: entry.frontmatter.name.clone(),
+                    query: if query.is_empty() {
+                        trimmed.to_string()
+                    } else {
+                        query.to_string()
+                    },
+                };
+            }
+            // Fall through if no skill matches the slash command
+        }
+
+        // 2. Trigger pattern matching (only for non-slash-command inputs)
+        if !trimmed.starts_with('/') {
+            let matched = catalog.match_triggers(&lower);
+            if !matched.is_empty() {
+                // Use the first (most specific) match
+                // Look up the actual display name from the catalog
+                let skill_name = if let Some(entry) = catalog.get(&matched[0]) {
+                    entry.frontmatter.name.clone()
+                } else {
+                    matched[0].clone()
+                };
+                return Intent::SkillInvocation {
+                    skill_name,
+                    query: trimmed.to_string(),
+                };
+            }
+        }
+
+        // 3. Fall through to existing parse() logic
+        self.parse(content)
     }
 
     pub fn suggest_tools(&self, content: &str) -> Vec<String> {
@@ -596,5 +652,182 @@ mod tests {
             "Should NOT suggest update_soul for unrelated write: {:?}",
             tools
         );
+    }
+
+    // --- parse_with_skills tests ---
+
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    fn create_test_skill_dir(parent: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
+        let dir = parent.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let md_path = dir.join("SKILL.md");
+        let mut f = std::fs::File::create(&md_path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        dir
+    }
+
+    fn make_test_catalog() -> (TempDir, SkillCatalog) {
+        let tmp = TempDir::new().unwrap();
+        create_test_skill_dir(tmp.path(), "code-review", r#"---
+name: "Code Review"
+description: "Review code for bugs"
+command: "review"
+trigger_patterns:
+  - "review.*code"
+  - "code review"
+tools_required:
+  - "file_read"
+auto_load: false
+---
+
+## Instructions
+
+Review the code.
+"#);
+        create_test_skill_dir(tmp.path(), "explain-code", r#"---
+name: "Explain Code"
+description: "Explain what code does"
+command: "explain-code"
+trigger_patterns:
+  - "explain.*code"
+  - "what does.*do"
+auto_load: false
+---
+
+## Instructions
+
+Explain step by step.
+"#);
+        create_test_skill_dir(tmp.path(), "commit-message", r#"---
+name: "Commit Message"
+description: "Generate commit messages"
+command: "commit"
+trigger_patterns:
+  - "commit message"
+  - "git commit"
+auto_load: false
+---
+
+## Instructions
+
+Generate a conventional commit.
+"#);
+
+        let catalog = SkillCatalog::new();
+        catalog.scan_directory(tmp.path());
+        (tmp, catalog)
+    }
+
+    #[test]
+    fn test_parse_with_skills_slash_command_review() {
+        let (_tmp, catalog) = make_test_catalog();
+        let intent = parser().parse_with_skills("/review some code", &catalog);
+        match intent {
+            Intent::SkillInvocation { skill_name, query } => {
+                assert_eq!(skill_name, "Code Review");
+                assert_eq!(query, "some code");
+            }
+            other => panic!("Expected SkillInvocation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_with_skills_slash_command_explain() {
+        let (_tmp, catalog) = make_test_catalog();
+        let intent = parser().parse_with_skills("/explain-code main.rs", &catalog);
+        match intent {
+            Intent::SkillInvocation { skill_name, query } => {
+                assert_eq!(skill_name, "Explain Code");
+                assert_eq!(query, "main.rs");
+            }
+            other => panic!("Expected SkillInvocation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_with_skills_slash_command_no_query() {
+        let (_tmp, catalog) = make_test_catalog();
+        let intent = parser().parse_with_skills("/review", &catalog);
+        match intent {
+            Intent::SkillInvocation { skill_name, query } => {
+                assert_eq!(skill_name, "Code Review");
+                assert_eq!(query, "/review"); // full text when no query
+            }
+            other => panic!("Expected SkillInvocation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_with_skills_trigger_match() {
+        let (_tmp, catalog) = make_test_catalog();
+        let intent = parser().parse_with_skills("please review my code for bugs", &catalog);
+        match intent {
+            Intent::SkillInvocation { skill_name, query } => {
+                assert_eq!(skill_name, "Code Review");
+                assert_eq!(query, "please review my code for bugs");
+            }
+            other => panic!("Expected SkillInvocation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_with_skills_trigger_commit() {
+        let (_tmp, catalog) = make_test_catalog();
+        let intent = parser().parse_with_skills("generate a git commit message", &catalog);
+        match intent {
+            Intent::SkillInvocation { skill_name, query } => {
+                assert_eq!(skill_name, "Commit Message");
+                assert_eq!(query, "generate a git commit message");
+            }
+            other => panic!("Expected SkillInvocation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_with_skills_no_match_fallthrough() {
+        let (_tmp, catalog) = make_test_catalog();
+        let intent = parser().parse_with_skills("hello world", &catalog);
+        assert!(
+            matches!(intent, Intent::SimpleQuery { .. }),
+            "Should fall through to SimpleQuery, got {:?}",
+            intent
+        );
+    }
+
+    #[test]
+    fn test_parse_with_skills_unknown_slash_fallthrough() {
+        let (_tmp, catalog) = make_test_catalog();
+        // /status is a built-in command, not a skill — should fall through to parse()
+        let intent = parser().parse_with_skills("/status", &catalog);
+        assert!(
+            matches!(intent, Intent::TaskQuery { .. }),
+            "Should fall through to TaskQuery, got {:?}",
+            intent
+        );
+    }
+
+    #[test]
+    fn test_parse_with_skills_empty_catalog() {
+        let catalog = SkillCatalog::new();
+        let intent = parser().parse_with_skills("/review some code", &catalog);
+        // No skills loaded — slash command won't match, falls through
+        // "/review some code" doesn't match built-in slash commands either
+        // It should become a SimpleQuery
+        assert!(
+            matches!(intent, Intent::SimpleQuery { .. }),
+            "Should fall through to SimpleQuery with empty catalog, got {:?}",
+            intent
+        );
+    }
+
+    #[test]
+    fn test_skill_invocation_intent_type() {
+        let intent = Intent::SkillInvocation {
+            skill_name: "Test".to_string(),
+            query: "test query".to_string(),
+        };
+        assert_eq!(intent.intent_type(), "skill_invocation");
     }
 }

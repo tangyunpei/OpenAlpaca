@@ -150,4 +150,12 @@ pub enum SystemEvent {
         backup_path: Option<String>,
         timestamp: DateTime<Utc>,
     },
+    /// The skill catalog was updated (skill added, removed, or reloaded)
+    SkillCatalogUpdated {
+        /// Skill name that changed
+        skill_name: String,
+        /// Action taken: "added", "removed", or "reloaded"
+        action: String,
+        timestamp: DateTime<Utc>,
+    },
 }
