@@ -670,31 +670,88 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
 
     let lane_manager = Arc::new(LaneManager::new());
 
-    // Step 5.2.2: Initialize OS secret store + auto-migrate secrets
-    // Probe keychain availability first. On headless/Docker systems where
-    // the OS keychain is unavailable, fall back to MemorySecretStore so the
-    // daemon starts cleanly. Keys using secret_env or secret_encrypted still
-    // work; only secret_ref keys (which require keychain) are unavailable.
-    let keyring_available = openalpaca_llm::probe_keyring();
-    let secret_store: Arc<dyn openalpaca_llm::SecretStore> = if keyring_available {
-        info!("OS keychain available");
-        Arc::new(openalpaca_llm::CachingSecretStore::new(Box::new(
-            openalpaca_llm::KeyringSecretStore,
-        )))
-    } else {
-        warn!(
-            "OS keychain unavailable (headless/Docker?). Using in-memory secret store. \
-             Keys stored via secret_ref will not be available — \
-             use secret_env or secret_encrypted instead."
-        );
-        Arc::new(openalpaca_llm::MemorySecretStore::new())
-    };
-
+    // Step 5.2.2: Initialize secret store based on [security] config.
+    // Default (use_keychain = false): use MemorySecretStore — zero keychain prompts.
+    // Keys are stored as secret_encrypted in llm.toml via AES-256-GCM.
+    // Opt-in (use_keychain = true): CachingSecretStore(KeyringSecretStore) with prefetch.
     let llm_config_path = config_base_dir.join("llm.toml");
 
-    // Auto-migrate secret_encrypted → OS keychain (skip when keychain
-    // unavailable to prevent stripping secret_encrypted from config with
-    // no durable replacement)
+    let use_keychain = if llm_config_path.exists() {
+        openalpaca_llm::read_config(&llm_config_path)
+            .ok()
+            .and_then(|c| c.security.as_ref().map(|s| s.use_keychain))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    let (secret_store, keyring_available): (Arc<dyn openalpaca_llm::SecretStore>, bool) =
+        if use_keychain {
+            // Opt-in keychain mode: CachingSecretStore + prefetch
+            let caching = openalpaca_llm::CachingSecretStore::new(Box::new(
+                openalpaca_llm::KeyringSecretStore,
+            ));
+
+            let refs: Vec<String> = if llm_config_path.exists() {
+                openalpaca_llm::read_config(&llm_config_path)
+                    .ok()
+                    .map(|c| openalpaca_llm::collect_secret_refs(&c))
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            };
+
+            let ref_strs: Vec<&str> = refs.iter().map(|s| s.as_str()).collect();
+            if caching.prefetch(&ref_strs) {
+                info!(
+                    "OS keychain enabled (use_keychain=true) — pre-fetched {} secret(s)",
+                    refs.len()
+                );
+                (Arc::new(caching), true)
+            } else {
+                warn!(
+                    "OS keychain requested but unavailable (headless/Docker?). \
+                     Falling back to in-memory secret store."
+                );
+                (Arc::new(openalpaca_llm::MemorySecretStore::new()), false)
+            }
+        } else {
+            // Default: no keychain, use secret_encrypted path
+            info!("OS keychain disabled (default). Using local encrypted storage.");
+
+            // One-time reverse migration: if config still has secret_ref keys,
+            // read them from keychain and convert to secret_encrypted.
+            if llm_config_path.exists() {
+                let refs = openalpaca_llm::read_config(&llm_config_path)
+                    .ok()
+                    .map(|c| openalpaca_llm::collect_secret_refs(&c))
+                    .unwrap_or_default();
+
+                if !refs.is_empty() {
+                    info!(
+                        "Found {} secret_ref key(s) needing reverse migration to local encrypted storage",
+                        refs.len()
+                    );
+                    // Temporarily create a keyring store to read the secrets
+                    let temp_keyring = openalpaca_llm::KeyringSecretStore;
+                    match openalpaca_llm::reverse_migrate_llm_secrets(
+                        &llm_config_path,
+                        &temp_keyring,
+                    ) {
+                        Ok(0) => info!("No keys needed reverse migration"),
+                        Ok(n) => info!("Reverse-migrated {n} secret(s) from OS keychain to local encrypted storage"),
+                        Err(e) => warn!(
+                            "Reverse migration failed: {e}. Keys with secret_ref may not be available. \
+                             Set [security] use_keychain = true to use OS keychain, or re-add keys."
+                        ),
+                    }
+                }
+            }
+
+            (Arc::new(openalpaca_llm::MemorySecretStore::new()), false)
+        };
+
+    // Forward-migrate secret_encrypted → OS keychain (only when keychain is active)
     if keyring_available && llm_config_path.exists() {
         match openalpaca_llm::migrate_llm_secrets(&llm_config_path, &*secret_store) {
             Ok(0) => {}
