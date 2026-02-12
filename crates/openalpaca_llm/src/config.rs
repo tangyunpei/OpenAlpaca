@@ -92,6 +92,15 @@ pub struct LlmRouterConfig {
     pub credential_discovery: Option<crate::credential_discovery::CredentialDiscoveryConfig>,
     pub cli_backends: Option<crate::cli_backend::CliBackendsConfig>,
     pub embeddings: Option<EmbeddingsConfig>,
+    pub security: Option<SecurityConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    /// Use OS keychain (macOS Keychain / Windows Credential Manager) for API key storage.
+    /// Default: false — uses AES-encrypted local storage (`secret_encrypted`) instead.
+    #[serde(default)]
+    pub use_keychain: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -643,6 +652,120 @@ pub fn migrate_llm_secrets(
     }
 
     Ok(migrated)
+}
+
+/// Reverse-migrate `secret_ref` keys back to `secret_encrypted`.
+///
+/// For each key that has `secret_ref` (but no `secret_encrypted`), reads
+/// the plaintext from the keychain, encrypts it locally, writes
+/// `secret_encrypted`, and clears `secret_ref`.
+///
+/// Used when switching from keychain storage to local encrypted storage
+/// (`[security] use_keychain = false`).
+pub fn reverse_migrate_llm_secrets(
+    config_path: &std::path::Path,
+    secret_store: &dyn crate::secret_store::SecretStore,
+) -> Result<u32, String> {
+    if !config_path.exists() {
+        return Ok(0);
+    }
+    if let Ok(metadata) = std::fs::metadata(config_path) {
+        if metadata.permissions().readonly() {
+            return Ok(0);
+        }
+    }
+
+    let mut config = read_config(config_path)
+        .map_err(|e| format!("Failed to read config for reverse migration: {e}"))?;
+
+    let encryptor = match crate::key_encryption::KeyEncryptor::load_or_generate() {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("Cannot load master key for reverse migration: {e}");
+            return Ok(0);
+        }
+    };
+
+    let mut migrated = 0u32;
+
+    if let Some(ref mut providers) = config.providers {
+        for (provider_name, provider) in providers.iter_mut() {
+            if let Some(ref mut keys) = provider.keys {
+                for key in keys.iter_mut() {
+                    // Skip if no secret_ref or already has secret_encrypted
+                    let Some(ref sref) = key.secret_ref else {
+                        continue;
+                    };
+                    if key.secret_encrypted.is_some() {
+                        continue;
+                    }
+
+                    // Read plaintext from keychain
+                    let plaintext = match secret_store.get(sref) {
+                        Ok(Some(p)) => p,
+                        Ok(None) => {
+                            tracing::warn!(
+                                "Reverse migration: secret_ref '{}' for key '{}' ({}) not found in keychain, skipping",
+                                sref, key.id, provider_name
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Reverse migration: cannot read '{}' from keychain for key '{}': {e}",
+                                sref, key.id
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Encrypt locally
+                    let encrypted = match encryptor.encrypt(&plaintext) {
+                        Ok(enc) => enc,
+                        Err(e) => {
+                            tracing::warn!("Failed to encrypt key '{}': {e}", key.id);
+                            continue;
+                        }
+                    };
+                    key.secret_encrypted = Some(encrypted);
+                    key.secret_ref = None;
+                    migrated += 1;
+                }
+            }
+        }
+    }
+
+    if migrated > 0 {
+        let _lock = crate::key_encryption::acquire_config_write_lock()
+            .map_err(|e| format!("Failed to acquire config lock for reverse migration: {e}"))?;
+        write_config(config_path, &config)
+            .map_err(|e| format!("Failed to write reverse-migrated config: {e}"))?;
+        tracing::info!("Reverse-migrated {migrated} secret(s) from OS keychain to local encrypted storage");
+    }
+
+    Ok(migrated)
+}
+
+/// Collect all unique `secret_ref` values from the config.
+///
+/// Used at startup to pre-fetch every keychain key in a single batch,
+/// so that all macOS Keychain password prompts happen at once.
+pub fn collect_secret_refs(config: &LlmRouterConfig) -> Vec<String> {
+    let mut refs = Vec::new();
+    if let Some(ref providers) = config.providers {
+        for (_name, provider) in providers {
+            if let Some(ref keys) = provider.keys {
+                for key in keys {
+                    if let Some(ref sref) = key.secret_ref {
+                        if !refs.contains(sref) {
+                            refs.push(sref.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    refs
 }
 
 #[cfg(test)]

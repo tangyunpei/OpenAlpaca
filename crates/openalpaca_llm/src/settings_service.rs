@@ -140,7 +140,7 @@ impl LlmSettingsService {
         config_path: PathBuf,
     ) -> Result<Self, String> {
         let encryptor = KeyEncryptor::load_or_generate()?;
-        let secret_store: Arc<dyn SecretStore> = Arc::new(crate::secret_store::KeyringSecretStore);
+        let secret_store: Arc<dyn SecretStore> = Arc::new(crate::secret_store::MemorySecretStore::new());
         Ok(Self {
             router,
             config_path,
@@ -275,15 +275,29 @@ impl LlmSettingsService {
             format!("key_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"))
         });
 
-        // Store secret in OS keychain
-        let sref = format!("llm/{}/{}", req.provider, uuid::Uuid::new_v4());
-        self.secret_store.set(&sref, &req.key.secret)?;
+        // Check if keychain is enabled from config
+        let use_keychain = read_config(&self.config_path)
+            .ok()
+            .and_then(|c| c.security.as_ref().map(|s| s.use_keychain))
+            .unwrap_or(false);
+
+        let (new_secret_ref, new_secret_encrypted) = if use_keychain {
+            // Store in OS keychain via secret_ref
+            let sref = format!("llm/{}/{}", req.provider, uuid::Uuid::new_v4());
+            self.secret_store.set(&sref, &req.key.secret)?;
+            (Some(sref), None)
+        } else {
+            // Store as local encrypted value
+            let encrypted = self.encryptor.encrypt(&req.key.secret)
+                .map_err(|e| format!("Failed to encrypt key: {e}"))?;
+            (None, Some(encrypted))
+        };
 
         let new_key_config = KeyConfig {
             id: key_id.clone(),
             secret_env: None,
-            secret_ref: Some(sref),
-            secret_encrypted: None,
+            secret_ref: new_secret_ref,
+            secret_encrypted: new_secret_encrypted,
             tier: req.key.tier.clone(),
             monthly_budget: None,
             priority: req.key.priority.clone(),

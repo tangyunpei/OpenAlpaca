@@ -10,7 +10,7 @@ use openalpaca_llm::config::{
 };
 use openalpaca_llm::credential_discovery::CredentialDiscoveryConfig;
 use openalpaca_llm::key_encryption::KeyEncryptor;
-use openalpaca_llm::secret_store::{KeyringSecretStore, SecretStore};
+use openalpaca_llm::secret_store::{KeyringSecretStore, MemorySecretStore, SecretStore};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -21,9 +21,25 @@ fn ensure_master_key() {
     }
 }
 
-/// Get the default secret store (OS keychain).
-fn secret_store() -> KeyringSecretStore {
-    KeyringSecretStore
+/// Check whether OS keychain is enabled via `[security] use_keychain` in llm.toml.
+fn is_keychain_enabled() -> bool {
+    llm_config_path()
+        .ok()
+        .filter(|p| p.exists())
+        .and_then(|p| read_config(&p).ok())
+        .and_then(|c| c.security.as_ref().map(|s| s.use_keychain))
+        .unwrap_or(false)
+}
+
+/// Get the secret store matching the current config.
+/// - `use_keychain = true`: OS keychain (KeyringSecretStore)
+/// - `use_keychain = false` (default): in-memory store (keys resolved via secret_encrypted)
+fn secret_store() -> Box<dyn SecretStore> {
+    if is_keychain_enabled() {
+        Box::new(KeyringSecretStore)
+    } else {
+        Box::new(MemorySecretStore::new())
+    }
 }
 
 /// Returns the path to `config/llm.toml`.
@@ -344,7 +360,7 @@ fn mask_key_value(secret: &str) -> String {
 }
 
 /// Upsert (add or update) a single provider key. Writes to disk immediately.
-/// Stores secret in OS keychain via `secret_ref`, NOT as `secret_encrypted`.
+/// Stores secret via OS keychain (when enabled) or local encrypted storage.
 pub fn upsert_provider_key(
     provider: &str,
     key_id: &str,
@@ -358,12 +374,23 @@ pub fn upsert_provider_key(
     let path = llm_config_path()?;
     let mut config = load_or_default(&path)?;
     let store = secret_store();
+    let use_kc = is_keychain_enabled();
 
-    // Store secret in OS keychain
-    let sref = format!("llm/{}/{}", provider, uuid::Uuid::new_v4());
-    store
-        .set(&sref, secret)
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    // Store secret via keychain or local encryption
+    let (new_secret_ref, new_secret_encrypted) = if use_kc {
+        let sref = format!("llm/{}/{}", provider, uuid::Uuid::new_v4());
+        store
+            .set(&sref, secret)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        (Some(sref), None)
+    } else {
+        let encryptor = KeyEncryptor::load_or_generate()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let encrypted = encryptor
+            .encrypt(secret)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        (None, Some(encrypted))
+    };
 
     let providers = config.providers.get_or_insert_with(HashMap::new);
     let entry = providers
@@ -372,12 +399,12 @@ pub fn upsert_provider_key(
     let keys = entry.keys.get_or_insert_with(Vec::new);
 
     if let Some(existing) = keys.iter_mut().find(|k| k.id == key_id) {
-        // Delete old keychain secret
+        // Delete old keychain secret if present
         if let Some(ref old_ref) = existing.secret_ref {
             let _ = store.delete(old_ref);
         }
-        existing.secret_ref = Some(sref);
-        existing.secret_encrypted = None;
+        existing.secret_ref = new_secret_ref;
+        existing.secret_encrypted = new_secret_encrypted;
         if let Some(s) = source {
             existing.source = Some(s.to_string());
         }
@@ -394,8 +421,8 @@ pub fn upsert_provider_key(
         keys.push(KeyConfig {
             id: key_id.to_string(),
             secret_env: None,
-            secret_ref: Some(sref),
-            secret_encrypted: None,
+            secret_ref: new_secret_ref,
+            secret_encrypted: new_secret_encrypted,
             tier: tier.map(|t| t.to_string()),
             monthly_budget: None,
             priority: Some(priority.unwrap_or("primary").to_string()),
@@ -621,12 +648,25 @@ fn apply_to_config(
             let provider = extract_provider(k)?;
             let cli_id = format!("{}_cli", provider);
             let source = source_hint.unwrap_or("api_console").to_string();
+            let use_kc = is_keychain_enabled();
 
-            // Store secret in OS keychain
-            let sref = format!("llm/{}/{}", provider, uuid::Uuid::new_v4());
-            store
-                .set(&sref, value)
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            // Determine how to store the secret
+            let (new_secret_ref, new_secret_encrypted) = if use_kc {
+                // Store in OS keychain via secret_ref
+                let sref = format!("llm/{}/{}", provider, uuid::Uuid::new_v4());
+                store
+                    .set(&sref, value)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                (Some(sref), None)
+            } else {
+                // Store as local encrypted value
+                let encryptor = KeyEncryptor::load_or_generate()
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                let encrypted = encryptor
+                    .encrypt(value)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                (None, Some(encrypted))
+            };
 
             let providers = config.providers.get_or_insert_with(HashMap::new);
             let entry = providers
@@ -634,12 +674,12 @@ fn apply_to_config(
                 .or_insert_with(ProviderConfig::default);
             let keys = entry.keys.get_or_insert_with(Vec::new);
             if let Some(existing) = keys.iter_mut().find(|k| k.id == cli_id) {
-                // Delete old keychain secret
+                // Delete old keychain secret if present
                 if let Some(ref old_ref) = existing.secret_ref {
                     let _ = store.delete(old_ref);
                 }
-                existing.secret_ref = Some(sref);
-                existing.secret_encrypted = None;
+                existing.secret_ref = new_secret_ref;
+                existing.secret_encrypted = new_secret_encrypted;
                 existing.source = Some(source);
                 existing.priority = Some("primary".to_string());
             } else {
@@ -647,18 +687,30 @@ fn apply_to_config(
                 // already stored under a different key ID (avoids duplicates
                 // when save_and_exit round-trips a value read from disk).
                 let already_stored = keys.iter().any(|k| {
-                    k.secret_ref
-                        .as_ref()
-                        .and_then(|sr| store.get(sr).ok().flatten())
-                        .map(|decrypted| decrypted == value)
-                        .unwrap_or(false)
+                    if use_kc {
+                        k.secret_ref
+                            .as_ref()
+                            .and_then(|sr| store.get(sr).ok().flatten())
+                            .map(|decrypted| decrypted == value)
+                            .unwrap_or(false)
+                    } else {
+                        k.secret_encrypted
+                            .as_ref()
+                            .and_then(|enc| {
+                                KeyEncryptor::load_or_generate()
+                                    .ok()
+                                    .and_then(|e| e.decrypt(enc).ok())
+                            })
+                            .map(|decrypted| decrypted == value)
+                            .unwrap_or(false)
+                    }
                 });
                 if !already_stored {
                     keys.push(KeyConfig {
                         id: cli_id,
                         secret_env: None,
-                        secret_ref: Some(sref),
-                        secret_encrypted: None,
+                        secret_ref: new_secret_ref,
+                        secret_encrypted: new_secret_encrypted,
                         tier: None,
                         monthly_budget: None,
                         priority: Some("primary".to_string()),
@@ -667,9 +719,9 @@ fn apply_to_config(
                         rate_limit: None,
                         allowed_models: None,
                     });
-                } else {
+                } else if let Some(ref sref) = new_secret_ref {
                     // Clean up the unused keychain entry
-                    let _ = store.delete(&sref);
+                    let _ = store.delete(sref);
                 }
             }
         }
