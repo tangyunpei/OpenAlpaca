@@ -28,6 +28,12 @@ openalpaca_wake = { workspace = true }
 toml.workspace = true
 rand.workspace = true
 async-trait.workspace = true
-openalpaca_llm = { workspace = true, features = ["anthropic", "openai", "ollama", "local-embeddings"] }
+openalpaca_llm = { workspace = true, features = [
+    "anthropic",
+    "openai",
+    "ollama",
+    "local-embeddings",
+] }
 teloxide = { workspace = true }
 tokio-util.workspace = true
+sha2.workspace = true

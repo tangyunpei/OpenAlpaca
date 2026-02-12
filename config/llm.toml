@@ -7,13 +7,13 @@ enabled = true
 
 [[providers.anthropic.keys]]
 id = "Claude Code Token"
-secret_ref = "llm/anthropic/9fd9c2c1-0e14-40f9-87f4-9da8116b0a8c"
+secret_encrypted = "aes256:8uSUYCYI2LPOOOp3kBdAYsj57Fn5pocHIzXkPjUaPebQV4YPA5DOOK/UiJ+irLFwg5kr5psovDhnjmQ4Mvw9my/WmsHYalVaWGlVKKsj7a+KlZSrRg/DrKQMmI3L/xzwwutWbOQwT4vJPwmew3uf8O+50XiVIkASXvxQ1vUYL3LfXAocxw7FFg=="
 priority = "fallback"
 source = "claude_code"
 
 [[providers.anthropic.keys]]
 id = "Anthropic API Key"
-secret_ref = "llm/anthropic/daa163be-9933-4f49-a066-06ec61e08953"
+secret_encrypted = "aes256:MeVZlPIVaS6WBXfwtuOi3sIfUafQB2v2CTFeBdnFCHWlJ8S+o70botMKMhjxVrFG+kNvOmjo2r3JAHM7q/IZS04z3VzHwa3SnGbqypfbW4MmCbMetVA4h9A3NTsZ5POy6AFtYg74lDKcGGdfCYVUOszRzKMiosZpELxm7CHWu/t4qLhg1VbNVw=="
 tier = "tier3"
 priority = "primary"
 source = "api_console"
@@ -32,7 +32,7 @@ claude_code = true
 enabled = false
 
 [embeddings]
-enabled = false
+enabled = true
 provider = "local"
 model = "intfloat/multilingual-e5-base"
 dimensions = 768

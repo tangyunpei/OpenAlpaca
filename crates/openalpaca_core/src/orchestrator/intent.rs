@@ -72,7 +72,8 @@ fn rel_path_regex() -> &'static Regex {
 
 fn file_named_regex() -> &'static Regex {
     FILE_NAMED_RE.get_or_init(|| {
-        Regex::new(r"(?i)\bfile\s+(?:named|called)\s+([A-Za-z0-9][A-Za-z0-9._/\-]{0,200})\b").unwrap()
+        Regex::new(r"(?i)\bfile\s+(?:named|called)\s+([A-Za-z0-9][A-Za-z0-9._/\-]{0,200})\b")
+            .unwrap()
     })
 }
 
@@ -83,16 +84,30 @@ struct ToolFlags {
     file_read: bool,
     file_write: bool,
     shell_execute: bool,
+    update_soul: bool,
 }
 
 impl ToolFlags {
     fn to_vec(&self) -> Vec<String> {
         let mut out = Vec::new();
-        if self.web_fetch { out.push("web_fetch".to_string()); }
-        if self.web_search { out.push("web_search".to_string()); }
-        if self.file_read { out.push("file_read".to_string()); }
-        if self.file_write { out.push("file_write".to_string()); }
-        if self.shell_execute { out.push("shell_execute".to_string()); }
+        if self.web_fetch {
+            out.push("web_fetch".to_string());
+        }
+        if self.web_search {
+            out.push("web_search".to_string());
+        }
+        if self.file_read {
+            out.push("file_read".to_string());
+        }
+        // Precedence: update_soul suppresses file_write for SOUL targets
+        if self.update_soul {
+            out.push("update_soul".to_string());
+        } else if self.file_write {
+            out.push("file_write".to_string());
+        }
+        if self.shell_execute {
+            out.push("shell_execute".to_string());
+        }
         out
     }
 }
@@ -165,9 +180,7 @@ impl IntentParser {
         if let Some(rest) = lower.strip_prefix("/status ") {
             let id = rest.trim().to_string();
             if !id.is_empty() {
-                return Some(Intent::TaskQuery {
-                    task_id: Some(id),
-                });
+                return Some(Intent::TaskQuery { task_id: Some(id) });
             }
         }
         None
@@ -206,8 +219,12 @@ impl IntentParser {
         let flags = ToolFlags {
             file_write: Self::has_write_verb(&lower) && Self::mentions_filename(content),
 
-            web_fetch: content.contains("http://") || content.contains("https://")
-                || lower.contains("fetch ") || lower.contains("download ")
+            update_soul: Self::has_soul_target(&lower),
+
+            web_fetch: content.contains("http://")
+                || content.contains("https://")
+                || lower.contains("fetch ")
+                || lower.contains("download ")
                 || lower.contains("open url"),
 
             web_search: lower.contains("search for")
@@ -230,8 +247,32 @@ impl IntentParser {
         flags.to_vec()
     }
 
+    /// Detect if the user is targeting the SOUL / persona.
+    fn has_soul_target(lower: &str) -> bool {
+        const SOUL_NOUNS: &[&str] = &["soul", "persona", "personality", "vibe", "soul.md"];
+        const SOUL_VERBS: &[&str] = &["update", "change", "edit", "modify", "set", "rewrite"];
+
+        // Direct file mention
+        if lower.contains("soul.md") {
+            return true;
+        }
+
+        // Noun + verb combination
+        let has_noun = SOUL_NOUNS.iter().any(|n| lower.contains(n));
+        let has_verb = SOUL_VERBS.iter().any(|v| lower.contains(v));
+        has_noun && has_verb
+    }
+
     fn has_write_verb(lower: &str) -> bool {
-        const WRITE_VERBS: &[&str] = &["write", "save", "create", "update", "edit", "append", "overwrite"];
+        const WRITE_VERBS: &[&str] = &[
+            "write",
+            "save",
+            "create",
+            "update",
+            "edit",
+            "append",
+            "overwrite",
+        ];
         WRITE_VERBS.iter().any(|v| lower.contains(v))
     }
 
@@ -347,37 +388,61 @@ mod tests {
     #[test]
     fn test_suggest_tools_write_readme() {
         let tools = parser().suggest_tools("write README.md with installation instructions");
-        assert!(tools.contains(&"file_write".to_string()), "Expected file_write, got: {:?}", tools);
+        assert!(
+            tools.contains(&"file_write".to_string()),
+            "Expected file_write, got: {:?}",
+            tools
+        );
     }
 
     #[test]
     fn test_suggest_tools_write_file_named() {
         let tools = parser().suggest_tools("write a file named README with docs");
-        assert!(tools.contains(&"file_write".to_string()), "Expected file_write, got: {:?}", tools);
+        assert!(
+            tools.contains(&"file_write".to_string()),
+            "Expected file_write, got: {:?}",
+            tools
+        );
     }
 
     #[test]
     fn test_suggest_tools_write_story_no_file() {
         let tools = parser().suggest_tools("write me a story about files");
-        assert!(!tools.contains(&"file_write".to_string()), "Should NOT have file_write: {:?}", tools);
+        assert!(
+            !tools.contains(&"file_write".to_string()),
+            "Should NOT have file_write: {:?}",
+            tools
+        );
     }
 
     #[test]
     fn test_suggest_tools_version_no_file_write() {
         let tools = parser().suggest_tools("support v1.x series");
-        assert!(!tools.contains(&"file_write".to_string()), "Should NOT have file_write: {:?}", tools);
+        assert!(
+            !tools.contains(&"file_write".to_string()),
+            "Should NOT have file_write: {:?}",
+            tools
+        );
     }
 
     #[test]
     fn test_suggest_tools_update_version_no_file_write() {
         let tools = parser().suggest_tools("update to v1.2 and ship it");
-        assert!(!tools.contains(&"file_write".to_string()), "Should NOT have file_write: {:?}", tools);
+        assert!(
+            !tools.contains(&"file_write".to_string()),
+            "Should NOT have file_write: {:?}",
+            tools
+        );
     }
 
     #[test]
     fn test_suggest_tools_fetch_url() {
         let tools = parser().suggest_tools("fetch https://example.com");
-        assert!(tools.contains(&"web_fetch".to_string()), "Expected web_fetch, got: {:?}", tools);
+        assert!(
+            tools.contains(&"web_fetch".to_string()),
+            "Expected web_fetch, got: {:?}",
+            tools
+        );
     }
 
     #[test]
@@ -389,7 +454,11 @@ mod tests {
     #[test]
     fn test_suggest_tools_run_command() {
         let tools = parser().suggest_tools("run command ls -la");
-        assert!(tools.contains(&"shell_execute".to_string()), "Expected shell_execute, got: {:?}", tools);
+        assert!(
+            tools.contains(&"shell_execute".to_string()),
+            "Expected shell_execute, got: {:?}",
+            tools
+        );
     }
 
     #[test]
@@ -400,6 +469,56 @@ mod tests {
         // web_fetch comes before web_search in ToolFlags::to_vec
         let fetch_idx = tools.iter().position(|t| t == "web_fetch").unwrap();
         let search_idx = tools.iter().position(|t| t == "web_search").unwrap();
-        assert!(fetch_idx < search_idx, "web_fetch should come before web_search");
+        assert!(
+            fetch_idx < search_idx,
+            "web_fetch should come before web_search"
+        );
+    }
+
+    // --- update_soul intent routing tests ---
+
+    #[test]
+    fn test_suggest_tools_update_soul_persona() {
+        let tools = parser().suggest_tools("update my persona to be more friendly");
+        assert!(
+            tools.contains(&"update_soul".to_string()),
+            "Should suggest update_soul: {:?}",
+            tools
+        );
+    }
+
+    #[test]
+    fn test_suggest_tools_edit_soul_md_suppresses_file_write() {
+        let tools = parser().suggest_tools("edit SOUL.md with new vibe");
+        assert!(
+            tools.contains(&"update_soul".to_string()),
+            "Should suggest update_soul: {:?}",
+            tools
+        );
+        assert!(
+            !tools.contains(&"file_write".to_string()),
+            "update_soul should suppress file_write: {:?}",
+            tools
+        );
+    }
+
+    #[test]
+    fn test_suggest_tools_change_personality() {
+        let tools = parser().suggest_tools("change personality to pirate");
+        assert!(
+            tools.contains(&"update_soul".to_string()),
+            "Should suggest update_soul: {:?}",
+            tools
+        );
+    }
+
+    #[test]
+    fn test_suggest_tools_write_readme_no_update_soul() {
+        let tools = parser().suggest_tools("write README.md with installation instructions");
+        assert!(
+            !tools.contains(&"update_soul".to_string()),
+            "Should NOT suggest update_soul for unrelated write: {:?}",
+            tools
+        );
     }
 }

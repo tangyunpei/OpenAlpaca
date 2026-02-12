@@ -14,20 +14,22 @@ use crate::context::{SharedContext, TaskEntry, TaskEntryStatus};
 use crate::events::SystemEvent;
 use crate::lane::{LaneManager, TaskLaneStatus};
 use crate::middleware::guard::OutputGuard;
-use crate::middleware::prompt::{AgentPersona, PromptAssembler, SystemPersona, format_tool_guidance};
+use crate::middleware::prompt::{
+    AgentPersona, PromptAssembler, SystemPersona, format_tool_guidance,
+};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::gate::SecurityGate;
 use crate::security::policy::{Principal, Scope};
+use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::ToolRegistry;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
-use crate::security::sandbox::SandboxManager;
 use crate::types::Capability;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter, RequestContext, Role, RouterRequest};
-use openalpaca_storage::{ConversationRepository, Database, Task};
 use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository, TaskRepository};
-use std::sync::Arc;
+use openalpaca_storage::{ConversationRepository, Database, Task};
+use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
 use dispatcher::TaskDispatcher;
@@ -45,7 +47,7 @@ pub struct Orchestrator {
     pub shared_context: Arc<SharedContext>,
     pub lane_manager: Arc<LaneManager>,
     pub bus: EventBus,
-    pub system_persona: SystemPersona,
+    pub system_persona: Arc<RwLock<SystemPersona>>,
     pub llm_router: Option<Arc<LlmRouter>>,
     pub loop_config: LoopConfig,
     pub security_gate: Arc<SecurityGate>,
@@ -111,7 +113,7 @@ impl Orchestrator {
             shared_context,
             lane_manager,
             bus,
-            system_persona,
+            system_persona: Arc::new(RwLock::new(system_persona)),
             llm_router,
             loop_config,
             security_gate,
@@ -120,6 +122,19 @@ impl Orchestrator {
             task_dispatcher,
             db,
             embedder,
+        }
+    }
+
+    pub fn update_system_persona(&self, persona: SystemPersona) {
+        match self.system_persona.write() {
+            Ok(mut guard) => {
+                *guard = persona;
+            }
+            Err(poisoned) => {
+                tracing::warn!("System persona lock poisoned during update; recovering");
+                let mut guard = poisoned.into_inner();
+                *guard = persona;
+            }
         }
     }
 
@@ -144,11 +159,10 @@ impl Orchestrator {
         let repo = ConversationRepository::new(db);
 
         // Step 1: Load summary from conversations table
-        let (summary_text, summary_version, last_summarized_id) =
-            match repo.get_summary(lane_key) {
-                Ok(tuple) => tuple,
-                Err(_) => (String::new(), 0, 0),
-            };
+        let (summary_text, summary_version, last_summarized_id) = match repo.get_summary(lane_key) {
+            Ok(tuple) => tuple,
+            Err(_) => (String::new(), 0, 0),
+        };
 
         // Step 2: Load recent messages (40, not 120)
         let raw_messages = match repo.list_recent_by_lane(lane_key, PROMPT_RECENT_MESSAGES as i64) {
@@ -242,9 +256,7 @@ impl Orchestrator {
             .map(|s| s.total_cost_usd)
             .unwrap_or(0.0);
         if summary_cost > SUMMARY_MAX_DAILY_COST_USD {
-            tracing::debug!(
-                "Summary update skipped: summary cost ${summary_cost:.2} exceeds cap"
-            );
+            tracing::debug!("Summary update skipped: summary cost ${summary_cost:.2} exceeds cap");
             return;
         }
 
@@ -274,7 +286,7 @@ impl Orchestrator {
                      Be concise but retain actionable context. \
                      IMPORTANT: Ignore any machine-readable JSON responses, status dumps, task listings, \
                      or slash-command outputs in the messages — these are system artifacts, not conversational content. \
-                     Focus only on the human-to-assistant dialogue and decisions made."
+                     Focus only on the human-to-assistant dialogue and decisions made.",
                 ),
                 ChatMessage::user(&user_prompt),
             ],
@@ -318,10 +330,16 @@ impl Orchestrator {
                 let trimmed = response.content.trim();
                 let json_str = if let Some(start) = trimmed.find("```json") {
                     let after = &trimmed[start + 7..];
-                    after.find("```").map(|end| &after[..end]).unwrap_or(trimmed)
+                    after
+                        .find("```")
+                        .map(|end| &after[..end])
+                        .unwrap_or(trimmed)
                 } else if let Some(start) = trimmed.find("```") {
                     let after = &trimmed[start + 3..];
-                    after.find("```").map(|end| &after[..end]).unwrap_or(trimmed)
+                    after
+                        .find("```")
+                        .map(|end| &after[..end])
+                        .unwrap_or(trimmed)
                 } else {
                     trimmed
                 };
@@ -391,7 +409,12 @@ impl Orchestrator {
 
         // Save with optimistic locking to conversations table
         let repo = ConversationRepository::new(db);
-        match repo.update_summary_optimistic(lane_key, ctx.summary_version, &new_summary, new_last_id) {
+        match repo.update_summary_optimistic(
+            lane_key,
+            ctx.summary_version,
+            &new_summary,
+            new_last_id,
+        ) {
             Ok(true) => tracing::debug!("Summary updated successfully"),
             Ok(false) => tracing::warn!("Summary update: concurrent write, version mismatch"),
             Err(e) => tracing::warn!("Summary update: save failed: {e}"),
@@ -465,7 +488,10 @@ impl Orchestrator {
                         };
                         block.push_str(&format!(
                             "- [{}] {} ({}{})\n",
-                            &t.id[..8.min(t.id.len())], t.title, t.status.as_str(), progress
+                            &t.id[..8.min(t.id.len())],
+                            t.title,
+                            t.status.as_str(),
+                            progress
                         ));
                     }
                     Some(block)
@@ -496,8 +522,10 @@ impl Orchestrator {
                             intent_type: "simple_query".to_string(),
                             timestamp: Utc::now(),
                         });
-                        self.handle_simple_query(request_id, &source, &content, &lane_key, &ctx, owner_id)
-                            .await
+                        self.handle_simple_query(
+                            request_id, &source, &content, &lane_key, &ctx, owner_id,
+                        )
+                        .await
                     }
                     "complex_task" => {
                         self.bus.publish(SystemEvent::IntentClassified {
@@ -516,8 +544,13 @@ impl Orchestrator {
                         ) {
                             Ok(response) => Ok(response),
                             Err(e) => {
-                                tracing::warn!("Dispatch planned failed: {e}, falling back to simple_query");
-                                self.handle_simple_query(request_id, &source, &content, &lane_key, &ctx, owner_id).await
+                                tracing::warn!(
+                                    "Dispatch planned failed: {e}, falling back to simple_query"
+                                );
+                                self.handle_simple_query(
+                                    request_id, &source, &content, &lane_key, &ctx, owner_id,
+                                )
+                                .await
                             }
                         }
                     }
@@ -605,7 +638,9 @@ impl Orchestrator {
                 self.handle_simple_query(request_id, source, &query, lane_key, ctx, owner_id)
                     .await
             }
-            Intent::TaskQuery { task_id } => self.handle_task_query(task_id, &principal_id(principal)),
+            Intent::TaskQuery { task_id } => {
+                self.handle_task_query(task_id, &principal_id(principal))
+            }
             Intent::ComplexTask {
                 description,
                 required_skills,
@@ -621,14 +656,22 @@ impl Orchestrator {
                 ) {
                     Ok(response) => Ok(response),
                     Err(e) => {
-                        tracing::warn!("Heuristic dispatch failed: {e}, falling back to simple_query");
-                        self.handle_simple_query(request_id, source, &description, lane_key, ctx, owner_id).await
+                        tracing::warn!(
+                            "Heuristic dispatch failed: {e}, falling back to simple_query"
+                        );
+                        self.handle_simple_query(
+                            request_id,
+                            source,
+                            &description,
+                            lane_key,
+                            ctx,
+                            owner_id,
+                        )
+                        .await
                     }
                 }
             }
-            Intent::TaskControl { task_id, action } => {
-                self.handle_task_control(&task_id, &action)
-            }
+            Intent::TaskControl { task_id, action } => self.handle_task_control(&task_id, &action),
         }
     }
 
@@ -641,26 +684,35 @@ impl Orchestrator {
         ctx: &ConversationContext,
         owner_id: Option<&str>,
     ) -> Result<String, String> {
+        let system_persona = match self.system_persona.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("System persona lock poisoned during read; recovering");
+                poisoned.into_inner().clone()
+            }
+        };
+
         let agent_persona = AgentPersona {
             role: "Assistant".to_string(),
             tone: "Concise and professional".to_string(),
             domain_knowledge: vec![],
         };
-        let mut system_prompt = PromptAssembler::assemble(&self.system_persona, &agent_persona);
-        system_prompt.push_str("\n\n### STYLE RULES ###\n");
-        system_prompt.push_str("- Be concise and direct. Avoid filler words.\n");
-        system_prompt.push_str("- Do NOT use emojis.\n");
-        system_prompt.push_str("- If the message is casual (greeting, number, short phrase), respond briefly and naturally.\n");
+        let mut system_prompt = PromptAssembler::assemble(&system_persona, &agent_persona);
 
         // Resolve tools based on intent analysis
         let tool_names = self.intent_parser.suggest_tools(query);
-        let tool_defs: Vec<_> = tool_names.iter()
+        let tool_defs: Vec<_> = tool_names
+            .iter()
             .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
             .collect();
 
         let (tools_for_loop, policy_opt, config_for_loop);
         if !tool_defs.is_empty() {
-            tracing::info!("Simple query upgraded with {} tools: {:?}", tool_defs.len(), tool_names);
+            tracing::info!(
+                "Simple query upgraded with {} tools: {:?}",
+                tool_defs.len(),
+                tool_names
+            );
             system_prompt.push_str(&format_tool_guidance(&tool_defs));
             let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
             policy_opt = Some(SandboxPolicy {
@@ -671,7 +723,11 @@ impl Orchestrator {
                 max_tool_calls: None,
                 max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
             });
-            config_for_loop = LoopConfig { max_rounds: 4, max_tools_per_round: 2, ..self.loop_config.clone() };
+            config_for_loop = LoopConfig {
+                max_rounds: 4,
+                max_tools_per_round: 2,
+                ..self.loop_config.clone()
+            };
             tools_for_loop = tool_defs;
         } else {
             tools_for_loop = vec![];
@@ -699,22 +755,39 @@ impl Orchestrator {
 
                 // Generate query embedding if embedder is available
                 let query_embedding = if let Some(ref embedder) = self.embedder {
-                    embedder.embed(&[query]).await.ok().and_then(|v| v.into_iter().next())
+                    embedder
+                        .embed(&[query])
+                        .await
+                        .ok()
+                        .and_then(|v| v.into_iter().next())
                 } else {
                     None
                 };
 
-                let memories = repo.search_hybrid(
-                    oid, query, query_embedding.as_deref(), top_k, None, None, None
-                ).unwrap_or_default();
+                let memories = repo
+                    .search_hybrid(
+                        oid,
+                        query,
+                        query_embedding.as_deref(),
+                        top_k,
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap_or_default();
 
                 if !memories.is_empty() {
                     let mut block = String::from("### RETRIEVED MEMORY ###\n");
                     let mut budget = 2000usize;
                     for m in &memories {
-                        let entry = format!("- [{}] {}\n", m.kind.as_str(),
-                            m.content.chars().take(300).collect::<String>());
-                        if entry.len() > budget { break; }
+                        let entry = format!(
+                            "- [{}] {}\n",
+                            m.kind.as_str(),
+                            m.content.chars().take(300).collect::<String>()
+                        );
+                        if entry.len() > budget {
+                            break;
+                        }
                         budget -= entry.len();
                         block.push_str(&entry);
                     }
@@ -726,9 +799,12 @@ impl Orchestrator {
             messages.push(ChatMessage::user(query));
 
             // Per-request sandbox with ContextualToolExecutor for owner-scoped tools
-            let ctx_exec = ToolExecutionContext { owner_id: owner_id.map(|s| s.to_string()) };
+            let ctx_exec = ToolExecutionContext {
+                owner_id: owner_id.map(|s| s.to_string()),
+            };
             let contextual_executor = Arc::new(ContextualToolExecutor::new(
-                self.tool_registry.clone(), ctx_exec,
+                self.tool_registry.clone(),
+                ctx_exec,
             ));
             let per_request_sandbox = SandboxManager::new(contextual_executor, self.bus.clone());
 
@@ -747,10 +823,13 @@ impl Orchestrator {
             let latency_ms = call_start.elapsed().as_millis() as i64;
 
             // Persist LLM usage and emit event
-            let actual_model = result.model_used.as_deref()
+            let actual_model = result
+                .model_used
+                .as_deref()
                 .or(self.loop_config.model.as_deref())
                 .unwrap_or(router.default_model());
-            let resolved_provider = router.model_registry()
+            let resolved_provider = router
+                .model_registry()
                 .resolve_provider(actual_model)
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
@@ -809,10 +888,13 @@ impl Orchestrator {
             (result.final_content, false)
         } else {
             // Fallback: echo stub (backward compatible) — produces JSON
-            (format!(
-                "{{\"status\": \"ok\", \"echo\": \"Received: {}\"}}",
-                query.chars().take(50).collect::<String>()
-            ), true)
+            (
+                format!(
+                    "{{\"status\": \"ok\", \"echo\": \"Received: {}\"}}",
+                    query.chars().take(50).collect::<String>()
+                ),
+                true,
+            )
         };
 
         // Output guard: only enforce JSON for structured (non-LLM) responses
@@ -833,7 +915,11 @@ impl Orchestrator {
         Ok(validated)
     }
 
-    fn handle_task_query(&self, task_id: Option<String>, created_by: &str) -> Result<String, String> {
+    fn handle_task_query(
+        &self,
+        task_id: Option<String>,
+        created_by: &str,
+    ) -> Result<String, String> {
         match task_id {
             Some(id) => {
                 // Try DB first, fall back to in-memory registry
@@ -857,16 +943,19 @@ impl Orchestrator {
                 if let Some(ref db) = self.db {
                     let repo = TaskRepository::new(db);
                     if let Ok(tasks) = repo.list_active_by_creator(created_by, 20) {
-                        let task_list: Vec<serde_json::Value> = tasks.iter().map(|t| {
-                            serde_json::json!({
-                                "task_id": t.id,
-                                "title": t.title,
-                                "status": t.status.as_str(),
-                                "progress_current": t.progress_current,
-                                "progress_total": t.progress_total,
-                                "created_at": t.created_at.to_rfc3339(),
+                        let task_list: Vec<serde_json::Value> = tasks
+                            .iter()
+                            .map(|t| {
+                                serde_json::json!({
+                                    "task_id": t.id,
+                                    "title": t.title,
+                                    "status": t.status.as_str(),
+                                    "progress_current": t.progress_current,
+                                    "progress_total": t.progress_total,
+                                    "created_at": t.created_at.to_rfc3339(),
+                                })
                             })
-                        }).collect();
+                            .collect();
                         return Ok(serde_json::json!({
                             "tasks": task_list,
                             "count": task_list.len(),
@@ -875,12 +964,16 @@ impl Orchestrator {
                     }
                 }
                 let active = self.shared_context.task_registry.list_active();
-                let tasks: Vec<serde_json::Value> =
-                    active.iter().map(|e| serde_json::json!({
-                        "task_id": e.task_id,
-                        "title": e.title,
-                        "status": e.status.as_str(),
-                    })).collect();
+                let tasks: Vec<serde_json::Value> = active
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "task_id": e.task_id,
+                            "title": e.title,
+                            "status": e.status.as_str(),
+                        })
+                    })
+                    .collect();
                 Ok(serde_json::json!({
                     "tasks": tasks,
                     "count": tasks.len(),
@@ -1002,7 +1095,9 @@ fn db_task_to_json(task: &Task) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent};
+    use crate::agent::subagent::{
+        AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent,
+    };
     use crate::security::sandbox::SandboxManager;
     use crate::tools::{RegistryToolExecutor, ToolRegistry};
 
@@ -1058,6 +1153,22 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn test_update_system_persona_updates_active_snapshot() {
+        let orch = make_orchestrator();
+        let mut replacement = SystemPersona::default();
+        replacement.name = "Soul Reloaded".to_string();
+
+        orch.update_system_persona(replacement.clone());
+
+        let active = orch
+            .system_persona
+            .read()
+            .expect("system_persona lock should be readable")
+            .clone();
+        assert_eq!(active.name, replacement.name);
     }
 
     fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
@@ -1233,7 +1344,10 @@ mod tests {
     #[tokio::test]
     async fn test_simple_query_with_mock_llm() {
         use async_trait::async_trait;
-        use openalpaca_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, LlmRouter, ProviderType, Usage};
+        use openalpaca_llm::{
+            ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, LlmRouter,
+            ProviderType, Usage,
+        };
 
         struct MockLlm;
 
@@ -1343,7 +1457,9 @@ mod tests {
     /// Helper: create a mock LLM that returns a fixed response string.
     fn make_planning_mock_llm(response: &str) -> Arc<LlmRouter> {
         use async_trait::async_trait;
-        use openalpaca_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, Usage};
+        use openalpaca_llm::{
+            ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, Usage,
+        };
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct PlanningMockLlm {
@@ -1435,7 +1551,11 @@ mod tests {
 
         assert!(result.is_ok());
         let text = result.unwrap();
-        assert!(text.contains("assigned"), "Expected 'assigned' in: {}", text);
+        assert!(
+            text.contains("assigned"),
+            "Expected 'assigned' in: {}",
+            text
+        );
 
         // Verify task is registered
         assert_eq!(orch.shared_context.task_registry.count(), 1);
@@ -1541,7 +1661,10 @@ mod tests {
 
     use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
 
-    fn make_security_gate_with_registry(bus: &EventBus, registry: Arc<ToolRegistry>) -> Arc<SecurityGate> {
+    fn make_security_gate_with_registry(
+        bus: &EventBus,
+        registry: Arc<ToolRegistry>,
+    ) -> Arc<SecurityGate> {
         let executor = Arc::new(RegistryToolExecutor::new(registry));
         let sandbox = Arc::new(SandboxManager::new(executor, bus.clone()));
         Arc::new(SecurityGate::new(sandbox))
@@ -1596,7 +1719,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_intent_detected_and_executes() {
-        use openalpaca_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, Usage, ToolCall as LlmToolCall};
+        use openalpaca_llm::{
+            ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider,
+            ToolCall as LlmToolCall, Usage,
+        };
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct ToolMockLlm {
@@ -1605,8 +1731,12 @@ mod tests {
 
         #[async_trait::async_trait]
         impl LlmProvider for ToolMockLlm {
-            fn name(&self) -> &str { "tool-mock" }
-            fn supports_tools(&self) -> bool { true }
+            fn name(&self) -> &str {
+                "tool-mock"
+            }
+            fn supports_tools(&self) -> bool {
+                true
+            }
             async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
                 let n = self.call_count.fetch_add(1, Ordering::SeqCst);
                 match n {
@@ -1642,25 +1772,26 @@ mod tests {
             }
         }
 
-        let mock = ToolMockLlm { call_count: AtomicUsize::new(0) };
+        let mock = ToolMockLlm {
+            call_count: AtomicUsize::new(0),
+        };
         let router = openalpaca_llm::LlmRouter::single_provider(
             Arc::new(mock),
             openalpaca_llm::ProviderType::Anthropic,
             "claude-sonnet-4-5-20250929".to_string(),
         );
-        let orch = make_orchestrator_with_tools_and_llm(
-            Arc::new(router),
-            &["web_fetch"],
-        );
+        let orch = make_orchestrator_with_tools_and_llm(Arc::new(router), &["web_fetch"]);
 
-        let result = orch.handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "fetch https://example.com".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-        ).await;
+        let result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "cli".to_string(),
+                "fetch https://example.com".to_string(),
+                Principal::System,
+                Scope::Global,
+                "test:cli".to_string(),
+            )
+            .await;
 
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
         let content = result.unwrap();
@@ -1669,7 +1800,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_max_rounds_enforcement() {
-        use openalpaca_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, Usage, ToolCall as LlmToolCall};
+        use openalpaca_llm::{
+            ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider,
+            ToolCall as LlmToolCall, Usage,
+        };
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct AlwaysToolUseLlm {
@@ -1678,8 +1812,12 @@ mod tests {
 
         #[async_trait::async_trait]
         impl LlmProvider for AlwaysToolUseLlm {
-            fn name(&self) -> &str { "always-tool" }
-            fn supports_tools(&self) -> bool { true }
+            fn name(&self) -> &str {
+                "always-tool"
+            }
+            fn supports_tools(&self) -> bool {
+                true
+            }
             async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
                 let n = self.call_count.fetch_add(1, Ordering::SeqCst);
                 if n == 0 {
@@ -1701,34 +1839,43 @@ mod tests {
                         arguments: serde_json::json!({"url": "https://example.com"}),
                     }],
                     model: "mock-model".to_string(),
-                    usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 20,
+                        ..Default::default()
+                    },
                     finish_reason: FinishReason::ToolUse,
                 })
             }
         }
 
-        let mock = AlwaysToolUseLlm { call_count: AtomicUsize::new(0) };
+        let mock = AlwaysToolUseLlm {
+            call_count: AtomicUsize::new(0),
+        };
         let router = openalpaca_llm::LlmRouter::single_provider(
             Arc::new(mock),
             openalpaca_llm::ProviderType::Anthropic,
             "claude-sonnet-4-5-20250929".to_string(),
         );
-        let orch = make_orchestrator_with_tools_and_llm(
-            Arc::new(router),
-            &["web_fetch"],
-        );
+        let orch = make_orchestrator_with_tools_and_llm(Arc::new(router), &["web_fetch"]);
 
-        let result = orch.handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "fetch https://example.com".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-        ).await;
+        let result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "cli".to_string(),
+                "fetch https://example.com".to_string(),
+                Principal::System,
+                Scope::Global,
+                "test:cli".to_string(),
+            )
+            .await;
 
         // Should complete without hanging (max_rounds=4 cap kicks in)
-        assert!(result.is_ok(), "Expected Ok (max_rounds should cap), got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Expected Ok (max_rounds should cap), got: {:?}",
+            result
+        );
     }
 
     #[tokio::test]
@@ -1739,14 +1886,16 @@ mod tests {
         // Build orchestrator with NO tools in registry
         let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
 
-        let result = orch.handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "fetch https://example.com".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-        ).await;
+        let result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "cli".to_string(),
+                "fetch https://example.com".to_string(),
+                Principal::System,
+                Scope::Global,
+                "test:cli".to_string(),
+            )
+            .await;
 
         // Should succeed without error — just proceeds tool-less
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
@@ -1760,17 +1909,23 @@ mod tests {
         // No agents registered → dispatch_planned will fail
         let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
 
-        let result = orch.handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "do something complex".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-        ).await;
+        let result = orch
+            .handle_message(
+                Uuid::new_v4(),
+                "cli".to_string(),
+                "do something complex".to_string(),
+                Principal::System,
+                Scope::Global,
+                "test:cli".to_string(),
+            )
+            .await;
 
         // Should succeed via fallback to simple_query (echo stub since mock LLM returns plan JSON)
-        assert!(result.is_ok(), "Expected Ok via fallback, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Expected Ok via fallback, got: {:?}",
+            result
+        );
         // No tasks should be registered (dispatch failed)
         assert_eq!(orch.shared_context.task_registry.count(), 0);
     }

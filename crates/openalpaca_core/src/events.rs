@@ -124,5 +124,16 @@ pub enum SystemEvent {
         reason: String,
         timestamp: DateTime<Utc>,
     },
+    /// The SOUL.md personality file was updated
+    SoulUpdated {
+        /// Who initiated the update: "agent" or "user" (via file watcher)
+        actor: String,
+        /// Update mode: "replace" or "sections"
+        mode: String,
+        /// SHA-256 hash of the new content for deduplication
+        content_sha256: String,
+        /// Path to the timestamped backup (if created)
+        backup_path: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
 }
-
