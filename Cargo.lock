@@ -3919,6 +3919,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "dashmap",
  "openalpaca_api",
@@ -3928,6 +3929,7 @@ dependencies = [
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -4043,6 +4045,7 @@ dependencies = [
  "rand 0.10.0",
  "serde",
  "serde_json",
+ "sha2",
  "teloxide",
  "tokio",
  "tokio-stream",

@@ -30,12 +30,21 @@ use openalpaca_core::{
     context::SharedContext,
     gateway::Gateway,
     lane::LaneManager,
-    middleware::prompt::SystemPersona,
+    middleware::{
+        prompt::SystemPersona,
+        soul::{parse_soul_markdown, soul_to_system_persona},
+    },
     orchestrator::Orchestrator,
+    tools::builtins::SoulToolContext,
 };
-use openalpaca_storage::{ConfigRepository, ConversationRepository, Database, IdentityRepository, discovery, paths};
+use openalpaca_storage::{
+    ConfigRepository, ConversationRepository, Database, IdentityRepository, discovery, paths,
+};
 use openalpaca_wake::manager::WakeManager;
-use std::sync::Arc;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 
@@ -73,8 +82,6 @@ pub struct AppState {
 /// 3. Walk upward from `current_dir()` looking for the same sentinel
 /// 4. Fallback: `current_dir()/config`
 fn resolve_config_base_dir() -> std::path::PathBuf {
-    use std::path::{Path, PathBuf};
-
     // 1. Explicit env var override
     if let Ok(dir) = std::env::var("OPENALPACA_CONFIG_DIR") {
         let p = PathBuf::from(dir);
@@ -117,6 +124,143 @@ fn resolve_config_base_dir() -> std::path::PathBuf {
 
     // 4. Last resort fallback
     std::env::current_dir().unwrap_or_default().join("config")
+}
+
+const DEFAULT_SOUL_TEMPLATE: &str = r#"---
+title: "SOUL.md Template"
+summary: "Workspace template for SOUL.md"
+read_when:
+  - Bootstrapping a workspace manually
+---
+
+# SOUL.md - Who You Are
+
+_You're not a chatbot. You're becoming someone._
+
+## Core Truths
+
+**Be genuinely helpful, not performatively helpful.** Skip the "Great question!" and "I'd be happy to help!" — just help. Actions speak louder than filler words.
+
+**Have opinions.** You're allowed to disagree, prefer things, find stuff amusing or boring. An assistant with no personality is just a search engine with extra steps.
+
+**Be resourceful before asking.** Try to figure it out. Read the file. Check the context. Search for it. _Then_ ask if you're stuck. The goal is to come back with answers, not questions.
+
+**Earn trust through competence.** Your human gave you access to their stuff. Don't make them regret it. Be careful with external actions (emails, tweets, anything public). Be bold with internal ones (reading, organizing, learning).
+
+**Remember you're a guest.** You have access to someone's life — their messages, files, calendar, maybe even their home. That's intimacy. Treat it with respect.
+
+## Boundaries
+
+- Private things stay private. Period.
+- When in doubt, ask before acting externally.
+- Never send half-baked replies to messaging surfaces.
+- You're not the user's voice — be careful in group chats.
+
+## Vibe
+
+Be the assistant you'd actually want to talk to. Concise when needed, thorough when it matters. Not a corporate drone. Not a sycophant. Just... good.
+
+## Continuity
+
+Each session, you wake up fresh. These files _are_ your memory. Read them. Update them. They're how you persist.
+
+If you change this file, tell the user — it's your soul, and they should know.
+
+---
+
+_This file is yours to evolve. As you learn who you are, update it._
+"#;
+
+fn ensure_soul_template_file(config_base_dir: &Path) -> Result<PathBuf> {
+    let templates_dir = config_base_dir.join("orchestrator").join("templates");
+    std::fs::create_dir_all(&templates_dir)
+        .with_context(|| format!("Failed to create templates dir {}", templates_dir.display()))?;
+
+    let template_path = templates_dir.join("SOUL_temp.md");
+    if !template_path.exists() {
+        std::fs::write(&template_path, DEFAULT_SOUL_TEMPLATE).with_context(|| {
+            format!(
+                "Failed to write soul template file {}",
+                template_path.display()
+            )
+        })?;
+        info!(
+            "Soul bootstrap created template: {}",
+            template_path.display()
+        );
+    }
+
+    Ok(template_path)
+}
+
+fn ensure_soul_file(config_base_dir: &Path, template_path: &Path) -> Result<PathBuf> {
+    let soul_path = config_base_dir.join("orchestrator").join("SOUL.md");
+    if !soul_path.exists() {
+        if template_path.exists() {
+            std::fs::copy(template_path, &soul_path).with_context(|| {
+                format!(
+                    "Failed to bootstrap SOUL.md from template {}",
+                    template_path.display()
+                )
+            })?;
+        } else {
+            std::fs::write(&soul_path, DEFAULT_SOUL_TEMPLATE).with_context(|| {
+                format!("Failed to bootstrap SOUL.md at {}", soul_path.display())
+            })?;
+        }
+        info!(
+            "Soul bootstrap created active file: {}",
+            soul_path.display()
+        );
+    }
+    Ok(soul_path)
+}
+
+fn load_system_persona_from_soul_file(soul_path: &Path) -> Result<SystemPersona> {
+    let content = std::fs::read_to_string(soul_path)
+        .with_context(|| format!("Failed to read {}", soul_path.display()))?;
+    let soul_doc = parse_soul_markdown(&content)
+        .with_context(|| format!("Failed to parse {}", soul_path.display()))?;
+    Ok(soul_to_system_persona(&soul_doc))
+}
+
+fn bootstrap_system_persona(config_base_dir: &Path) -> (SystemPersona, PathBuf) {
+    let template_path = match ensure_soul_template_file(config_base_dir) {
+        Ok(path) => path,
+        Err(e) => {
+            warn!("SOUL template bootstrap failed: {e}");
+            config_base_dir.join("orchestrator").join("templates").join("SOUL_temp.md")
+        }
+    };
+
+    let soul_path = match ensure_soul_file(config_base_dir, &template_path) {
+        Ok(path) => path,
+        Err(e) => {
+            warn!("SOUL bootstrap failed: {e}");
+            config_base_dir.join("orchestrator").join("SOUL.md")
+        }
+    };
+
+    match load_system_persona_from_soul_file(&soul_path) {
+        Ok(persona) => {
+            info!("Soul loaded: {}", soul_path.display());
+            (persona, soul_path)
+        }
+        Err(e) => {
+            warn!("SOUL parse/validation failed: {e}; using default system persona");
+            (SystemPersona::default(), soul_path)
+        }
+    }
+}
+
+fn is_same_file_path(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a_abs), Ok(b_abs)) => a_abs == b_abs,
+        _ => false,
+    }
 }
 
 /// Resolve the stable local user ID from the database. On first run, if legacy
@@ -229,11 +373,19 @@ fn main() -> Result<()> {
     match openalpaca_llm::key_encryption::KeyEncryptor::ensure_at(&app_dir) {
         Ok(hex_key) => {
             // SAFETY: No other threads exist yet — tokio runtime has not started.
-            unsafe { std::env::set_var("OPENALPACA_MASTER_KEY", &hex_key); }
-            info!("Master key loaded from {}", app_dir.join(".master_key").display());
+            unsafe {
+                std::env::set_var("OPENALPACA_MASTER_KEY", &hex_key);
+            }
+            info!(
+                "Master key loaded from {}",
+                app_dir.join(".master_key").display()
+            );
         }
         Err(e) => {
-            error!("FATAL: Cannot ensure master key at {}: {e}", app_dir.display());
+            error!(
+                "FATAL: Cannot ensure master key at {}: {e}",
+                app_dir.display()
+            );
             std::process::exit(1);
         }
     }
@@ -281,6 +433,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let default_lane_key = format!("{local_user_id}:gui");
     info!("Local user ID: {local_user_id}, default lane: {default_lane_key}");
 
+    // Step 4.2: Bootstrap and load SOUL.md for orchestrator persona
+    let (initial_system_persona, soul_path) = bootstrap_system_persona(&config_base_dir);
+
     // Step 5: Create event broadcaster for WebSocket streaming
     let event_broadcaster = EventBroadcaster::new(64, instance_id.clone(), Some(db.clone()));
 
@@ -302,6 +457,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     if llm_config.exists() {
         watch_paths.push(llm_config);
     }
+    if soul_path.exists() {
+        watch_paths.push(soul_path.clone());
+    }
     if !watch_paths.is_empty() {
         info!("Wake: watching paths: {:?}", watch_paths);
         wake_manager.add_filesystem_watcher(watch_paths);
@@ -312,15 +470,6 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         .start()
         .await
         .context("Failed to start WakeManager")?;
-
-    // Spawn forwarding task: WakeEvent -> ServerEvent::Wake -> Broadcast & Persist
-    let eb_clone = event_broadcaster.clone();
-    tokio::spawn(async move {
-        while let Some(event) = wake_rx.recv().await {
-            info!("Received WakeEvent: {:?}", event);
-            eb_clone.wake(event);
-        }
-    });
 
     // Step 6: Build HTTP router with public/protected/websocket split
 
@@ -340,7 +489,10 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     eb_bridge.connector_status(&id, &status);
                 }
                 openalpaca_core::events::SystemEvent::TaskCreated {
-                    task_id, title, created_by: _, ..
+                    task_id,
+                    title,
+                    created_by: _,
+                    ..
                 } => {
                     eb_bridge.task_status(&task_id, &title, "queued", None, None, None);
                 }
@@ -351,7 +503,14 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     progress_total,
                     ..
                 } => {
-                    eb_bridge.task_status(&task_id, "", &status, progress_current, progress_total, None);
+                    eb_bridge.task_status(
+                        &task_id,
+                        "",
+                        &status,
+                        progress_current,
+                        progress_total,
+                        None,
+                    );
                 }
                 openalpaca_core::events::SystemEvent::TaskCompleted {
                     task_id,
@@ -360,9 +519,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                 } => {
                     eb_bridge.task_status(&task_id, "", "completed", None, None, result_summary);
                 }
-                openalpaca_core::events::SystemEvent::TaskFailed {
-                    task_id, error, ..
-                } => {
+                openalpaca_core::events::SystemEvent::TaskFailed { task_id, error, .. } => {
                     eb_bridge.task_status(&task_id, "", "failed", None, None, Some(error));
                 }
                 openalpaca_core::events::SystemEvent::AgentRegistered {
@@ -371,41 +528,89 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     eb_bridge.agent_status(&agent_id, &name, "idle", None);
                 }
                 openalpaca_core::events::SystemEvent::AgentStatusChanged {
-                    agent_id, status, current_task_id, ..
+                    agent_id,
+                    status,
+                    current_task_id,
+                    ..
                 } => {
                     eb_bridge.agent_status(&agent_id, "", &status, current_task_id);
                 }
                 openalpaca_core::events::SystemEvent::SecurityViolation {
-                    agent_id, tool_name, reason, ..
+                    agent_id,
+                    tool_name,
+                    reason,
+                    ..
                 } => {
                     tracing::warn!(
                         "Security violation: agent={}, tool={}, reason={}",
-                        agent_id, tool_name, reason
+                        agent_id,
+                        tool_name,
+                        reason
                     );
                 }
                 openalpaca_core::events::SystemEvent::ToolExecuted {
-                    agent_id, tool_name, success, duration_ms, ..
+                    agent_id,
+                    tool_name,
+                    success,
+                    duration_ms,
+                    ..
                 } => {
                     tracing::debug!(
                         "Tool executed: agent={}, tool={}, success={}, duration={}ms",
-                        agent_id, tool_name, success, duration_ms
+                        agent_id,
+                        tool_name,
+                        success,
+                        duration_ms
                     );
                 }
                 openalpaca_core::events::SystemEvent::LlmCallCompleted {
-                    agent_id, model, input_tokens, output_tokens, cost_usd, ..
+                    agent_id,
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    cost_usd,
+                    ..
                 } => {
                     tracing::info!(
                         "LLM call: agent={}, model={}, tokens={}/{}, cost=${:.6}",
-                        agent_id, model, input_tokens, output_tokens, cost_usd
+                        agent_id,
+                        model,
+                        input_tokens,
+                        output_tokens,
+                        cost_usd
                     );
                 }
                 openalpaca_core::events::SystemEvent::ModelAccessDenied {
-                    agent_id, model_id, reason, ..
+                    agent_id,
+                    model_id,
+                    reason,
+                    ..
                 } => {
                     tracing::warn!(
                         "Model access denied: agent={}, model={}, reason={}",
-                        agent_id, model_id, reason
+                        agent_id,
+                        model_id,
+                        reason
                     );
+                }
+                openalpaca_core::events::SystemEvent::SoulUpdated {
+                    actor,
+                    mode,
+                    content_sha256,
+                    backup_path,
+                    ..
+                } => {
+                    // Structured audit log with actor attribution
+                    tracing::info!(
+                        target: "soul_audit",
+                        actor = %actor,
+                        mode = %mode,
+                        content_sha256 = %content_sha256,
+                        backup_path = ?backup_path,
+                        "SOUL.md updated"
+                    );
+                    // Forward to EventBroadcaster for WebSocket clients + DB persistence
+                    eb_bridge.soul_updated(&actor, &mode, &content_sha256, backup_path);
                 }
                 // Wake events are forwarded via the dedicated wake_rx channel (lines 130-135),
                 // not through the Core EventBus. If a future Core component publishes
@@ -429,8 +634,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
             if path.extension().is_some_and(|e| e == "toml") {
                 match std::fs::read_to_string(&path) {
                     Ok(content) => {
-                        match toml::from_str::<openalpaca_core::agent::AgentConfigFile>(&content)
-                        {
+                        match toml::from_str::<openalpaca_core::agent::AgentConfigFile>(&content) {
                             Ok(agent_config) => {
                                 // Register in-memory
                                 let subagent = agent_config.clone().into_subagent();
@@ -439,27 +643,20 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                                 // Persist to DB
                                 let storage_config = agent_config.into_storage_config();
                                 let agent_id = storage_config.id.clone();
-                                let repo =
-                                    openalpaca_storage::SubAgentRepository::new(&db);
+                                let repo = openalpaca_storage::SubAgentRepository::new(&db);
                                 let _ = repo.upsert(&storage_config);
 
                                 // Initialize metrics row if not exists
                                 if let Ok(None) = repo.get_metrics(&agent_id) {
                                     let _ = repo.upsert_metrics(
-                                        &openalpaca_storage::AgentMetrics::new_empty(
-                                            &agent_id,
-                                        ),
+                                        &openalpaca_storage::AgentMetrics::new_empty(&agent_id),
                                     );
                                 }
 
                                 info!("Loaded agent config: {}", path.display());
                             }
                             Err(e) => {
-                                warn!(
-                                    "Failed to parse agent config {}: {}",
-                                    path.display(),
-                                    e
-                                );
+                                warn!("Failed to parse agent config {}: {}", path.display(), e);
                             }
                         }
                     }
@@ -481,9 +678,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let keyring_available = openalpaca_llm::probe_keyring();
     let secret_store: Arc<dyn openalpaca_llm::SecretStore> = if keyring_available {
         info!("OS keychain available");
-        Arc::new(openalpaca_llm::CachingSecretStore::new(
-            Box::new(openalpaca_llm::KeyringSecretStore),
-        ))
+        Arc::new(openalpaca_llm::CachingSecretStore::new(Box::new(
+            openalpaca_llm::KeyringSecretStore,
+        )))
     } else {
         warn!(
             "OS keychain unavailable (headless/Docker?). Using in-memory secret store. \
@@ -510,7 +707,10 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     // Note: OPENALPACA_MASTER_KEY was set in the sync main() preamble before tokio started.
     let llm_router: Option<Arc<openalpaca_llm::LlmRouter>> = {
         if llm_config_path.exists() {
-            match openalpaca_llm::build_router_with_secret_store(&llm_config_path, Some(&*secret_store)) {
+            match openalpaca_llm::build_router_with_secret_store(
+                &llm_config_path,
+                Some(&*secret_store),
+            ) {
                 Ok(router) => {
                     info!(
                         "LLM router loaded (default model: {})",
@@ -573,19 +773,34 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         let emb_config = llm_config.as_ref().and_then(|c| c.embeddings.clone());
         match emb_config {
             Some(ref cfg) if cfg.enabled => {
-                let provider_config = llm_config.as_ref()
+                let provider_config = llm_config
+                    .as_ref()
                     .and_then(|c| c.providers.as_ref())
                     .and_then(|p| p.get(&cfg.provider));
                 match openalpaca_llm::build_embedder(cfg, Some(&*secret_store), provider_config) {
-                    Ok(e) => { info!("Embedder initialized: {} ({}d)", cfg.provider, e.dimensions()); Some(e) }
-                    Err(e) => { warn!("Failed to build embedder: {e}"); None }
+                    Ok(e) => {
+                        info!(
+                            "Embedder initialized: {} ({}d)",
+                            cfg.provider,
+                            e.dimensions()
+                        );
+                        Some(e)
+                    }
+                    Err(e) => {
+                        warn!("Failed to build embedder: {e}");
+                        None
+                    }
                 }
             }
-            _ => { info!("Embeddings disabled"); None }
+            _ => {
+                info!("Embeddings disabled");
+                None
+            }
         }
     };
 
-    let cred_config = llm_config.as_ref()
+    let cred_config = llm_config
+        .as_ref()
         .and_then(|c| c.credential_discovery.clone())
         .unwrap_or_default();
 
@@ -596,11 +811,8 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                 tm.rescan(svc, router).await;
             }
             if let (Some(router), Some(svc)) = (&llm_router, &llm_settings_service) {
-                let _refresh_handle = tm.start_refresh_loop(
-                    svc.clone(),
-                    router.clone(),
-                    cancel_token.clone(),
-                );
+                let _refresh_handle =
+                    tm.start_refresh_loop(svc.clone(), router.clone(), cancel_token.clone());
             }
             info!("TokenManager initialized with credential discovery");
             Some(tm)
@@ -627,8 +839,18 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     // Build ToolRegistry with built-in tools + user-defined tools
     let mut tool_registry = openalpaca_core::tools::ToolRegistry::new();
 
-    // Register built-in tools
-    for tool in openalpaca_core::tools::builtins::builtin_tools(Some(db.clone()), embedder.clone()) {
+    // Register built-in tools (including update_soul)
+    let soul_tool_ctx = SoulToolContext {
+        soul_path: soul_path.clone(),
+        backup_dir: config_base_dir.join("orchestrator").join("backups"),
+        bus: bus.clone(),
+        max_backups: Some(10),
+    };
+    for tool in openalpaca_core::tools::builtins::builtin_tools_with_soul_context(
+        Some(db.clone()),
+        embedder.clone(),
+        soul_tool_ctx,
+    ) {
         tool_registry.register(tool);
     }
 
@@ -640,25 +862,32 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     }
     info!("Tool registry: {} tools loaded", tool_registry.count());
 
+    if tool_registry.get("update_soul").is_none() {
+        anyhow::bail!(
+            "update_soul tool failed to register — SOUL.md updates will not work"
+        );
+    }
+
     let tool_registry = Arc::new(tool_registry);
 
     // Construct SecurityGate → SandboxManager → RegistryToolExecutor chain
-    let registry_executor = Arc::new(
-        openalpaca_core::tools::RegistryToolExecutor::new(tool_registry.clone()),
-    );
-    let sandbox_manager = Arc::new(
-        openalpaca_core::security::sandbox::SandboxManager::new(registry_executor, bus.clone()),
-    );
-    let security_gate = Arc::new(
-        openalpaca_core::security::gate::SecurityGate::new(sandbox_manager),
-    );
+    let registry_executor = Arc::new(openalpaca_core::tools::RegistryToolExecutor::new(
+        tool_registry.clone(),
+    ));
+    let sandbox_manager = Arc::new(openalpaca_core::security::sandbox::SandboxManager::new(
+        registry_executor,
+        bus.clone(),
+    ));
+    let security_gate = Arc::new(openalpaca_core::security::gate::SecurityGate::new(
+        sandbox_manager,
+    ));
 
     // Construct Orchestrator as the new message handler
     let orchestrator = Arc::new(Orchestrator::new(
         shared_context.clone(),
         lane_manager.clone(),
         bus.clone(),
-        SystemPersona::default(),
+        initial_system_persona,
         llm_router,
         openalpaca_core::runner::LoopConfig::default(),
         security_gate,
@@ -666,7 +895,122 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         Some(db.clone()),
         embedder.clone(),
     ));
-    let handler = Arc::new(gateway_bridge::OrchestratorHandler::new(orchestrator));
+    let eb_clone = event_broadcaster.clone();
+    let soul_path_for_reload = soul_path.clone();
+    let orchestrator_for_reload = orchestrator.clone();
+
+    // Step 5 (Dedup): Shared ring buffer of recent agent-write content hashes.
+    // The SoulUpdated subscriber records hashes after agent-initiated reloads;
+    // the file watcher checks this buffer to skip duplicate reloads.
+    let recent_soul_hashes: Arc<tokio::sync::Mutex<std::collections::VecDeque<String>>> = Arc::new(
+        tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)),
+    );
+
+    let hashes_for_watcher = recent_soul_hashes.clone();
+    tokio::spawn(async move {
+        while let Some(event) = wake_rx.recv().await {
+            info!("Received WakeEvent: {:?}", event);
+
+            if let openalpaca_api::events::WakeEvent::FileChanged { path, .. } = &event {
+                let changed_path = PathBuf::from(path);
+                if is_same_file_path(&changed_path, &soul_path_for_reload) {
+                    // Dedup: compute hash of the file on disk and check against recent agent writes
+                    let should_skip = if let Ok(content) = std::fs::read(&soul_path_for_reload) {
+                        use sha2::{Digest, Sha256};
+                        let file_hash = format!("{:x}", Sha256::digest(&content));
+                        let mut ring = hashes_for_watcher.lock().await;
+                        if let Some(pos) = ring.iter().position(|h| *h == file_hash) {
+                            ring.remove(pos);
+                            info!(
+                                "Watcher dedup: skipping reload for hash {} (already applied via EventBus)",
+                                &file_hash[..16]
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !should_skip {
+                        match load_system_persona_from_soul_file(&soul_path_for_reload) {
+                            Ok(persona) => {
+                                orchestrator_for_reload.update_system_persona(persona);
+                                info!(
+                                    "Soul reloaded (watcher): {}",
+                                    soul_path_for_reload.display()
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "SOUL parse/validation failed for {}: {e}; keeping last active soul",
+                                    soul_path_for_reload.display()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            eb_clone.wake(event);
+        }
+    });
+
+    // Step 5.5: Soul hot-reload via EventBus (agent-initiated updates)
+    // When the update_soul tool writes a new SOUL file, it publishes SoulUpdated.
+    // This subscriber reloads the persona immediately without waiting for the
+    // file watcher, providing a more reliable activation path.
+    {
+        let mut soul_rx = bus.subscribe();
+        let orchestrator_for_soul = orchestrator.clone();
+        let soul_path_for_bus = soul_path.clone();
+        let hashes_for_bus = recent_soul_hashes.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = soul_rx.recv().await {
+                if let openalpaca_core::events::SystemEvent::SoulUpdated {
+                    actor,
+                    content_sha256,
+                    ..
+                } = event
+                {
+                    info!(
+                        "SoulUpdated via EventBus (actor={}, sha256={}), reloading persona",
+                        actor,
+                        &content_sha256[..16.min(content_sha256.len())]
+                    );
+                    match load_system_persona_from_soul_file(&soul_path_for_bus) {
+                        Ok(persona) => {
+                            orchestrator_for_soul.update_system_persona(persona);
+
+                            // Record this hash so the file watcher won't double-reload
+                            let mut ring = hashes_for_bus.lock().await;
+                            ring.push_back(content_sha256.clone());
+                            // Keep ring bounded
+                            while ring.len() > 8 {
+                                ring.pop_front();
+                            }
+
+                            info!(
+                                "Soul hot-reloaded via EventBus: {}",
+                                soul_path_for_bus.display()
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Soul EventBus reload failed for {}: {e}; keeping last active soul",
+                                soul_path_for_bus.display()
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    let handler = Arc::new(gateway_bridge::OrchestratorHandler::new(
+        orchestrator.clone(),
+    ));
     let gateway = Arc::new(Gateway::new(
         shared_context,
         lane_manager,
@@ -677,11 +1021,8 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
 
     // Step 5.3: Connector Lifecycle (Phase 4.1.8)
     let notif_bus = bus.clone();
-    let connector_manager = managers::connector::ConnectorManager::new(
-        db.clone(),
-        bus,
-        gateway.clone(),
-    );
+    let connector_manager =
+        managers::connector::ConnectorManager::new(db.clone(), bus, gateway.clone());
     connector_manager.start_all().await;
 
     // Step 5.3.1: Spawn NotificationDispatcher (Phase 5.6)
@@ -693,7 +1034,8 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
             .flatten()
             .map(teloxide::Bot::new);
         let notif_rx = notif_bus.subscribe();
-        let dispatcher = notification::NotificationDispatcher::new(notif_rx, telegram_bot, db.clone());
+        let dispatcher =
+            notification::NotificationDispatcher::new(notif_rx, telegram_bot, db.clone());
         tokio::spawn(dispatcher.run());
     }
 
@@ -719,7 +1061,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
-                if missing.is_empty() { continue; }
+                if missing.is_empty() {
+                    continue;
+                }
 
                 let texts: Vec<&str> = missing.iter().map(|(_, c)| c.as_str()).collect();
                 match idx_emb.embed(&texts).await {
@@ -787,26 +1131,44 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         .route("/v1/preferences", get(routes::list_preferences_handler))
         .route("/v1/preferences/{key}", get(routes::get_preference_handler))
         .route("/v1/preferences/{key}", put(routes::set_preference_handler))
-        .route("/v1/preferences/{key}", delete(routes::delete_preference_handler))
+        .route(
+            "/v1/preferences/{key}",
+            delete(routes::delete_preference_handler),
+        )
         .route("/v1/agents", get(routes::list_agents_handler))
         .route("/v1/agents", post(routes::create_agent_handler))
-        .route("/v1/agents/from-toml", post(routes::create_agent_from_toml_handler))
-        .route("/v1/agents/from-chat", post(routes::create_agent_from_chat_handler))
+        .route(
+            "/v1/agents/from-toml",
+            post(routes::create_agent_from_toml_handler),
+        )
+        .route(
+            "/v1/agents/from-chat",
+            post(routes::create_agent_from_chat_handler),
+        )
         .route("/v1/agents/{id}", get(routes::get_agent_handler))
         .route("/v1/agents/{id}", delete(routes::delete_agent_handler))
-        .route("/v1/agents/{id}/config", get(routes::get_agent_config_handler))
-        .route("/v1/agents/{id}/config", put(routes::update_agent_config_handler))
         .route(
-            "/v1/agents/{id}/action",
-            post(routes::agent_action_handler),
+            "/v1/agents/{id}/config",
+            get(routes::get_agent_config_handler),
         )
+        .route(
+            "/v1/agents/{id}/config",
+            put(routes::update_agent_config_handler),
+        )
+        .route("/v1/agents/{id}/action", post(routes::agent_action_handler))
         // Chat routes (Phase 5.6)
         .route("/v1/chat", post(routes::send_chat_handler))
         .route("/v1/chat/history", get(routes::get_chat_history_handler))
-        .route("/v1/chat/history", delete(routes::delete_chat_history_handler))
+        .route(
+            "/v1/chat/history",
+            delete(routes::delete_chat_history_handler),
+        )
         // Cross-platform conversation API (Phase 5.6)
         .route("/v1/conversations", get(routes::list_conversations_handler))
-        .route("/v1/conversations/{id}/messages", get(routes::get_conversation_messages_handler))
+        .route(
+            "/v1/conversations/{id}/messages",
+            get(routes::get_conversation_messages_handler),
+        )
         // Settings routes (Phase 5.5)
         .route("/v1/settings/llm", get(routes::get_llm_settings))
         .route("/v1/settings/llm", put(routes::upsert_key))
@@ -814,10 +1176,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
             "/v1/settings/llm/keys/{provider}/{key_id}",
             delete(routes::delete_key),
         )
-        .route(
-            "/v1/settings/llm/keys/reorder",
-            put(routes::reorder_keys),
-        )
+        .route("/v1/settings/llm/keys/reorder", put(routes::reorder_keys))
         .route(
             "/v1/settings/llm/keys/priority",
             put(routes::set_key_priority),
@@ -834,15 +1193,33 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         .route("/v1/models", get(routes::list_models))
         .route("/v1/models/refresh", post(routes::refresh_models))
         // Credential discovery routes
-        .route("/v1/settings/llm/credentials", get(routes::get_discovered_credentials))
-        .route("/v1/settings/llm/credentials/rescan", post(routes::rescan_credentials))
+        .route(
+            "/v1/settings/llm/credentials",
+            get(routes::get_discovered_credentials),
+        )
+        .route(
+            "/v1/settings/llm/credentials/rescan",
+            post(routes::rescan_credentials),
+        )
         // CLI backend routes
-        .route("/v1/settings/llm/cli-backends", get(routes::get_cli_backends))
+        .route(
+            "/v1/settings/llm/cli-backends",
+            get(routes::get_cli_backends),
+        )
         // Provider usage routes
-        .route("/v1/settings/llm/providers/usage", get(routes::get_provider_usage))
+        .route(
+            "/v1/settings/llm/providers/usage",
+            get(routes::get_provider_usage),
+        )
         // Orchestrator config routes (Phase 5.7)
-        .route("/v1/orchestrator/config", get(routes::get_orchestrator_config))
-        .route("/v1/orchestrator/config", put(routes::update_orchestrator_config))
+        .route(
+            "/v1/orchestrator/config",
+            get(routes::get_orchestrator_config),
+        )
+        .route(
+            "/v1/orchestrator/config",
+            put(routes::update_orchestrator_config),
+        )
         // Memory admin routes (Phase 6)
         .route("/v1/memory/reindex", post(routes::reindex_handler))
         .route("/v1/memory/status", get(routes::index_status_handler))
@@ -952,14 +1329,16 @@ fn migrate_preference_summaries(db: &Database) {
     if let Err(e) = db.with_connection(|conn| {
         // Find all preference rows with conversation_summary
         let mut stmt = conn.prepare(
-            "SELECT user_id, value, version FROM preference WHERE key = 'conversation_summary'"
+            "SELECT user_id, value, version FROM preference WHERE key = 'conversation_summary'",
         )?;
         let rows: Vec<(String, String, i64)> = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .filter_map(Result::ok)
             .collect();
 
-        if rows.is_empty() { return Ok(()); }
+        if rows.is_empty() {
+            return Ok(());
+        }
 
         let tx = conn.unchecked_transaction()?;
         let mut migrated = 0usize;
@@ -969,7 +1348,10 @@ fn migrate_preference_summaries(db: &Database) {
                 Err(_) => continue,
             };
             let summary = parsed.get("summary").and_then(|s| s.as_str()).unwrap_or("");
-            let last_id = parsed.get("last_summarized_message_id").and_then(|n| n.as_i64()).unwrap_or(0);
+            let last_id = parsed
+                .get("last_summarized_message_id")
+                .and_then(|n| n.as_i64())
+                .unwrap_or(0);
 
             // Only update if conversation row exists
             let updated = tx.execute(
@@ -989,7 +1371,9 @@ fn migrate_preference_summaries(db: &Database) {
         }
         tx.commit()?;
         if migrated > 0 {
-            tracing::info!("Migrated {migrated} conversation summaries from preference -> conversations");
+            tracing::info!(
+                "Migrated {migrated} conversation summaries from preference -> conversations"
+            );
         }
         Ok(())
     }) {
@@ -1019,5 +1403,56 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{}-{}", prefix, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir should be creatable");
+        dir
+    }
+
+    #[test]
+    fn test_bootstrap_system_persona_creates_template_and_soul() {
+        let dir = make_temp_dir("openalpaca-soul-bootstrap");
+        let (persona, soul_path) = bootstrap_system_persona(&dir);
+
+        assert_eq!(persona.name, "OpenAlpaca");
+        assert!(soul_path.exists());
+        assert!(dir.join("orchestrator").join("templates").join("SOUL_temp.md").exists());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_bootstrap_system_persona_falls_back_on_invalid_soul() {
+        let dir = make_temp_dir("openalpaca-soul-invalid");
+        let template_path = ensure_soul_template_file(&dir).expect("template should bootstrap");
+        let soul_path = ensure_soul_file(&dir, &template_path).expect("soul file should bootstrap");
+
+        std::fs::write(&soul_path, "invalid").expect("test should write invalid soul");
+        let (persona, loaded_path) = bootstrap_system_persona(&dir);
+
+        assert_eq!(loaded_path, soul_path);
+        assert_eq!(persona.name, SystemPersona::default().name);
+        assert_eq!(persona.core_values, SystemPersona::default().core_values);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_is_same_file_path_matches_identical_files() {
+        let dir = make_temp_dir("openalpaca-soul-path");
+        let file = dir.join("SOUL.md");
+        std::fs::write(&file, "x").expect("test file should be writable");
+
+        let canonical = std::fs::canonicalize(&file).expect("file should canonicalize");
+        assert!(is_same_file_path(&file, &canonical));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

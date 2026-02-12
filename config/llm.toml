@@ -32,7 +32,7 @@ claude_code = true
 enabled = false
 
 [embeddings]
-enabled = false
+enabled = true
 provider = "local"
 model = "intfloat/multilingual-e5-base"
 dimensions = 768
