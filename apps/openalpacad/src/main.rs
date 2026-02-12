@@ -33,9 +33,10 @@ use openalpaca_core::{
     middleware::{
         prompt::SystemPersona,
         soul::{parse_soul_markdown, soul_to_system_persona},
+        user::{parse_user_markdown, UserDocument},
     },
     orchestrator::Orchestrator,
-    tools::builtins::SoulToolContext,
+    tools::builtins::{SoulToolContext, UserToolContext},
 };
 use openalpaca_storage::{
     ConfigRepository, ConversationRepository, Database, IdentityRepository, discovery, paths,
@@ -253,6 +254,136 @@ fn bootstrap_system_persona(config_base_dir: &Path) -> (SystemPersona, PathBuf) 
     }
 }
 
+// ---------------------------------------------------------------------------
+// USER.md bootstrap
+// ---------------------------------------------------------------------------
+
+const DEFAULT_USER_TEMPLATE: &str = r#"---
+title: "USER.md"
+summary: "User profile record"
+read_when:
+  - Bootstrapping a workspace manually
+---
+
+# USER.md -- About Your Human
+
+Learn about the person you're helping. Update this as you go.
+
+## Identity
+
+* Name:
+* What to call them:
+* Pronouns:
+* Timezone:
+
+## Communication Style
+
+(How they like to communicate -- terse vs verbose, formal vs casual, etc.)
+
+## Expertise & Background
+
+(Technical background, domains of expertise, skill level in various areas)
+
+## Projects & Context
+
+(Current projects, tools they use, stack preferences)
+
+## Preferences
+
+(Likes, dislikes, pet peeves, formatting preferences, etc.)
+
+## Notes
+
+(Anything else. Build this over time.)
+
+The more you know, the better you can help. But remember -- you're learning about a person, not building a dossier. Respect the difference.
+"#;
+
+fn ensure_user_template_file(config_base_dir: &Path) -> Result<PathBuf> {
+    let templates_dir = config_base_dir.join("orchestrator").join("templates");
+    std::fs::create_dir_all(&templates_dir)
+        .with_context(|| format!("Failed to create templates dir {}", templates_dir.display()))?;
+
+    let template_path = templates_dir.join("USER_temp.md");
+    if !template_path.exists() {
+        std::fs::write(&template_path, DEFAULT_USER_TEMPLATE).with_context(|| {
+            format!(
+                "Failed to write user template file {}",
+                template_path.display()
+            )
+        })?;
+        info!(
+            "User bootstrap created template: {}",
+            template_path.display()
+        );
+    }
+
+    Ok(template_path)
+}
+
+fn ensure_user_file(config_base_dir: &Path, template_path: &Path) -> Result<PathBuf> {
+    let user_path = config_base_dir.join("orchestrator").join("USER.md");
+    if !user_path.exists() {
+        if template_path.exists() {
+            std::fs::copy(template_path, &user_path).with_context(|| {
+                format!(
+                    "Failed to bootstrap USER.md from template {}",
+                    template_path.display()
+                )
+            })?;
+        } else {
+            std::fs::write(&user_path, DEFAULT_USER_TEMPLATE).with_context(|| {
+                format!("Failed to bootstrap USER.md at {}", user_path.display())
+            })?;
+        }
+        info!(
+            "User bootstrap created active file: {}",
+            user_path.display()
+        );
+    }
+    Ok(user_path)
+}
+
+fn load_user_document_from_file(user_path: &Path) -> Result<UserDocument> {
+    let content = std::fs::read_to_string(user_path)
+        .with_context(|| format!("Failed to read {}", user_path.display()))?;
+    let doc = parse_user_markdown(&content)
+        .with_context(|| format!("Failed to parse {}", user_path.display()))?;
+    Ok(doc)
+}
+
+fn bootstrap_user_document(config_base_dir: &Path) -> (Option<UserDocument>, PathBuf) {
+    let template_path = match ensure_user_template_file(config_base_dir) {
+        Ok(path) => path,
+        Err(e) => {
+            warn!("USER template bootstrap failed: {e}");
+            config_base_dir
+                .join("orchestrator")
+                .join("templates")
+                .join("USER_temp.md")
+        }
+    };
+
+    let user_path = match ensure_user_file(config_base_dir, &template_path) {
+        Ok(path) => path,
+        Err(e) => {
+            warn!("USER bootstrap failed: {e}");
+            config_base_dir.join("orchestrator").join("USER.md")
+        }
+    };
+
+    match load_user_document_from_file(&user_path) {
+        Ok(doc) => {
+            info!("User profile loaded: {}", user_path.display());
+            (Some(doc), user_path)
+        }
+        Err(e) => {
+            warn!("USER parse/validation failed: {e}; starting with empty user profile");
+            (None, user_path)
+        }
+    }
+}
+
 fn is_same_file_path(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -436,6 +567,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     // Step 4.2: Bootstrap and load SOUL.md for orchestrator persona
     let (initial_system_persona, soul_path) = bootstrap_system_persona(&config_base_dir);
 
+    // Step 4.3: Bootstrap and load USER.md for user portrait
+    let (initial_user_document, user_path) = bootstrap_user_document(&config_base_dir);
+
     // Step 5: Create event broadcaster for WebSocket streaming
     let event_broadcaster = EventBroadcaster::new(64, instance_id.clone(), Some(db.clone()));
 
@@ -459,6 +593,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     }
     if soul_path.exists() {
         watch_paths.push(soul_path.clone());
+    }
+    if user_path.exists() {
+        watch_paths.push(user_path.clone());
     }
     if !watch_paths.is_empty() {
         info!("Wake: watching paths: {:?}", watch_paths);
@@ -611,6 +748,22 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     );
                     // Forward to EventBroadcaster for WebSocket clients + DB persistence
                     eb_bridge.soul_updated(&actor, &mode, &content_sha256, backup_path);
+                }
+                openalpaca_core::events::SystemEvent::UserProfileUpdated {
+                    actor,
+                    mode,
+                    content_sha256,
+                    modified_sections,
+                    ..
+                } => {
+                    tracing::info!(
+                        target: "user_audit",
+                        actor = %actor,
+                        mode = %mode,
+                        content_sha256 = %content_sha256,
+                        modified_sections = ?modified_sections,
+                        "USER.md updated"
+                    );
                 }
                 // Wake events are forwarded via the dedicated wake_rx channel (lines 130-135),
                 // not through the Core EventBus. If a future Core component publishes
@@ -896,17 +1049,24 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     // Build ToolRegistry with built-in tools + user-defined tools
     let mut tool_registry = openalpaca_core::tools::ToolRegistry::new();
 
-    // Register built-in tools (including update_soul)
+    // Register built-in tools (including update_soul and update_user)
     let soul_tool_ctx = SoulToolContext {
         soul_path: soul_path.clone(),
         backup_dir: config_base_dir.join("orchestrator").join("backups"),
         bus: bus.clone(),
         max_backups: Some(10),
     };
-    for tool in openalpaca_core::tools::builtins::builtin_tools_with_soul_context(
+    let user_tool_ctx = UserToolContext {
+        user_path: user_path.clone(),
+        backup_dir: config_base_dir.join("orchestrator").join("backups"),
+        bus: bus.clone(),
+        max_backups: Some(10),
+    };
+    for tool in openalpaca_core::tools::builtins::builtin_tools_with_persona_context(
         Some(db.clone()),
         embedder.clone(),
         soul_tool_ctx,
+        user_tool_ctx,
     ) {
         tool_registry.register(tool);
     }
@@ -952,24 +1112,37 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         Some(db.clone()),
         embedder.clone(),
     ));
+
+    // Set the initial user document (loaded from USER.md bootstrap)
+    orchestrator.update_user_document(initial_user_document);
+    orchestrator.set_user_path(user_path.clone());
+
     let eb_clone = event_broadcaster.clone();
     let soul_path_for_reload = soul_path.clone();
+    let user_path_for_reload = user_path.clone();
     let orchestrator_for_reload = orchestrator.clone();
 
-    // Step 5 (Dedup): Shared ring buffer of recent agent-write content hashes.
-    // The SoulUpdated subscriber records hashes after agent-initiated reloads;
-    // the file watcher checks this buffer to skip duplicate reloads.
+    // Step 5 (Dedup): Shared ring buffers of recent agent-write content hashes.
+    // The SoulUpdated/UserProfileUpdated subscribers record hashes after agent-initiated reloads;
+    // the file watcher checks these buffers to skip duplicate reloads.
     let recent_soul_hashes: Arc<tokio::sync::Mutex<std::collections::VecDeque<String>>> = Arc::new(
+        tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)),
+    );
+    let recent_user_hashes: Arc<tokio::sync::Mutex<std::collections::VecDeque<String>>> = Arc::new(
         tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)),
     );
 
     let hashes_for_watcher = recent_soul_hashes.clone();
+    let user_hashes_for_watcher = recent_user_hashes.clone();
+    let orchestrator_for_user_reload = orchestrator.clone();
     tokio::spawn(async move {
         while let Some(event) = wake_rx.recv().await {
             info!("Received WakeEvent: {:?}", event);
 
             if let openalpaca_api::events::WakeEvent::FileChanged { path, .. } = &event {
                 let changed_path = PathBuf::from(path);
+
+                // SOUL.md file watcher
                 if is_same_file_path(&changed_path, &soul_path_for_reload) {
                     // Dedup: compute hash of the file on disk and check against recent agent writes
                     let should_skip = if let Ok(content) = std::fs::read(&soul_path_for_reload) {
@@ -1003,6 +1176,45 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                                 warn!(
                                     "SOUL parse/validation failed for {}: {e}; keeping last active soul",
                                     soul_path_for_reload.display()
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // USER.md file watcher
+                if is_same_file_path(&changed_path, &user_path_for_reload) {
+                    let should_skip = if let Ok(content) = std::fs::read(&user_path_for_reload) {
+                        use sha2::{Digest, Sha256};
+                        let file_hash = format!("{:x}", Sha256::digest(&content));
+                        let mut ring = user_hashes_for_watcher.lock().await;
+                        if let Some(pos) = ring.iter().position(|h| *h == file_hash) {
+                            ring.remove(pos);
+                            info!(
+                                "Watcher dedup: skipping USER reload for hash {} (already applied via EventBus)",
+                                &file_hash[..16]
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !should_skip {
+                        match load_user_document_from_file(&user_path_for_reload) {
+                            Ok(doc) => {
+                                orchestrator_for_user_reload.update_user_document(Some(doc));
+                                info!(
+                                    "User profile reloaded (watcher): {}",
+                                    user_path_for_reload.display()
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "USER parse/validation failed for {}: {e}; keeping last active profile",
+                                    user_path_for_reload.display()
                                 );
                             }
                         }
@@ -1057,6 +1269,53 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                             warn!(
                                 "Soul EventBus reload failed for {}: {e}; keeping last active soul",
                                 soul_path_for_bus.display()
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Step 5.6: User profile hot-reload via EventBus (agent-initiated updates)
+    {
+        let mut user_rx = bus.subscribe();
+        let orchestrator_for_user = orchestrator.clone();
+        let user_path_for_bus = user_path.clone();
+        let user_hashes_for_bus = recent_user_hashes.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = user_rx.recv().await {
+                if let openalpaca_core::events::SystemEvent::UserProfileUpdated {
+                    actor,
+                    content_sha256,
+                    ..
+                } = event
+                {
+                    info!(
+                        "UserProfileUpdated via EventBus (actor={}, sha256={}), reloading profile",
+                        actor,
+                        &content_sha256[..16.min(content_sha256.len())]
+                    );
+                    match load_user_document_from_file(&user_path_for_bus) {
+                        Ok(doc) => {
+                            orchestrator_for_user.update_user_document(Some(doc));
+
+                            // Record this hash so the file watcher won't double-reload
+                            let mut ring = user_hashes_for_bus.lock().await;
+                            ring.push_back(content_sha256.clone());
+                            while ring.len() > 8 {
+                                ring.pop_front();
+                            }
+
+                            info!(
+                                "User profile hot-reloaded via EventBus: {}",
+                                user_path_for_bus.display()
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "User EventBus reload failed for {}: {e}; keeping last active profile",
+                                user_path_for_bus.display()
                             );
                         }
                     }

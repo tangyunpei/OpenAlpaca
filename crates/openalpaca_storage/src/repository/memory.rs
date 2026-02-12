@@ -297,6 +297,14 @@ impl<'a> MemoryRepository<'a> {
         })
     }
 
+    /// Delete a single memory by its primary key.
+    pub fn delete(&self, id: i64) -> Result<bool> {
+        self.db.with_connection(|conn| {
+            let count = conn.execute("DELETE FROM memory WHERE id = ?1", [id])?;
+            Ok(count > 0)
+        })
+    }
+
     /// Get a memory by its primary key.
     pub fn get(&self, id: i64) -> Result<Option<MemoryV2>> {
         self.db.with_connection(|conn| {
