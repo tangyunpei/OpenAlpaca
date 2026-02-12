@@ -101,6 +101,19 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// Event triggered when SOUL.md personality is updated
+    SoulUpdated {
+        /// Who initiated: "agent" or "user"
+        actor: String,
+        /// Update mode: "replace" or "sections"
+        mode: String,
+        /// SHA-256 hash of the new content
+        content_sha256: String,
+        /// Path to backup file (if created)
+        backup_path: Option<String>,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
 }
 
 // ── Unified Event System (M3.5) ────────────────────────────────────
@@ -123,9 +136,18 @@ pub enum EventSource {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "payload_type", rename_all = "snake_case")]
 pub enum EventPayload {
-    UserMessage { content: String },
-    Command { name: String, args: Vec<String> },
-    StatusChange { entity: String, old: String, new: String },
+    UserMessage {
+        content: String,
+    },
+    Command {
+        name: String,
+        args: Vec<String>,
+    },
+    StatusChange {
+        entity: String,
+        old: String,
+        new: String,
+    },
 }
 
 /// A unified event that all connectors translate into.

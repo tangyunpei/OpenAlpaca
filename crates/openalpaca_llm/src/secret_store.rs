@@ -22,6 +22,19 @@ pub trait SecretStore: Send + Sync {
     fn delete(&self, secret_ref: &str) -> Result<(), String>;
 }
 
+/// Blanket impl so `Box<dyn SecretStore>` can be used as a `SecretStore`.
+impl SecretStore for Box<dyn SecretStore> {
+    fn get(&self, secret_ref: &str) -> Result<Option<String>, String> {
+        (**self).get(secret_ref)
+    }
+    fn set(&self, secret_ref: &str, secret: &str) -> Result<(), String> {
+        (**self).set(secret_ref, secret)
+    }
+    fn delete(&self, secret_ref: &str) -> Result<(), String> {
+        (**self).delete(secret_ref)
+    }
+}
+
 /// OS keychain-backed secret store.
 ///
 /// Service = `"OpenAlpaca"`, account = `secret_ref` value
@@ -58,24 +71,6 @@ impl SecretStore for KeyringSecretStore {
     }
 }
 
-/// Probe whether the OS keychain is functional.
-///
-/// Performs a read-only `get_password()` on a non-existent key.
-/// Returns `true` if the keychain infrastructure is available (even though
-/// the probe key doesn't exist), `false` if unavailable
-/// (e.g. headless Linux, Docker, no GUI session, no D-Bus secret service).
-pub fn probe_keyring() -> bool {
-    let entry = match keyring::Entry::new(SERVICE, "__openalpaca_probe__") {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-    match entry.get_password() {
-        Ok(_) => true,                         // key exists (unlikely but fine)
-        Err(keyring::Error::NoEntry) => true,  // keychain works, key just missing
-        Err(_) => false,                       // infrastructure error
-    }
-}
-
 /// Caching wrapper around any [`SecretStore`] implementation.
 ///
 /// Caches `get()` results in an in-memory `HashMap` so each unique
@@ -97,6 +92,39 @@ impl CachingSecretStore {
             inner,
             cache: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Pre-fetch a batch of `secret_ref` keys into the cache.
+    ///
+    /// Reads every key from the underlying store (e.g. OS keychain) and
+    /// populates the cache so that later `get()` calls are pure cache hits.
+    /// All keychain prompts happen here, back-to-back, in a single phase.
+    ///
+    /// Returns `true` if the underlying keychain is functional (even if
+    /// some keys are missing), `false` if the keychain infrastructure
+    /// itself is broken (headless / Docker / no D-Bus).
+    pub fn prefetch(&self, keys: &[&str]) -> bool {
+        for key in keys {
+            match self.inner.get(key) {
+                Ok(val) => {
+                    let mut cache = self.cache.write().unwrap();
+                    cache.insert(key.to_string(), val);
+                }
+                Err(_) => {
+                    // Infrastructure error → keychain not functional
+                    return false;
+                }
+            }
+        }
+        // If keys is empty we still need to verify keychain works,
+        // so do a single probe read on a non-existent key.
+        if keys.is_empty() {
+            return match self.inner.get("__openalpaca_probe__") {
+                Ok(_) => true,
+                Err(_) => false,
+            };
+        }
+        true
     }
 }
 
