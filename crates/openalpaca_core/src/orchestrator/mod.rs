@@ -18,6 +18,7 @@ use crate::middleware::guard::OutputGuard;
 use crate::middleware::prompt::{
     AgentPersona, PromptAssembler, SystemPersona, format_tool_guidance,
 };
+use crate::middleware::identity::{IdentityDocument, identity_to_prompt_block};
 use crate::middleware::skill::skill_to_prompt_block;
 use crate::middleware::user::{
     UserDocument, parse_user_markdown, render_user_markdown, user_to_prompt_block,
@@ -55,6 +56,7 @@ pub struct Orchestrator {
     pub bus: EventBus,
     pub system_persona: Arc<RwLock<SystemPersona>>,
     pub user_document: Arc<RwLock<Option<UserDocument>>>,
+    pub identity_document: Arc<RwLock<Option<IdentityDocument>>>,
     pub llm_router: Option<Arc<LlmRouter>>,
     pub loop_config: LoopConfig,
     pub security_gate: Arc<SecurityGate>,
@@ -67,6 +69,8 @@ pub struct Orchestrator {
     extraction_turn_counter: Mutex<HashMap<String, usize>>,
     /// Path to USER.md for writing extraction results. Set via `set_user_path()`.
     user_path: RwLock<Option<std::path::PathBuf>>,
+    /// Path to IDENTITY.md for writing identity updates. Set via `set_identity_path()`.
+    identity_path: RwLock<Option<std::path::PathBuf>>,
     /// Skill catalog for progressive skill loading and invocation.
     pub skill_catalog: Arc<skill_catalog::SkillCatalog>,
 }
@@ -132,6 +136,7 @@ impl Orchestrator {
             bus,
             system_persona: Arc::new(RwLock::new(system_persona)),
             user_document: Arc::new(RwLock::new(None)),
+            identity_document: Arc::new(RwLock::new(None)),
             llm_router,
             loop_config,
             security_gate,
@@ -142,6 +147,7 @@ impl Orchestrator {
             embedder,
             extraction_turn_counter: Mutex::new(HashMap::new()),
             user_path: RwLock::new(None),
+            identity_path: RwLock::new(None),
             skill_catalog,
         }
     }
@@ -177,6 +183,46 @@ impl Orchestrator {
                 let mut guard = poisoned.into_inner();
                 *guard = persona;
             }
+        }
+    }
+
+    /// Replace the active identity document (from IDENTITY.md reload or bootstrap).
+    ///
+    /// If the identity has a non-empty name, also updates `system_persona.name`
+    /// so that `PromptAssembler::assemble()` uses the chosen name.
+    pub fn update_identity_document(&self, doc: Option<IdentityDocument>) {
+        // Update system persona name if identity provides one
+        if let Some(ref identity) = doc {
+            if !identity.name.is_empty() {
+                match self.system_persona.write() {
+                    Ok(mut guard) => {
+                        guard.name = identity.name.clone();
+                    }
+                    Err(poisoned) => {
+                        tracing::warn!("System persona lock poisoned during identity name update; recovering");
+                        let mut guard = poisoned.into_inner();
+                        guard.name = identity.name.clone();
+                    }
+                }
+            }
+        }
+
+        match self.identity_document.write() {
+            Ok(mut guard) => {
+                *guard = doc;
+            }
+            Err(poisoned) => {
+                tracing::warn!("Identity document lock poisoned during update; recovering");
+                let mut guard = poisoned.into_inner();
+                *guard = doc;
+            }
+        }
+    }
+
+    /// Set the path to IDENTITY.md for writes.
+    pub fn set_identity_path(&self, path: std::path::PathBuf) {
+        if let Ok(mut guard) = self.identity_path.write() {
+            *guard = Some(path);
         }
     }
 
@@ -532,7 +578,8 @@ impl Orchestrator {
                    \"field\": \"identity.Name\" | \"identity.Timezone\" | \"identity.Pronouns\" | \
              \"communication_style\" | \"expertise\" | \"projects\" | \"preferences\" | \"notes\",\n\
                    \"value\": \"the extracted value\",\n\
-                   \"confidence\": 0.0 to 1.0\n\
+                   \"confidence\": 0.0 to 1.0,\n\
+                   \"action\": \"set\" or \"update\"\n\
                  }}\n\
                ]\n\
              }}\n\n\
@@ -540,6 +587,9 @@ impl Orchestrator {
              - \"target\": \"profile\" for stable identity traits (name, timezone, expertise, style). Requires confidence >= 0.8.\n\
              - \"target\": \"memory\" for situational preferences. Confidence >= 0.5.\n\
              - For identity fields, use \"identity.<Key>\" (e.g. \"identity.Name\").\n\
+             - \"action\": \"set\" (default) fills only empty profile fields. \"action\": \"update\" replaces existing values.\n\
+             - Use \"update\" ONLY when the user explicitly states a change to something previously known \
+             (e.g. \"I moved to Tokyo\", \"call me Alex now\", \"I switched to vim\"). Requires confidence >= 0.9.\n\
              - Only extract what is clearly stated or strongly implied. Do not hallucinate.\n\
              - If nothing can be extracted, return {{\"extractions\": []}}.\n\
              - Be conservative. Prefer fewer high-confidence extractions over many low-confidence ones.",
@@ -678,19 +728,34 @@ impl Orchestrator {
                     if confidence < 0.8 {
                         continue;
                     }
+                    let action = extraction.get("action").and_then(|v| v.as_str()).unwrap_or("set");
+                    // "update" requires higher confidence than "set"
+                    if action == "update" && confidence < 0.9 {
+                        tracing::debug!(
+                            "Extraction: skipping update action for '{}' (confidence {:.2} < 0.9)",
+                            field, confidence
+                        );
+                        continue;
+                    }
                     // Route identity fields into the identity object
                     if let Some(key) = field.strip_prefix("identity.") {
                         let identity_obj = profile_patches
                             .entry("identity".to_string())
                             .or_insert_with(|| serde_json::json!({}));
                         if let Some(obj) = identity_obj.as_object_mut() {
-                            obj.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+                            obj.insert(key.to_string(), serde_json::json!({
+                                "value": value,
+                                "action": action,
+                            }));
                         }
                     } else {
                         // Direct section field (e.g. "expertise", "preferences")
                         profile_patches.insert(
                             field.to_string(),
-                            serde_json::Value::String(value.to_string()),
+                            serde_json::json!({
+                                "value": value,
+                                "action": action,
+                            }),
                         );
                     }
                 }
@@ -785,55 +850,64 @@ impl Orchestrator {
                 "identity" => {
                     if let Some(obj) = value.as_object() {
                         for (key, val) in obj {
-                            if let Some(v) = val.as_str() {
-                                // Only write if field is empty or we're overwriting
-                                let existing = doc.identity.get(key).cloned().unwrap_or_default();
-                                if existing.is_empty() {
-                                    doc.identity.insert(key.clone(), v.to_string());
-                                    modified_sections.push(format!("identity.{}", key));
-                                }
+                            let v = val.get("value").and_then(|v| v.as_str())
+                                .or_else(|| val.as_str()) // backward compat: bare string
+                                .unwrap_or("");
+                            let action = val.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                            if v.is_empty() {
+                                continue;
+                            }
+                            let existing = doc.identity.get(key).cloned().unwrap_or_default();
+                            if existing.is_empty() || action == "update" {
+                                doc.identity.insert(key.clone(), v.to_string());
+                                modified_sections.push(format!("identity.{}", key));
                             }
                         }
                     }
                 }
                 "communication_style" => {
-                    if let Some(v) = value.as_str() {
-                        if doc.communication_style.is_empty() {
-                            doc.communication_style = v.to_string();
-                            modified_sections.push("communication_style".to_string());
-                        }
+                    let v = value.get("value").and_then(|v| v.as_str())
+                        .or_else(|| value.as_str()).unwrap_or("");
+                    let action = value.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                    if !v.is_empty() && (doc.communication_style.is_empty() || action == "update") {
+                        doc.communication_style = v.to_string();
+                        modified_sections.push("communication_style".to_string());
                     }
                 }
                 "expertise" => {
-                    if let Some(v) = value.as_str() {
-                        if doc.expertise.is_empty() {
-                            doc.expertise = v.to_string();
-                            modified_sections.push("expertise".to_string());
-                        }
+                    let v = value.get("value").and_then(|v| v.as_str())
+                        .or_else(|| value.as_str()).unwrap_or("");
+                    let action = value.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                    if !v.is_empty() && (doc.expertise.is_empty() || action == "update") {
+                        doc.expertise = v.to_string();
+                        modified_sections.push("expertise".to_string());
                     }
                 }
                 "projects" => {
-                    if let Some(v) = value.as_str() {
-                        if doc.projects.is_empty() {
-                            doc.projects = v.to_string();
-                            modified_sections.push("projects".to_string());
-                        }
+                    let v = value.get("value").and_then(|v| v.as_str())
+                        .or_else(|| value.as_str()).unwrap_or("");
+                    let action = value.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                    if !v.is_empty() && (doc.projects.is_empty() || action == "update") {
+                        doc.projects = v.to_string();
+                        modified_sections.push("projects".to_string());
                     }
                 }
                 "preferences" => {
-                    if let Some(v) = value.as_str() {
-                        if doc.preferences.is_empty() {
-                            doc.preferences = v.to_string();
-                            modified_sections.push("preferences".to_string());
-                        }
+                    let v = value.get("value").and_then(|v| v.as_str())
+                        .or_else(|| value.as_str()).unwrap_or("");
+                    let action = value.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                    if !v.is_empty() && (doc.preferences.is_empty() || action == "update") {
+                        doc.preferences = v.to_string();
+                        modified_sections.push("preferences".to_string());
                     }
                 }
                 "notes" => {
-                    if let Some(v) = value.as_str() {
-                        if doc.notes.is_empty() {
-                            doc.notes = v.to_string();
-                            modified_sections.push("notes".to_string());
-                        }
+                    let v = value.get("value").and_then(|v| v.as_str())
+                        .or_else(|| value.as_str()).unwrap_or("");
+                    let action = value.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                    if !v.is_empty() && (doc.notes.is_empty() || action == "update") {
+                        doc.notes = v.to_string();
+                        modified_sections.push("notes".to_string());
                     }
                 }
                 _ => {
@@ -1191,6 +1265,17 @@ impl Orchestrator {
         };
         let mut system_prompt = PromptAssembler::assemble(&system_persona, &agent_persona);
 
+        // Inject agent identity if available
+        if let Ok(guard) = self.identity_document.read() {
+            if let Some(ref doc) = *guard {
+                let id_block = identity_to_prompt_block(doc);
+                if !id_block.is_empty() {
+                    system_prompt.push('\n');
+                    system_prompt.push_str(&id_block);
+                }
+            }
+        }
+
         // Inject available skills catalog so the LLM knows what skills exist
         let skills_catalog_block = self.build_skills_catalog_block();
         if !skills_catalog_block.is_empty() {
@@ -1488,6 +1573,17 @@ impl Orchestrator {
         if !skill_block.is_empty() {
             system_prompt.push('\n');
             system_prompt.push_str(&skill_block);
+        }
+
+        // Inject agent identity if available
+        if let Ok(guard) = self.identity_document.read() {
+            if let Some(ref doc) = *guard {
+                let id_block = identity_to_prompt_block(doc);
+                if !id_block.is_empty() {
+                    system_prompt.push('\n');
+                    system_prompt.push_str(&id_block);
+                }
+            }
         }
 
         // Resolve tools: merge skill.tools_required with intent-suggested tools
