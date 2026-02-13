@@ -170,4 +170,12 @@ pub enum SystemEvent {
         backup_path: Option<String>,
         timestamp: DateTime<Utc>,
     },
+    /// Bootstrap onboarding completed — BOOTSTRAP.md has been consumed and deleted
+    BootstrapCompleted {
+        /// Whether the agent identity was populated during bootstrap
+        identity_populated: bool,
+        /// Whether the user profile was populated during bootstrap
+        user_populated: bool,
+        timestamp: DateTime<Utc>,
+    },
 }

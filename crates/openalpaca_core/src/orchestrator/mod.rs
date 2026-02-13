@@ -18,10 +18,12 @@ use crate::middleware::guard::OutputGuard;
 use crate::middleware::prompt::{
     AgentPersona, PromptAssembler, SystemPersona, format_tool_guidance,
 };
-use crate::middleware::identity::{IdentityDocument, identity_to_prompt_block};
+use crate::middleware::bootstrap::{BootstrapDocument, bootstrap_to_prompt_block};
+use crate::middleware::identity::{IdentityDocument, identity_document_has_content, identity_to_prompt_block};
 use crate::middleware::skill::skill_to_prompt_block;
 use crate::middleware::user::{
-    UserDocument, parse_user_markdown, render_user_markdown, user_to_prompt_block,
+    UserDocument, parse_user_markdown, render_user_markdown, user_document_has_content,
+    user_to_prompt_block,
 };
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::gate::SecurityGate;
@@ -73,6 +75,10 @@ pub struct Orchestrator {
     identity_path: RwLock<Option<std::path::PathBuf>>,
     /// Skill catalog for progressive skill loading and invocation.
     pub skill_catalog: Arc<skill_catalog::SkillCatalog>,
+    /// Bootstrap document — `Some` = first-run onboarding active, `None` = normal operation.
+    pub bootstrap_document: Arc<RwLock<Option<BootstrapDocument>>>,
+    /// Path to BOOTSTRAP.md on disk (for deletion on completion).
+    bootstrap_path: RwLock<Option<std::path::PathBuf>>,
 }
 
 const PROMPT_RECENT_MESSAGES: usize = 40;
@@ -149,6 +155,8 @@ impl Orchestrator {
             user_path: RwLock::new(None),
             identity_path: RwLock::new(None),
             skill_catalog,
+            bootstrap_document: Arc::new(RwLock::new(None)),
+            bootstrap_path: RwLock::new(None),
         }
     }
 
@@ -224,6 +232,100 @@ impl Orchestrator {
         if let Ok(mut guard) = self.identity_path.write() {
             *guard = Some(path);
         }
+    }
+
+    /// Replace the active bootstrap document (from BOOTSTRAP.md load or deletion).
+    pub fn update_bootstrap_document(&self, doc: Option<BootstrapDocument>) {
+        match self.bootstrap_document.write() {
+            Ok(mut guard) => {
+                *guard = doc;
+            }
+            Err(poisoned) => {
+                tracing::warn!("Bootstrap document lock poisoned during update; recovering");
+                let mut guard = poisoned.into_inner();
+                *guard = doc;
+            }
+        }
+    }
+
+    /// Set the path to BOOTSTRAP.md for deletion on completion.
+    pub fn set_bootstrap_path(&self, path: std::path::PathBuf) {
+        if let Ok(mut guard) = self.bootstrap_path.write() {
+            *guard = Some(path);
+        }
+    }
+
+    /// Check if bootstrap mode is active.
+    pub fn is_bootstrapping(&self) -> bool {
+        self.bootstrap_document
+            .read()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Check if IDENTITY.md and USER.md have been populated; if so, finalize bootstrap.
+    ///
+    /// Runs post-response (like `maybe_extract_user_traits`) and:
+    /// 1. Checks if `bootstrap_document` is Some (bootstrap mode active)
+    /// 2. Checks if `identity_document` has content AND `user_document` has content
+    /// 3. If both populated: delete BOOTSTRAP.md, clear state, publish event
+    async fn maybe_complete_bootstrap(&self) {
+        // Quick check: are we even in bootstrap mode?
+        if !self.is_bootstrapping() {
+            return;
+        }
+
+        // Check identity
+        let identity_populated = self
+            .identity_document
+            .read()
+            .map(|g| {
+                g.as_ref()
+                    .map_or(false, |d| identity_document_has_content(d))
+            })
+            .unwrap_or(false);
+
+        // Check user
+        let user_populated = self
+            .user_document
+            .read()
+            .map(|g| {
+                g.as_ref()
+                    .map_or(false, |d| user_document_has_content(d))
+            })
+            .unwrap_or(false);
+
+        if !identity_populated || !user_populated {
+            tracing::debug!(
+                "Bootstrap check: identity={}, user={} -- not yet complete",
+                identity_populated,
+                user_populated
+            );
+            return;
+        }
+
+        // Both populated — complete bootstrap
+        tracing::info!("Bootstrap onboarding complete! Identity and user profile populated.");
+
+        // Delete BOOTSTRAP.md from disk
+        if let Ok(guard) = self.bootstrap_path.read() {
+            if let Some(ref path) = *guard {
+                match std::fs::remove_file(path) {
+                    Ok(()) => tracing::info!("Deleted BOOTSTRAP.md: {}", path.display()),
+                    Err(e) => tracing::warn!("Failed to delete BOOTSTRAP.md: {e}"),
+                }
+            }
+        }
+
+        // Clear in-memory state
+        self.update_bootstrap_document(None);
+
+        // Publish event
+        self.bus.publish(SystemEvent::BootstrapCompleted {
+            identity_populated,
+            user_populated,
+            timestamp: Utc::now(),
+        });
     }
 
     /// Build the full conversation context for a turn: loads history, deduplicates
@@ -1138,6 +1240,9 @@ impl Orchestrator {
                 .await;
         }
 
+        // 8. Check if bootstrap onboarding is complete
+        self.maybe_complete_bootstrap().await;
+
         result
     }
 
@@ -1265,6 +1370,17 @@ impl Orchestrator {
         };
         let mut system_prompt = PromptAssembler::assemble(&system_persona, &agent_persona);
 
+        // Inject bootstrap instructions if in first-run mode
+        if let Ok(guard) = self.bootstrap_document.read() {
+            if let Some(ref doc) = *guard {
+                let block = bootstrap_to_prompt_block(doc);
+                if !block.is_empty() {
+                    system_prompt.push('\n');
+                    system_prompt.push_str(&block);
+                }
+            }
+        }
+
         // Inject agent identity if available
         if let Ok(guard) = self.identity_document.read() {
             if let Some(ref doc) = *guard {
@@ -1284,7 +1400,16 @@ impl Orchestrator {
         }
 
         // Resolve tools based on intent analysis
-        let tool_names = self.intent_parser.suggest_tools(query);
+        let mut tool_names = self.intent_parser.suggest_tools(query);
+
+        // Force-include persona tools during bootstrap mode
+        if self.is_bootstrapping() {
+            for name in &["update_identity", "update_user", "update_soul"] {
+                if !tool_names.contains(&name.to_string()) {
+                    tool_names.push(name.to_string());
+                }
+            }
+        }
         let tool_defs: Vec<_> = tool_names
             .iter()
             .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
@@ -1568,6 +1693,17 @@ impl Orchestrator {
         };
         let mut system_prompt = PromptAssembler::assemble(&system_persona, &agent_persona);
 
+        // Inject bootstrap instructions if in first-run mode
+        if let Ok(guard) = self.bootstrap_document.read() {
+            if let Some(ref doc) = *guard {
+                let block = bootstrap_to_prompt_block(doc);
+                if !block.is_empty() {
+                    system_prompt.push('\n');
+                    system_prompt.push_str(&block);
+                }
+            }
+        }
+
         // Inject skill context block
         let skill_block = skill_to_prompt_block(&skill_doc);
         if !skill_block.is_empty() {
@@ -1592,6 +1728,15 @@ impl Orchestrator {
         for t in intent_tools {
             if !tool_names.contains(&t) {
                 tool_names.push(t);
+            }
+        }
+
+        // Force-include persona tools during bootstrap mode
+        if self.is_bootstrapping() {
+            for name in &["update_identity", "update_user", "update_soul"] {
+                if !tool_names.contains(&name.to_string()) {
+                    tool_names.push(name.to_string());
+                }
             }
         }
 
