@@ -5,6 +5,7 @@
 
 pub mod dispatcher;
 pub mod intent;
+pub mod skill_catalog;
 pub mod skill_matcher;
 pub mod task_planner;
 pub mod task_state;
@@ -16,6 +17,13 @@ use crate::lane::{LaneManager, TaskLaneStatus};
 use crate::middleware::guard::OutputGuard;
 use crate::middleware::prompt::{
     AgentPersona, PromptAssembler, SystemPersona, format_tool_guidance,
+};
+use crate::middleware::bootstrap::{BootstrapDocument, bootstrap_to_prompt_block};
+use crate::middleware::identity::{IdentityDocument, identity_document_has_content, identity_to_prompt_block};
+use crate::middleware::skill::skill_to_prompt_block;
+use crate::middleware::user::{
+    UserDocument, parse_user_markdown, render_user_markdown, user_document_has_content,
+    user_to_prompt_block,
 };
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::gate::SecurityGate;
@@ -29,7 +37,8 @@ use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter, RequestContext, Role, RouterRequest};
 use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository, TaskRepository};
 use openalpaca_storage::{ConversationRepository, Database, Task};
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 use uuid::Uuid;
 
 use dispatcher::TaskDispatcher;
@@ -48,6 +57,8 @@ pub struct Orchestrator {
     pub lane_manager: Arc<LaneManager>,
     pub bus: EventBus,
     pub system_persona: Arc<RwLock<SystemPersona>>,
+    pub user_document: Arc<RwLock<Option<UserDocument>>>,
+    pub identity_document: Arc<RwLock<Option<IdentityDocument>>>,
     pub llm_router: Option<Arc<LlmRouter>>,
     pub loop_config: LoopConfig,
     pub security_gate: Arc<SecurityGate>,
@@ -56,6 +67,18 @@ pub struct Orchestrator {
     task_dispatcher: TaskDispatcher,
     db: Option<Database>,
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+    /// Per-lane turn counter for extraction frequency gating.
+    extraction_turn_counter: Mutex<HashMap<String, usize>>,
+    /// Path to USER.md for writing extraction results. Set via `set_user_path()`.
+    user_path: RwLock<Option<std::path::PathBuf>>,
+    /// Path to IDENTITY.md for writing identity updates. Set via `set_identity_path()`.
+    identity_path: RwLock<Option<std::path::PathBuf>>,
+    /// Skill catalog for progressive skill loading and invocation.
+    pub skill_catalog: Arc<skill_catalog::SkillCatalog>,
+    /// Bootstrap document — `Some` = first-run onboarding active, `None` = normal operation.
+    pub bootstrap_document: Arc<RwLock<Option<BootstrapDocument>>>,
+    /// Path to BOOTSTRAP.md on disk (for deletion on completion).
+    bootstrap_path: RwLock<Option<std::path::PathBuf>>,
 }
 
 const PROMPT_RECENT_MESSAGES: usize = 40;
@@ -63,6 +86,9 @@ const SUMMARY_MIN_NEW_OLDER_MESSAGES: usize = 12;
 const SUMMARY_MAX_CHARS: usize = 4000;
 const MSG_TRUNC_CHARS: usize = 1500;
 const SUMMARY_MAX_DAILY_COST_USD: f64 = 0.50;
+const EXTRACT_MAX_DAILY_COST_USD: f64 = 0.25;
+const EXTRACT_EVERY_N_TURNS: usize = 5;
+const EXTRACT_MIN_CONTENT_LEN: usize = 20;
 
 /// Full conversation context for prompt building and summary update.
 struct ConversationContext {
@@ -99,6 +125,7 @@ impl Orchestrator {
         tool_registry: Arc<ToolRegistry>,
         db: Option<Database>,
         embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+        skill_catalog: Arc<skill_catalog::SkillCatalog>,
     ) -> Self {
         let task_dispatcher = TaskDispatcher::new(
             shared_context.clone(),
@@ -114,6 +141,8 @@ impl Orchestrator {
             lane_manager,
             bus,
             system_persona: Arc::new(RwLock::new(system_persona)),
+            user_document: Arc::new(RwLock::new(None)),
+            identity_document: Arc::new(RwLock::new(None)),
             llm_router,
             loop_config,
             security_gate,
@@ -122,6 +151,33 @@ impl Orchestrator {
             task_dispatcher,
             db,
             embedder,
+            extraction_turn_counter: Mutex::new(HashMap::new()),
+            user_path: RwLock::new(None),
+            identity_path: RwLock::new(None),
+            skill_catalog,
+            bootstrap_document: Arc::new(RwLock::new(None)),
+            bootstrap_path: RwLock::new(None),
+        }
+    }
+
+    /// Set the path to USER.md for extraction writes.
+    pub fn set_user_path(&self, path: std::path::PathBuf) {
+        if let Ok(mut guard) = self.user_path.write() {
+            *guard = Some(path);
+        }
+    }
+
+    /// Replace the active user document (from USER.md reload or bootstrap).
+    pub fn update_user_document(&self, doc: Option<UserDocument>) {
+        match self.user_document.write() {
+            Ok(mut guard) => {
+                *guard = doc;
+            }
+            Err(poisoned) => {
+                tracing::warn!("User document lock poisoned during update; recovering");
+                let mut guard = poisoned.into_inner();
+                *guard = doc;
+            }
         }
     }
 
@@ -136,6 +192,140 @@ impl Orchestrator {
                 *guard = persona;
             }
         }
+    }
+
+    /// Replace the active identity document (from IDENTITY.md reload or bootstrap).
+    ///
+    /// If the identity has a non-empty name, also updates `system_persona.name`
+    /// so that `PromptAssembler::assemble()` uses the chosen name.
+    pub fn update_identity_document(&self, doc: Option<IdentityDocument>) {
+        // Update system persona name if identity provides one
+        if let Some(ref identity) = doc {
+            if !identity.name.is_empty() {
+                match self.system_persona.write() {
+                    Ok(mut guard) => {
+                        guard.name = identity.name.clone();
+                    }
+                    Err(poisoned) => {
+                        tracing::warn!("System persona lock poisoned during identity name update; recovering");
+                        let mut guard = poisoned.into_inner();
+                        guard.name = identity.name.clone();
+                    }
+                }
+            }
+        }
+
+        match self.identity_document.write() {
+            Ok(mut guard) => {
+                *guard = doc;
+            }
+            Err(poisoned) => {
+                tracing::warn!("Identity document lock poisoned during update; recovering");
+                let mut guard = poisoned.into_inner();
+                *guard = doc;
+            }
+        }
+    }
+
+    /// Set the path to IDENTITY.md for writes.
+    pub fn set_identity_path(&self, path: std::path::PathBuf) {
+        if let Ok(mut guard) = self.identity_path.write() {
+            *guard = Some(path);
+        }
+    }
+
+    /// Replace the active bootstrap document (from BOOTSTRAP.md load or deletion).
+    pub fn update_bootstrap_document(&self, doc: Option<BootstrapDocument>) {
+        match self.bootstrap_document.write() {
+            Ok(mut guard) => {
+                *guard = doc;
+            }
+            Err(poisoned) => {
+                tracing::warn!("Bootstrap document lock poisoned during update; recovering");
+                let mut guard = poisoned.into_inner();
+                *guard = doc;
+            }
+        }
+    }
+
+    /// Set the path to BOOTSTRAP.md for deletion on completion.
+    pub fn set_bootstrap_path(&self, path: std::path::PathBuf) {
+        if let Ok(mut guard) = self.bootstrap_path.write() {
+            *guard = Some(path);
+        }
+    }
+
+    /// Check if bootstrap mode is active.
+    pub fn is_bootstrapping(&self) -> bool {
+        self.bootstrap_document
+            .read()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Check if IDENTITY.md and USER.md have been populated; if so, finalize bootstrap.
+    ///
+    /// Runs post-response (like `maybe_extract_user_traits`) and:
+    /// 1. Checks if `bootstrap_document` is Some (bootstrap mode active)
+    /// 2. Checks if `identity_document` has content AND `user_document` has content
+    /// 3. If both populated: delete BOOTSTRAP.md, clear state, publish event
+    async fn maybe_complete_bootstrap(&self) {
+        // Quick check: are we even in bootstrap mode?
+        if !self.is_bootstrapping() {
+            return;
+        }
+
+        // Check identity
+        let identity_populated = self
+            .identity_document
+            .read()
+            .map(|g| {
+                g.as_ref()
+                    .map_or(false, |d| identity_document_has_content(d))
+            })
+            .unwrap_or(false);
+
+        // Check user
+        let user_populated = self
+            .user_document
+            .read()
+            .map(|g| {
+                g.as_ref()
+                    .map_or(false, |d| user_document_has_content(d))
+            })
+            .unwrap_or(false);
+
+        if !identity_populated || !user_populated {
+            tracing::debug!(
+                "Bootstrap check: identity={}, user={} -- not yet complete",
+                identity_populated,
+                user_populated
+            );
+            return;
+        }
+
+        // Both populated — complete bootstrap
+        tracing::info!("Bootstrap onboarding complete! Identity and user profile populated.");
+
+        // Delete BOOTSTRAP.md from disk
+        if let Ok(guard) = self.bootstrap_path.read() {
+            if let Some(ref path) = *guard {
+                match std::fs::remove_file(path) {
+                    Ok(()) => tracing::info!("Deleted BOOTSTRAP.md: {}", path.display()),
+                    Err(e) => tracing::warn!("Failed to delete BOOTSTRAP.md: {e}"),
+                }
+            }
+        }
+
+        // Clear in-memory state
+        self.update_bootstrap_document(None);
+
+        // Publish event
+        self.bus.publish(SystemEvent::BootstrapCompleted {
+            identity_populated,
+            user_populated,
+            timestamp: Utc::now(),
+        });
     }
 
     /// Build the full conversation context for a turn: loads history, deduplicates
@@ -421,6 +611,466 @@ impl Orchestrator {
         }
     }
 
+    /// Automatically extract user traits from a conversation turn.
+    ///
+    /// Runs post-response, asynchronously — never adds latency to user-facing
+    /// responses. Guarded by frequency (every N turns), daily cost cap, and
+    /// content length filter.
+    async fn maybe_extract_user_traits(
+        &self,
+        lane_key: &str,
+        user_message: &str,
+        assistant_response: &str,
+        owner_id: Option<&str>,
+    ) {
+        let oid = match owner_id {
+            Some(id) => id,
+            None => return,
+        };
+        let (db, router) = match (&self.db, &self.llm_router) {
+            (Some(db), Some(router)) => (db, router),
+            _ => return,
+        };
+
+        // Content filter: skip short messages and slash commands
+        if user_message.len() < EXTRACT_MIN_CONTENT_LEN || user_message.starts_with('/') {
+            return;
+        }
+
+        // Frequency gate: only extract every N turns per lane
+        {
+            let mut counter = match self.extraction_turn_counter.lock() {
+                Ok(c) => c,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let count = counter.entry(lane_key.to_string()).or_insert(0);
+            *count += 1;
+            if *count < EXTRACT_EVERY_N_TURNS {
+                return;
+            }
+            *count = 0;
+        }
+
+        // Budget pre-check — agent-specific cost for "orchestrator_user_extract"
+        let extract_cost = router
+            .cost_tracker
+            .get_agent_usage("orchestrator_user_extract")
+            .await
+            .map(|s| s.total_cost_usd)
+            .unwrap_or(0.0);
+        if extract_cost > EXTRACT_MAX_DAILY_COST_USD {
+            tracing::debug!(
+                "User extraction skipped: cost ${extract_cost:.2} exceeds cap"
+            );
+            return;
+        }
+
+        // Truncate inputs to keep extraction prompt small
+        let user_trunc: String = user_message.chars().take(800).collect();
+        let asst_trunc: String = assistant_response.chars().take(400).collect();
+
+        let user_prompt = format!(
+            "## Conversation Turn\nUser: {}\nAssistant: {}\n\n\
+             Analyze this conversation turn and extract any user traits.\n\
+             Output ONLY a JSON object with this schema:\n\
+             {{\n\
+               \"extractions\": [\n\
+                 {{\n\
+                   \"target\": \"profile\" or \"memory\",\n\
+                   \"field\": \"identity.Name\" | \"identity.Timezone\" | \"identity.Pronouns\" | \
+             \"communication_style\" | \"expertise\" | \"projects\" | \"preferences\" | \"notes\",\n\
+                   \"value\": \"the extracted value\",\n\
+                   \"confidence\": 0.0 to 1.0,\n\
+                   \"action\": \"set\" or \"update\"\n\
+                 }}\n\
+               ]\n\
+             }}\n\n\
+             Rules:\n\
+             - \"target\": \"profile\" for stable identity traits (name, timezone, expertise, style). Requires confidence >= 0.8.\n\
+             - \"target\": \"memory\" for situational preferences. Confidence >= 0.5.\n\
+             - For identity fields, use \"identity.<Key>\" (e.g. \"identity.Name\").\n\
+             - \"action\": \"set\" (default) fills only empty profile fields. \"action\": \"update\" replaces existing values.\n\
+             - Use \"update\" ONLY when the user explicitly states a change to something previously known \
+             (e.g. \"I moved to Tokyo\", \"call me Alex now\", \"I switched to vim\"). Requires confidence >= 0.9.\n\
+             - Only extract what is clearly stated or strongly implied. Do not hallucinate.\n\
+             - If nothing can be extracted, return {{\"extractions\": []}}.\n\
+             - Be conservative. Prefer fewer high-confidence extractions over many low-confidence ones.",
+            user_trunc, asst_trunc
+        );
+
+        let request = RouterRequest {
+            model: None,
+            messages: vec![
+                ChatMessage::system(
+                    "You are a user trait extractor. Output ONLY valid JSON matching the schema. \
+                     No markdown fences, no commentary.",
+                ),
+                ChatMessage::user(&user_prompt),
+            ],
+            tools: vec![],
+            temperature: Some(0.0),
+            max_tokens: Some(256),
+            context: RequestContext {
+                agent_id: Some("orchestrator_user_extract".to_string()),
+                task_id: None,
+            },
+        };
+
+        let call_start = std::time::Instant::now();
+        let response = match router.complete(request).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("User extraction LLM call failed: {e}");
+                return;
+            }
+        };
+        let latency_ms = call_start.elapsed().as_millis() as i64;
+
+        // Record LLM usage
+        let actual_model = response.model.as_str();
+        let resolved_provider = router
+            .model_registry()
+            .resolve_provider(actual_model)
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let call_cost = router.cost_tracker.calculate_cost(
+            actual_model,
+            response.usage.input_tokens as u32,
+            response.usage.output_tokens as u32,
+        );
+        let usage_repo = LlmUsageRepository::new(db);
+
+        // Parse response JSON (try raw, then ```json fence)
+        let parsed: serde_json::Value = match serde_json::from_str(response.content.trim()) {
+            Ok(v) => v,
+            Err(_) => {
+                let trimmed = response.content.trim();
+                let json_str = if let Some(start) = trimmed.find("```json") {
+                    let after = &trimmed[start + 7..];
+                    after
+                        .find("```")
+                        .map(|end| &after[..end])
+                        .unwrap_or(trimmed)
+                } else if let Some(start) = trimmed.find("```") {
+                    let after = &trimmed[start + 3..];
+                    after
+                        .find("```")
+                        .map(|end| &after[..end])
+                        .unwrap_or(trimmed)
+                } else {
+                    trimmed
+                };
+                match serde_json::from_str(json_str.trim()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("User extraction: malformed JSON from LLM: {e}");
+                        let _ = usage_repo.record_and_log(
+                            "orchestrator_user_extract",
+                            None,
+                            &resolved_provider,
+                            actual_model,
+                            response.usage.input_tokens as i32,
+                            response.usage.output_tokens as i32,
+                            call_cost,
+                            latency_ms,
+                            "error",
+                            Some(&format!("JSON parse: {e}")),
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+
+        // Log successful usage
+        if let Err(e) = usage_repo.record_and_log(
+            "orchestrator_user_extract",
+            None,
+            &resolved_provider,
+            actual_model,
+            response.usage.input_tokens as i32,
+            response.usage.output_tokens as i32,
+            call_cost,
+            latency_ms,
+            "success",
+            None,
+        ) {
+            tracing::warn!("Failed to persist extraction LLM usage: {e}");
+        }
+
+        // Process extractions
+        let extractions = match parsed.get("extractions").and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => {
+                tracing::debug!("User extraction: no extractions array in response");
+                return;
+            }
+        };
+
+        if extractions.is_empty() {
+            return;
+        }
+
+        // Collect profile-level patches and memory-level items separately
+        let mut profile_patches: HashMap<String, serde_json::Value> = HashMap::new();
+        let mut memory_items: Vec<String> = Vec::new();
+
+        for extraction in extractions {
+            let target = extraction.get("target").and_then(|v| v.as_str()).unwrap_or("");
+            let field = extraction.get("field").and_then(|v| v.as_str()).unwrap_or("");
+            let value = extraction.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            let confidence = extraction.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+            if value.is_empty() || field.is_empty() {
+                continue;
+            }
+
+            match target {
+                "profile" => {
+                    if confidence < 0.8 {
+                        continue;
+                    }
+                    let action = extraction.get("action").and_then(|v| v.as_str()).unwrap_or("set");
+                    // "update" requires higher confidence than "set"
+                    if action == "update" && confidence < 0.9 {
+                        tracing::debug!(
+                            "Extraction: skipping update action for '{}' (confidence {:.2} < 0.9)",
+                            field, confidence
+                        );
+                        continue;
+                    }
+                    // Route identity fields into the identity object
+                    if let Some(key) = field.strip_prefix("identity.") {
+                        let identity_obj = profile_patches
+                            .entry("identity".to_string())
+                            .or_insert_with(|| serde_json::json!({}));
+                        if let Some(obj) = identity_obj.as_object_mut() {
+                            obj.insert(key.to_string(), serde_json::json!({
+                                "value": value,
+                                "action": action,
+                            }));
+                        }
+                    } else {
+                        // Direct section field (e.g. "expertise", "preferences")
+                        profile_patches.insert(
+                            field.to_string(),
+                            serde_json::json!({
+                                "value": value,
+                                "action": action,
+                            }),
+                        );
+                    }
+                }
+                "memory" => {
+                    if confidence < 0.5 {
+                        continue;
+                    }
+                    memory_items.push(value.to_string());
+                }
+                _ => {
+                    tracing::debug!("User extraction: unknown target '{target}', skipping");
+                }
+            }
+        }
+
+        // Write memory-level items to Memory v2
+        if !memory_items.is_empty() {
+            let repo = MemoryRepository::new(db);
+            for item in &memory_items {
+                match repo.add(
+                    oid,
+                    openalpaca_storage::models::memory::MemoryKind::Preference,
+                    openalpaca_storage::models::memory::MemoryScope::Global,
+                    "",
+                    openalpaca_storage::models::memory::MemorySource::Conversation,
+                    item,
+                    None,
+                    0.6, // moderate importance: inferred, not explicit
+                    0.7, // moderate confidence: from extraction
+                ) {
+                    Ok(new_id) if new_id > 0 => {
+                        // Embed if embedder available
+                        if let Some(ref embedder) = self.embedder {
+                            if let Ok(embeddings) = embedder.embed(&[item.as_str()]).await {
+                                if let Some(embedding) = embeddings.into_iter().next() {
+                                    let _ = repo.insert_embedding(new_id, &embedding);
+                                }
+                            }
+                        }
+                        tracing::debug!("Extraction: stored memory preference: {}", &item[..item.len().min(60)]);
+                    }
+                    Ok(_) => {} // duplicate, skip
+                    Err(e) => tracing::warn!("Extraction: failed to store memory: {e}"),
+                }
+            }
+        }
+
+        // Write profile-level patches to USER.md
+        if !profile_patches.is_empty() {
+            self.apply_profile_patches(oid, &profile_patches).await;
+        }
+    }
+
+    /// Apply extracted profile patches to USER.md using the sections-mode pattern.
+    async fn apply_profile_patches(
+        &self,
+        _owner_id: &str,
+        patches: &HashMap<String, serde_json::Value>,
+    ) {
+        let user_path = match self.user_path.read() {
+            Ok(guard) => match guard.clone() {
+                Some(p) => p,
+                None => {
+                    tracing::debug!("Extraction: no user_path set, skipping profile patches");
+                    return;
+                }
+            },
+            Err(_) => return,
+        };
+
+        // Read current USER.md
+        let current_content = match std::fs::read_to_string(&user_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Extraction: failed to read USER.md: {e}");
+                return;
+            }
+        };
+
+        let mut doc = match parse_user_markdown(&current_content) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("Extraction: failed to parse USER.md: {e}");
+                return;
+            }
+        };
+
+        let mut modified_sections: Vec<String> = Vec::new();
+
+        for (field, value) in patches {
+            match field.as_str() {
+                "identity" => {
+                    if let Some(obj) = value.as_object() {
+                        for (key, val) in obj {
+                            let v = val.get("value").and_then(|v| v.as_str())
+                                .or_else(|| val.as_str()) // backward compat: bare string
+                                .unwrap_or("");
+                            let action = val.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                            if v.is_empty() {
+                                continue;
+                            }
+                            let existing = doc.identity.get(key).cloned().unwrap_or_default();
+                            if existing.is_empty() || action == "update" {
+                                doc.identity.insert(key.clone(), v.to_string());
+                                modified_sections.push(format!("identity.{}", key));
+                            }
+                        }
+                    }
+                }
+                "communication_style" => {
+                    let v = value.get("value").and_then(|v| v.as_str())
+                        .or_else(|| value.as_str()).unwrap_or("");
+                    let action = value.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                    if !v.is_empty() && (doc.communication_style.is_empty() || action == "update") {
+                        doc.communication_style = v.to_string();
+                        modified_sections.push("communication_style".to_string());
+                    }
+                }
+                "expertise" => {
+                    let v = value.get("value").and_then(|v| v.as_str())
+                        .or_else(|| value.as_str()).unwrap_or("");
+                    let action = value.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                    if !v.is_empty() && (doc.expertise.is_empty() || action == "update") {
+                        doc.expertise = v.to_string();
+                        modified_sections.push("expertise".to_string());
+                    }
+                }
+                "projects" => {
+                    let v = value.get("value").and_then(|v| v.as_str())
+                        .or_else(|| value.as_str()).unwrap_or("");
+                    let action = value.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                    if !v.is_empty() && (doc.projects.is_empty() || action == "update") {
+                        doc.projects = v.to_string();
+                        modified_sections.push("projects".to_string());
+                    }
+                }
+                "preferences" => {
+                    let v = value.get("value").and_then(|v| v.as_str())
+                        .or_else(|| value.as_str()).unwrap_or("");
+                    let action = value.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                    if !v.is_empty() && (doc.preferences.is_empty() || action == "update") {
+                        doc.preferences = v.to_string();
+                        modified_sections.push("preferences".to_string());
+                    }
+                }
+                "notes" => {
+                    let v = value.get("value").and_then(|v| v.as_str())
+                        .or_else(|| value.as_str()).unwrap_or("");
+                    let action = value.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                    if !v.is_empty() && (doc.notes.is_empty() || action == "update") {
+                        doc.notes = v.to_string();
+                        modified_sections.push("notes".to_string());
+                    }
+                }
+                _ => {
+                    tracing::debug!("Extraction: unknown profile field '{field}', skipping");
+                }
+            }
+        }
+
+        if modified_sections.is_empty() {
+            return;
+        }
+
+        // Render and atomic-write
+        let new_content = render_user_markdown(&doc);
+
+        // Validate round-trip
+        if parse_user_markdown(&new_content).is_err() {
+            tracing::warn!("Extraction: rendered USER.md failed round-trip validation, aborting");
+            return;
+        }
+
+        // Atomic write: temp file → rename
+        let tmp_path = user_path.with_extension("md.tmp");
+        if let Err(e) = std::fs::write(&tmp_path, &new_content) {
+            tracing::warn!("Extraction: failed to write temp file: {e}");
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp_path, &user_path) {
+            tracing::warn!("Extraction: failed to rename temp file: {e}");
+            let _ = std::fs::remove_file(&tmp_path);
+            return;
+        }
+
+        // Update in-memory document
+        if let Ok(new_doc) = parse_user_markdown(&new_content) {
+            self.update_user_document(Some(new_doc));
+        }
+
+        // Publish event
+        let content_sha256 = {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(new_content.as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+
+        self.bus.publish(SystemEvent::UserProfileUpdated {
+            actor: "extraction".to_string(),
+            mode: "sections".to_string(),
+            content_sha256,
+            modified_sections: modified_sections.clone(),
+            backup_path: None,
+            timestamp: Utc::now(),
+        });
+
+        tracing::info!(
+            "Extraction: updated USER.md sections: {:?}",
+            modified_sections
+        );
+    }
+
     /// Handle a user message through the full pipeline:
     /// 1. SecurityGate permission check (wraps TrustGate)
     /// 2. Input sanitization
@@ -452,8 +1102,8 @@ impl Orchestrator {
             _ => None,
         };
 
-        // 3. Try slash commands and task queries first (cheap, no context needed)
-        let intent = self.intent_parser.parse(&content);
+        // 3. Try slash commands, task queries, and skill invocations first
+        let intent = self.intent_parser.parse_with_skills(&content, &self.skill_catalog);
         match &intent {
             Intent::TaskQuery { .. } | Intent::TaskControl { .. } => {
                 self.bus.publish(SystemEvent::IntentClassified {
@@ -584,6 +1234,15 @@ impl Orchestrator {
         // 6. Summary update ONCE, AFTER result, for ALL normal turns (D7)
         self.maybe_update_summary(&lane_key, &ctx).await;
 
+        // 7. Automatic user trait extraction (post-response, fire-and-forget cost)
+        if let Ok(ref response_text) = result {
+            self.maybe_extract_user_traits(&lane_key, &content, response_text, owner_id)
+                .await;
+        }
+
+        // 8. Check if bootstrap onboarding is complete
+        self.maybe_complete_bootstrap().await;
+
         result
     }
 
@@ -625,7 +1284,7 @@ impl Orchestrator {
         ctx: &ConversationContext,
         owner_id: Option<&str>,
     ) -> Result<String, String> {
-        let intent = self.intent_parser.parse(content);
+        let intent = self.intent_parser.parse_with_skills(content, &self.skill_catalog);
 
         self.bus.publish(SystemEvent::IntentClassified {
             request_id,
@@ -672,6 +1331,18 @@ impl Orchestrator {
                 }
             }
             Intent::TaskControl { task_id, action } => self.handle_task_control(&task_id, &action),
+            Intent::RememberCommand { content } => {
+                self.handle_remember_command(&content, owner_id).await
+            }
+            Intent::ForgetCommand { content } => {
+                self.handle_forget_command(&content, owner_id).await
+            }
+            Intent::SkillInvocation { skill_name, query } => {
+                self.handle_skill_invocation(
+                    request_id, source, &skill_name, &query, lane_key, ctx, owner_id,
+                )
+                .await
+            }
         }
     }
 
@@ -699,8 +1370,46 @@ impl Orchestrator {
         };
         let mut system_prompt = PromptAssembler::assemble(&system_persona, &agent_persona);
 
+        // Inject bootstrap instructions if in first-run mode
+        if let Ok(guard) = self.bootstrap_document.read() {
+            if let Some(ref doc) = *guard {
+                let block = bootstrap_to_prompt_block(doc);
+                if !block.is_empty() {
+                    system_prompt.push('\n');
+                    system_prompt.push_str(&block);
+                }
+            }
+        }
+
+        // Inject agent identity if available
+        if let Ok(guard) = self.identity_document.read() {
+            if let Some(ref doc) = *guard {
+                let id_block = identity_to_prompt_block(doc);
+                if !id_block.is_empty() {
+                    system_prompt.push('\n');
+                    system_prompt.push_str(&id_block);
+                }
+            }
+        }
+
+        // Inject available skills catalog so the LLM knows what skills exist
+        let skills_catalog_block = self.build_skills_catalog_block();
+        if !skills_catalog_block.is_empty() {
+            system_prompt.push('\n');
+            system_prompt.push_str(&skills_catalog_block);
+        }
+
         // Resolve tools based on intent analysis
-        let tool_names = self.intent_parser.suggest_tools(query);
+        let mut tool_names = self.intent_parser.suggest_tools(query);
+
+        // Force-include persona tools during bootstrap mode
+        if self.is_bootstrapping() {
+            for name in &["update_identity", "update_user", "update_soul"] {
+                if !tool_names.contains(&name.to_string()) {
+                    tool_names.push(name.to_string());
+                }
+            }
+        }
         let tool_defs: Vec<_> = tool_names
             .iter()
             .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
@@ -737,8 +1446,18 @@ impl Orchestrator {
 
         let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
             // Real LLM call via routed agentic loop
-            let mut messages = Vec::with_capacity(3 + ctx.recent_messages.len());
+            let mut messages = Vec::with_capacity(4 + ctx.recent_messages.len());
             messages.push(ChatMessage::system(&system_prompt));
+
+            // Inject user profile if available
+            if let Ok(guard) = self.user_document.read() {
+                if let Some(ref doc) = *guard {
+                    let profile_block = user_to_prompt_block(doc);
+                    if !profile_block.is_empty() {
+                        messages.push(ChatMessage::system(&profile_block));
+                    }
+                }
+            }
 
             // Inject session summary if available
             if let Some(ref summary) = ctx.summary {
@@ -915,6 +1634,333 @@ impl Orchestrator {
         Ok(validated)
     }
 
+    /// Build a lightweight `### AVAILABLE SKILLS ###` block for system prompt injection.
+    ///
+    /// Lists all registered skills with their slash commands and descriptions.
+    /// Budget: ~500 chars. Returns empty string if no skills are loaded.
+    fn build_skills_catalog_block(&self) -> String {
+        let summaries = self.skill_catalog.catalog_summary();
+        if summaries.is_empty() {
+            return String::new();
+        }
+
+        let mut block = String::from("### AVAILABLE SKILLS ###\nThe user can invoke these specialized skills with slash commands:\n");
+        let mut budget = 500usize;
+        for (name, description, command) in &summaries {
+            let line = if let Some(cmd) = command {
+                format!("- {} (/{}): {}\n", name, cmd, description)
+            } else {
+                format!("- {}: {}\n", name, description)
+            };
+            if line.len() > budget {
+                break;
+            }
+            budget -= line.len();
+            block.push_str(&line);
+        }
+        block
+    }
+
+    /// Handle a skill invocation: load full SKILL.md, inject as context, run agentic loop.
+    ///
+    /// Mirrors `handle_simple_query()` with an extra `### SKILL CONTEXT ###` block.
+    async fn handle_skill_invocation(
+        &self,
+        request_id: Uuid,
+        _source: &str,
+        skill_name: &str,
+        query: &str,
+        _lane_key: &str,
+        ctx: &ConversationContext,
+        owner_id: Option<&str>,
+    ) -> Result<String, String> {
+        // Load full skill (Level 2)
+        let skill_doc = self.skill_catalog.load_full(skill_name)
+            .map_err(|e| format!("Failed to load skill '{}': {}", skill_name, e))?;
+
+        let system_persona = match self.system_persona.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("System persona lock poisoned during read; recovering");
+                poisoned.into_inner().clone()
+            }
+        };
+
+        let agent_persona = AgentPersona {
+            role: "Assistant".to_string(),
+            tone: "Concise and professional".to_string(),
+            domain_knowledge: vec![],
+        };
+        let mut system_prompt = PromptAssembler::assemble(&system_persona, &agent_persona);
+
+        // Inject bootstrap instructions if in first-run mode
+        if let Ok(guard) = self.bootstrap_document.read() {
+            if let Some(ref doc) = *guard {
+                let block = bootstrap_to_prompt_block(doc);
+                if !block.is_empty() {
+                    system_prompt.push('\n');
+                    system_prompt.push_str(&block);
+                }
+            }
+        }
+
+        // Inject skill context block
+        let skill_block = skill_to_prompt_block(&skill_doc);
+        if !skill_block.is_empty() {
+            system_prompt.push('\n');
+            system_prompt.push_str(&skill_block);
+        }
+
+        // Inject agent identity if available
+        if let Ok(guard) = self.identity_document.read() {
+            if let Some(ref doc) = *guard {
+                let id_block = identity_to_prompt_block(doc);
+                if !id_block.is_empty() {
+                    system_prompt.push('\n');
+                    system_prompt.push_str(&id_block);
+                }
+            }
+        }
+
+        // Resolve tools: merge skill.tools_required with intent-suggested tools
+        let mut tool_names: Vec<String> = skill_doc.frontmatter.tools_required.clone();
+        let intent_tools = self.intent_parser.suggest_tools(query);
+        for t in intent_tools {
+            if !tool_names.contains(&t) {
+                tool_names.push(t);
+            }
+        }
+
+        // Force-include persona tools during bootstrap mode
+        if self.is_bootstrapping() {
+            for name in &["update_identity", "update_user", "update_soul"] {
+                if !tool_names.contains(&name.to_string()) {
+                    tool_names.push(name.to_string());
+                }
+            }
+        }
+
+        let tool_defs: Vec<_> = tool_names
+            .iter()
+            .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
+            .collect();
+
+        let (tools_for_loop, policy_opt, config_for_loop);
+        if !tool_defs.is_empty() {
+            tracing::info!(
+                "Skill invocation '{}' with {} tools: {:?}",
+                skill_name,
+                tool_defs.len(),
+                tool_names
+            );
+            system_prompt.push_str(&format_tool_guidance(&tool_defs));
+            let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
+            policy_opt = Some(SandboxPolicy {
+                agent_id: "orchestrator".to_string(),
+                allowed_capabilities: resolved,
+                denied_capabilities: vec![],
+                require_confirmation_for: vec![],
+                max_tool_calls: None,
+                max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
+            });
+            config_for_loop = LoopConfig {
+                max_rounds: 6, // Skills may need more rounds than simple queries
+                max_tools_per_round: 3,
+                ..self.loop_config.clone()
+            };
+            tools_for_loop = tool_defs;
+        } else {
+            tools_for_loop = vec![];
+            policy_opt = None;
+            config_for_loop = self.loop_config.clone();
+        }
+
+        let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
+            let mut messages = Vec::with_capacity(4 + ctx.recent_messages.len());
+            messages.push(ChatMessage::system(&system_prompt));
+
+            // Inject user profile if available
+            if let Ok(guard) = self.user_document.read() {
+                if let Some(ref doc) = *guard {
+                    let profile_block = user_to_prompt_block(doc);
+                    if !profile_block.is_empty() {
+                        messages.push(ChatMessage::system(&profile_block));
+                    }
+                }
+            }
+
+            // Inject session summary if available
+            if let Some(ref summary) = ctx.summary {
+                messages.push(ChatMessage::system(&format!(
+                    "### SESSION SUMMARY ###\nThe following summarizes earlier parts of this conversation:\n{}",
+                    summary
+                )));
+            }
+
+            // Retrieval injection: hybrid FTS+vector search for user memories
+            if let (Some(db), Some(oid)) = (&self.db, owner_id) {
+                let repo = MemoryRepository::new(db);
+                let top_k = if !tools_for_loop.is_empty() { 5 } else { 10 };
+
+                let query_embedding = if let Some(ref embedder) = self.embedder {
+                    embedder
+                        .embed(&[query])
+                        .await
+                        .ok()
+                        .and_then(|v| v.into_iter().next())
+                } else {
+                    None
+                };
+
+                let memories = repo
+                    .search_hybrid(
+                        oid,
+                        query,
+                        query_embedding.as_deref(),
+                        top_k,
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap_or_default();
+
+                if !memories.is_empty() {
+                    let mut block = String::from("### RETRIEVED MEMORY ###\n");
+                    let mut budget = 2000usize;
+                    for m in &memories {
+                        let entry = format!(
+                            "- [{}] {}\n",
+                            m.kind.as_str(),
+                            m.content.chars().take(300).collect::<String>()
+                        );
+                        if entry.len() > budget {
+                            break;
+                        }
+                        budget -= entry.len();
+                        block.push_str(&entry);
+                    }
+                    messages.push(ChatMessage::system(&block));
+                }
+            }
+
+            messages.extend(ctx.recent_messages.clone());
+            messages.push(ChatMessage::user(query));
+
+            // Per-request sandbox with ContextualToolExecutor
+            let ctx_exec = ToolExecutionContext {
+                owner_id: owner_id.map(|s| s.to_string()),
+            };
+            let contextual_executor = Arc::new(ContextualToolExecutor::new(
+                self.tool_registry.clone(),
+                ctx_exec,
+            ));
+            let per_request_sandbox = SandboxManager::new(contextual_executor, self.bus.clone());
+
+            let call_start = std::time::Instant::now();
+            let result = run_agentic_loop_routed(
+                router.as_ref(),
+                messages,
+                tools_for_loop,
+                &config_for_loop,
+                Some(&per_request_sandbox),
+                "orchestrator",
+                policy_opt.as_ref(),
+                None,
+            )
+            .await;
+            let latency_ms = call_start.elapsed().as_millis() as i64;
+
+            // Persist LLM usage and emit event
+            let actual_model = result
+                .model_used
+                .as_deref()
+                .or(self.loop_config.model.as_deref())
+                .unwrap_or(router.default_model());
+            let resolved_provider = router
+                .model_registry()
+                .resolve_provider(actual_model)
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let call_cost = router.cost_tracker.calculate_cost(
+                actual_model,
+                result.total_input_tokens,
+                result.total_output_tokens,
+            );
+
+            let call_status = match &result.finish_reason {
+                LoopFinishReason::Complete | LoopFinishReason::MaxRounds => "success",
+                LoopFinishReason::CostExceeded => "cost_exceeded",
+                LoopFinishReason::Error(_) => "error",
+            };
+            let call_error = match &result.finish_reason {
+                LoopFinishReason::Error(msg) => Some(msg.as_str()),
+                _ => None,
+            };
+
+            if let Some(ref db) = self.db {
+                let usage_repo = LlmUsageRepository::new(db);
+                if let Err(e) = usage_repo.record_and_log(
+                    "orchestrator",
+                    None,
+                    &resolved_provider,
+                    actual_model,
+                    result.total_input_tokens as i32,
+                    result.total_output_tokens as i32,
+                    call_cost,
+                    latency_ms,
+                    call_status,
+                    call_error,
+                ) {
+                    tracing::warn!("Failed to persist LLM usage: {e}");
+                }
+            }
+
+            self.bus.publish(SystemEvent::LlmCallCompleted {
+                agent_id: "orchestrator".to_string(),
+                model: actual_model.to_string(),
+                input_tokens: result.total_input_tokens,
+                output_tokens: result.total_output_tokens,
+                cost_usd: call_cost,
+                timestamp: Utc::now(),
+            });
+
+            if let LoopFinishReason::Error(ref err) = result.finish_reason {
+                if result.final_content.trim().is_empty() {
+                    return Err(format!("LLM error: {}", err));
+                }
+            }
+
+            (result.final_content, false)
+        } else {
+            // Fallback: echo stub with skill info
+            (
+                format!(
+                    "{{\"status\": \"ok\", \"skill\": \"{}\", \"echo\": \"Skill invocation: {}\"}}",
+                    skill_name,
+                    query.chars().take(50).collect::<String>()
+                ),
+                true,
+            )
+        };
+
+        // Output guard
+        let validated = if is_structured {
+            OutputGuard::ensure_json(&response_content)?
+        } else {
+            response_content
+        };
+
+        // Emit AgentResponse event
+        self.bus.publish(SystemEvent::AgentResponse {
+            request_id,
+            agent_id: "orchestrator".to_string(),
+            content: validated.clone(),
+            timestamp: Utc::now(),
+        });
+
+        Ok(validated)
+    }
+
     fn handle_task_query(
         &self,
         task_id: Option<String>,
@@ -1057,6 +2103,91 @@ impl Orchestrator {
         })
         .to_string())
     }
+
+    /// Handle "remember X" commands by storing in Memory v2 as a Preference.
+    async fn handle_remember_command(
+        &self,
+        content: &str,
+        owner_id: Option<&str>,
+    ) -> Result<String, String> {
+        let oid = owner_id.ok_or_else(|| "Cannot store memory without an owner_id".to_string())?;
+
+        if let Some(ref db) = self.db {
+            let repo = MemoryRepository::new(db);
+
+            // Store as a high-confidence preference in Memory v2
+            let result = repo
+                .add(
+                    oid,
+                    openalpaca_storage::models::memory::MemoryKind::Preference,
+                    openalpaca_storage::models::memory::MemoryScope::Global,
+                    "",
+                    openalpaca_storage::models::memory::MemorySource::Conversation,
+                    content,
+                    None,
+                    0.9,  // high importance: explicit user instruction
+                    1.0,  // max confidence: user said it directly
+                )
+                .map_err(|e| format!("Failed to store memory: {}", e))?;
+
+            if result == 0 {
+                Ok("I already have that noted.".to_string())
+            } else {
+                // If there's an embedder, try to embed the new memory
+                if let Some(ref embedder) = self.embedder {
+                    if let Ok(embeddings) = embedder.embed(&[content]).await {
+                        if let Some(embedding) = embeddings.into_iter().next() {
+                            let _ = repo.insert_embedding(result, &embedding);
+                        }
+                    }
+                }
+                Ok(format!("Got it, I'll remember that: {}", content))
+            }
+        } else {
+            Err("Memory system is not available.".to_string())
+        }
+    }
+
+    /// Handle "forget X" commands by searching and removing from Memory v2.
+    async fn handle_forget_command(
+        &self,
+        content: &str,
+        owner_id: Option<&str>,
+    ) -> Result<String, String> {
+        let oid = owner_id.ok_or_else(|| "Cannot search memory without an owner_id".to_string())?;
+
+        if let Some(ref db) = self.db {
+            let repo = MemoryRepository::new(db);
+
+            // Search for matching memories
+            let memories = repo
+                .search_fts(
+                    oid,
+                    content,
+                    5,
+                    Some(openalpaca_storage::models::memory::MemoryKind::Preference),
+                    None,
+                    None,
+                )
+                .map_err(|e| format!("Failed to search memory: {}", e))?;
+
+            if memories.is_empty() {
+                return Ok(format!("I don't have any memory matching: {}", content));
+            }
+
+            // Delete the best match (first result)
+            let best_match = &memories[0];
+            repo.delete(best_match.id)
+                .map_err(|e| format!("Failed to delete memory: {}", e))?;
+
+            Ok(format!(
+                "Done, I've forgotten: {}",
+                best_match.content.chars().take(100).collect::<String>()
+            ))
+        } else {
+            Err("Memory system is not available.".to_string())
+        }
+    }
 }
 
 fn principal_id(principal: &Principal) -> String {
@@ -1129,6 +2260,7 @@ mod tests {
             registry,
             None,
             None,
+            Arc::new(skill_catalog::SkillCatalog::new()),
         )
     }
 
@@ -1152,6 +2284,7 @@ mod tests {
             registry,
             None,
             None,
+            Arc::new(skill_catalog::SkillCatalog::new()),
         )
     }
 
@@ -1395,6 +2528,7 @@ mod tests {
             registry,
             None,
             None,
+            Arc::new(skill_catalog::SkillCatalog::new()),
         );
 
         let result = orch
@@ -1526,6 +2660,7 @@ mod tests {
             registry,
             None,
             None,
+            Arc::new(skill_catalog::SkillCatalog::new()),
         )
     }
 
@@ -1714,6 +2849,7 @@ mod tests {
             registry,
             None,
             None,
+            Arc::new(skill_catalog::SkillCatalog::new()),
         )
     }
 

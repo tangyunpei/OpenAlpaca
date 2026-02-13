@@ -136,4 +136,46 @@ pub enum SystemEvent {
         backup_path: Option<String>,
         timestamp: DateTime<Utc>,
     },
+    /// The USER.md profile file was updated
+    UserProfileUpdated {
+        /// Who initiated the update: "agent", "user" (via file watcher), or "extraction"
+        actor: String,
+        /// Update mode: "replace", "sections", or "remember_command"
+        mode: String,
+        /// SHA-256 hash of the new content for deduplication
+        content_sha256: String,
+        /// Which sections were modified (for sections mode)
+        modified_sections: Vec<String>,
+        /// Path to the timestamped backup (if created)
+        backup_path: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
+    /// The skill catalog was updated (skill added, removed, or reloaded)
+    SkillCatalogUpdated {
+        /// Skill name that changed
+        skill_name: String,
+        /// Action taken: "added", "removed", or "reloaded"
+        action: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// The IDENTITY.md file was updated
+    IdentityUpdated {
+        /// Who initiated the update: "agent" or "user" (via file watcher)
+        actor: String,
+        /// Update mode: "replace" or "sections"
+        mode: String,
+        /// SHA-256 hash of the new content for deduplication
+        content_sha256: String,
+        /// Path to the timestamped backup (if created)
+        backup_path: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
+    /// Bootstrap onboarding completed — BOOTSTRAP.md has been consumed and deleted
+    BootstrapCompleted {
+        /// Whether the agent identity was populated during bootstrap
+        identity_populated: bool,
+        /// Whether the user profile was populated during bootstrap
+        user_populated: bool,
+        timestamp: DateTime<Utc>,
+    },
 }

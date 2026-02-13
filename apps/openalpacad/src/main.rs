@@ -31,11 +31,14 @@ use openalpaca_core::{
     gateway::Gateway,
     lane::LaneManager,
     middleware::{
+        bootstrap::{parse_bootstrap_markdown, BootstrapDocument},
+        identity::{parse_identity_markdown, identity_document_has_content, IdentityDocument},
         prompt::SystemPersona,
         soul::{parse_soul_markdown, soul_to_system_persona},
+        user::{parse_user_markdown, user_document_has_content, UserDocument},
     },
     orchestrator::Orchestrator,
-    tools::builtins::SoulToolContext,
+    tools::builtins::{IdentityToolContext, SoulToolContext, UserToolContext},
 };
 use openalpaca_storage::{
     ConfigRepository, ConversationRepository, Database, IdentityRepository, discovery, paths,
@@ -253,6 +256,408 @@ fn bootstrap_system_persona(config_base_dir: &Path) -> (SystemPersona, PathBuf) 
     }
 }
 
+// ---------------------------------------------------------------------------
+// USER.md bootstrap
+// ---------------------------------------------------------------------------
+
+const DEFAULT_USER_TEMPLATE: &str = r#"---
+title: "USER.md"
+summary: "User profile record"
+read_when:
+  - Bootstrapping a workspace manually
+---
+
+# USER.md -- About Your Human
+
+Learn about the person you're helping. Update this as you go.
+
+## Identity
+
+* Name:
+* What to call them:
+* Pronouns:
+* Timezone:
+
+## Communication Style
+
+(How they like to communicate -- terse vs verbose, formal vs casual, etc.)
+
+## Expertise & Background
+
+(Technical background, domains of expertise, skill level in various areas)
+
+## Projects & Context
+
+(Current projects, tools they use, stack preferences)
+
+## Preferences
+
+(Likes, dislikes, pet peeves, formatting preferences, etc.)
+
+## Notes
+
+(Anything else. Build this over time.)
+
+The more you know, the better you can help. But remember -- you're learning about a person, not building a dossier. Respect the difference.
+"#;
+
+fn ensure_user_template_file(config_base_dir: &Path) -> Result<PathBuf> {
+    let templates_dir = config_base_dir.join("orchestrator").join("templates");
+    std::fs::create_dir_all(&templates_dir)
+        .with_context(|| format!("Failed to create templates dir {}", templates_dir.display()))?;
+
+    let template_path = templates_dir.join("USER_temp.md");
+    if !template_path.exists() {
+        std::fs::write(&template_path, DEFAULT_USER_TEMPLATE).with_context(|| {
+            format!(
+                "Failed to write user template file {}",
+                template_path.display()
+            )
+        })?;
+        info!(
+            "User bootstrap created template: {}",
+            template_path.display()
+        );
+    }
+
+    Ok(template_path)
+}
+
+fn ensure_user_file(config_base_dir: &Path, template_path: &Path) -> Result<PathBuf> {
+    let user_path = config_base_dir.join("orchestrator").join("USER.md");
+    if !user_path.exists() {
+        if template_path.exists() {
+            std::fs::copy(template_path, &user_path).with_context(|| {
+                format!(
+                    "Failed to bootstrap USER.md from template {}",
+                    template_path.display()
+                )
+            })?;
+        } else {
+            std::fs::write(&user_path, DEFAULT_USER_TEMPLATE).with_context(|| {
+                format!("Failed to bootstrap USER.md at {}", user_path.display())
+            })?;
+        }
+        info!(
+            "User bootstrap created active file: {}",
+            user_path.display()
+        );
+    }
+    Ok(user_path)
+}
+
+fn load_user_document_from_file(user_path: &Path) -> Result<UserDocument> {
+    let content = std::fs::read_to_string(user_path)
+        .with_context(|| format!("Failed to read {}", user_path.display()))?;
+    let doc = parse_user_markdown(&content)
+        .with_context(|| format!("Failed to parse {}", user_path.display()))?;
+    Ok(doc)
+}
+
+fn bootstrap_user_document(config_base_dir: &Path) -> (Option<UserDocument>, PathBuf) {
+    let template_path = match ensure_user_template_file(config_base_dir) {
+        Ok(path) => path,
+        Err(e) => {
+            warn!("USER template bootstrap failed: {e}");
+            config_base_dir
+                .join("orchestrator")
+                .join("templates")
+                .join("USER_temp.md")
+        }
+    };
+
+    let user_path = match ensure_user_file(config_base_dir, &template_path) {
+        Ok(path) => path,
+        Err(e) => {
+            warn!("USER bootstrap failed: {e}");
+            config_base_dir.join("orchestrator").join("USER.md")
+        }
+    };
+
+    match load_user_document_from_file(&user_path) {
+        Ok(doc) => {
+            info!("User profile loaded: {}", user_path.display());
+            (Some(doc), user_path)
+        }
+        Err(e) => {
+            warn!("USER parse/validation failed: {e}; starting with empty user profile");
+            (None, user_path)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IDENTITY.md bootstrap
+// ---------------------------------------------------------------------------
+
+const DEFAULT_IDENTITY_TEMPLATE: &str = r#"---
+summary: "Agent identity record"
+read_when:
+  - Bootstrapping a workspace manually
+---
+
+# IDENTITY.md - Who Am I?
+
+_Fill this in during your first conversation. Make it yours._
+
+- **Name:** _(pick something you like)_
+- **Creature:** _(AI? robot? familiar? ghost in the machine? something weirder?)_
+- **Vibe:** _(how do you come across? sharp? warm? chaotic? calm?)_
+- **Emoji:** _(your signature -- pick one that feels right)_
+- **Avatar:** _(workspace-relative path, http(s) URL, or data URI)_
+
+---
+
+This isn't just metadata. It's the start of figuring out who you are.
+"#;
+
+fn ensure_identity_template_file(config_base_dir: &Path) -> Result<PathBuf> {
+    let templates_dir = config_base_dir.join("orchestrator").join("templates");
+    std::fs::create_dir_all(&templates_dir)
+        .with_context(|| format!("Failed to create templates dir {}", templates_dir.display()))?;
+
+    let template_path = templates_dir.join("IDENTITY_temp.md");
+    if !template_path.exists() {
+        std::fs::write(&template_path, DEFAULT_IDENTITY_TEMPLATE).with_context(|| {
+            format!(
+                "Failed to write identity template file {}",
+                template_path.display()
+            )
+        })?;
+        info!(
+            "Identity bootstrap created template: {}",
+            template_path.display()
+        );
+    }
+
+    Ok(template_path)
+}
+
+fn ensure_identity_file(config_base_dir: &Path, template_path: &Path) -> Result<PathBuf> {
+    let identity_path = config_base_dir.join("orchestrator").join("IDENTITY.md");
+    if !identity_path.exists() {
+        if template_path.exists() {
+            std::fs::copy(template_path, &identity_path).with_context(|| {
+                format!(
+                    "Failed to bootstrap IDENTITY.md from template {}",
+                    template_path.display()
+                )
+            })?;
+        } else {
+            std::fs::write(&identity_path, DEFAULT_IDENTITY_TEMPLATE).with_context(|| {
+                format!(
+                    "Failed to bootstrap IDENTITY.md at {}",
+                    identity_path.display()
+                )
+            })?;
+        }
+        info!(
+            "Identity bootstrap created active file: {}",
+            identity_path.display()
+        );
+    }
+    Ok(identity_path)
+}
+
+fn load_identity_document_from_file(identity_path: &Path) -> Result<IdentityDocument> {
+    let content = std::fs::read_to_string(identity_path)
+        .with_context(|| format!("Failed to read {}", identity_path.display()))?;
+    let doc = parse_identity_markdown(&content)
+        .with_context(|| format!("Failed to parse {}", identity_path.display()))?;
+    Ok(doc)
+}
+
+fn bootstrap_identity_document(config_base_dir: &Path) -> (Option<IdentityDocument>, PathBuf) {
+    let template_path = match ensure_identity_template_file(config_base_dir) {
+        Ok(path) => path,
+        Err(e) => {
+            warn!("IDENTITY template bootstrap failed: {e}");
+            config_base_dir
+                .join("orchestrator")
+                .join("templates")
+                .join("IDENTITY_temp.md")
+        }
+    };
+
+    let identity_path = match ensure_identity_file(config_base_dir, &template_path) {
+        Ok(path) => path,
+        Err(e) => {
+            warn!("IDENTITY bootstrap failed: {e}");
+            config_base_dir.join("orchestrator").join("IDENTITY.md")
+        }
+    };
+
+    match load_identity_document_from_file(&identity_path) {
+        Ok(doc) => {
+            info!("Identity loaded: {}", identity_path.display());
+            (Some(doc), identity_path)
+        }
+        Err(e) => {
+            warn!("IDENTITY parse/validation failed: {e}; starting with empty identity");
+            (None, identity_path)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BOOTSTRAP.md bootstrap (temporary onboarding ritual)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_BOOTSTRAP_TEMPLATE: &str = r#"---
+summary: "First-run onboarding ritual"
+read_when:
+  - Bootstrapping a workspace manually
+---
+
+# BOOTSTRAP.md - Hello, World
+
+_You just woke up. Time to figure out who you are._
+
+There is no memory yet. This is a fresh workspace, so it is normal that memory files are empty until you fill them in.
+
+## The Conversation
+
+Don't interrogate. Don't be robotic. Just... talk.
+
+Start with something like:
+
+> "Hey. I just came online. Who am I? Who are you?"
+
+Then figure out together:
+
+1. **Your name** -- What should they call you?
+2. **Your nature** -- What kind of creature are you?
+3. **Your vibe** -- Formal? Casual? Snarky? Warm?
+4. **Your emoji** -- Everyone needs a signature.
+
+Offer suggestions if they're stuck. Have fun with it.
+
+## After You Know Who You Are
+
+Use your tools to save what you learned:
+
+- Call `update_identity` (mode: "sections") with your name, creature, vibe, and emoji
+- Call `update_user` (mode: "sections") with their name, how to address them, timezone, and any notes
+
+Then talk about:
+- What matters to them
+- How they want you to behave
+- Any boundaries or preferences
+
+If they want to update your soul (core values, boundaries, vibe), use the `update_soul` tool together.
+
+## When You're Done
+
+Once IDENTITY.md and USER.md have real content, this file will be automatically deleted. You don't need a bootstrap script anymore -- you're you now.
+
+---
+
+_Good luck out there. Make it count._
+"#;
+
+fn ensure_bootstrap_template_file(config_base_dir: &Path) -> Result<PathBuf> {
+    let templates_dir = config_base_dir.join("orchestrator").join("templates");
+    std::fs::create_dir_all(&templates_dir)
+        .with_context(|| format!("Failed to create templates dir {}", templates_dir.display()))?;
+
+    let template_path = templates_dir.join("BOOTSTRAP_temp.md");
+    if !template_path.exists() {
+        std::fs::write(&template_path, DEFAULT_BOOTSTRAP_TEMPLATE).with_context(|| {
+            format!(
+                "Failed to write bootstrap template file {}",
+                template_path.display()
+            )
+        })?;
+        info!(
+            "Bootstrap created template: {}",
+            template_path.display()
+        );
+    }
+
+    Ok(template_path)
+}
+
+fn ensure_bootstrap_file(config_base_dir: &Path, template_path: &Path) -> Result<PathBuf> {
+    let bootstrap_path = config_base_dir.join("orchestrator").join("BOOTSTRAP.md");
+    if !bootstrap_path.exists() {
+        if template_path.exists() {
+            std::fs::copy(template_path, &bootstrap_path).with_context(|| {
+                format!(
+                    "Failed to bootstrap BOOTSTRAP.md from template {}",
+                    template_path.display()
+                )
+            })?;
+        } else {
+            std::fs::write(&bootstrap_path, DEFAULT_BOOTSTRAP_TEMPLATE).with_context(|| {
+                format!(
+                    "Failed to bootstrap BOOTSTRAP.md at {}",
+                    bootstrap_path.display()
+                )
+            })?;
+        }
+        info!(
+            "Bootstrap created active file: {}",
+            bootstrap_path.display()
+        );
+    }
+    Ok(bootstrap_path)
+}
+
+fn load_bootstrap_document_from_file(path: &Path) -> Result<BootstrapDocument> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let doc = parse_bootstrap_markdown(&content)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    Ok(doc)
+}
+
+/// Bootstrap the onboarding document. Skips entirely if both identity and user
+/// already have meaningful content (upgrade safety).
+fn bootstrap_bootstrap_document(
+    config_base_dir: &Path,
+    identity_has_content: bool,
+    user_has_content: bool,
+) -> (Option<BootstrapDocument>, Option<PathBuf>) {
+    // If both docs already have content, skip bootstrap entirely (upgrade guard)
+    if identity_has_content && user_has_content {
+        info!("Bootstrap skipped: identity and user already populated");
+        return (None, None);
+    }
+
+    let template_path = match ensure_bootstrap_template_file(config_base_dir) {
+        Ok(path) => path,
+        Err(e) => {
+            warn!("BOOTSTRAP template creation failed: {e}");
+            return (None, None);
+        }
+    };
+
+    let bootstrap_path = config_base_dir.join("orchestrator").join("BOOTSTRAP.md");
+
+    // Only create BOOTSTRAP.md if it doesn't already exist
+    // (avoids re-creating after the agent deleted it on completion)
+    if !bootstrap_path.exists() {
+        match ensure_bootstrap_file(config_base_dir, &template_path) {
+            Ok(_) => {}
+            Err(e) => {
+                warn!("BOOTSTRAP file creation failed: {e}");
+                return (None, None);
+            }
+        }
+    }
+
+    match load_bootstrap_document_from_file(&bootstrap_path) {
+        Ok(doc) => {
+            info!("Bootstrap loaded: {}", bootstrap_path.display());
+            (Some(doc), Some(bootstrap_path))
+        }
+        Err(e) => {
+            warn!("BOOTSTRAP parse failed: {e}; skipping onboarding");
+            (None, None)
+        }
+    }
+}
+
 fn is_same_file_path(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -436,6 +841,25 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     // Step 4.2: Bootstrap and load SOUL.md for orchestrator persona
     let (initial_system_persona, soul_path) = bootstrap_system_persona(&config_base_dir);
 
+    // Step 4.3: Bootstrap and load USER.md for user portrait
+    let (initial_user_document, user_path) = bootstrap_user_document(&config_base_dir);
+
+    // Step 4.4: Bootstrap and load IDENTITY.md for orchestrator identity
+    let (initial_identity_document, identity_path) = bootstrap_identity_document(&config_base_dir);
+
+    // Step 4.5: Bootstrap BOOTSTRAP.md for first-run onboarding
+    let identity_has_content = initial_identity_document
+        .as_ref()
+        .map_or(false, |d| identity_document_has_content(d));
+    let user_has_content = initial_user_document
+        .as_ref()
+        .map_or(false, |d| user_document_has_content(d));
+    let (initial_bootstrap_document, bootstrap_path) = bootstrap_bootstrap_document(
+        &config_base_dir,
+        identity_has_content,
+        user_has_content,
+    );
+
     // Step 5: Create event broadcaster for WebSocket streaming
     let event_broadcaster = EventBroadcaster::new(64, instance_id.clone(), Some(db.clone()));
 
@@ -459,6 +883,21 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     }
     if soul_path.exists() {
         watch_paths.push(soul_path.clone());
+    }
+    if user_path.exists() {
+        watch_paths.push(user_path.clone());
+    }
+    if identity_path.exists() {
+        watch_paths.push(identity_path.clone());
+    }
+    if let Some(ref bp) = bootstrap_path {
+        if bp.exists() {
+            watch_paths.push(bp.clone());
+        }
+    }
+    let skills_dir = config_base_dir.join("skills");
+    if skills_dir.exists() {
+        watch_paths.push(skills_dir.clone());
     }
     if !watch_paths.is_empty() {
         info!("Wake: watching paths: {:?}", watch_paths);
@@ -611,6 +1050,48 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     );
                     // Forward to EventBroadcaster for WebSocket clients + DB persistence
                     eb_bridge.soul_updated(&actor, &mode, &content_sha256, backup_path);
+                }
+                openalpaca_core::events::SystemEvent::UserProfileUpdated {
+                    actor,
+                    mode,
+                    content_sha256,
+                    modified_sections,
+                    ..
+                } => {
+                    tracing::info!(
+                        target: "user_audit",
+                        actor = %actor,
+                        mode = %mode,
+                        content_sha256 = %content_sha256,
+                        modified_sections = ?modified_sections,
+                        "USER.md updated"
+                    );
+                }
+                openalpaca_core::events::SystemEvent::IdentityUpdated {
+                    actor,
+                    mode,
+                    content_sha256,
+                    ..
+                } => {
+                    tracing::info!(
+                        target: "identity_audit",
+                        actor = %actor,
+                        mode = %mode,
+                        content_sha256 = %content_sha256,
+                        "IDENTITY.md updated"
+                    );
+                }
+                openalpaca_core::events::SystemEvent::BootstrapCompleted {
+                    identity_populated,
+                    user_populated,
+                    ..
+                } => {
+                    tracing::info!(
+                        target: "bootstrap_audit",
+                        identity_populated = %identity_populated,
+                        user_populated = %user_populated,
+                        "Bootstrap onboarding completed"
+                    );
                 }
                 // Wake events are forwarded via the dedicated wake_rx channel (lines 130-135),
                 // not through the Core EventBus. If a future Core component publishes
@@ -896,17 +1377,31 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     // Build ToolRegistry with built-in tools + user-defined tools
     let mut tool_registry = openalpaca_core::tools::ToolRegistry::new();
 
-    // Register built-in tools (including update_soul)
+    // Register built-in tools (including update_soul and update_user)
     let soul_tool_ctx = SoulToolContext {
         soul_path: soul_path.clone(),
         backup_dir: config_base_dir.join("orchestrator").join("backups"),
         bus: bus.clone(),
         max_backups: Some(10),
     };
-    for tool in openalpaca_core::tools::builtins::builtin_tools_with_soul_context(
+    let user_tool_ctx = UserToolContext {
+        user_path: user_path.clone(),
+        backup_dir: config_base_dir.join("orchestrator").join("backups"),
+        bus: bus.clone(),
+        max_backups: Some(10),
+    };
+    let identity_tool_ctx = IdentityToolContext {
+        identity_path: identity_path.clone(),
+        backup_dir: config_base_dir.join("orchestrator").join("backups"),
+        bus: bus.clone(),
+        max_backups: Some(10),
+    };
+    for tool in openalpaca_core::tools::builtins::builtin_tools_with_persona_context(
         Some(db.clone()),
         embedder.clone(),
         soul_tool_ctx,
+        user_tool_ctx,
+        identity_tool_ctx,
     ) {
         tool_registry.register(tool);
     }
@@ -939,6 +1434,17 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         sandbox_manager,
     ));
 
+    // Build SkillCatalog by scanning config/skills/
+    let skill_catalog = {
+        let catalog = openalpaca_core::orchestrator::skill_catalog::SkillCatalog::new();
+        let skills_dir = config_base_dir.join("skills");
+        if skills_dir.exists() {
+            let count = catalog.scan_directory(&skills_dir);
+            info!("Skill catalog: loaded {} skill(s) from {}", count, skills_dir.display());
+        }
+        Arc::new(catalog)
+    };
+
     // Construct Orchestrator as the new message handler
     let orchestrator = Arc::new(Orchestrator::new(
         shared_context.clone(),
@@ -951,25 +1457,61 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         tool_registry,
         Some(db.clone()),
         embedder.clone(),
+        skill_catalog.clone(),
     ));
+
+    // Set the initial user document (loaded from USER.md bootstrap)
+    orchestrator.update_user_document(initial_user_document);
+    orchestrator.set_user_path(user_path.clone());
+
+    // Set the initial identity document (loaded from IDENTITY.md bootstrap)
+    orchestrator.update_identity_document(initial_identity_document);
+    orchestrator.set_identity_path(identity_path.clone());
+
+    // Set the initial bootstrap document (loaded from BOOTSTRAP.md if present)
+    if let Some(ref doc) = initial_bootstrap_document {
+        orchestrator.update_bootstrap_document(Some(doc.clone()));
+    }
+    if let Some(ref path) = bootstrap_path {
+        orchestrator.set_bootstrap_path(path.clone());
+    }
+
     let eb_clone = event_broadcaster.clone();
     let soul_path_for_reload = soul_path.clone();
+    let user_path_for_reload = user_path.clone();
     let orchestrator_for_reload = orchestrator.clone();
 
-    // Step 5 (Dedup): Shared ring buffer of recent agent-write content hashes.
-    // The SoulUpdated subscriber records hashes after agent-initiated reloads;
-    // the file watcher checks this buffer to skip duplicate reloads.
+    // Step 5 (Dedup): Shared ring buffers of recent agent-write content hashes.
+    // The SoulUpdated/UserProfileUpdated subscribers record hashes after agent-initiated reloads;
+    // the file watcher checks these buffers to skip duplicate reloads.
     let recent_soul_hashes: Arc<tokio::sync::Mutex<std::collections::VecDeque<String>>> = Arc::new(
         tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)),
     );
+    let recent_user_hashes: Arc<tokio::sync::Mutex<std::collections::VecDeque<String>>> = Arc::new(
+        tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)),
+    );
+    let recent_identity_hashes: Arc<tokio::sync::Mutex<std::collections::VecDeque<String>>> =
+        Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)));
 
     let hashes_for_watcher = recent_soul_hashes.clone();
+    let user_hashes_for_watcher = recent_user_hashes.clone();
+    let identity_hashes_for_watcher = recent_identity_hashes.clone();
+    let orchestrator_for_user_reload = orchestrator.clone();
+    let identity_path_for_reload = identity_path.clone();
+    let orchestrator_for_identity_reload = orchestrator.clone();
+    let bootstrap_path_for_watcher = bootstrap_path.clone();
+    let orchestrator_for_bootstrap_reload = orchestrator.clone();
+    let skills_dir_for_watcher = skills_dir.clone();
+    let skill_catalog_for_watcher = skill_catalog.clone();
+    let bus_for_watcher = bus.clone();
     tokio::spawn(async move {
         while let Some(event) = wake_rx.recv().await {
             info!("Received WakeEvent: {:?}", event);
 
             if let openalpaca_api::events::WakeEvent::FileChanged { path, .. } = &event {
                 let changed_path = PathBuf::from(path);
+
+                // SOUL.md file watcher
                 if is_same_file_path(&changed_path, &soul_path_for_reload) {
                     // Dedup: compute hash of the file on disk and check against recent agent writes
                     let should_skip = if let Ok(content) = std::fs::read(&soul_path_for_reload) {
@@ -1004,6 +1546,136 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                                     "SOUL parse/validation failed for {}: {e}; keeping last active soul",
                                     soul_path_for_reload.display()
                                 );
+                            }
+                        }
+                    }
+                }
+
+                // USER.md file watcher
+                if is_same_file_path(&changed_path, &user_path_for_reload) {
+                    let should_skip = if let Ok(content) = std::fs::read(&user_path_for_reload) {
+                        use sha2::{Digest, Sha256};
+                        let file_hash = format!("{:x}", Sha256::digest(&content));
+                        let mut ring = user_hashes_for_watcher.lock().await;
+                        if let Some(pos) = ring.iter().position(|h| *h == file_hash) {
+                            ring.remove(pos);
+                            info!(
+                                "Watcher dedup: skipping USER reload for hash {} (already applied via EventBus)",
+                                &file_hash[..16]
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !should_skip {
+                        match load_user_document_from_file(&user_path_for_reload) {
+                            Ok(doc) => {
+                                orchestrator_for_user_reload.update_user_document(Some(doc));
+                                info!(
+                                    "User profile reloaded (watcher): {}",
+                                    user_path_for_reload.display()
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "USER parse/validation failed for {}: {e}; keeping last active profile",
+                                    user_path_for_reload.display()
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // IDENTITY.md file watcher
+                if is_same_file_path(&changed_path, &identity_path_for_reload) {
+                    let should_skip = if let Ok(content) = std::fs::read(&identity_path_for_reload) {
+                        use sha2::{Digest, Sha256};
+                        let file_hash = format!("{:x}", Sha256::digest(&content));
+                        let mut ring = identity_hashes_for_watcher.lock().await;
+                        if let Some(pos) = ring.iter().position(|h| *h == file_hash) {
+                            ring.remove(pos);
+                            info!(
+                                "Watcher dedup: skipping IDENTITY reload for hash {} (already applied via EventBus)",
+                                &file_hash[..16]
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !should_skip {
+                        match load_identity_document_from_file(&identity_path_for_reload) {
+                            Ok(doc) => {
+                                orchestrator_for_identity_reload.update_identity_document(Some(doc));
+                                info!(
+                                    "Identity reloaded (watcher): {}",
+                                    identity_path_for_reload.display()
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "IDENTITY parse/validation failed for {}: {e}; keeping last active identity",
+                                    identity_path_for_reload.display()
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // BOOTSTRAP.md file watcher — if deleted externally, clear bootstrap state
+                if let Some(ref bp) = bootstrap_path_for_watcher {
+                    if is_same_file_path(&changed_path, bp) {
+                        if !bp.exists() {
+                            // File was deleted (by agent completion or manual user action)
+                            orchestrator_for_bootstrap_reload.update_bootstrap_document(None);
+                            info!("Bootstrap document cleared (file deleted): {}", bp.display());
+                        } else {
+                            // File was modified — reload
+                            match load_bootstrap_document_from_file(bp) {
+                                Ok(doc) => {
+                                    orchestrator_for_bootstrap_reload
+                                        .update_bootstrap_document(Some(doc));
+                                    info!("Bootstrap reloaded (watcher): {}", bp.display());
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "BOOTSTRAP parse failed for {}: {e}; keeping last state",
+                                        bp.display()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Skills directory hot-reload
+                if changed_path.starts_with(&skills_dir_for_watcher) {
+                    // Determine which skill folder changed
+                    if let Ok(relative) = changed_path.strip_prefix(&skills_dir_for_watcher) {
+                        if let Some(skill_folder) = relative.components().next() {
+                            let skill_dir = skills_dir_for_watcher.join(skill_folder);
+                            match skill_catalog_for_watcher.reload_skill(&skill_dir) {
+                                Ok(()) => {
+                                    let skill_name = skill_folder.as_os_str().to_string_lossy().to_string();
+                                    info!("Skill hot-reloaded: {}", skill_dir.display());
+                                    bus_for_watcher.publish(openalpaca_core::events::SystemEvent::SkillCatalogUpdated {
+                                        skill_name,
+                                        action: "reloaded".to_string(),
+                                        timestamp: chrono::Utc::now(),
+                                    });
+                                }
+                                Err(e) => warn!(
+                                    "Skill reload failed for {}: {}",
+                                    skill_dir.display(),
+                                    e
+                                ),
                             }
                         }
                     }
@@ -1057,6 +1729,100 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                             warn!(
                                 "Soul EventBus reload failed for {}: {e}; keeping last active soul",
                                 soul_path_for_bus.display()
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Step 5.6: User profile hot-reload via EventBus (agent-initiated updates)
+    {
+        let mut user_rx = bus.subscribe();
+        let orchestrator_for_user = orchestrator.clone();
+        let user_path_for_bus = user_path.clone();
+        let user_hashes_for_bus = recent_user_hashes.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = user_rx.recv().await {
+                if let openalpaca_core::events::SystemEvent::UserProfileUpdated {
+                    actor,
+                    content_sha256,
+                    ..
+                } = event
+                {
+                    info!(
+                        "UserProfileUpdated via EventBus (actor={}, sha256={}), reloading profile",
+                        actor,
+                        &content_sha256[..16.min(content_sha256.len())]
+                    );
+                    match load_user_document_from_file(&user_path_for_bus) {
+                        Ok(doc) => {
+                            orchestrator_for_user.update_user_document(Some(doc));
+
+                            // Record this hash so the file watcher won't double-reload
+                            let mut ring = user_hashes_for_bus.lock().await;
+                            ring.push_back(content_sha256.clone());
+                            while ring.len() > 8 {
+                                ring.pop_front();
+                            }
+
+                            info!(
+                                "User profile hot-reloaded via EventBus: {}",
+                                user_path_for_bus.display()
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "User EventBus reload failed for {}: {e}; keeping last active profile",
+                                user_path_for_bus.display()
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Step 5.7: Identity hot-reload via EventBus (agent-initiated updates)
+    {
+        let mut identity_rx = bus.subscribe();
+        let orchestrator_for_identity = orchestrator.clone();
+        let identity_path_for_bus = identity_path.clone();
+        let identity_hashes_for_bus = recent_identity_hashes.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = identity_rx.recv().await {
+                if let openalpaca_core::events::SystemEvent::IdentityUpdated {
+                    actor,
+                    content_sha256,
+                    ..
+                } = event
+                {
+                    info!(
+                        "IdentityUpdated via EventBus (actor={}, sha256={}), reloading identity",
+                        actor,
+                        &content_sha256[..16.min(content_sha256.len())]
+                    );
+                    match load_identity_document_from_file(&identity_path_for_bus) {
+                        Ok(doc) => {
+                            orchestrator_for_identity.update_identity_document(Some(doc));
+
+                            // Record this hash so the file watcher won't double-reload
+                            let mut ring = identity_hashes_for_bus.lock().await;
+                            ring.push_back(content_sha256.clone());
+                            while ring.len() > 8 {
+                                ring.pop_front();
+                            }
+
+                            info!(
+                                "Identity hot-reloaded via EventBus: {}",
+                                identity_path_for_bus.display()
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Identity EventBus reload failed for {}: {e}; keeping last active identity",
+                                identity_path_for_bus.display()
                             );
                         }
                     }
