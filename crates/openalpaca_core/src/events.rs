@@ -158,4 +158,16 @@ pub enum SystemEvent {
         action: String,
         timestamp: DateTime<Utc>,
     },
+    /// The IDENTITY.md file was updated
+    IdentityUpdated {
+        /// Who initiated the update: "agent" or "user" (via file watcher)
+        actor: String,
+        /// Update mode: "replace" or "sections"
+        mode: String,
+        /// SHA-256 hash of the new content for deduplication
+        content_sha256: String,
+        /// Path to the timestamped backup (if created)
+        backup_path: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
 }
