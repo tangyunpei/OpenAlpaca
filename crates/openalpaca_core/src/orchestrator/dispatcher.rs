@@ -2,9 +2,10 @@
 
 use crate::agent::subagent::{AgentStatus, SubAgent};
 use crate::bus::EventBus;
-use crate::context::{SharedContext, TaskEntryStatus};
+use crate::context::{DagSummary, SharedContext, TaskEntryStatus};
 use crate::events::SystemEvent;
 use crate::lane::LaneManager;
+use crate::runner::dag_executor::{DagExecutorConfig, DagFinishReason, execute_dag};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::gate::SecurityGate;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
@@ -22,7 +23,7 @@ use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 
 use crate::middleware::prompt::format_tool_guidance;
 use super::skill_matcher::{SkillMatch, SkillMatcher};
-use super::task_planner::TaskPlan;
+use super::task_planner::{TaskDag, TaskPlan};
 use super::task_state::TaskState;
 
 /// Dispatches complex tasks by matching skills to agents and creating task lanes.
@@ -74,7 +75,7 @@ impl TaskDispatcher {
             .skill_matcher
             .match_skills(required_skills, &self.shared_context.agent_registry)?;
         let title = generate_title(description);
-        self.dispatch_core(description, title, matches, created_by, lane_key, source)
+        self.dispatch_core(description, title, matches, created_by, lane_key, source, None)
     }
 
     /// Dispatch a complex task using an LLM-generated plan.
@@ -126,12 +127,13 @@ impl TaskDispatcher {
             return Err("No agents assigned by planner".to_string());
         }
 
+        let dag = plan.dag;
         let title = plan
             .title
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| generate_title(description));
 
-        self.dispatch_core(description, title, matches, created_by, lane_key, source)
+        self.dispatch_core(description, title, matches, created_by, lane_key, source, dag)
     }
 
     /// Core dispatch logic shared by both heuristic and LLM-planned paths.
@@ -143,6 +145,7 @@ impl TaskDispatcher {
         created_by: &str,
         lane_key: &str,
         source: &str,
+        dag: Option<TaskDag>,
     ) -> Result<String, String> {
         let task_id = Uuid::new_v4().to_string();
 
@@ -243,7 +246,8 @@ impl TaskDispatcher {
             let step_info: Vec<(String, String, String)> = matches.iter()
                 .map(|m| (m.agent_id.clone(), m.agent_name.clone(), m.role_description.clone()))
                 .collect();
-            let initial_state = TaskState::initial(description, &step_info);
+            let mut initial_state = TaskState::initial(description, &step_info);
+            initial_state.dag = dag.clone();
             let _ = repo.update_state(&task_id, &initial_state.to_json(), 0);
         }
 
@@ -285,16 +289,28 @@ impl TaskDispatcher {
             );
         }
 
-        // Spawn sequential pipeline (agents run in step_order, each receives previous output)
-        self.spawn_agent_pipeline(
-            task_id.clone(),
-            title.clone(),
-            description.to_string(),
-            agents_with_assignments,
-            lane_key.to_string(),
-            source.to_string(),
-            created_by.to_string(),
-        );
+        // Choose execution path: DAG-parallel or sequential pipeline
+        if let Some(dag) = dag {
+            self.spawn_dag_execution(
+                task_id.clone(),
+                title.clone(),
+                description.to_string(),
+                dag,
+                created_by.to_string(),
+                lane_key.to_string(),
+                source.to_string(),
+            );
+        } else {
+            self.spawn_agent_pipeline(
+                task_id.clone(),
+                title.clone(),
+                description.to_string(),
+                agents_with_assignments,
+                lane_key.to_string(),
+                source.to_string(),
+                created_by.to_string(),
+            );
+        }
 
         // Build human-readable response for chat
         let agent_list: Vec<String> = assignments.iter().map(|a| {
@@ -308,6 +324,181 @@ impl TaskDispatcher {
             "I've created a task and assigned it to the following agents:\n\n{}\n\nTask: {}\nYou'll see the results here when the task completes.",
             agent_list.join("\n"), title
         ))
+    }
+
+    /// Spawn DAG-parallel execution: independent nodes run concurrently.
+    fn spawn_dag_execution(
+        &self,
+        task_id: String,
+        task_title: String,
+        description: String,
+        dag: TaskDag,
+        created_by: String,
+        lane_key: String,
+        source: String,
+    ) {
+        let router = match &self.llm_router {
+            Some(r) => r.clone(),
+            None => {
+                tracing::warn!(
+                    "No LLM router configured — cannot execute DAG for task '{}'",
+                    task_id
+                );
+                return;
+            }
+        };
+
+        let bus = self.bus.clone();
+        let ctx = self.shared_context.clone();
+        let db = self.db.clone();
+        let tool_registry = self.tool_registry.clone();
+
+        tokio::spawn(async move {
+            let start_time = std::time::Instant::now();
+            let node_count = dag.nodes.len();
+
+            // Update task status → Running
+            ctx.task_registry.update_status(&task_id, TaskEntryStatus::Running);
+            bus.publish(SystemEvent::TaskUpdated {
+                task_id: task_id.clone(),
+                status: "running".to_string(),
+                progress_current: Some(0),
+                progress_total: Some(node_count as i32),
+                timestamp: Utc::now(),
+            });
+            if let Some(ref db) = db {
+                let repo = openalpaca_storage::repository::TaskRepository::new(db);
+                let _ = repo.update_status(&task_id, openalpaca_storage::TaskStatus::Running);
+                let _ = repo.update_progress(&task_id, 0, node_count as i32);
+            }
+
+            // Set initial DAG progress in TaskRegistry
+            ctx.task_registry.update_progress(
+                &task_id,
+                0,
+                node_count as i32,
+                Some(DagSummary {
+                    total_nodes: node_count,
+                    completed_nodes: 0,
+                    running_nodes: 0,
+                    failed_nodes: 0,
+                }),
+            );
+
+            // Execute DAG
+            let config = DagExecutorConfig::default();
+            let mut dag = dag;
+            let result = execute_dag(
+                &mut dag,
+                &config,
+                router.clone(),
+                tool_registry,
+                bus.clone(),
+                ctx.clone(),
+                &task_id,
+                &description,
+                db.clone(),
+                &created_by,
+            )
+            .await;
+
+            let now = Utc::now();
+            let runtime_secs = start_time.elapsed().as_secs() as i64;
+
+            // Release all agents back to Idle
+            for node in &dag.nodes {
+                ctx.agent_registry.update_status(&node.agent_id, AgentStatus::Idle);
+                bus.publish(SystemEvent::AgentStatusChanged {
+                    agent_id: node.agent_id.clone(),
+                    status: "idle".to_string(),
+                    current_task_id: None,
+                    timestamp: now,
+                });
+            }
+
+            // Build final content from completed nodes
+            let final_content = if result.success {
+                result
+                    .node_results
+                    .iter()
+                    .filter(|nr| nr.success && !nr.final_content.is_empty())
+                    .map(|nr| nr.final_content.clone())
+                    .last()
+                    .unwrap_or_else(|| {
+                        format!(
+                            "DAG completed: {}/{} nodes succeeded ({} tokens used)",
+                            result.node_results.iter().filter(|n| n.success).count(),
+                            node_count,
+                            result.total_input_tokens + result.total_output_tokens,
+                        )
+                    })
+            } else {
+                match &result.finish_reason {
+                    DagFinishReason::NodeFailed { node_id, error } => {
+                        format!("DAG execution failed at node '{}': {}", node_id, error)
+                    }
+                    DagFinishReason::Timeout => "DAG execution timed out".to_string(),
+                    DagFinishReason::AllCompleted => "Completed".to_string(),
+                    DagFinishReason::Aborted { reason } => {
+                        format!("DAG execution aborted: {}", reason)
+                    }
+                }
+            };
+
+            let db_summary = final_content.chars().take(2000).collect::<String>();
+
+            // Update task status
+            if result.success {
+                ctx.task_registry.update_status(&task_id, TaskEntryStatus::Completed);
+                if let Some(ref db) = db {
+                    let repo = openalpaca_storage::repository::TaskRepository::new(db);
+                    let _ = repo.update_status(&task_id, openalpaca_storage::TaskStatus::Completed);
+                    let _ = repo.set_result(&task_id, &db_summary);
+                }
+                bus.publish(SystemEvent::TaskCompleted {
+                    task_id: task_id.clone(),
+                    result_summary: Some(db_summary.clone()),
+                    timestamp: now,
+                });
+            } else {
+                ctx.task_registry.update_status(&task_id, TaskEntryStatus::Failed);
+                if let Some(ref db) = db {
+                    let repo = openalpaca_storage::repository::TaskRepository::new(db);
+                    let _ = repo.update_status(&task_id, openalpaca_storage::TaskStatus::Failed);
+                    let _ = repo.set_result(&task_id, &db_summary);
+                }
+                bus.publish(SystemEvent::TaskFailed {
+                    task_id: task_id.clone(),
+                    error: db_summary.clone(),
+                    timestamp: now,
+                });
+            }
+
+            // Persist final result to conversation
+            if let Some(ref db) = db {
+                let content = format_task_result(&task_title, &final_content, result.success);
+                let conv_repo = ConversationRepository::new(db);
+                let _ = conv_repo.get_or_create_conversation(&lane_key, &source);
+                let _ = conv_repo.insert(&ConversationMessage {
+                    id: 0,
+                    lane_key: lane_key.clone(),
+                    role: "assistant".to_string(),
+                    content,
+                    source: Some(source.clone()),
+                    model: None,
+                    tokens_in: Some(result.total_input_tokens as i64),
+                    tokens_out: Some(result.total_output_tokens as i64),
+                    duration_ms: Some(runtime_secs * 1000),
+                    created_at: String::new(),
+                });
+                let _ = conv_repo.increment_message_count(&lane_key);
+            }
+
+            tracing::info!(
+                "DAG execution for task '{}' finished: success={}, nodes={}/{}, runtime={}s",
+                task_id, result.success, result.node_results.len(), node_count, runtime_secs
+            );
+        });
     }
 
     /// Spawn a sequential pipeline: agents run in step_order, each receiving
@@ -337,15 +528,8 @@ impl TaskDispatcher {
         let ctx = self.shared_context.clone();
         let db = self.db.clone();
         let tool_registry = self.tool_registry.clone();
-        let bus_for_sandbox = self.bus.clone();
 
         tokio::spawn(async move {
-            // Per-request sandbox with ContextualToolExecutor for owner-scoped tools
-            let ctx_exec = ToolExecutionContext { owner_id: Some(created_by.clone()) };
-            let contextual_executor = Arc::new(ContextualToolExecutor::new(
-                tool_registry.clone(), ctx_exec,
-            ));
-            let per_request_sandbox = SandboxManager::new(contextual_executor, bus_for_sandbox);
             let start_time = std::time::Instant::now();
             let total_agents = agents_with_assignments.len();
 
@@ -364,6 +548,14 @@ impl TaskDispatcher {
                 let _ = repo.update_progress(&task_id, 0, total_agents as i32);
             }
 
+            // Set initial pipeline progress in TaskRegistry (no DAG summary for sequential)
+            ctx.task_registry.update_progress(
+                &task_id,
+                0,
+                total_agents as i32,
+                None,
+            );
+
             // 2. Run agents sequentially — each receives the previous agent's output
             let mut previous_output: Option<String> = None;
             let mut pipeline_success = true;
@@ -376,6 +568,20 @@ impl TaskDispatcher {
             for (step, (agent, assignment_id, role_description)) in agents_with_assignments.iter().enumerate() {
                 last_processed_step = step;
                 let agent_id = &agent.id;
+
+                // Per-step sandbox with ContextualToolExecutor scoped to this agent.
+                // Created inside the loop so each step gets the correct agent_id for
+                // workspace attribution instead of "unknown".
+                let ctx_exec = ToolExecutionContext {
+                    owner_id: Some(created_by.clone()),
+                    task_id: Some(task_id.clone()),
+                    agent_id: Some(agent_id.clone()),
+                    db: db.clone(),
+                };
+                let contextual_executor = Arc::new(ContextualToolExecutor::new(
+                    tool_registry.clone(), ctx_exec,
+                ));
+                let per_request_sandbox = SandboxManager::new(contextual_executor, bus.clone());
 
                 tracing::info!(
                     "Pipeline step {}/{}: agent '{}' starting on task '{}'",
@@ -404,17 +610,19 @@ impl TaskDispatcher {
                     }
                 }
 
-                // Emit progress event for this step
+                // Emit progress event for this step.
+                // Use `step` (0-indexed) as progress_current, meaning "N steps completed so far".
+                // This avoids showing "3/3" before the last agent even starts.
                 bus.publish(SystemEvent::TaskUpdated {
                     task_id: task_id.clone(),
                     status: "running".to_string(),
-                    progress_current: Some((step + 1) as i32),
+                    progress_current: Some(step as i32),
                     progress_total: Some(total_agents as i32),
                     timestamp: Utc::now(),
                 });
                 if let Some(ref db) = db {
                     let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                    let _ = repo.update_progress(&task_id, (step + 1) as i32, total_agents as i32);
+                    let _ = repo.update_progress(&task_id, step as i32, total_agents as i32);
                 }
 
                 // Build LoopConfig
@@ -432,10 +640,12 @@ impl TaskDispatcher {
                 let sandbox_policy =
                     SandboxPolicy::from_constraints(agent_id, &agent.constraints);
 
-                // Resolve tools
+                // Resolve tools (agent skills + workspace tools for task context)
                 let skill_names: Vec<String> =
                     agent.skills.iter().map(|s| s.name.clone()).collect();
-                let tools = tool_registry.definitions_for_skills(&skill_names);
+                let mut tools = tool_registry.definitions_for_skills(&skill_names);
+                // Add workspace tool definitions so agents can read/write shared workspace
+                tools.extend(crate::tools::builtins::workspace_tool_definitions());
                 tracing::info!(
                     "Agent '{}' loaded {} tool definitions for skills: {:?}",
                     agent_id, tools.len(), skill_names
@@ -448,14 +658,42 @@ impl TaskDispatcher {
                     agent.preset.persona, role_description, tool_guidance
                 );
 
-                // Build messages: system + task + optional previous output
+                // Build messages: system + task + workspace context
                 let mut messages = vec![
                     ChatMessage::system(&system_prompt),
                     ChatMessage::user(&description),
                 ];
 
-                // For pipeline step > 0, inject previous agent's output as additional context
-                if let Some(ref prev) = previous_output {
+                // Inject shared workspace context (supplements previous_output for backward compat)
+                // Load current workspace from TaskState
+                let workspace_context = if let Some(ref db) = db {
+                    let repo = openalpaca_storage::repository::TaskRepository::new(db);
+                    if let Ok(Some(existing)) = repo.get(&task_id) {
+                        if let Some(ref sj) = existing.state_json {
+                            if let Ok(state) = serde_json::from_str::<TaskState>(sj) {
+                                state.workspace.format_for_prompt(&[])
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+
+                if !workspace_context.is_empty() {
+                    messages.push(ChatMessage::user(&format!(
+                        "The following shared workspace contains results from previous agents. \
+                         Use this information to complete your role. You can also use the \
+                         workspace_read and workspace_write tools to access or update entries.\n\n{}",
+                        workspace_context
+                    )));
+                } else if let Some(ref prev) = previous_output {
+                    // Backward compat: if workspace is empty but previous_output exists
                     messages.push(ChatMessage::user(&format!(
                         "## Previous Agent Output\n\
                          The previous agent produced the following result. \
@@ -613,7 +851,7 @@ impl TaskDispatcher {
                         raw_content.clone()
                     };
 
-                    // Update state_json: mark step completed (before raw_content is moved)
+                    // Update state_json: mark step completed + auto-write output to workspace
                     if let Some(ref db) = db {
                         let repo = openalpaca_storage::repository::TaskRepository::new(db);
                         if let Ok(Some(existing)) = repo.get(&task_id) {
@@ -621,11 +859,41 @@ impl TaskDispatcher {
                                 if let Ok(mut state) = serde_json::from_str::<TaskState>(sj) {
                                     let summary: String = raw_content.chars().take(500).collect();
                                     state.mark_step_completed(step as i32, &summary);
-                                    let _ = repo.update_state(&task_id, &state.to_json(), existing.state_version);
+                                    // Auto-write agent output to shared workspace
+                                    if !raw_content.is_empty() {
+                                        let ws_key = format!("step_{}_output", step);
+                                        if let Err(e) = state.workspace.write(
+                                            &ws_key,
+                                            &raw_content,
+                                            agent_id,
+                                            crate::orchestrator::task_state::WorkspaceEntryType::Context,
+                                        ) {
+                                            tracing::warn!("Failed to auto-write step {} output to workspace: {}", step, e);
+                                        }
+                                    }
+                                    match repo.update_state(&task_id, &state.to_json(), existing.state_version) {
+                                        Ok(false) => tracing::warn!("Version conflict persisting step {} state — data may be stale", step),
+                                        Err(e) => tracing::warn!("Failed to persist step {} state: {}", step, e),
+                                        Ok(true) => {}
+                                    }
                                 }
                             }
                         }
                     }
+
+                    // Emit progress event showing step completed (step + 1 = "N+1 steps done")
+                    bus.publish(SystemEvent::TaskUpdated {
+                        task_id: task_id.clone(),
+                        status: "running".to_string(),
+                        progress_current: Some((step + 1) as i32),
+                        progress_total: Some(total_agents as i32),
+                        timestamp: Utc::now(),
+                    });
+                    if let Some(ref db) = db {
+                        let repo = openalpaca_storage::repository::TaskRepository::new(db);
+                        let _ = repo.update_progress(&task_id, (step + 1) as i32, total_agents as i32);
+                    }
+                    ctx.task_registry.update_progress(&task_id, (step + 1) as i32, total_agents as i32, None);
 
                     // Only pass actual content to next agent (not synthetic metadata)
                     if !raw_content.is_empty() {

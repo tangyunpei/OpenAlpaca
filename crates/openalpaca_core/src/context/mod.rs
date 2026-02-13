@@ -1,3 +1,3 @@
 mod shared;
 
-pub use shared::{SharedContext, TaskEntry, TaskEntryStatus, TaskRegistry};
+pub use shared::{DagSummary, SharedContext, TaskEntry, TaskEntryStatus, TaskRegistry};

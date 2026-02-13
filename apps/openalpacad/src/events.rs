@@ -209,6 +209,24 @@ impl EventBroadcaster {
                     });
                     repo.log("orchestrator_config_changed", None, Some(&detail), None)
                 }
+                // Log DAG node status changes
+                ServerEvent::DagNodeStatus {
+                    task_id,
+                    node_id,
+                    agent_id,
+                    status,
+                    duration_ms,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "task_id": task_id,
+                        "node_id": node_id,
+                        "agent_id": agent_id,
+                        "status": status,
+                        "duration_ms": duration_ms,
+                    });
+                    repo.log("dag_node_status", Some(agent_id), Some(&detail), None)
+                }
                 // Log SOUL.md personality updates with actor attribution
                 ServerEvent::SoulUpdated {
                     actor,
@@ -349,6 +367,33 @@ impl EventBroadcaster {
             stream_id: stream_id.to_string(),
             lane_key: lane_key.to_string(),
             status: status.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a DAG node status event and persist it
+    pub fn dag_node_status(
+        &self,
+        task_id: &str,
+        node_id: &str,
+        node_title: &str,
+        agent_id: &str,
+        status: &str,
+        duration_ms: Option<u64>,
+        output_preview: Option<String>,
+    ) {
+        let event = ServerEvent::DagNodeStatus {
+            task_id: task_id.to_string(),
+            node_id: node_id.to_string(),
+            node_title: node_title.to_string(),
+            agent_id: agent_id.to_string(),
+            status: status.to_string(),
+            duration_ms,
+            output_preview,
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };

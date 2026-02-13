@@ -1093,6 +1093,24 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                         "Bootstrap onboarding completed"
                     );
                 }
+                openalpaca_core::events::SystemEvent::DagNodeStarted {
+                    task_id, node_id, node_title, agent_id, ..
+                } => {
+                    eb_bridge.dag_node_status(
+                        &task_id, &node_id, &node_title, &agent_id,
+                        "started", None, None,
+                    );
+                }
+                openalpaca_core::events::SystemEvent::DagNodeCompleted {
+                    task_id, node_id, node_title, agent_id,
+                    success, duration_ms, output_preview, ..
+                } => {
+                    let status = if success { "completed" } else { "failed" };
+                    eb_bridge.dag_node_status(
+                        &task_id, &node_id, &node_title, &agent_id,
+                        status, Some(duration_ms), output_preview,
+                    );
+                }
                 // Wake events are forwarded via the dedicated wake_rx channel (lines 130-135),
                 // not through the Core EventBus. If a future Core component publishes
                 // SystemEvent::Wake to the bus, add an explicit arm here — but remove
@@ -1950,6 +1968,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         .route("/v1/tasks", get(routes::list_tasks_handler))
         .route("/v1/tasks/{id}", get(routes::get_task_handler))
         .route("/v1/tasks/{id}/action", post(routes::task_action_handler))
+        .route("/v1/tasks/{id}/dag", get(routes::get_task_dag_handler))
         // Preferences routes (Phase 5)
         .route("/v1/preferences", get(routes::list_preferences_handler))
         .route("/v1/preferences/{key}", get(routes::get_preference_handler))
