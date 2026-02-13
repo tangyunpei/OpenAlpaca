@@ -1,3 +1,4 @@
+pub mod bootstrap;
 pub mod guard;
 pub mod identity;
 pub mod prompt;

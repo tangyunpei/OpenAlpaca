@@ -1,6 +1,13 @@
 [orchestrator]
-model = "claude-haiku-4-5-20251001"
+model = "claude-sonnet-4-5-20250929"
 fallback_models = ["claude-sonnet-4-5-20250929"]
+
+[providers.ollama]
+enabled = false
+base_url = "http://localhost:11434/v1"
+
+[providers.openai]
+enabled = false
 
 [providers.anthropic]
 enabled = true
@@ -17,13 +24,6 @@ secret_encrypted = "aes256:MeVZlPIVaS6WBXfwtuOi3sIfUafQB2v2CTFeBdnFCHWlJ8S+o70bo
 tier = "tier3"
 priority = "primary"
 source = "api_console"
-
-[providers.ollama]
-enabled = false
-base_url = "http://localhost:11434/v1"
-
-[providers.openai]
-enabled = false
 
 [credential_discovery]
 claude_code = true

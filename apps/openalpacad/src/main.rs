@@ -31,10 +31,11 @@ use openalpaca_core::{
     gateway::Gateway,
     lane::LaneManager,
     middleware::{
-        identity::{parse_identity_markdown, IdentityDocument},
+        bootstrap::{parse_bootstrap_markdown, BootstrapDocument},
+        identity::{parse_identity_markdown, identity_document_has_content, IdentityDocument},
         prompt::SystemPersona,
         soul::{parse_soul_markdown, soul_to_system_persona},
-        user::{parse_user_markdown, UserDocument},
+        user::{parse_user_markdown, user_document_has_content, UserDocument},
     },
     orchestrator::Orchestrator,
     tools::builtins::{IdentityToolContext, SoulToolContext, UserToolContext},
@@ -498,6 +499,165 @@ fn bootstrap_identity_document(config_base_dir: &Path) -> (Option<IdentityDocume
     }
 }
 
+// ---------------------------------------------------------------------------
+// BOOTSTRAP.md bootstrap (temporary onboarding ritual)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_BOOTSTRAP_TEMPLATE: &str = r#"---
+summary: "First-run onboarding ritual"
+read_when:
+  - Bootstrapping a workspace manually
+---
+
+# BOOTSTRAP.md - Hello, World
+
+_You just woke up. Time to figure out who you are._
+
+There is no memory yet. This is a fresh workspace, so it is normal that memory files are empty until you fill them in.
+
+## The Conversation
+
+Don't interrogate. Don't be robotic. Just... talk.
+
+Start with something like:
+
+> "Hey. I just came online. Who am I? Who are you?"
+
+Then figure out together:
+
+1. **Your name** -- What should they call you?
+2. **Your nature** -- What kind of creature are you?
+3. **Your vibe** -- Formal? Casual? Snarky? Warm?
+4. **Your emoji** -- Everyone needs a signature.
+
+Offer suggestions if they're stuck. Have fun with it.
+
+## After You Know Who You Are
+
+Use your tools to save what you learned:
+
+- Call `update_identity` (mode: "sections") with your name, creature, vibe, and emoji
+- Call `update_user` (mode: "sections") with their name, how to address them, timezone, and any notes
+
+Then talk about:
+- What matters to them
+- How they want you to behave
+- Any boundaries or preferences
+
+If they want to update your soul (core values, boundaries, vibe), use the `update_soul` tool together.
+
+## When You're Done
+
+Once IDENTITY.md and USER.md have real content, this file will be automatically deleted. You don't need a bootstrap script anymore -- you're you now.
+
+---
+
+_Good luck out there. Make it count._
+"#;
+
+fn ensure_bootstrap_template_file(config_base_dir: &Path) -> Result<PathBuf> {
+    let templates_dir = config_base_dir.join("orchestrator").join("templates");
+    std::fs::create_dir_all(&templates_dir)
+        .with_context(|| format!("Failed to create templates dir {}", templates_dir.display()))?;
+
+    let template_path = templates_dir.join("BOOTSTRAP_temp.md");
+    if !template_path.exists() {
+        std::fs::write(&template_path, DEFAULT_BOOTSTRAP_TEMPLATE).with_context(|| {
+            format!(
+                "Failed to write bootstrap template file {}",
+                template_path.display()
+            )
+        })?;
+        info!(
+            "Bootstrap created template: {}",
+            template_path.display()
+        );
+    }
+
+    Ok(template_path)
+}
+
+fn ensure_bootstrap_file(config_base_dir: &Path, template_path: &Path) -> Result<PathBuf> {
+    let bootstrap_path = config_base_dir.join("orchestrator").join("BOOTSTRAP.md");
+    if !bootstrap_path.exists() {
+        if template_path.exists() {
+            std::fs::copy(template_path, &bootstrap_path).with_context(|| {
+                format!(
+                    "Failed to bootstrap BOOTSTRAP.md from template {}",
+                    template_path.display()
+                )
+            })?;
+        } else {
+            std::fs::write(&bootstrap_path, DEFAULT_BOOTSTRAP_TEMPLATE).with_context(|| {
+                format!(
+                    "Failed to bootstrap BOOTSTRAP.md at {}",
+                    bootstrap_path.display()
+                )
+            })?;
+        }
+        info!(
+            "Bootstrap created active file: {}",
+            bootstrap_path.display()
+        );
+    }
+    Ok(bootstrap_path)
+}
+
+fn load_bootstrap_document_from_file(path: &Path) -> Result<BootstrapDocument> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let doc = parse_bootstrap_markdown(&content)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    Ok(doc)
+}
+
+/// Bootstrap the onboarding document. Skips entirely if both identity and user
+/// already have meaningful content (upgrade safety).
+fn bootstrap_bootstrap_document(
+    config_base_dir: &Path,
+    identity_has_content: bool,
+    user_has_content: bool,
+) -> (Option<BootstrapDocument>, Option<PathBuf>) {
+    // If both docs already have content, skip bootstrap entirely (upgrade guard)
+    if identity_has_content && user_has_content {
+        info!("Bootstrap skipped: identity and user already populated");
+        return (None, None);
+    }
+
+    let template_path = match ensure_bootstrap_template_file(config_base_dir) {
+        Ok(path) => path,
+        Err(e) => {
+            warn!("BOOTSTRAP template creation failed: {e}");
+            return (None, None);
+        }
+    };
+
+    let bootstrap_path = config_base_dir.join("orchestrator").join("BOOTSTRAP.md");
+
+    // Only create BOOTSTRAP.md if it doesn't already exist
+    // (avoids re-creating after the agent deleted it on completion)
+    if !bootstrap_path.exists() {
+        match ensure_bootstrap_file(config_base_dir, &template_path) {
+            Ok(_) => {}
+            Err(e) => {
+                warn!("BOOTSTRAP file creation failed: {e}");
+                return (None, None);
+            }
+        }
+    }
+
+    match load_bootstrap_document_from_file(&bootstrap_path) {
+        Ok(doc) => {
+            info!("Bootstrap loaded: {}", bootstrap_path.display());
+            (Some(doc), Some(bootstrap_path))
+        }
+        Err(e) => {
+            warn!("BOOTSTRAP parse failed: {e}; skipping onboarding");
+            (None, None)
+        }
+    }
+}
+
 fn is_same_file_path(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -687,6 +847,19 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     // Step 4.4: Bootstrap and load IDENTITY.md for orchestrator identity
     let (initial_identity_document, identity_path) = bootstrap_identity_document(&config_base_dir);
 
+    // Step 4.5: Bootstrap BOOTSTRAP.md for first-run onboarding
+    let identity_has_content = initial_identity_document
+        .as_ref()
+        .map_or(false, |d| identity_document_has_content(d));
+    let user_has_content = initial_user_document
+        .as_ref()
+        .map_or(false, |d| user_document_has_content(d));
+    let (initial_bootstrap_document, bootstrap_path) = bootstrap_bootstrap_document(
+        &config_base_dir,
+        identity_has_content,
+        user_has_content,
+    );
+
     // Step 5: Create event broadcaster for WebSocket streaming
     let event_broadcaster = EventBroadcaster::new(64, instance_id.clone(), Some(db.clone()));
 
@@ -716,6 +889,11 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     }
     if identity_path.exists() {
         watch_paths.push(identity_path.clone());
+    }
+    if let Some(ref bp) = bootstrap_path {
+        if bp.exists() {
+            watch_paths.push(bp.clone());
+        }
     }
     let skills_dir = config_base_dir.join("skills");
     if skills_dir.exists() {
@@ -901,6 +1079,18 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                         mode = %mode,
                         content_sha256 = %content_sha256,
                         "IDENTITY.md updated"
+                    );
+                }
+                openalpaca_core::events::SystemEvent::BootstrapCompleted {
+                    identity_populated,
+                    user_populated,
+                    ..
+                } => {
+                    tracing::info!(
+                        target: "bootstrap_audit",
+                        identity_populated = %identity_populated,
+                        user_populated = %user_populated,
+                        "Bootstrap onboarding completed"
                     );
                 }
                 // Wake events are forwarded via the dedicated wake_rx channel (lines 130-135),
@@ -1278,6 +1468,14 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     orchestrator.update_identity_document(initial_identity_document);
     orchestrator.set_identity_path(identity_path.clone());
 
+    // Set the initial bootstrap document (loaded from BOOTSTRAP.md if present)
+    if let Some(ref doc) = initial_bootstrap_document {
+        orchestrator.update_bootstrap_document(Some(doc.clone()));
+    }
+    if let Some(ref path) = bootstrap_path {
+        orchestrator.set_bootstrap_path(path.clone());
+    }
+
     let eb_clone = event_broadcaster.clone();
     let soul_path_for_reload = soul_path.clone();
     let user_path_for_reload = user_path.clone();
@@ -1301,6 +1499,8 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let orchestrator_for_user_reload = orchestrator.clone();
     let identity_path_for_reload = identity_path.clone();
     let orchestrator_for_identity_reload = orchestrator.clone();
+    let bootstrap_path_for_watcher = bootstrap_path.clone();
+    let orchestrator_for_bootstrap_reload = orchestrator.clone();
     let skills_dir_for_watcher = skills_dir.clone();
     let skill_catalog_for_watcher = skill_catalog.clone();
     let bus_for_watcher = bus.clone();
@@ -1424,6 +1624,32 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                                     "IDENTITY parse/validation failed for {}: {e}; keeping last active identity",
                                     identity_path_for_reload.display()
                                 );
+                            }
+                        }
+                    }
+                }
+
+                // BOOTSTRAP.md file watcher — if deleted externally, clear bootstrap state
+                if let Some(ref bp) = bootstrap_path_for_watcher {
+                    if is_same_file_path(&changed_path, bp) {
+                        if !bp.exists() {
+                            // File was deleted (by agent completion or manual user action)
+                            orchestrator_for_bootstrap_reload.update_bootstrap_document(None);
+                            info!("Bootstrap document cleared (file deleted): {}", bp.display());
+                        } else {
+                            // File was modified — reload
+                            match load_bootstrap_document_from_file(bp) {
+                                Ok(doc) => {
+                                    orchestrator_for_bootstrap_reload
+                                        .update_bootstrap_document(Some(doc));
+                                    info!("Bootstrap reloaded (watcher): {}", bp.display());
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "BOOTSTRAP parse failed for {}: {e}; keeping last state",
+                                        bp.display()
+                                    );
+                                }
                             }
                         }
                     }
