@@ -31,12 +31,24 @@ impl TaskEntryStatus {
     }
 }
 
+/// Lightweight summary of DAG execution state for in-memory tracking.
+#[derive(Debug, Clone)]
+pub struct DagSummary {
+    pub total_nodes: usize,
+    pub completed_nodes: usize,
+    pub running_nodes: usize,
+    pub failed_nodes: usize,
+}
+
 /// An in-memory task entry tracked by the registry.
 #[derive(Debug, Clone)]
 pub struct TaskEntry {
     pub task_id: String,
     pub title: String,
     pub status: TaskEntryStatus,
+    pub progress_current: Option<i32>,
+    pub progress_total: Option<i32>,
+    pub dag_summary: Option<DagSummary>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -66,6 +78,9 @@ impl TaskRegistry {
                 task_id,
                 title,
                 status: TaskEntryStatus::Queued,
+                progress_current: None,
+                progress_total: None,
+                dag_summary: None,
                 created_at: now,
                 updated_at: now,
             },
@@ -98,6 +113,27 @@ impl TaskRegistry {
     /// Number of tracked tasks.
     pub fn count(&self) -> usize {
         self.tasks.lock().unwrap().len()
+    }
+
+    /// Update progress counters and optional DAG summary for a task.
+    /// Returns false if the task doesn't exist.
+    pub fn update_progress(
+        &self,
+        task_id: &str,
+        progress_current: i32,
+        progress_total: i32,
+        dag_summary: Option<DagSummary>,
+    ) -> bool {
+        let mut tasks = self.tasks.lock().unwrap();
+        if let Some(entry) = tasks.get_mut(task_id) {
+            entry.progress_current = Some(progress_current);
+            entry.progress_total = Some(progress_total);
+            entry.dag_summary = dag_summary;
+            entry.updated_at = Utc::now();
+            true
+        } else {
+            false
+        }
     }
 
     /// List all non-terminal (active) task entries.
