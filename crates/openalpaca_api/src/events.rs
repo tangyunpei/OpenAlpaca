@@ -101,6 +101,19 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// Event triggered when a DAG node starts or completes
+    DagNodeStatus {
+        task_id: String,
+        node_id: String,
+        node_title: String,
+        agent_id: String,
+        /// "started" | "completed" | "failed"
+        status: String,
+        duration_ms: Option<u64>,
+        output_preview: Option<String>,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
     /// Event triggered when SOUL.md personality is updated
     SoulUpdated {
         /// Who initiated: "agent" or "user"

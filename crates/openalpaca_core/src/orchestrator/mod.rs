@@ -5,6 +5,7 @@
 
 pub mod dispatcher;
 pub mod intent;
+pub mod replanner;
 pub mod skill_catalog;
 pub mod skill_matcher;
 pub mod task_planner;
@@ -1155,7 +1156,7 @@ impl Orchestrator {
         // 5. Compute result — planner path or heuristic fallback
         let result: Result<String, String> = if let Some(ref router) = self.llm_router {
             let idle_agents = self.shared_context.agent_registry.list_idle();
-            match TaskPlanner::plan(
+            match TaskPlanner::plan_hierarchical(
                 router,
                 &content,
                 &idle_agents,
@@ -1520,6 +1521,9 @@ impl Orchestrator {
             // Per-request sandbox with ContextualToolExecutor for owner-scoped tools
             let ctx_exec = ToolExecutionContext {
                 owner_id: owner_id.map(|s| s.to_string()),
+                task_id: None,
+                agent_id: None,
+                db: None,
             };
             let contextual_executor = Arc::new(ContextualToolExecutor::new(
                 self.tool_registry.clone(),
@@ -1849,6 +1853,9 @@ impl Orchestrator {
             // Per-request sandbox with ContextualToolExecutor
             let ctx_exec = ToolExecutionContext {
                 owner_id: owner_id.map(|s| s.to_string()),
+                task_id: None,
+                agent_id: None,
+                db: None,
             };
             let contextual_executor = Arc::new(ContextualToolExecutor::new(
                 self.tool_registry.clone(),
@@ -2013,11 +2020,25 @@ impl Orchestrator {
                 let tasks: Vec<serde_json::Value> = active
                     .iter()
                     .map(|e| {
-                        serde_json::json!({
+                        let mut v = serde_json::json!({
                             "task_id": e.task_id,
                             "title": e.title,
                             "status": e.status.as_str(),
-                        })
+                            "progress_current": e.progress_current,
+                            "progress_total": e.progress_total,
+                        });
+                        if let Some(ref dag) = e.dag_summary {
+                            v.as_object_mut().unwrap().insert(
+                                "dag_summary".to_string(),
+                                serde_json::json!({
+                                    "total_nodes": dag.total_nodes,
+                                    "completed_nodes": dag.completed_nodes,
+                                    "running_nodes": dag.running_nodes,
+                                    "failed_nodes": dag.failed_nodes,
+                                }),
+                            );
+                        }
+                        v
                     })
                     .collect();
                 Ok(serde_json::json!({
@@ -2199,18 +2220,31 @@ fn principal_id(principal: &Principal) -> String {
 }
 
 fn task_entry_to_json(entry: &TaskEntry) -> String {
-    serde_json::json!({
+    let mut obj = serde_json::json!({
         "task_id": entry.task_id,
         "title": entry.title,
         "status": entry.status.as_str(),
+        "progress_current": entry.progress_current,
+        "progress_total": entry.progress_total,
         "created_at": entry.created_at.to_rfc3339(),
         "updated_at": entry.updated_at.to_rfc3339(),
-    })
-    .to_string()
+    });
+    if let Some(ref dag) = entry.dag_summary {
+        obj.as_object_mut().unwrap().insert(
+            "dag_summary".to_string(),
+            serde_json::json!({
+                "total_nodes": dag.total_nodes,
+                "completed_nodes": dag.completed_nodes,
+                "running_nodes": dag.running_nodes,
+                "failed_nodes": dag.failed_nodes,
+            }),
+        );
+    }
+    obj.to_string()
 }
 
 fn db_task_to_json(task: &Task) -> String {
-    serde_json::json!({
+    let mut obj = serde_json::json!({
         "task_id": task.id,
         "title": task.title,
         "status": task.status.as_str(),
@@ -2219,8 +2253,33 @@ fn db_task_to_json(task: &Task) -> String {
         "result_summary": task.result_summary,
         "created_at": task.created_at.to_rfc3339(),
         "updated_at": task.updated_at.to_rfc3339(),
-    })
-    .to_string()
+    });
+
+    // Parse state_json to extract DAG node details if available
+    if let Some(ref sj) = task.state_json {
+        if let Ok(state) = serde_json::from_str::<task_state::TaskState>(sj) {
+            if let Some(ref dag) = state.dag {
+                let nodes_summary: Vec<serde_json::Value> = dag
+                    .nodes
+                    .iter()
+                    .map(|n| {
+                        serde_json::json!({
+                            "node_id": n.node_id,
+                            "title": n.title,
+                            "agent_id": n.agent_id,
+                            "status": n.status,
+                        })
+                    })
+                    .collect();
+                obj.as_object_mut().unwrap().insert(
+                    "dag_nodes".to_string(),
+                    serde_json::json!(nodes_summary),
+                );
+            }
+        }
+    }
+
+    obj.to_string()
 }
 
 #[cfg(test)]

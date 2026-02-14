@@ -97,6 +97,51 @@ pub fn builtin_tools_with_persona_context(
     tools
 }
 
+/// Return ToolDefinition entries for workspace tools.
+/// These tools are handled by ContextualToolExecutor (not the registry),
+/// so they only have definitions (no BuiltInTool backend).
+pub fn workspace_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "workspace_read".to_string(),
+            description: "Read entries from the shared task workspace. If key is empty, returns all entries.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "The workspace entry key to read. Leave empty to list all entries."
+                    }
+                },
+                "required": []
+            }),
+        },
+        ToolDefinition {
+            name: "workspace_write".to_string(),
+            description: "Write an entry to the shared task workspace for other agents to read.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "A descriptive key for this entry (e.g. 'research_results', 'outline', 'draft_v1')"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The content to store (max 8KB)"
+                    },
+                    "entry_type": {
+                        "type": "string",
+                        "enum": ["text", "artifact", "summary", "context"],
+                        "description": "The type of entry. Default: text"
+                    }
+                },
+                "required": ["key", "content"]
+            }),
+        },
+    ]
+}
+
 // --- web_search ---
 
 struct WebSearchTool;
@@ -875,13 +920,16 @@ fn update_soul_tool(ctx: SoulToolContext) -> RegisteredTool {
 /// Validate that a path is safe for workspace-scoped file operations.
 /// Rejects absolute paths and paths containing `..` components.
 fn validate_workspace_path(path: &str) -> Result<(), String> {
-    if path.starts_with('/') || path.starts_with('\\') {
+    let path_buf = std::path::PathBuf::from(path);
+    if path_buf.is_absolute() {
         return Err(
             "Absolute paths are not allowed. Use relative paths within the workspace.".to_string(),
         );
     }
-    if path.contains("..") {
-        return Err("Path traversal ('..') is not allowed.".to_string());
+    for component in path_buf.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err("Path traversal ('..') is not allowed.".to_string());
+        }
     }
     Ok(())
 }
