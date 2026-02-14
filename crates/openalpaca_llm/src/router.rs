@@ -1,6 +1,7 @@
 //! LLM Router: routes requests to the correct provider with key rotation,
 //! fallback chains, and cost tracking.
 
+use crate::config::LlmRuntimeConfig;
 use crate::cost_tracker::{CallRecord, CostTracker};
 use crate::error::LlmError;
 use crate::key_pool::{ApiKey, CallResult, KeyPool, KeyPoolError, KeyStatus, ProviderType, SelectionStrategy};
@@ -70,9 +71,11 @@ pub struct LlmRouter {
     model_registry: ModelRegistry,
     fallback_chains: HashMap<String, Vec<String>>,
     pub cost_tracker: Arc<CostTracker>,
-    default_model: String,
+    default_model: ArcSwap<String>,
     /// CLI backend providers for fallback (e.g. `claude` CLI, `codex` CLI).
     cli_backends: DashMap<ProviderType, Arc<dyn LlmProvider>>,
+    /// Hot-swappable runtime config (timeouts, endpoints, env vars, provider defaults).
+    runtime_config: ArcSwap<LlmRuntimeConfig>,
 }
 
 impl LlmRouter {
@@ -92,8 +95,33 @@ impl LlmRouter {
             model_registry,
             fallback_chains,
             cost_tracker,
-            default_model,
+            default_model: ArcSwap::from_pointee(default_model),
             cli_backends: DashMap::new(),
+            runtime_config: ArcSwap::from_pointee(LlmRuntimeConfig::default()),
+        }
+    }
+
+    /// Create a router with an explicit runtime config.
+    pub fn new_with_runtime(
+        providers: HashMap<ProviderType, ProviderEntry>,
+        model_registry: ModelRegistry,
+        fallback_chains: HashMap<String, Vec<String>>,
+        cost_tracker: Arc<CostTracker>,
+        default_model: String,
+        runtime_config: LlmRuntimeConfig,
+    ) -> Self {
+        let dm = DashMap::new();
+        for (k, v) in providers {
+            dm.insert(k, v);
+        }
+        Self {
+            providers: dm,
+            model_registry,
+            fallback_chains,
+            cost_tracker,
+            default_model: ArcSwap::from_pointee(default_model),
+            cli_backends: DashMap::new(),
+            runtime_config: ArcSwap::from_pointee(runtime_config),
         }
     }
 
@@ -125,14 +153,37 @@ impl LlmRouter {
             model_registry,
             fallback_chains: HashMap::new(),
             cost_tracker,
-            default_model,
+            default_model: ArcSwap::from_pointee(default_model),
             cli_backends: DashMap::new(),
+            runtime_config: ArcSwap::from_pointee(LlmRuntimeConfig::default()),
         }
     }
 
     /// Get the default model.
-    pub fn default_model(&self) -> &str {
-        &self.default_model
+    pub fn default_model(&self) -> String {
+        (**self.default_model.load()).clone()
+    }
+
+    /// Set the default model (hot-reload).
+    pub fn set_default_model(&self, model: String) {
+        self.default_model.store(Arc::new(model));
+    }
+
+    /// Get a snapshot of the runtime config.
+    pub fn runtime_config(&self) -> arc_swap::Guard<Arc<LlmRuntimeConfig>> {
+        self.runtime_config.load()
+    }
+
+    /// Hot-reload the runtime config (timeouts, endpoints, env vars, provider defaults).
+    pub fn reload_runtime_config(&self, config: LlmRuntimeConfig) {
+        self.runtime_config.store(Arc::new(config));
+    }
+
+    /// Batch-reload model registry entries from config.
+    pub fn reload_model_registry(&self, models: HashMap<String, ModelInfo>) {
+        for (model_id, info) in models {
+            self.model_registry.register(model_id, info);
+        }
     }
 
     /// Get fallback models for a given model.
@@ -288,7 +339,8 @@ impl LlmRouter {
 
     /// Complete a request: resolve provider, acquire key, call, handle retries/fallbacks.
     pub async fn complete(&self, request: RouterRequest) -> Result<ChatResponse, LlmRouterError> {
-        let model = request.model.as_deref().unwrap_or(&self.default_model);
+        let default = self.default_model();
+        let model = request.model.as_deref().unwrap_or(&default);
 
         match self.try_model(model, &request).await {
             Ok(response) => Ok(response),

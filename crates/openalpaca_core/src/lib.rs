@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod bus;
 pub mod chat;
+pub mod daemon_config;
 pub mod context;
 pub mod events;
 pub mod gateway;

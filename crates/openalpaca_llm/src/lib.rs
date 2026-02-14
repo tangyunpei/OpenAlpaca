@@ -15,8 +15,8 @@ pub mod settings_service;
 pub mod types;
 
 pub use cli_backend::{CliBackendsConfig, CliBackendConfig, CliBackendStatus, ClaudeCodeCliProvider, CodexCliProvider, detect_cli_backends};
-pub use config::{LlmConfig, LlmRouterConfig, ProviderConfig, KeyConfig, OrchestratorLlmConfig, EmbeddingsConfig, SecurityConfig, build_provider, build_router, build_router_with_secret_store, read_config, write_config, resolve_key_from_config, migrate_llm_secrets, reverse_migrate_llm_secrets, collect_secret_refs};
-pub use embedder::{Embedder, EmbedError, build_embedder};
+pub use config::{LlmConfig, LlmRouterConfig, LlmRuntimeConfig, ProviderConfig, ProviderDefaults, KeyConfig, OrchestratorLlmConfig, EmbeddingsConfig, SecurityConfig, TimeoutsConfig, EndpointsConfig, EnvVarsConfig, ModelConfigEntry, build_provider, build_provider_with_runtime, build_router, build_router_with_secret_store, read_config, write_config, resolve_key_from_config, migrate_llm_secrets, reverse_migrate_llm_secrets, collect_secret_refs};
+pub use embedder::{Embedder, EmbedError, build_embedder, build_embedder_with_runtime};
 pub use cost_tracker::{CallRecord, CostTracker, ModelUsageStats, UsageStats};
 pub use credential_discovery::{CredentialDiscoveryConfig, CredentialSource, DiscoveredCredential, DiscoveredCredentialInfo, OAuthToken, TokenManager};
 pub use error::LlmError;

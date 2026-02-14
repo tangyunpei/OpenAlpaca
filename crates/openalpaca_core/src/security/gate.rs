@@ -32,8 +32,10 @@ impl SecurityGate {
     }
 
     /// Layer 2: Sanitize user input.
-    pub fn sanitize_input(input: &str) -> Result<String, String> {
-        InputSanitizer::sanitize_user_input(input).map_err(|v| v.to_string())
+    ///
+    /// Pass `None` for `max_input_length` to use the compiled default (32768 bytes).
+    pub fn sanitize_input(input: &str, max_input_length: Option<usize>) -> Result<String, String> {
+        InputSanitizer::sanitize_user_input(input, max_input_length).map_err(|v| v.to_string())
     }
 
     /// Layer 3: Access the sandbox manager for tool execution.
@@ -96,8 +98,8 @@ mod tests {
 
     #[test]
     fn test_sanitize_delegates() {
-        assert!(SecurityGate::sanitize_input("hello world").is_ok());
-        assert!(SecurityGate::sanitize_input("hello\0world").is_err());
+        assert!(SecurityGate::sanitize_input("hello world", None).is_ok());
+        assert!(SecurityGate::sanitize_input("hello\0world", None).is_err());
     }
 
     #[test]

@@ -305,14 +305,19 @@ fn sanitize_prompt_field(value: &str) -> String {
         .to_string()
 }
 
-/// Character budget for the identity prompt block.
+/// Default character budget for the identity prompt block.
 const IDENTITY_PROMPT_BUDGET: usize = 300;
 
 /// Render an `IdentityDocument` into a `### AGENT IDENTITY ###` prompt block.
 ///
 /// Returns an empty string if the document has no meaningful content.
 /// Format: `Name: Koda | Creature: familiar | Vibe: sharp | Emoji: 🦙`
-pub fn identity_to_prompt_block(doc: &IdentityDocument) -> String {
+///
+/// The `budget` parameter controls the maximum character length of the identity
+/// line. Pass `None` to use the compiled default (300 chars).
+pub fn identity_to_prompt_block(doc: &IdentityDocument, budget: Option<usize>) -> String {
+    let budget = budget.unwrap_or(IDENTITY_PROMPT_BUDGET);
+
     if !identity_document_has_content(doc) {
         return String::new();
     }
@@ -338,7 +343,7 @@ pub fn identity_to_prompt_block(doc: &IdentityDocument) -> String {
     }
 
     let line = parts.join(" | ");
-    let truncated: String = line.chars().take(IDENTITY_PROMPT_BUDGET).collect();
+    let truncated: String = line.chars().take(budget).collect();
     block.push_str(&truncated);
     block.push('\n');
 
@@ -509,13 +514,13 @@ read_when:
             emoji: String::new(),
             avatar: String::new(),
         };
-        assert!(identity_to_prompt_block(&doc).is_empty());
+        assert!(identity_to_prompt_block(&doc, None).is_empty());
     }
 
     #[test]
     fn test_prompt_block_populated() {
         let doc = parse_identity_markdown(POPULATED).expect("should parse");
-        let block = identity_to_prompt_block(&doc);
+        let block = identity_to_prompt_block(&doc, None);
         assert!(block.starts_with("### AGENT IDENTITY ###\n"));
         assert!(block.contains("Name: Koda"));
         assert!(block.contains("Creature: familiar"));
@@ -536,7 +541,7 @@ read_when:
             emoji: String::new(),
             avatar: String::new(),
         };
-        let block = identity_to_prompt_block(&doc);
+        let block = identity_to_prompt_block(&doc, None);
         assert!(block.contains("Name: Koda"));
         assert!(block.contains("Vibe: warm"));
         assert!(!block.contains("Creature"));

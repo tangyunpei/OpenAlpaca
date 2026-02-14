@@ -3,6 +3,8 @@
 use crate::agent::subagent::{AgentStatus, SubAgent};
 use crate::bus::EventBus;
 use crate::context::{DagSummary, SharedContext, TaskEntryStatus};
+use crate::daemon_config::DaemonConfig;
+use arc_swap::ArcSwap;
 use crate::events::SystemEvent;
 use crate::lane::LaneManager;
 use crate::runner::dag_executor::{DagExecutorConfig, DagFinishReason, execute_dag};
@@ -37,6 +39,7 @@ pub struct TaskDispatcher {
     _security_gate: Arc<SecurityGate>,
     tool_registry: Arc<ToolRegistry>,
     db: Option<Database>,
+    daemon_config: Arc<ArcSwap<DaemonConfig>>,
 }
 
 impl TaskDispatcher {
@@ -48,6 +51,7 @@ impl TaskDispatcher {
         security_gate: Arc<SecurityGate>,
         tool_registry: Arc<ToolRegistry>,
         db: Option<Database>,
+        daemon_config: Arc<ArcSwap<DaemonConfig>>,
     ) -> Self {
         Self {
             shared_context,
@@ -58,6 +62,7 @@ impl TaskDispatcher {
             _security_gate: security_gate,
             tool_registry,
             db,
+            daemon_config,
         }
     }
 
@@ -365,6 +370,7 @@ impl TaskDispatcher {
         let ctx = self.shared_context.clone();
         let db = self.db.clone();
         let tool_registry = self.tool_registry.clone();
+        let daemon_config = self.daemon_config.clone();
 
         tokio::spawn(async move {
             let start_time = std::time::Instant::now();
@@ -398,8 +404,20 @@ impl TaskDispatcher {
                 }),
             );
 
-            // Execute DAG
-            let config = DagExecutorConfig::default();
+            // Execute DAG — read config from daemon_config
+            let dcfg = daemon_config.load();
+            let dag_cfg = &dcfg.execution.dag;
+            let config = DagExecutorConfig {
+                max_concurrent_agents: dag_cfg.max_concurrent_agents,
+                node_timeout: Duration::from_secs(dag_cfg.node_timeout_secs),
+                total_timeout: Duration::from_secs(dag_cfg.total_timeout_secs),
+                max_retries_per_node: dag_cfg.max_retries_per_node,
+                replan_config: crate::orchestrator::replanner::ReplanConfig {
+                    enabled: false,
+                    replan_after_every_n_nodes: dag_cfg.replan_after_every_n_nodes,
+                    max_replans: dag_cfg.max_replans,
+                },
+            };
             let mut dag = dag;
             let result = execute_dag(
                 &mut dag,
@@ -412,6 +430,7 @@ impl TaskDispatcher {
                 &description,
                 db.clone(),
                 &created_by,
+                &daemon_config,
             )
             .await;
 
@@ -541,6 +560,7 @@ impl TaskDispatcher {
         let ctx = self.shared_context.clone();
         let db = self.db.clone();
         let tool_registry = self.tool_registry.clone();
+        let daemon_config = self.daemon_config.clone();
 
         tokio::spawn(async move {
             let start_time = std::time::Instant::now();
@@ -638,14 +658,15 @@ impl TaskDispatcher {
                     let _ = repo.update_progress(&task_id, step as i32, total_agents as i32);
                 }
 
-                // Build LoopConfig
+                // Build LoopConfig — agent constraints override daemon defaults
+                let ad = &daemon_config.load().execution.agent_defaults;
                 let loop_config = LoopConfig {
-                    max_rounds: 15,
-                    max_tools_per_round: 5,
+                    max_rounds: ad.max_rounds,
+                    max_tools_per_round: ad.max_tools_per_round,
                     max_tool_runtime: Duration::from_secs(
-                        agent.constraints.timeout_seconds.unwrap_or(60),
+                        agent.constraints.timeout_seconds.unwrap_or(ad.max_tool_runtime_secs),
                     ),
-                    max_cost: agent.constraints.max_cost_per_task.unwrap_or(1.0),
+                    max_cost: agent.constraints.max_cost_per_task.unwrap_or(ad.max_cost),
                     model: agent.llm_config.model.clone(),
                     fallback_models: agent.llm_config.fallback_models.clone(),
                 };
@@ -748,9 +769,10 @@ impl TaskDispatcher {
                 total_output_tokens += result.total_output_tokens;
 
                 // Persist LLM usage to DB and emit event (regardless of success/failure)
+                let default_model = router.default_model();
                 let actual_model = result.model_used.as_deref()
                     .or(loop_config.model.as_deref())
-                    .unwrap_or(router.default_model());
+                    .unwrap_or(&default_model);
                 let resolved_provider = router.model_registry()
                     .resolve_provider(actual_model)
                     .map(|p| p.to_string())
@@ -1183,6 +1205,7 @@ impl TaskDispatcher {
         let ctx = self.shared_context.clone();
         let db = self.db.clone();
         let tool_registry = self.tool_registry.clone();
+        let daemon_config = self.daemon_config.clone();
 
         tokio::spawn(async move {
             let start_time = std::time::Instant::now();
@@ -1213,6 +1236,7 @@ impl TaskDispatcher {
                 db.clone(),
                 &task_id,
                 &created_by,
+                &daemon_config,
             )
             .await;
 
@@ -1252,12 +1276,13 @@ impl TaskDispatcher {
             let db_summary = final_content.chars().take(2000).collect::<String>();
 
             // Persist LLM usage for the lead agent's own loop
+            let default_model = router.default_model();
             let actual_model = result
                 .loop_result
                 .model_used
                 .as_deref()
                 .or(lead_agent.llm_config.model.as_deref())
-                .unwrap_or(router.default_model());
+                .unwrap_or(&default_model);
             let resolved_provider = router
                 .model_registry()
                 .resolve_provider(actual_model)
@@ -1460,7 +1485,8 @@ mod tests {
         let executor = Arc::new(crate::tools::RegistryToolExecutor::new(tool_registry.clone()));
         let sandbox = Arc::new(crate::security::sandbox::SandboxManager::new(executor, bus.clone()));
         let gate = Arc::new(crate::security::gate::SecurityGate::new(sandbox));
-        TaskDispatcher::new(ctx, lane_mgr, bus, None, gate, tool_registry, None)
+        let daemon_config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+        TaskDispatcher::new(ctx, lane_mgr, bus, None, gate, tool_registry, None, daemon_config)
     }
 
     #[test]

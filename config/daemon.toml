@@ -1,0 +1,71 @@
+# OpenAlpaca Daemon Configuration
+#
+# All sections are optional. Omitted values fall back to compiled defaults.
+# Changes to this file are detected and hot-reloaded automatically.
+
+# ── Orchestrator Memory ──────────────────────────────────────────────
+# Controls the context window, summarization, and extraction behavior.
+
+[orchestrator.memory]
+prompt_recent_messages = 40
+summary_min_new_older_messages = 12
+summary_max_chars = 4000
+msg_trunc_chars = 1500
+
+[orchestrator.costs]
+summary_max_daily_cost_usd = 0.50
+extract_max_daily_cost_usd = 0.25
+extract_every_n_turns = 5
+extract_min_content_len = 20
+
+[orchestrator.prompt_budgets]
+identity_budget = 300
+user_profile_budget = 1000
+
+# ── Agent Execution Defaults ────────────────────────────────────────
+# Fallbacks when agent TOML [constraints] are not set.
+
+[execution.agent_defaults]
+max_rounds = 15
+max_tools_per_round = 5
+max_tool_runtime_secs = 60
+max_cost = 1.00
+
+[execution.lead_agent_defaults]
+max_rounds = 30
+max_tools_per_round = 3
+max_tool_runtime_secs = 300
+max_cost = 5.0
+
+# ── DAG Executor ────────────────────────────────────────────────────
+
+[execution.dag]
+max_concurrent_agents = 3
+node_timeout_secs = 300
+total_timeout_secs = 1800
+max_retries_per_node = 1
+replan_after_every_n_nodes = 2
+max_replans = 3
+
+# ── Security ────────────────────────────────────────────────────────
+
+[security]
+max_input_length = 32768
+
+# ── Server ──────────────────────────────────────────────────────────
+
+[server]
+# NOTE: channel capacities require daemon restart to take effect.
+event_broadcaster_capacity = 64   # restart-only
+wake_channel_capacity = 256       # restart-only
+# The following are hot-reloadable (take effect on next tick/request).
+heartbeat_interval_secs = 5
+sse_keep_alive_secs = 15
+
+[server.chat_streams]
+cleanup_interval_secs = 60
+stale_timeout_secs = 30
+
+[server.embedding_indexer]
+poll_interval_secs = 30
+batch_size = 50

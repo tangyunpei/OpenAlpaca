@@ -2,8 +2,10 @@
 //! using `tokio::JoinSet`, respecting dependency edges in the TaskDag.
 
 use crate::agent::subagent::SubAgent;
+use crate::daemon_config::DaemonConfig;
 use crate::orchestrator::replanner::{ReplanConfig, ReplanDecision, Replanner, merge_replanned_dag};
 use crate::orchestrator::task_planner::{DagNode, DagNodeStatus, TaskDag};
+use arc_swap::ArcSwap;
 use crate::orchestrator::task_state::{TaskState, TaskWorkspace, WorkspaceEntryType};
 use crate::runner::{LoopConfig, LoopFinishReason, LoopResult, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
@@ -110,6 +112,7 @@ pub async fn execute_dag(
     task_description: &str,
     db: Option<Database>,
     created_by: &str,
+    daemon_config: &Arc<ArcSwap<DaemonConfig>>,
 ) -> DagExecutionResult {
     let start = Instant::now();
 
@@ -246,6 +249,7 @@ pub async fn execute_dag(
             let description_owned = task_description.to_string();
             let created_by_owned = created_by.to_string();
             let node_timeout = config.node_timeout;
+            let daemon_config_clone = daemon_config.clone();
 
             join_set.spawn(async move {
                 execute_single_node(
@@ -259,6 +263,7 @@ pub async fn execute_dag(
                     created_by_owned,
                     agent,
                     node_timeout,
+                    daemon_config_clone,
                 )
                 .await
             });
@@ -529,6 +534,7 @@ async fn execute_single_node(
     created_by: String,
     agent: SubAgent,
     node_timeout: Duration,
+    daemon_config: Arc<ArcSwap<DaemonConfig>>,
 ) -> NodeResult {
     let agent_id = agent.id.clone();
 
@@ -544,15 +550,16 @@ async fn execute_single_node(
     ));
     let per_request_sandbox = SandboxManager::new(contextual_executor, bus.clone());
 
-    // Build LoopConfig
+    // Build LoopConfig — agent constraints override daemon defaults
+    let ad = &daemon_config.load().execution.agent_defaults;
     let loop_config = LoopConfig {
-        max_rounds: 15,
-        max_tools_per_round: 5,
+        max_rounds: ad.max_rounds,
+        max_tools_per_round: ad.max_tools_per_round,
         max_tool_runtime: std::cmp::min(
             node_timeout,
-            Duration::from_secs(agent.constraints.timeout_seconds.unwrap_or(60)),
+            Duration::from_secs(agent.constraints.timeout_seconds.unwrap_or(ad.max_tool_runtime_secs)),
         ),
-        max_cost: agent.constraints.max_cost_per_task.unwrap_or(1.0),
+        max_cost: agent.constraints.max_cost_per_task.unwrap_or(ad.max_cost),
         model: agent.llm_config.model.clone(),
         fallback_models: agent.llm_config.fallback_models.clone(),
     };
@@ -616,9 +623,10 @@ async fn execute_single_node(
     );
 
     // Record LLM usage
+    let default_model = router.default_model();
     let actual_model = result.model_used.as_deref()
         .or(loop_config.model.as_deref())
-        .unwrap_or(router.default_model());
+        .unwrap_or(&default_model);
     let resolved_provider = router.model_registry()
         .resolve_provider(actual_model)
         .map(|p| p.to_string())

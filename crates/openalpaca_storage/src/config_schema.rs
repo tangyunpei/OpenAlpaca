@@ -11,6 +11,8 @@ pub enum ConfigBackend {
     SystemConfig,
     /// config/llm.toml file (AI/LLM settings).
     LlmToml,
+    /// config/daemon.toml file (orchestrator, execution, DAG, server settings).
+    DaemonToml,
 }
 
 /// Value type for validation.
@@ -214,12 +216,12 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
             min: Some(1),
             max: Some(32),
         },
-        default: Some("8"),
-        description: "Maximum concurrent agents",
-        category: "System",
-        subcategory: None,
+        default: Some("3"),
+        description: "Maximum concurrent DAG agents (alias for daemon.dag.max_concurrent_agents)",
+        category: "Daemon",
+        subcategory: Some("DAG"),
         sensitive: false,
-        backend: ConfigBackend::SystemConfig,
+        backend: ConfigBackend::DaemonToml,
     },
     ConfigKeyDef {
         key: "system.data_dir",
@@ -230,6 +232,157 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         subcategory: None,
         sensitive: false,
         backend: ConfigBackend::SystemConfig,
+    },
+    // -- Daemon: Orchestrator --
+    ConfigKeyDef {
+        key: "daemon.orchestrator.prompt_recent_messages",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(200),
+        },
+        default: Some("40"),
+        description: "Number of recent messages kept in prompt context",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.orchestrator.summary_max_chars",
+        kind: ConfigKind::Int {
+            min: Some(100),
+            max: Some(32000),
+        },
+        default: Some("4000"),
+        description: "Maximum summary length in characters",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.orchestrator.summary_max_daily_cost_usd",
+        kind: ConfigKind::String,
+        default: Some("0.50"),
+        description: "Daily cost cap for summarization (USD)",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.orchestrator.identity_budget",
+        kind: ConfigKind::Int {
+            min: Some(50),
+            max: Some(5000),
+        },
+        default: Some("300"),
+        description: "Identity prompt budget in characters",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.orchestrator.user_profile_budget",
+        kind: ConfigKind::Int {
+            min: Some(100),
+            max: Some(10000),
+        },
+        default: Some("1000"),
+        description: "User profile prompt budget in characters",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    // -- Daemon: Execution --
+    ConfigKeyDef {
+        key: "daemon.execution.max_rounds",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(100),
+        },
+        default: Some("15"),
+        description: "Default max rounds per agent",
+        category: "Daemon",
+        subcategory: Some("Execution"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.execution.max_cost",
+        kind: ConfigKind::String,
+        default: Some("1.00"),
+        description: "Default max cost per agent (USD)",
+        category: "Daemon",
+        subcategory: Some("Execution"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.execution.lead_max_rounds",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(200),
+        },
+        default: Some("30"),
+        description: "Lead agent max rounds",
+        category: "Daemon",
+        subcategory: Some("Execution"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.execution.lead_max_cost",
+        kind: ConfigKind::String,
+        default: Some("5.0"),
+        description: "Lead agent max cost (USD)",
+        category: "Daemon",
+        subcategory: Some("Execution"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    // -- Daemon: DAG --
+    ConfigKeyDef {
+        key: "daemon.dag.max_concurrent_agents",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(32),
+        },
+        default: Some("3"),
+        description: "Maximum concurrent DAG agents",
+        category: "Daemon",
+        subcategory: Some("DAG"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.dag.total_timeout_secs",
+        kind: ConfigKind::Int {
+            min: Some(60),
+            max: Some(7200),
+        },
+        default: Some("1800"),
+        description: "DAG total timeout in seconds",
+        category: "Daemon",
+        subcategory: Some("DAG"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    // -- Daemon: Security --
+    ConfigKeyDef {
+        key: "daemon.security.max_input_length",
+        kind: ConfigKind::Int {
+            min: Some(1024),
+            max: Some(1_048_576),
+        },
+        default: Some("32768"),
+        description: "Maximum user input length in bytes",
+        category: "Daemon",
+        subcategory: Some("Security"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
     },
     // -- Agents --
     ConfigKeyDef {
@@ -684,6 +837,7 @@ mod tests {
         assert!(cats.contains(&"System"));
         assert!(cats.contains(&"API-Keys"));
         assert!(cats.contains(&"Agents"));
+        assert!(cats.contains(&"Daemon"));
         assert!(!cats.contains(&"AI"));
     }
 
@@ -691,7 +845,19 @@ mod tests {
     fn test_keys_in_category() {
         let keys = keys_in_category("System");
         assert!(keys.iter().any(|d| d.key == "system.debug_level"));
+        // system.max_agents moved to "Daemon" category
+        assert!(!keys.iter().any(|d| d.key == "system.max_agents"));
+    }
+
+    #[test]
+    fn test_daemon_keys_in_category() {
+        let keys = keys_in_category("Daemon");
         assert!(keys.iter().any(|d| d.key == "system.max_agents"));
+        assert!(keys.iter().any(|d| d.key == "daemon.dag.max_concurrent_agents"));
+        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.prompt_recent_messages"));
+        assert!(keys.iter().any(|d| d.key == "daemon.execution.max_rounds"));
+        assert!(keys.iter().any(|d| d.key == "daemon.security.max_input_length"));
+        assert!(keys.iter().all(|d| d.backend == ConfigBackend::DaemonToml));
     }
 
     #[test]
@@ -744,6 +910,13 @@ mod tests {
         // Connectors/System have no subcategories
         assert!(subcategories_in_category("Connectors").is_empty());
         assert!(subcategories_in_category("System").is_empty());
+
+        // Daemon subcategories
+        let daemon_subs = subcategories_in_category("Daemon");
+        assert!(daemon_subs.contains(&"Orchestrator"));
+        assert!(daemon_subs.contains(&"Execution"));
+        assert!(daemon_subs.contains(&"DAG"));
+        assert!(daemon_subs.contains(&"Security"));
     }
 
     #[test]
@@ -780,6 +953,29 @@ mod tests {
 
         let suggestions = suggest_key("debug");
         assert!(suggestions.contains(&"system.debug_level"));
+    }
+
+    #[test]
+    fn test_daemon_key_lookup() {
+        let def = lookup("daemon.dag.max_concurrent_agents").unwrap();
+        assert_eq!(def.backend, ConfigBackend::DaemonToml);
+        assert_eq!(def.category, "Daemon");
+        assert_eq!(def.default, Some("3"));
+
+        let def = lookup("system.max_agents").unwrap();
+        assert_eq!(def.backend, ConfigBackend::DaemonToml);
+
+        let def = lookup("daemon.orchestrator.prompt_recent_messages").unwrap();
+        assert_eq!(def.default, Some("40"));
+    }
+
+    #[test]
+    fn test_validate_daemon_int_range() {
+        assert!(validate("daemon.dag.max_concurrent_agents", "3").is_ok());
+        assert!(validate("daemon.dag.max_concurrent_agents", "1").is_ok());
+        assert!(validate("daemon.dag.max_concurrent_agents", "32").is_ok());
+        assert!(validate("daemon.dag.max_concurrent_agents", "0").is_err());
+        assert!(validate("daemon.dag.max_concurrent_agents", "99").is_err());
     }
 
     #[test]

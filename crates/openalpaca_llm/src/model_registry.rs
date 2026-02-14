@@ -113,6 +113,48 @@ impl ModelRegistry {
         }
     }
 
+    /// Create a registry with well-known models, overridden by config models.
+    /// Config models take precedence over compiled defaults.
+    pub fn with_defaults_and_config(
+        config_models: &HashMap<String, crate::config::ModelConfigEntry>,
+    ) -> Self {
+        let registry = Self::with_defaults();
+        for (model_id, entry) in config_models {
+            if let Some(provider) = crate::config::parse_provider_type_pub(&entry.provider) {
+                registry.register(
+                    model_id.clone(),
+                    ModelInfo {
+                        provider,
+                        input_price_per_million: entry.input_price.unwrap_or(0.0),
+                        output_price_per_million: entry.output_price.unwrap_or(0.0),
+                        context_window: entry.context.unwrap_or(200_000),
+                        discovered: false,
+                    },
+                );
+            }
+        }
+        registry
+    }
+
+    /// Reload model registry entries from config (hot-reload).
+    /// Config models override any existing entries.
+    pub fn reload_from_config(&self, config_models: &HashMap<String, crate::config::ModelConfigEntry>) {
+        for (model_id, entry) in config_models {
+            if let Some(provider) = crate::config::parse_provider_type_pub(&entry.provider) {
+                self.register(
+                    model_id.clone(),
+                    ModelInfo {
+                        provider,
+                        input_price_per_million: entry.input_price.unwrap_or(0.0),
+                        output_price_per_million: entry.output_price.unwrap_or(0.0),
+                        context_window: entry.context.unwrap_or(200_000),
+                        discovered: false,
+                    },
+                );
+            }
+        }
+    }
+
     /// Resolve which provider handles a given model ID.
     pub fn resolve_provider(&self, model_id: &str) -> Option<ProviderType> {
         self.models
