@@ -134,7 +134,7 @@ impl ContextualToolExecutor {
                 None => return Err("Task has no state".to_string()),
             };
 
-            state.workspace.write(key, content, agent_id, entry_type.clone())?;
+            state.workspace.write(key, content, agent_id, entry_type.clone(), &[])?;
 
             let new_json = state.to_json();
             let updated = repo

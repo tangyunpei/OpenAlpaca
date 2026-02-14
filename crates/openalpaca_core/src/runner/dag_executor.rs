@@ -274,6 +274,9 @@ pub async fn execute_dag(
                     total_input_tokens += node_result.loop_result.total_input_tokens;
                     total_output_tokens += node_result.loop_result.total_output_tokens;
 
+                    // Track whether this is a retry (don't record intermediate failures)
+                    let mut should_record = true;
+
                     if node_result.success {
                         tracing::info!(
                             "DAG node '{}' completed successfully for task '{}'",
@@ -303,6 +306,7 @@ pub async fn execute_dag(
                                 n.result_summary = None;
                             }
                             mark_ready_nodes(dag);
+                            should_record = false;
                         } else {
                             tracing::error!(
                                 "DAG node '{}' failed permanently for task '{}'",
@@ -356,7 +360,10 @@ pub async fn execute_dag(
                         Some(dag_summary),
                     );
 
-                    node_results.push(node_result);
+                    // Only record final results (success or permanent failure), not retries
+                    if should_record {
+                        node_results.push(node_result);
+                    }
 
                     // ── Dynamic replanning check ─────────────────────
                     if config.replan_config.enabled
@@ -779,11 +786,18 @@ fn write_node_output_to_workspace(
             Err(_) => return,
         };
 
+        // Collect workspace_keys from nodes that haven't completed yet
+        let protected_keys: Vec<String> = dag.nodes.iter()
+            .filter(|n| matches!(n.status, DagNodeStatus::Pending | DagNodeStatus::Ready | DagNodeStatus::Running))
+            .flat_map(|n| n.workspace_keys.iter().cloned())
+            .collect();
+
         if let Err(e) = state.workspace.write(
             key,
             &node_result.final_content,
             &node_result.agent_id,
             WorkspaceEntryType::Context,
+            &protected_keys,
         ) {
             tracing::warn!(
                 "Failed to write workspace entry '{}' for node '{}': {}",

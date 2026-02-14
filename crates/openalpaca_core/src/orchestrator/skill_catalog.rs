@@ -117,13 +117,6 @@ impl SkillCatalog {
 
         let key = frontmatter.name.to_lowercase();
 
-        // Register command mapping
-        if let Some(ref cmd) = frontmatter.command {
-            if let Ok(mut idx) = self.command_index.write() {
-                idx.insert(cmd.to_lowercase(), key.clone());
-            }
-        }
-
         let entry = SkillEntry {
             frontmatter,
             skill_md_path: skill_md.to_path_buf(),
@@ -131,7 +124,13 @@ impl SkillCatalog {
             compiled_triggers,
         };
 
+        // Insert entry and command index atomically (matching remove()'s lock order)
         if let Ok(mut entries) = self.entries.write() {
+            if let Some(ref cmd) = entry.frontmatter.command {
+                if let Ok(mut idx) = self.command_index.write() {
+                    idx.insert(cmd.to_lowercase(), key.clone());
+                }
+            }
             entries.insert(key, entry);
         }
 
