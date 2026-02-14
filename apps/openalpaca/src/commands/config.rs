@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::ai_config;
+use super::daemon_config_cli;
 use crate::output::{OutputFormat, TableRow, print_list};
 
 #[derive(Args)]
@@ -100,6 +101,7 @@ fn cmd_set(repo: &ConfigRepository, key: &str, value: &str) -> Result<()> {
 
     match def.backend {
         ConfigBackend::LlmToml => ai_config::set_ai_value(key, &normalized)?,
+        ConfigBackend::DaemonToml => daemon_config_cli::set_daemon_value(key, &normalized)?,
         ConfigBackend::SystemConfig => {
             let kind = def.kind.as_db_kind();
             repo.set(key, &normalized, kind)?;
@@ -122,6 +124,7 @@ fn cmd_get(repo: &ConfigRepository, key: &str) -> Result<()> {
 
     let value = match backend {
         ConfigBackend::LlmToml => ai_config::get_ai_value(key)?,
+        ConfigBackend::DaemonToml => daemon_config_cli::get_daemon_value(key)?,
         ConfigBackend::SystemConfig => repo.get(key)?,
     };
 
@@ -191,6 +194,22 @@ fn cmd_list_set(repo: &ConfigRepository, format: OutputFormat) -> Result<()> {
         });
     }
 
+    // Merge daemon entries from daemon.toml
+    for (k, v, kind) in daemon_config_cli::list_daemon_entries().unwrap_or_default() {
+        let def = config_schema::lookup(&k);
+        let sensitive = def.as_ref().map_or(false, |d| d.sensitive);
+        entries.push(ConfigEntry {
+            key: k,
+            value: if sensitive {
+                config_schema::mask_value(&v)
+            } else {
+                v
+            },
+            kind,
+            source: "daemon.toml".to_string(),
+        });
+    }
+
     print_list(&entries, format);
     Ok(())
 }
@@ -209,6 +228,13 @@ fn cmd_list_all(repo: &ConfigRepository, format: OutputFormat) -> Result<()> {
         .map(|(k, v, _)| (k, v))
         .collect();
 
+    // Build a map of daemon values for DaemonToml-backed keys
+    let daemon_map: HashMap<String, String> = daemon_config_cli::list_daemon_entries()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(k, v, _)| (k, v))
+        .collect();
+
     let mut entries: Vec<ConfigEntry> = Vec::new();
 
     for def in config_schema::CONFIG_KEYS {
@@ -221,6 +247,20 @@ fn cmd_list_all(repo: &ConfigRepository, format: OutputFormat) -> Result<()> {
                         val.clone()
                     };
                     (display, "llm.toml".to_string())
+                } else if let Some(default) = def.default {
+                    (format!("(default: {})", default), "default".to_string())
+                } else {
+                    ("(not set)".to_string(), "not set".to_string())
+                }
+            }
+            ConfigBackend::DaemonToml => {
+                if let Some(val) = daemon_map.get(def.key) {
+                    let display = if def.sensitive {
+                        config_schema::mask_value(val)
+                    } else {
+                        val.clone()
+                    };
+                    (display, "daemon.toml".to_string())
                 } else if let Some(default) = def.default {
                     (format!("(default: {})", default), "default".to_string())
                 } else {
@@ -300,6 +340,7 @@ fn cmd_reset(
         let backend = def.as_ref().map(|d| d.backend).unwrap_or(ConfigBackend::SystemConfig);
         match backend {
             ConfigBackend::LlmToml => ai_config::delete_ai_value(&k)?,
+            ConfigBackend::DaemonToml => daemon_config_cli::delete_daemon_value(&k)?,
             ConfigBackend::SystemConfig => repo.delete(&k)?,
         }
         println!("Key '{}' reset (deleted).", k);
@@ -1612,6 +1653,10 @@ fn save_and_exit(repo: &ConfigRepository, config_map: &HashMap<String, String>) 
         let backend = def.as_ref().map(|d| d.backend).unwrap_or(ConfigBackend::SystemConfig);
         match backend {
             ConfigBackend::LlmToml => ai_entries.push((k.as_str(), v.as_str())),
+            ConfigBackend::DaemonToml => {
+                // Write daemon.toml entries one at a time
+                daemon_config_cli::set_daemon_value(k, v)?;
+            }
             ConfigBackend::SystemConfig => {
                 let kind = def.map(|d| d.kind.as_db_kind()).unwrap_or("string");
                 repo.set(k, v, kind)?;

@@ -1,6 +1,6 @@
 use crate::error::LlmError;
 use crate::key_pool::{ApiKey, KeyPool, KeyPriority, KeySource, ProviderType, SelectionStrategy};
-use crate::model_registry::{ModelInfo, ModelRegistry};
+use crate::model_registry::ModelRegistry;
 use crate::cost_tracker::CostTracker;
 use crate::router::{LlmRouter, ProviderEntry};
 use crate::LlmProvider;
@@ -28,12 +28,18 @@ impl LlmConfig {
     }
 
     pub fn resolve_api_key(&self) -> Option<String> {
+        self.resolve_api_key_with_env_config(None)
+    }
+
+    pub fn resolve_api_key_with_env_config(&self, env_config: Option<&EnvVarsConfig>) -> Option<String> {
         if let Some(ref key) = self.api_key {
             return Some(key.clone());
         }
+        let defaults = EnvVarsConfig::default();
+        let env_cfg = env_config.unwrap_or(&defaults);
         let env_var = match self.provider.as_str() {
-            "anthropic" => "ANTHROPIC_API_KEY",
-            "openai" => "OPENAI_API_KEY",
+            "anthropic" => &env_cfg.anthropic_api_key,
+            "openai" => &env_cfg.openai_api_key,
             _ => return None,
         };
         std::env::var(env_var).ok()
@@ -41,38 +47,56 @@ impl LlmConfig {
 }
 
 pub fn build_provider(config: &LlmConfig) -> Result<Box<dyn LlmProvider>, LlmError> {
+    build_provider_with_runtime(config, None)
+}
+
+pub fn build_provider_with_runtime(
+    config: &LlmConfig,
+    runtime: Option<&LlmRuntimeConfig>,
+) -> Result<Box<dyn LlmProvider>, LlmError> {
+    let defaults = LlmRuntimeConfig::default();
+    let rt = runtime.unwrap_or(&defaults);
+    let provider_defaults = rt.provider_defaults.get(config.provider.as_str());
+
     match config.provider.as_str() {
         #[cfg(feature = "anthropic")]
         "anthropic" => {
             let api_key = config
-                .resolve_api_key()
+                .resolve_api_key_with_env_config(Some(&rt.env_vars))
                 .ok_or(LlmError::Config("Anthropic API key not configured. Set api_key in config or ANTHROPIC_API_KEY env var.".into()))?;
+            let model = config.model.clone()
+                .or_else(|| provider_defaults.map(|d| d.default_model.clone()));
+            let max_tokens = config.max_tokens
+                .or_else(|| provider_defaults.map(|d| d.default_max_tokens));
             let provider = crate::providers::anthropic::AnthropicProvider::new(
-                api_key,
-                config.model.clone(),
-                config.max_tokens,
+                api_key, model, max_tokens,
             );
             Ok(Box::new(provider))
         }
         #[cfg(feature = "openai")]
         "openai" => {
             let api_key = config
-                .resolve_api_key()
+                .resolve_api_key_with_env_config(Some(&rt.env_vars))
                 .ok_or(LlmError::Config("OpenAI API key not configured. Set api_key in config or OPENAI_API_KEY env var.".into()))?;
+            let model = config.model.clone()
+                .or_else(|| provider_defaults.map(|d| d.default_model.clone()));
+            let base_url = config.base_url.clone()
+                .or_else(|| provider_defaults.and_then(|d| d.base_url.clone()));
+            let max_tokens = config.max_tokens
+                .or_else(|| provider_defaults.map(|d| d.default_max_tokens));
             let provider = crate::providers::openai::OpenAiProvider::new(
-                api_key,
-                config.model.clone(),
-                config.base_url.clone(),
-                config.max_tokens,
+                api_key, model, base_url, max_tokens,
             );
             Ok(Box::new(provider))
         }
         #[cfg(feature = "ollama")]
         "ollama" => {
-            let provider = crate::providers::ollama::OllamaProvider::new(
-                config.model.clone().unwrap_or_else(|| "llama3".to_string()),
-                config.base_url.clone(),
-            );
+            let model = config.model.clone()
+                .or_else(|| provider_defaults.map(|d| d.default_model.clone()))
+                .unwrap_or_else(|| "llama3".to_string());
+            let base_url = config.base_url.clone()
+                .or_else(|| provider_defaults.and_then(|d| d.base_url.clone()));
+            let provider = crate::providers::ollama::OllamaProvider::new(model, base_url);
             Ok(Box::new(provider))
         }
         other => Err(LlmError::UnknownProvider(other.to_string())),
@@ -93,6 +117,9 @@ pub struct LlmRouterConfig {
     pub cli_backends: Option<crate::cli_backend::CliBackendsConfig>,
     pub embeddings: Option<EmbeddingsConfig>,
     pub security: Option<SecurityConfig>,
+    pub timeouts: Option<TimeoutsConfig>,
+    pub endpoints: Option<EndpointsConfig>,
+    pub env_vars: Option<EnvVarsConfig>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -127,6 +154,8 @@ pub struct ProviderConfig {
     #[serde(alias = "key_selection_strategy")]
     pub key_selection_strategy: Option<String>,
     pub keys: Option<Vec<KeyConfig>>,
+    pub default_model: Option<String>,
+    pub default_max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +192,155 @@ pub struct LimitsConfig {
     pub max_cost_per_agent: Option<f64>,
 }
 
+// ── Externalized Config Structs ───────────────────────────────────────
+
+fn default_usage_cache_ttl() -> u64 { 300 }
+fn default_usage_fetch_timeout() -> u64 { 10 }
+fn default_cli_timeout() -> u64 { 120 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeoutsConfig {
+    #[serde(default = "default_usage_cache_ttl")]
+    pub usage_cache_ttl_secs: u64,
+    #[serde(default = "default_usage_fetch_timeout")]
+    pub usage_fetch_timeout_secs: u64,
+    #[serde(default = "default_cli_timeout")]
+    pub cli_backend_timeout_secs: u64,
+}
+
+impl Default for TimeoutsConfig {
+    fn default() -> Self {
+        Self {
+            usage_cache_ttl_secs: default_usage_cache_ttl(),
+            usage_fetch_timeout_secs: default_usage_fetch_timeout(),
+            cli_backend_timeout_secs: default_cli_timeout(),
+        }
+    }
+}
+
+fn default_anthropic_usage_url() -> String { "https://api.anthropic.com/api/oauth/usage".to_string() }
+fn default_openai_usage_url() -> String { "https://api.openai.com/dashboard/billing/usage".to_string() }
+fn default_openai_embeddings_url() -> String { "https://api.openai.com/v1/embeddings".to_string() }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointsConfig {
+    #[serde(default = "default_anthropic_usage_url")]
+    pub anthropic_usage: String,
+    #[serde(default = "default_openai_usage_url")]
+    pub openai_usage: String,
+    #[serde(default = "default_openai_embeddings_url")]
+    pub openai_embeddings: String,
+}
+
+impl Default for EndpointsConfig {
+    fn default() -> Self {
+        Self {
+            anthropic_usage: default_anthropic_usage_url(),
+            openai_usage: default_openai_usage_url(),
+            openai_embeddings: default_openai_embeddings_url(),
+        }
+    }
+}
+
+fn default_anthropic_env() -> String { "ANTHROPIC_API_KEY".to_string() }
+fn default_openai_env() -> String { "OPENAI_API_KEY".to_string() }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvVarsConfig {
+    #[serde(default = "default_anthropic_env")]
+    pub anthropic_api_key: String,
+    #[serde(default = "default_openai_env")]
+    pub openai_api_key: String,
+}
+
+impl Default for EnvVarsConfig {
+    fn default() -> Self {
+        Self {
+            anthropic_api_key: default_anthropic_env(),
+            openai_api_key: default_openai_env(),
+        }
+    }
+}
+
+/// Per-provider default settings resolved from config.
+#[derive(Debug, Clone)]
+pub struct ProviderDefaults {
+    pub default_model: String,
+    pub default_max_tokens: u32,
+    pub base_url: Option<String>,
+}
+
+/// Runtime representation of all externalized LLM configuration.
+/// Wrapped in ArcSwap for lock-free hot-reload.
+#[derive(Debug, Clone)]
+pub struct LlmRuntimeConfig {
+    pub timeouts: TimeoutsConfig,
+    pub endpoints: EndpointsConfig,
+    pub env_vars: EnvVarsConfig,
+    pub provider_defaults: HashMap<String, ProviderDefaults>,
+}
+
+impl Default for LlmRuntimeConfig {
+    fn default() -> Self {
+        let mut provider_defaults = HashMap::new();
+        provider_defaults.insert("anthropic".to_string(), ProviderDefaults {
+            default_model: "claude-sonnet-4-5-20250929".to_string(),
+            default_max_tokens: 4096,
+            base_url: None,
+        });
+        provider_defaults.insert("openai".to_string(), ProviderDefaults {
+            default_model: "gpt-4o".to_string(),
+            default_max_tokens: 4096,
+            base_url: Some("https://api.openai.com/v1".to_string()),
+        });
+        provider_defaults.insert("ollama".to_string(), ProviderDefaults {
+            default_model: "llama3".to_string(),
+            default_max_tokens: 4096,
+            base_url: Some("http://localhost:11434/v1".to_string()),
+        });
+        Self {
+            timeouts: TimeoutsConfig::default(),
+            endpoints: EndpointsConfig::default(),
+            env_vars: EnvVarsConfig::default(),
+            provider_defaults,
+        }
+    }
+}
+
+impl From<&LlmRouterConfig> for LlmRuntimeConfig {
+    fn from(config: &LlmRouterConfig) -> Self {
+        let timeouts = config.timeouts.clone().unwrap_or_default();
+        let endpoints = config.endpoints.clone().unwrap_or_default();
+        let env_vars = config.env_vars.clone().unwrap_or_default();
+
+        let mut provider_defaults = LlmRuntimeConfig::default().provider_defaults;
+
+        if let Some(ref providers) = config.providers {
+            for (name, pc) in providers {
+                let existing = provider_defaults.get(name);
+                let defaults = ProviderDefaults {
+                    default_model: pc.default_model.clone()
+                        .or_else(|| existing.map(|e| e.default_model.clone()))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    default_max_tokens: pc.default_max_tokens
+                        .or_else(|| existing.map(|e| e.default_max_tokens))
+                        .unwrap_or(4096),
+                    base_url: pc.base_url.clone()
+                        .or_else(|| existing.and_then(|e| e.base_url.clone())),
+                };
+                provider_defaults.insert(name.clone(), defaults);
+            }
+        }
+
+        Self {
+            timeouts,
+            endpoints,
+            env_vars,
+            provider_defaults,
+        }
+    }
+}
+
 fn parse_provider_type(name: &str) -> Option<ProviderType> {
     match name {
         "anthropic" => Some(ProviderType::Anthropic),
@@ -170,6 +348,11 @@ fn parse_provider_type(name: &str) -> Option<ProviderType> {
         "ollama" => Some(ProviderType::Ollama),
         _ => None,
     }
+}
+
+/// Public version of `parse_provider_type` for use by other modules.
+pub fn parse_provider_type_pub(name: &str) -> Option<ProviderType> {
+    parse_provider_type(name)
 }
 
 fn resolve_key_secret(env_var: &str) -> Option<String> {
@@ -209,14 +392,15 @@ fn build_router_from_legacy(content: &str) -> Result<LlmRouter, LlmError> {
     let config: LlmConfig = toml::from_str(content)
         .map_err(|e| LlmError::Config(format!("Failed to parse legacy config: {}", e)))?;
 
-    let provider = build_provider(&config)?;
+    let runtime = LlmRuntimeConfig::default();
+    let provider = build_provider_with_runtime(&config, Some(&runtime))?;
     let provider_type = parse_provider_type(&config.provider)
         .ok_or_else(|| LlmError::UnknownProvider(config.provider.clone()))?;
 
-    let default_model = config.model.unwrap_or_else(|| match provider_type {
-        ProviderType::Anthropic => "claude-sonnet-4-5-20250929".to_string(),
-        ProviderType::OpenAI => "gpt-5.2".to_string(),
-        ProviderType::Ollama => "llama3".to_string(),
+    let default_model = config.model.unwrap_or_else(|| {
+        runtime.provider_defaults.get(config.provider.as_str())
+            .map(|d| d.default_model.clone())
+            .unwrap_or_else(|| "claude-sonnet-4-5-20250929".to_string())
     });
 
     Ok(LlmRouter::single_provider(
@@ -235,6 +419,7 @@ fn build_router_from_hierarchical(
     let config: LlmRouterConfig = toml::from_str(content)
         .map_err(|e| LlmError::Config(format!("Failed to parse router config: {}", e)))?;
 
+    let runtime_config = LlmRuntimeConfig::from(&config);
     let mut providers_map: HashMap<ProviderType, ProviderEntry> = HashMap::new();
 
     // Build provider entries
@@ -377,6 +562,7 @@ fn build_router_from_hierarchical(
 
             // Build the actual provider.
             // Skip providers that require keys but have none resolved.
+            let prov_defaults = runtime_config.provider_defaults.get(provider_name);
             let provider: Box<dyn LlmProvider> = match provider_type {
                 #[cfg(feature = "anthropic")]
                 ProviderType::Anthropic => {
@@ -387,8 +573,12 @@ fn build_router_from_hierarchical(
                         );
                         continue;
                     };
+                    let model = provider_config.default_model.clone()
+                        .or_else(|| prov_defaults.map(|d| d.default_model.clone()));
+                    let max_tokens = provider_config.default_max_tokens
+                        .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
                     Box::new(crate::providers::anthropic::AnthropicProvider::new(
-                        key, None, None,
+                        key, model, max_tokens,
                     ))
                 }
                 #[cfg(feature = "openai")]
@@ -400,18 +590,25 @@ fn build_router_from_hierarchical(
                         );
                         continue;
                     };
+                    let model = provider_config.default_model.clone()
+                        .or_else(|| prov_defaults.map(|d| d.default_model.clone()));
+                    let base_url = provider_config.base_url.clone()
+                        .or_else(|| prov_defaults.and_then(|d| d.base_url.clone()));
+                    let max_tokens = provider_config.default_max_tokens
+                        .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
                     Box::new(crate::providers::openai::OpenAiProvider::new(
-                        key,
-                        None,
-                        provider_config.base_url.clone(),
-                        None,
+                        key, model, base_url, max_tokens,
                     ))
                 }
                 #[cfg(feature = "ollama")]
                 ProviderType::Ollama => {
+                    let model = provider_config.default_model.clone()
+                        .or_else(|| prov_defaults.map(|d| d.default_model.clone()))
+                        .unwrap_or_else(|| "llama3".to_string());
+                    let base_url = provider_config.base_url.clone()
+                        .or_else(|| prov_defaults.and_then(|d| d.base_url.clone()));
                     Box::new(crate::providers::ollama::OllamaProvider::new(
-                        "llama3".to_string(),
-                        provider_config.base_url.clone(),
+                        model, base_url,
                     ))
                 }
                 #[allow(unreachable_patterns)]
@@ -430,31 +627,23 @@ fn build_router_from_hierarchical(
         }
     }
 
-    // Build model registry
-    let model_registry = ModelRegistry::with_defaults();
-    if let Some(ref models) = config.models {
-        for (model_id, model_config) in models {
-            if let Some(pt) = parse_provider_type(&model_config.provider) {
-                model_registry.register(
-                    model_id.clone(),
-                    ModelInfo {
-                        provider: pt,
-                        input_price_per_million: model_config.input_price.unwrap_or(3.0),
-                        output_price_per_million: model_config.output_price.unwrap_or(15.0),
-                        context_window: model_config.context.unwrap_or(200_000),
-                        discovered: false,
-                    },
-                );
-            }
-        }
-    }
+    // Build model registry (config models override compiled defaults)
+    let model_registry = if let Some(ref models) = config.models {
+        ModelRegistry::with_defaults_and_config(models)
+    } else {
+        ModelRegistry::with_defaults()
+    };
 
     // Default model
     let default_model = config
         .orchestrator
         .as_ref()
         .map(|o| o.model.clone())
-        .unwrap_or_else(|| "claude-sonnet-4-5-20250929".to_string());
+        .unwrap_or_else(|| {
+            runtime_config.provider_defaults.get("anthropic")
+                .map(|d| d.default_model.clone())
+                .unwrap_or_else(|| "claude-sonnet-4-5-20250929".to_string())
+        });
 
     // Fallback chains
     let mut fallback_chains = config.fallback_chains.unwrap_or_default();
@@ -468,16 +657,18 @@ fn build_router_from_hierarchical(
 
     let cost_tracker = Arc::new(CostTracker::new(ModelRegistry::with_defaults()));
 
-    let router = LlmRouter::new(
+    let router = LlmRouter::new_with_runtime(
         providers_map,
         model_registry,
         fallback_chains,
         cost_tracker,
         default_model,
+        runtime_config,
     );
 
     // Register CLI backends if detected
     let cli_config = config.cli_backends.unwrap_or_default();
+    let cli_timeout_secs = router.runtime_config().timeouts.cli_backend_timeout_secs;
 
     if let Some(ref cc_config) = cli_config.claude_code {
         if let Some(provider) = crate::cli_backend::ClaudeCodeCliProvider::from_config(cc_config) {
@@ -488,7 +679,7 @@ fn build_router_from_hierarchical(
         tracing::info!("Auto-detected Claude Code CLI at {:?}", path);
         let provider = crate::cli_backend::ClaudeCodeCliProvider::new(
             path,
-            std::time::Duration::from_secs(120),
+            std::time::Duration::from_secs(cli_timeout_secs),
         );
         router.register_cli_backend(ProviderType::Anthropic, Arc::new(provider));
     }
@@ -502,7 +693,7 @@ fn build_router_from_hierarchical(
         tracing::info!("Auto-detected Codex CLI at {:?}", path);
         let provider = crate::cli_backend::CodexCliProvider::new(
             path,
-            std::time::Duration::from_secs(120),
+            std::time::Duration::from_secs(cli_timeout_secs),
         );
         router.register_cli_backend(ProviderType::OpenAI, Arc::new(provider));
     }
