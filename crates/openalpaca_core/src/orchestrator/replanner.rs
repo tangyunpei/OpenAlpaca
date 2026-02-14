@@ -316,6 +316,10 @@ pub fn merge_replanned_dag(
     for node in &new_dag.nodes {
         // Skip if a node with the same ID already exists (from completed/running)
         if merged_nodes.iter().any(|n| n.node_id == node.node_id) {
+            tracing::warn!(
+                "Replanned DAG contains duplicate node_id '{}' — skipping (already completed/running)",
+                node.node_id
+            );
             continue;
         }
         merged_nodes.push(node.clone());
@@ -330,6 +334,20 @@ pub fn merge_replanned_dag(
     merged.validate(available_agents).map_err(|e| {
         format!("Merged DAG validation failed: {}", e)
     })?;
+
+    // Warn about agents that exist but aren't currently available
+    for node in &merged.nodes {
+        if matches!(node.status, DagNodeStatus::Pending) {
+            if let Some(agent) = available_agents.iter().find(|a| a.id == node.agent_id) {
+                if !agent.status.is_available() {
+                    tracing::warn!(
+                        "Merged DAG node '{}' references agent '{}' which is currently {:?}",
+                        node.node_id, agent.id, agent.status
+                    );
+                }
+            }
+        }
+    }
 
     Ok(merged)
 }

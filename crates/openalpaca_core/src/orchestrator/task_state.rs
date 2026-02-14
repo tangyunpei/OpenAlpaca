@@ -77,6 +77,14 @@ impl TaskWorkspace {
         author_agent_id: &str,
         entry_type: WorkspaceEntryType,
     ) -> Result<(), String> {
+        if content.len() > self.max_entry_size {
+            tracing::warn!(
+                "Workspace entry '{}' truncated from {} to {} chars",
+                key,
+                content.len(),
+                self.max_entry_size
+            );
+        }
         let capped_content: String = content.chars().take(self.max_entry_size).collect();
         let now = Utc::now();
 
@@ -90,11 +98,21 @@ impl TaskWorkspace {
         }
 
         if self.entries.len() >= self.max_entries {
-            return Err(format!(
-                "Workspace full: {} entries (max {})",
-                self.entries.len(),
-                self.max_entries
-            ));
+            // Evict the oldest entry (by updated_at) to make room
+            if let Some(oldest_idx) = self
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, e)| e.updated_at)
+                .map(|(i, _)| i)
+            {
+                let evicted_key = self.entries[oldest_idx].key.clone();
+                self.entries.remove(oldest_idx);
+                tracing::debug!(
+                    "Workspace full — evicted oldest entry '{}' to make room for '{}'",
+                    evicted_key, key
+                );
+            }
         }
 
         self.entries.push(WorkspaceEntry {
@@ -237,7 +255,13 @@ impl TaskState {
 
     /// Serialize to JSON string.
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        match serde_json::to_string(self) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::error!("Failed to serialize TaskState: {}", e);
+                "{}".to_string()
+            }
+        }
     }
 }
 
@@ -364,13 +388,18 @@ mod tests {
     }
 
     #[test]
-    fn test_workspace_max_entries() {
+    fn test_workspace_max_entries_evicts_oldest() {
         let mut ws = TaskWorkspace { max_entries: 2, ..Default::default() };
         ws.write("k1", "a", "agent", WorkspaceEntryType::Text).unwrap();
         ws.write("k2", "b", "agent", WorkspaceEntryType::Text).unwrap();
+        // Third write should evict the oldest entry ("k1") instead of failing
         let result = ws.write("k3", "c", "agent", WorkspaceEntryType::Text);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Workspace full"));
+        assert!(result.is_ok());
+        assert_eq!(ws.entries.len(), 2);
+        // k1 should be evicted, k2 and k3 should remain
+        assert!(ws.read("k1").is_empty());
+        assert!(!ws.read("k2").is_empty());
+        assert!(!ws.read("k3").is_empty());
     }
 
     #[test]

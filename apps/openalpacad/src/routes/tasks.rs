@@ -62,6 +62,22 @@ pub async fn create_task_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateTaskRequest>,
 ) -> impl IntoResponse {
+    // Input validation
+    if request.title.is_empty() || request.title.len() > 500 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Title must be 1-500 characters" })),
+        );
+    }
+    if let Some(ref desc) = request.description {
+        if desc.len() > 10_000 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Description must be at most 10000 characters" })),
+            );
+        }
+    }
+
     let task_id = Uuid::new_v4().to_string();
     let now = Utc::now();
 
@@ -159,11 +175,17 @@ pub async fn list_tasks_handler(
                         "status": a.status.as_str()
                     })
                 }).collect();
-                let mut v = serde_json::to_value(t).unwrap();
-                v.as_object_mut().unwrap().insert("assigned_agents".to_string(), serde_json::json!(agents));
-                v
+                match serde_json::to_value(t) {
+                    Ok(mut v) => {
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert("assigned_agents".to_string(), serde_json::json!(agents));
+                        }
+                        v
+                    }
+                    Err(_) => serde_json::json!({ "id": t.id, "error": "serialization_failed" })
+                }
             }).collect();
-            (StatusCode::OK, Json(serde_json::to_value(enriched).unwrap()))
+            (StatusCode::OK, Json(serde_json::to_value(enriched).unwrap_or_else(|_| serde_json::json!([]))))
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -189,7 +211,7 @@ pub async fn get_task_handler(
                         task,
                         assignments: Some(assignments),
                     })
-                    .unwrap(),
+                    .unwrap_or_else(|_| serde_json::json!({"error": "serialization_failed"})),
                 ),
             )
         }

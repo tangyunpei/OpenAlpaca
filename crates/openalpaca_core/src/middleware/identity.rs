@@ -173,7 +173,7 @@ fn parse_identity_field(line: &str) -> Option<(String, String)> {
     }
 
     // Filter out template placeholders like "_(pick something you like)_"
-    if value.starts_with("_(") && value.ends_with(')') || value.starts_with("_(") && value.ends_with(")_") {
+    if value.starts_with("_(") && (value.ends_with(')') || value.ends_with(")_")) {
         return Some((key, String::new()));
     }
 
@@ -293,6 +293,18 @@ pub fn identity_document_has_content(doc: &IdentityDocument) -> bool {
         || !doc.avatar.is_empty()
 }
 
+/// Strip markdown heading markers that could be used for prompt injection.
+fn sanitize_prompt_field(value: &str) -> String {
+    value
+        .replace("###", "")
+        .replace("## ", "")
+        .replace("# ", "")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
 /// Character budget for the identity prompt block.
 const IDENTITY_PROMPT_BUDGET: usize = 300;
 
@@ -318,7 +330,7 @@ pub fn identity_to_prompt_block(doc: &IdentityDocument) -> String {
     let parts: Vec<String> = fields
         .iter()
         .filter(|(_, v)| !v.is_empty())
-        .map(|(k, v)| format!("{}: {}", k, v))
+        .map(|(k, v)| format!("{}: {}", k, sanitize_prompt_field(v)))
         .collect();
 
     if parts.is_empty() {

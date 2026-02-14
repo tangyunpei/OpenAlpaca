@@ -151,6 +151,8 @@ impl ContextualToolExecutor {
                     "Workspace write version conflict for key '{}' (attempt {}/{}), retrying",
                     key, attempt + 1, MAX_RETRIES
                 );
+                // Brief backoff to reduce collision probability
+                std::thread::sleep(std::time::Duration::from_millis(10 * (1 << attempt)));
             }
         }
 
