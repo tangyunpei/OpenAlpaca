@@ -291,10 +291,15 @@ If the task should be abandoned:
 /// Merge a replanned DAG into the existing DAG:
 /// - Keep all COMPLETED and RUNNING nodes from the old DAG
 /// - Replace PENDING/READY/SKIPPED nodes with nodes from the new DAG
-/// - Validate that the merged result has no broken dependencies
+/// - Validate the merged result: structure (deps, cycles) AND agent existence
 ///
-/// Returns Err if the merged DAG has dangling dependency references.
-pub fn merge_replanned_dag(existing: &TaskDag, new_dag: &TaskDag) -> Result<TaskDag, String> {
+/// Returns Err if the merged DAG has dangling dependency references,
+/// cycles, or references agents not in `available_agents`.
+pub fn merge_replanned_dag(
+    existing: &TaskDag,
+    new_dag: &TaskDag,
+    available_agents: &[SubAgent],
+) -> Result<TaskDag, String> {
     let mut merged_nodes: Vec<DagNode> = Vec::new();
 
     // Keep completed and running nodes
@@ -321,8 +326,8 @@ pub fn merge_replanned_dag(existing: &TaskDag, new_dag: &TaskDag) -> Result<Task
         nodes: merged_nodes,
     };
 
-    // validate_structure checks: dependency existence AND cycle detection
-    merged.validate_structure().map_err(|e| {
+    // Full validation: dependency existence, cycle detection, AND agent existence
+    merged.validate(available_agents).map_err(|e| {
         format!("Merged DAG validation failed: {}", e)
     })?;
 
@@ -468,7 +473,7 @@ mod tests {
             ],
         };
 
-        let merged = merge_replanned_dag(&existing, &new_dag).unwrap();
+        let merged = merge_replanned_dag(&existing, &new_dag, &make_agents()).unwrap();
         assert_eq!(merged.nodes.len(), 2); // n1 (completed) + n4 (new)
         assert_eq!(merged.nodes[0].node_id, "n1");
         assert_eq!(merged.nodes[1].node_id, "n4");
@@ -489,7 +494,7 @@ mod tests {
             ],
         };
 
-        let merged = merge_replanned_dag(&existing, &new_dag).unwrap();
+        let merged = merge_replanned_dag(&existing, &new_dag, &make_agents()).unwrap();
         assert_eq!(merged.nodes.len(), 3); // n1, n2, n5
         assert_eq!(merged.nodes[0].node_id, "n1");
         assert_eq!(merged.nodes[1].node_id, "n2");
@@ -511,7 +516,7 @@ mod tests {
             ],
         };
 
-        let merged = merge_replanned_dag(&existing, &new_dag).unwrap();
+        let merged = merge_replanned_dag(&existing, &new_dag, &make_agents()).unwrap();
         assert_eq!(merged.nodes.len(), 2); // n1 (from existing) + n2 (new)
         assert_eq!(merged.nodes[0].agent_id, "agent-1"); // kept the completed version
         assert_eq!(merged.nodes[1].node_id, "n2");
@@ -532,7 +537,7 @@ mod tests {
             ],
         };
 
-        let merged = merge_replanned_dag(&existing, &new_dag).unwrap();
+        let merged = merge_replanned_dag(&existing, &new_dag, &make_agents()).unwrap();
         assert_eq!(merged.nodes.len(), 2); // n1 (completed) + n4 (new)
         assert!(!merged.nodes.iter().any(|n| n.node_id == "n2"));
         assert!(!merged.nodes.iter().any(|n| n.node_id == "n3"));
@@ -553,7 +558,7 @@ mod tests {
             ],
         };
 
-        let result = merge_replanned_dag(&existing, &new_dag);
+        let result = merge_replanned_dag(&existing, &new_dag, &make_agents());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("unknown node"));
     }
@@ -574,9 +579,28 @@ mod tests {
             ],
         };
 
-        let result = merge_replanned_dag(&existing, &new_dag);
+        let result = merge_replanned_dag(&existing, &new_dag, &make_agents());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("cycle"));
+    }
+
+    #[test]
+    fn test_merge_rejects_unknown_agent() {
+        let existing = TaskDag {
+            nodes: vec![
+                make_node("n1", "agent-1", &[], DagNodeStatus::Completed),
+            ],
+        };
+        // New DAG references an agent that doesn't exist in make_agents()
+        let new_dag = TaskDag {
+            nodes: vec![
+                make_node("n2", "ghost-agent", &["n1"], DagNodeStatus::Pending),
+            ],
+        };
+
+        let result = merge_replanned_dag(&existing, &new_dag, &make_agents());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown agent"));
     }
 
     // ── build_replan_prompt tests ───────────────────────────────────

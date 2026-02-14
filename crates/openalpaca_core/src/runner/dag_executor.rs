@@ -399,7 +399,7 @@ pub async fn execute_dag(
                                     replan_attempt, old_pending, new_count
                                 );
 
-                                match merge_replanned_dag(dag, &new_dag) {
+                                match merge_replanned_dag(dag, &new_dag, &idle_agents) {
                                     Ok(merged) => {
                                         *dag = merged;
                                         mark_ready_nodes(dag);
