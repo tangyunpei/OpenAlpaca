@@ -94,7 +94,8 @@ apps/openalpaca-gui/src-tauri/gen/
 .claude/*   config/.master_key
 config/llm.toml
 !config/templates/SOUL_temp.md
-!config/orchestrator/*
+!config/orchestrator/*.md
+!config/orchestrator/templates/
 # ============================================
 # Markdown Documentation (Except Manuals)
 # ============================================

@@ -228,8 +228,8 @@ impl SkillCatalog {
     /// Remove a skill from the catalog.
     pub fn remove(&self, name: &str) {
         let key = name.to_lowercase();
-        // Remove command index entry
-        if let Ok(entries) = self.entries.read() {
+        if let Ok(mut entries) = self.entries.write() {
+            // Remove command index entry first
             if let Some(entry) = entries.get(&key) {
                 if let Some(ref cmd) = entry.frontmatter.command {
                     if let Ok(mut idx) = self.command_index.write() {
@@ -237,9 +237,7 @@ impl SkillCatalog {
                     }
                 }
             }
-        }
-        // Remove the entry
-        if let Ok(mut entries) = self.entries.write() {
+            // Then remove the entry from the same lock scope
             entries.remove(&key);
         }
     }

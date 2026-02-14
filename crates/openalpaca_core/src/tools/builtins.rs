@@ -920,13 +920,16 @@ fn update_soul_tool(ctx: SoulToolContext) -> RegisteredTool {
 /// Validate that a path is safe for workspace-scoped file operations.
 /// Rejects absolute paths and paths containing `..` components.
 fn validate_workspace_path(path: &str) -> Result<(), String> {
-    if path.starts_with('/') || path.starts_with('\\') {
+    let path_buf = std::path::PathBuf::from(path);
+    if path_buf.is_absolute() {
         return Err(
             "Absolute paths are not allowed. Use relative paths within the workspace.".to_string(),
         );
     }
-    if path.contains("..") {
-        return Err("Path traversal ('..') is not allowed.".to_string());
+    for component in path_buf.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err("Path traversal ('..') is not allowed.".to_string());
+        }
     }
     Ok(())
 }

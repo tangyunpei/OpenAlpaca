@@ -176,6 +176,17 @@ pub async fn execute_dag(
                 break;
             }
 
+            // Verify node is still in a dispatchable state (may have changed during replanning)
+            if let Some(current_node) = dag.nodes.iter().find(|n| n.node_id == node_id) {
+                if current_node.status != DagNodeStatus::Pending {
+                    tracing::debug!("Node '{}' is no longer Pending (now {:?}), skipping", node_id, current_node.status);
+                    continue;
+                }
+            } else {
+                tracing::warn!("Node '{}' no longer exists in DAG, skipping", node_id);
+                continue;
+            }
+
             dag.mark_running(&node_id);
             running_count += 1;
 
@@ -471,10 +482,15 @@ pub async fn execute_dag(
     let finish_reason = if all_completed {
         DagFinishReason::AllCompleted
     } else if any_failed {
-        let failed_node = dag.nodes.iter().find(|n| n.status == DagNodeStatus::Failed).unwrap();
-        DagFinishReason::NodeFailed {
-            node_id: failed_node.node_id.clone(),
-            error: failed_node.result_summary.clone().unwrap_or_default(),
+        match dag.nodes.iter().find(|n| n.status == DagNodeStatus::Failed) {
+            Some(failed_node) => DagFinishReason::NodeFailed {
+                node_id: failed_node.node_id.clone(),
+                error: failed_node.result_summary.clone().unwrap_or_default(),
+            },
+            None => DagFinishReason::NodeFailed {
+                node_id: "unknown".to_string(),
+                error: "Failed node not found in DAG".to_string(),
+            },
         }
     } else {
         DagFinishReason::Timeout
@@ -784,6 +800,8 @@ fn write_node_output_to_workspace(
                         "Workspace write version conflict for key '{}' node '{}' (attempt {}/{}), retrying",
                         key, node_result.node_id, attempt + 1, MAX_RETRIES
                     );
+                    // Brief backoff to reduce collision probability
+                    std::thread::sleep(std::time::Duration::from_millis(10 * (1 << attempt)));
                 } else {
                     tracing::warn!(
                         "Workspace write for key '{}' node '{}' failed after {} retries — data may be lost",

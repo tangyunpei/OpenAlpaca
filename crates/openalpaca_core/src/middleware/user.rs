@@ -392,6 +392,18 @@ pub fn user_document_has_content(doc: &UserDocument) -> bool {
         || !doc.notes.is_empty()
 }
 
+/// Strip markdown heading markers that could be used for prompt injection.
+fn sanitize_prompt_field(value: &str) -> String {
+    value
+        .replace("###", "")
+        .replace("## ", "")
+        .replace("# ", "")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
 /// Character budget for the user profile prompt block.
 const USER_PROFILE_BUDGET: usize = 1000;
 
@@ -413,7 +425,7 @@ pub fn user_to_prompt_block(doc: &UserDocument) -> String {
         for key in &known_keys {
             if let Some(value) = doc.identity.get(*key) {
                 if !value.is_empty() {
-                    parts.push(format!("{}: {}", key, value));
+                    parts.push(format!("{}: {}", key, sanitize_prompt_field(value)));
                 }
             }
         }
@@ -427,7 +439,7 @@ pub fn user_to_prompt_block(doc: &UserDocument) -> String {
         for key in extra_keys {
             let val = &doc.identity[key];
             if !val.is_empty() {
-                parts.push(format!("{}: {}", key, val));
+                parts.push(format!("{}: {}", key, sanitize_prompt_field(val)));
             }
         }
         if !parts.is_empty() {
@@ -453,7 +465,8 @@ pub fn user_to_prompt_block(doc: &UserDocument) -> String {
         if content.is_empty() {
             continue;
         }
-        let truncated: String = content.chars().take(200).collect();
+        let sanitized = sanitize_prompt_field(content);
+        let truncated: String = sanitized.chars().take(200).collect();
         let entry = format!("{}: {}\n", label, truncated);
         if entry.len() > budget {
             break;
