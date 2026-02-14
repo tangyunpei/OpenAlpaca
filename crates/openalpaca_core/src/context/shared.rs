@@ -31,12 +31,24 @@ impl TaskEntryStatus {
     }
 }
 
+/// Lightweight summary of DAG execution state for in-memory tracking.
+#[derive(Debug, Clone)]
+pub struct DagSummary {
+    pub total_nodes: usize,
+    pub completed_nodes: usize,
+    pub running_nodes: usize,
+    pub failed_nodes: usize,
+}
+
 /// An in-memory task entry tracked by the registry.
 #[derive(Debug, Clone)]
 pub struct TaskEntry {
     pub task_id: String,
     pub title: String,
     pub status: TaskEntryStatus,
+    pub progress_current: Option<i32>,
+    pub progress_total: Option<i32>,
+    pub dag_summary: Option<DagSummary>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -53,9 +65,20 @@ impl TaskRegistry {
         }
     }
 
+    /// Acquire the tasks lock, recovering from poisoning if necessary.
+    fn lock_tasks(&self) -> std::sync::MutexGuard<'_, HashMap<String, TaskEntry>> {
+        match self.tasks.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::error!("TaskRegistry mutex poisoned — recovering");
+                poisoned.into_inner()
+            }
+        }
+    }
+
     /// Register a task. Returns false if the task_id already exists.
     pub fn register(&self, task_id: String, title: String) -> bool {
-        let mut tasks = self.tasks.lock().unwrap();
+        let mut tasks = self.lock_tasks();
         if tasks.contains_key(&task_id) {
             return false;
         }
@@ -66,6 +89,9 @@ impl TaskRegistry {
                 task_id,
                 title,
                 status: TaskEntryStatus::Queued,
+                progress_current: None,
+                progress_total: None,
+                dag_summary: None,
                 created_at: now,
                 updated_at: now,
             },
@@ -75,7 +101,7 @@ impl TaskRegistry {
 
     /// Update the status of a task. Returns false if the task doesn't exist.
     pub fn update_status(&self, task_id: &str, status: TaskEntryStatus) -> bool {
-        let mut tasks = self.tasks.lock().unwrap();
+        let mut tasks = self.lock_tasks();
         if let Some(entry) = tasks.get_mut(task_id) {
             entry.status = status;
             entry.updated_at = Utc::now();
@@ -87,24 +113,43 @@ impl TaskRegistry {
 
     /// Get a task entry by ID.
     pub fn get(&self, task_id: &str) -> Option<TaskEntry> {
-        self.tasks.lock().unwrap().get(task_id).cloned()
+        self.lock_tasks().get(task_id).cloned()
     }
 
     /// Remove a task by id. Returns true if it existed.
     pub fn remove(&self, task_id: &str) -> bool {
-        self.tasks.lock().unwrap().remove(task_id).is_some()
+        self.lock_tasks().remove(task_id).is_some()
     }
 
     /// Number of tracked tasks.
     pub fn count(&self) -> usize {
-        self.tasks.lock().unwrap().len()
+        self.lock_tasks().len()
+    }
+
+    /// Update progress counters and optional DAG summary for a task.
+    /// Returns false if the task doesn't exist.
+    pub fn update_progress(
+        &self,
+        task_id: &str,
+        progress_current: i32,
+        progress_total: i32,
+        dag_summary: Option<DagSummary>,
+    ) -> bool {
+        let mut tasks = self.lock_tasks();
+        if let Some(entry) = tasks.get_mut(task_id) {
+            entry.progress_current = Some(progress_current);
+            entry.progress_total = Some(progress_total);
+            entry.dag_summary = dag_summary;
+            entry.updated_at = Utc::now();
+            true
+        } else {
+            false
+        }
     }
 
     /// List all non-terminal (active) task entries.
     pub fn list_active(&self) -> Vec<TaskEntry> {
-        self.tasks
-            .lock()
-            .unwrap()
+        self.lock_tasks()
             .values()
             .filter(|e| !e.status.is_terminal())
             .cloned()

@@ -178,4 +178,37 @@ pub enum SystemEvent {
         user_populated: bool,
         timestamp: DateTime<Utc>,
     },
+    /// A DAG node started execution
+    DagNodeStarted {
+        task_id: String,
+        node_id: String,
+        node_title: String,
+        agent_id: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// A DAG node completed execution (success or failure)
+    DagNodeCompleted {
+        task_id: String,
+        node_id: String,
+        node_title: String,
+        agent_id: String,
+        success: bool,
+        duration_ms: u64,
+        /// First 200 chars of the node's output (for quick preview)
+        output_preview: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
+    /// A task DAG was replanned during execution
+    TaskReplanned {
+        task_id: String,
+        /// Which replan iteration this was (1-based)
+        replan_number: usize,
+        /// The decision taken: "continue", "modify", or "abort"
+        decision: String,
+        /// How many nodes were added in the new DAG
+        nodes_added: usize,
+        /// How many nodes were removed (replaced) from the old DAG
+        nodes_removed: usize,
+        timestamp: DateTime<Utc>,
+    },
 }

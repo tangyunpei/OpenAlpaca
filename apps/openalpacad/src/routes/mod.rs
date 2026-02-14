@@ -36,5 +36,5 @@ pub use preferences::{
     delete_preference_handler, get_preference_handler, list_preferences_handler,
     set_preference_handler,
 };
-pub use tasks::{create_task_handler, get_task_handler, list_tasks_handler, task_action_handler};
+pub use tasks::{create_task_handler, get_task_dag_handler, get_task_handler, list_tasks_handler, task_action_handler};
 pub use memory::{reindex_handler, index_status_handler, kb_ingest_handler};
