@@ -93,9 +93,9 @@ apps/openalpaca-gui/src-tauri/gen/
 .claude/
 .claude/*   config/.master_key
 config/llm.toml
-!config/templates/SOUL_temp.md
-!config/orchestrator/*.md
-!config/orchestrator/templates/
+
+
+
 # ============================================
 # Markdown Documentation (Except Manuals)
 # ============================================
@@ -109,3 +109,6 @@ config/llm.toml
 # Embedding Model
 # ============================================
 .fastembed_cache/*
+
+!config/orchestrator/templates/
+!config/orchestrator/templates/*.md
