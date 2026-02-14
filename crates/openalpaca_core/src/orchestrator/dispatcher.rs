@@ -880,6 +880,7 @@ impl TaskDispatcher {
                                             &raw_content,
                                             agent_id,
                                             crate::orchestrator::task_state::WorkspaceEntryType::Context,
+                                            &[],
                                         ) {
                                             tracing::warn!("Failed to auto-write step {} output to workspace: {}", step, e);
                                         }
@@ -1060,14 +1061,10 @@ impl TaskDispatcher {
                 None => {
                     // Fallback: find any idle agent to act as lead
                     let idle = self.shared_context.agent_registry.list_idle();
-                    if idle.is_empty() {
-                        return Err(
-                            "No agents available to act as Lead Agent. All agents are busy."
-                                .to_string(),
-                        );
-                    }
-                    // Pick the first idle agent
-                    idle.into_iter().next().unwrap()
+                    idle.into_iter().next().ok_or_else(|| {
+                        "No agents available to act as Lead Agent. All agents are busy."
+                            .to_string()
+                    })?
                 }
             }
         };

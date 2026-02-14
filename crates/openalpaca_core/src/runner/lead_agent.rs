@@ -129,6 +129,7 @@ impl BuiltInTool for SpawnSubagentTool {
             timestamp: Utc::now(),
         });
 
+        self.spawn_count.fetch_add(1, Ordering::SeqCst);
         let agent_start = std::time::Instant::now();
 
         // 5. Build ContextualToolExecutor + SandboxManager for subagent
@@ -190,7 +191,6 @@ impl BuiltInTool for SpawnSubagentTool {
 
         let duration_ms = agent_start.elapsed().as_millis() as u64;
         let now = Utc::now();
-        self.spawn_count.fetch_add(1, Ordering::SeqCst);
 
         let agent_success = matches!(
             &result.finish_reason,

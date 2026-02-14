@@ -76,6 +76,7 @@ impl TaskWorkspace {
         content: &str,
         author_agent_id: &str,
         entry_type: WorkspaceEntryType,
+        protected_keys: &[String],
     ) -> Result<(), String> {
         if content.len() > self.max_entry_size {
             tracing::warn!(
@@ -98,11 +99,12 @@ impl TaskWorkspace {
         }
 
         if self.entries.len() >= self.max_entries {
-            // Evict the oldest entry (by updated_at) to make room
+            // Evict the oldest non-protected entry (by updated_at) to make room
             if let Some(oldest_idx) = self
                 .entries
                 .iter()
                 .enumerate()
+                .filter(|(_, e)| !protected_keys.contains(&e.key))
                 .min_by_key(|(_, e)| e.updated_at)
                 .map(|(i, _)| i)
             {
@@ -112,6 +114,11 @@ impl TaskWorkspace {
                     "Workspace full — evicted oldest entry '{}' to make room for '{}'",
                     evicted_key, key
                 );
+            } else {
+                return Err(format!(
+                    "Workspace full ({} entries) and all are protected — cannot write '{}'",
+                    self.max_entries, key
+                ));
             }
         }
 
@@ -356,8 +363,8 @@ mod tests {
     #[test]
     fn test_workspace_write_and_read() {
         let mut ws = TaskWorkspace::default();
-        ws.write("key1", "hello", "agent_a", WorkspaceEntryType::Text).unwrap();
-        ws.write("key2", "world", "agent_b", WorkspaceEntryType::Summary).unwrap();
+        ws.write("key1", "hello", "agent_a", WorkspaceEntryType::Text, &[]).unwrap();
+        ws.write("key2", "world", "agent_b", WorkspaceEntryType::Summary, &[]).unwrap();
 
         let all = ws.read("");
         assert_eq!(all.len(), 2);
@@ -371,8 +378,8 @@ mod tests {
     #[test]
     fn test_workspace_upsert() {
         let mut ws = TaskWorkspace::default();
-        ws.write("key1", "v1", "agent_a", WorkspaceEntryType::Text).unwrap();
-        ws.write("key1", "v2", "agent_b", WorkspaceEntryType::Artifact).unwrap();
+        ws.write("key1", "v1", "agent_a", WorkspaceEntryType::Text, &[]).unwrap();
+        ws.write("key1", "v2", "agent_b", WorkspaceEntryType::Artifact, &[]).unwrap();
 
         assert_eq!(ws.entries.len(), 1);
         assert_eq!(ws.entries[0].content, "v2");
@@ -383,17 +390,17 @@ mod tests {
     #[test]
     fn test_workspace_caps_content() {
         let mut ws = TaskWorkspace { max_entry_size: 10, ..Default::default() };
-        ws.write("key1", "abcdefghijklmnop", "agent_a", WorkspaceEntryType::Text).unwrap();
+        ws.write("key1", "abcdefghijklmnop", "agent_a", WorkspaceEntryType::Text, &[]).unwrap();
         assert_eq!(ws.entries[0].content.len(), 10);
     }
 
     #[test]
     fn test_workspace_max_entries_evicts_oldest() {
         let mut ws = TaskWorkspace { max_entries: 2, ..Default::default() };
-        ws.write("k1", "a", "agent", WorkspaceEntryType::Text).unwrap();
-        ws.write("k2", "b", "agent", WorkspaceEntryType::Text).unwrap();
+        ws.write("k1", "a", "agent", WorkspaceEntryType::Text, &[]).unwrap();
+        ws.write("k2", "b", "agent", WorkspaceEntryType::Text, &[]).unwrap();
         // Third write should evict the oldest entry ("k1") instead of failing
-        let result = ws.write("k3", "c", "agent", WorkspaceEntryType::Text);
+        let result = ws.write("k3", "c", "agent", WorkspaceEntryType::Text, &[]);
         assert!(result.is_ok());
         assert_eq!(ws.entries.len(), 2);
         // k1 should be evicted, k2 and k3 should remain
@@ -405,8 +412,8 @@ mod tests {
     #[test]
     fn test_workspace_list_keys() {
         let mut ws = TaskWorkspace::default();
-        ws.write("research", "data", "agent_a", WorkspaceEntryType::Text).unwrap();
-        ws.write("outline", "structure", "agent_b", WorkspaceEntryType::Summary).unwrap();
+        ws.write("research", "data", "agent_a", WorkspaceEntryType::Text, &[]).unwrap();
+        ws.write("outline", "structure", "agent_b", WorkspaceEntryType::Summary, &[]).unwrap();
 
         let keys = ws.list_keys();
         assert_eq!(keys.len(), 2);
@@ -417,8 +424,8 @@ mod tests {
     #[test]
     fn test_workspace_format_for_prompt() {
         let mut ws = TaskWorkspace::default();
-        ws.write("research", "AI data", "agent_a", WorkspaceEntryType::Text).unwrap();
-        ws.write("outline", "sections", "agent_b", WorkspaceEntryType::Summary).unwrap();
+        ws.write("research", "AI data", "agent_a", WorkspaceEntryType::Text, &[]).unwrap();
+        ws.write("outline", "sections", "agent_b", WorkspaceEntryType::Summary, &[]).unwrap();
 
         // Format all
         let all = ws.format_for_prompt(&[]);
@@ -438,7 +445,7 @@ mod tests {
     #[test]
     fn test_workspace_roundtrip_in_task_state() {
         let mut state = TaskState::initial("Test workspace", &make_assignments());
-        state.workspace.write("key1", "data", "agent", WorkspaceEntryType::Text).unwrap();
+        state.workspace.write("key1", "data", "agent", WorkspaceEntryType::Text, &[]).unwrap();
 
         let json = state.to_json();
         let deserialized: TaskState = serde_json::from_str(&json).unwrap();
@@ -446,6 +453,31 @@ mod tests {
         assert_eq!(deserialized.workspace.entries.len(), 1);
         assert_eq!(deserialized.workspace.entries[0].key, "key1");
         assert_eq!(deserialized.workspace.entries[0].content, "data");
+    }
+
+    #[test]
+    fn test_workspace_eviction_respects_protected_keys() {
+        let mut ws = TaskWorkspace { max_entries: 2, ..Default::default() };
+        ws.write("k1", "a", "agent", WorkspaceEntryType::Text, &[]).unwrap();
+        ws.write("k2", "b", "agent", WorkspaceEntryType::Text, &[]).unwrap();
+        // k1 is protected, so k2 (the oldest unprotected) should be evicted
+        let result = ws.write("k3", "c", "agent", WorkspaceEntryType::Text, &["k1".to_string()]);
+        assert!(result.is_ok());
+        assert!(!ws.read("k1").is_empty()); // protected — kept
+        assert!(ws.read("k2").is_empty());  // evicted
+        assert!(!ws.read("k3").is_empty()); // written
+    }
+
+    #[test]
+    fn test_workspace_eviction_all_protected_returns_error() {
+        let mut ws = TaskWorkspace { max_entries: 2, ..Default::default() };
+        ws.write("k1", "a", "agent", WorkspaceEntryType::Text, &[]).unwrap();
+        ws.write("k2", "b", "agent", WorkspaceEntryType::Text, &[]).unwrap();
+        // Both existing keys are protected — write should fail
+        let result = ws.write("k3", "c", "agent", WorkspaceEntryType::Text,
+            &["k1".to_string(), "k2".to_string()]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("all are protected"));
     }
 
     #[test]
