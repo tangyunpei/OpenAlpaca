@@ -65,6 +65,10 @@ async fn retrieve_memory_block(
         return None;
     }
 
+    // Track access for importance decay
+    let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
+    let _ = repo.touch_accessed(&ids);
+
     let mut block = String::from("### RETRIEVED MEMORY ###\n");
     let mut budget = 2000usize;
     for m in &memories {

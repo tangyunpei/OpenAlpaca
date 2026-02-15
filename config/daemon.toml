@@ -29,6 +29,13 @@ msg_trunc_chars = 1500
 prompt_recent_messages = 40
 summary_max_chars = 4000
 summary_min_new_older_messages = 12
+supersession_distance_threshold = 1.0
+
+[orchestrator.memory.decay]
+poll_interval_secs = 3600
+half_life_days = 30.0
+min_importance = 0.05
+soft_cap = 500
 
 [orchestrator.prompt_budgets]
 identity_budget = 300

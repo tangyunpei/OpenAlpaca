@@ -38,6 +38,10 @@ fn row_to_memory_v2(row: &rusqlite::Row<'_>) -> Result<MemoryV2> {
         .transpose()
         .context("Invalid memory metadata JSON")?;
 
+    let updated_at: Option<String> = row.get(12)?;
+    let supersedes_id: Option<i64> = row.get(13)?;
+    let last_accessed_at: Option<String> = row.get(14)?;
+
     Ok(MemoryV2 {
         id,
         owner_id,
@@ -51,15 +55,18 @@ fn row_to_memory_v2(row: &rusqlite::Row<'_>) -> Result<MemoryV2> {
         confidence,
         created_at,
         metadata,
+        updated_at,
+        supersedes_id,
+        last_accessed_at,
     })
 }
 
 const ALL_COLUMNS: &str =
-    "m.id, m.owner_id, m.kind, m.scope, m.scope_id, m.source, m.content, m.content_hash, m.importance, m.confidence, m.created_at, m.metadata";
+    "m.id, m.owner_id, m.kind, m.scope, m.scope_id, m.source, m.content, m.content_hash, m.importance, m.confidence, m.created_at, m.metadata, m.updated_at, m.supersedes_id, m.last_accessed_at";
 
 /// Unqualified columns for non-JOIN queries (uses implicit table alias).
 const ALL_COLUMNS_PLAIN: &str =
-    "id, owner_id, kind, scope, scope_id, source, content, content_hash, importance, confidence, created_at, metadata";
+    "id, owner_id, kind, scope, scope_id, source, content, content_hash, importance, confidence, created_at, metadata, updated_at, supersedes_id, last_accessed_at";
 
 impl<'a> MemoryRepository<'a> {
     pub fn new(db: &'a Database) -> Self {
@@ -315,6 +322,255 @@ impl<'a> MemoryRepository<'a> {
                 Some(row) => Ok(Some(row_to_memory_v2(row)?)),
                 None => Ok(None),
             }
+        })
+    }
+
+    // ── Lifecycle methods (migration 018) ───────────────────────────────
+
+    /// Batch-update `last_accessed_at` for a set of memory IDs.
+    /// Called after retrieval (proactive injection or memory_search tool).
+    pub fn touch_accessed(&self, ids: &[i64]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.db.with_connection(|conn| {
+            let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "UPDATE memory SET last_accessed_at = datetime('now') WHERE id IN ({placeholders})"
+            );
+            let params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                ids.iter().map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>).collect();
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+            conn.execute(&sql, param_refs.as_slice())?;
+            Ok(())
+        })
+    }
+
+    /// Find semantically similar memories for supersession using vector search.
+    /// Only matches Fact and Preference kinds (excludes KbChunk).
+    /// Returns `Vec<(MemoryV2, f64)>` sorted by L2 distance ascending.
+    pub fn find_similar_for_supersession(
+        &self,
+        owner_id: &str,
+        embedding: &[f32],
+        distance_threshold: f64,
+        limit: usize,
+    ) -> Result<Vec<(MemoryV2, f64)>> {
+        self.db.with_connection(|conn| {
+            let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+            let k = (limit * 5) as i64;
+            let sql = format!(
+                "SELECT {ALL_COLUMNS}, v.distance FROM memory m
+                 JOIN (
+                     SELECT memory_id, distance FROM memory_vec
+                     WHERE embedding MATCH ?1 AND k = ?2
+                 ) v ON m.id = v.memory_id
+                 WHERE m.owner_id = ?3
+                   AND m.kind IN ('fact', 'preference')
+                   AND v.distance < ?4
+                 ORDER BY v.distance ASC
+                 LIMIT ?5"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mut rows = stmt.query(rusqlite::params![
+                blob, k, owner_id, distance_threshold, limit as i64
+            ])?;
+            let mut results = Vec::new();
+            while let Some(row) = rows.next()? {
+                let memory = row_to_memory_v2(row)?;
+                let distance: f64 = row.get(15)?; // column after the 15 memory columns
+                results.push((memory, distance));
+            }
+            Ok(results)
+        })
+    }
+
+    /// FTS-based fallback for supersession when vector search is unavailable.
+    /// Extracts key terms from content and searches for matching Fact/Preference memories.
+    pub fn find_similar_fts_fallback(
+        &self,
+        owner_id: &str,
+        content: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryV2>> {
+        // Extract key terms from content (first 200 chars to avoid FTS5 query length issues)
+        let query_terms: String = content
+            .chars()
+            .take(200)
+            .collect::<String>()
+            .split_whitespace()
+            .filter(|w| w.len() > 2)
+            .take(8)
+            .collect::<Vec<_>>()
+            .join(" OR ");
+
+        if query_terms.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let all = self.search_fts(owner_id, &query_terms, limit * 2, None, None, None)?;
+        Ok(all
+            .into_iter()
+            .filter(|m| m.kind == MemoryKind::Fact || m.kind == MemoryKind::Preference)
+            .take(limit)
+            .collect())
+    }
+
+    /// Supersede an existing memory: insert a new memory and mark the old one.
+    ///
+    /// The new memory gets `supersedes_id = existing_id` and `importance = max(old, new)`.
+    /// The old memory gets `importance = 0.1` and `updated_at = now` so decay will prune it.
+    ///
+    /// Returns the new memory's id, or 0 if the new content already exists (hash collision).
+    pub fn supersede(
+        &self,
+        existing_id: i64,
+        new_content: &str,
+        new_kind: MemoryKind,
+        new_scope: MemoryScope,
+        new_scope_id: &str,
+        new_source: MemorySource,
+        new_importance: f64,
+        new_confidence: f64,
+        new_metadata: Option<&serde_json::Value>,
+    ) -> Result<i64> {
+        let new_hash = content_hash(new_content);
+        self.db.with_connection_mut(|conn| {
+            let tx = conn.transaction()?;
+
+            // Get the existing memory's owner_id and importance
+            let (owner_id, existing_importance): (String, f64) = tx.query_row(
+                "SELECT owner_id, importance FROM memory WHERE id = ?1",
+                [existing_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+
+            let final_importance = existing_importance.max(new_importance);
+
+            // Insert new memory (INSERT OR IGNORE handles hash collision)
+            tx.execute(
+                "INSERT OR IGNORE INTO memory
+                 (owner_id, kind, scope, scope_id, source, content, content_hash,
+                  importance, confidence, metadata, supersedes_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                rusqlite::params![
+                    owner_id,
+                    new_kind.as_str(),
+                    new_scope.as_str(),
+                    new_scope_id,
+                    new_source.as_str(),
+                    new_content,
+                    new_hash,
+                    final_importance,
+                    new_confidence,
+                    new_metadata.map(|v| v.to_string()),
+                    existing_id,
+                ],
+            )?;
+
+            if tx.changes() == 0 {
+                // Hash collision with existing memory — skip
+                tx.commit()?;
+                return Ok(0);
+            }
+
+            let new_id = tx.last_insert_rowid();
+
+            // Mark old memory: reduce importance so decay will eventually prune it
+            tx.execute(
+                "UPDATE memory SET importance = 0.1, updated_at = datetime('now') WHERE id = ?1",
+                [existing_id],
+            )?;
+
+            tx.commit()?;
+            Ok(new_id)
+        })
+    }
+
+    /// Apply exponential decay to importance for non-KbChunk memories.
+    ///
+    /// Formula: `importance *= exp(-ln(2) * days_since_access / half_life_days)`
+    /// Uses `COALESCE(last_accessed_at, created_at)` as reference time.
+    /// Returns the number of memories updated.
+    pub fn apply_importance_decay(
+        &self,
+        owner_id: &str,
+        half_life_days: f64,
+        min_importance: f64,
+    ) -> Result<usize> {
+        self.db.with_connection(|conn| {
+            let updated = conn.execute(
+                "UPDATE memory SET
+                    importance = MAX(?1, importance * EXP(-0.693147 * (julianday('now') - julianday(COALESCE(last_accessed_at, created_at))) / ?2))
+                 WHERE owner_id = ?3
+                   AND kind != 'kb_chunk'
+                   AND importance > ?1",
+                rusqlite::params![min_importance, half_life_days, owner_id],
+            )?;
+            Ok(updated)
+        })
+    }
+
+    /// Prune memories with low importance and enforce a soft cap per owner.
+    ///
+    /// Phase 1: Delete non-KbChunk memories below `min_importance`.
+    /// Phase 2: If still over `soft_cap`, delete excess lowest-importance entries.
+    /// Returns the total number of memories deleted.
+    pub fn prune_low_importance(
+        &self,
+        owner_id: &str,
+        min_importance: f64,
+        soft_cap: usize,
+    ) -> Result<usize> {
+        self.db.with_connection_mut(|conn| {
+            let tx = conn.transaction()?;
+
+            // Phase 1: Delete memories below minimum importance (excluding KbChunk)
+            let deleted_threshold = tx.execute(
+                "DELETE FROM memory WHERE owner_id = ?1 AND kind != 'kb_chunk' AND importance < ?2",
+                rusqlite::params![owner_id, min_importance],
+            )?;
+
+            // Phase 2: If still over soft cap, delete lowest-importance non-KbChunk memories
+            let current_count: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM memory WHERE owner_id = ?1 AND kind != 'kb_chunk'",
+                [owner_id],
+                |row| row.get(0),
+            )?;
+
+            let deleted_cap = if current_count as usize > soft_cap {
+                let excess = (current_count as usize - soft_cap) as i64;
+                tx.execute(
+                    "DELETE FROM memory WHERE id IN (
+                        SELECT id FROM memory
+                        WHERE owner_id = ?1 AND kind != 'kb_chunk'
+                        ORDER BY importance ASC
+                        LIMIT ?2
+                    )",
+                    rusqlite::params![owner_id, excess],
+                )?
+            } else {
+                0
+            };
+
+            // Clean up orphaned memory_vec entries
+            tx.execute(
+                "DELETE FROM memory_vec WHERE memory_id NOT IN (SELECT id FROM memory)",
+                [],
+            )?;
+
+            tx.commit()?;
+            Ok(deleted_threshold + deleted_cap)
+        })
+    }
+
+    /// List all distinct owner_ids in the memory table.
+    pub fn list_owner_ids(&self) -> Result<Vec<String>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare("SELECT DISTINCT owner_id FROM memory")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         })
     }
 }
