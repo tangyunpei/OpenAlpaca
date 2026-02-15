@@ -2037,12 +2037,21 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     {
         let decay_db = db.clone();
         let decay_daemon_config = daemon_config.clone();
+        let decay_cancel = cancel_token.clone();
         tokio::spawn(async move {
             loop {
                 let dcfg = decay_daemon_config.load();
                 let decay_cfg = &dcfg.orchestrator.memory.decay;
                 let poll_secs = decay_cfg.poll_interval_secs;
-                tokio::time::sleep(tokio::time::Duration::from_secs(poll_secs)).await;
+
+                // Wait for next poll interval, or exit on shutdown
+                tokio::select! {
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(poll_secs)) => {}
+                    _ = decay_cancel.cancelled() => {
+                        tracing::info!("Memory decay task shutting down");
+                        break;
+                    }
+                }
 
                 let half_life = dcfg.orchestrator.memory.decay.half_life_days;
                 let min_importance = dcfg.orchestrator.memory.decay.min_importance;

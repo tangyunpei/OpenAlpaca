@@ -23,6 +23,9 @@ extract_every_n_turns = 5
 extract_max_daily_cost_usd = 0.25
 extract_min_content_len = 20
 summary_max_daily_cost_usd = 0.5
+task_extract_enabled = true
+task_extract_max_daily_cost_usd = 0.50
+task_extract_min_content_len = 100
 
 [orchestrator.memory]
 msg_trunc_chars = 1500
@@ -30,6 +33,7 @@ prompt_recent_messages = 40
 summary_max_chars = 4000
 summary_min_new_older_messages = 12
 supersession_distance_threshold = 1.0
+fts_jaccard_threshold = 0.4
 
 [orchestrator.memory.decay]
 poll_interval_secs = 3600
