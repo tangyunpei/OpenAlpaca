@@ -280,6 +280,9 @@ impl Orchestrator {
             let jaccard_threshold = dcfg.orchestrator.memory.fts_jaccard_threshold;
 
             for item in &memory_items {
+                // User trait memories use Global scope intentionally:
+                // user preferences and personality traits are universal,
+                // not workspace-specific (e.g., "prefers dark mode" applies everywhere).
                 persist_memory_item(
                     &repo,
                     &self.embedder,

@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use crate::tools::ToolRegistry;
 
+use crate::memory::scope_context::MemoryScopeContext;
 use crate::memory::task_extraction::{TaskExtractionParams, extract_task_memories};
 use openalpaca_storage::repository::MemoryRepository;
 use super::skill_matcher::{SkillMatch, SkillMatcher};
@@ -27,12 +28,17 @@ use super::task_planner::TaskPlan;
 
 /// Retrieve relevant user memories as a formatted block for agent prompts.
 /// Mirrors the retrieval pattern used in `handle_simple_query()`.
+///
+/// When `scope_ctx` is provided, uses cascading search (Workspace → Global).
+/// When `None`, falls back to unscoped global search (backward compatibility for
+/// pipeline and lead_agent contexts that don't yet carry scope context).
 pub(super) async fn retrieve_memory_block(
     db: &Database,
     embedder: Option<&Arc<dyn openalpaca_llm::Embedder>>,
     owner_id: &str,
     query: &str,
     top_k: usize,
+    scope_ctx: Option<&MemoryScopeContext>,
 ) -> Option<String> {
     let repo = MemoryRepository::new(db);
     let query_embedding = if let Some(embedder) = embedder {
@@ -44,8 +50,19 @@ pub(super) async fn retrieve_memory_block(
     } else {
         None
     };
-    let memories = repo
-        .search_hybrid(
+    let memories = if let Some(ctx) = scope_ctx {
+        let cascade_scopes = ctx.cascade_scopes();
+        repo.search_hybrid_cascade(
+            owner_id,
+            query,
+            query_embedding.as_deref(),
+            top_k,
+            None,
+            &cascade_scopes,
+        )
+        .unwrap_or_default()
+    } else {
+        repo.search_hybrid(
             owner_id,
             query,
             query_embedding.as_deref(),
@@ -54,7 +71,8 @@ pub(super) async fn retrieve_memory_block(
             None,
             None,
         )
-        .unwrap_or_default();
+        .unwrap_or_default()
+    };
 
     if memories.is_empty() {
         return None;
@@ -96,6 +114,7 @@ pub(super) fn spawn_task_memory_extraction(
     task_output: &str,
     source_path: &str,
     success: bool,
+    workspace_id: Option<String>,
 ) {
     if !success {
         return;
@@ -111,6 +130,7 @@ pub(super) fn spawn_task_memory_extraction(
         task_description: task_description.to_string(),
         task_output: task_output.to_string(),
         source_path: source_path.to_string(),
+        workspace_id,
     };
     let db = db.clone();
     let router = router.clone();

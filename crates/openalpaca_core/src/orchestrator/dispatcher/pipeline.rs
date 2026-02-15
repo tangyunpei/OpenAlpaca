@@ -190,8 +190,9 @@ impl TaskDispatcher {
                 // Inject memory context for the first agent in the pipeline
                 if step == 0 {
                     if let Some(ref db) = db {
+                        // TODO: Wire workspace scope_ctx through dispatch paths
                         if let Some(block) = retrieve_memory_block(
-                            db, embedder.as_ref(), &created_by, &description, 5,
+                            db, embedder.as_ref(), &created_by, &description, 5, None,
                         ).await {
                             messages.push(ChatMessage::system(&block));
                         }
@@ -565,6 +566,7 @@ impl TaskDispatcher {
 
             // Memory extraction from pipeline output (non-blocking)
             if let (Some(db), Some(output)) = (&db, &extraction_content) {
+                // TODO: Wire workspace_id through dispatch paths
                 spawn_task_memory_extraction(
                     db,
                     &router,
@@ -576,6 +578,7 @@ impl TaskDispatcher {
                     output,
                     "pipeline",
                     pipeline_success,
+                    None,
                 );
             }
         });

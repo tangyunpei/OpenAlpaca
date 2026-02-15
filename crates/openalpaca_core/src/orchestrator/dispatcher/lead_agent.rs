@@ -353,6 +353,7 @@ impl TaskDispatcher {
 
             // Memory extraction from lead agent output (non-blocking)
             if let Some(ref db) = db {
+                // TODO: Wire workspace_id through dispatch paths
                 spawn_task_memory_extraction(
                     db,
                     &router,
@@ -364,6 +365,7 @@ impl TaskDispatcher {
                     &final_content,
                     "lead_agent",
                     result.success,
+                    None,
                 );
             }
 

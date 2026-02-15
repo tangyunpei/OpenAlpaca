@@ -1,5 +1,6 @@
 use super::{principal_id, role_label, ConversationContext, Orchestrator};
 use crate::events::SystemEvent;
+use crate::memory::scope_context::MemoryScopeContext;
 use crate::security::gate::SecurityGate;
 use crate::security::policy::{Principal, Scope};
 use crate::types::Capability;
@@ -42,6 +43,12 @@ impl Orchestrator {
             Principal::User { .. } => Some(owner_id_str.as_str()),
             _ => None,
         };
+
+        // Resolve workspace context for memory scoping
+        let workspace_id = std::env::current_dir()
+            .ok()
+            .and_then(|d| crate::memory::workspace::resolve_workspace_id(&d));
+        let scope_ctx = MemoryScopeContext::new(workspace_id);
 
         // 3. Try slash commands, task queries, and skill invocations first
         let intent = self.intent_parser.parse_with_skills(&content, &self.skill_catalog);
@@ -114,7 +121,7 @@ impl Orchestrator {
                             timestamp: Utc::now(),
                         });
                         self.handle_simple_query(
-                            request_id, &source, &content, &lane_key, &ctx, owner_id,
+                            request_id, &source, &content, &lane_key, &ctx, owner_id, &scope_ctx,
                         )
                         .await
                     }
@@ -139,7 +146,7 @@ impl Orchestrator {
                                     "Dispatch planned failed: {e}, falling back to simple_query"
                                 );
                                 self.handle_simple_query(
-                                    request_id, &source, &content, &lane_key, &ctx, owner_id,
+                                    request_id, &source, &content, &lane_key, &ctx, owner_id, &scope_ctx,
                                 )
                                 .await
                             }
@@ -151,7 +158,7 @@ impl Orchestrator {
                             _other
                         );
                         self.dispatch_with_heuristic(
-                            request_id, &source, &content, &principal, &lane_key, &ctx, owner_id,
+                            request_id, &source, &content, &principal, &lane_key, &ctx, owner_id, &scope_ctx,
                         )
                         .await
                     }
@@ -159,7 +166,7 @@ impl Orchestrator {
                 Err(e) => {
                     tracing::warn!("LLM planning failed: {}, falling back to heuristic", e);
                     self.dispatch_with_heuristic(
-                        request_id, &source, &content, &principal, &lane_key, &ctx, owner_id,
+                        request_id, &source, &content, &principal, &lane_key, &ctx, owner_id, &scope_ctx,
                     )
                     .await
                 }
@@ -167,7 +174,7 @@ impl Orchestrator {
         } else {
             // No LLM router — keyword heuristic
             self.dispatch_with_heuristic(
-                request_id, &source, &content, &principal, &lane_key, &ctx, owner_id,
+                request_id, &source, &content, &principal, &lane_key, &ctx, owner_id, &scope_ctx,
             )
             .await
         };
@@ -224,6 +231,7 @@ impl Orchestrator {
         lane_key: &str,
         ctx: &ConversationContext,
         owner_id: Option<&str>,
+        scope_ctx: &MemoryScopeContext,
     ) -> Result<String, String> {
         let intent = self.intent_parser.parse_with_skills(content, &self.skill_catalog);
 
@@ -235,7 +243,7 @@ impl Orchestrator {
 
         match intent {
             Intent::SimpleQuery { query } => {
-                self.handle_simple_query(request_id, source, &query, lane_key, ctx, owner_id)
+                self.handle_simple_query(request_id, source, &query, lane_key, ctx, owner_id, scope_ctx)
                     .await
             }
             Intent::TaskQuery { task_id } => {
@@ -266,6 +274,7 @@ impl Orchestrator {
                             lane_key,
                             ctx,
                             owner_id,
+                            scope_ctx,
                         )
                         .await
                     }
@@ -273,14 +282,14 @@ impl Orchestrator {
             }
             Intent::TaskControl { task_id, action } => self.handle_task_control(&task_id, &action),
             Intent::RememberCommand { content } => {
-                self.handle_remember_command(&content, owner_id).await
+                self.handle_remember_command(&content, owner_id, scope_ctx).await
             }
             Intent::ForgetCommand { content } => {
                 self.handle_forget_command(&content, owner_id).await
             }
             Intent::SkillInvocation { skill_name, query } => {
                 self.handle_skill_invocation(
-                    request_id, source, &skill_name, &query, lane_key, ctx, owner_id,
+                    request_id, source, &skill_name, &query, lane_key, ctx, owner_id, scope_ctx,
                 )
                 .await
             }
