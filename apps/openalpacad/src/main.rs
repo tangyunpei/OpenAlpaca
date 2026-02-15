@@ -2017,7 +2017,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                         let mut count = 0usize;
                         for ((id, _), embedding) in missing.iter().zip(embeddings.iter()) {
                             if embedding.len() == idx_emb.dimensions() as usize {
-                                let _ = repo.insert_embedding(*id, embedding);
+                                if let Err(e) = repo.insert_embedding(*id, embedding) {
+                                    tracing::warn!("Failed to insert embedding for memory #{id}: {e}");
+                                }
                                 count += 1;
                             }
                         }
@@ -2026,6 +2028,63 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                         }
                     }
                     Err(e) => tracing::warn!("Embedding batch failed: {e}"),
+                }
+            }
+        });
+    }
+
+    // Step 6.5: Spawn background memory decay task
+    {
+        let decay_db = db.clone();
+        let decay_daemon_config = daemon_config.clone();
+        let decay_cancel = cancel_token.clone();
+        tokio::spawn(async move {
+            loop {
+                let dcfg = decay_daemon_config.load();
+                let decay_cfg = &dcfg.orchestrator.memory.decay;
+                let poll_secs = decay_cfg.poll_interval_secs;
+
+                // Wait for next poll interval, or exit on shutdown
+                tokio::select! {
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(poll_secs)) => {}
+                    _ = decay_cancel.cancelled() => {
+                        tracing::info!("Memory decay task shutting down");
+                        break;
+                    }
+                }
+
+                let half_life = dcfg.orchestrator.memory.decay.half_life_days;
+                let min_importance = dcfg.orchestrator.memory.decay.min_importance;
+                let soft_cap = dcfg.orchestrator.memory.decay.soft_cap;
+
+                let repo = openalpaca_storage::MemoryRepository::new(&decay_db);
+
+                let owner_ids = match repo.list_owner_ids() {
+                    Ok(ids) => ids,
+                    Err(e) => {
+                        tracing::warn!("Memory decay: failed to list owners: {e}");
+                        continue;
+                    }
+                };
+
+                let mut total_decayed = 0usize;
+                let mut total_pruned = 0usize;
+
+                for owner_id in &owner_ids {
+                    match repo.apply_importance_decay(owner_id, half_life, min_importance) {
+                        Ok(n) => total_decayed += n,
+                        Err(e) => tracing::warn!("Memory decay failed for {owner_id}: {e}"),
+                    }
+                    match repo.prune_low_importance(owner_id, min_importance, soft_cap) {
+                        Ok(n) => total_pruned += n,
+                        Err(e) => tracing::warn!("Memory pruning failed for {owner_id}: {e}"),
+                    }
+                }
+
+                if total_decayed > 0 || total_pruned > 0 {
+                    tracing::info!(
+                        "Memory lifecycle: decayed {total_decayed} memories, pruned {total_pruned}"
+                    );
                 }
             }
         });

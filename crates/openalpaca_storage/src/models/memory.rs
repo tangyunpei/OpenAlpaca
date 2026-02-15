@@ -17,6 +17,13 @@ pub struct MemoryV2 {
     pub confidence: f64,
     pub created_at: String,
     pub metadata: Option<serde_json::Value>,
+    // --- Lifecycle fields (migration 018) ---
+    /// When this memory was last modified (e.g. via supersession).
+    pub updated_at: Option<String>,
+    /// If this memory superseded another, the old memory's id.
+    pub supersedes_id: Option<i64>,
+    /// Last time this memory was retrieved (for importance decay).
+    pub last_accessed_at: Option<String>,
 }
 
 /// The type of memory entry.

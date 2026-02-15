@@ -60,6 +60,15 @@ pub struct MemoryConfig {
     pub summary_max_chars: usize,
     /// Character limit for message truncation in summary input.
     pub msg_trunc_chars: usize,
+    /// L2 distance threshold for semantic supersession (lower = stricter).
+    /// Memories within this distance are considered "same topic" and will be superseded.
+    pub supersession_distance_threshold: f64,
+    /// Jaccard word-overlap threshold for FTS-based supersession fallback.
+    /// Only memories with overlap >= this value are considered for supersession
+    /// when the embedder is unavailable. Range: 0.0–1.0.
+    pub fts_jaccard_threshold: f64,
+    /// Decay and pruning configuration.
+    pub decay: MemoryDecayConfig,
 }
 
 impl Default for MemoryConfig {
@@ -69,6 +78,34 @@ impl Default for MemoryConfig {
             summary_min_new_older_messages: 12,
             summary_max_chars: 4000,
             msg_trunc_chars: 1500,
+            supersession_distance_threshold: 1.0,
+            fts_jaccard_threshold: 0.4,
+            decay: MemoryDecayConfig::default(),
+        }
+    }
+}
+
+/// Configuration for memory importance decay and pruning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryDecayConfig {
+    /// How often to run the decay task (seconds).
+    pub poll_interval_secs: u64,
+    /// Half-life in days: after this many days without access, importance drops by 50%.
+    pub half_life_days: f64,
+    /// Minimum importance floor. Memories below this are eligible for pruning.
+    pub min_importance: f64,
+    /// Soft cap on total non-KbChunk memories per owner. Excess is pruned by lowest importance.
+    pub soft_cap: usize,
+}
+
+impl Default for MemoryDecayConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: 3600,
+            half_life_days: 30.0,
+            min_importance: 0.05,
+            soft_cap: 500,
         }
     }
 }
@@ -84,6 +121,12 @@ pub struct CostsConfig {
     pub extract_every_n_turns: usize,
     /// Minimum content length (chars) to trigger extraction.
     pub extract_min_content_len: usize,
+    /// Whether task output memory extraction is enabled.
+    pub task_extract_enabled: bool,
+    /// Maximum daily cost (USD) for task output memory extractions.
+    pub task_extract_max_daily_cost_usd: f64,
+    /// Minimum content length (chars) for task output to trigger extraction.
+    pub task_extract_min_content_len: usize,
 }
 
 impl Default for CostsConfig {
@@ -93,6 +136,9 @@ impl Default for CostsConfig {
             extract_max_daily_cost_usd: 0.25,
             extract_every_n_turns: 5,
             extract_min_content_len: 20,
+            task_extract_enabled: true,
+            task_extract_max_daily_cost_usd: 0.50,
+            task_extract_min_content_len: 100,
         }
     }
 }

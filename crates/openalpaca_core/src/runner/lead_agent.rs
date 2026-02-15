@@ -498,6 +498,7 @@ pub async fn run_lead_agent(
     shared_context: Arc<SharedContext>,
     bus: EventBus,
     db: Option<Database>,
+    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     task_id: &str,
     created_by: &str,
     daemon_config: &Arc<ArcSwap<DaemonConfig>>,
@@ -512,9 +513,13 @@ pub async fn run_lead_agent(
     // 2. Build spawn_subagent tool definition with dynamic agent list
     let spawn_tool_def = spawn_subagent_tool_definition(&worker_agents);
 
-    // 3. Build tools: spawn_subagent + workspace_read + workspace_write
+    // 3. Build tools: spawn_subagent + workspace_read + workspace_write + memory_search
     let mut tools = vec![spawn_tool_def];
     tools.extend(crate::tools::builtins::workspace_tool_definitions());
+    // Add memory_search so the lead agent can query user memories directly
+    if let Some(mem_tool) = tool_registry.get("memory_search") {
+        tools.push(mem_tool.definition.clone());
+    }
 
     // 4. Build LeadAgentToolExecutor
     let spawn_tool = Arc::new(SpawnSubagentTool::new(
@@ -552,11 +557,57 @@ pub async fn run_lead_agent(
     let tool_guidance = format_tool_guidance(&tools);
     let full_system = format!("{}{}", system_prompt, tool_guidance);
 
-    // 7. Build messages
-    let messages = vec![
-        ChatMessage::system(&full_system),
-        ChatMessage::user(task_description),
-    ];
+    // 7. Build messages (with proactive memory injection)
+    let mut messages = vec![ChatMessage::system(&full_system)];
+
+    // Inject retrieved memory context so lead agent has user preferences/facts
+    if let Some(ref db) = db {
+        let repo = openalpaca_storage::repository::MemoryRepository::new(db);
+        let query_embedding = if let Some(ref emb) = embedder {
+            emb.embed(&[task_description])
+                .await
+                .ok()
+                .and_then(|v| v.into_iter().next())
+        } else {
+            None
+        };
+        let memories = repo
+            .search_hybrid(
+                created_by,
+                task_description,
+                query_embedding.as_deref(),
+                5,
+                None,
+                None,
+                None,
+            )
+            .unwrap_or_default();
+        if !memories.is_empty() {
+            // Track access for importance decay
+            let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
+            if let Err(e) = repo.touch_accessed(&ids) {
+                tracing::warn!("Failed to track memory access: {e}");
+            }
+
+            let mut block = String::from("### RETRIEVED MEMORY ###\n");
+            let mut budget = 2000usize;
+            for m in &memories {
+                let entry = format!(
+                    "- [{}] {}\n",
+                    m.kind.as_str(),
+                    m.content.chars().take(300).collect::<String>()
+                );
+                if entry.len() > budget {
+                    break;
+                }
+                budget -= entry.len();
+                block.push_str(&entry);
+            }
+            messages.push(ChatMessage::system(&block));
+        }
+    }
+
+    messages.push(ChatMessage::user(task_description));
 
     // 8. Build LoopConfig from lead agent's constraints (agent overrides daemon defaults)
     let ld = &daemon_config.load().execution.lead_agent_defaults;

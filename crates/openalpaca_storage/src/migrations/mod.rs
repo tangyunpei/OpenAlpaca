@@ -96,4 +96,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "vec_768",
         sql: include_str!("017_vec_768.sql"),
     },
+    Migration {
+        version: 18,
+        name: "memory_lifecycle",
+        sql: include_str!("018_memory_lifecycle.sql"),
+    },
 ];

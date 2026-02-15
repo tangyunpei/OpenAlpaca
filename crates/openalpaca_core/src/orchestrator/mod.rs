@@ -33,6 +33,7 @@ use crate::security::gate::SecurityGate;
 use crate::security::policy::{Principal, Scope};
 use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
+use crate::memory::task_extraction::{PersistResult, persist_memory_item};
 use crate::tools::ToolRegistry;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 use crate::types::Capability;
@@ -132,6 +133,7 @@ impl Orchestrator {
             security_gate.clone(),
             tool_registry.clone(),
             db.clone(),
+            embedder.clone(),
             daemon_config.clone(),
         );
         Self {
@@ -876,35 +878,30 @@ impl Orchestrator {
             }
         }
 
-        // Write memory-level items to Memory v2
+        // Write memory-level items to Memory v2 (with supersession)
         if !memory_items.is_empty() {
             let repo = MemoryRepository::new(db);
+            let dcfg = self.daemon_config.load();
+            let supersession_threshold = dcfg.orchestrator.memory.supersession_distance_threshold;
+            let jaccard_threshold = dcfg.orchestrator.memory.fts_jaccard_threshold;
+
             for item in &memory_items {
-                match repo.add(
+                persist_memory_item(
+                    &repo,
+                    &self.embedder,
                     oid,
+                    item,
                     openalpaca_storage::models::memory::MemoryKind::Preference,
                     openalpaca_storage::models::memory::MemoryScope::Global,
                     "",
                     openalpaca_storage::models::memory::MemorySource::Conversation,
-                    item,
+                    0.6,
+                    0.7,
                     None,
-                    0.6, // moderate importance: inferred, not explicit
-                    0.7, // moderate confidence: from extraction
-                ) {
-                    Ok(new_id) if new_id > 0 => {
-                        // Embed if embedder available
-                        if let Some(ref embedder) = self.embedder {
-                            if let Ok(embeddings) = embedder.embed(&[item.as_str()]).await {
-                                if let Some(embedding) = embeddings.into_iter().next() {
-                                    let _ = repo.insert_embedding(new_id, &embedding);
-                                }
-                            }
-                        }
-                        tracing::debug!("Extraction: stored memory preference: {}", &item[..item.len().min(60)]);
-                    }
-                    Ok(_) => {} // duplicate, skip
-                    Err(e) => tracing::warn!("Extraction: failed to store memory: {e}"),
-                }
+                    supersession_threshold,
+                    jaccard_threshold,
+                )
+                .await;
             }
         }
 
@@ -1502,6 +1499,12 @@ impl Orchestrator {
                     .unwrap_or_default();
 
                 if !memories.is_empty() {
+                    // Track access for importance decay
+                    let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
+                    if let Err(e) = repo.touch_accessed(&ids) {
+                        tracing::warn!("Failed to track memory access: {e}");
+                    }
+
                     let mut block = String::from("### RETRIEVED MEMORY ###\n");
                     let mut budget = 2000usize;
                     for m in &memories {
@@ -1837,6 +1840,12 @@ impl Orchestrator {
                     .unwrap_or_default();
 
                 if !memories.is_empty() {
+                    // Track access for importance decay
+                    let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
+                    if let Err(e) = repo.touch_accessed(&ids) {
+                        tracing::warn!("Failed to track memory access: {e}");
+                    }
+
                     let mut block = String::from("### RETRIEVED MEMORY ###\n");
                     let mut budget = 2000usize;
                     for m in &memories {
@@ -2135,6 +2144,7 @@ impl Orchestrator {
     }
 
     /// Handle "remember X" commands by storing in Memory v2 as a Preference.
+    /// Checks for semantically similar existing memories and supersedes if found.
     async fn handle_remember_command(
         &self,
         content: &str,
@@ -2144,34 +2154,44 @@ impl Orchestrator {
 
         if let Some(ref db) = self.db {
             let repo = MemoryRepository::new(db);
+            let dcfg = self.daemon_config.load();
+            let supersession_threshold = dcfg.orchestrator.memory.supersession_distance_threshold;
+            let jaccard_threshold = dcfg.orchestrator.memory.fts_jaccard_threshold;
 
-            // Store as a high-confidence preference in Memory v2
-            let result = repo
-                .add(
-                    oid,
-                    openalpaca_storage::models::memory::MemoryKind::Preference,
-                    openalpaca_storage::models::memory::MemoryScope::Global,
-                    "",
-                    openalpaca_storage::models::memory::MemorySource::Conversation,
-                    content,
-                    None,
-                    0.9,  // high importance: explicit user instruction
-                    1.0,  // max confidence: user said it directly
-                )
-                .map_err(|e| format!("Failed to store memory: {}", e))?;
+            let result = persist_memory_item(
+                &repo,
+                &self.embedder,
+                oid,
+                content,
+                openalpaca_storage::models::memory::MemoryKind::Preference,
+                openalpaca_storage::models::memory::MemoryScope::Global,
+                "",
+                openalpaca_storage::models::memory::MemorySource::Conversation,
+                0.9,
+                1.0,
+                None,
+                supersession_threshold,
+                jaccard_threshold,
+            )
+            .await;
 
-            if result == 0 {
-                Ok("I already have that noted.".to_string())
-            } else {
-                // If there's an embedder, try to embed the new memory
-                if let Some(ref embedder) = self.embedder {
-                    if let Ok(embeddings) = embedder.embed(&[content]).await {
-                        if let Some(embedding) = embeddings.into_iter().next() {
-                            let _ = repo.insert_embedding(result, &embedding);
-                        }
-                    }
+            match result {
+                PersistResult::Superseded { old_content, .. } => {
+                    Ok(format!(
+                        "Got it, I've updated my memory (was: \"{}\"): {}",
+                        old_content.chars().take(50).collect::<String>(),
+                        content
+                    ))
                 }
-                Ok(format!("Got it, I'll remember that: {}", content))
+                PersistResult::Inserted(_) => {
+                    Ok(format!("Got it, I'll remember that: {}", content))
+                }
+                PersistResult::Duplicate => {
+                    Ok("I already have that noted.".to_string())
+                }
+                PersistResult::Error(e) => {
+                    Err(format!("Failed to store memory: {}", e))
+                }
             }
         } else {
             Err("Memory system is not available.".to_string())

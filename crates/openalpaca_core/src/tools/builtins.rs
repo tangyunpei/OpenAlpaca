@@ -545,6 +545,14 @@ impl BuiltInTool for MemorySearchTool {
             )
             .map_err(|e| format!("Memory search failed: {}", e))?;
 
+        // Track access for importance decay
+        if !memories.is_empty() {
+            let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
+            if let Err(e) = repo.touch_accessed(&ids) {
+                tracing::warn!("Failed to track memory access: {e}");
+            }
+        }
+
         let results: Vec<serde_json::Value> = memories
             .iter()
             .map(|m| {

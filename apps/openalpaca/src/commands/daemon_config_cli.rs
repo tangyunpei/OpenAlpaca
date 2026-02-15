@@ -109,6 +109,54 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["orchestrator", "costs"],
         field: "extract_min_content_len",
     },
+    // Orchestrator: Task Extraction
+    TomlMapping {
+        schema_key: "daemon.orchestrator.task_extract_enabled",
+        section: &["orchestrator", "costs"],
+        field: "task_extract_enabled",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.task_extract_max_daily_cost_usd",
+        section: &["orchestrator", "costs"],
+        field: "task_extract_max_daily_cost_usd",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.task_extract_min_content_len",
+        section: &["orchestrator", "costs"],
+        field: "task_extract_min_content_len",
+    },
+    // Orchestrator: Supersession
+    TomlMapping {
+        schema_key: "daemon.orchestrator.supersession_distance_threshold",
+        section: &["orchestrator", "memory"],
+        field: "supersession_distance_threshold",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.fts_jaccard_threshold",
+        section: &["orchestrator", "memory"],
+        field: "fts_jaccard_threshold",
+    },
+    // Orchestrator: Decay
+    TomlMapping {
+        schema_key: "daemon.orchestrator.decay_poll_interval_secs",
+        section: &["orchestrator", "memory", "decay"],
+        field: "poll_interval_secs",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.decay_half_life_days",
+        section: &["orchestrator", "memory", "decay"],
+        field: "half_life_days",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.decay_min_importance",
+        section: &["orchestrator", "memory", "decay"],
+        field: "min_importance",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.decay_soft_cap",
+        section: &["orchestrator", "memory", "decay"],
+        field: "soft_cap",
+    },
     // Execution: Agent Defaults (cont.)
     TomlMapping {
         schema_key: "daemon.execution.max_tools_per_round",
