@@ -571,6 +571,13 @@ async fn execute_single_node(
     let mut tools: Vec<ToolDefinition> = tool_registry.definitions_for_skills(&skill_names);
     tools.extend(crate::tools::builtins::workspace_tool_definitions());
 
+    // Ensure memory_search is always available (owner-scoped via ContextualToolExecutor)
+    if !tools.iter().any(|t| t.name == "memory_search") {
+        if let Some(mem_tool) = tool_registry.get("memory_search") {
+            tools.push(mem_tool.definition.clone());
+        }
+    }
+
     // Build system prompt
     let tool_guidance = format_tool_guidance(&tools);
     let system_prompt = format!(

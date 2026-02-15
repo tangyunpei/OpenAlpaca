@@ -25,9 +25,62 @@ use crate::tools::ToolRegistry;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 
 use crate::middleware::prompt::format_tool_guidance;
+use openalpaca_storage::repository::MemoryRepository;
 use super::skill_matcher::{SkillMatch, SkillMatcher};
 use super::task_planner::{TaskDag, TaskPlan};
 use super::task_state::TaskState;
+
+/// Retrieve relevant user memories as a formatted block for agent prompts.
+/// Mirrors the retrieval pattern used in `handle_simple_query()`.
+async fn retrieve_memory_block(
+    db: &Database,
+    embedder: Option<&Arc<dyn openalpaca_llm::Embedder>>,
+    owner_id: &str,
+    query: &str,
+    top_k: usize,
+) -> Option<String> {
+    let repo = MemoryRepository::new(db);
+    let query_embedding = if let Some(embedder) = embedder {
+        embedder
+            .embed(&[query])
+            .await
+            .ok()
+            .and_then(|v| v.into_iter().next())
+    } else {
+        None
+    };
+    let memories = repo
+        .search_hybrid(
+            owner_id,
+            query,
+            query_embedding.as_deref(),
+            top_k,
+            None,
+            None,
+            None,
+        )
+        .unwrap_or_default();
+
+    if memories.is_empty() {
+        return None;
+    }
+
+    let mut block = String::from("### RETRIEVED MEMORY ###\n");
+    let mut budget = 2000usize;
+    for m in &memories {
+        let entry = format!(
+            "- [{}] {}\n",
+            m.kind.as_str(),
+            m.content.chars().take(300).collect::<String>()
+        );
+        if entry.len() > budget {
+            break;
+        }
+        budget -= entry.len();
+        block.push_str(&entry);
+    }
+    Some(block)
+}
 
 /// Dispatches complex tasks by matching skills to agents and creating task lanes.
 pub struct TaskDispatcher {
@@ -39,6 +92,7 @@ pub struct TaskDispatcher {
     _security_gate: Arc<SecurityGate>,
     tool_registry: Arc<ToolRegistry>,
     db: Option<Database>,
+    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
 }
 
@@ -51,6 +105,7 @@ impl TaskDispatcher {
         security_gate: Arc<SecurityGate>,
         tool_registry: Arc<ToolRegistry>,
         db: Option<Database>,
+        embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
     ) -> Self {
         Self {
@@ -62,6 +117,7 @@ impl TaskDispatcher {
             _security_gate: security_gate,
             tool_registry,
             db,
+            embedder,
             daemon_config,
         }
     }
@@ -559,6 +615,7 @@ impl TaskDispatcher {
         let bus = self.bus.clone();
         let ctx = self.shared_context.clone();
         let db = self.db.clone();
+        let embedder = self.embedder.clone();
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
 
@@ -680,6 +737,12 @@ impl TaskDispatcher {
                 let mut tools = tool_registry.definitions_for_skills(&skill_names);
                 // Add workspace tool definitions so agents can read/write shared workspace
                 tools.extend(crate::tools::builtins::workspace_tool_definitions());
+                // Ensure memory_search is always available (owner-scoped via ContextualToolExecutor)
+                if !tools.iter().any(|t| t.name == "memory_search") {
+                    if let Some(mem_tool) = tool_registry.get("memory_search") {
+                        tools.push(mem_tool.definition.clone());
+                    }
+                }
                 tracing::info!(
                     "Agent '{}' loaded {} tool definitions for skills: {:?}",
                     agent_id, tools.len(), skill_names
@@ -695,8 +758,20 @@ impl TaskDispatcher {
                 // Build messages: system + task + workspace context
                 let mut messages = vec![
                     ChatMessage::system(&system_prompt),
-                    ChatMessage::user(&description),
                 ];
+
+                // Inject memory context for the first agent in the pipeline
+                if step == 0 {
+                    if let Some(ref db) = db {
+                        if let Some(block) = retrieve_memory_block(
+                            db, embedder.as_ref(), &created_by, &description, 5,
+                        ).await {
+                            messages.push(ChatMessage::system(&block));
+                        }
+                    }
+                }
+
+                messages.push(ChatMessage::user(&description));
 
                 // Inject shared workspace context (supplements previous_output for backward compat)
                 // Load current workspace from TaskState
@@ -1204,6 +1279,7 @@ impl TaskDispatcher {
         let bus = self.bus.clone();
         let ctx = self.shared_context.clone();
         let db = self.db.clone();
+        let embedder = self.embedder.clone();
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
 
@@ -1234,6 +1310,7 @@ impl TaskDispatcher {
                 ctx.clone(),
                 bus.clone(),
                 db.clone(),
+                embedder.clone(),
                 &task_id,
                 &created_by,
                 &daemon_config,
@@ -1486,7 +1563,7 @@ mod tests {
         let sandbox = Arc::new(crate::security::sandbox::SandboxManager::new(executor, bus.clone()));
         let gate = Arc::new(crate::security::gate::SecurityGate::new(sandbox));
         let daemon_config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
-        TaskDispatcher::new(ctx, lane_mgr, bus, None, gate, tool_registry, None, daemon_config)
+        TaskDispatcher::new(ctx, lane_mgr, bus, None, gate, tool_registry, None, None, daemon_config)
     }
 
     #[test]
