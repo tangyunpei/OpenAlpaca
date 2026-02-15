@@ -1,0 +1,52 @@
+[execution.agent_defaults]
+max_cost = 1
+max_rounds = 15
+max_tool_runtime_secs = 60
+max_tools_per_round = 5
+
+[execution.dag]
+max_concurrent_agents = 3
+max_replans = 3
+max_retries_per_node = 1
+node_timeout_secs = 300
+replan_after_every_n_nodes = 2
+total_timeout_secs = 1800
+
+[execution.lead_agent_defaults]
+max_cost = 5
+max_rounds = 30
+max_tool_runtime_secs = 300
+max_tools_per_round = 3
+
+[orchestrator.costs]
+extract_every_n_turns = 5
+extract_max_daily_cost_usd = 0.25
+extract_min_content_len = 20
+summary_max_daily_cost_usd = 0.5
+
+[orchestrator.memory]
+msg_trunc_chars = 1500
+prompt_recent_messages = 40
+summary_max_chars = 4000
+summary_min_new_older_messages = 12
+
+[orchestrator.prompt_budgets]
+identity_budget = 300
+user_profile_budget = 1000
+
+[security]
+max_input_length = 32768
+
+[server]
+event_broadcaster_capacity = 64
+heartbeat_interval_secs = 5
+sse_keep_alive_secs = 15
+wake_channel_capacity = 256
+
+[server.chat_streams]
+cleanup_interval_secs = 60
+stale_timeout_secs = 30
+
+[server.embedding_indexer]
+batch_size = 50
+poll_interval_secs = 30

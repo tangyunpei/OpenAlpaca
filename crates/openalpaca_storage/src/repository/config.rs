@@ -90,21 +90,47 @@ impl<'a> ConfigRepository<'a> {
     }
 
     /// Set a config value after validating against the schema.
-    /// Use this for CLI/TUI writes. For daemon internal writes, use `set()` directly.
+    ///
+    /// Only allows writes for `SystemConfig`-backed keys (SQLite).
+    /// File-backed keys (`LlmToml`, `DaemonToml`) are rejected with guidance
+    /// to use the CLI or edit the file directly.
+    ///
+    /// Use this for programmatic writes that should be validated. For daemon
+    /// internal writes that skip validation, use `set()` directly.
     pub fn set_checked(&self, key: &str, value: &str) -> Result<()> {
         use crate::config_schema;
-        config_schema::lookup(key).ok_or_else(|| {
+        use crate::config_schema::ConfigBackend;
+
+        let def = config_schema::lookup(key).ok_or_else(|| {
             anyhow::anyhow!(
                 "Unknown config key '{}'. Run 'openalpaca config list --all' to see valid keys.",
                 key
             )
         })?;
+
+        // Guard against writes for file-backed keys
+        match def.backend {
+            ConfigBackend::LlmToml => {
+                anyhow::bail!(
+                    "Key '{}' is managed by config/llm.toml. \
+                     Use `openalpaca config set {} <value>` (CLI) or edit the file directly.",
+                    key, key
+                );
+            }
+            ConfigBackend::DaemonToml => {
+                anyhow::bail!(
+                    "Key '{}' is managed by config/daemon.toml. \
+                     Use `openalpaca config set {} <value>` (CLI) or edit the file directly.",
+                    key, key
+                );
+            }
+            ConfigBackend::SystemConfig => {} // proceed
+        }
+
         config_schema::validate(key, value)
             .map_err(|e| anyhow::anyhow!("Invalid value for '{}': {}", key, e))?;
         let normalized = config_schema::normalize(key, value);
-        let kind = config_schema::lookup(key)
-            .map(|def| def.kind.as_db_kind())
-            .unwrap_or("string");
+        let kind = def.kind.as_db_kind();
         self.set(key, &normalized, kind)
     }
 

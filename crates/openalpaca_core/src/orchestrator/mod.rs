@@ -13,6 +13,8 @@ pub mod task_state;
 
 use crate::bus::EventBus;
 use crate::context::{SharedContext, TaskEntry, TaskEntryStatus};
+use crate::daemon_config::DaemonConfig;
+use arc_swap::ArcSwap;
 use crate::events::SystemEvent;
 use crate::lane::{LaneManager, TaskLaneStatus};
 use crate::middleware::guard::OutputGuard;
@@ -80,16 +82,9 @@ pub struct Orchestrator {
     pub bootstrap_document: Arc<RwLock<Option<BootstrapDocument>>>,
     /// Path to BOOTSTRAP.md on disk (for deletion on completion).
     bootstrap_path: RwLock<Option<std::path::PathBuf>>,
+    /// Daemon-level config (memory limits, costs, execution defaults, etc.).
+    pub daemon_config: Arc<ArcSwap<DaemonConfig>>,
 }
-
-const PROMPT_RECENT_MESSAGES: usize = 40;
-const SUMMARY_MIN_NEW_OLDER_MESSAGES: usize = 12;
-const SUMMARY_MAX_CHARS: usize = 4000;
-const MSG_TRUNC_CHARS: usize = 1500;
-const SUMMARY_MAX_DAILY_COST_USD: f64 = 0.50;
-const EXTRACT_MAX_DAILY_COST_USD: f64 = 0.25;
-const EXTRACT_EVERY_N_TURNS: usize = 5;
-const EXTRACT_MIN_CONTENT_LEN: usize = 20;
 
 /// Full conversation context for prompt building and summary update.
 struct ConversationContext {
@@ -127,6 +122,7 @@ impl Orchestrator {
         db: Option<Database>,
         embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
         skill_catalog: Arc<skill_catalog::SkillCatalog>,
+        daemon_config: Arc<ArcSwap<DaemonConfig>>,
     ) -> Self {
         let task_dispatcher = TaskDispatcher::new(
             shared_context.clone(),
@@ -136,6 +132,7 @@ impl Orchestrator {
             security_gate.clone(),
             tool_registry.clone(),
             db.clone(),
+            daemon_config.clone(),
         );
         Self {
             shared_context,
@@ -158,6 +155,7 @@ impl Orchestrator {
             skill_catalog,
             bootstrap_document: Arc::new(RwLock::new(None)),
             bootstrap_path: RwLock::new(None),
+            daemon_config,
         }
     }
 
@@ -356,7 +354,8 @@ impl Orchestrator {
         };
 
         // Step 2: Load recent messages (40, not 120)
-        let raw_messages = match repo.list_recent_by_lane(lane_key, PROMPT_RECENT_MESSAGES as i64) {
+        let dcfg = self.daemon_config.load();
+        let raw_messages = match repo.list_recent_by_lane(lane_key, dcfg.orchestrator.memory.prompt_recent_messages as i64) {
             Ok(msgs) => msgs,
             Err(_) => return empty,
         };
@@ -435,7 +434,8 @@ impl Orchestrator {
             .iter()
             .filter(|(id, _, _)| *id > ctx.last_summarized_id)
             .collect();
-        if new_older.len() < SUMMARY_MIN_NEW_OLDER_MESSAGES {
+        let dcfg = self.daemon_config.load();
+        if new_older.len() < dcfg.orchestrator.memory.summary_min_new_older_messages {
             return;
         }
 
@@ -446,7 +446,7 @@ impl Orchestrator {
             .await
             .map(|s| s.total_cost_usd)
             .unwrap_or(0.0);
-        if summary_cost > SUMMARY_MAX_DAILY_COST_USD {
+        if summary_cost > dcfg.orchestrator.costs.summary_max_daily_cost_usd {
             tracing::debug!("Summary update skipped: summary cost ${summary_cost:.2} exceeds cap");
             return;
         }
@@ -460,12 +460,12 @@ impl Orchestrator {
         }
         user_prompt.push_str("## New Messages\n");
         for (_, role, content) in &new_older {
-            let truncated: String = content.chars().take(MSG_TRUNC_CHARS).collect();
+            let truncated: String = content.chars().take(dcfg.orchestrator.memory.msg_trunc_chars).collect();
             user_prompt.push_str(&format!("{}: {}\n", role, truncated));
         }
         user_prompt.push_str(&format!(
             "\nUpdate the summary incorporating these new messages. Max {} characters. Output JSON only.",
-            SUMMARY_MAX_CHARS
+            dcfg.orchestrator.memory.summary_max_chars
         ));
 
         let request = RouterRequest {
@@ -592,7 +592,7 @@ impl Orchestrator {
             tracing::warn!("Failed to persist summary LLM usage: {e}");
         }
 
-        let new_summary: String = new_summary.chars().take(SUMMARY_MAX_CHARS).collect();
+        let new_summary: String = new_summary.chars().take(dcfg.orchestrator.memory.summary_max_chars).collect();
         let new_last_id = new_older
             .last()
             .map(|(id, _, _)| *id)
@@ -633,8 +633,10 @@ impl Orchestrator {
             _ => return,
         };
 
+        let dcfg = self.daemon_config.load();
+
         // Content filter: skip short messages and slash commands
-        if user_message.len() < EXTRACT_MIN_CONTENT_LEN || user_message.starts_with('/') {
+        if user_message.len() < dcfg.orchestrator.costs.extract_min_content_len || user_message.starts_with('/') {
             return;
         }
 
@@ -646,7 +648,7 @@ impl Orchestrator {
             };
             let count = counter.entry(lane_key.to_string()).or_insert(0);
             *count += 1;
-            if *count < EXTRACT_EVERY_N_TURNS {
+            if *count < dcfg.orchestrator.costs.extract_every_n_turns {
                 return;
             }
             *count = 0;
@@ -659,7 +661,7 @@ impl Orchestrator {
             .await
             .map(|s| s.total_cost_usd)
             .unwrap_or(0.0);
-        if extract_cost > EXTRACT_MAX_DAILY_COST_USD {
+        if extract_cost > dcfg.orchestrator.costs.extract_max_daily_cost_usd {
             tracing::debug!(
                 "User extraction skipped: cost ${extract_cost:.2} exceeds cap"
             );
@@ -1094,7 +1096,8 @@ impl Orchestrator {
         SecurityGate::check_access(&principal, &capability, &scope)?;
 
         // 2. Input sanitization
-        let content = SecurityGate::sanitize_input(&content)?;
+        let max_input_len = self.daemon_config.load().security.max_input_length;
+        let content = SecurityGate::sanitize_input(&content, Some(max_input_len))?;
 
         // Extract owner_id from principal (before slash-command early return)
         let owner_id_str = principal_id(&principal);
@@ -1385,7 +1388,8 @@ impl Orchestrator {
         // Inject agent identity if available
         if let Ok(guard) = self.identity_document.read() {
             if let Some(ref doc) = *guard {
-                let id_block = identity_to_prompt_block(doc);
+                let identity_budget = self.daemon_config.load().orchestrator.prompt_budgets.identity_budget;
+                let id_block = identity_to_prompt_block(doc, Some(identity_budget));
                 if !id_block.is_empty() {
                     system_prompt.push('\n');
                     system_prompt.push_str(&id_block);
@@ -1453,7 +1457,8 @@ impl Orchestrator {
             // Inject user profile if available
             if let Ok(guard) = self.user_document.read() {
                 if let Some(ref doc) = *guard {
-                    let profile_block = user_to_prompt_block(doc);
+                    let user_budget = self.daemon_config.load().orchestrator.prompt_budgets.user_profile_budget;
+                    let profile_block = user_to_prompt_block(doc, Some(user_budget));
                     if !profile_block.is_empty() {
                         messages.push(ChatMessage::system(&profile_block));
                     }
@@ -1546,11 +1551,12 @@ impl Orchestrator {
             let latency_ms = call_start.elapsed().as_millis() as i64;
 
             // Persist LLM usage and emit event
+            let default_model = router.default_model();
             let actual_model = result
                 .model_used
                 .as_deref()
                 .or(self.loop_config.model.as_deref())
-                .unwrap_or(router.default_model());
+                .unwrap_or(&default_model);
             let resolved_provider = router
                 .model_registry()
                 .resolve_provider(actual_model)
@@ -1718,7 +1724,8 @@ impl Orchestrator {
         // Inject agent identity if available
         if let Ok(guard) = self.identity_document.read() {
             if let Some(ref doc) = *guard {
-                let id_block = identity_to_prompt_block(doc);
+                let identity_budget = self.daemon_config.load().orchestrator.prompt_budgets.identity_budget;
+                let id_block = identity_to_prompt_block(doc, Some(identity_budget));
                 if !id_block.is_empty() {
                     system_prompt.push('\n');
                     system_prompt.push_str(&id_block);
@@ -1786,7 +1793,8 @@ impl Orchestrator {
             // Inject user profile if available
             if let Ok(guard) = self.user_document.read() {
                 if let Some(ref doc) = *guard {
-                    let profile_block = user_to_prompt_block(doc);
+                    let user_budget = self.daemon_config.load().orchestrator.prompt_budgets.user_profile_budget;
+                    let profile_block = user_to_prompt_block(doc, Some(user_budget));
                     if !profile_block.is_empty() {
                         messages.push(ChatMessage::system(&profile_block));
                     }
@@ -1878,11 +1886,12 @@ impl Orchestrator {
             let latency_ms = call_start.elapsed().as_millis() as i64;
 
             // Persist LLM usage and emit event
+            let default_model = router.default_model();
             let actual_model = result
                 .model_used
                 .as_deref()
                 .or(self.loop_config.model.as_deref())
-                .unwrap_or(router.default_model());
+                .unwrap_or(&default_model);
             let resolved_provider = router
                 .model_registry()
                 .resolve_provider(actual_model)
@@ -2320,6 +2329,7 @@ mod tests {
             None,
             None,
             Arc::new(skill_catalog::SkillCatalog::new()),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
         )
     }
 
@@ -2344,6 +2354,7 @@ mod tests {
             None,
             None,
             Arc::new(skill_catalog::SkillCatalog::new()),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
         )
     }
 
@@ -2588,6 +2599,7 @@ mod tests {
             None,
             None,
             Arc::new(skill_catalog::SkillCatalog::new()),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
         );
 
         let result = orch
@@ -2720,6 +2732,7 @@ mod tests {
             None,
             None,
             Arc::new(skill_catalog::SkillCatalog::new()),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
         )
     }
 
@@ -2909,6 +2922,7 @@ mod tests {
             None,
             None,
             Arc::new(skill_catalog::SkillCatalog::new()),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
         )
     }
 
