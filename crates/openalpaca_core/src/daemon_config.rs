@@ -60,6 +60,11 @@ pub struct MemoryConfig {
     pub summary_max_chars: usize,
     /// Character limit for message truncation in summary input.
     pub msg_trunc_chars: usize,
+    /// L2 distance threshold for semantic supersession (lower = stricter).
+    /// Memories within this distance are considered "same topic" and will be superseded.
+    pub supersession_distance_threshold: f64,
+    /// Decay and pruning configuration.
+    pub decay: MemoryDecayConfig,
 }
 
 impl Default for MemoryConfig {
@@ -69,6 +74,33 @@ impl Default for MemoryConfig {
             summary_min_new_older_messages: 12,
             summary_max_chars: 4000,
             msg_trunc_chars: 1500,
+            supersession_distance_threshold: 1.0,
+            decay: MemoryDecayConfig::default(),
+        }
+    }
+}
+
+/// Configuration for memory importance decay and pruning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryDecayConfig {
+    /// How often to run the decay task (seconds).
+    pub poll_interval_secs: u64,
+    /// Half-life in days: after this many days without access, importance drops by 50%.
+    pub half_life_days: f64,
+    /// Minimum importance floor. Memories below this are eligible for pruning.
+    pub min_importance: f64,
+    /// Soft cap on total non-KbChunk memories per owner. Excess is pruned by lowest importance.
+    pub soft_cap: usize,
+}
+
+impl Default for MemoryDecayConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: 3600,
+            half_life_days: 30.0,
+            min_importance: 0.05,
+            soft_cap: 500,
         }
     }
 }
