@@ -33,6 +33,7 @@ use crate::security::gate::SecurityGate;
 use crate::security::policy::{Principal, Scope};
 use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
+use crate::memory::task_extraction::{PersistResult, persist_memory_item};
 use crate::tools::ToolRegistry;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 use crate::types::Capability;
@@ -882,80 +883,25 @@ impl Orchestrator {
             let repo = MemoryRepository::new(db);
             let dcfg = self.daemon_config.load();
             let supersession_threshold = dcfg.orchestrator.memory.supersession_distance_threshold;
+            let jaccard_threshold = dcfg.orchestrator.memory.fts_jaccard_threshold;
 
             for item in &memory_items {
-                // Step 1: Embed new content
-                let new_embedding = if let Some(ref embedder) = self.embedder {
-                    embedder.embed(&[item.as_str()]).await.ok().and_then(|v| v.into_iter().next())
-                } else {
-                    None
-                };
-
-                // Step 2: Check for semantically similar existing memories
-                let similar = if let Some(ref emb) = new_embedding {
-                    repo.find_similar_for_supersession(oid, emb, supersession_threshold, 1)
-                        .unwrap_or_default()
-                } else {
-                    // FTS fallback returns (memory, jaccard_score); require >= 0.4 overlap
-                    repo.find_similar_fts_fallback(oid, item, 3)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|(_, jaccard)| *jaccard >= 0.4)
-                        .collect()
-                };
-
-                if let Some((existing, _distance)) = similar.first() {
-                    // Step 3: Supersede the best match
-                    match repo.supersede(
-                        existing.id,
-                        item,
-                        openalpaca_storage::models::memory::MemoryKind::Preference,
-                        openalpaca_storage::models::memory::MemoryScope::Global,
-                        "",
-                        openalpaca_storage::models::memory::MemorySource::Conversation,
-                        0.6,
-                        0.7,
-                        None,
-                    ) {
-                        Ok(new_id) if new_id > 0 => {
-                            if let Some(ref emb) = new_embedding {
-                                if let Err(e) = repo.insert_embedding(new_id, emb) {
-                                    tracing::warn!("Failed to insert embedding for superseded memory #{new_id}: {e}");
-                                }
-                            }
-                            tracing::debug!(
-                                "Extraction: superseded memory #{} -> #{}: {}",
-                                existing.id, new_id, &item[..item.len().min(60)]
-                            );
-                        }
-                        Ok(_) => {} // hash collision, skip
-                        Err(e) => tracing::warn!("Extraction: supersession failed: {e}"),
-                    }
-                } else {
-                    // Step 4: No similar memory, insert new
-                    match repo.add(
-                        oid,
-                        openalpaca_storage::models::memory::MemoryKind::Preference,
-                        openalpaca_storage::models::memory::MemoryScope::Global,
-                        "",
-                        openalpaca_storage::models::memory::MemorySource::Conversation,
-                        item,
-                        None,
-                        0.6,
-                        0.7,
-                    ) {
-                        Ok(new_id) if new_id > 0 => {
-                            if let Some(ref emb) = new_embedding {
-                                if let Err(e) = repo.insert_embedding(new_id, emb) {
-                                    tracing::warn!("Failed to insert embedding for memory #{new_id}: {e}");
-                                }
-                            }
-                            tracing::debug!("Extraction: stored memory preference: {}", &item[..item.len().min(60)]);
-                        }
-                        Ok(_) => {} // duplicate, skip
-                        Err(e) => tracing::warn!("Extraction: failed to store memory: {e}"),
-                    }
-                }
+                persist_memory_item(
+                    &repo,
+                    &self.embedder,
+                    oid,
+                    item,
+                    openalpaca_storage::models::memory::MemoryKind::Preference,
+                    openalpaca_storage::models::memory::MemoryScope::Global,
+                    "",
+                    openalpaca_storage::models::memory::MemorySource::Conversation,
+                    0.6,
+                    0.7,
+                    None,
+                    supersession_threshold,
+                    jaccard_threshold,
+                )
+                .await;
             }
         }
 
@@ -2209,81 +2155,42 @@ impl Orchestrator {
         if let Some(ref db) = self.db {
             let repo = MemoryRepository::new(db);
             let dcfg = self.daemon_config.load();
-            let threshold = dcfg.orchestrator.memory.supersession_distance_threshold;
+            let supersession_threshold = dcfg.orchestrator.memory.supersession_distance_threshold;
+            let jaccard_threshold = dcfg.orchestrator.memory.fts_jaccard_threshold;
 
-            // Embed new content for similarity check
-            let new_embedding = if let Some(ref embedder) = self.embedder {
-                embedder.embed(&[content]).await.ok().and_then(|v| v.into_iter().next())
-            } else {
-                None
-            };
+            let result = persist_memory_item(
+                &repo,
+                &self.embedder,
+                oid,
+                content,
+                openalpaca_storage::models::memory::MemoryKind::Preference,
+                openalpaca_storage::models::memory::MemoryScope::Global,
+                "",
+                openalpaca_storage::models::memory::MemorySource::Conversation,
+                0.9,
+                1.0,
+                None,
+                supersession_threshold,
+                jaccard_threshold,
+            )
+            .await;
 
-            // Check for semantically similar existing memories
-            let similar = if let Some(ref emb) = new_embedding {
-                repo.find_similar_for_supersession(oid, emb, threshold, 1)
-                    .unwrap_or_default()
-            } else {
-                // FTS fallback returns (memory, jaccard_score); require >= 0.4 overlap
-                repo.find_similar_fts_fallback(oid, content, 3)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|(_, jaccard)| *jaccard >= 0.4)
-                    .collect()
-            };
-
-            if let Some((existing, _)) = similar.first() {
-                // Supersede the best match
-                let result = repo.supersede(
-                    existing.id,
-                    content,
-                    openalpaca_storage::models::memory::MemoryKind::Preference,
-                    openalpaca_storage::models::memory::MemoryScope::Global,
-                    "",
-                    openalpaca_storage::models::memory::MemorySource::Conversation,
-                    0.9,
-                    1.0,
-                    None,
-                ).map_err(|e| format!("Failed to supersede memory: {}", e))?;
-
-                if result > 0 {
-                    if let Some(ref emb) = new_embedding {
-                        if let Err(e) = repo.insert_embedding(result, emb) {
-                            tracing::warn!("Failed to insert embedding for superseded memory #{result}: {e}");
-                        }
-                    }
+            match result {
+                PersistResult::Superseded { old_content, .. } => {
                     Ok(format!(
                         "Got it, I've updated my memory (was: \"{}\"): {}",
-                        existing.content.chars().take(50).collect::<String>(),
+                        old_content.chars().take(50).collect::<String>(),
                         content
                     ))
-                } else {
+                }
+                PersistResult::Inserted(_) => {
+                    Ok(format!("Got it, I'll remember that: {}", content))
+                }
+                PersistResult::Duplicate => {
                     Ok("I already have that noted.".to_string())
                 }
-            } else {
-                // No similar memory, insert new
-                let result = repo
-                    .add(
-                        oid,
-                        openalpaca_storage::models::memory::MemoryKind::Preference,
-                        openalpaca_storage::models::memory::MemoryScope::Global,
-                        "",
-                        openalpaca_storage::models::memory::MemorySource::Conversation,
-                        content,
-                        None,
-                        0.9,
-                        1.0,
-                    )
-                    .map_err(|e| format!("Failed to store memory: {}", e))?;
-
-                if result == 0 {
-                    Ok("I already have that noted.".to_string())
-                } else {
-                    if let Some(ref emb) = new_embedding {
-                        if let Err(e) = repo.insert_embedding(result, emb) {
-                            tracing::warn!("Failed to insert embedding for memory #{result}: {e}");
-                        }
-                    }
-                    Ok(format!("Got it, I'll remember that: {}", content))
+                PersistResult::Error(e) => {
+                    Err(format!("Failed to store memory: {}", e))
                 }
             }
         } else {

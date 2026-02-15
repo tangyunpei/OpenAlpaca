@@ -63,6 +63,10 @@ pub struct MemoryConfig {
     /// L2 distance threshold for semantic supersession (lower = stricter).
     /// Memories within this distance are considered "same topic" and will be superseded.
     pub supersession_distance_threshold: f64,
+    /// Jaccard word-overlap threshold for FTS-based supersession fallback.
+    /// Only memories with overlap >= this value are considered for supersession
+    /// when the embedder is unavailable. Range: 0.0–1.0.
+    pub fts_jaccard_threshold: f64,
     /// Decay and pruning configuration.
     pub decay: MemoryDecayConfig,
 }
@@ -75,6 +79,7 @@ impl Default for MemoryConfig {
             summary_max_chars: 4000,
             msg_trunc_chars: 1500,
             supersession_distance_threshold: 1.0,
+            fts_jaccard_threshold: 0.4,
             decay: MemoryDecayConfig::default(),
         }
     }

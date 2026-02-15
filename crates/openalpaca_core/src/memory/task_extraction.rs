@@ -13,6 +13,22 @@ use std::sync::Arc;
 
 use crate::daemon_config::DaemonConfig;
 
+/// Result of persisting a memory item via [`persist_memory_item`].
+pub enum PersistResult {
+    /// New memory inserted. Contains the new row id.
+    Inserted(i64),
+    /// Existing memory superseded. Contains old content, old id, and new id.
+    Superseded {
+        old_id: i64,
+        old_content: String,
+        new_id: i64,
+    },
+    /// Content already exists (hash collision / duplicate).
+    Duplicate,
+    /// Operation failed.
+    Error(String),
+}
+
 /// Parameters for task memory extraction.
 pub struct TaskExtractionParams {
     pub owner_id: String,
@@ -76,7 +92,6 @@ pub async fn extract_task_memories(
              {{\n\
                \"content\": \"a concise factual statement\",\n\
                \"kind\": \"fact\" or \"preference\",\n\
-               \"scope\": \"global\" or \"workspace\",\n\
                \"importance\": 0.0 to 1.0,\n\
                \"confidence\": 0.0 to 1.0\n\
              }}\n\
@@ -86,8 +101,6 @@ pub async fn extract_task_memories(
          - Extract key findings, decisions made, technical learnings, and user-specific insights.\n\
          - \"fact\" for objective learnings (e.g. \"Project X uses PostgreSQL 15\").\n\
          - \"preference\" for user-specific insights (e.g. \"User prefers concise summaries\").\n\
-         - \"global\" scope for universally applicable knowledge.\n\
-         - \"workspace\" scope for project/task-specific knowledge.\n\
          - importance: how useful is this for future tasks (0.3 = trivial, 0.9 = critical).\n\
          - confidence: how certain is this extraction (0.5 = inferred, 1.0 = explicitly stated).\n\
          - Only extract what is clearly stated or strongly implied. Do not hallucinate.\n\
@@ -146,7 +159,7 @@ pub async fn extract_task_memories(
     let parsed: serde_json::Value = match parse_json_response(&response.content) {
         Some(v) => v,
         None => {
-            let _ = usage_repo.record_and_log(
+            if let Err(e) = usage_repo.record_and_log(
                 AGENT_LABEL,
                 Some(&params.task_id),
                 &resolved_provider,
@@ -157,7 +170,9 @@ pub async fn extract_task_memories(
                 latency_ms,
                 "error",
                 Some("JSON parse failure"),
-            );
+            ) {
+                tracing::warn!("Failed to persist task extraction LLM usage: {e}");
+            }
             tracing::warn!("Task extraction: malformed JSON from LLM");
             return;
         }
@@ -194,6 +209,7 @@ pub async fn extract_task_memories(
 
     let repo = MemoryRepository::new(&db);
     let supersession_threshold = dcfg.orchestrator.memory.supersession_distance_threshold;
+    let jaccard_threshold = dcfg.orchestrator.memory.fts_jaccard_threshold;
 
     let metadata = serde_json::json!({
         "task_id": params.task_id,
@@ -210,10 +226,6 @@ pub async fn extract_task_memories(
             .get("kind")
             .and_then(|v| v.as_str())
             .unwrap_or("fact");
-        let scope_str = extraction
-            .get("scope")
-            .and_then(|v| v.as_str())
-            .unwrap_or("global");
         let importance = extraction
             .get("importance")
             .and_then(|v| v.as_f64())
@@ -231,32 +243,29 @@ pub async fn extract_task_memories(
             "preference" => MemoryKind::Preference,
             _ => MemoryKind::Fact,
         };
-        let scope = match scope_str {
-            "workspace" => MemoryScope::Workspace,
-            _ => MemoryScope::Global,
-        };
-        let scope_id = if matches!(scope, MemoryScope::Workspace) {
-            &params.task_id
-        } else {
-            ""
-        };
 
-        persist_memory_item(
+        // All task-extracted memories use Global scope — workspace-scoped retrieval
+        // is not yet implemented, so scope_id filtering would make them unretrievable.
+        let result = persist_memory_item(
             &repo,
             &embedder,
             &params.owner_id,
             content,
             kind,
-            scope,
-            scope_id,
+            MemoryScope::Global,
+            "",
             MemorySource::Tool,
             importance,
             confidence,
             Some(&metadata),
             supersession_threshold,
+            jaccard_threshold,
         )
         .await;
-        stored += 1;
+        match result {
+            PersistResult::Inserted(_) | PersistResult::Superseded { .. } => stored += 1,
+            _ => {}
+        }
     }
 
     tracing::info!(
@@ -267,6 +276,11 @@ pub async fn extract_task_memories(
 }
 
 /// Persist a single memory item with embed + supersession logic.
+///
+/// Handles the full flow: embed content → check for similar existing memories
+/// (vector or FTS fallback) → supersede or insert → store embedding.
+///
+/// Used by task extraction, auto-extraction, and the /remember handler.
 pub async fn persist_memory_item(
     repo: &MemoryRepository<'_>,
     embedder: &Option<Arc<dyn Embedder>>,
@@ -280,7 +294,8 @@ pub async fn persist_memory_item(
     confidence: f64,
     metadata: Option<&serde_json::Value>,
     supersession_threshold: f64,
-) {
+    fts_jaccard_threshold: f64,
+) -> PersistResult {
     // Step 1: Embed
     let new_embedding = if let Some(emb) = embedder {
         emb.embed(&[content])
@@ -299,11 +314,13 @@ pub async fn persist_memory_item(
         repo.find_similar_fts_fallback(owner_id, content, 3)
             .unwrap_or_default()
             .into_iter()
-            .filter(|(_, jaccard)| *jaccard >= 0.4)
+            .filter(|(_, jaccard)| *jaccard >= fts_jaccard_threshold)
             .collect()
     };
 
     if let Some((existing, _distance)) = similar.first() {
+        let old_content = existing.content.clone();
+        let old_id = existing.id;
         // Step 3: Supersede
         match repo.supersede(
             existing.id,
@@ -325,14 +342,22 @@ pub async fn persist_memory_item(
                     }
                 }
                 tracing::debug!(
-                    "Task extraction: superseded memory #{} -> #{}: {}",
-                    existing.id,
+                    "Memory persist: superseded #{} -> #{}: {}",
+                    old_id,
                     new_id,
                     &content[..content.len().min(60)]
                 );
+                PersistResult::Superseded {
+                    old_id,
+                    old_content,
+                    new_id,
+                }
             }
-            Ok(_) => {} // hash collision
-            Err(e) => tracing::warn!("Task extraction: supersession failed: {e}"),
+            Ok(_) => PersistResult::Duplicate, // hash collision
+            Err(e) => {
+                tracing::warn!("Memory persist: supersession failed: {e}");
+                PersistResult::Error(e.to_string())
+            }
         }
     } else {
         // Step 4: Insert new
@@ -346,12 +371,16 @@ pub async fn persist_memory_item(
                     }
                 }
                 tracing::debug!(
-                    "Task extraction: stored memory: {}",
+                    "Memory persist: stored new: {}",
                     &content[..content.len().min(60)]
                 );
+                PersistResult::Inserted(new_id)
             }
-            Ok(_) => {} // duplicate
-            Err(e) => tracing::warn!("Task extraction: failed to store memory: {e}"),
+            Ok(_) => PersistResult::Duplicate, // duplicate
+            Err(e) => {
+                tracing::warn!("Memory persist: failed to store: {e}");
+                PersistResult::Error(e.to_string())
+            }
         }
     }
 }
