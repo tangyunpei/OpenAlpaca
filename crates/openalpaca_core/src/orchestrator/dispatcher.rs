@@ -24,10 +24,109 @@ use uuid::Uuid;
 use crate::tools::ToolRegistry;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 
+use crate::memory::task_extraction::{TaskExtractionParams, extract_task_memories};
 use crate::middleware::prompt::format_tool_guidance;
+use openalpaca_storage::repository::MemoryRepository;
 use super::skill_matcher::{SkillMatch, SkillMatcher};
 use super::task_planner::{TaskDag, TaskPlan};
 use super::task_state::TaskState;
+
+/// Retrieve relevant user memories as a formatted block for agent prompts.
+/// Mirrors the retrieval pattern used in `handle_simple_query()`.
+async fn retrieve_memory_block(
+    db: &Database,
+    embedder: Option<&Arc<dyn openalpaca_llm::Embedder>>,
+    owner_id: &str,
+    query: &str,
+    top_k: usize,
+) -> Option<String> {
+    let repo = MemoryRepository::new(db);
+    let query_embedding = if let Some(embedder) = embedder {
+        embedder
+            .embed(&[query])
+            .await
+            .ok()
+            .and_then(|v| v.into_iter().next())
+    } else {
+        None
+    };
+    let memories = repo
+        .search_hybrid(
+            owner_id,
+            query,
+            query_embedding.as_deref(),
+            top_k,
+            None,
+            None,
+            None,
+        )
+        .unwrap_or_default();
+
+    if memories.is_empty() {
+        return None;
+    }
+
+    // Track access for importance decay
+    let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
+    if let Err(e) = repo.touch_accessed(&ids) {
+        tracing::warn!("Failed to track memory access: {e}");
+    }
+
+    let mut block = String::from("### RETRIEVED MEMORY ###\n");
+    let mut budget = 2000usize;
+    for m in &memories {
+        let entry = format!(
+            "- [{}] {}\n",
+            m.kind.as_str(),
+            m.content.chars().take(300).collect::<String>()
+        );
+        if entry.len() > budget {
+            break;
+        }
+        budget -= entry.len();
+        block.push_str(&entry);
+    }
+    Some(block)
+}
+
+/// Spawn a background task to extract memories from a completed task output.
+/// Fire-and-forget: does not block the caller. Only runs for successful tasks.
+fn spawn_task_memory_extraction(
+    db: &Database,
+    router: &Arc<LlmRouter>,
+    embedder: &Option<Arc<dyn openalpaca_llm::Embedder>>,
+    daemon_config: &Arc<ArcSwap<DaemonConfig>>,
+    owner_id: &str,
+    task_id: &str,
+    task_description: &str,
+    task_output: &str,
+    source_path: &str,
+    success: bool,
+) {
+    if !success {
+        return;
+    }
+    let dcfg = daemon_config.load();
+    if !dcfg.orchestrator.costs.task_extract_enabled {
+        return;
+    }
+
+    let params = TaskExtractionParams {
+        owner_id: owner_id.to_string(),
+        task_id: task_id.to_string(),
+        task_description: task_description.to_string(),
+        task_output: task_output.to_string(),
+        source_path: source_path.to_string(),
+    };
+    let db = db.clone();
+    let router = router.clone();
+    let embedder = embedder.clone();
+    let daemon_config = daemon_config.clone();
+
+    tokio::spawn(async move {
+        extract_task_memories(params, db, router, embedder, daemon_config).await;
+    });
+}
 
 /// Dispatches complex tasks by matching skills to agents and creating task lanes.
 pub struct TaskDispatcher {
@@ -39,6 +138,7 @@ pub struct TaskDispatcher {
     _security_gate: Arc<SecurityGate>,
     tool_registry: Arc<ToolRegistry>,
     db: Option<Database>,
+    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
 }
 
@@ -51,6 +151,7 @@ impl TaskDispatcher {
         security_gate: Arc<SecurityGate>,
         tool_registry: Arc<ToolRegistry>,
         db: Option<Database>,
+        embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
     ) -> Self {
         Self {
@@ -62,6 +163,7 @@ impl TaskDispatcher {
             _security_gate: security_gate,
             tool_registry,
             db,
+            embedder,
             daemon_config,
         }
     }
@@ -369,6 +471,7 @@ impl TaskDispatcher {
         let bus = self.bus.clone();
         let ctx = self.shared_context.clone();
         let db = self.db.clone();
+        let embedder = self.embedder.clone();
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
 
@@ -526,6 +629,22 @@ impl TaskDispatcher {
                 let _ = conv_repo.increment_message_count(&lane_key);
             }
 
+            // Memory extraction from DAG output (non-blocking)
+            if let Some(ref db) = db {
+                spawn_task_memory_extraction(
+                    db,
+                    &router,
+                    &embedder,
+                    &daemon_config,
+                    &created_by,
+                    &task_id,
+                    &description,
+                    &final_content,
+                    "dag",
+                    result.success,
+                );
+            }
+
             tracing::info!(
                 "DAG execution for task '{}' finished: success={}, nodes={}/{}, runtime={}s",
                 task_id, result.success, result.node_results.len(), node_count, runtime_secs
@@ -559,6 +678,7 @@ impl TaskDispatcher {
         let bus = self.bus.clone();
         let ctx = self.shared_context.clone();
         let db = self.db.clone();
+        let embedder = self.embedder.clone();
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
 
@@ -680,6 +800,12 @@ impl TaskDispatcher {
                 let mut tools = tool_registry.definitions_for_skills(&skill_names);
                 // Add workspace tool definitions so agents can read/write shared workspace
                 tools.extend(crate::tools::builtins::workspace_tool_definitions());
+                // Ensure memory_search is always available (owner-scoped via ContextualToolExecutor)
+                if !tools.iter().any(|t| t.name == "memory_search") {
+                    if let Some(mem_tool) = tool_registry.get("memory_search") {
+                        tools.push(mem_tool.definition.clone());
+                    }
+                }
                 tracing::info!(
                     "Agent '{}' loaded {} tool definitions for skills: {:?}",
                     agent_id, tools.len(), skill_names
@@ -695,8 +821,20 @@ impl TaskDispatcher {
                 // Build messages: system + task + workspace context
                 let mut messages = vec![
                     ChatMessage::system(&system_prompt),
-                    ChatMessage::user(&description),
                 ];
+
+                // Inject memory context for the first agent in the pipeline
+                if step == 0 {
+                    if let Some(ref db) = db {
+                        if let Some(block) = retrieve_memory_block(
+                            db, embedder.as_ref(), &created_by, &description, 5,
+                        ).await {
+                            messages.push(ChatMessage::system(&block));
+                        }
+                    }
+                }
+
+                messages.push(ChatMessage::user(&description));
 
                 // Inject shared workspace context (supplements previous_output for backward compat)
                 // Load current workspace from TaskState
@@ -1028,6 +1166,12 @@ impl TaskDispatcher {
 
             // 5. Persist final result to conversation (single message for entire pipeline)
             let runtime_secs = start_time.elapsed().as_secs() as i64;
+            // Clone for memory extraction before final_content is consumed
+            let extraction_content = if pipeline_success {
+                Some(final_content.clone())
+            } else {
+                None
+            };
             if let Some(ref db) = db {
                 let chat_text = if pipeline_success {
                     final_content
@@ -1053,6 +1197,22 @@ impl TaskDispatcher {
                     created_at: String::new(),
                 });
                 let _ = conv_repo.increment_message_count(&lane_key);
+            }
+
+            // Memory extraction from pipeline output (non-blocking)
+            if let (Some(db), Some(output)) = (&db, &extraction_content) {
+                spawn_task_memory_extraction(
+                    db,
+                    &router,
+                    &embedder,
+                    &daemon_config,
+                    &created_by,
+                    &task_id,
+                    &description,
+                    output,
+                    "pipeline",
+                    pipeline_success,
+                );
             }
         });
     }
@@ -1204,6 +1364,7 @@ impl TaskDispatcher {
         let bus = self.bus.clone();
         let ctx = self.shared_context.clone();
         let db = self.db.clone();
+        let embedder = self.embedder.clone();
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
 
@@ -1234,6 +1395,7 @@ impl TaskDispatcher {
                 ctx.clone(),
                 bus.clone(),
                 db.clone(),
+                embedder.clone(),
                 &task_id,
                 &created_by,
                 &daemon_config,
@@ -1396,6 +1558,22 @@ impl TaskDispatcher {
                 let _ = conv_repo.increment_message_count(&lane_key);
             }
 
+            // Memory extraction from lead agent output (non-blocking)
+            if let Some(ref db) = db {
+                spawn_task_memory_extraction(
+                    db,
+                    &router,
+                    &embedder,
+                    &daemon_config,
+                    &created_by,
+                    &task_id,
+                    &description,
+                    &final_content,
+                    "lead_agent",
+                    result.success,
+                );
+            }
+
             tracing::info!(
                 "Lead agent execution for task '{}' finished: success={}, subagents={}, rounds={}, runtime={}s",
                 task_id,
@@ -1486,7 +1664,7 @@ mod tests {
         let sandbox = Arc::new(crate::security::sandbox::SandboxManager::new(executor, bus.clone()));
         let gate = Arc::new(crate::security::gate::SecurityGate::new(sandbox));
         let daemon_config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
-        TaskDispatcher::new(ctx, lane_mgr, bus, None, gate, tool_registry, None, daemon_config)
+        TaskDispatcher::new(ctx, lane_mgr, bus, None, gate, tool_registry, None, None, daemon_config)
     }
 
     #[test]
