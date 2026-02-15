@@ -139,6 +139,7 @@ impl Orchestrator {
                             &principal_id(&principal),
                             &lane_key,
                             &source,
+                            scope_ctx.workspace_id.clone(),
                         ) {
                             Ok(response) => Ok(response),
                             Err(e) => {
@@ -261,6 +262,7 @@ impl Orchestrator {
                     &required_skills,
                     &principal_id(principal),
                     lane_key,
+                    scope_ctx.workspace_id.clone(),
                 ) {
                     Ok(response) => Ok(response),
                     Err(e) => {

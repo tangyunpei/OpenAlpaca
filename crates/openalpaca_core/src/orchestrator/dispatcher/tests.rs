@@ -49,6 +49,7 @@ fn test_creates_task_and_lane() {
         &["web_search".to_string()],
         "user1",
         "user1:cli",
+        None,
     );
 
     assert!(result.is_ok());
@@ -73,6 +74,7 @@ fn test_fails_no_matching() {
         &["text_generate".to_string()],
         "user1",
         "user1:cli",
+        None,
     );
     assert!(result.is_err());
 }
@@ -91,6 +93,7 @@ fn test_assigns_multiple() {
             &["web_search".to_string(), "text_generate".to_string()],
             "user1",
             "user1:cli",
+            None,
         )
         .unwrap();
 
@@ -145,6 +148,7 @@ fn test_dispatch_planned_with_use_lead_agent_routes_correctly() {
         "user1",
         "user1:cli",
         "cli",
+        None,
     );
 
     // Should succeed because lead agent path doesn't require assignments
@@ -172,6 +176,7 @@ fn test_dispatch_lead_agent_marks_agent_busy() {
         "user1",
         "user1:cli",
         "cli",
+        None,
     );
 
     assert!(result.is_ok());
@@ -199,6 +204,7 @@ fn test_dispatch_lead_agent_prefers_lead_orchestration_skill() {
         "user1",
         "user1:cli",
         "cli",
+        None,
     );
 
     assert!(result.is_ok());
@@ -225,6 +231,7 @@ fn test_dispatch_lead_agent_fallback_to_any_idle_agent() {
         "user1",
         "user1:cli",
         "cli",
+        None,
     );
 
     assert!(result.is_ok());
@@ -245,6 +252,7 @@ fn test_dispatch_lead_agent_fails_no_agents() {
         "user1",
         "user1:cli",
         "cli",
+        None,
     );
 
     assert!(result.is_err());
@@ -270,6 +278,7 @@ fn test_dispatch_planned_use_lead_agent_false_goes_normal_path() {
         "user1",
         "user1:cli",
         "cli",
+        None,
     );
 
     // Should fail because assignments is empty and use_lead_agent is false

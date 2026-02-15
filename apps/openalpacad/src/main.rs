@@ -1435,6 +1435,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         soul_tool_ctx,
         user_tool_ctx,
         identity_tool_ctx,
+        Some(daemon_config.clone()),
     ) {
         tool_registry.register(tool);
     }

@@ -193,12 +193,13 @@ impl TaskDispatcher {
         required_skills: &[String],
         created_by: &str,
         lane_key: &str,
+        workspace_id: Option<String>,
     ) -> Result<String, String> {
         let matches = self
             .skill_matcher
             .match_skills(required_skills, &self.shared_context.agent_registry)?;
         let title = generate_title(description);
-        self.dispatch_core(description, title, matches, created_by, lane_key, source, None)
+        self.dispatch_core(description, title, matches, created_by, lane_key, source, None, workspace_id)
     }
 
     /// Dispatch a complex task using an LLM-generated plan.
@@ -211,6 +212,7 @@ impl TaskDispatcher {
         created_by: &str,
         lane_key: &str,
         source: &str,
+        workspace_id: Option<String>,
     ) -> Result<String, String> {
         // Lead Agent path: dynamic orchestration for complex/exploratory tasks
         if plan.use_lead_agent {
@@ -219,7 +221,7 @@ impl TaskDispatcher {
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| generate_title(description));
             return self.dispatch_lead_agent(
-                description, title, created_by, lane_key, source,
+                description, title, created_by, lane_key, source, workspace_id,
             );
         }
 
@@ -268,7 +270,7 @@ impl TaskDispatcher {
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| generate_title(description));
 
-        self.dispatch_core(description, title, matches, created_by, lane_key, source, dag)
+        self.dispatch_core(description, title, matches, created_by, lane_key, source, dag, workspace_id)
     }
 }
 

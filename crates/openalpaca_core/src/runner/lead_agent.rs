@@ -502,6 +502,7 @@ pub async fn run_lead_agent(
     task_id: &str,
     created_by: &str,
     daemon_config: &Arc<ArcSwap<DaemonConfig>>,
+    workspace_id: Option<String>,
 ) -> LeadAgentResult {
     // 1. List idle worker agents (all agents except the lead itself)
     let all_agents = shared_context.agent_registry.list_all();
@@ -571,9 +572,22 @@ pub async fn run_lead_agent(
         } else {
             None
         };
-        // TODO: Wire workspace scope_ctx through lead agent dispatch path
-        let memories = repo
-            .search_hybrid(
+        let scope_ctx = workspace_id.as_ref().map(|ws| {
+            crate::memory::scope_context::MemoryScopeContext::new(Some(ws.clone()))
+        });
+        let memories = if let Some(ref ctx) = scope_ctx {
+            let cascade_scopes = ctx.cascade_scopes();
+            repo.search_hybrid_cascade(
+                created_by,
+                task_description,
+                query_embedding.as_deref(),
+                5,
+                None,
+                &cascade_scopes,
+            )
+            .unwrap_or_default()
+        } else {
+            repo.search_hybrid(
                 created_by,
                 task_description,
                 query_embedding.as_deref(),
@@ -582,12 +596,13 @@ pub async fn run_lead_agent(
                 None,
                 None,
             )
-            .unwrap_or_default();
+            .unwrap_or_default()
+        };
         if !memories.is_empty() {
             // Track access for importance decay + boost
             let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-            // Default access_boost (lead_agent context doesn't carry DaemonConfig)
-            if let Err(e) = repo.touch_accessed(&ids, 0.05) {
+            let access_boost = daemon_config.load().orchestrator.memory.decay.access_boost;
+            if let Err(e) = repo.touch_accessed(&ids, access_boost) {
                 tracing::warn!("Failed to track memory access: {e}");
             }
 
