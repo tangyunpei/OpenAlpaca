@@ -896,10 +896,11 @@ impl Orchestrator {
                     repo.find_similar_for_supersession(oid, emb, supersession_threshold, 1)
                         .unwrap_or_default()
                 } else {
+                    // FTS fallback returns (memory, jaccard_score); require >= 0.4 overlap
                     repo.find_similar_fts_fallback(oid, item, 3)
                         .unwrap_or_default()
                         .into_iter()
-                        .map(|m| (m, 0.0))
+                        .filter(|(_, jaccard)| *jaccard >= 0.4)
                         .collect()
                 };
 
@@ -2214,10 +2215,11 @@ impl Orchestrator {
                 repo.find_similar_for_supersession(oid, emb, threshold, 1)
                     .unwrap_or_default()
             } else {
+                // FTS fallback returns (memory, jaccard_score); require >= 0.4 overlap
                 repo.find_similar_fts_fallback(oid, content, 3)
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|m| (m, 0.0))
+                    .filter(|(_, jaccard)| *jaccard >= 0.4)
                     .collect()
             };
 
