@@ -101,4 +101,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "memory_lifecycle",
         sql: include_str!("018_memory_lifecycle.sql"),
     },
+    Migration {
+        version: 19,
+        name: "memory_fixes",
+        sql: include_str!("019_memory_fixes.sql"),
+    },
 ];

@@ -584,9 +584,10 @@ pub async fn run_lead_agent(
             )
             .unwrap_or_default();
         if !memories.is_empty() {
-            // Track access for importance decay
+            // Track access for importance decay + boost
             let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-            if let Err(e) = repo.touch_accessed(&ids) {
+            // Default access_boost (lead_agent context doesn't carry DaemonConfig)
+            if let Err(e) = repo.touch_accessed(&ids, 0.05) {
                 tracing::warn!("Failed to track memory access: {e}");
             }
 

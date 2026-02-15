@@ -192,7 +192,7 @@ impl TaskDispatcher {
                     if let Some(ref db) = db {
                         // TODO: Wire workspace scope_ctx through dispatch paths
                         if let Some(block) = retrieve_memory_block(
-                            db, embedder.as_ref(), &created_by, &description, 5, None,
+                            db, embedder.as_ref(), &created_by, &description, 5, None, 0.05,
                         ).await {
                             messages.push(ChatMessage::system(&block));
                         }

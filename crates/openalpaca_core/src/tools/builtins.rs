@@ -545,10 +545,11 @@ impl BuiltInTool for MemorySearchTool {
             )
             .map_err(|e| format!("Memory search failed: {}", e))?;
 
-        // Track access for importance decay
+        // Track access for importance decay + boost
         if !memories.is_empty() {
             let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-            if let Err(e) = repo.touch_accessed(&ids) {
+            // Default access_boost (tool context doesn't carry DaemonConfig)
+            if let Err(e) = repo.touch_accessed(&ids, 0.05) {
                 tracing::warn!("Failed to track memory access: {e}");
             }
         }
