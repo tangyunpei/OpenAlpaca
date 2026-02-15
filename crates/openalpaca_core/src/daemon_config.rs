@@ -116,6 +116,12 @@ pub struct CostsConfig {
     pub extract_every_n_turns: usize,
     /// Minimum content length (chars) to trigger extraction.
     pub extract_min_content_len: usize,
+    /// Whether task output memory extraction is enabled.
+    pub task_extract_enabled: bool,
+    /// Maximum daily cost (USD) for task output memory extractions.
+    pub task_extract_max_daily_cost_usd: f64,
+    /// Minimum content length (chars) for task output to trigger extraction.
+    pub task_extract_min_content_len: usize,
 }
 
 impl Default for CostsConfig {
@@ -125,6 +131,9 @@ impl Default for CostsConfig {
             extract_max_daily_cost_usd: 0.25,
             extract_every_n_turns: 5,
             extract_min_content_len: 20,
+            task_extract_enabled: true,
+            task_extract_max_daily_cost_usd: 0.50,
+            task_extract_min_content_len: 100,
         }
     }
 }
