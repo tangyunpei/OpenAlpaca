@@ -571,6 +571,7 @@ pub async fn run_lead_agent(
         } else {
             None
         };
+        // TODO: Wire workspace scope_ctx through lead agent dispatch path
         let memories = repo
             .search_hybrid(
                 created_by,

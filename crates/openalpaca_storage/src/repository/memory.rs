@@ -279,6 +279,60 @@ impl<'a> MemoryRepository<'a> {
         Ok(merged)
     }
 
+    /// Cascading hybrid search: queries multiple scope levels and merges results.
+    ///
+    /// Iterates `scopes` in reverse order (most-specific first: Workspace before Global),
+    /// running `search_hybrid()` for each scope layer. Results are deduplicated by memory ID.
+    /// Falls back to unscoped global search if `scopes` is empty.
+    ///
+    /// The `scopes` list is typically built by `MemoryScopeContext::cascade_scopes()`:
+    /// `[(Global, None), (Workspace, Some(workspace_id))]`.
+    pub fn search_hybrid_cascade(
+        &self,
+        owner_id: &str,
+        query: &str,
+        embedding: Option<&[f32]>,
+        limit: usize,
+        kind_filter: Option<MemoryKind>,
+        scopes: &[(MemoryScope, Option<&str>)],
+    ) -> Result<Vec<MemoryV2>> {
+        if scopes.is_empty() {
+            return self.search_hybrid(owner_id, query, embedding, limit, kind_filter, None, None);
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let mut merged = Vec::with_capacity(limit);
+
+        // Iterate in reverse: most specific scope first (Workspace before Global)
+        for &(scope, scope_id) in scopes.iter().rev() {
+            let (scope_filter, scope_id_filter) = match scope {
+                MemoryScope::Global => (None, None), // Global: no scope filter
+                _ => (Some(scope), scope_id),
+            };
+
+            let results = self.search_hybrid(
+                owner_id,
+                query,
+                embedding,
+                limit, // Over-fetch per scope to fill quota
+                kind_filter,
+                scope_filter,
+                scope_id_filter,
+            )?;
+
+            for m in results {
+                if seen.insert(m.id) {
+                    merged.push(m);
+                    if merged.len() >= limit {
+                        return Ok(merged);
+                    }
+                }
+            }
+        }
+
+        Ok(merged)
+    }
+
     /// Get recent memories for an owner, ordered by created_at DESC.
     pub fn recent(&self, owner_id: &str, limit: usize) -> Result<Vec<MemoryV2>> {
         self.db.with_connection(|conn| {
