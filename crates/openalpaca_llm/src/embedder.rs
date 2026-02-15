@@ -30,16 +30,22 @@ pub struct OpenAiEmbedder {
     api_key: String,
     model: String,
     dimensions: u32,
+    embeddings_url: String,
 }
 
 #[cfg(feature = "openai")]
 impl OpenAiEmbedder {
     pub fn new(api_key: String, model: String, dimensions: u32) -> Result<Self, EmbedError> {
+        Self::new_with_url(api_key, model, dimensions, None)
+    }
+
+    pub fn new_with_url(api_key: String, model: String, dimensions: u32, url: Option<String>) -> Result<Self, EmbedError> {
         Ok(Self {
             client: reqwest::Client::new(),
             api_key,
             model,
             dimensions,
+            embeddings_url: url.unwrap_or_else(|| "https://api.openai.com/v1/embeddings".to_string()),
         })
     }
 }
@@ -60,7 +66,7 @@ impl Embedder for OpenAiEmbedder {
 
         let response = self
             .client
-            .post("https://api.openai.com/v1/embeddings")
+            .post(&self.embeddings_url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&body)
@@ -175,12 +181,21 @@ pub fn build_embedder(
     secret_store: Option<&dyn crate::secret_store::SecretStore>,
     provider_config: Option<&crate::config::ProviderConfig>,
 ) -> Result<Arc<dyn Embedder>, EmbedError> {
-    let dimensions = config.dimensions.unwrap_or(768);
+    build_embedder_with_runtime(config, secret_store, provider_config, None)
+}
+
+pub fn build_embedder_with_runtime(
+    config: &EmbeddingsConfig,
+    _secret_store: Option<&dyn crate::secret_store::SecretStore>,
+    _provider_config: Option<&crate::config::ProviderConfig>,
+    _runtime_config: Option<&crate::config::LlmRuntimeConfig>,
+) -> Result<Arc<dyn Embedder>, EmbedError> {
+    let _dimensions = config.dimensions.unwrap_or(768);
 
     match config.provider.as_str() {
         #[cfg(feature = "openai")]
         "openai" => {
-            let api_key = resolve_openai_key(secret_store, provider_config)
+            let api_key = resolve_openai_key(_secret_store, _provider_config)
                 .ok_or_else(|| {
                     EmbedError::Config(
                         "No OpenAI API key found for embeddings. Configure a key in [providers.openai]."
@@ -191,13 +206,14 @@ pub fn build_embedder(
                 .model
                 .clone()
                 .unwrap_or_else(|| "text-embedding-3-small".to_string());
-            let embedder = OpenAiEmbedder::new(api_key, model, dimensions)?;
+            let url = _runtime_config.map(|rt| rt.endpoints.openai_embeddings.clone());
+            let embedder = OpenAiEmbedder::new_with_url(api_key, model, _dimensions, url)?;
             Ok(Arc::new(embedder))
         }
         #[cfg(feature = "local-embeddings")]
         "local" => {
             let model_name = config.model.as_deref();
-            let embedder = LocalEmbedder::new(model_name, dimensions)?;
+            let embedder = LocalEmbedder::new(model_name, _dimensions)?;
             Ok(Arc::new(embedder))
         }
         other => Err(EmbedError::Config(format!(
@@ -212,6 +228,7 @@ pub fn build_embedder(
 }
 
 /// Resolve OpenAI API key from provider config (same key pool as chat).
+#[cfg(feature = "openai")]
 fn resolve_openai_key(
     secret_store: Option<&dyn crate::secret_store::SecretStore>,
     provider_config: Option<&crate::config::ProviderConfig>,

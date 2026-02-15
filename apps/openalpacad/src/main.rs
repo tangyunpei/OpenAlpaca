@@ -23,11 +23,13 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use events::EventBroadcaster;
+use arc_swap::ArcSwap;
 use openalpaca_core::{
     agent::AgentConfigService,
     bus::EventBus,
     chat::{ChatService, ChatStreamManager},
     context::SharedContext,
+    daemon_config::load_daemon_config,
     gateway::Gateway,
     lane::LaneManager,
     middleware::{
@@ -74,6 +76,7 @@ pub struct AppState {
     pub embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     pub local_user_id: String,
     pub default_lane_key: String,
+    pub daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
 }
 
 /// Resolve the config base directory.
@@ -860,11 +863,20 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         user_has_content,
     );
 
+    // Load daemon config (orchestrator memory/cost limits, execution defaults, server intervals)
+    let daemon_config_path = config_base_dir.join("daemon.toml");
+    let daemon_config = Arc::new(ArcSwap::from_pointee(load_daemon_config(&daemon_config_path)));
+    info!("Daemon config loaded from {}", daemon_config_path.display());
+
     // Step 5: Create event broadcaster for WebSocket streaming
-    let event_broadcaster = EventBroadcaster::new(64, instance_id.clone(), Some(db.clone()));
+    let event_broadcaster = EventBroadcaster::new(
+        daemon_config.load().server.event_broadcaster_capacity,
+        instance_id.clone(),
+        Some(db.clone()),
+    );
 
     // Step 5.1.1: Initialize WakeManager
-    let (wake_tx, mut wake_rx) = mpsc::channel(256);
+    let (wake_tx, mut wake_rx) = mpsc::channel(daemon_config.load().server.wake_channel_capacity);
     let mut wake_manager = WakeManager::new(wake_tx)
         .await
         .context("Failed to init WakeManager")?;
@@ -880,6 +892,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let llm_config = config_base_dir.join("llm.toml");
     if llm_config.exists() {
         watch_paths.push(llm_config);
+    }
+    if daemon_config_path.exists() {
+        watch_paths.push(daemon_config_path.clone());
     }
     if soul_path.exists() {
         watch_paths.push(soul_path.clone());
@@ -1463,6 +1478,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         Arc::new(catalog)
     };
 
+    // Clone llm_router before moving into Orchestrator (needed for hot-reload handler)
+    let llm_router_for_reload = llm_router.clone();
+
     // Construct Orchestrator as the new message handler
     let orchestrator = Arc::new(Orchestrator::new(
         shared_context.clone(),
@@ -1476,6 +1494,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         Some(db.clone()),
         embedder.clone(),
         skill_catalog.clone(),
+        daemon_config.clone(),
     ));
 
     // Set the initial user document (loaded from USER.md bootstrap)
@@ -1522,6 +1541,13 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let skills_dir_for_watcher = skills_dir.clone();
     let skill_catalog_for_watcher = skill_catalog.clone();
     let bus_for_watcher = bus.clone();
+    let llm_config_path_for_reload = llm_config_path.clone();
+    let secret_store_for_reload = secret_store.clone();
+    let recent_llm_hashes: Arc<tokio::sync::Mutex<std::collections::VecDeque<String>>> =
+        Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)));
+    let llm_hashes_for_watcher = recent_llm_hashes.clone();
+    let daemon_config_for_reload = daemon_config.clone();
+    let daemon_config_path_for_reload = daemon_config_path.clone();
     tokio::spawn(async move {
         while let Some(event) = wake_rx.recv().await {
             info!("Received WakeEvent: {:?}", event);
@@ -1671,6 +1697,81 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                             }
                         }
                     }
+                }
+
+                // LLM config (llm.toml) hot-reload
+                if is_same_file_path(&changed_path, &llm_config_path_for_reload) {
+                    // Dedup: skip if this write was from settings_service
+                    let should_skip = if let Ok(content) = std::fs::read(&llm_config_path_for_reload) {
+                        use sha2::{Digest, Sha256};
+                        let hash = format!("{:x}", Sha256::digest(&content));
+                        let hashes = llm_hashes_for_watcher.lock().await;
+                        hashes.contains(&hash)
+                    } else {
+                        false
+                    };
+
+                    if !should_skip {
+                        if let Some(ref router) = llm_router_for_reload {
+                            match openalpaca_llm::read_config(&llm_config_path_for_reload) {
+                                Ok(new_config) => {
+                                    // 1. Reload runtime config (timeouts, endpoints, env vars, provider defaults)
+                                    let runtime = openalpaca_llm::LlmRuntimeConfig::from(&new_config);
+                                    router.reload_runtime_config(runtime);
+
+                                    // 2. Reload model registry entries from config
+                                    if let Some(ref models) = new_config.models {
+                                        router.model_registry().reload_from_config(models);
+                                    }
+
+                                    // 3. Reload default model
+                                    if let Some(ref orch) = new_config.orchestrator {
+                                        router.set_default_model(orch.model.clone());
+                                    }
+
+                                    // 4. Reload key pools for each configured provider
+                                    if let Some(ref providers) = new_config.providers {
+                                        for (provider_name, provider_config) in providers {
+                                            if provider_config.enabled == Some(false) {
+                                                continue;
+                                            }
+                                            if let Some(provider_type) = openalpaca_llm::config::parse_provider_type_pub(provider_name) {
+                                                match openalpaca_llm::settings_service::build_key_pool_from_provider_config(
+                                                    provider_config,
+                                                    provider_type,
+                                                    Some(&*secret_store_for_reload),
+                                                ) {
+                                                    Ok(pool) => {
+                                                        router.reload_keys(provider_type, pool);
+                                                    }
+                                                    Err(e) => {
+                                                        warn!("LLM config reload: failed to rebuild key pool for {}: {}", provider_name, e);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    info!("LLM config hot-reloaded from {}", llm_config_path_for_reload.display());
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "LLM config reload failed for {}: {e}; keeping current config",
+                                        llm_config_path_for_reload.display()
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        info!("Skipping LLM config reload (settings-service write dedup)");
+                    }
+                }
+
+                // Daemon config (daemon.toml) hot-reload
+                if is_same_file_path(&changed_path, &daemon_config_path_for_reload) {
+                    let new_cfg = load_daemon_config(&daemon_config_path_for_reload);
+                    daemon_config_for_reload.store(Arc::new(new_cfg));
+                    info!("Daemon config hot-reloaded from {}", daemon_config_path_for_reload.display());
                 }
 
                 // Skills directory hot-reload
@@ -1893,12 +1994,16 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         let idx_emb = emb.clone();
         let idx_db = db.clone();
         let idx_uid = local_user_id.clone();
+        let idx_daemon_config = daemon_config.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            // Re-reads poll interval and batch size from ArcSwap each tick for hot-reload support.
             loop {
-                interval.tick().await;
+                let ei_cfg = idx_daemon_config.load();
+                let poll_secs = ei_cfg.server.embedding_indexer.poll_interval_secs;
+                let batch_size = ei_cfg.server.embedding_indexer.batch_size;
+                tokio::time::sleep(tokio::time::Duration::from_secs(poll_secs)).await;
                 let repo = openalpaca_storage::MemoryRepository::new(&idx_db);
-                let missing = match repo.list_missing_embeddings(&idx_uid, 50) {
+                let missing = match repo.list_missing_embeddings(&idx_uid, batch_size) {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
@@ -1943,6 +2048,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         embedder,
         local_user_id,
         default_lane_key,
+        daemon_config: daemon_config.clone(),
     });
 
     // Public routes (no auth required)
@@ -2089,22 +2195,28 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         .layer(CorsLayer::permissive());
 
     // Step 6: Spawn daemon-level heartbeat task
+    // Re-reads interval from ArcSwap each tick for hot-reload support.
     let heartbeat_state = state.clone();
+    let heartbeat_dc = daemon_config.clone();
     let _heartbeat_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         loop {
-            interval.tick().await;
+            let secs = heartbeat_dc.load().server.heartbeat_interval_secs;
+            tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
             heartbeat_state.event_broadcaster.heartbeat();
         }
     });
 
     // Step 6.1: Spawn chat stream cleanup task (Phase 5.6)
+    // Re-reads interval and stale timeout from ArcSwap each tick for hot-reload support.
     let cleanup_csm = chat_stream_manager;
+    let cleanup_dc = daemon_config.clone();
     let _chat_cleanup_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         loop {
-            interval.tick().await;
-            cleanup_csm.cleanup_stale(std::time::Duration::from_secs(30));
+            let cfg = cleanup_dc.load();
+            let cleanup_secs = cfg.server.chat_streams.cleanup_interval_secs;
+            let stale_secs = cfg.server.chat_streams.stale_timeout_secs;
+            tokio::time::sleep(tokio::time::Duration::from_secs(cleanup_secs)).await;
+            cleanup_csm.cleanup_stale(std::time::Duration::from_secs(stale_secs));
         }
     });
 

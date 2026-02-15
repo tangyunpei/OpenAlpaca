@@ -5,7 +5,7 @@
 
 use super::capabilities::SecurityViolation;
 
-/// Maximum input length in bytes (32 KB).
+/// Default maximum input length in bytes (32 KB).
 const MAX_INPUT_LENGTH: usize = 32 * 1024;
 
 /// Sanitizes user input and tool arguments.
@@ -15,18 +15,21 @@ impl InputSanitizer {
     /// Sanitize user input before processing.
     ///
     /// Checks for:
-    /// - Excessive length (> 32KB)
+    /// - Excessive length (> max_input_length, default 32KB)
     /// - Null bytes
     /// - Path traversal patterns (`../`)
     /// - Command injection patterns (`;`, `&&`, `|`, backticks, `$(`)
-    pub fn sanitize_user_input(input: &str) -> Result<String, SecurityViolation> {
+    ///
+    /// Pass `None` for `max_input_length` to use the compiled default (32768 bytes).
+    pub fn sanitize_user_input(input: &str, max_input_length: Option<usize>) -> Result<String, SecurityViolation> {
+        let max_len = max_input_length.unwrap_or(MAX_INPUT_LENGTH);
         // Check length
-        if input.len() > MAX_INPUT_LENGTH {
+        if input.len() > max_len {
             return Err(SecurityViolation::InputBlocked {
                 reason: format!(
                     "Input exceeds maximum length ({} > {} bytes)",
                     input.len(),
-                    MAX_INPUT_LENGTH
+                    max_len
                 ),
             });
         }
@@ -125,7 +128,7 @@ mod tests {
 
     #[test]
     fn test_clean_input_passes() {
-        let result = InputSanitizer::sanitize_user_input("Hello, how are you?");
+        let result = InputSanitizer::sanitize_user_input("Hello, how are you?", None);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Hello, how are you?");
     }
@@ -133,7 +136,7 @@ mod tests {
     #[test]
     fn test_oversized_input_blocked() {
         let large = "x".repeat(MAX_INPUT_LENGTH + 1);
-        let result = InputSanitizer::sanitize_user_input(&large);
+        let result = InputSanitizer::sanitize_user_input(&large, None);
         assert!(result.is_err());
         match result.unwrap_err() {
             SecurityViolation::InputBlocked { reason } => {
@@ -145,7 +148,7 @@ mod tests {
 
     #[test]
     fn test_null_byte_blocked() {
-        let result = InputSanitizer::sanitize_user_input("hello\0world");
+        let result = InputSanitizer::sanitize_user_input("hello\0world", None);
         assert!(result.is_err());
         match result.unwrap_err() {
             SecurityViolation::InputBlocked { reason } => {

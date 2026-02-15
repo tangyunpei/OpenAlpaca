@@ -9,6 +9,8 @@
 use crate::agent::subagent::{AgentStatus, SubAgent};
 use crate::bus::EventBus;
 use crate::context::SharedContext;
+use crate::daemon_config::DaemonConfig;
+use arc_swap::ArcSwap;
 use crate::events::SystemEvent;
 use crate::middleware::prompt::format_tool_guidance;
 use crate::runner::{LoopConfig, LoopResult, run_agentic_loop_routed};
@@ -226,11 +228,12 @@ impl BuiltInTool for SpawnSubagentTool {
         });
 
         // 12. Record LLM usage + agent history
+        let default_model = self.router.default_model();
         let actual_model = result
             .model_used
             .as_deref()
             .or(loop_config.model.as_deref())
-            .unwrap_or(self.router.default_model());
+            .unwrap_or(&default_model);
         let resolved_provider = self
             .router
             .model_registry()
@@ -497,6 +500,7 @@ pub async fn run_lead_agent(
     db: Option<Database>,
     task_id: &str,
     created_by: &str,
+    daemon_config: &Arc<ArcSwap<DaemonConfig>>,
 ) -> LeadAgentResult {
     // 1. List idle worker agents (all agents except the lead itself)
     let all_agents = shared_context.agent_registry.list_all();
@@ -554,15 +558,15 @@ pub async fn run_lead_agent(
         ChatMessage::user(task_description),
     ];
 
-    // 8. Build LoopConfig from lead agent's constraints
-    // Lead agents get higher limits than regular agents
+    // 8. Build LoopConfig from lead agent's constraints (agent overrides daemon defaults)
+    let ld = &daemon_config.load().execution.lead_agent_defaults;
     let loop_config = LoopConfig {
-        max_rounds: 30, // Higher than default 15 — lead agent needs more rounds
-        max_tools_per_round: 3, // Each spawn_subagent is expensive, limit per round
+        max_rounds: ld.max_rounds,
+        max_tools_per_round: ld.max_tools_per_round,
         max_tool_runtime: Duration::from_secs(
-            lead_agent.constraints.timeout_seconds.unwrap_or(300), // 5 min default
+            lead_agent.constraints.timeout_seconds.unwrap_or(ld.max_tool_runtime_secs),
         ),
-        max_cost: lead_agent.constraints.max_cost_per_task.unwrap_or(5.0), // Higher budget
+        max_cost: lead_agent.constraints.max_cost_per_task.unwrap_or(ld.max_cost),
         model: lead_agent.llm_config.model.clone(),
         fallback_models: lead_agent.llm_config.fallback_models.clone(),
     };

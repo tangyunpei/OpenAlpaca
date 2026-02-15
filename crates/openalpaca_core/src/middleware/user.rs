@@ -404,19 +404,22 @@ fn sanitize_prompt_field(value: &str) -> String {
         .to_string()
 }
 
-/// Character budget for the user profile prompt block.
+/// Default character budget for the user profile prompt block.
 const USER_PROFILE_BUDGET: usize = 1000;
 
 /// Render a `UserDocument` into a `### USER PROFILE ###` prompt block.
 ///
 /// Returns an empty string if the document has no meaningful content.
-pub fn user_to_prompt_block(doc: &UserDocument) -> String {
+///
+/// The `budget` parameter controls the maximum character budget for the profile
+/// block. Pass `None` to use the compiled default (1000 chars).
+pub fn user_to_prompt_block(doc: &UserDocument, budget: Option<usize>) -> String {
     if !user_document_has_content(doc) {
         return String::new();
     }
 
     let mut block = String::from("### USER PROFILE ###\n");
-    let mut budget = USER_PROFILE_BUDGET;
+    let mut budget = budget.unwrap_or(USER_PROFILE_BUDGET);
 
     // Identity line (compact: "Name: Alex | Timezone: PST")
     if !doc.identity.is_empty() {
@@ -653,13 +656,13 @@ Likes to work late. Coffee over tea.
             preferences: String::new(),
             notes: String::new(),
         };
-        assert!(user_to_prompt_block(&doc).is_empty());
+        assert!(user_to_prompt_block(&doc, None).is_empty());
     }
 
     #[test]
     fn test_prompt_block_populated() {
         let doc = parse_user_markdown(POPULATED_DOC).expect("should parse");
-        let block = user_to_prompt_block(&doc);
+        let block = user_to_prompt_block(&doc, None);
         assert!(block.starts_with("### USER PROFILE ###\n"));
         assert!(block.contains("Name: Alex"));
         assert!(block.contains("Timezone: PST"));

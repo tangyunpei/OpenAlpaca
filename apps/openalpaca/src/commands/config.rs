@@ -5,12 +5,14 @@ use dialoguer::{Confirm, Input, Password, Select, theme::ColorfulTheme};
 use openalpaca_llm::{ClaudeCodeCliProvider, CodexCliProvider};
 use openalpaca_storage::{ConfigRepository, Database, config_schema, paths};
 use openalpaca_storage::config_schema::ConfigBackend;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
 use super::ai_config;
-use crate::output::{OutputFormat, TableRow, print_list};
+use super::daemon_config_cli;
+use crate::client::DaemonClient;
+use crate::output::OutputFormat;
 
 #[derive(Args)]
 pub struct ConfigArgs {
@@ -32,6 +34,9 @@ pub enum ConfigAction {
         /// Output format
         #[arg(long, value_enum, default_value = "table")]
         format: OutputFormat,
+        /// Show source column (db, llm.toml, daemon.toml)
+        #[arg(long, short)]
+        verbose: bool,
     },
     /// Reset configuration
     Reset {
@@ -49,18 +54,10 @@ struct ConfigEntry {
     value: String,
     kind: String,
     source: String,
-}
-
-impl TableRow for ConfigEntry {
-    fn headers() -> Vec<(&'static str, usize)> {
-        vec![("KEY", 28), ("VALUE", 30), ("KIND", 8), ("SOURCE", 10)]
-    }
-    fn table_row(&self) -> String {
-        format!(
-            "{:<28} {:<30} {:<8} {}",
-            self.key, self.value, self.kind, self.source
-        )
-    }
+    #[serde(skip_serializing_if = "Option::is_none")]
+    category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 pub async fn run(args: ConfigArgs) -> Result<()> {
@@ -71,7 +68,7 @@ pub async fn run(args: ConfigArgs) -> Result<()> {
     match args.action {
         Some(ConfigAction::Set { key, value }) => cmd_set(&repo, &key, &value)?,
         Some(ConfigAction::Get { key }) => cmd_get(&repo, &key)?,
-        Some(ConfigAction::List { all, format }) => cmd_list(&repo, all, format)?,
+        Some(ConfigAction::List { all, format, verbose }) => cmd_list(&repo, all, format, verbose)?,
         Some(ConfigAction::Reset { key, factory }) => cmd_reset(&repo, &db, key, factory)?,
         None => run_interactive(&repo, &db)?,
     }
@@ -100,6 +97,7 @@ fn cmd_set(repo: &ConfigRepository, key: &str, value: &str) -> Result<()> {
 
     match def.backend {
         ConfigBackend::LlmToml => ai_config::set_ai_value(key, &normalized)?,
+        ConfigBackend::DaemonToml => daemon_config_cli::set_daemon_value(key, &normalized)?,
         ConfigBackend::SystemConfig => {
             let kind = def.kind.as_db_kind();
             repo.set(key, &normalized, kind)?;
@@ -122,6 +120,7 @@ fn cmd_get(repo: &ConfigRepository, key: &str) -> Result<()> {
 
     let value = match backend {
         ConfigBackend::LlmToml => ai_config::get_ai_value(key)?,
+        ConfigBackend::DaemonToml => daemon_config_cli::get_daemon_value(key)?,
         ConfigBackend::SystemConfig => repo.get(key)?,
     };
 
@@ -147,131 +146,289 @@ fn cmd_get(repo: &ConfigRepository, key: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_list(repo: &ConfigRepository, all: bool, format: OutputFormat) -> Result<()> {
-    if all {
-        cmd_list_all(repo, format)
-    } else {
-        cmd_list_set(repo, format)
-    }
-}
-
-fn cmd_list_set(repo: &ConfigRepository, format: OutputFormat) -> Result<()> {
-    let items = repo.list()?;
-    let mut entries: Vec<ConfigEntry> = items
-        .into_iter()
-        .map(|(k, v, kind)| {
-            let def = config_schema::lookup(&k);
-            let sensitive = def.as_ref().map_or(false, |d| d.sensitive);
-            ConfigEntry {
-                key: k,
-                value: if sensitive {
-                    config_schema::mask_value(&v)
-                } else {
-                    v
-                },
-                kind,
-                source: "db".to_string(),
-            }
-        })
-        .collect();
-
-    // Merge AI entries from llm.toml
-    for (k, v, kind) in ai_config::list_ai_entries().unwrap_or_default() {
-        let def = config_schema::lookup(&k);
-        let sensitive = def.as_ref().map_or(false, |d| d.sensitive);
-        entries.push(ConfigEntry {
-            key: k,
-            value: if sensitive {
-                config_schema::mask_value(&v)
-            } else {
-                v
-            },
-            kind,
-            source: "llm.toml".to_string(),
-        });
-    }
-
-    print_list(&entries, format);
-    Ok(())
-}
-
-fn cmd_list_all(repo: &ConfigRepository, format: OutputFormat) -> Result<()> {
+fn cmd_list(repo: &ConfigRepository, all: bool, format: OutputFormat, verbose: bool) -> Result<()> {
+    // Gather values from all backends
     let db_items = repo.list()?;
     let db_map: HashMap<String, (String, String)> = db_items
         .into_iter()
         .map(|(k, v, kind)| (k, (v, kind)))
         .collect();
-
-    // Build a map of AI values for LlmToml-backed keys
     let ai_map: HashMap<String, String> = ai_config::list_ai_entries()
         .unwrap_or_default()
         .into_iter()
         .map(|(k, v, _)| (k, v))
         .collect();
+    let daemon_map: HashMap<String, String> = daemon_config_cli::list_daemon_entries()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(k, v, _)| (k, v))
+        .collect();
 
-    let mut entries: Vec<ConfigEntry> = Vec::new();
+    // Resolve each key to (display_value, source, is_set)
+    let mut resolved: HashMap<String, (String, String, bool)> = HashMap::new();
 
     for def in config_schema::CONFIG_KEYS {
-        let (value, source) = match def.backend {
+        let (raw_val, source, is_set) = match def.backend {
             ConfigBackend::LlmToml => {
                 if let Some(val) = ai_map.get(def.key) {
-                    let display = if def.sensitive {
-                        config_schema::mask_value(val)
+                    (val.clone(), "llm.toml", true)
+                } else if all {
+                    if let Some(d) = def.default {
+                        (d.to_string(), "default", false)
                     } else {
-                        val.clone()
-                    };
-                    (display, "llm.toml".to_string())
-                } else if let Some(default) = def.default {
-                    (format!("(default: {})", default), "default".to_string())
+                        (String::new(), "—", false)
+                    }
                 } else {
-                    ("(not set)".to_string(), "not set".to_string())
+                    continue;
+                }
+            }
+            ConfigBackend::DaemonToml => {
+                if let Some(val) = daemon_map.get(def.key) {
+                    (val.clone(), "daemon.toml", true)
+                } else if all {
+                    if let Some(d) = def.default {
+                        (d.to_string(), "default", false)
+                    } else {
+                        (String::new(), "—", false)
+                    }
+                } else {
+                    continue;
                 }
             }
             ConfigBackend::SystemConfig => {
                 if let Some((val, _)) = db_map.get(def.key) {
-                    let display = if def.sensitive {
-                        config_schema::mask_value(val)
+                    (val.clone(), "db", true)
+                } else if all {
+                    if let Some(d) = def.default {
+                        (d.to_string(), "default", false)
                     } else {
-                        val.clone()
-                    };
-                    (display, "db".to_string())
-                } else if let Some(default) = def.default {
-                    (format!("(default: {})", default), "default".to_string())
+                        (String::new(), "—", false)
+                    }
                 } else {
-                    ("(not set)".to_string(), "not set".to_string())
+                    continue;
                 }
             }
         };
 
-        entries.push(ConfigEntry {
-            key: def.key.to_string(),
-            value,
-            kind: def.kind.as_db_kind().to_string(),
-            source,
-        });
+        let display = if def.sensitive {
+            config_schema::mask_value(&raw_val)
+        } else {
+            raw_val
+        };
+        resolved.insert(def.key.to_string(), (display, source.to_string(), is_set));
     }
 
-    // Also include any DB keys not in the static registry (dynamic connector keys)
-    for (k, (v, kind)) in &db_map {
+    // Dynamic connector keys from DB not in the static registry
+    for (k, (v, _kind)) in &db_map {
         if config_schema::CONFIG_KEYS.iter().any(|d| d.key == k) {
             continue;
         }
         let def = config_schema::lookup(k);
         let sensitive = def.as_ref().map_or(false, |d| d.sensitive);
-        entries.push(ConfigEntry {
-            key: k.clone(),
-            value: if sensitive {
-                config_schema::mask_value(v)
-            } else {
-                v.clone()
-            },
-            kind: kind.clone(),
-            source: "db".to_string(),
-        });
+        let display = if sensitive {
+            config_schema::mask_value(v)
+        } else {
+            v.clone()
+        };
+        resolved.insert(k.clone(), (display, "db".to_string(), true));
     }
 
-    print_list(&entries, format);
+    match format {
+        OutputFormat::Json => {
+            let entries: Vec<ConfigEntry> = resolved
+                .iter()
+                .map(|(k, (v, src, _))| {
+                    let def = config_schema::lookup(k);
+                    ConfigEntry {
+                        key: k.clone(),
+                        value: v.clone(),
+                        kind: def
+                            .as_ref()
+                            .map_or("string".to_string(), |d| d.kind.as_db_kind().to_string()),
+                        source: src.clone(),
+                        category: def.as_ref().map(|d| d.category.to_string()),
+                        description: def.as_ref().map(|d| d.description.to_string()),
+                    }
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&entries).unwrap_or_default()
+            );
+        }
+        OutputFormat::Table => {
+            print_grouped_table(&resolved, verbose);
+        }
+    }
+
     Ok(())
+}
+
+/// Print config values grouped by category and subcategory with colored output.
+fn print_grouped_table(
+    resolved: &HashMap<String, (String, String, bool)>, // key → (display_value, source, is_set)
+    verbose: bool,
+) {
+    let category_order = ["Agents", "API-Keys", "Daemon", "Connectors", "System"];
+
+    // Compute column widths from actual data
+    let key_width = resolved
+        .keys()
+        .map(|k| k.len())
+        .max()
+        .unwrap_or(30)
+        .max(20);
+    let val_width = resolved
+        .values()
+        .map(|(v, _, _)| v.len())
+        .max()
+        .unwrap_or(20)
+        .clamp(10, 36);
+
+    let mut total_keys = 0usize;
+    let mut set_keys = 0usize;
+    let mut first_category = true;
+
+    for cat in &category_order {
+        let subcats = config_schema::subcategories_in_category(cat);
+
+        // Collect keys for this category
+        let cat_keys = config_schema::keys_in_category(cat);
+        let has_any = cat_keys.iter().any(|d| resolved.contains_key(d.key));
+        if !has_any {
+            continue;
+        }
+
+        // Category header
+        if !first_category {
+            println!();
+        }
+        first_category = false;
+        let header = format!("━━━ {} ", cat);
+        let pad = 60usize.saturating_sub(header.len());
+        println!("{}", style(format!("{}{}", header, "━".repeat(pad))).bold().cyan());
+
+        if subcats.is_empty() {
+            // Flat category (Connectors, System)
+            print_category_keys(&cat_keys, resolved, key_width, val_width, verbose, &mut total_keys, &mut set_keys);
+        } else {
+            // Subcategory-based rendering
+            for sub in &subcats {
+                let sub_keys = config_schema::keys_in_subcategory(cat, sub);
+                let has_sub = sub_keys.iter().any(|d| resolved.contains_key(d.key));
+                if !has_sub {
+                    continue;
+                }
+                println!("  {}", style(sub).bold());
+                print_category_keys(&sub_keys, resolved, key_width, val_width, verbose, &mut total_keys, &mut set_keys);
+            }
+        }
+    }
+
+    // Dynamic connector keys not in the static registry
+    let mut dynamic_keys: Vec<&String> = resolved
+        .keys()
+        .filter(|k| config_schema::CONFIG_KEYS.iter().all(|d| d.key != k.as_str()))
+        .collect();
+    dynamic_keys.sort();
+
+    if !dynamic_keys.is_empty() {
+        if !first_category {
+            println!();
+        }
+        let header = "━━━ Dynamic ";
+        let pad = 60usize.saturating_sub(header.len());
+        println!("{}", style(format!("{}{}", header, "━".repeat(pad))).bold().cyan());
+
+        for k in &dynamic_keys {
+            let (display_val, source, is_set) = &resolved[k.as_str()];
+            total_keys += 1;
+            if *is_set {
+                set_keys += 1;
+            }
+            let desc = config_schema::lookup(k)
+                .map(|d| d.description.to_string())
+                .unwrap_or_default();
+            print_key_row(k, display_val, *is_set, source, &desc, key_width, val_width, verbose);
+        }
+    }
+
+    // Footer
+    let default_count = total_keys - set_keys;
+    println!();
+    println!(
+        "{}",
+        style(format!(
+            "{} keys ({} set, {} default)",
+            total_keys, set_keys, default_count
+        ))
+        .dim()
+    );
+}
+
+fn print_category_keys(
+    defs: &[&config_schema::ConfigKeyDef],
+    resolved: &HashMap<String, (String, String, bool)>,
+    key_width: usize,
+    val_width: usize,
+    verbose: bool,
+    total: &mut usize,
+    set: &mut usize,
+) {
+    for def in defs {
+        if let Some((display_val, source, is_set)) = resolved.get(def.key) {
+            *total += 1;
+            if *is_set {
+                *set += 1;
+            }
+            print_key_row(def.key, display_val, *is_set, source, def.description, key_width, val_width, verbose);
+        }
+    }
+}
+
+fn print_key_row(
+    key: &str,
+    value: &str,
+    is_set: bool,
+    source: &str,
+    description: &str,
+    key_width: usize,
+    val_width: usize,
+    verbose: bool,
+) {
+    let styled_val = if !is_set {
+        if value.is_empty() {
+            style("(not set)".to_string()).yellow().dim()
+        } else {
+            style(format!("(default: {})", value)).yellow().dim()
+        }
+    } else {
+        style(value.to_string()).green()
+    };
+
+    let desc_styled = style(description).dim();
+
+    if verbose {
+        let source_styled = style(format!("[{}]", source)).dim();
+        println!(
+            "    {:<kw$} {:<vw$} {} {}",
+            key,
+            styled_val,
+            desc_styled,
+            source_styled,
+            kw = key_width,
+            vw = val_width,
+        );
+    } else {
+        println!(
+            "    {:<kw$} {:<vw$} {}",
+            key,
+            styled_val,
+            desc_styled,
+            kw = key_width,
+            vw = val_width,
+        );
+    }
 }
 
 fn cmd_reset(
@@ -300,6 +457,7 @@ fn cmd_reset(
         let backend = def.as_ref().map(|d| d.backend).unwrap_or(ConfigBackend::SystemConfig);
         match backend {
             ConfigBackend::LlmToml => ai_config::delete_ai_value(&k)?,
+            ConfigBackend::DaemonToml => daemon_config_cli::delete_daemon_value(&k)?,
             ConfigBackend::SystemConfig => repo.delete(&k)?,
         }
         println!("Key '{}' reset (deleted).", k);
@@ -335,12 +493,15 @@ fn run_interactive(repo: &ConfigRepository, db: &Database) -> Result<()> {
     for (k, v, _) in ai_config::list_ai_entries().unwrap_or_default() {
         config_map.insert(k, v);
     }
+    for (k, v, _) in daemon_config_cli::list_daemon_entries().unwrap_or_default() {
+        config_map.insert(k, v);
+    }
 
     let mut did_write_llm_toml = false;
 
     loop {
         let mut categories = config_schema::categories();
-        let order = ["Agents", "API-Keys", "Connectors", "System"];
+        let order = ["Agents", "API-Keys", "Daemon", "Connectors", "System"];
         categories.sort_by_key(|c| order.iter().position(|o| o == c).unwrap_or(99));
 
         let mut menu_items: Vec<String> = categories
@@ -362,6 +523,7 @@ fn run_interactive(repo: &ConfigRepository, db: &Database) -> Result<()> {
             let result = match cat {
                 "API-Keys" => interactive_api_keys(repo, &mut config_map, &mut did_write_llm_toml)?,
                 "Agents" => interactive_agents(repo, &mut config_map)?,
+                "Daemon" => interactive_daemon(repo, &mut config_map)?,
                 _ => interactive_category(repo, &mut config_map, cat)?,
             };
             if result {
@@ -421,6 +583,63 @@ fn format_category_label(category: &str, config_map: &HashMap<String, String>) -
     )
 }
 
+/// Format a config key as a human-readable menu item with value, description, and backend.
+///
+/// Example output:
+///   max retries per node          1          Max retries per DAG node on failure  [daemon.toml]
+fn format_key_menu_item(
+    def: &config_schema::ConfigKeyDef,
+    config: &HashMap<String, String>,
+) -> String {
+    // Extract leaf key name and humanize: "daemon.dag.max_retries_per_node" → "max retries per node"
+    let leaf = def
+        .key
+        .rsplit('.')
+        .next()
+        .unwrap_or(def.key)
+        .replace('_', " ");
+
+    // Resolve display value
+    let (display_val, is_set) = if let Some(v) = config.get(def.key) {
+        let val = if def.sensitive {
+            config_schema::mask_value(v)
+        } else {
+            v.clone()
+        };
+        (val, true)
+    } else if let Some(d) = def.default {
+        if def.sensitive {
+            (format!("(default: {})", config_schema::mask_value(d)), false)
+        } else {
+            (format!("(default: {})", d), false)
+        }
+    } else {
+        ("(not set)".to_string(), false)
+    };
+
+    // Color the value
+    let styled_val = if is_set {
+        style(display_val).green().to_string()
+    } else {
+        style(display_val).yellow().dim().to_string()
+    };
+
+    // Backend badge
+    let backend = match def.backend {
+        ConfigBackend::SystemConfig => "db",
+        ConfigBackend::LlmToml => "llm.toml",
+        ConfigBackend::DaemonToml => "daemon.toml",
+    };
+
+    format!(
+        "{:<30} {:<28} {}  {}",
+        style(&leaf).bold(),
+        styled_val,
+        style(def.description).dim(),
+        style(format!("[{}]", backend)).dim(),
+    )
+}
+
 fn interactive_category(
     repo: &ConfigRepository,
     config: &mut HashMap<String, String>,
@@ -430,23 +649,7 @@ fn interactive_category(
     loop {
         let mut items: Vec<String> = keys
             .iter()
-            .map(|def| {
-                let current = config
-                    .get(def.key)
-                    .map(|v| {
-                        if def.sensitive {
-                            config_schema::mask_value(v)
-                        } else {
-                            v.clone()
-                        }
-                    })
-                    .unwrap_or_else(|| {
-                        def.default
-                            .map(|d| format!("(default: {})", d))
-                            .unwrap_or_else(|| "(not set)".into())
-                    });
-                format!("{} = {}", def.key, current)
-            })
+            .map(|def| format_key_menu_item(def, config))
             .collect();
         items.push(style("Save & Exit").bold().green().to_string());
         items.push(style("Back").dim().to_string());
@@ -549,23 +752,7 @@ fn interactive_provider_flat(
     loop {
         let mut items: Vec<String> = keys
             .iter()
-            .map(|def| {
-                let current = config
-                    .get(def.key)
-                    .map(|v| {
-                        if def.sensitive {
-                            config_schema::mask_value(v)
-                        } else {
-                            v.clone()
-                        }
-                    })
-                    .unwrap_or_else(|| {
-                        def.default
-                            .map(|d| format!("(default: {})", d))
-                            .unwrap_or_else(|| "(not set)".into())
-                    });
-                format!("{} = {}", def.key, current)
-            })
+            .map(|def| format_key_menu_item(def, config))
             .collect();
         items.push(style("Back").dim().to_string());
 
@@ -1206,6 +1393,680 @@ fn guided_codex_quick_setup(config: &mut HashMap<String, String>) -> Result<()> 
     }
 }
 
+fn interactive_daemon(
+    repo: &ConfigRepository,
+    config: &mut HashMap<String, String>,
+) -> Result<bool> {
+    let subcats = config_schema::subcategories_in_category("Daemon");
+    loop {
+        let mut items: Vec<String> = Vec::new();
+
+        for sub in &subcats {
+            let keys = config_schema::keys_in_subcategory("Daemon", sub);
+            let set_count = keys.iter().filter(|d| config.contains_key(d.key)).count();
+            let total = keys.len();
+            items.push(format!(
+                "{}  {}",
+                style(sub).bold(),
+                style(format!("({}/{})", set_count, total)).dim(),
+            ));
+        }
+
+        items.push(style("Save & Exit").bold().green().to_string());
+        items.push(style("Back").dim().to_string());
+
+        let sel = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Daemon Configuration")
+            .default(0)
+            .items(&items)
+            .interact()?;
+
+        if sel < subcats.len() {
+            if interactive_subcategory(repo, config, "Daemon", subcats[sel])? {
+                return Ok(true); // saved from subcategory
+            }
+        } else if sel == subcats.len() {
+            save_and_exit(repo, config)?;
+            return Ok(true);
+        } else {
+            return Ok(false);
+        }
+    }
+}
+
+// ── Agent management structs (local deserialization) ────────────────────
+//
+// These mirror the structs in agents.rs but are kept local to avoid coupling.
+
+#[derive(Debug, Deserialize)]
+struct TuiAgentItem {
+    id: String,
+    name: String,
+    status: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    skills: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TuiAgentConfigResponse {
+    config: serde_json::Value,
+    config_version: u64,
+}
+
+/// Run an async future on the current tokio runtime from synchronous code.
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    tokio::runtime::Handle::current().block_on(f)
+}
+
+/// Fetch agents from the daemon. Returns empty vec on connection failure.
+fn fetch_agents() -> Vec<TuiAgentItem> {
+    let client = match DaemonClient::connect() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    block_on(async {
+        client
+            .get::<Vec<TuiAgentItem>>("/v1/agents?limit=50")
+            .await
+            .unwrap_or_default()
+    })
+}
+
+/// Format an agent as a menu item line.
+fn format_agent_menu_item(agent: &TuiAgentItem) -> String {
+    let status_styled = match agent.status.to_lowercase().as_str() {
+        "idle" | "active" | "running" => style(&agent.status).green(),
+        "paused" | "waiting" => style(&agent.status).yellow(),
+        "error" | "failed" | "archived" => style(&agent.status).red(),
+        _ => style(&agent.status).dim(),
+    };
+
+    let model = agent.model.as_deref().unwrap_or("-");
+    let skills = agent
+        .skills
+        .as_ref()
+        .map(|s| s.join(", "))
+        .unwrap_or_else(|| "-".to_string());
+
+    format!(
+        "{:<22} {:<10} {:<24} {}",
+        style(&agent.name).bold(),
+        status_styled,
+        style(model).dim(),
+        style(&skills).dim(),
+    )
+}
+
+/// Interactive agent management sub-menu.
+fn interactive_manage_agents(_repo: &ConfigRepository, _config: &HashMap<String, String>) -> Result<bool> {
+    loop {
+        // Fetch fresh agent list every iteration
+        let agents = fetch_agents();
+
+        if agents.is_empty() {
+            let daemon_hint = if DaemonClient::connect().is_err() {
+                " (daemon is not running)"
+            } else {
+                ""
+            };
+
+            println!(
+                "\n{}{}",
+                style("No agents found.").yellow(),
+                style(daemon_hint).dim(),
+            );
+        }
+
+        let mut items: Vec<String> = Vec::new();
+
+        // Agent list
+        for agent in &agents {
+            items.push(format_agent_menu_item(agent));
+        }
+
+        // Actions at the bottom
+        items.push(style("+ Create New Agent").bold().cyan().to_string());
+        items.push(style("Back").dim().to_string());
+
+        let sel = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Manage Agents")
+            .default(0)
+            .items(&items)
+            .interact()?;
+
+        if sel < agents.len() {
+            // Selected an existing agent
+            interactive_agent_detail(&agents[sel])?;
+        } else if sel == agents.len() {
+            // Create new agent
+            interactive_create_agent()?;
+        } else {
+            // Back
+            return Ok(false);
+        }
+    }
+}
+
+/// Show agent detail and allow actions.
+fn interactive_agent_detail(agent: &TuiAgentItem) -> Result<()> {
+    loop {
+        // Print agent summary
+        println!();
+        println!("{} {}", style("Agent:").dim(), style(&agent.name).bold());
+        println!("{} {}", style("ID:").dim(), &agent.id);
+        if let Some(ref desc) = agent.description {
+            if !desc.is_empty() {
+                println!("{} {}", style("Description:").dim(), desc);
+            }
+        }
+
+        let status_styled = match agent.status.to_lowercase().as_str() {
+            "idle" | "active" | "running" => style(&agent.status).green(),
+            "paused" | "waiting" => style(&agent.status).yellow(),
+            "error" | "failed" | "archived" => style(&agent.status).red(),
+            _ => style(&agent.status).dim(),
+        };
+        println!("{} {}", style("Status:").dim(), status_styled);
+        println!(
+            "{} {}",
+            style("Model:").dim(),
+            agent.model.as_deref().unwrap_or("-")
+        );
+        if let Some(ref skills) = agent.skills {
+            println!("{} {}", style("Skills:").dim(), skills.join(", "));
+        }
+        println!();
+
+        let mut items = vec![
+            format!("{}", style("Edit Configuration").bold()),
+            format!("{}", style("View Full Config (JSON)").bold()),
+        ];
+
+        // Show pause/resume based on status
+        let is_paused = agent.status.to_lowercase() == "paused";
+        if is_paused {
+            items.push(style("Resume Agent").green().to_string());
+        } else {
+            items.push(style("Pause Agent").yellow().to_string());
+        }
+
+        items.push(style("Remove Agent").red().to_string());
+        items.push(style("Back").dim().to_string());
+
+        let sel = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!("Agent: {}", &agent.name))
+            .default(0)
+            .items(&items)
+            .interact()?;
+
+        match sel {
+            0 => interactive_edit_agent_config(&agent.id, &agent.name)?,
+            1 => view_agent_config_json(&agent.id)?,
+            2 => {
+                let action = if is_paused { "resume" } else { "pause" };
+                agent_action_tui(&agent.id, action)?;
+                return Ok(()); // Return to refresh list with new status
+            }
+            3 => {
+                if remove_agent_tui(&agent.id, &agent.name)? {
+                    return Ok(()); // Agent removed, go back to list
+                }
+            }
+            _ => return Ok(()), // Back
+        }
+    }
+}
+
+/// Show full agent config as pretty-printed JSON.
+fn view_agent_config_json(agent_id: &str) -> Result<()> {
+    let client = DaemonClient::connect().context("Daemon is not running")?;
+    let config: TuiAgentConfigResponse = block_on(async {
+        client
+            .get(&format!("/v1/agents/{}/config", agent_id))
+            .await
+    })?;
+
+    println!();
+    println!(
+        "{} {}",
+        style("Config version:").dim(),
+        config.config_version
+    );
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&config.config).unwrap_or_default()
+    );
+    println!();
+
+    // Wait for user to press enter
+    let _: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Press Enter to continue")
+        .allow_empty(true)
+        .interact_text()?;
+
+    Ok(())
+}
+
+/// Interactive editor for an agent's config (key-by-key editing).
+fn interactive_edit_agent_config(agent_id: &str, agent_name: &str) -> Result<()> {
+    let client = DaemonClient::connect().context("Daemon is not running")?;
+    let resp: TuiAgentConfigResponse = block_on(async {
+        client
+            .get(&format!("/v1/agents/{}/config", agent_id))
+            .await
+    })?;
+
+    let mut config = resp.config;
+    let version = resp.config_version;
+
+    loop {
+        // Build editable fields from the config
+        let fields = flatten_agent_config(&config);
+
+        let mut items: Vec<String> = fields
+            .iter()
+            .map(|(path, value)| {
+                let display_val = if value.is_null() {
+                    style("(not set)").dim().to_string()
+                } else if let Some(s) = value.as_str() {
+                    style(s).green().to_string()
+                } else {
+                    style(value.to_string()).green().to_string()
+                };
+
+                let leaf = path.rsplit('.').next().unwrap_or(path).replace('_', " ");
+                format!(
+                    "{:<30} {}  {}",
+                    style(&leaf).bold(),
+                    display_val,
+                    style(path).dim(),
+                )
+            })
+            .collect();
+
+        items.push(style("Save Changes").bold().green().to_string());
+        items.push(style("Discard & Back").dim().to_string());
+
+        let sel = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!("Edit: {}", agent_name))
+            .default(0)
+            .items(&items)
+            .interact()?;
+
+        if sel < fields.len() {
+            let (path, old_value) = &fields[sel];
+            let current = if old_value.is_null() {
+                String::new()
+            } else if let Some(s) = old_value.as_str() {
+                s.to_string()
+            } else {
+                old_value.to_string()
+            };
+
+            let new_value: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt(path)
+                .default(current)
+                .allow_empty(true)
+                .interact_text()?;
+
+            // Parse the value and set it
+            let json_val = parse_json_value(&new_value);
+            set_nested_value(&mut config, path, json_val);
+        } else if sel == fields.len() {
+            // Save
+            let body = serde_json::json!({
+                "config": config,
+                "config_version": version,
+            });
+            let save_result: Result<serde_json::Value> = block_on(async {
+                client
+                    .put(&format!("/v1/agents/{}/config", agent_id), &body)
+                    .await
+            });
+            match save_result {
+                Ok(result) => {
+                    let new_version = result["config_version"].as_u64().unwrap_or(version + 1);
+                    println!(
+                        "{} Agent config saved (version {})",
+                        style("✓").green(),
+                        new_version
+                    );
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("409") || msg.contains("conflict") {
+                        println!(
+                            "{} Config was modified by another client — please try again",
+                            style("✗").red()
+                        );
+                    } else {
+                        println!("{} Failed to save: {}", style("✗").red(), msg);
+                    }
+                }
+            }
+            return Ok(());
+        } else {
+            // Discard
+            println!("{}", style("Changes discarded.").yellow());
+            return Ok(());
+        }
+    }
+}
+
+/// Flatten a JSON agent config into (dotted.path, value) pairs for editing.
+fn flatten_agent_config(config: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
+    let mut result = Vec::new();
+    flatten_json("", config, &mut result);
+    result
+}
+
+fn flatten_json(
+    prefix: &str,
+    value: &serde_json::Value,
+    out: &mut Vec<(String, serde_json::Value)>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                let path = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{}.{}", prefix, k)
+                };
+                // Don't recurse into arrays or deeply nested objects —
+                // keep objects one level deep for usability
+                if v.is_object() {
+                    flatten_json(&path, v, out);
+                } else {
+                    out.push((path, v.clone()));
+                }
+            }
+        }
+        _ => {
+            if !prefix.is_empty() {
+                out.push((prefix.to_string(), value.clone()));
+            }
+        }
+    }
+}
+
+/// Set a value at a dotted path inside a JSON object.
+fn set_nested_value(root: &mut serde_json::Value, path: &str, value: serde_json::Value) {
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut current = root;
+    for (i, part) in parts.iter().enumerate() {
+        if i == parts.len() - 1 {
+            if let Some(obj) = current.as_object_mut() {
+                obj.insert(part.to_string(), value);
+            }
+            return;
+        }
+        // Navigate deeper, creating objects as needed
+        if !current.get(*part).map_or(false, |v| v.is_object()) {
+            if let Some(obj) = current.as_object_mut() {
+                obj.insert(part.to_string(), serde_json::json!({}));
+            }
+        }
+        current = current.get_mut(*part).unwrap();
+    }
+}
+
+/// Parse a string into a JSON value (number, bool, array, or string).
+fn parse_json_value(s: &str) -> serde_json::Value {
+    if s.is_empty() {
+        return serde_json::Value::Null;
+    }
+    // Try number
+    if let Ok(n) = s.parse::<i64>() {
+        return serde_json::Value::Number(n.into());
+    }
+    if let Ok(n) = s.parse::<f64>() {
+        return serde_json::json!(n);
+    }
+    // Try bool
+    if s == "true" {
+        return serde_json::Value::Bool(true);
+    }
+    if s == "false" {
+        return serde_json::Value::Bool(false);
+    }
+    // Try JSON array (e.g., ["a","b"])
+    if s.starts_with('[') {
+        if let Ok(arr) = serde_json::from_str::<serde_json::Value>(s) {
+            return arr;
+        }
+    }
+    // Comma-separated → array
+    if s.contains(',') && !s.contains('"') {
+        let items: Vec<serde_json::Value> = s
+            .split(',')
+            .map(|item| serde_json::Value::String(item.trim().to_string()))
+            .filter(|v| v.as_str().map_or(true, |s| !s.is_empty()))
+            .collect();
+        if items.len() > 1 {
+            return serde_json::Value::Array(items);
+        }
+    }
+    serde_json::Value::String(s.to_string())
+}
+
+/// Perform a pause/resume action on an agent.
+fn agent_action_tui(agent_id: &str, action: &str) -> Result<()> {
+    let client = DaemonClient::connect().context("Daemon is not running")?;
+    let body = serde_json::json!({ "action": action });
+    let result: serde_json::Value = block_on(async {
+        client
+            .post(&format!("/v1/agents/{}/action", agent_id), &body)
+            .await
+    })?;
+
+    let status = result["status"].as_str().unwrap_or("unknown");
+    let status_styled = match status.to_lowercase().as_str() {
+        "idle" | "active" | "running" => style(status).green(),
+        "paused" => style(status).yellow(),
+        _ => style(status).dim(),
+    };
+    println!("{} Agent {} → {}", style("✓").green(), agent_id, status_styled);
+    Ok(())
+}
+
+/// Remove (archive) an agent with confirmation.
+fn remove_agent_tui(agent_id: &str, agent_name: &str) -> Result<bool> {
+    let confirm = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("Remove agent '{}'? This will archive it.", agent_name))
+        .default(false)
+        .interact()?;
+
+    if !confirm {
+        println!("{}", style("Cancelled.").dim());
+        return Ok(false);
+    }
+
+    let client = DaemonClient::connect().context("Daemon is not running")?;
+    let result: serde_json::Value = block_on(async {
+        client
+            .delete_req(&format!("/v1/agents/{}", agent_id))
+            .await
+    })?;
+
+    let status = result["status"].as_str().unwrap_or("archived");
+    println!(
+        "{} Agent '{}' → {}",
+        style("✓").green(),
+        agent_name,
+        style(status).dim()
+    );
+    Ok(true)
+}
+
+/// Interactive agent creation wizard (mirrors agents.rs create_interactive).
+fn interactive_create_agent() -> Result<()> {
+    let theme = ColorfulTheme::default();
+
+    println!();
+    println!("{}", style("Create New Agent").bold().cyan());
+    println!();
+
+    // 1. Agent name
+    let name: String = Input::with_theme(&theme)
+        .with_prompt("Agent name")
+        .interact_text()?;
+
+    if name.trim().is_empty() {
+        println!("{}", style("Cancelled.").dim());
+        return Ok(());
+    }
+
+    // 2. Description
+    let description: String = Input::with_theme(&theme)
+        .with_prompt("Description")
+        .allow_empty(true)
+        .interact_text()?;
+
+    // 3. Model — try to fetch available models, fall back to free text
+    let model = match fetch_model_list() {
+        Ok(models) if !models.is_empty() => {
+            let mut display = models.clone();
+            display.push("(enter manually)".to_string());
+            let idx = Select::with_theme(&theme)
+                .with_prompt("Model")
+                .items(&display)
+                .default(0)
+                .interact()?;
+            if idx < models.len() {
+                models[idx].clone()
+            } else {
+                Input::<String>::with_theme(&theme)
+                    .with_prompt("Model name")
+                    .interact_text()?
+            }
+        }
+        _ => {
+            Input::<String>::with_theme(&theme)
+                .with_prompt("Model (e.g., claude-sonnet-4-5-20250929)")
+                .interact_text()?
+        }
+    };
+
+    // 4. Persona
+    let persona: String = Input::with_theme(&theme)
+        .with_prompt("Persona / system prompt")
+        .default("You are a helpful assistant.".to_string())
+        .interact_text()?;
+
+    // 5. Skills
+    let skills_input: String = Input::with_theme(&theme)
+        .with_prompt("Skills (comma-separated, e.g., research,code_review)")
+        .allow_empty(true)
+        .interact_text()?;
+    let skills: Vec<String> = skills_input
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // 6. Max cost per task
+    let max_cost_input: String = Input::with_theme(&theme)
+        .with_prompt("Max cost per task (USD, 0 for unlimited)")
+        .default("0".to_string())
+        .interact_text()?;
+    let max_cost: f64 = max_cost_input.parse().unwrap_or(0.0);
+
+    // 7. Temperature
+    let temp_input: String = Input::with_theme(&theme)
+        .with_prompt("Temperature (0.0-1.0)")
+        .default("0.5".to_string())
+        .interact_text()?;
+    let temperature: f64 = temp_input.parse().unwrap_or(0.5);
+
+    // Build the config JSON
+    let mut agent_config = serde_json::json!({
+        "name": name,
+        "description": description,
+        "llm": {
+            "model": model,
+        },
+        "skills": skills,
+        "persona": persona,
+        "preset": {
+            "temperature": temperature,
+        }
+    });
+
+    if max_cost > 0.0 {
+        agent_config["constraints"] = serde_json::json!({
+            "max_cost_per_task": max_cost,
+        });
+    }
+
+    // Confirm
+    println!();
+    println!("{}", style("Agent summary:").bold());
+    println!("  {} {}", style("Name:").dim(), &name);
+    if !description.is_empty() {
+        println!("  {} {}", style("Desc:").dim(), &description);
+    }
+    println!("  {} {}", style("Model:").dim(), &model);
+    if !skills.is_empty() {
+        println!("  {} {}", style("Skills:").dim(), skills.join(", "));
+    }
+    if max_cost > 0.0 {
+        println!("  {} ${:.2}", style("Max cost:").dim(), max_cost);
+    }
+    println!();
+
+    let confirm = Confirm::with_theme(&theme)
+        .with_prompt("Create this agent?")
+        .default(true)
+        .interact()?;
+
+    if !confirm {
+        println!("{}", style("Cancelled.").dim());
+        return Ok(());
+    }
+
+    let client = DaemonClient::connect().context("Daemon is not running")?;
+    let body = serde_json::json!({ "config": agent_config });
+    let result: Result<serde_json::Value> = block_on(async {
+        client.post("/v1/agents", &body).await
+    });
+
+    match result {
+        Ok(resp) => {
+            let agent_id = resp["agent_id"].as_str().unwrap_or("unknown");
+            println!(
+                "{} Agent created: {}",
+                style("✓").green(),
+                style(agent_id).bold()
+            );
+        }
+        Err(e) => {
+            println!(
+                "{} Failed to create agent: {}",
+                style("✗").red(),
+                e
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Try to fetch the list of available models from the daemon.
+fn fetch_model_list() -> Result<Vec<String>> {
+    let client = DaemonClient::connect()?;
+    let models: Vec<serde_json::Value> = block_on(async { client.get("/v1/models").await })?;
+    let names: Vec<String> = models
+        .iter()
+        .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+        .collect();
+    Ok(names)
+}
+
 fn interactive_agents(
     repo: &ConfigRepository,
     config: &mut HashMap<String, String>,
@@ -1226,11 +2087,12 @@ fn interactive_agents(
             ));
         }
 
-        // Agents placeholder
+        // Manage individual agents (now functional!)
+        let agent_count = fetch_agents().len();
         items.push(format!(
             "{}  {}",
-            style("Agents").bold(),
-            style("(coming soon)").dim(),
+            style("Manage Agents").bold(),
+            style(format!("({} agents)", agent_count)).dim(),
         ));
         items.push(style("Save & Exit").bold().green().to_string());
         items.push(style("Back").dim().to_string());
@@ -1242,13 +2104,14 @@ fn interactive_agents(
             .interact()?;
 
         if sel < subcats.len() {
-            interactive_subcategory(repo, config, "Agents", subcats[sel])?;
+            if interactive_subcategory(repo, config, "Agents", subcats[sel])? {
+                return Ok(true); // saved from subcategory
+            }
         } else if sel == subcats.len() {
-            // "Agents" placeholder
-            println!(
-                "{}",
-                style("Agent configuration is coming soon.").yellow()
-            );
+            // Manage individual agents
+            if interactive_manage_agents(repo, config)? {
+                return Ok(true);
+            }
         } else if sel == subcats.len() + 1 {
             save_and_exit(repo, config)?;
             return Ok(true);
@@ -1259,33 +2122,18 @@ fn interactive_agents(
 }
 
 fn interactive_subcategory(
-    _repo: &ConfigRepository,
+    repo: &ConfigRepository,
     config: &mut HashMap<String, String>,
     category: &str,
     subcategory: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let keys = config_schema::keys_in_subcategory(category, subcategory);
     loop {
         let mut items: Vec<String> = keys
             .iter()
-            .map(|def| {
-                let current = config
-                    .get(def.key)
-                    .map(|v| {
-                        if def.sensitive {
-                            config_schema::mask_value(v)
-                        } else {
-                            v.clone()
-                        }
-                    })
-                    .unwrap_or_else(|| {
-                        def.default
-                            .map(|d| format!("(default: {})", d))
-                            .unwrap_or_else(|| "(not set)".into())
-                    });
-                format!("{} = {}", def.key, current)
-            })
+            .map(|def| format_key_menu_item(def, config))
             .collect();
+        items.push(style("Save & Exit").bold().green().to_string());
         items.push(style("Back").dim().to_string());
 
         let sel = Select::with_theme(&ColorfulTheme::default())
@@ -1296,8 +2144,11 @@ fn interactive_subcategory(
 
         if sel < keys.len() {
             configure_key(config, keys[sel])?;
+        } else if sel == keys.len() {
+            save_and_exit(repo, config)?;
+            return Ok(true);
         } else {
-            return Ok(());
+            return Ok(false);
         }
     }
 }
@@ -1543,12 +2394,15 @@ fn configure_key(
         .map(|s| s.as_str())
         .unwrap_or(def.default.unwrap_or(""));
 
+    // Show key path + description as the prompt so users can reference the key name
+    let prompt = format!("{} ({})", def.key, def.description);
+
     let new_val = match &def.kind {
         config_schema::ConfigKind::Bool => {
             let choices = ["true", "false"];
             let idx = choices.iter().position(|&x| x == current).unwrap_or(1);
             let sel = Select::with_theme(&ColorfulTheme::default())
-                .with_prompt(def.description)
+                .with_prompt(&prompt)
                 .default(idx)
                 .items(&choices)
                 .interact()?;
@@ -1557,20 +2411,23 @@ fn configure_key(
         config_schema::ConfigKind::Enum(choices) => {
             let idx = choices.iter().position(|&x| x == current).unwrap_or(0);
             let sel = Select::with_theme(&ColorfulTheme::default())
-                .with_prompt(def.description)
+                .with_prompt(&prompt)
                 .default(idx)
                 .items(*choices)
                 .interact()?;
             choices[sel].to_string()
         }
         config_schema::ConfigKind::String if def.sensitive => {
-            let prompt = if current.is_empty() {
-                format!("Enter {}", def.key)
+            let sensitive_prompt = if current.is_empty() {
+                format!("{} ({})", def.key, def.description)
             } else {
-                format!("Enter {} (currently set, leave empty to keep)", def.key)
+                format!(
+                    "{} ({}, currently set — leave empty to keep)",
+                    def.key, def.description
+                )
             };
             let val: String = Password::with_theme(&ColorfulTheme::default())
-                .with_prompt(prompt)
+                .with_prompt(sensitive_prompt)
                 .allow_empty_password(true)
                 .interact()?;
             if val.is_empty() {
@@ -1579,13 +2436,13 @@ fn configure_key(
             val
         }
         config_schema::ConfigKind::String => Input::with_theme(&ColorfulTheme::default())
-            .with_prompt(def.description)
+            .with_prompt(&prompt)
             .default(current.to_string())
             .allow_empty(true)
             .interact_text()?,
         config_schema::ConfigKind::Int { .. } => loop {
             let val: String = Input::with_theme(&ColorfulTheme::default())
-                .with_prompt(def.description)
+                .with_prompt(&prompt)
                 .default(current.to_string())
                 .interact_text()?;
             match config_schema::validate(def.key, &val) {
@@ -1612,6 +2469,10 @@ fn save_and_exit(repo: &ConfigRepository, config_map: &HashMap<String, String>) 
         let backend = def.as_ref().map(|d| d.backend).unwrap_or(ConfigBackend::SystemConfig);
         match backend {
             ConfigBackend::LlmToml => ai_entries.push((k.as_str(), v.as_str())),
+            ConfigBackend::DaemonToml => {
+                // Write daemon.toml entries one at a time
+                daemon_config_cli::set_daemon_value(k, v)?;
+            }
             ConfigBackend::SystemConfig => {
                 let kind = def.map(|d| d.kind.as_db_kind()).unwrap_or("string");
                 repo.set(k, v, kind)?;

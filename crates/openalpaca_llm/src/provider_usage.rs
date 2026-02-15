@@ -3,14 +3,14 @@
 //! Fetches usage data from provider APIs (opt-in, cached with 5-min TTL).
 //! All failures are silent (debug-level logs) and never block LLM calls.
 
+use crate::config::LlmRuntimeConfig;
 use crate::credential_discovery::CredentialSource;
+use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-
-const CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
 
 /// External usage data from a provider API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,8 +41,8 @@ struct CachedUsage {
 }
 
 impl CachedUsage {
-    fn is_stale(&self) -> bool {
-        self.fetched_at.elapsed() > CACHE_TTL
+    fn is_stale(&self, ttl: Duration) -> bool {
+        self.fetched_at.elapsed() > ttl
     }
 }
 
@@ -51,6 +51,7 @@ pub struct ProviderUsageTracker {
     cache: Arc<RwLock<HashMap<CredentialSource, CachedUsage>>>,
     #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
     client: reqwest::Client,
+    runtime_config: Arc<ArcSwap<LlmRuntimeConfig>>,
 }
 
 impl ProviderUsageTracker {
@@ -59,6 +60,16 @@ impl ProviderUsageTracker {
             cache: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
             client: reqwest::Client::new(),
+            runtime_config: Arc::new(ArcSwap::from_pointee(LlmRuntimeConfig::default())),
+        }
+    }
+
+    pub fn with_runtime_config(runtime_config: Arc<ArcSwap<LlmRuntimeConfig>>) -> Self {
+        Self {
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+            client: reqwest::Client::new(),
+            runtime_config,
         }
     }
 
@@ -68,11 +79,13 @@ impl ProviderUsageTracker {
         source: CredentialSource,
         token: &str,
     ) -> Option<ExternalUsage> {
+        let rt = self.runtime_config.load();
+        let cache_ttl = Duration::from_secs(rt.timeouts.usage_cache_ttl_secs);
         // Check cache first
         {
             let cache = self.cache.read().await;
             if let Some(cached) = cache.get(&source) {
-                if !cached.is_stale() {
+                if !cached.is_stale(cache_ttl) {
                     return Some(cached.data.clone());
                 }
             }
@@ -127,11 +140,13 @@ impl ProviderUsageTracker {
     /// Fetch usage from Anthropic API.
     #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
     async fn fetch_anthropic_usage(&self, token: &str) -> Result<ExternalUsage, String> {
-        let fetch_timeout = Duration::from_secs(10);
+        let rt = self.runtime_config.load();
+        let fetch_timeout = Duration::from_secs(rt.timeouts.usage_fetch_timeout_secs);
+        let url = &rt.endpoints.anthropic_usage;
         let result = tokio::time::timeout(
             fetch_timeout,
             self.client
-                .get("https://api.anthropic.com/api/oauth/usage")
+                .get(url.as_str())
                 .bearer_auth(token)
                 .send(),
         )
@@ -156,11 +171,13 @@ impl ProviderUsageTracker {
     /// Fetch usage from OpenAI API.
     #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
     async fn fetch_openai_usage(&self, token: &str) -> Result<ExternalUsage, String> {
-        let fetch_timeout = Duration::from_secs(10);
+        let rt = self.runtime_config.load();
+        let fetch_timeout = Duration::from_secs(rt.timeouts.usage_fetch_timeout_secs);
+        let url = &rt.endpoints.openai_usage;
         let result = tokio::time::timeout(
             fetch_timeout,
             self.client
-                .get("https://api.openai.com/dashboard/billing/usage")
+                .get(url.as_str())
                 .bearer_auth(token)
                 .send(),
         )
@@ -337,6 +354,7 @@ mod tests {
             },
             fetched_at: Instant::now(),
         };
-        assert!(!cached.is_stale()); // Just created, should not be stale
+        let ttl = Duration::from_secs(300);
+        assert!(!cached.is_stale(ttl)); // Just created, should not be stale
     }
 }

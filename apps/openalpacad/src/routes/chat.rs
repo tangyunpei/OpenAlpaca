@@ -183,8 +183,9 @@ pub async fn chat_stream_handler(
 
     let stream = make_sse_stream(rx);
 
+    let sse_keep_alive_secs = state.daemon_config.load().server.sse_keep_alive_secs;
     Sse::new(stream)
-        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(sse_keep_alive_secs)))
         .into_response()
 }
 
