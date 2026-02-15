@@ -56,7 +56,7 @@ pub fn build_provider_with_runtime(
 ) -> Result<Box<dyn LlmProvider>, LlmError> {
     let defaults = LlmRuntimeConfig::default();
     let rt = runtime.unwrap_or(&defaults);
-    let provider_defaults = rt.provider_defaults.get(config.provider.as_str());
+    let _provider_defaults = rt.provider_defaults.get(config.provider.as_str());
 
     match config.provider.as_str() {
         #[cfg(feature = "anthropic")]
@@ -65,9 +65,9 @@ pub fn build_provider_with_runtime(
                 .resolve_api_key_with_env_config(Some(&rt.env_vars))
                 .ok_or(LlmError::Config("Anthropic API key not configured. Set api_key in config or ANTHROPIC_API_KEY env var.".into()))?;
             let model = config.model.clone()
-                .or_else(|| provider_defaults.map(|d| d.default_model.clone()));
+                .or_else(|| _provider_defaults.map(|d| d.default_model.clone()));
             let max_tokens = config.max_tokens
-                .or_else(|| provider_defaults.map(|d| d.default_max_tokens));
+                .or_else(|| _provider_defaults.map(|d| d.default_max_tokens));
             let provider = crate::providers::anthropic::AnthropicProvider::new(
                 api_key, model, max_tokens,
             );
@@ -79,11 +79,11 @@ pub fn build_provider_with_runtime(
                 .resolve_api_key_with_env_config(Some(&rt.env_vars))
                 .ok_or(LlmError::Config("OpenAI API key not configured. Set api_key in config or OPENAI_API_KEY env var.".into()))?;
             let model = config.model.clone()
-                .or_else(|| provider_defaults.map(|d| d.default_model.clone()));
+                .or_else(|| _provider_defaults.map(|d| d.default_model.clone()));
             let base_url = config.base_url.clone()
-                .or_else(|| provider_defaults.and_then(|d| d.base_url.clone()));
+                .or_else(|| _provider_defaults.and_then(|d| d.base_url.clone()));
             let max_tokens = config.max_tokens
-                .or_else(|| provider_defaults.map(|d| d.default_max_tokens));
+                .or_else(|| _provider_defaults.map(|d| d.default_max_tokens));
             let provider = crate::providers::openai::OpenAiProvider::new(
                 api_key, model, base_url, max_tokens,
             );
@@ -92,10 +92,10 @@ pub fn build_provider_with_runtime(
         #[cfg(feature = "ollama")]
         "ollama" => {
             let model = config.model.clone()
-                .or_else(|| provider_defaults.map(|d| d.default_model.clone()))
+                .or_else(|| _provider_defaults.map(|d| d.default_model.clone()))
                 .unwrap_or_else(|| "llama3".to_string());
             let base_url = config.base_url.clone()
-                .or_else(|| provider_defaults.and_then(|d| d.base_url.clone()));
+                .or_else(|| _provider_defaults.and_then(|d| d.base_url.clone()));
             let provider = crate::providers::ollama::OllamaProvider::new(model, base_url);
             Ok(Box::new(provider))
         }

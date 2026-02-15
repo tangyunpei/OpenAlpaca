@@ -82,11 +82,124 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["execution", "dag"],
         field: "total_timeout_secs",
     },
+    // Orchestrator: Memory (cont.)
+    TomlMapping {
+        schema_key: "daemon.orchestrator.summary_min_new_older_messages",
+        section: &["orchestrator", "memory"],
+        field: "summary_min_new_older_messages",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.msg_trunc_chars",
+        section: &["orchestrator", "memory"],
+        field: "msg_trunc_chars",
+    },
+    // Orchestrator: Costs (cont.)
+    TomlMapping {
+        schema_key: "daemon.orchestrator.extract_max_daily_cost_usd",
+        section: &["orchestrator", "costs"],
+        field: "extract_max_daily_cost_usd",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.extract_every_n_turns",
+        section: &["orchestrator", "costs"],
+        field: "extract_every_n_turns",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.extract_min_content_len",
+        section: &["orchestrator", "costs"],
+        field: "extract_min_content_len",
+    },
+    // Execution: Agent Defaults (cont.)
+    TomlMapping {
+        schema_key: "daemon.execution.max_tools_per_round",
+        section: &["execution", "agent_defaults"],
+        field: "max_tools_per_round",
+    },
+    TomlMapping {
+        schema_key: "daemon.execution.max_tool_runtime_secs",
+        section: &["execution", "agent_defaults"],
+        field: "max_tool_runtime_secs",
+    },
+    // Execution: Lead Agent Defaults (cont.)
+    TomlMapping {
+        schema_key: "daemon.execution.lead_max_tools_per_round",
+        section: &["execution", "lead_agent_defaults"],
+        field: "max_tools_per_round",
+    },
+    TomlMapping {
+        schema_key: "daemon.execution.lead_max_tool_runtime_secs",
+        section: &["execution", "lead_agent_defaults"],
+        field: "max_tool_runtime_secs",
+    },
+    // DAG (cont.)
+    TomlMapping {
+        schema_key: "daemon.dag.node_timeout_secs",
+        section: &["execution", "dag"],
+        field: "node_timeout_secs",
+    },
+    TomlMapping {
+        schema_key: "daemon.dag.max_retries_per_node",
+        section: &["execution", "dag"],
+        field: "max_retries_per_node",
+    },
+    TomlMapping {
+        schema_key: "daemon.dag.replan_after_every_n_nodes",
+        section: &["execution", "dag"],
+        field: "replan_after_every_n_nodes",
+    },
+    TomlMapping {
+        schema_key: "daemon.dag.max_replans",
+        section: &["execution", "dag"],
+        field: "max_replans",
+    },
     // Security
     TomlMapping {
         schema_key: "daemon.security.max_input_length",
         section: &["security"],
         field: "max_input_length",
+    },
+    // Server
+    TomlMapping {
+        schema_key: "daemon.server.heartbeat_interval_secs",
+        section: &["server"],
+        field: "heartbeat_interval_secs",
+    },
+    TomlMapping {
+        schema_key: "daemon.server.sse_keep_alive_secs",
+        section: &["server"],
+        field: "sse_keep_alive_secs",
+    },
+    TomlMapping {
+        schema_key: "daemon.server.event_broadcaster_capacity",
+        section: &["server"],
+        field: "event_broadcaster_capacity",
+    },
+    TomlMapping {
+        schema_key: "daemon.server.wake_channel_capacity",
+        section: &["server"],
+        field: "wake_channel_capacity",
+    },
+    // Server: Chat Streams
+    TomlMapping {
+        schema_key: "daemon.server.cleanup_interval_secs",
+        section: &["server", "chat_streams"],
+        field: "cleanup_interval_secs",
+    },
+    TomlMapping {
+        schema_key: "daemon.server.stale_timeout_secs",
+        section: &["server", "chat_streams"],
+        field: "stale_timeout_secs",
+    },
+    // Server: Embedding Indexer
+    TomlMapping {
+        schema_key: "daemon.server.embedding_poll_interval_secs",
+        section: &["server", "embedding_indexer"],
+        field: "poll_interval_secs",
+    },
+    TomlMapping {
+        schema_key: "daemon.server.embedding_batch_size",
+        section: &["server", "embedding_indexer"],
+        field: "batch_size",
     },
     // Alias: system.max_agents → same as daemon.dag.max_concurrent_agents
     TomlMapping {
