@@ -39,6 +39,7 @@ pub(super) async fn retrieve_memory_block(
     query: &str,
     top_k: usize,
     scope_ctx: Option<&MemoryScopeContext>,
+    access_boost: f64,
 ) -> Option<String> {
     let repo = MemoryRepository::new(db);
     let query_embedding = if let Some(embedder) = embedder {
@@ -78,9 +79,9 @@ pub(super) async fn retrieve_memory_block(
         return None;
     }
 
-    // Track access for importance decay
+    // Track access for importance decay + boost
     let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-    if let Err(e) = repo.touch_accessed(&ids) {
+    if let Err(e) = repo.touch_accessed(&ids, access_boost) {
         tracing::warn!("Failed to track memory access: {e}");
     }
 

@@ -185,9 +185,10 @@ impl Orchestrator {
                     .unwrap_or_default();
 
                 if !memories.is_empty() {
-                    // Track access for importance decay
+                    // Track access for importance decay + boost
                     let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-                    if let Err(e) = repo.touch_accessed(&ids) {
+                    let boost = self.daemon_config.load().orchestrator.memory.decay.access_boost;
+                    if let Err(e) = repo.touch_accessed(&ids, boost) {
                         tracing::warn!("Failed to track memory access: {e}");
                     }
 
