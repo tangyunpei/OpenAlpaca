@@ -132,6 +132,7 @@ impl Orchestrator {
             security_gate.clone(),
             tool_registry.clone(),
             db.clone(),
+            embedder.clone(),
             daemon_config.clone(),
         );
         Self {
