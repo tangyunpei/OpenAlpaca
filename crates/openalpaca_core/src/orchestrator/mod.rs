@@ -919,7 +919,9 @@ impl Orchestrator {
                     ) {
                         Ok(new_id) if new_id > 0 => {
                             if let Some(ref emb) = new_embedding {
-                                let _ = repo.insert_embedding(new_id, emb);
+                                if let Err(e) = repo.insert_embedding(new_id, emb) {
+                                    tracing::warn!("Failed to insert embedding for superseded memory #{new_id}: {e}");
+                                }
                             }
                             tracing::debug!(
                                 "Extraction: superseded memory #{} -> #{}: {}",
@@ -944,7 +946,9 @@ impl Orchestrator {
                     ) {
                         Ok(new_id) if new_id > 0 => {
                             if let Some(ref emb) = new_embedding {
-                                let _ = repo.insert_embedding(new_id, emb);
+                                if let Err(e) = repo.insert_embedding(new_id, emb) {
+                                    tracing::warn!("Failed to insert embedding for memory #{new_id}: {e}");
+                                }
                             }
                             tracing::debug!("Extraction: stored memory preference: {}", &item[..item.len().min(60)]);
                         }
@@ -1551,7 +1555,9 @@ impl Orchestrator {
                 if !memories.is_empty() {
                     // Track access for importance decay
                     let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-                    let _ = repo.touch_accessed(&ids);
+                    if let Err(e) = repo.touch_accessed(&ids) {
+                        tracing::warn!("Failed to track memory access: {e}");
+                    }
 
                     let mut block = String::from("### RETRIEVED MEMORY ###\n");
                     let mut budget = 2000usize;
@@ -1890,7 +1896,9 @@ impl Orchestrator {
                 if !memories.is_empty() {
                     // Track access for importance decay
                     let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-                    let _ = repo.touch_accessed(&ids);
+                    if let Err(e) = repo.touch_accessed(&ids) {
+                        tracing::warn!("Failed to track memory access: {e}");
+                    }
 
                     let mut block = String::from("### RETRIEVED MEMORY ###\n");
                     let mut budget = 2000usize;
@@ -2239,7 +2247,9 @@ impl Orchestrator {
 
                 if result > 0 {
                     if let Some(ref emb) = new_embedding {
-                        let _ = repo.insert_embedding(result, emb);
+                        if let Err(e) = repo.insert_embedding(result, emb) {
+                            tracing::warn!("Failed to insert embedding for superseded memory #{result}: {e}");
+                        }
                     }
                     Ok(format!(
                         "Got it, I've updated my memory (was: \"{}\"): {}",
@@ -2269,7 +2279,9 @@ impl Orchestrator {
                     Ok("I already have that noted.".to_string())
                 } else {
                     if let Some(ref emb) = new_embedding {
-                        let _ = repo.insert_embedding(result, emb);
+                        if let Err(e) = repo.insert_embedding(result, emb) {
+                            tracing::warn!("Failed to insert embedding for memory #{result}: {e}");
+                        }
                     }
                     Ok(format!("Got it, I'll remember that: {}", content))
                 }

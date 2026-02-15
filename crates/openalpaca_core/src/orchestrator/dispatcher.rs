@@ -24,6 +24,7 @@ use uuid::Uuid;
 use crate::tools::ToolRegistry;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 
+use crate::memory::task_extraction::{TaskExtractionParams, extract_task_memories};
 use crate::middleware::prompt::format_tool_guidance;
 use openalpaca_storage::repository::MemoryRepository;
 use super::skill_matcher::{SkillMatch, SkillMatcher};
@@ -67,7 +68,9 @@ async fn retrieve_memory_block(
 
     // Track access for importance decay
     let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-    let _ = repo.touch_accessed(&ids);
+    if let Err(e) = repo.touch_accessed(&ids) {
+        tracing::warn!("Failed to track memory access: {e}");
+    }
 
     let mut block = String::from("### RETRIEVED MEMORY ###\n");
     let mut budget = 2000usize;
@@ -84,6 +87,45 @@ async fn retrieve_memory_block(
         block.push_str(&entry);
     }
     Some(block)
+}
+
+/// Spawn a background task to extract memories from a completed task output.
+/// Fire-and-forget: does not block the caller. Only runs for successful tasks.
+fn spawn_task_memory_extraction(
+    db: &Database,
+    router: &Arc<LlmRouter>,
+    embedder: &Option<Arc<dyn openalpaca_llm::Embedder>>,
+    daemon_config: &Arc<ArcSwap<DaemonConfig>>,
+    owner_id: &str,
+    task_id: &str,
+    task_description: &str,
+    task_output: &str,
+    source_path: &str,
+    success: bool,
+) {
+    if !success {
+        return;
+    }
+    let dcfg = daemon_config.load();
+    if !dcfg.orchestrator.costs.task_extract_enabled {
+        return;
+    }
+
+    let params = TaskExtractionParams {
+        owner_id: owner_id.to_string(),
+        task_id: task_id.to_string(),
+        task_description: task_description.to_string(),
+        task_output: task_output.to_string(),
+        source_path: source_path.to_string(),
+    };
+    let db = db.clone();
+    let router = router.clone();
+    let embedder = embedder.clone();
+    let daemon_config = daemon_config.clone();
+
+    tokio::spawn(async move {
+        extract_task_memories(params, db, router, embedder, daemon_config).await;
+    });
 }
 
 /// Dispatches complex tasks by matching skills to agents and creating task lanes.
@@ -429,6 +471,7 @@ impl TaskDispatcher {
         let bus = self.bus.clone();
         let ctx = self.shared_context.clone();
         let db = self.db.clone();
+        let embedder = self.embedder.clone();
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
 
@@ -584,6 +627,22 @@ impl TaskDispatcher {
                     created_at: String::new(),
                 });
                 let _ = conv_repo.increment_message_count(&lane_key);
+            }
+
+            // Memory extraction from DAG output (non-blocking)
+            if let Some(ref db) = db {
+                spawn_task_memory_extraction(
+                    db,
+                    &router,
+                    &embedder,
+                    &daemon_config,
+                    &created_by,
+                    &task_id,
+                    &description,
+                    &final_content,
+                    "dag",
+                    result.success,
+                );
             }
 
             tracing::info!(
@@ -1107,6 +1166,12 @@ impl TaskDispatcher {
 
             // 5. Persist final result to conversation (single message for entire pipeline)
             let runtime_secs = start_time.elapsed().as_secs() as i64;
+            // Clone for memory extraction before final_content is consumed
+            let extraction_content = if pipeline_success {
+                Some(final_content.clone())
+            } else {
+                None
+            };
             if let Some(ref db) = db {
                 let chat_text = if pipeline_success {
                     final_content
@@ -1132,6 +1197,22 @@ impl TaskDispatcher {
                     created_at: String::new(),
                 });
                 let _ = conv_repo.increment_message_count(&lane_key);
+            }
+
+            // Memory extraction from pipeline output (non-blocking)
+            if let (Some(db), Some(output)) = (&db, &extraction_content) {
+                spawn_task_memory_extraction(
+                    db,
+                    &router,
+                    &embedder,
+                    &daemon_config,
+                    &created_by,
+                    &task_id,
+                    &description,
+                    output,
+                    "pipeline",
+                    pipeline_success,
+                );
             }
         });
     }
@@ -1475,6 +1556,22 @@ impl TaskDispatcher {
                     created_at: String::new(),
                 });
                 let _ = conv_repo.increment_message_count(&lane_key);
+            }
+
+            // Memory extraction from lead agent output (non-blocking)
+            if let Some(ref db) = db {
+                spawn_task_memory_extraction(
+                    db,
+                    &router,
+                    &embedder,
+                    &daemon_config,
+                    &created_by,
+                    &task_id,
+                    &description,
+                    &final_content,
+                    "lead_agent",
+                    result.success,
+                );
             }
 
             tracing::info!(

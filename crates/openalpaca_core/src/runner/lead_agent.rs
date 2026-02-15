@@ -585,7 +585,9 @@ pub async fn run_lead_agent(
         if !memories.is_empty() {
             // Track access for importance decay
             let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-            let _ = repo.touch_accessed(&ids);
+            if let Err(e) = repo.touch_accessed(&ids) {
+                tracing::warn!("Failed to track memory access: {e}");
+            }
 
             let mut block = String::from("### RETRIEVED MEMORY ###\n");
             let mut budget = 2000usize;

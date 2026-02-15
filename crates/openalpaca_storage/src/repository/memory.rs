@@ -511,6 +511,12 @@ impl<'a> MemoryRepository<'a> {
                 [existing_id],
             )?;
 
+            // Remove old memory's embedding so it no longer matches vector searches
+            tx.execute(
+                "DELETE FROM memory_vec WHERE memory_id = ?1",
+                [existing_id],
+            )?;
+
             tx.commit()?;
             Ok(new_id)
         })

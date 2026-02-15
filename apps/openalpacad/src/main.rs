@@ -2017,7 +2017,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                         let mut count = 0usize;
                         for ((id, _), embedding) in missing.iter().zip(embeddings.iter()) {
                             if embedding.len() == idx_emb.dimensions() as usize {
-                                let _ = repo.insert_embedding(*id, embedding);
+                                if let Err(e) = repo.insert_embedding(*id, embedding) {
+                                    tracing::warn!("Failed to insert embedding for memory #{id}: {e}");
+                                }
                                 count += 1;
                             }
                         }
