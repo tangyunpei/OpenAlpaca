@@ -441,7 +441,7 @@ pub fn list_daemon_entries() -> Result<Vec<(String, String, String)>> {
             if let Some(val) = section.get(mapping.field) {
                 let kind = match val {
                     toml::Value::Integer(_) => "int",
-                    toml::Value::Float(_) => "string", // costs are stored as floats
+                    toml::Value::Float(_) => "float",
                     toml::Value::Boolean(_) => "bool",
                     _ => "string",
                 };

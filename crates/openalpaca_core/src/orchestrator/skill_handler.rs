@@ -1,5 +1,6 @@
 use super::{ConversationContext, Orchestrator};
 use crate::events::SystemEvent;
+use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::bootstrap::bootstrap_to_prompt_block;
 use crate::middleware::guard::OutputGuard;
 use crate::middleware::identity::identity_to_prompt_block;
@@ -29,6 +30,7 @@ impl Orchestrator {
         _lane_key: &str,
         ctx: &ConversationContext,
         owner_id: Option<&str>,
+        scope_ctx: &MemoryScopeContext,
     ) -> Result<String, String> {
         // Load full skill (Level 2)
         let skill_doc = self.skill_catalog.load_full(skill_name)
@@ -170,22 +172,23 @@ impl Orchestrator {
                     None
                 };
 
+                let cascade_scopes = scope_ctx.cascade_scopes();
                 let memories = repo
-                    .search_hybrid(
+                    .search_hybrid_cascade(
                         oid,
                         query,
                         query_embedding.as_deref(),
                         top_k,
                         None,
-                        None,
-                        None,
+                        &cascade_scopes,
                     )
                     .unwrap_or_default();
 
                 if !memories.is_empty() {
-                    // Track access for importance decay
+                    // Track access for importance decay + boost
                     let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-                    if let Err(e) = repo.touch_accessed(&ids) {
+                    let boost = self.daemon_config.load().orchestrator.memory.decay.access_boost;
+                    if let Err(e) = repo.touch_accessed(&ids, boost) {
                         tracing::warn!("Failed to track memory access: {e}");
                     }
 

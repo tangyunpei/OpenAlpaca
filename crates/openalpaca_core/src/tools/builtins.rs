@@ -1,8 +1,10 @@
 use super::registry::{BuiltInTool, RegisteredTool, ToolBackend};
 use crate::bus::EventBus;
+use crate::daemon_config::DaemonConfig;
 use crate::middleware::identity::{parse_identity_markdown, render_identity_markdown};
 use crate::middleware::soul::{parse_soul_markdown, render_soul_markdown};
 use crate::middleware::user::{parse_user_markdown, render_user_markdown};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use base64::Engine as _;
 use openalpaca_llm::ToolDefinition;
@@ -54,6 +56,7 @@ pub struct IdentityToolContext {
 pub fn builtin_tools(
     db: Option<openalpaca_storage::Database>,
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+    daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
 ) -> Vec<RegisteredTool> {
     let mut tools = vec![
         web_search_tool(),
@@ -64,8 +67,8 @@ pub fn builtin_tools(
         file_write_tool(),
         shell_execute_tool(),
     ];
-    if let Some(db) = db {
-        tools.push(memory_search_tool(db, embedder));
+    if let (Some(db), Some(dc)) = (db, daemon_config) {
+        tools.push(memory_search_tool(db, embedder, dc));
     }
     tools
 }
@@ -76,8 +79,9 @@ pub fn builtin_tools_with_soul_context(
     db: Option<openalpaca_storage::Database>,
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     soul_ctx: SoulToolContext,
+    daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
 ) -> Vec<RegisteredTool> {
-    let mut tools = builtin_tools(db, embedder);
+    let mut tools = builtin_tools(db, embedder, daemon_config);
     tools.push(update_soul_tool(soul_ctx));
     tools
 }
@@ -89,8 +93,9 @@ pub fn builtin_tools_with_persona_context(
     soul_ctx: SoulToolContext,
     user_ctx: UserToolContext,
     identity_ctx: IdentityToolContext,
+    daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
 ) -> Vec<RegisteredTool> {
-    let mut tools = builtin_tools(db, embedder);
+    let mut tools = builtin_tools(db, embedder, daemon_config);
     tools.push(update_soul_tool(soul_ctx));
     tools.push(update_user_tool(user_ctx));
     tools.push(update_identity_tool(identity_ctx));
@@ -504,6 +509,7 @@ fn shell_execute_tool() -> RegisteredTool {
 struct MemorySearchTool {
     db: openalpaca_storage::Database,
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+    daemon_config: Arc<ArcSwap<DaemonConfig>>,
 }
 
 #[async_trait]
@@ -545,10 +551,11 @@ impl BuiltInTool for MemorySearchTool {
             )
             .map_err(|e| format!("Memory search failed: {}", e))?;
 
-        // Track access for importance decay
+        // Track access for importance decay + boost
         if !memories.is_empty() {
             let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-            if let Err(e) = repo.touch_accessed(&ids) {
+            let access_boost = self.daemon_config.load().orchestrator.memory.decay.access_boost;
+            if let Err(e) = repo.touch_accessed(&ids, access_boost) {
                 tracing::warn!("Failed to track memory access: {e}");
             }
         }
@@ -574,6 +581,7 @@ impl BuiltInTool for MemorySearchTool {
 fn memory_search_tool(
     db: openalpaca_storage::Database,
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+    daemon_config: Arc<ArcSwap<DaemonConfig>>,
 ) -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
@@ -594,7 +602,7 @@ fn memory_search_tool(
                 "required": ["query"]
             }),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MemorySearchTool { db, embedder })),
+        backend: ToolBackend::BuiltIn(Arc::new(MemorySearchTool { db, embedder, daemon_config })),
     }
 }
 
@@ -1712,7 +1720,7 @@ mod tests {
 
     #[test]
     fn test_builtin_tools_count_without_db() {
-        let tools = builtin_tools(None, None);
+        let tools = builtin_tools(None, None, None);
         assert_eq!(tools.len(), 7);
     }
 
@@ -1720,13 +1728,14 @@ mod tests {
     fn test_builtin_tools_count_with_db() {
         let dir = tempfile::tempdir().unwrap();
         let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
-        let tools = builtin_tools(Some(db), None);
+        let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+        let tools = builtin_tools(Some(db), None, Some(dc));
         assert_eq!(tools.len(), 8);
     }
 
     #[test]
     fn test_all_tools_have_valid_definitions() {
-        for tool in builtin_tools(None, None) {
+        for tool in builtin_tools(None, None, None) {
             assert!(!tool.definition.name.is_empty());
             assert!(!tool.definition.description.is_empty());
             assert!(tool.definition.parameters.is_object());
@@ -2223,7 +2232,8 @@ Remember everything.
             bus: EventBus::new(16),
             max_backups: None,
         };
-        let tools = builtin_tools_with_soul_context(Some(db), None, ctx);
+        let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+        let tools = builtin_tools_with_soul_context(Some(db), None, ctx, Some(dc));
         assert_eq!(tools.len(), 9, "Should have 9 tools (8 base + update_soul)");
         assert!(
             tools.iter().any(|t| t.definition.name == "update_soul"),

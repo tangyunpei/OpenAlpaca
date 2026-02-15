@@ -25,6 +25,8 @@ pub enum ConfigKind {
     Enum(&'static [&'static str]),
     /// Validated integer range.
     Int { min: Option<i64>, max: Option<i64> },
+    /// Validated floating-point range.
+    Float { min: Option<f64>, max: Option<f64> },
 }
 
 impl ConfigKind {
@@ -35,6 +37,7 @@ impl ConfigKind {
             ConfigKind::Bool => "bool",
             ConfigKind::Enum(_) => "enum",
             ConfigKind::Int { .. } => "int",
+            ConfigKind::Float { .. } => "float",
         }
     }
 
@@ -82,6 +85,23 @@ impl ConfigKind {
                 }
                 Ok(())
             }
+            ConfigKind::Float { min, max } => {
+                let n: f64 = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("expected a number, got '{}'", value))?;
+                if let Some(lo) = min {
+                    if n < *lo {
+                        return Err(format!("value {} is below minimum {}", n, lo));
+                    }
+                }
+                if let Some(hi) = max {
+                    if n > *hi {
+                        return Err(format!("value {} is above maximum {}", n, hi));
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
@@ -104,6 +124,7 @@ impl ConfigKind {
                     .to_string()
             }
             ConfigKind::Int { .. } => value.trim().to_string(),
+            ConfigKind::Float { .. } => value.trim().to_string(),
             ConfigKind::String => value.trim().to_string(),
         }
     }
@@ -262,7 +283,10 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
     },
     ConfigKeyDef {
         key: "daemon.orchestrator.summary_max_daily_cost_usd",
-        kind: ConfigKind::String,
+        kind: ConfigKind::Float {
+            min: Some(0.0),
+            max: Some(100.0),
+        },
         default: Some("0.50"),
         description: "Daily cost cap for summarization (USD)",
         category: "Daemon",
@@ -312,7 +336,10 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
     },
     ConfigKeyDef {
         key: "daemon.execution.max_cost",
-        kind: ConfigKind::String,
+        kind: ConfigKind::Float {
+            min: Some(0.0),
+            max: Some(1000.0),
+        },
         default: Some("1.00"),
         description: "Default max cost per agent (USD)",
         category: "Daemon",
@@ -335,7 +362,10 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
     },
     ConfigKeyDef {
         key: "daemon.execution.lead_max_cost",
-        kind: ConfigKind::String,
+        kind: ConfigKind::Float {
+            min: Some(0.0),
+            max: Some(1000.0),
+        },
         default: Some("5.0"),
         description: "Lead agent max cost (USD)",
         category: "Daemon",
@@ -399,7 +429,10 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
     },
     ConfigKeyDef {
         key: "daemon.orchestrator.extract_max_daily_cost_usd",
-        kind: ConfigKind::String,
+        kind: ConfigKind::Float {
+            min: Some(0.0),
+            max: Some(100.0),
+        },
         default: Some("0.25"),
         description: "Daily cost cap for memory extractions (USD)",
         category: "Daemon",
@@ -446,7 +479,10 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
     },
     ConfigKeyDef {
         key: "daemon.orchestrator.task_extract_max_daily_cost_usd",
-        kind: ConfigKind::String,
+        kind: ConfigKind::Float {
+            min: Some(0.0),
+            max: Some(100.0),
+        },
         default: Some("0.50"),
         description: "Daily cost cap for task output extraction (USD)",
         category: "Daemon",
@@ -470,7 +506,10 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
     // -- Daemon: Orchestrator – Supersession --
     ConfigKeyDef {
         key: "daemon.orchestrator.supersession_distance_threshold",
-        kind: ConfigKind::String,
+        kind: ConfigKind::Float {
+            min: Some(0.0),
+            max: Some(10.0),
+        },
         default: Some("1.0"),
         description: "L2 distance threshold for semantic supersession",
         category: "Daemon",
@@ -480,7 +519,10 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
     },
     ConfigKeyDef {
         key: "daemon.orchestrator.fts_jaccard_threshold",
-        kind: ConfigKind::String,
+        kind: ConfigKind::Float {
+            min: Some(0.0),
+            max: Some(1.0),
+        },
         default: Some("0.4"),
         description: "Jaccard overlap threshold for FTS supersession fallback",
         category: "Daemon",
@@ -504,7 +546,10 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
     },
     ConfigKeyDef {
         key: "daemon.orchestrator.decay_half_life_days",
-        kind: ConfigKind::String,
+        kind: ConfigKind::Float {
+            min: Some(1.0),
+            max: Some(365.0),
+        },
         default: Some("30.0"),
         description: "Half-life in days for importance decay",
         category: "Daemon",
@@ -514,7 +559,10 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
     },
     ConfigKeyDef {
         key: "daemon.orchestrator.decay_min_importance",
-        kind: ConfigKind::String,
+        kind: ConfigKind::Float {
+            min: Some(0.0),
+            max: Some(1.0),
+        },
         default: Some("0.05"),
         description: "Min importance floor; below this memories are prune-eligible",
         category: "Daemon",

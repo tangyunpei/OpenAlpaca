@@ -27,6 +27,7 @@ impl TaskDispatcher {
         lane_key: String,
         source: String,
         created_by: String,
+        workspace_id: Option<String>,
     ) {
         let router = match &self.llm_router {
             Some(r) => r.clone(),
@@ -190,8 +191,12 @@ impl TaskDispatcher {
                 // Inject memory context for the first agent in the pipeline
                 if step == 0 {
                     if let Some(ref db) = db {
+                        let scope_ctx = workspace_id.as_ref().map(|ws| {
+                            crate::memory::scope_context::MemoryScopeContext::new(Some(ws.clone()))
+                        });
+                        let access_boost = daemon_config.load().orchestrator.memory.decay.access_boost;
                         if let Some(block) = retrieve_memory_block(
-                            db, embedder.as_ref(), &created_by, &description, 5,
+                            db, embedder.as_ref(), &created_by, &description, 5, scope_ctx.as_ref(), access_boost,
                         ).await {
                             messages.push(ChatMessage::system(&block));
                         }
@@ -576,6 +581,7 @@ impl TaskDispatcher {
                     output,
                     "pipeline",
                     pipeline_success,
+                    workspace_id.clone(),
                 );
             }
         });
