@@ -2440,7 +2440,7 @@ fn configure_key(
             .default(current.to_string())
             .allow_empty(true)
             .interact_text()?,
-        config_schema::ConfigKind::Int { .. } => loop {
+        config_schema::ConfigKind::Int { .. } | config_schema::ConfigKind::Float { .. } => loop {
             let val: String = Input::with_theme(&ColorfulTheme::default())
                 .with_prompt(&prompt)
                 .default(current.to_string())

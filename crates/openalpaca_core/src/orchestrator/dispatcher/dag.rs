@@ -19,6 +19,7 @@ impl TaskDispatcher {
         created_by: String,
         lane_key: String,
         source: String,
+        workspace_id: Option<String>,
     ) {
         let router = match &self.llm_router {
             Some(r) => r.clone(),
@@ -194,7 +195,6 @@ impl TaskDispatcher {
 
             // Memory extraction from DAG output (non-blocking)
             if let Some(ref db) = db {
-                // TODO: Wire workspace_id through dispatch paths
                 spawn_task_memory_extraction(
                     db,
                     &router,
@@ -206,7 +206,7 @@ impl TaskDispatcher {
                     &final_content,
                     "dag",
                     result.success,
-                    None,
+                    workspace_id.clone(),
                 );
             }
 

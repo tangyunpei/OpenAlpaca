@@ -20,6 +20,7 @@ impl TaskDispatcher {
         lane_key: &str,
         source: &str,
         dag: Option<TaskDag>,
+        workspace_id: Option<String>,
     ) -> Result<String, String> {
         let task_id = Uuid::new_v4().to_string();
 
@@ -173,6 +174,7 @@ impl TaskDispatcher {
                 created_by.to_string(),
                 lane_key.to_string(),
                 source.to_string(),
+                workspace_id,
             );
         } else {
             self.spawn_agent_pipeline(
@@ -183,6 +185,7 @@ impl TaskDispatcher {
                 lane_key.to_string(),
                 source.to_string(),
                 created_by.to_string(),
+                workspace_id,
             );
         }
 
