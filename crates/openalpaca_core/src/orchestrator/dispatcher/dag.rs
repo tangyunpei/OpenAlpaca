@@ -19,6 +19,7 @@ impl TaskDispatcher {
         created_by: String,
         lane_key: String,
         source: String,
+        workspace_id: Option<String>,
     ) {
         let router = match &self.llm_router {
             Some(r) => r.clone(),
@@ -205,6 +206,7 @@ impl TaskDispatcher {
                     &final_content,
                     "dag",
                     result.success,
+                    workspace_id.clone(),
                 );
             }
 

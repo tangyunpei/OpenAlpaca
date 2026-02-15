@@ -97,6 +97,9 @@ pub struct MemoryDecayConfig {
     pub min_importance: f64,
     /// Soft cap on total non-KbChunk memories per owner. Excess is pruned by lowest importance.
     pub soft_cap: usize,
+    /// Small importance boost applied each time a memory is accessed.
+    /// Reinforces frequently-used memories. Capped at 1.0 to prevent unbounded growth.
+    pub access_boost: f64,
 }
 
 impl Default for MemoryDecayConfig {
@@ -106,6 +109,7 @@ impl Default for MemoryDecayConfig {
             half_life_days: 30.0,
             min_importance: 0.05,
             soft_cap: 500,
+            access_boost: 0.05,
         }
     }
 }

@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use crate::tools::ToolRegistry;
 
+use crate::memory::scope_context::MemoryScopeContext;
 use crate::memory::task_extraction::{TaskExtractionParams, extract_task_memories};
 use openalpaca_storage::repository::MemoryRepository;
 use super::skill_matcher::{SkillMatch, SkillMatcher};
@@ -27,12 +28,18 @@ use super::task_planner::TaskPlan;
 
 /// Retrieve relevant user memories as a formatted block for agent prompts.
 /// Mirrors the retrieval pattern used in `handle_simple_query()`.
+///
+/// When `scope_ctx` is provided, uses cascading search (Workspace → Global).
+/// When `None`, falls back to unscoped global search (backward compatibility for
+/// pipeline and lead_agent contexts that don't yet carry scope context).
 pub(super) async fn retrieve_memory_block(
     db: &Database,
     embedder: Option<&Arc<dyn openalpaca_llm::Embedder>>,
     owner_id: &str,
     query: &str,
     top_k: usize,
+    scope_ctx: Option<&MemoryScopeContext>,
+    access_boost: f64,
 ) -> Option<String> {
     let repo = MemoryRepository::new(db);
     let query_embedding = if let Some(embedder) = embedder {
@@ -44,8 +51,19 @@ pub(super) async fn retrieve_memory_block(
     } else {
         None
     };
-    let memories = repo
-        .search_hybrid(
+    let memories = if let Some(ctx) = scope_ctx {
+        let cascade_scopes = ctx.cascade_scopes();
+        repo.search_hybrid_cascade(
+            owner_id,
+            query,
+            query_embedding.as_deref(),
+            top_k,
+            None,
+            &cascade_scopes,
+        )
+        .unwrap_or_default()
+    } else {
+        repo.search_hybrid(
             owner_id,
             query,
             query_embedding.as_deref(),
@@ -54,15 +72,16 @@ pub(super) async fn retrieve_memory_block(
             None,
             None,
         )
-        .unwrap_or_default();
+        .unwrap_or_default()
+    };
 
     if memories.is_empty() {
         return None;
     }
 
-    // Track access for importance decay
+    // Track access for importance decay + boost
     let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-    if let Err(e) = repo.touch_accessed(&ids) {
+    if let Err(e) = repo.touch_accessed(&ids, access_boost) {
         tracing::warn!("Failed to track memory access: {e}");
     }
 
@@ -96,6 +115,7 @@ pub(super) fn spawn_task_memory_extraction(
     task_output: &str,
     source_path: &str,
     success: bool,
+    workspace_id: Option<String>,
 ) {
     if !success {
         return;
@@ -111,6 +131,7 @@ pub(super) fn spawn_task_memory_extraction(
         task_description: task_description.to_string(),
         task_output: task_output.to_string(),
         source_path: source_path.to_string(),
+        workspace_id,
     };
     let db = db.clone();
     let router = router.clone();
@@ -172,12 +193,13 @@ impl TaskDispatcher {
         required_skills: &[String],
         created_by: &str,
         lane_key: &str,
+        workspace_id: Option<String>,
     ) -> Result<String, String> {
         let matches = self
             .skill_matcher
             .match_skills(required_skills, &self.shared_context.agent_registry)?;
         let title = generate_title(description);
-        self.dispatch_core(description, title, matches, created_by, lane_key, source, None)
+        self.dispatch_core(description, title, matches, created_by, lane_key, source, None, workspace_id)
     }
 
     /// Dispatch a complex task using an LLM-generated plan.
@@ -190,6 +212,7 @@ impl TaskDispatcher {
         created_by: &str,
         lane_key: &str,
         source: &str,
+        workspace_id: Option<String>,
     ) -> Result<String, String> {
         // Lead Agent path: dynamic orchestration for complex/exploratory tasks
         if plan.use_lead_agent {
@@ -198,7 +221,7 @@ impl TaskDispatcher {
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| generate_title(description));
             return self.dispatch_lead_agent(
-                description, title, created_by, lane_key, source,
+                description, title, created_by, lane_key, source, workspace_id,
             );
         }
 
@@ -247,7 +270,7 @@ impl TaskDispatcher {
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| generate_title(description));
 
-        self.dispatch_core(description, title, matches, created_by, lane_key, source, dag)
+        self.dispatch_core(description, title, matches, created_by, lane_key, source, dag, workspace_id)
     }
 }
 

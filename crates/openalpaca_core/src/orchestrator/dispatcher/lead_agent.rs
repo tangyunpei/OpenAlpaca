@@ -20,6 +20,7 @@ impl TaskDispatcher {
         created_by: &str,
         lane_key: &str,
         source: &str,
+        workspace_id: Option<String>,
     ) -> Result<String, String> {
         // Find the lead agent: look for an agent with "lead_orchestration" skill,
         // or fall back to using any available agent as the lead
@@ -121,6 +122,7 @@ impl TaskDispatcher {
             lane_key.to_string(),
             source.to_string(),
             created_by.to_string(),
+            workspace_id,
         );
 
         Ok(format!(
@@ -142,6 +144,7 @@ impl TaskDispatcher {
         lane_key: String,
         source: String,
         created_by: String,
+        workspace_id: Option<String>,
     ) {
         let router = match &self.llm_router {
             Some(r) => r.clone(),
@@ -192,6 +195,7 @@ impl TaskDispatcher {
                 &task_id,
                 &created_by,
                 &daemon_config,
+                workspace_id.clone(),
             )
             .await;
 
@@ -364,6 +368,7 @@ impl TaskDispatcher {
                     &final_content,
                     "lead_agent",
                     result.success,
+                    workspace_id,
                 );
             }
 

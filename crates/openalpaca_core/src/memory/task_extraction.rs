@@ -37,6 +37,10 @@ pub struct TaskExtractionParams {
     pub task_output: String,
     /// Source path: "lead_agent", "dag", or "pipeline".
     pub source_path: String,
+    /// Optional workspace ID for Workspace-scoped memories.
+    /// When set, extracted memories are scoped to this workspace.
+    /// When None, memories are stored as Global.
+    pub workspace_id: Option<String>,
 }
 
 const AGENT_LABEL: &str = "orchestrator_task_extract";
@@ -244,16 +248,20 @@ pub async fn extract_task_memories(
             _ => MemoryKind::Fact,
         };
 
-        // All task-extracted memories use Global scope — workspace-scoped retrieval
-        // is not yet implemented, so scope_id filtering would make them unretrievable.
+        // Use workspace scope if available, otherwise Global.
+        let (scope, scope_id) = if let Some(ref ws) = params.workspace_id {
+            (MemoryScope::Workspace, ws.as_str())
+        } else {
+            (MemoryScope::Global, "")
+        };
         let result = persist_memory_item(
             &repo,
             &embedder,
             &params.owner_id,
             content,
             kind,
-            MemoryScope::Global,
-            "",
+            scope,
+            scope_id,
             MemorySource::Tool,
             importance,
             confidence,

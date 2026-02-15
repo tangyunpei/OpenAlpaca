@@ -1435,6 +1435,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         soul_tool_ctx,
         user_tool_ctx,
         identity_tool_ctx,
+        Some(daemon_config.clone()),
     ) {
         tool_registry.register(tool);
     }
@@ -2227,10 +2228,15 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
             "/v1/orchestrator/config",
             put(routes::update_orchestrator_config),
         )
-        // Memory admin routes (Phase 6)
+        // Memory routes
+        .route("/v1/memory", get(routes::list_memories_handler))
         .route("/v1/memory/reindex", post(routes::reindex_handler))
         .route("/v1/memory/status", get(routes::index_status_handler))
         .route("/v1/memory/kb/ingest", post(routes::kb_ingest_handler))
+        .route(
+            "/v1/memory/{id}",
+            get(routes::get_memory_handler).delete(routes::delete_memory_handler),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_middleware,
