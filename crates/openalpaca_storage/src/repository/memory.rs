@@ -387,34 +387,62 @@ impl<'a> MemoryRepository<'a> {
     }
 
     /// FTS-based fallback for supersession when vector search is unavailable.
-    /// Extracts key terms from content and searches for matching Fact/Preference memories.
+    ///
+    /// Uses AND-joined significant terms (>3 chars, up to 6) to avoid false matches on
+    /// common short words. Requires at least 2 meaningful terms; returns empty if content
+    /// is too short or generic. Results include a Jaccard word-overlap score for callers
+    /// to apply a threshold before superseding.
     pub fn find_similar_fts_fallback(
         &self,
         owner_id: &str,
         content: &str,
         limit: usize,
-    ) -> Result<Vec<MemoryV2>> {
-        // Extract key terms from content (first 200 chars to avoid FTS5 query length issues)
-        let query_terms: String = content
-            .chars()
-            .take(200)
-            .collect::<String>()
+    ) -> Result<Vec<(MemoryV2, f64)>> {
+        // Extract significant terms (>3 chars to skip "I", "the", "is", "like", etc.)
+        let truncated: String = content.chars().take(200).collect();
+        let terms: Vec<&str> = truncated
             .split_whitespace()
-            .filter(|w| w.len() > 2)
-            .take(8)
-            .collect::<Vec<_>>()
-            .join(" OR ");
+            .filter(|w| w.len() > 3)
+            .take(6)
+            .collect();
 
-        if query_terms.is_empty() {
+        // Require at least 2 meaningful terms to avoid false positives
+        if terms.len() < 2 {
             return Ok(vec![]);
         }
 
+        // AND-join: all terms must be present in the matched memory
+        let query_terms = terms.join(" AND ");
+
         let all = self.search_fts(owner_id, &query_terms, limit * 2, None, None, None)?;
-        Ok(all
+
+        // Compute Jaccard word-overlap score for each result
+        let new_words: std::collections::HashSet<String> = content
+            .split_whitespace()
+            .map(|w| w.to_lowercase())
+            .collect();
+
+        let mut results: Vec<(MemoryV2, f64)> = all
             .into_iter()
             .filter(|m| m.kind == MemoryKind::Fact || m.kind == MemoryKind::Preference)
-            .take(limit)
-            .collect())
+            .map(|m| {
+                let old_words: std::collections::HashSet<String> = m
+                    .content
+                    .split_whitespace()
+                    .map(|w| w.to_lowercase())
+                    .collect();
+                let intersection = new_words.intersection(&old_words).count();
+                let union = new_words.union(&old_words).count();
+                let jaccard = if union > 0 { intersection as f64 / union as f64 } else { 0.0 };
+                (m, jaccard)
+            })
+            .collect();
+
+        // Sort by overlap score descending (best match first)
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(limit);
+
+        Ok(results)
     }
 
     /// Supersede an existing memory: insert a new memory and mark the old one.
@@ -490,8 +518,11 @@ impl<'a> MemoryRepository<'a> {
 
     /// Apply exponential decay to importance for non-KbChunk memories.
     ///
-    /// Formula: `importance *= exp(-ln(2) * days_since_access / half_life_days)`
-    /// Uses `COALESCE(last_accessed_at, created_at)` as reference time.
+    /// Formula: `importance *= exp(-ln(2) * elapsed_days / half_life_days)`
+    /// where `elapsed_days` is the time since the last decay run (or last access/creation).
+    ///
+    /// After applying decay, resets the reference timestamp so the next run only
+    /// decays over the newly elapsed interval (avoiding compounding).
     /// Returns the number of memories updated.
     pub fn apply_importance_decay(
         &self,
@@ -499,15 +530,21 @@ impl<'a> MemoryRepository<'a> {
         half_life_days: f64,
         min_importance: f64,
     ) -> Result<usize> {
-        self.db.with_connection(|conn| {
-            let updated = conn.execute(
+        self.db.with_connection_mut(|conn| {
+            let tx = conn.transaction()?;
+
+            // Apply decay using elapsed time since last reference point
+            let updated = tx.execute(
                 "UPDATE memory SET
-                    importance = MAX(?1, importance * EXP(-0.693147 * (julianday('now') - julianday(COALESCE(last_accessed_at, created_at))) / ?2))
+                    importance = MAX(?1, importance * EXP(-0.693147 * (julianday('now') - julianday(COALESCE(last_accessed_at, created_at))) / ?2)),
+                    last_accessed_at = datetime('now')
                  WHERE owner_id = ?3
                    AND kind != 'kb_chunk'
                    AND importance > ?1",
                 rusqlite::params![min_importance, half_life_days, owner_id],
             )?;
+
+            tx.commit()?;
             Ok(updated)
         })
     }
@@ -526,9 +563,11 @@ impl<'a> MemoryRepository<'a> {
         self.db.with_connection_mut(|conn| {
             let tx = conn.transaction()?;
 
-            // Phase 1: Delete memories below minimum importance (excluding KbChunk)
+            // Phase 1: Delete memories at or below minimum importance (excluding KbChunk).
+            // Decay clamps values with MAX(min_importance, ...), so decayed memories
+            // settle exactly at the floor — use <= to catch them.
             let deleted_threshold = tx.execute(
-                "DELETE FROM memory WHERE owner_id = ?1 AND kind != 'kb_chunk' AND importance < ?2",
+                "DELETE FROM memory WHERE owner_id = ?1 AND kind != 'kb_chunk' AND importance <= ?2",
                 rusqlite::params![owner_id, min_importance],
             )?;
 
