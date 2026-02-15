@@ -370,6 +370,175 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         sensitive: false,
         backend: ConfigBackend::DaemonToml,
     },
+    // -- Daemon: Orchestrator (cont.) --
+    ConfigKeyDef {
+        key: "daemon.orchestrator.summary_min_new_older_messages",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(200),
+        },
+        default: Some("12"),
+        description: "Min new older messages before triggering summary",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.orchestrator.msg_trunc_chars",
+        kind: ConfigKind::Int {
+            min: Some(100),
+            max: Some(32000),
+        },
+        default: Some("1500"),
+        description: "Character limit for message truncation in summary input",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.orchestrator.extract_max_daily_cost_usd",
+        kind: ConfigKind::String,
+        default: Some("0.25"),
+        description: "Daily cost cap for memory extractions (USD)",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.orchestrator.extract_every_n_turns",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(100),
+        },
+        default: Some("5"),
+        description: "Run memory extraction every N user turns",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.orchestrator.extract_min_content_len",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(10000),
+        },
+        default: Some("20"),
+        description: "Min content length (chars) to trigger extraction",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    // -- Daemon: Execution (cont.) --
+    ConfigKeyDef {
+        key: "daemon.execution.max_tools_per_round",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(50),
+        },
+        default: Some("5"),
+        description: "Default max tool calls per agent round",
+        category: "Daemon",
+        subcategory: Some("Execution"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.execution.max_tool_runtime_secs",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(600),
+        },
+        default: Some("60"),
+        description: "Default max tool runtime in seconds",
+        category: "Daemon",
+        subcategory: Some("Execution"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.execution.lead_max_tools_per_round",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(50),
+        },
+        default: Some("3"),
+        description: "Lead agent max tool calls per round",
+        category: "Daemon",
+        subcategory: Some("Execution"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.execution.lead_max_tool_runtime_secs",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(3600),
+        },
+        default: Some("300"),
+        description: "Lead agent max tool runtime in seconds",
+        category: "Daemon",
+        subcategory: Some("Execution"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    // -- Daemon: DAG (cont.) --
+    ConfigKeyDef {
+        key: "daemon.dag.node_timeout_secs",
+        kind: ConfigKind::Int {
+            min: Some(10),
+            max: Some(3600),
+        },
+        default: Some("300"),
+        description: "Timeout per DAG node in seconds",
+        category: "Daemon",
+        subcategory: Some("DAG"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.dag.max_retries_per_node",
+        kind: ConfigKind::Int {
+            min: Some(0),
+            max: Some(10),
+        },
+        default: Some("1"),
+        description: "Max retries per DAG node on failure",
+        category: "Daemon",
+        subcategory: Some("DAG"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.dag.replan_after_every_n_nodes",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(50),
+        },
+        default: Some("2"),
+        description: "Trigger DAG replan after every N completed nodes",
+        category: "Daemon",
+        subcategory: Some("DAG"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.dag.max_replans",
+        kind: ConfigKind::Int {
+            min: Some(0),
+            max: Some(50),
+        },
+        default: Some("3"),
+        description: "Maximum number of DAG replans allowed",
+        category: "Daemon",
+        subcategory: Some("DAG"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
     // -- Daemon: Security --
     ConfigKeyDef {
         key: "daemon.security.max_input_length",
@@ -381,6 +550,111 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         description: "Maximum user input length in bytes",
         category: "Daemon",
         subcategory: Some("Security"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    // -- Daemon: Server --
+    ConfigKeyDef {
+        key: "daemon.server.heartbeat_interval_secs",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(300),
+        },
+        default: Some("5"),
+        description: "WebSocket heartbeat interval in seconds",
+        category: "Daemon",
+        subcategory: Some("Server"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.server.sse_keep_alive_secs",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(300),
+        },
+        default: Some("15"),
+        description: "SSE keep-alive interval in seconds",
+        category: "Daemon",
+        subcategory: Some("Server"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.server.event_broadcaster_capacity",
+        kind: ConfigKind::Int {
+            min: Some(8),
+            max: Some(1024),
+        },
+        default: Some("64"),
+        description: "Event broadcaster channel capacity (restart-only)",
+        category: "Daemon",
+        subcategory: Some("Server"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.server.wake_channel_capacity",
+        kind: ConfigKind::Int {
+            min: Some(8),
+            max: Some(4096),
+        },
+        default: Some("256"),
+        description: "Wake event channel capacity (restart-only)",
+        category: "Daemon",
+        subcategory: Some("Server"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.server.cleanup_interval_secs",
+        kind: ConfigKind::Int {
+            min: Some(5),
+            max: Some(3600),
+        },
+        default: Some("60"),
+        description: "Chat stream stale cleanup interval in seconds",
+        category: "Daemon",
+        subcategory: Some("Server"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.server.stale_timeout_secs",
+        kind: ConfigKind::Int {
+            min: Some(5),
+            max: Some(3600),
+        },
+        default: Some("30"),
+        description: "Chat stream stale timeout in seconds",
+        category: "Daemon",
+        subcategory: Some("Server"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.server.embedding_poll_interval_secs",
+        kind: ConfigKind::Int {
+            min: Some(5),
+            max: Some(3600),
+        },
+        default: Some("30"),
+        description: "Embedding indexer poll interval in seconds",
+        category: "Daemon",
+        subcategory: Some("Server"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.server.embedding_batch_size",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(500),
+        },
+        default: Some("50"),
+        description: "Embedding indexer batch size per run",
+        category: "Daemon",
+        subcategory: Some("Server"),
         sensitive: false,
         backend: ConfigBackend::DaemonToml,
     },
@@ -852,11 +1126,23 @@ mod tests {
     #[test]
     fn test_daemon_keys_in_category() {
         let keys = keys_in_category("Daemon");
+        // 33 daemon keys + 1 alias (system.max_agents) = 34 total
+        assert_eq!(keys.len(), 34);
         assert!(keys.iter().any(|d| d.key == "system.max_agents"));
         assert!(keys.iter().any(|d| d.key == "daemon.dag.max_concurrent_agents"));
         assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.prompt_recent_messages"));
         assert!(keys.iter().any(|d| d.key == "daemon.execution.max_rounds"));
         assert!(keys.iter().any(|d| d.key == "daemon.security.max_input_length"));
+        // New keys
+        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.summary_min_new_older_messages"));
+        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.msg_trunc_chars"));
+        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.extract_max_daily_cost_usd"));
+        assert!(keys.iter().any(|d| d.key == "daemon.execution.max_tools_per_round"));
+        assert!(keys.iter().any(|d| d.key == "daemon.execution.lead_max_tools_per_round"));
+        assert!(keys.iter().any(|d| d.key == "daemon.dag.node_timeout_secs"));
+        assert!(keys.iter().any(|d| d.key == "daemon.dag.max_retries_per_node"));
+        assert!(keys.iter().any(|d| d.key == "daemon.server.heartbeat_interval_secs"));
+        assert!(keys.iter().any(|d| d.key == "daemon.server.embedding_batch_size"));
         assert!(keys.iter().all(|d| d.backend == ConfigBackend::DaemonToml));
     }
 
@@ -913,10 +1199,12 @@ mod tests {
 
         // Daemon subcategories
         let daemon_subs = subcategories_in_category("Daemon");
+        assert_eq!(daemon_subs.len(), 5);
         assert!(daemon_subs.contains(&"Orchestrator"));
         assert!(daemon_subs.contains(&"Execution"));
         assert!(daemon_subs.contains(&"DAG"));
         assert!(daemon_subs.contains(&"Security"));
+        assert!(daemon_subs.contains(&"Server"));
     }
 
     #[test]
@@ -976,6 +1264,44 @@ mod tests {
         assert!(validate("daemon.dag.max_concurrent_agents", "32").is_ok());
         assert!(validate("daemon.dag.max_concurrent_agents", "0").is_err());
         assert!(validate("daemon.dag.max_concurrent_agents", "99").is_err());
+    }
+
+    #[test]
+    fn test_daemon_server_keys() {
+        let server_keys = keys_in_subcategory("Daemon", "Server");
+        assert_eq!(server_keys.len(), 8);
+        assert!(server_keys.iter().any(|d| d.key == "daemon.server.heartbeat_interval_secs"));
+        assert!(server_keys.iter().any(|d| d.key == "daemon.server.sse_keep_alive_secs"));
+        assert!(server_keys.iter().any(|d| d.key == "daemon.server.event_broadcaster_capacity"));
+        assert!(server_keys.iter().any(|d| d.key == "daemon.server.wake_channel_capacity"));
+        assert!(server_keys.iter().any(|d| d.key == "daemon.server.cleanup_interval_secs"));
+        assert!(server_keys.iter().any(|d| d.key == "daemon.server.stale_timeout_secs"));
+        assert!(server_keys.iter().any(|d| d.key == "daemon.server.embedding_poll_interval_secs"));
+        assert!(server_keys.iter().any(|d| d.key == "daemon.server.embedding_batch_size"));
+        assert!(server_keys.iter().all(|d| d.backend == ConfigBackend::DaemonToml));
+    }
+
+    #[test]
+    fn test_validate_new_daemon_keys() {
+        // Server keys
+        assert!(validate("daemon.server.heartbeat_interval_secs", "5").is_ok());
+        assert!(validate("daemon.server.heartbeat_interval_secs", "0").is_err());
+        assert!(validate("daemon.server.heartbeat_interval_secs", "301").is_err());
+        assert!(validate("daemon.server.embedding_batch_size", "50").is_ok());
+        assert!(validate("daemon.server.embedding_batch_size", "0").is_err());
+
+        // Orchestrator keys
+        assert!(validate("daemon.orchestrator.summary_min_new_older_messages", "12").is_ok());
+        assert!(validate("daemon.orchestrator.extract_every_n_turns", "5").is_ok());
+
+        // Execution keys
+        assert!(validate("daemon.execution.max_tools_per_round", "5").is_ok());
+        assert!(validate("daemon.execution.max_tools_per_round", "0").is_err());
+
+        // DAG keys
+        assert!(validate("daemon.dag.node_timeout_secs", "300").is_ok());
+        assert!(validate("daemon.dag.max_retries_per_node", "0").is_ok());
+        assert!(validate("daemon.dag.max_retries_per_node", "11").is_err());
     }
 
     #[test]
