@@ -433,6 +433,108 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         sensitive: false,
         backend: ConfigBackend::DaemonToml,
     },
+    // -- Daemon: Orchestrator – Task Extraction --
+    ConfigKeyDef {
+        key: "daemon.orchestrator.task_extract_enabled",
+        kind: ConfigKind::Bool,
+        default: Some("true"),
+        description: "Enable task output memory extraction",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.orchestrator.task_extract_max_daily_cost_usd",
+        kind: ConfigKind::String,
+        default: Some("0.50"),
+        description: "Daily cost cap for task output extraction (USD)",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.orchestrator.task_extract_min_content_len",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(10000),
+        },
+        default: Some("100"),
+        description: "Min task output length (chars) for extraction",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    // -- Daemon: Orchestrator – Supersession --
+    ConfigKeyDef {
+        key: "daemon.orchestrator.supersession_distance_threshold",
+        kind: ConfigKind::String,
+        default: Some("1.0"),
+        description: "L2 distance threshold for semantic supersession",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.orchestrator.fts_jaccard_threshold",
+        kind: ConfigKind::String,
+        default: Some("0.4"),
+        description: "Jaccard overlap threshold for FTS supersession fallback",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    // -- Daemon: Orchestrator – Decay --
+    ConfigKeyDef {
+        key: "daemon.orchestrator.decay_poll_interval_secs",
+        kind: ConfigKind::Int {
+            min: Some(60),
+            max: Some(86400),
+        },
+        default: Some("3600"),
+        description: "How often to run the decay task (seconds)",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.orchestrator.decay_half_life_days",
+        kind: ConfigKind::String,
+        default: Some("30.0"),
+        description: "Half-life in days for importance decay",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.orchestrator.decay_min_importance",
+        kind: ConfigKind::String,
+        default: Some("0.05"),
+        description: "Min importance floor; below this memories are prune-eligible",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.orchestrator.decay_soft_cap",
+        kind: ConfigKind::Int {
+            min: Some(10),
+            max: Some(100000),
+        },
+        default: Some("500"),
+        description: "Soft cap on total memories per owner",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
     // -- Daemon: Execution (cont.) --
     ConfigKeyDef {
         key: "daemon.execution.max_tools_per_round",
@@ -1126,8 +1228,8 @@ mod tests {
     #[test]
     fn test_daemon_keys_in_category() {
         let keys = keys_in_category("Daemon");
-        // 33 daemon keys + 1 alias (system.max_agents) = 34 total
-        assert_eq!(keys.len(), 34);
+        // 42 daemon keys + 1 alias (system.max_agents) = 43 total
+        assert_eq!(keys.len(), 43);
         assert!(keys.iter().any(|d| d.key == "system.max_agents"));
         assert!(keys.iter().any(|d| d.key == "daemon.dag.max_concurrent_agents"));
         assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.prompt_recent_messages"));
@@ -1143,6 +1245,16 @@ mod tests {
         assert!(keys.iter().any(|d| d.key == "daemon.dag.max_retries_per_node"));
         assert!(keys.iter().any(|d| d.key == "daemon.server.heartbeat_interval_secs"));
         assert!(keys.iter().any(|d| d.key == "daemon.server.embedding_batch_size"));
+        // Memory lifecycle keys
+        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.task_extract_enabled"));
+        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.task_extract_max_daily_cost_usd"));
+        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.task_extract_min_content_len"));
+        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.supersession_distance_threshold"));
+        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.fts_jaccard_threshold"));
+        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.decay_poll_interval_secs"));
+        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.decay_half_life_days"));
+        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.decay_min_importance"));
+        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.decay_soft_cap"));
         assert!(keys.iter().all(|d| d.backend == ConfigBackend::DaemonToml));
     }
 
