@@ -145,7 +145,7 @@ impl BuiltInTool for SpawnSubagentTool {
             self.tool_registry.clone(),
             ctx_exec,
         ));
-        let sandbox = SandboxManager::new(contextual_executor, self.bus.clone());
+        let sandbox = SandboxManager::with_defaults(contextual_executor, self.bus.clone());
 
         // 6. Resolve tools for subagent's skills
         let skill_names: Vec<String> = agent.skills.iter().map(|s| s.name.clone()).collect();
@@ -550,7 +550,7 @@ pub async fn run_lead_agent(
     ));
 
     // 5. Build SandboxManager with lead agent's policy
-    let sandbox = SandboxManager::new(lead_executor, bus.clone());
+    let sandbox = SandboxManager::with_defaults(lead_executor, bus.clone());
     let sandbox_policy = SandboxPolicy::from_constraints(&lead_agent.id, &lead_agent.constraints);
 
     // 6. Build system prompt

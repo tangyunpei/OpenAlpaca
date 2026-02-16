@@ -238,19 +238,21 @@ impl IntentParser {
     fn parse_remember_command(lower: &str, original: &str) -> Option<String> {
         // "remember that ...", "remember my ...", "remember I ..."
         if let Some(rest) = lower.strip_prefix("remember ") {
-            let content = rest.trim();
-            if !content.is_empty() {
-                // Use the original casing for the content
-                let start = original.len() - original.trim_start().len() + "remember ".len();
-                return Some(original[start..].trim().to_string());
+            if !rest.trim().is_empty() {
+                // Safe: "remember " is 9 ASCII bytes, original is already trimmed
+                return Some(original["remember ".len()..].trim().to_string());
             }
         }
         // "please remember ..."
         if let Some(idx) = lower.find("please remember ") {
             let start = idx + "please remember ".len();
-            let content = original[start..].trim();
-            if !content.is_empty() {
-                return Some(content.to_string());
+            // Guard against UTF-8 boundary mismatch (lower indices may differ from original
+            // for non-ASCII text due to to_lowercase() byte-length changes)
+            if start <= original.len() && original.is_char_boundary(start) {
+                let content = original[start..].trim();
+                if !content.is_empty() {
+                    return Some(content.to_string());
+                }
             }
         }
         None
@@ -259,17 +261,19 @@ impl IntentParser {
     /// Detect "forget X" style commands.
     fn parse_forget_command(lower: &str, original: &str) -> Option<String> {
         if let Some(rest) = lower.strip_prefix("forget ") {
-            let content = rest.trim();
-            if !content.is_empty() {
-                let start = original.len() - original.trim_start().len() + "forget ".len();
-                return Some(original[start..].trim().to_string());
+            if !rest.trim().is_empty() {
+                // Safe: "forget " is 7 ASCII bytes, original is already trimmed
+                return Some(original["forget ".len()..].trim().to_string());
             }
         }
         if let Some(idx) = lower.find("please forget ") {
             let start = idx + "please forget ".len();
-            let content = original[start..].trim();
-            if !content.is_empty() {
-                return Some(content.to_string());
+            // Guard against UTF-8 boundary mismatch (see parse_remember_command)
+            if start <= original.len() && original.is_char_boundary(start) {
+                let content = original[start..].trim();
+                if !content.is_empty() {
+                    return Some(content.to_string());
+                }
             }
         }
         None

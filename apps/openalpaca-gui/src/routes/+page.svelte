@@ -11,18 +11,14 @@
   } from "$lib/daemon";
 
   import AppHeader from "$lib/components/AppHeader.svelte";
-  import TabBar from "$lib/components/TabBar.svelte";
-  import EventLog from "$lib/components/EventLog.svelte";
-  import ConnectorPanel from "$lib/components/ConnectorPanel.svelte";
   import TaskPanel from "$lib/components/TaskPanel.svelte";
   import AgentPanel from "$lib/components/AgentPanel.svelte";
-  import SettingsPanel from "$lib/components/SettingsPanel.svelte";
-  import ConversationsPanel from "$lib/components/ConversationsPanel.svelte";
   import ChatPanel from "$lib/components/ChatPanel.svelte";
+  import SettingsDrawer from "$lib/components/SettingsDrawer.svelte";
 
   import { loadTasks, subscribeToTaskEvents } from "$lib/stores/tasks";
   import { loadAgents, subscribeToAgentEvents } from "$lib/stores/agents";
-  import { loadSettings, subscribeToKeyEvents } from "$lib/stores/settings";
+  import { subscribeToKeyEvents } from "$lib/stores/settings";
   import { subscribeToChatEvents } from "$lib/stores/chat";
 
   // Reactive state from stores
@@ -31,25 +27,13 @@
   let eventList = $state<ServerEvent[]>([]);
   let error = $state<string | null>(null);
 
-  let activeTab = $state<string>("events");
-
-  let connectorPanel: ConnectorPanel | undefined = $state();
-  let settingsPanel: SettingsPanel | undefined = $state();
-
-  const tabs = [
-    { id: "events", label: "Event Log" },
-    { id: "connectors", label: "Connectors" },
-    { id: "tasks", label: "Tasks" },
-    { id: "agents", label: "Agents" },
-    { id: "conversations", label: "Conversations" },
-    { id: "settings", label: "Settings" },
-  ];
+  let rightTab = $state<"tasks" | "agents">("tasks");
+  let drawerOpen = $state(false);
 
   // Store subscriptions
   const unsubState = connectionState.subscribe((v) => {
     statusState = v;
     if (v === "connected") {
-      if (activeTab === "connectors") connectorPanel?.refreshConnectors();
       loadTasks();
       loadAgents();
     }
@@ -83,17 +67,19 @@
     unsubChatEvents?.();
   });
 
-  function handleTabChange(id: string) {
-    activeTab = id;
-    if (id === "connectors") connectorPanel?.refreshConnectors();
-    if (id === "tasks") loadTasks();
-    if (id === "agents") loadAgents();
-    if (id === "settings") settingsPanel?.refreshSettings();
+  function toggleDrawer() {
+    drawerOpen = !drawerOpen;
+  }
+
+  function handleRightTabChange(tab: "tasks" | "agents") {
+    rightTab = tab;
+    if (tab === "tasks") loadTasks();
+    if (tab === "agents") loadAgents();
   }
 </script>
 
 <main class="w-full min-h-screen flex flex-col px-8 py-5 max-sm:px-3">
-  <AppHeader {statusState} {info} />
+  <AppHeader {statusState} {info} onToggleSettings={toggleDrawer} />
 
   {#if error}
     <div class="mb-4 rounded-lg border border-danger bg-danger/20 px-4 py-3 text-sm text-danger">
@@ -102,28 +88,41 @@
   {/if}
 
   <div class="flex flex-1 min-h-0 max-[900px]:flex-col">
-    <aside class="flex-1 min-w-[300px] border-r border-primary h-[calc(100vh-120px)] overflow-hidden max-[900px]:min-w-full max-[900px]:h-[300px] max-[900px]:border-r-0 max-[900px]:border-b max-[900px]:border-primary">
+    <aside class="flex-1 min-w-[300px] border-r border-primary h-[calc(100vh-120px)] overflow-hidden max-[900px]:min-w-full max-[900px]:h-[50vh] max-[900px]:border-r-0 max-[900px]:border-b max-[900px]:border-primary">
       <ChatPanel />
     </aside>
 
     <div class="flex-[0_1_900px] max-w-[900px] min-w-0 pl-6 max-[900px]:flex-auto max-[900px]:max-w-full max-[900px]:pl-0 max-[900px]:pt-4">
-      <TabBar {activeTab} {tabs} onTabChange={handleTabChange} />
+      <!-- Tasks / Agents switcher -->
+      <div class="flex bg-black/25 p-1 rounded-[10px] mx-auto mb-6 gap-1 w-fit border border-white/5 backdrop-blur-[10px]">
+        <button
+          class="px-6 py-2 border-none bg-transparent text-muted-foreground cursor-pointer text-sm font-medium rounded-md transition-all duration-200 whitespace-nowrap hover:text-foreground {rightTab === 'tasks' ? 'bg-white/10 text-white shadow-sm' : ''}"
+          onclick={() => handleRightTabChange('tasks')}
+        >
+          Tasks
+        </button>
+        <button
+          class="px-6 py-2 border-none bg-transparent text-muted-foreground cursor-pointer text-sm font-medium rounded-md transition-all duration-200 whitespace-nowrap hover:text-foreground {rightTab === 'agents' ? 'bg-white/10 text-white shadow-sm' : ''}"
+          onclick={() => handleRightTabChange('agents')}
+        >
+          Agents
+        </button>
+      </div>
 
       <div>
-        {#if activeTab === "events"}
-          <EventLog events={eventList} />
-        {:else if activeTab === "connectors"}
-          <ConnectorPanel bind:this={connectorPanel} connectionState={statusState} />
-        {:else if activeTab === "tasks"}
+        {#if rightTab === "tasks"}
           <TaskPanel />
-        {:else if activeTab === "agents"}
+        {:else}
           <AgentPanel />
-        {:else if activeTab === "conversations"}
-          <ConversationsPanel />
-        {:else if activeTab === "settings"}
-          <SettingsPanel bind:this={settingsPanel} />
         {/if}
       </div>
     </div>
   </div>
+
+  <SettingsDrawer
+    open={drawerOpen}
+    onClose={() => drawerOpen = false}
+    {eventList}
+    connectionState={statusState}
+  />
 </main>

@@ -198,6 +198,15 @@ pub enum SystemEvent {
         output_preview: Option<String>,
         timestamp: DateTime<Utc>,
     },
+    /// A tool's circuit breaker was tripped due to repeated transient failures.
+    /// The tool will be blocked for `reset_after_secs` before a probe call is allowed.
+    CircuitBreakerTripped {
+        agent_id: String,
+        tool_name: String,
+        consecutive_failures: usize,
+        reset_after_secs: u64,
+        timestamp: DateTime<Utc>,
+    },
     /// A task DAG was replanned during execution
     TaskReplanned {
         task_id: String,

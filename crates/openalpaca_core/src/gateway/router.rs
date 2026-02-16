@@ -124,7 +124,7 @@ impl Gateway {
             }
             Err(e) => GatewayResponse {
                 lane_key: key,
-                content: format!("Error: {e}"),
+                content: format!("[error] {e}"),
             },
         }
     }
@@ -292,7 +292,7 @@ mod tests {
                 scope: Scope::Global,
             })
             .await;
-        assert_eq!(resp.content, "Error: Access denied");
+        assert_eq!(resp.content, "[error] Access denied");
     }
 
     #[tokio::test]

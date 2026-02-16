@@ -23,10 +23,11 @@ impl EventBus {
     /// Publish an event to all subscribers.
     /// Returns the number of subscribers triggered.
     pub fn publish(&self, event: SystemEvent) -> usize {
-        // We ignore the error if there are no subscribers,
-        // but we might want to log it if it's critical.
-        // For now, implicit drop is fine.
-        self.sender.send(event).unwrap_or_default()
+        let count = self.sender.send(event).unwrap_or(0);
+        if count == 0 {
+            tracing::debug!("Event published with no subscribers");
+        }
+        count
     }
 }
 

@@ -43,27 +43,34 @@ pub(super) async fn retrieve_memory_block(
 ) -> Option<String> {
     let repo = MemoryRepository::new(db);
     let query_embedding = if let Some(embedder) = embedder {
-        embedder
-            .embed(&[query])
-            .await
-            .ok()
-            .and_then(|v| v.into_iter().next())
+        match embedder.embed(&[query]).await {
+            Ok(v) => v.into_iter().next(),
+            Err(e) => {
+                tracing::warn!("Memory embedding failed, falling back to text-only search: {e}");
+                None
+            }
+        }
     } else {
         None
     };
     let memories = if let Some(ctx) = scope_ctx {
         let cascade_scopes = ctx.cascade_scopes();
-        repo.search_hybrid_cascade(
+        match repo.search_hybrid_cascade(
             owner_id,
             query,
             query_embedding.as_deref(),
             top_k,
             None,
             &cascade_scopes,
-        )
-        .unwrap_or_default()
+        ) {
+            Ok(results) => results,
+            Err(e) => {
+                tracing::warn!("Memory cascade search failed: {e}");
+                Vec::new()
+            }
+        }
     } else {
-        repo.search_hybrid(
+        match repo.search_hybrid(
             owner_id,
             query,
             query_embedding.as_deref(),
@@ -71,8 +78,13 @@ pub(super) async fn retrieve_memory_block(
             None,
             None,
             None,
-        )
-        .unwrap_or_default()
+        ) {
+            Ok(results) => results,
+            Err(e) => {
+                tracing::warn!("Memory search failed: {e}");
+                Vec::new()
+            }
+        }
     };
 
     if memories.is_empty() {

@@ -97,7 +97,8 @@ impl PreferenceStore {
             new_val.version = 1;
         }
 
-        // TODO: Audit Log (History) before write
+        // Note: Change history is tracked at the extraction level via
+        // persist_memory_item() supersession, not here at the preference store.
 
         self.backend
             .set(user_id, new_val)

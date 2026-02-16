@@ -46,10 +46,13 @@ impl Orchestrator {
             .collect();
 
         // Dedup (D6) — if the last row matches current_query, drop it (Bug A fix).
-        if let Some((_, role, content)) = chat_rows.last() {
-            if role == "user" && content == current_query {
-                chat_rows.pop();
-            }
+        let should_dedup = chat_rows
+            .last()
+            .map(|(_, role, content)| role == "user" && content == current_query)
+            .unwrap_or(false);
+        if should_dedup {
+            tracing::debug!("Dedup: dropping duplicate user message from recent window");
+            chat_rows.pop();
         }
 
         // Step 4: Get first_recent_id for the ID-range query

@@ -99,7 +99,7 @@ impl TaskDispatcher {
                 let contextual_executor = Arc::new(ContextualToolExecutor::new(
                     tool_registry.clone(), ctx_exec,
                 ));
-                let per_request_sandbox = SandboxManager::new(contextual_executor, bus.clone());
+                let per_request_sandbox = SandboxManager::with_defaults(contextual_executor, bus.clone());
 
                 tracing::info!(
                     "Pipeline step {}/{}: agent '{}' starting on task '{}'",

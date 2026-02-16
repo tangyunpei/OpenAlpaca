@@ -92,26 +92,29 @@ impl TaskDispatcher {
                 state_json: None,
                 state_version: 0,
             };
-            if let Err(e) = repo.create(&task) {
-                tracing::warn!("Failed to persist task to DB: {e}");
-            }
 
-            for (i, skill_match) in matches.iter().enumerate() {
-                let assignment = openalpaca_storage::TaskAgentAssignment {
-                    id: Uuid::new_v4().to_string(),
-                    task_id: task_id.clone(),
-                    agent_id: skill_match.agent_id.clone(),
-                    role: skill_match.role_description.clone(),
-                    status: openalpaca_storage::AssignmentStatus::Pending,
-                    step_order: Some(i as i32),
-                    started_at: None,
-                    completed_at: None,
-                    result_output: None,
-                };
-                if let Err(e) = repo.create_assignment(&assignment) {
-                    tracing::warn!("Failed to persist assignment to DB: {e}");
-                }
-                assignment_ids.insert(skill_match.agent_id.clone(), assignment.id.clone());
+            let db_assignments: Vec<openalpaca_storage::TaskAgentAssignment> = matches
+                .iter()
+                .enumerate()
+                .map(|(i, skill_match)| {
+                    let id = Uuid::new_v4().to_string();
+                    assignment_ids.insert(skill_match.agent_id.clone(), id.clone());
+                    openalpaca_storage::TaskAgentAssignment {
+                        id,
+                        task_id: task_id.clone(),
+                        agent_id: skill_match.agent_id.clone(),
+                        role: skill_match.role_description.clone(),
+                        status: openalpaca_storage::AssignmentStatus::Pending,
+                        step_order: Some(i as i32),
+                        started_at: None,
+                        completed_at: None,
+                        result_output: None,
+                    }
+                })
+                .collect();
+
+            if let Err(e) = repo.create_task_with_assignments(&task, &db_assignments) {
+                tracing::warn!("Failed to persist task+assignments to DB: {e}");
             }
         }
 
@@ -159,6 +162,13 @@ impl TaskDispatcher {
             self.shared_context
                 .task_registry
                 .update_status(&task_id, TaskEntryStatus::Failed);
+            // Also update DB to keep it in sync with in-memory registry
+            if let Some(ref db) = self.db {
+                let repo = openalpaca_storage::repository::TaskRepository::new(db);
+                if let Err(e) = repo.update_status(&task_id, openalpaca_storage::TaskStatus::Failed) {
+                    tracing::warn!("Failed to update task status to Failed in DB: {e}");
+                }
+            }
             return Err(
                 "Pipeline assembly failed: some agents became unavailable".to_string(),
             );
