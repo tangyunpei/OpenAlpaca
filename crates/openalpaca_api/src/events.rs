@@ -114,6 +114,61 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// A security policy was violated by an agent
+    SecurityViolation {
+        agent_id: String,
+        tool_name: String,
+        reason: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// A tool's circuit breaker was tripped due to repeated failures
+    CircuitBreakerTripped {
+        agent_id: String,
+        tool_name: String,
+        consecutive_failures: usize,
+        reset_after_secs: u64,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// A tool was executed by an agent
+    ToolExecuted {
+        agent_id: String,
+        tool_name: String,
+        success: bool,
+        duration_ms: u64,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// An LLM call completed
+    LlmCallCompleted {
+        agent_id: String,
+        model: String,
+        input_tokens: u32,
+        output_tokens: u32,
+        cost_usd: f64,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// The skill catalog was updated (skill added, removed, or reloaded)
+    SkillCatalogUpdated {
+        skill_name: String,
+        /// "added" | "removed" | "reloaded"
+        action: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// A task DAG was replanned during execution
+    TaskReplanned {
+        task_id: String,
+        replan_number: usize,
+        /// "continue" | "modify" | "abort"
+        decision: String,
+        nodes_added: usize,
+        nodes_removed: usize,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
     /// Event triggered when SOUL.md personality is updated
     SoulUpdated {
         /// Who initiated: "agent" or "user"
