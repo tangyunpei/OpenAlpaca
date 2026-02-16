@@ -571,7 +571,7 @@ mod tests {
             }
         }
 
-        let sandbox = SandboxManager::new(
+        let sandbox = SandboxManager::with_defaults(
             std::sync::Arc::new(TestExecutor),
             EventBus::default(),
         );
@@ -622,7 +622,7 @@ mod tests {
             }
         }
 
-        let sandbox = SandboxManager::new(
+        let sandbox = SandboxManager::with_defaults(
             std::sync::Arc::new(TestExecutor),
             EventBus::default(),
         );

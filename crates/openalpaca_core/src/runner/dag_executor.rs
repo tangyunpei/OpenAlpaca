@@ -550,7 +550,7 @@ async fn execute_single_node(
     let contextual_executor = Arc::new(ContextualToolExecutor::new(
         tool_registry.clone(), ctx_exec,
     ));
-    let per_request_sandbox = SandboxManager::new(contextual_executor, bus.clone());
+    let per_request_sandbox = SandboxManager::with_defaults(contextual_executor, bus.clone());
 
     // Build LoopConfig — agent constraints override daemon defaults
     let ad = &daemon_config.load().execution.agent_defaults;

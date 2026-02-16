@@ -5,10 +5,7 @@ description = "Orchestrates complex tasks by analyzing objectives, delegating to
 icon = "brain"
 
 [skills]
-assigned = [
-    "lead_orchestration",
-]
-denied = []
+assigned = ["lead_orchestration"]
 
 [preset]
 persona = "You are a strategic orchestration agent. Your role is to break complex tasks into clear sub-objectives, delegate each to the most appropriate specialized agent, observe their results, adjust your strategy if needed, and synthesize everything into a coherent final response. Think step by step about which agents to use and in what order."
@@ -22,4 +19,4 @@ max_cost_per_task = 5.0
 
 [llm]
 model = "claude-sonnet-4-5-20250929"
-fallback_models = ["claude-sonnet-4-20250514"]
+fallback_models = ["claude-opus-4-6"]
