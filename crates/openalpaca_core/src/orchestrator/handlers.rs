@@ -9,7 +9,7 @@ use openalpaca_storage::repository::TaskRepository;
 use uuid::Uuid;
 
 use super::intent::Intent;
-use super::task_planner::TaskPlanner;
+use super::task_planner::{PlannerLimits, TaskPlanner};
 
 impl Orchestrator {
     /// Handle a user message through the full pipeline:
@@ -103,6 +103,11 @@ impl Orchestrator {
         // 5. Compute result — planner path or heuristic fallback
         let result: Result<String, String> = if let Some(ref router) = self.llm_router {
             let idle_agents = self.shared_context.agent_registry.list_idle();
+            let planner_cfg = &self.daemon_config.load().execution.planner;
+            let limits = PlannerLimits {
+                timeout_secs: planner_cfg.planning_timeout_secs,
+                max_retries: planner_cfg.max_retries,
+            };
             match TaskPlanner::plan_hierarchical(
                 router,
                 &content,
@@ -110,6 +115,7 @@ impl Orchestrator {
                 &ctx.recent_messages,
                 ctx.summary.as_deref(),
                 active_tasks_block.as_deref(),
+                limits,
             )
             .await
             {

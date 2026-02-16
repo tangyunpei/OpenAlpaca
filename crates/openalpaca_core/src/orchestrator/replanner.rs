@@ -2,7 +2,7 @@
 //! and decides whether to continue, modify the remaining DAG, or abort.
 
 use crate::agent::subagent::SubAgent;
-use crate::orchestrator::task_planner::{DagNode, DagNodeStatus, TaskDag};
+use crate::orchestrator::task_planner::{extract_json_block, DagNode, DagNodeStatus, TaskDag};
 use crate::orchestrator::task_state::TaskWorkspace;
 use openalpaca_llm::{ChatMessage, LlmRouter, RequestContext, RouterRequest};
 use serde::{Deserialize, Serialize};
@@ -217,7 +217,7 @@ If the task should be abandoned:
         content: &str,
         available_agents: &[SubAgent],
     ) -> Result<ReplanDecision, String> {
-        let json_str = Self::extract_json(content);
+        let json_str = extract_json_block(content);
 
         // Try direct parse
         if let Ok(decision) = serde_json::from_str::<ReplanDecision>(json_str) {
@@ -264,26 +264,6 @@ If the task should be abandoned:
         Ok(ReplanDecision::Continue)
     }
 
-    /// Extract JSON from a response that may be wrapped in markdown code fences.
-    fn extract_json(content: &str) -> &str {
-        let trimmed = content.trim();
-
-        if let Some(start) = trimmed.find("```json") {
-            let after_fence = &trimmed[start + 7..];
-            if let Some(end) = after_fence.find("```") {
-                return after_fence[..end].trim();
-            }
-        }
-
-        if let Some(start) = trimmed.find("```") {
-            let after_fence = &trimmed[start + 3..];
-            if let Some(end) = after_fence.find("```") {
-                return after_fence[..end].trim();
-            }
-        }
-
-        trimmed
-    }
 }
 
 // ── Merge logic ──────────────────────────────────────────────────────

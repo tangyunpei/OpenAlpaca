@@ -182,6 +182,7 @@ pub struct ExecutionConfig {
     pub agent_defaults: AgentDefaults,
     pub lead_agent_defaults: LeadAgentDefaults,
     pub skill_defaults: SkillDefaults,
+    pub planner: PlannerConfig,
     pub dag: DagConfig,
 }
 
@@ -191,6 +192,7 @@ impl Default for ExecutionConfig {
             agent_defaults: AgentDefaults::default(),
             lead_agent_defaults: LeadAgentDefaults::default(),
             skill_defaults: SkillDefaults::default(),
+            planner: PlannerConfig::default(),
             dag: DagConfig::default(),
         }
     }
@@ -251,6 +253,25 @@ impl Default for SkillDefaults {
         Self {
             max_rounds: 6,
             max_tools_per_round: 3,
+        }
+    }
+}
+
+/// LLM planner configuration (classification + hierarchical planning).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlannerConfig {
+    /// Timeout in seconds for a single LLM planning call.
+    pub planning_timeout_secs: u64,
+    /// Maximum retry attempts on malformed LLM responses before giving up.
+    pub max_retries: usize,
+}
+
+impl Default for PlannerConfig {
+    fn default() -> Self {
+        Self {
+            planning_timeout_secs: 30,
+            max_retries: 2,
         }
     }
 }
@@ -477,6 +498,9 @@ impl DaemonConfig {
         // ── Execution > Skill Defaults ──
         clamp_usize(&mut self.execution.skill_defaults.max_rounds, 1, 100, "skill_defaults.max_rounds");
         clamp_usize(&mut self.execution.skill_defaults.max_tools_per_round, 1, 50, "skill_defaults.max_tools_per_round");
+        // ── Execution > Planner ──
+        clamp_u64(&mut self.execution.planner.planning_timeout_secs, 5, 120, "planner.planning_timeout_secs");
+        clamp_usize(&mut self.execution.planner.max_retries, 0, 5, "planner.max_retries");
         // ── Execution > DAG ──
         clamp_usize(&mut self.execution.dag.max_concurrent_agents, 1, 32, "dag.max_concurrent_agents");
         clamp_u64(&mut self.execution.dag.node_timeout_secs, 10, 3600, "dag.node_timeout_secs");
@@ -540,6 +564,8 @@ mod tests {
         assert_eq!(config.orchestrator.costs.summary_max_daily_cost_usd, 0.50);
         assert_eq!(config.execution.agent_defaults.max_rounds, 15);
         assert_eq!(config.execution.lead_agent_defaults.max_rounds, 30);
+        assert_eq!(config.execution.planner.planning_timeout_secs, 30);
+        assert_eq!(config.execution.planner.max_retries, 2);
         assert_eq!(config.execution.dag.max_concurrent_agents, 3);
         assert_eq!(config.security.max_input_length, 32768);
         assert_eq!(config.server.heartbeat_interval_secs, 5);

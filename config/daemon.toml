@@ -4,6 +4,10 @@ max_rounds = 15
 max_tool_runtime_secs = 60
 max_tools_per_round = 5
 
+# [execution.planner]
+# planning_timeout_secs = 30
+# max_retries = 2
+
 [execution.dag]
 max_concurrent_agents = 3
 max_replans = 3
