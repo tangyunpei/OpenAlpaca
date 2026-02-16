@@ -992,6 +992,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                 } => {
                     eb_bridge.agent_status(&agent_id, "", &status, current_task_id);
                 }
+                // ── Forwarded to clients: security & observability ─────────
                 openalpaca_core::events::SystemEvent::SecurityViolation {
                     agent_id,
                     tool_name,
@@ -999,11 +1000,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     ..
                 } => {
                     tracing::warn!(
-                        "Security violation: agent={}, tool={}, reason={}",
-                        agent_id,
-                        tool_name,
-                        reason
+                        "Security violation: agent={agent_id}, tool={tool_name}, reason={reason}"
                     );
+                    eb_bridge.security_violation(&agent_id, &tool_name, &reason);
                 }
                 openalpaca_core::events::SystemEvent::ToolExecuted {
                     agent_id,
@@ -1013,12 +1012,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     ..
                 } => {
                     tracing::debug!(
-                        "Tool executed: agent={}, tool={}, success={}, duration={}ms",
-                        agent_id,
-                        tool_name,
-                        success,
-                        duration_ms
+                        "Tool executed: agent={agent_id}, tool={tool_name}, success={success}, duration={duration_ms}ms"
                     );
+                    eb_bridge.tool_executed(&agent_id, &tool_name, success, duration_ms);
                 }
                 openalpaca_core::events::SystemEvent::LlmCallCompleted {
                     agent_id,
@@ -1029,27 +1025,80 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     ..
                 } => {
                     tracing::info!(
-                        "LLM call: agent={}, model={}, tokens={}/{}, cost=${:.6}",
-                        agent_id,
-                        model,
-                        input_tokens,
-                        output_tokens,
-                        cost_usd
+                        "LLM call: agent={agent_id}, model={model}, tokens={input_tokens}/{output_tokens}, cost=${cost_usd:.6}"
                     );
+                    eb_bridge.llm_call_completed(&agent_id, &model, input_tokens, output_tokens, cost_usd);
                 }
-                openalpaca_core::events::SystemEvent::ModelAccessDenied {
+                openalpaca_core::events::SystemEvent::CircuitBreakerTripped {
                     agent_id,
-                    model_id,
-                    reason,
+                    tool_name,
+                    consecutive_failures,
+                    reset_after_secs,
                     ..
                 } => {
                     tracing::warn!(
-                        "Model access denied: agent={}, model={}, reason={}",
-                        agent_id,
-                        model_id,
-                        reason
+                        "Circuit breaker tripped: agent={agent_id}, tool={tool_name}, failures={consecutive_failures}"
                     );
+                    eb_bridge.circuit_breaker_tripped(&agent_id, &tool_name, consecutive_failures, reset_after_secs);
                 }
+                openalpaca_core::events::SystemEvent::SkillCatalogUpdated {
+                    skill_name,
+                    action,
+                    ..
+                } => {
+                    eb_bridge.skill_catalog_updated(&skill_name, &action);
+                }
+                openalpaca_core::events::SystemEvent::TaskReplanned {
+                    task_id,
+                    replan_number,
+                    decision,
+                    nodes_added,
+                    nodes_removed,
+                    ..
+                } => {
+                    eb_bridge.task_replanned(&task_id, replan_number, &decision, nodes_added, nodes_removed);
+                }
+
+                // ── Forwarded to clients: config changes ──────────────────
+                openalpaca_core::events::SystemEvent::AgentConfigChanged {
+                    agent_id,
+                    action,
+                    config_version,
+                    ..
+                } => {
+                    eb_bridge.agent_config_changed(&agent_id, &action, config_version);
+                }
+                openalpaca_core::events::SystemEvent::OrchestratorConfigChanged {
+                    model,
+                    ..
+                } => {
+                    eb_bridge.orchestrator_config_changed(&model);
+                }
+                openalpaca_core::events::SystemEvent::KeyStatusChanged {
+                    provider,
+                    key_id,
+                    status,
+                    ..
+                } => {
+                    eb_bridge.key_status_changed(&provider, &key_id, &status);
+                }
+                openalpaca_core::events::SystemEvent::ChatStreamStarted {
+                    stream_id,
+                    lane_key,
+                    ..
+                } => {
+                    eb_bridge.chat_stream_started(&stream_id, &lane_key);
+                }
+                openalpaca_core::events::SystemEvent::ChatStreamEnded {
+                    stream_id,
+                    lane_key,
+                    status,
+                    ..
+                } => {
+                    eb_bridge.chat_stream_ended(&stream_id, &lane_key, &status);
+                }
+
+                // ── Forwarded to clients: existing mappings ───────────────
                 openalpaca_core::events::SystemEvent::SoulUpdated {
                     actor,
                     mode,
@@ -1057,7 +1106,6 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     backup_path,
                     ..
                 } => {
-                    // Structured audit log with actor attribution
                     tracing::info!(
                         target: "soul_audit",
                         actor = %actor,
@@ -1066,8 +1114,46 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                         backup_path = ?backup_path,
                         "SOUL.md updated"
                     );
-                    // Forward to EventBroadcaster for WebSocket clients + DB persistence
                     eb_bridge.soul_updated(&actor, &mode, &content_sha256, backup_path);
+                }
+                openalpaca_core::events::SystemEvent::DagNodeStarted {
+                    task_id, node_id, node_title, agent_id, ..
+                } => {
+                    eb_bridge.dag_node_status(
+                        &task_id, &node_id, &node_title, &agent_id,
+                        "started", None, None,
+                    );
+                }
+                openalpaca_core::events::SystemEvent::DagNodeCompleted {
+                    task_id, node_id, node_title, agent_id,
+                    success, duration_ms, output_preview, ..
+                } => {
+                    let status = if success { "completed" } else { "failed" };
+                    eb_bridge.dag_node_status(
+                        &task_id, &node_id, &node_title, &agent_id,
+                        status, Some(duration_ms), output_preview,
+                    );
+                }
+
+                // ── Log-only (NOT forwarded to clients) ───────────────────
+                openalpaca_core::events::SystemEvent::ModelAccessDenied {
+                    agent_id,
+                    model_id,
+                    reason,
+                    ..
+                } => {
+                    tracing::warn!(
+                        "Model access denied: agent={agent_id}, model={model_id}, reason={reason}"
+                    );
+                }
+                openalpaca_core::events::SystemEvent::IntentClassified {
+                    request_id,
+                    intent_type,
+                    ..
+                } => {
+                    tracing::debug!(
+                        "Intent classified: request={request_id}, type={intent_type}"
+                    );
                 }
                 openalpaca_core::events::SystemEvent::UserProfileUpdated {
                     actor,
@@ -1111,29 +1197,27 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                         "Bootstrap onboarding completed"
                     );
                 }
-                openalpaca_core::events::SystemEvent::DagNodeStarted {
-                    task_id, node_id, node_title, agent_id, ..
-                } => {
-                    eb_bridge.dag_node_status(
-                        &task_id, &node_id, &node_title, &agent_id,
-                        "started", None, None,
-                    );
+
+                // ── Infrastructure events (handled via separate channels) ─
+                openalpaca_core::events::SystemEvent::Heartbeat { .. } => {
+                    // Heartbeat managed by dedicated timer, not the bridge
                 }
-                openalpaca_core::events::SystemEvent::DagNodeCompleted {
-                    task_id, node_id, node_title, agent_id,
-                    success, duration_ms, output_preview, ..
-                } => {
-                    let status = if success { "completed" } else { "failed" };
-                    eb_bridge.dag_node_status(
-                        &task_id, &node_id, &node_title, &agent_id,
-                        status, Some(duration_ms), output_preview,
-                    );
+                openalpaca_core::events::SystemEvent::Wake(_) => {
+                    // Wake events forwarded via dedicated wake_rx channel
                 }
-                // Wake events are forwarded via the dedicated wake_rx channel (lines 130-135),
-                // not through the Core EventBus. If a future Core component publishes
-                // SystemEvent::Wake to the bus, add an explicit arm here — but remove
-                // the wake_rx pipeline first to avoid double-broadcast.
-                _ => {}
+                openalpaca_core::events::SystemEvent::Log { .. } => {
+                    // Log events generated by EventBroadcaster directly
+                }
+                openalpaca_core::events::SystemEvent::UserRequest { .. } => {
+                    // User requests flow through chat SSE, not event bus bridge
+                }
+                openalpaca_core::events::SystemEvent::AgentResponse { .. } => {
+                    // Agent responses flow through chat SSE
+                }
+                openalpaca_core::events::SystemEvent::Error { code, message, .. } => {
+                    tracing::error!("System error: code={code}, message={message}");
+                }
+                // NO catch-all: compiler will flag any missing SystemEvent variant
             }
         }
     });

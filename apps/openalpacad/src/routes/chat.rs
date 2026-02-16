@@ -14,7 +14,9 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
     },
 };
+use chrono::Utc;
 use futures_util::stream::Stream;
+use openalpaca_core::events::SystemEvent;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, convert::Infallible, sync::Arc};
 use tokio_stream::wrappers::BroadcastStream;
@@ -122,10 +124,12 @@ pub async fn send_chat_handler(
 
     match chat_service.send_message(body.content, principal) {
         Ok(resp) => {
-            // Broadcast WS events
-            state
-                .event_broadcaster
-                .chat_stream_started(&resp.stream_id, &resp.lane_key);
+            // Publish to EventBus; bridge forwards to WebSocket clients
+            let _ = state.gateway.bus.publish(SystemEvent::ChatStreamStarted {
+                stream_id: resp.stream_id.clone(),
+                lane_key: resp.lane_key.clone(),
+                timestamp: Utc::now(),
+            });
 
             Json(ChatSendResponseBody {
                 stream_id: resp.stream_id,

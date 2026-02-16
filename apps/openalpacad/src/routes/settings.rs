@@ -5,7 +5,9 @@ use axum::{
     extract::{Path, Query, State},
     response::IntoResponse,
 };
+use chrono::Utc;
 use serde::Deserialize;
+use openalpaca_core::events::SystemEvent;
 use openalpaca_llm::settings_service::{
     AddKeyRequest, OrchestratorConfigResponse, ReorderKeysRequest, SetKeyPriorityRequest,
     UpdateOrchestratorRequest, ValidateKeyRequest,
@@ -69,10 +71,13 @@ pub async fn upsert_key(
     let event_key_id = body.key.id.clone().unwrap_or_default();
     match service.upsert_key(body).await {
         Ok(()) => {
-            // Emit key status changed event
-            state.event_broadcaster.key_status_changed(
-                &event_provider, &event_key_id, "added",
-            );
+            // Emit key status changed event via EventBus
+            let _ = state.gateway.bus.publish(SystemEvent::KeyStatusChanged {
+                provider: event_provider,
+                key_id: event_key_id,
+                status: "added".to_string(),
+                timestamp: Utc::now(),
+            });
             (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
         }
         Err(e) if e.contains("Encryption") => {
@@ -100,9 +105,12 @@ pub async fn delete_key(
 
     match service.remove_key(&provider, &key_id).await {
         Ok(()) => {
-            state.event_broadcaster.key_status_changed(
-                &provider, &key_id, "removed",
-            );
+            let _ = state.gateway.bus.publish(SystemEvent::KeyStatusChanged {
+                provider: provider.clone(),
+                key_id: key_id.clone(),
+                status: "removed".to_string(),
+                timestamp: Utc::now(),
+            });
             (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
         }
         Err(e) if e.contains("not found") => {
@@ -131,9 +139,12 @@ pub async fn reorder_keys(
     let event_provider = body.provider.clone();
     match service.reorder_keys(body).await {
         Ok(()) => {
-            state.event_broadcaster.key_status_changed(
-                &event_provider, "*", "reordered",
-            );
+            let _ = state.gateway.bus.publish(SystemEvent::KeyStatusChanged {
+                provider: event_provider,
+                key_id: "*".to_string(),
+                status: "reordered".to_string(),
+                timestamp: Utc::now(),
+            });
             (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
         }
         Err(e) => {
@@ -169,9 +180,12 @@ pub async fn set_key_priority(
 
     match service.set_key_priority(body).await {
         Ok(()) => {
-            state.event_broadcaster.key_status_changed(
-                &provider, &key_id, "priority_changed",
-            );
+            let _ = state.gateway.bus.publish(SystemEvent::KeyStatusChanged {
+                provider: provider.clone(),
+                key_id: key_id.clone(),
+                status: "priority_changed".to_string(),
+                timestamp: Utc::now(),
+            });
             (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
         }
         Err(e) if e.contains("not found") => {
@@ -313,9 +327,10 @@ pub async fn update_orchestrator_config(
     let model_name = body.model.clone();
     match service.update_orchestrator_config(body) {
         Ok(()) => {
-            state
-                .event_broadcaster
-                .orchestrator_config_changed(&model_name);
+            let _ = state.gateway.bus.publish(SystemEvent::OrchestratorConfigChanged {
+                model: model_name,
+                timestamp: Utc::now(),
+            });
             (
                 StatusCode::OK,
                 Json(serde_json::json!({ "status": "ok" })),

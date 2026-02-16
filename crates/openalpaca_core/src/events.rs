@@ -198,6 +198,40 @@ pub enum SystemEvent {
         output_preview: Option<String>,
         timestamp: DateTime<Utc>,
     },
+    /// An agent configuration was created, updated, or deleted
+    AgentConfigChanged {
+        agent_id: String,
+        /// "created" | "updated" | "deleted"
+        action: String,
+        config_version: u64,
+        timestamp: DateTime<Utc>,
+    },
+    /// The orchestrator configuration was changed (e.g. default model)
+    OrchestratorConfigChanged {
+        model: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// An LLM API key status changed (add/remove/reorder/priority)
+    KeyStatusChanged {
+        provider: String,
+        key_id: String,
+        /// "added" | "removed" | "reordered" | "priority_changed"
+        status: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// A chat stream started
+    ChatStreamStarted {
+        stream_id: String,
+        lane_key: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// A chat stream ended
+    ChatStreamEnded {
+        stream_id: String,
+        lane_key: String,
+        status: String,
+        timestamp: DateTime<Utc>,
+    },
     /// A tool's circuit breaker was tripped due to repeated transient failures.
     /// The tool will be blocked for `reset_after_secs` before a probe call is allowed.
     CircuitBreakerTripped {

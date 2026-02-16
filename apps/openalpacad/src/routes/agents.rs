@@ -309,9 +309,12 @@ pub async fn update_agent_config_handler(
 
     match service.update_agent_config(&id, body.config, body.config_version) {
         Ok(new_version) => {
-            state
-                .event_broadcaster
-                .agent_config_changed(&id, "updated", new_version);
+            let _ = state.gateway.bus.publish(SystemEvent::AgentConfigChanged {
+                agent_id: id.clone(),
+                action: "updated".to_string(),
+                config_version: new_version,
+                timestamp: Utc::now(),
+            });
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -358,9 +361,12 @@ pub async fn create_agent_handler(
 
     match service.create_agent(body.config) {
         Ok(agent_id) => {
-            state
-                .event_broadcaster
-                .agent_config_changed(&agent_id, "created", 0);
+            let _ = state.gateway.bus.publish(SystemEvent::AgentConfigChanged {
+                agent_id: agent_id.clone(),
+                action: "created".to_string(),
+                config_version: 0,
+                timestamp: Utc::now(),
+            });
             (
                 StatusCode::CREATED,
                 Json(serde_json::json!({
@@ -396,9 +402,12 @@ pub async fn create_agent_from_toml_handler(
 
     match service.create_agent_from_toml(&body.toml_content) {
         Ok(agent_id) => {
-            state
-                .event_broadcaster
-                .agent_config_changed(&agent_id, "created", 0);
+            let _ = state.gateway.bus.publish(SystemEvent::AgentConfigChanged {
+                agent_id: agent_id.clone(),
+                action: "created".to_string(),
+                config_version: 0,
+                timestamp: Utc::now(),
+            });
             (
                 StatusCode::CREATED,
                 Json(serde_json::json!({
@@ -444,9 +453,12 @@ pub async fn delete_agent_handler(
 
     match service.delete_agent(&id) {
         Ok(()) => {
-            state
-                .event_broadcaster
-                .agent_config_changed(&id, "deleted", 0);
+            let _ = state.gateway.bus.publish(SystemEvent::AgentConfigChanged {
+                agent_id: id.clone(),
+                action: "deleted".to_string(),
+                config_version: 0,
+                timestamp: Utc::now(),
+            });
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
