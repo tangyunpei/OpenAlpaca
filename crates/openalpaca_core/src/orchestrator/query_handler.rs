@@ -280,8 +280,8 @@ impl Orchestrator {
                 timestamp: Utc::now(),
             });
 
-            // Store LLM metadata for bridge to read
-            *self.last_llm_metadata.lock().unwrap() = Some(super::LlmMetadata {
+            // Store LLM metadata for bridge to read (keyed by request_id for concurrency safety)
+            self.llm_metadata_map.insert(request_id, super::LlmMetadata {
                 model: actual_model.to_string(),
                 tokens_in: result.total_input_tokens,
                 tokens_out: result.total_output_tokens,

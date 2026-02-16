@@ -113,9 +113,9 @@ impl ChatService {
                 let chunk_words = cfg.server.chat_streams.stream_chunk_words;
 
                 let chunks = chunk_by_words(&response.content, chunk_words);
-                if !chunks.is_empty() && delay_ms > 0 {
-                    for chunk in &chunks {
-                        sink.send_delta(chunk);
+                for chunk in &chunks {
+                    sink.send_delta(chunk);
+                    if delay_ms > 0 {
                         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     }
                 }

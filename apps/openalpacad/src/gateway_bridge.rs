@@ -29,16 +29,16 @@ impl MessageHandler for OrchestratorHandler {
         scope: Scope,
         lane_key: String,
     ) -> Result<HandleResult, String> {
-        // Clear any stale metadata from a previous call
-        *self.orchestrator.last_llm_metadata.lock().unwrap() = None;
-
-        let content = self
+        let result = self
             .orchestrator
             .handle_message(request_id, source, content, principal, scope, lane_key)
-            .await?;
+            .await;
 
-        // Read metadata stored by query_handler / skill_handler
-        let meta = self.orchestrator.last_llm_metadata.lock().unwrap().take();
+        // Always drain metadata (even on error) to prevent unbounded map growth.
+        // Handlers may insert metadata before returning Err (e.g. LLM error with empty content).
+        let meta = self.orchestrator.llm_metadata_map.remove(&request_id).map(|(_, v)| v);
+
+        let content = result?;
 
         Ok(HandleResult {
             content,
