@@ -3,6 +3,7 @@ use crate::events::SystemEvent;
 use crate::middleware::identity::identity_document_has_content;
 use crate::middleware::user::user_document_has_content;
 use chrono::Utc;
+use std::sync::atomic::Ordering;
 
 impl Orchestrator {
     /// Check if IDENTITY.md and USER.md have been populated; if so, finalize bootstrap.
@@ -11,9 +12,19 @@ impl Orchestrator {
     /// 1. Checks if `bootstrap_document` is Some (bootstrap mode active)
     /// 2. Checks if `identity_document` has content AND `user_document` has content
     /// 3. If both populated: delete BOOTSTRAP.md, clear state, publish event
+    ///
+    /// An `AtomicBool` guard ensures only one concurrent caller can proceed
+    /// past the check-then-act boundary, preventing duplicate completion events.
     pub(super) async fn maybe_complete_bootstrap(&self) {
         // Quick check: are we even in bootstrap mode?
         if !self.is_bootstrapping() {
+            return;
+        }
+
+        // Atomic guard: only one task proceeds past this point.
+        // swap(true) returns the *previous* value — if it was already true,
+        // another task is completing bootstrap, so bail out.
+        if self.bootstrap_completing.swap(true, Ordering::AcqRel) {
             return;
         }
 
@@ -43,6 +54,8 @@ impl Orchestrator {
                 identity_populated,
                 user_populated
             );
+            // Reset flag so future calls can retry once docs are populated.
+            self.bootstrap_completing.store(false, Ordering::Release);
             return;
         }
 
@@ -68,5 +81,8 @@ impl Orchestrator {
             user_populated,
             timestamp: Utc::now(),
         });
+
+        // Note: bootstrap_completing stays true — bootstrap is done, no further
+        // attempts should proceed even if is_bootstrapping() check were racy.
     }
 }
