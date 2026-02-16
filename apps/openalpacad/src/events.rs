@@ -209,6 +209,94 @@ impl EventBroadcaster {
                     });
                     repo.log("orchestrator_config_changed", None, Some(&detail), None)
                 }
+                ServerEvent::SecurityViolation {
+                    agent_id,
+                    tool_name,
+                    reason,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "agent_id": agent_id,
+                        "tool_name": tool_name,
+                        "reason": reason
+                    });
+                    repo.log("security_violation", Some(agent_id), Some(&detail), None)
+                }
+                ServerEvent::CircuitBreakerTripped {
+                    agent_id,
+                    tool_name,
+                    consecutive_failures,
+                    reset_after_secs,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "agent_id": agent_id,
+                        "tool_name": tool_name,
+                        "consecutive_failures": consecutive_failures,
+                        "reset_after_secs": reset_after_secs
+                    });
+                    repo.log("circuit_breaker_tripped", Some(agent_id), Some(&detail), None)
+                }
+                ServerEvent::ToolExecuted {
+                    agent_id,
+                    tool_name,
+                    success,
+                    duration_ms,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "agent_id": agent_id,
+                        "tool_name": tool_name,
+                        "success": success,
+                        "duration_ms": duration_ms
+                    });
+                    repo.log("tool_executed", Some(agent_id), Some(&detail), None)
+                }
+                ServerEvent::LlmCallCompleted {
+                    agent_id,
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    cost_usd,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "agent_id": agent_id,
+                        "model": model,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "cost_usd": cost_usd
+                    });
+                    repo.log("llm_call_completed", Some(agent_id), Some(&detail), None)
+                }
+                ServerEvent::SkillCatalogUpdated {
+                    skill_name,
+                    action,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "skill_name": skill_name,
+                        "action": action
+                    });
+                    repo.log("skill_catalog_updated", None, Some(&detail), None)
+                }
+                ServerEvent::TaskReplanned {
+                    task_id,
+                    replan_number,
+                    decision,
+                    nodes_added,
+                    nodes_removed,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "task_id": task_id,
+                        "replan_number": replan_number,
+                        "decision": decision,
+                        "nodes_added": nodes_added,
+                        "nodes_removed": nodes_removed
+                    });
+                    repo.log("task_replanned", None, Some(&detail), None)
+                }
                 // Log DAG node status changes
                 ServerEvent::DagNodeStatus {
                     task_id,
@@ -395,6 +483,121 @@ impl EventBroadcaster {
             status: status.to_string(),
             duration_ms,
             output_preview,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a security violation event and persist it
+    pub fn security_violation(&self, agent_id: &str, tool_name: &str, reason: &str) {
+        let event = ServerEvent::SecurityViolation {
+            agent_id: agent_id.to_string(),
+            tool_name: tool_name.to_string(),
+            reason: reason.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a circuit breaker tripped event and persist it
+    pub fn circuit_breaker_tripped(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        consecutive_failures: usize,
+        reset_after_secs: u64,
+    ) {
+        let event = ServerEvent::CircuitBreakerTripped {
+            agent_id: agent_id.to_string(),
+            tool_name: tool_name.to_string(),
+            consecutive_failures,
+            reset_after_secs,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a tool executed event and persist it
+    pub fn tool_executed(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        success: bool,
+        duration_ms: u64,
+    ) {
+        let event = ServerEvent::ToolExecuted {
+            agent_id: agent_id.to_string(),
+            tool_name: tool_name.to_string(),
+            success,
+            duration_ms,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast an LLM call completed event and persist it
+    pub fn llm_call_completed(
+        &self,
+        agent_id: &str,
+        model: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+        cost_usd: f64,
+    ) {
+        let event = ServerEvent::LlmCallCompleted {
+            agent_id: agent_id.to_string(),
+            model: model.to_string(),
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a skill catalog updated event and persist it
+    pub fn skill_catalog_updated(&self, skill_name: &str, action: &str) {
+        let event = ServerEvent::SkillCatalogUpdated {
+            skill_name: skill_name.to_string(),
+            action: action.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a task replanned event and persist it
+    pub fn task_replanned(
+        &self,
+        task_id: &str,
+        replan_number: usize,
+        decision: &str,
+        nodes_added: usize,
+        nodes_removed: usize,
+    ) {
+        let event = ServerEvent::TaskReplanned {
+            task_id: task_id.to_string(),
+            replan_number,
+            decision: decision.to_string(),
+            nodes_added,
+            nodes_removed,
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };
