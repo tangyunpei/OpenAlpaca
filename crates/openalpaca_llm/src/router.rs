@@ -438,6 +438,15 @@ impl LlmRouter {
                     // Try next key
                     continue;
                 }
+                Err(e) if e.is_auth_error() => {
+                    tracing::warn!(
+                        "Authentication error for key '{}', trying next key",
+                        key_guard.id
+                    );
+                    pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
+                        .await;
+                    continue;
+                }
                 Err(e) => {
                     pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
                         .await;

@@ -130,17 +130,23 @@ pub async fn run_agentic_loop(
                     for tc in response.tool_calls.iter().take(calls_this_round) {
                         tool_calls_made += 1;
 
+                        // Tool error convention: errors are prefixed with [tool_error]
+                        // so the LLM sees a consistent format regardless of the tool.
                         let result_text = if let (Some(sbx), Some(policy)) =
                             (sandbox, sandbox_policy)
                         {
                             // Route through sandbox
                             match sbx.execute_tool(agent_id, tc, policy).await {
                                 Ok(output) => output,
-                                Err(err) => format!("Error: {}", err),
+                                Err(err) => format!("[tool_error] {}", err),
                             }
                         } else {
-                            // Fallback: stub
-                            format!("Error: tool '{}' not yet implemented", tc.name)
+                            tracing::warn!(
+                                agent_id = agent_id,
+                                tool = tc.name,
+                                "Sandbox not configured — returning stub for tool call (misconfiguration?)"
+                            );
+                            format!("[tool_error] tool '{}' not available — sandbox not configured", tc.name)
                         };
 
                         messages.push(ChatMessage::tool_result(&tc.id, &result_text));
@@ -150,7 +156,7 @@ pub async fn run_agentic_loop(
                     for tc in response.tool_calls.iter().skip(calls_this_round) {
                         messages.push(ChatMessage::tool_result(
                             &tc.id,
-                            "Error: max tools per round exceeded",
+                            "[tool_error] max tools per round exceeded",
                         ));
                     }
 
@@ -290,10 +296,15 @@ pub async fn run_agentic_loop_routed(
                         {
                             match sbx.execute_tool(agent_id, tc, policy).await {
                                 Ok(output) => output,
-                                Err(err) => format!("Error: {}", err),
+                                Err(err) => format!("[tool_error] {}", err),
                             }
                         } else {
-                            format!("Error: tool '{}' not yet implemented", tc.name)
+                            tracing::warn!(
+                                agent_id = agent_id,
+                                tool = tc.name,
+                                "Sandbox not configured — returning stub for tool call (misconfiguration?)"
+                            );
+                            format!("[tool_error] tool '{}' not available — sandbox not configured", tc.name)
                         };
 
                         messages.push(ChatMessage::tool_result(&tc.id, &result_text));
@@ -302,7 +313,7 @@ pub async fn run_agentic_loop_routed(
                     for tc in response.tool_calls.iter().skip(calls_this_round) {
                         messages.push(ChatMessage::tool_result(
                             &tc.id,
-                            "Error: max tools per round exceeded",
+                            "[tool_error] max tools per round exceeded",
                         ));
                     }
 
@@ -334,9 +345,14 @@ pub async fn run_agentic_loop_routed(
     }
 }
 
+/// Fallback cost rates for the non-routed (test) path.
+/// Claude Sonnet pricing as conservative upper bound.
+const FALLBACK_INPUT_RATE: f64 = 3.0; // $ per 1M tokens
+const FALLBACK_OUTPUT_RATE: f64 = 15.0; // $ per 1M tokens
+
 fn estimate_cost(input_tokens: u32, output_tokens: u32) -> f64 {
-    // Simplified pricing: $3/1M input, $15/1M output (Claude Sonnet range)
-    (input_tokens as f64 * 3.0 / 1_000_000.0) + (output_tokens as f64 * 15.0 / 1_000_000.0)
+    (input_tokens as f64 * FALLBACK_INPUT_RATE / 1_000_000.0)
+        + (output_tokens as f64 * FALLBACK_OUTPUT_RATE / 1_000_000.0)
 }
 
 #[cfg(test)]
@@ -555,7 +571,7 @@ mod tests {
             }
         }
 
-        let sandbox = SandboxManager::new(
+        let sandbox = SandboxManager::with_defaults(
             std::sync::Arc::new(TestExecutor),
             EventBus::default(),
         );
@@ -606,7 +622,7 @@ mod tests {
             }
         }
 
-        let sandbox = SandboxManager::new(
+        let sandbox = SandboxManager::with_defaults(
             std::sync::Arc::new(TestExecutor),
             EventBus::default(),
         );

@@ -82,7 +82,7 @@ impl EventBroadcaster {
     fn persist(&self, event: &ServerEvent) {
         if let Some(db) = &self.db {
             let repo = EventLogRepository::new(db);
-            let _ = match event {
+            let persist_result: Result<i64, _> = match event {
                 ServerEvent::Heartbeat { .. } => Ok(0), // Skip heartbeats
                 ServerEvent::Log { level, message, .. } => {
                     let detail = serde_json::json!({
@@ -244,8 +244,9 @@ impl EventBroadcaster {
                     repo.log("soul_updated", None, Some(&detail), None)
                 }
             };
-            // Error handling strategy: log errors but don't crash or block broadcast
-            // For now we just ignore errors as per architecture plan
+            if let Err(e) = persist_result {
+                tracing::warn!("Failed to persist event to DB: {e}");
+            }
         }
     }
 

@@ -4,7 +4,8 @@ use std::panic::AssertUnwindSafe;
 /// It catches panics and ensures the daemon doesn't crash.
 #[derive(Default)]
 pub struct AgentRuntime {
-    // TODO: Add metrics, limits, etc.
+    // Intentionally empty — runtime metrics and resource limits
+    // are tracked at the orchestrator/router level.
 }
 
 impl AgentRuntime {

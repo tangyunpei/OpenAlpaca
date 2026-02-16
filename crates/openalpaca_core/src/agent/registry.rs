@@ -23,9 +23,20 @@ impl AgentRegistry {
         }
     }
 
+    /// Acquire the agents lock, recovering from poisoning if necessary.
+    fn lock_agents(&self) -> std::sync::MutexGuard<'_, HashMap<String, RegisteredAgent>> {
+        match self.agents.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::error!("AgentRegistry mutex poisoned — recovering");
+                poisoned.into_inner()
+            }
+        }
+    }
+
     /// Register a SubAgent. Returns false if the id already exists.
     pub fn register(&self, agent: SubAgent) -> bool {
-        let mut agents = self.agents.lock().unwrap();
+        let mut agents = self.lock_agents();
         if agents.contains_key(&agent.id) {
             return false;
         }
@@ -41,18 +52,14 @@ impl AgentRegistry {
 
     /// Get a SubAgent by id.
     pub fn get(&self, agent_id: &str) -> Option<SubAgent> {
-        self.agents
-            .lock()
-            .unwrap()
+        self.lock_agents()
             .get(agent_id)
             .map(|r| r.agent.clone())
     }
 
     /// Get a SubAgent and its config_version by id.
     pub fn get_with_version(&self, agent_id: &str) -> Option<(SubAgent, u64)> {
-        self.agents
-            .lock()
-            .unwrap()
+        self.lock_agents()
             .get(agent_id)
             .map(|r| (r.agent.clone(), r.config_version))
     }
@@ -65,7 +72,7 @@ impl AgentRegistry {
         new_agent: SubAgent,
         expected_version: u64,
     ) -> Result<u64, String> {
-        let mut agents = self.agents.lock().unwrap();
+        let mut agents = self.lock_agents();
         let entry = agents
             .get_mut(agent_id)
             .ok_or_else(|| "AGENT_NOT_FOUND".to_string())?;
@@ -81,7 +88,7 @@ impl AgentRegistry {
 
     /// Update the status of a SubAgent. Returns false if not found.
     pub fn update_status(&self, agent_id: &str, status: AgentStatus) -> bool {
-        let mut agents = self.agents.lock().unwrap();
+        let mut agents = self.lock_agents();
         if let Some(entry) = agents.get_mut(agent_id) {
             entry.agent.current_task = match &status {
                 AgentStatus::Busy { task_id } => Some(task_id.clone()),
@@ -96,19 +103,17 @@ impl AgentRegistry {
 
     /// Remove a SubAgent by id. Returns true if it existed.
     pub fn remove(&self, agent_id: &str) -> bool {
-        self.agents.lock().unwrap().remove(agent_id).is_some()
+        self.lock_agents().remove(agent_id).is_some()
     }
 
     /// Number of registered agents.
     pub fn count(&self) -> usize {
-        self.agents.lock().unwrap().len()
+        self.lock_agents().len()
     }
 
     /// List all registered agents.
     pub fn list_all(&self) -> Vec<SubAgent> {
-        self.agents
-            .lock()
-            .unwrap()
+        self.lock_agents()
             .values()
             .map(|r| r.agent.clone())
             .collect()
@@ -116,9 +121,7 @@ impl AgentRegistry {
 
     /// List agents that are idle (available).
     pub fn list_idle(&self) -> Vec<SubAgent> {
-        self.agents
-            .lock()
-            .unwrap()
+        self.lock_agents()
             .values()
             .filter(|r| r.agent.status.is_available())
             .map(|r| r.agent.clone())
@@ -127,9 +130,7 @@ impl AgentRegistry {
 
     /// Find agents that have a given skill.
     pub fn find_by_skill(&self, skill_name: &str) -> Vec<SubAgent> {
-        self.agents
-            .lock()
-            .unwrap()
+        self.lock_agents()
             .values()
             .filter(|r| r.agent.skills.iter().any(|s| s.name == skill_name))
             .map(|r| r.agent.clone())

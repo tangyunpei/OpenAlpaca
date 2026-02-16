@@ -47,6 +47,63 @@ impl<'a> TaskRepository<'a> {
         })
     }
 
+    /// Create a task and its assignments atomically in a single transaction.
+    /// If any insert fails, the entire operation is rolled back.
+    pub fn create_task_with_assignments(
+        &self,
+        task: &Task,
+        assignments: &[TaskAgentAssignment],
+    ) -> Result<()> {
+        self.db.with_connection_mut(|conn| {
+            let tx = conn.transaction()?;
+
+            tx.execute(
+                "INSERT INTO task (id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                rusqlite::params![
+                    task.id,
+                    task.title,
+                    task.description,
+                    task.status.as_str(),
+                    task.priority,
+                    task.progress_current,
+                    task.progress_total,
+                    task.result_summary,
+                    task.created_by,
+                    task.source_lane,
+                    task.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    task.updated_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    task.completed_at.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+                    task.state_json,
+                    task.state_version,
+                ],
+            )
+            .context("Failed to create task")?;
+
+            for assignment in assignments {
+                tx.execute(
+                    "INSERT INTO task_agent_assignment (id, task_id, agent_id, role, status, step_order, started_at, completed_at, result_output)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    rusqlite::params![
+                        assignment.id,
+                        assignment.task_id,
+                        assignment.agent_id,
+                        assignment.role,
+                        assignment.status.as_str(),
+                        assignment.step_order,
+                        assignment.started_at.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+                        assignment.completed_at.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+                        assignment.result_output,
+                    ],
+                )
+                .context("Failed to create assignment")?;
+            }
+
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
     /// Get a task by ID.
     pub fn get(&self, id: &str) -> Result<Option<Task>> {
         self.db.with_connection(|conn| {

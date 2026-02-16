@@ -69,6 +69,12 @@ pub struct MemoryConfig {
     pub fts_jaccard_threshold: f64,
     /// Decay and pruning configuration.
     pub decay: MemoryDecayConfig,
+    /// Minimum confidence for profile trait extraction (set action). Range: 0.0–1.0.
+    pub profile_confidence_threshold: f64,
+    /// Minimum confidence for profile trait update action. Range: 0.0–1.0.
+    pub profile_update_confidence_threshold: f64,
+    /// Minimum confidence for memory item extraction. Range: 0.0–1.0.
+    pub memory_confidence_threshold: f64,
 }
 
 impl Default for MemoryConfig {
@@ -81,6 +87,9 @@ impl Default for MemoryConfig {
             supersession_distance_threshold: 1.0,
             fts_jaccard_threshold: 0.4,
             decay: MemoryDecayConfig::default(),
+            profile_confidence_threshold: 0.8,
+            profile_update_confidence_threshold: 0.9,
+            memory_confidence_threshold: 0.5,
         }
     }
 }
@@ -172,6 +181,7 @@ impl Default for PromptBudgetsConfig {
 pub struct ExecutionConfig {
     pub agent_defaults: AgentDefaults,
     pub lead_agent_defaults: LeadAgentDefaults,
+    pub skill_defaults: SkillDefaults,
     pub dag: DagConfig,
 }
 
@@ -180,6 +190,7 @@ impl Default for ExecutionConfig {
         Self {
             agent_defaults: AgentDefaults::default(),
             lead_agent_defaults: LeadAgentDefaults::default(),
+            skill_defaults: SkillDefaults::default(),
             dag: DagConfig::default(),
         }
     }
@@ -227,6 +238,23 @@ impl Default for LeadAgentDefaults {
     }
 }
 
+/// Fallback defaults for skill invocations (agentic loop during /skill commands).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillDefaults {
+    pub max_rounds: usize,
+    pub max_tools_per_round: usize,
+}
+
+impl Default for SkillDefaults {
+    fn default() -> Self {
+        Self {
+            max_rounds: 6,
+            max_tools_per_round: 3,
+        }
+    }
+}
+
 /// DAG executor configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -259,12 +287,42 @@ impl Default for DagConfig {
 pub struct SecurityConfig {
     /// Maximum input length in bytes.
     pub max_input_length: usize,
+    /// Circuit breaker settings for repeated tool failures.
+    pub circuit_breaker: CircuitBreakerConfig,
 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             max_input_length: 32 * 1024,
+            circuit_breaker: CircuitBreakerConfig::default(),
+        }
+    }
+}
+
+/// Circuit breaker configuration for tool execution.
+///
+/// When a tool (HTTP, Command, or BuiltIn) fails consecutively more than
+/// `failure_threshold` times for a given (agent, tool) pair, the circuit
+/// opens and subsequent calls are rejected immediately until `reset_timeout_secs`
+/// elapses, at which point a single probe call is allowed (half-open state).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CircuitBreakerConfig {
+    /// Enable/disable the tool circuit breaker.
+    pub enabled: bool,
+    /// Number of consecutive transient failures before the circuit opens.
+    pub failure_threshold: usize,
+    /// Seconds to keep the circuit open before allowing a probe call (half-open).
+    pub reset_timeout_secs: u64,
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            failure_threshold: 5,
+            reset_timeout_secs: 300, // 5 minutes
         }
     }
 }
@@ -274,6 +332,8 @@ impl Default for SecurityConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
+    /// Capacity for the EventBus broadcast channel (system-wide event distribution).
+    pub event_bus_capacity: usize,
     /// Capacity for the WebSocket event broadcaster channel.
     pub event_broadcaster_capacity: usize,
     /// Capacity for the wake event channel.
@@ -289,6 +349,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            event_bus_capacity: 1024,
             event_broadcaster_capacity: 64,
             wake_channel_capacity: 256,
             heartbeat_interval_secs: 5,
@@ -335,13 +396,109 @@ impl Default for EmbeddingIndexerConfig {
     }
 }
 
+// ── Validation helpers ───────────────────────────────────────────────
+
+fn clamp_usize(val: &mut usize, min: usize, max: usize, name: &str) {
+    if *val < min {
+        tracing::warn!("Config '{name}': {val} below minimum {min}, clamping");
+        *val = min;
+    } else if *val > max {
+        tracing::warn!("Config '{name}': {val} above maximum {max}, clamping");
+        *val = max;
+    }
+}
+
+fn clamp_u64(val: &mut u64, min: u64, max: u64, name: &str) {
+    if *val < min {
+        tracing::warn!("Config '{name}': {val} below minimum {min}, clamping");
+        *val = min;
+    } else if *val > max {
+        tracing::warn!("Config '{name}': {val} above maximum {max}, clamping");
+        *val = max;
+    }
+}
+
+fn clamp_f64(val: &mut f64, min: f64, max: f64, name: &str) {
+    if *val < min {
+        tracing::warn!("Config '{name}': {val} below minimum {min}, clamping");
+        *val = min;
+    } else if *val > max {
+        tracing::warn!("Config '{name}': {val} above maximum {max}, clamping");
+        *val = max;
+    }
+}
+
+impl DaemonConfig {
+    /// Validate and clamp all fields to their allowed ranges.
+    ///
+    /// Ranges are sourced from `config_schema.rs` `ConfigKeyDef` entries.
+    /// Invalid values are clamped to the nearest valid boundary with a warning log.
+    pub fn validate(&mut self) {
+        // ── Orchestrator > Memory ──
+        clamp_usize(&mut self.orchestrator.memory.prompt_recent_messages, 1, 200, "prompt_recent_messages");
+        clamp_usize(&mut self.orchestrator.memory.summary_min_new_older_messages, 1, 200, "summary_min_new_older_messages");
+        clamp_usize(&mut self.orchestrator.memory.summary_max_chars, 100, 32000, "summary_max_chars");
+        clamp_usize(&mut self.orchestrator.memory.msg_trunc_chars, 100, 32000, "msg_trunc_chars");
+        clamp_f64(&mut self.orchestrator.memory.supersession_distance_threshold, 0.0, 10.0, "supersession_distance_threshold");
+        clamp_f64(&mut self.orchestrator.memory.fts_jaccard_threshold, 0.0, 1.0, "fts_jaccard_threshold");
+        clamp_f64(&mut self.orchestrator.memory.profile_confidence_threshold, 0.0, 1.0, "profile_confidence_threshold");
+        clamp_f64(&mut self.orchestrator.memory.profile_update_confidence_threshold, 0.0, 1.0, "profile_update_confidence_threshold");
+        clamp_f64(&mut self.orchestrator.memory.memory_confidence_threshold, 0.0, 1.0, "memory_confidence_threshold");
+        // ── Orchestrator > Memory > Decay ──
+        clamp_u64(&mut self.orchestrator.memory.decay.poll_interval_secs, 60, 86400, "decay.poll_interval_secs");
+        clamp_f64(&mut self.orchestrator.memory.decay.half_life_days, 1.0, 365.0, "decay.half_life_days");
+        clamp_f64(&mut self.orchestrator.memory.decay.min_importance, 0.0, 1.0, "decay.min_importance");
+        clamp_usize(&mut self.orchestrator.memory.decay.soft_cap, 10, 100_000, "decay.soft_cap");
+        clamp_f64(&mut self.orchestrator.memory.decay.access_boost, 0.0, 1.0, "decay.access_boost");
+        // ── Orchestrator > Costs ──
+        clamp_f64(&mut self.orchestrator.costs.summary_max_daily_cost_usd, 0.0, 100.0, "summary_max_daily_cost_usd");
+        clamp_f64(&mut self.orchestrator.costs.extract_max_daily_cost_usd, 0.0, 100.0, "extract_max_daily_cost_usd");
+        clamp_usize(&mut self.orchestrator.costs.extract_every_n_turns, 1, 100, "extract_every_n_turns");
+        clamp_f64(&mut self.orchestrator.costs.task_extract_max_daily_cost_usd, 0.0, 100.0, "task_extract_max_daily_cost_usd");
+        // ── Orchestrator > Prompt Budgets ──
+        clamp_usize(&mut self.orchestrator.prompt_budgets.identity_budget, 50, 5000, "identity_budget");
+        clamp_usize(&mut self.orchestrator.prompt_budgets.user_profile_budget, 100, 10000, "user_profile_budget");
+        // ── Execution > Agent Defaults ──
+        clamp_usize(&mut self.execution.agent_defaults.max_rounds, 1, 100, "agent_defaults.max_rounds");
+        clamp_usize(&mut self.execution.agent_defaults.max_tools_per_round, 1, 50, "agent_defaults.max_tools_per_round");
+        clamp_u64(&mut self.execution.agent_defaults.max_tool_runtime_secs, 1, 600, "agent_defaults.max_tool_runtime_secs");
+        clamp_f64(&mut self.execution.agent_defaults.max_cost, 0.0, 1000.0, "agent_defaults.max_cost");
+        // ── Execution > Lead Agent Defaults ──
+        clamp_usize(&mut self.execution.lead_agent_defaults.max_rounds, 1, 200, "lead_agent_defaults.max_rounds");
+        clamp_usize(&mut self.execution.lead_agent_defaults.max_tools_per_round, 1, 50, "lead_agent_defaults.max_tools_per_round");
+        clamp_u64(&mut self.execution.lead_agent_defaults.max_tool_runtime_secs, 1, 3600, "lead_agent_defaults.max_tool_runtime_secs");
+        clamp_f64(&mut self.execution.lead_agent_defaults.max_cost, 0.0, 1000.0, "lead_agent_defaults.max_cost");
+        // ── Execution > Skill Defaults ──
+        clamp_usize(&mut self.execution.skill_defaults.max_rounds, 1, 100, "skill_defaults.max_rounds");
+        clamp_usize(&mut self.execution.skill_defaults.max_tools_per_round, 1, 50, "skill_defaults.max_tools_per_round");
+        // ── Execution > DAG ──
+        clamp_usize(&mut self.execution.dag.max_concurrent_agents, 1, 32, "dag.max_concurrent_agents");
+        clamp_u64(&mut self.execution.dag.node_timeout_secs, 10, 3600, "dag.node_timeout_secs");
+        clamp_u64(&mut self.execution.dag.total_timeout_secs, 60, 7200, "dag.total_timeout_secs");
+        clamp_usize(&mut self.execution.dag.max_retries_per_node, 0, 10, "dag.max_retries_per_node");
+        clamp_usize(&mut self.execution.dag.replan_after_every_n_nodes, 1, 50, "dag.replan_after_every_n_nodes");
+        clamp_usize(&mut self.execution.dag.max_replans, 0, 50, "dag.max_replans");
+        // ── Security ──
+        clamp_usize(&mut self.security.max_input_length, 1024, 1_048_576, "security.max_input_length");
+        clamp_usize(&mut self.security.circuit_breaker.failure_threshold, 1, 100, "circuit_breaker.failure_threshold");
+        clamp_u64(&mut self.security.circuit_breaker.reset_timeout_secs, 10, 3600, "circuit_breaker.reset_timeout_secs");
+        // ── Server ──
+        clamp_usize(&mut self.server.event_bus_capacity, 64, 65536, "server.event_bus_capacity");
+        clamp_usize(&mut self.server.event_broadcaster_capacity, 8, 4096, "server.event_broadcaster_capacity");
+        clamp_usize(&mut self.server.wake_channel_capacity, 8, 4096, "server.wake_channel_capacity");
+        clamp_u64(&mut self.server.heartbeat_interval_secs, 1, 300, "server.heartbeat_interval_secs");
+        clamp_u64(&mut self.server.sse_keep_alive_secs, 1, 300, "server.sse_keep_alive_secs");
+    }
+}
+
 // ── Loader ───────────────────────────────────────────────────────────
 
 /// Load daemon config from a TOML file. Returns defaults if file is missing or unparseable.
 pub fn load_daemon_config(path: &Path) -> DaemonConfig {
     match std::fs::read_to_string(path) {
         Ok(content) => match toml::from_str::<DaemonConfig>(&content) {
-            Ok(config) => {
+            Ok(mut config) => {
+                config.validate();
                 tracing::info!("Daemon config loaded from {}", path.display());
                 config
             }
@@ -401,5 +558,42 @@ max_concurrent_agents = 8
         assert_eq!(config.orchestrator.memory.summary_max_chars, 4000); // still default
         assert_eq!(config.execution.dag.max_concurrent_agents, 8);
         assert_eq!(config.execution.dag.node_timeout_secs, 300); // still default
+    }
+
+    #[test]
+    fn test_validate_clamps_out_of_range_values() {
+        let mut config = DaemonConfig::default();
+        // Set some values out of range
+        config.orchestrator.memory.prompt_recent_messages = 0; // min is 1
+        config.orchestrator.memory.summary_max_chars = 999_999; // max is 32000
+        config.orchestrator.memory.fts_jaccard_threshold = 2.5; // max is 1.0
+        config.orchestrator.memory.decay.half_life_days = 0.0; // min is 1.0
+        config.execution.dag.max_concurrent_agents = 100; // max is 32
+        config.security.max_input_length = 0; // min is 1024
+        config.server.event_bus_capacity = 1; // min is 64
+
+        config.validate();
+
+        assert_eq!(config.orchestrator.memory.prompt_recent_messages, 1);
+        assert_eq!(config.orchestrator.memory.summary_max_chars, 32000);
+        assert_eq!(config.orchestrator.memory.fts_jaccard_threshold, 1.0);
+        assert_eq!(config.orchestrator.memory.decay.half_life_days, 1.0);
+        assert_eq!(config.execution.dag.max_concurrent_agents, 32);
+        assert_eq!(config.security.max_input_length, 1024);
+        assert_eq!(config.server.event_bus_capacity, 64);
+    }
+
+    #[test]
+    fn test_validate_leaves_valid_values_unchanged() {
+        let mut config = DaemonConfig::default();
+        let original = config.clone();
+        config.validate();
+
+        // All defaults should be within valid ranges
+        assert_eq!(config.orchestrator.memory.prompt_recent_messages, original.orchestrator.memory.prompt_recent_messages);
+        assert_eq!(config.orchestrator.memory.summary_max_chars, original.orchestrator.memory.summary_max_chars);
+        assert_eq!(config.execution.dag.max_concurrent_agents, original.execution.dag.max_concurrent_agents);
+        assert_eq!(config.security.max_input_length, original.security.max_input_length);
+        assert_eq!(config.server.event_bus_capacity, original.server.event_bus_capacity);
     }
 }

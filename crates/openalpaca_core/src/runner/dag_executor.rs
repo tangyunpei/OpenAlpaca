@@ -146,7 +146,8 @@ pub async fn execute_dag(
     loop {
         // Check total timeout
         if start.elapsed() > config.total_timeout {
-            tracing::warn!("DAG execution timed out for task '{}'", task_id);
+            tracing::warn!("DAG execution timed out for task '{}' — aborting {} running tasks", task_id, running_count);
+            join_set.abort_all();
             return DagExecutionResult {
                 success: false,
                 node_results,
@@ -447,9 +448,10 @@ pub async fn execute_dag(
                             }
                             Ok(ReplanDecision::Abort { reason }) => {
                                 tracing::warn!(
-                                    "Replan #{}: aborting task '{}': {}",
-                                    replan_attempt, task_id, reason
+                                    "Replan #{}: aborting task '{}': {} — aborting {} running tasks",
+                                    replan_attempt, task_id, reason, running_count
                                 );
+                                join_set.abort_all();
                                 bus.publish(SystemEvent::TaskReplanned {
                                     task_id: task_id.to_string(),
                                     replan_number: replan_attempt,
@@ -548,7 +550,7 @@ async fn execute_single_node(
     let contextual_executor = Arc::new(ContextualToolExecutor::new(
         tool_registry.clone(), ctx_exec,
     ));
-    let per_request_sandbox = SandboxManager::new(contextual_executor, bus.clone());
+    let per_request_sandbox = SandboxManager::with_defaults(contextual_executor, bus.clone());
 
     // Build LoopConfig — agent constraints override daemon defaults
     let ad = &daemon_config.load().execution.agent_defaults;

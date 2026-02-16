@@ -68,7 +68,7 @@ mod tests {
     }
 
     fn make_gate() -> SecurityGate {
-        let sandbox = Arc::new(SandboxManager::new(
+        let sandbox = Arc::new(SandboxManager::with_defaults(
             Arc::new(NoopExecutor),
             EventBus::default(),
         ));

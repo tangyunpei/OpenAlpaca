@@ -5,7 +5,7 @@ use tracing::{error, info};
 
 use crate::models::ScheduledTask;
 use crate::scheduler::WakeScheduler;
-use crate::watcher::{EventWatcher, filesystem::FilesystemWatcher};
+use crate::watcher::{EventWatcher, filesystem::{FileWatchHandle, FilesystemWatcher}};
 use openalpaca_api::events::WakeEvent;
 
 /// Central manager for the Wake Module
@@ -14,6 +14,7 @@ use openalpaca_api::events::WakeEvent;
 pub struct WakeManager {
     scheduler: WakeScheduler,
     watchers: Vec<Box<dyn EventWatcher>>,
+    fs_watch_handle: Option<FileWatchHandle>,
     event_tx: mpsc::Sender<WakeEvent>,
 }
 
@@ -30,6 +31,7 @@ impl WakeManager {
         Ok(Self {
             scheduler,
             watchers: Vec::new(),
+            fs_watch_handle: None,
             event_tx,
         })
     }
@@ -37,6 +39,7 @@ impl WakeManager {
     /// Add a filesystem watcher
     pub fn add_filesystem_watcher(&mut self, paths: Vec<std::path::PathBuf>) {
         let watcher = FilesystemWatcher::new(paths);
+        self.fs_watch_handle = Some(watcher.unwatch_handle());
         self.watchers.push(Box::new(watcher));
     }
 
@@ -47,6 +50,7 @@ impl WakeManager {
         poll_interval: std::time::Duration,
     ) {
         let watcher = FilesystemWatcher::with_poll_interval(paths, poll_interval);
+        self.fs_watch_handle = Some(watcher.unwatch_handle());
         self.watchers.push(Box::new(watcher));
     }
 
@@ -96,6 +100,11 @@ impl WakeManager {
     /// List all scheduled jobs (passthrough to scheduler)
     pub async fn list_jobs(&self) -> Vec<ScheduledTask> {
         self.scheduler.list_jobs().await
+    }
+
+    /// Returns a cloneable handle for unwatching individual filesystem paths.
+    pub fn fs_watch_handle(&self) -> Option<FileWatchHandle> {
+        self.fs_watch_handle.clone()
     }
 
     // accessors for testing or dynamic scheduling
