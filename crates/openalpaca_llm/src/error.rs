@@ -33,3 +33,24 @@ pub enum LlmError {
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
 }
+
+impl LlmError {
+    /// Whether this error is transient and worth retrying with the same key.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Http(_) => true,
+            Self::RateLimited { .. } => true,
+            Self::Api { status, .. } => *status >= 500,
+            _ => false,
+        }
+    }
+
+    /// Whether this is an authentication/authorization error (bad key).
+    pub fn is_auth_error(&self) -> bool {
+        match self {
+            Self::Api { status, .. } => *status == 401 || *status == 403,
+            Self::AuthenticationFailed(_) => true,
+            _ => false,
+        }
+    }
+}

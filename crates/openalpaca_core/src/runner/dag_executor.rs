@@ -146,7 +146,8 @@ pub async fn execute_dag(
     loop {
         // Check total timeout
         if start.elapsed() > config.total_timeout {
-            tracing::warn!("DAG execution timed out for task '{}'", task_id);
+            tracing::warn!("DAG execution timed out for task '{}' — aborting {} running tasks", task_id, running_count);
+            join_set.abort_all();
             return DagExecutionResult {
                 success: false,
                 node_results,
@@ -447,9 +448,10 @@ pub async fn execute_dag(
                             }
                             Ok(ReplanDecision::Abort { reason }) => {
                                 tracing::warn!(
-                                    "Replan #{}: aborting task '{}': {}",
-                                    replan_attempt, task_id, reason
+                                    "Replan #{}: aborting task '{}': {} — aborting {} running tasks",
+                                    replan_attempt, task_id, reason, running_count
                                 );
+                                join_set.abort_all();
                                 bus.publish(SystemEvent::TaskReplanned {
                                     task_id: task_id.to_string(),
                                     replan_number: replan_attempt,

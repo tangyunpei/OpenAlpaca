@@ -122,9 +122,10 @@ impl Orchestrator {
                 max_tool_calls: None,
                 max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
             });
+            let skill_cfg = &self.daemon_config.load().execution.skill_defaults;
             config_for_loop = LoopConfig {
-                max_rounds: 6, // Skills may need more rounds than simple queries
-                max_tools_per_round: 3,
+                max_rounds: skill_cfg.max_rounds,
+                max_tools_per_round: skill_cfg.max_tools_per_round,
                 ..self.loop_config.clone()
             };
             tools_for_loop = tool_defs;

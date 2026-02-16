@@ -191,7 +191,21 @@ impl Orchestrator {
             new_last_id,
         ) {
             Ok(true) => tracing::debug!("Summary updated successfully"),
-            Ok(false) => tracing::warn!("Summary update: concurrent write, version mismatch"),
+            Ok(false) => {
+                tracing::warn!("Summary update: version mismatch, retrying once");
+                if let Ok((_, new_version, _)) = repo.get_summary(lane_key) {
+                    match repo.update_summary_optimistic(
+                        lane_key,
+                        new_version,
+                        &new_summary,
+                        new_last_id,
+                    ) {
+                        Ok(true) => tracing::debug!("Summary updated on retry"),
+                        Ok(false) => tracing::warn!("Summary update: version conflict persists, discarding"),
+                        Err(e) => tracing::warn!("Summary retry failed: {e}"),
+                    }
+                }
+            }
             Err(e) => tracing::warn!("Summary update: save failed: {e}"),
         }
     }
