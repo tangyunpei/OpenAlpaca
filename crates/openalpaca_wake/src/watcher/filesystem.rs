@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use notify::{Config, Event, PollWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
@@ -38,6 +38,31 @@ impl FilesystemWatcher {
             poll_interval,
             watcher: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Returns a cloneable handle that can unwatch individual paths.
+    pub fn unwatch_handle(&self) -> FileWatchHandle {
+        FileWatchHandle {
+            inner: Arc::clone(&self.watcher),
+        }
+    }
+}
+
+/// A cloneable handle for unwatching individual paths from a running [`FilesystemWatcher`].
+#[derive(Clone)]
+pub struct FileWatchHandle {
+    inner: Arc<Mutex<Option<PollWatcher>>>,
+}
+
+impl FileWatchHandle {
+    /// Stop polling a specific path.
+    pub fn unwatch_path(&self, path: &Path) -> Result<()> {
+        let mut guard = self.inner.lock().unwrap();
+        if let Some(ref mut watcher) = *guard {
+            watcher.unwatch(path)?;
+            info!("Unwatched path: {:?}", path);
+        }
+        Ok(())
     }
 }
 

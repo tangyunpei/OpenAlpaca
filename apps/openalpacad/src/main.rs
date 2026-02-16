@@ -925,6 +925,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         .await
         .context("Failed to start WakeManager")?;
 
+    // Handle for unwatching paths dynamically (e.g. after bootstrap completes)
+    let fs_watch_handle = wake_manager.fs_watch_handle();
+
     // Step 6: Build HTTP router with public/protected/websocket split
 
     // Shutdown channel for API-triggered shutdown
@@ -1549,6 +1552,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let llm_hashes_for_watcher = recent_llm_hashes.clone();
     let daemon_config_for_reload = daemon_config.clone();
     let daemon_config_path_for_reload = daemon_config_path.clone();
+    let fs_watch_handle_for_watcher = fs_watch_handle.clone();
     tokio::spawn(async move {
         while let Some(event) = wake_rx.recv().await {
             info!("Received WakeEvent: {:?}", event);
@@ -1681,6 +1685,12 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                             // File was deleted (by agent completion or manual user action)
                             orchestrator_for_bootstrap_reload.update_bootstrap_document(None);
                             info!("Bootstrap document cleared (file deleted): {}", bp.display());
+                            // Stop polling the deleted path to avoid log spam
+                            if let Some(ref handle) = fs_watch_handle_for_watcher {
+                                if let Err(e) = handle.unwatch_path(bp) {
+                                    warn!("Failed to unwatch bootstrap path: {e}");
+                                }
+                            }
                         } else {
                             // File was modified — reload
                             match load_bootstrap_document_from_file(bp) {
