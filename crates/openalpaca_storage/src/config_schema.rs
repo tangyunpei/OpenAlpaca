@@ -783,6 +783,32 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         backend: ConfigBackend::DaemonToml,
     },
     ConfigKeyDef {
+        key: "daemon.server.stream_chunk_delay_ms",
+        kind: ConfigKind::Int {
+            min: Some(0),
+            max: Some(500),
+        },
+        default: Some("30"),
+        description: "Delay in milliseconds between streaming word chunks (0 = no delay)",
+        category: "Daemon",
+        subcategory: Some("Server"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.server.stream_chunk_words",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(50),
+        },
+        default: Some("3"),
+        description: "Number of words per streaming delta chunk",
+        category: "Daemon",
+        subcategory: Some("Server"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
         key: "daemon.server.embedding_poll_interval_secs",
         kind: ConfigKind::Int {
             min: Some(5),
@@ -1276,8 +1302,8 @@ mod tests {
     #[test]
     fn test_daemon_keys_in_category() {
         let keys = keys_in_category("Daemon");
-        // 42 daemon keys + 1 alias (system.max_agents) = 43 total
-        assert_eq!(keys.len(), 43);
+        // 42 daemon keys + 1 alias (system.max_agents) + 2 streaming keys = 45 total
+        assert_eq!(keys.len(), 45);
         assert!(keys.iter().any(|d| d.key == "system.max_agents"));
         assert!(keys.iter().any(|d| d.key == "daemon.dag.max_concurrent_agents"));
         assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.prompt_recent_messages"));
@@ -1303,6 +1329,9 @@ mod tests {
         assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.decay_half_life_days"));
         assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.decay_min_importance"));
         assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.decay_soft_cap"));
+        // Streaming keys
+        assert!(keys.iter().any(|d| d.key == "daemon.server.stream_chunk_delay_ms"));
+        assert!(keys.iter().any(|d| d.key == "daemon.server.stream_chunk_words"));
         assert!(keys.iter().all(|d| d.backend == ConfigBackend::DaemonToml));
     }
 
@@ -1429,7 +1458,7 @@ mod tests {
     #[test]
     fn test_daemon_server_keys() {
         let server_keys = keys_in_subcategory("Daemon", "Server");
-        assert_eq!(server_keys.len(), 8);
+        assert_eq!(server_keys.len(), 10);
         assert!(server_keys.iter().any(|d| d.key == "daemon.server.heartbeat_interval_secs"));
         assert!(server_keys.iter().any(|d| d.key == "daemon.server.sse_keep_alive_secs"));
         assert!(server_keys.iter().any(|d| d.key == "daemon.server.event_broadcaster_capacity"));

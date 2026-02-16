@@ -11,6 +11,30 @@ use openalpaca_storage::Database;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Rich result from message handling, carrying optional LLM metadata.
+///
+/// Non-LLM paths (task queries, commands, etc.) use `HandleResult::text()` which
+/// sets all metadata fields to `None`.
+#[derive(Debug)]
+pub struct HandleResult {
+    pub content: String,
+    pub model: Option<String>,
+    pub tokens_in: Option<u32>,
+    pub tokens_out: Option<u32>,
+}
+
+impl HandleResult {
+    /// Create a HandleResult for non-LLM responses (no metadata).
+    pub fn text(content: String) -> Self {
+        Self {
+            content,
+            model: None,
+            tokens_in: None,
+            tokens_out: None,
+        }
+    }
+}
+
 /// Trait for processing messages through the pipeline.
 /// The daemon implements this by delegating to the Orchestrator.
 #[async_trait]
@@ -23,7 +47,7 @@ pub trait MessageHandler: Send + Sync {
         principal: Principal,
         scope: Scope,
         lane_key: String,
-    ) -> Result<String, String>;
+    ) -> Result<HandleResult, String>;
 }
 
 /// Inbound request to the Gateway.
@@ -39,6 +63,15 @@ pub struct GatewayRequest {
 pub struct GatewayResponse {
     pub lane_key: LaneKey,
     pub content: String,
+    /// Structured error flag — `true` when the handler returned `Err`.
+    /// Replaces ad-hoc string prefix matching ("[error]", "Error:", etc.).
+    pub is_error: bool,
+    /// LLM model used (if any).
+    pub model: Option<String>,
+    /// Input tokens consumed (if LLM was called).
+    pub tokens_in: Option<u32>,
+    /// Output tokens generated (if LLM was called).
+    pub tokens_out: Option<u32>,
 }
 
 /// The unified entry point for all inbound messages.
@@ -109,22 +142,30 @@ impl Gateway {
             .handle(request_id, source_name.clone(), req.content, req.principal, req.scope, lane_key_str.clone())
             .await
         {
-            Ok(content) => {
+            Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 // Persist assistant message
                 if let Some(ref p) = self.persistence {
-                    if let Err(e) = p.persist_assistant_message(&lane_key_str, &content, Some(duration_ms), &source_name) {
+                    if let Err(e) = p.persist_assistant_message(&lane_key_str, &result.content, Some(duration_ms), &source_name) {
                         tracing::warn!("Failed to persist assistant message: {e}");
                     }
                 }
                 GatewayResponse {
                     lane_key: key,
-                    content,
+                    content: result.content,
+                    is_error: false,
+                    model: result.model,
+                    tokens_in: result.tokens_in,
+                    tokens_out: result.tokens_out,
                 }
             }
             Err(e) => GatewayResponse {
                 lane_key: key,
-                content: format!("[error] {e}"),
+                content: e,
+                is_error: true,
+                model: None,
+                tokens_in: None,
+                tokens_out: None,
             },
         }
     }
@@ -181,8 +222,8 @@ mod tests {
             _principal: Principal,
             _scope: Scope,
             _lane_key: String,
-        ) -> Result<String, String> {
-            Ok(format!("Echo: {content}"))
+        ) -> Result<HandleResult, String> {
+            Ok(HandleResult::text(format!("Echo: {content}")))
         }
     }
 
@@ -199,7 +240,7 @@ mod tests {
             _principal: Principal,
             _scope: Scope,
             _lane_key: String,
-        ) -> Result<String, String> {
+        ) -> Result<HandleResult, String> {
             Err("Access denied".to_string())
         }
     }
@@ -246,6 +287,7 @@ mod tests {
         assert_eq!(resp.lane_key.user_id, "user1");
         assert_eq!(resp.lane_key.source, "cli");
         assert_eq!(resp.content, "Echo: hello");
+        assert!(!resp.is_error);
     }
 
     #[tokio::test]
@@ -292,7 +334,8 @@ mod tests {
                 scope: Scope::Global,
             })
             .await;
-        assert_eq!(resp.content, "[error] Access denied");
+        assert!(resp.is_error);
+        assert_eq!(resp.content, "Access denied");
     }
 
     #[tokio::test]
@@ -411,6 +454,7 @@ mod tests {
         let resp = gw.handle_message("user1", "cli", "hello").await;
         // handle_message now delegates through the handler
         assert!(resp.content.starts_with("Echo:"));
+        assert!(!resp.is_error);
     }
 
     #[tokio::test]
