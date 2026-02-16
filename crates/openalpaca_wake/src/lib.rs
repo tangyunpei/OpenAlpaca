@@ -12,7 +12,7 @@ pub use manager::WakeManager;
 pub use models::ScheduledTask;
 pub use scheduler::WakeScheduler;
 pub use watcher::EventWatcher;
-pub use watcher::filesystem::FilesystemWatcher;
+pub use watcher::filesystem::{FileWatchHandle, FilesystemWatcher};
 
 // Re-export WakeEvent for convenience
 pub use openalpaca_api::events::WakeEvent;
