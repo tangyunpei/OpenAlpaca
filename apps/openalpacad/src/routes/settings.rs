@@ -65,11 +65,13 @@ pub async fn upsert_key(
         ).into_response();
     }
 
+    let event_provider = body.provider.clone();
+    let event_key_id = body.key.id.clone().unwrap_or_default();
     match service.upsert_key(body).await {
         Ok(()) => {
             // Emit key status changed event
             state.event_broadcaster.key_status_changed(
-                "", "", "added",
+                &event_provider, &event_key_id, "added",
             );
             (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
         }
@@ -126,10 +128,11 @@ pub async fn reorder_keys(
         ).into_response(),
     };
 
+    let event_provider = body.provider.clone();
     match service.reorder_keys(body).await {
         Ok(()) => {
             state.event_broadcaster.key_status_changed(
-                "", "", "reordered",
+                &event_provider, "*", "reordered",
             );
             (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
         }

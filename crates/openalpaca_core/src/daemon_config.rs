@@ -69,6 +69,12 @@ pub struct MemoryConfig {
     pub fts_jaccard_threshold: f64,
     /// Decay and pruning configuration.
     pub decay: MemoryDecayConfig,
+    /// Minimum confidence for profile trait extraction (set action). Range: 0.0–1.0.
+    pub profile_confidence_threshold: f64,
+    /// Minimum confidence for profile trait update action. Range: 0.0–1.0.
+    pub profile_update_confidence_threshold: f64,
+    /// Minimum confidence for memory item extraction. Range: 0.0–1.0.
+    pub memory_confidence_threshold: f64,
 }
 
 impl Default for MemoryConfig {
@@ -81,6 +87,9 @@ impl Default for MemoryConfig {
             supersession_distance_threshold: 1.0,
             fts_jaccard_threshold: 0.4,
             decay: MemoryDecayConfig::default(),
+            profile_confidence_threshold: 0.8,
+            profile_update_confidence_threshold: 0.9,
+            memory_confidence_threshold: 0.5,
         }
     }
 }
@@ -172,6 +181,7 @@ impl Default for PromptBudgetsConfig {
 pub struct ExecutionConfig {
     pub agent_defaults: AgentDefaults,
     pub lead_agent_defaults: LeadAgentDefaults,
+    pub skill_defaults: SkillDefaults,
     pub dag: DagConfig,
 }
 
@@ -180,6 +190,7 @@ impl Default for ExecutionConfig {
         Self {
             agent_defaults: AgentDefaults::default(),
             lead_agent_defaults: LeadAgentDefaults::default(),
+            skill_defaults: SkillDefaults::default(),
             dag: DagConfig::default(),
         }
     }
@@ -223,6 +234,23 @@ impl Default for LeadAgentDefaults {
             max_tools_per_round: 3,
             max_tool_runtime_secs: 300,
             max_cost: 5.0,
+        }
+    }
+}
+
+/// Fallback defaults for skill invocations (agentic loop during /skill commands).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillDefaults {
+    pub max_rounds: usize,
+    pub max_tools_per_round: usize,
+}
+
+impl Default for SkillDefaults {
+    fn default() -> Self {
+        Self {
+            max_rounds: 6,
+            max_tools_per_round: 3,
         }
     }
 }

@@ -1,6 +1,6 @@
 use super::Orchestrator;
 use crate::events::SystemEvent;
-use crate::memory::task_extraction::persist_memory_item;
+use crate::memory::task_extraction::{PersistResult, persist_memory_item};
 use crate::middleware::user::{parse_user_markdown, render_user_markdown};
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, RequestContext, RouterRequest};
@@ -214,6 +214,11 @@ impl Orchestrator {
         let mut profile_patches: HashMap<String, serde_json::Value> = HashMap::new();
         let mut memory_items: Vec<String> = Vec::new();
 
+        let mem_cfg = &self.daemon_config.load().orchestrator.memory;
+        let profile_threshold = mem_cfg.profile_confidence_threshold;
+        let profile_update_threshold = mem_cfg.profile_update_confidence_threshold;
+        let memory_threshold = mem_cfg.memory_confidence_threshold;
+
         for extraction in extractions {
             let target = extraction.get("target").and_then(|v| v.as_str()).unwrap_or("");
             let field = extraction.get("field").and_then(|v| v.as_str()).unwrap_or("");
@@ -226,15 +231,15 @@ impl Orchestrator {
 
             match target {
                 "profile" => {
-                    if confidence < 0.8 {
+                    if confidence < profile_threshold {
                         continue;
                     }
                     let action = extraction.get("action").and_then(|v| v.as_str()).unwrap_or("set");
                     // "update" requires higher confidence than "set"
-                    if action == "update" && confidence < 0.9 {
+                    if action == "update" && confidence < profile_update_threshold {
                         tracing::debug!(
-                            "Extraction: skipping update action for '{}' (confidence {:.2} < 0.9)",
-                            field, confidence
+                            "Extraction: skipping update action for '{}' (confidence {:.2} < {:.1})",
+                            field, confidence, profile_update_threshold
                         );
                         continue;
                     }
@@ -261,7 +266,7 @@ impl Orchestrator {
                     }
                 }
                 "memory" => {
-                    if confidence < 0.5 {
+                    if confidence < memory_threshold {
                         continue;
                     }
                     memory_items.push(value.to_string());
@@ -283,7 +288,7 @@ impl Orchestrator {
                 // User trait memories use Global scope intentionally:
                 // user preferences and personality traits are universal,
                 // not workspace-specific (e.g., "prefers dark mode" applies everywhere).
-                persist_memory_item(
+                let result = persist_memory_item(
                     &repo,
                     &self.embedder,
                     oid,
@@ -299,6 +304,9 @@ impl Orchestrator {
                     jaccard_threshold,
                 )
                 .await;
+                if let PersistResult::Error(e) = &result {
+                    tracing::warn!("Failed to persist extracted memory item: {e}");
+                }
             }
         }
 

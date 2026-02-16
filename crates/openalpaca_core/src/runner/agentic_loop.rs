@@ -139,8 +139,12 @@ pub async fn run_agentic_loop(
                                 Err(err) => format!("Error: {}", err),
                             }
                         } else {
-                            // Fallback: stub
-                            format!("Error: tool '{}' not yet implemented", tc.name)
+                            tracing::warn!(
+                                agent_id = agent_id,
+                                tool = tc.name,
+                                "Sandbox not configured — returning stub for tool call (misconfiguration?)"
+                            );
+                            format!("Error: tool '{}' not available — sandbox not configured", tc.name)
                         };
 
                         messages.push(ChatMessage::tool_result(&tc.id, &result_text));
@@ -293,7 +297,12 @@ pub async fn run_agentic_loop_routed(
                                 Err(err) => format!("Error: {}", err),
                             }
                         } else {
-                            format!("Error: tool '{}' not yet implemented", tc.name)
+                            tracing::warn!(
+                                agent_id = agent_id,
+                                tool = tc.name,
+                                "Sandbox not configured — returning stub for tool call (misconfiguration?)"
+                            );
+                            format!("Error: tool '{}' not available — sandbox not configured", tc.name)
                         };
 
                         messages.push(ChatMessage::tool_result(&tc.id, &result_text));
@@ -334,9 +343,14 @@ pub async fn run_agentic_loop_routed(
     }
 }
 
+/// Fallback cost rates for the non-routed (test) path.
+/// Claude Sonnet pricing as conservative upper bound.
+const FALLBACK_INPUT_RATE: f64 = 3.0; // $ per 1M tokens
+const FALLBACK_OUTPUT_RATE: f64 = 15.0; // $ per 1M tokens
+
 fn estimate_cost(input_tokens: u32, output_tokens: u32) -> f64 {
-    // Simplified pricing: $3/1M input, $15/1M output (Claude Sonnet range)
-    (input_tokens as f64 * 3.0 / 1_000_000.0) + (output_tokens as f64 * 15.0 / 1_000_000.0)
+    (input_tokens as f64 * FALLBACK_INPUT_RATE / 1_000_000.0)
+        + (output_tokens as f64 * FALLBACK_OUTPUT_RATE / 1_000_000.0)
 }
 
 #[cfg(test)]

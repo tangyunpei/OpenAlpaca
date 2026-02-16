@@ -28,7 +28,9 @@ export type ServerEvent =
   | { type: "chat_stream_started"; stream_id: string; lane_key: string; ts: string; instance_id: string; _id: number }
   | { type: "chat_stream_ended"; stream_id: string; lane_key: string; status: string; ts: string; instance_id: string; _id: number }
   | { type: "agent_config_changed"; agent_id: string; action: string; config_version: number; ts: string; instance_id: string; _id: number }
-  | { type: "orchestrator_config_changed"; model: string; ts: string; instance_id: string; _id: number };
+  | { type: "orchestrator_config_changed"; model: string; ts: string; instance_id: string; _id: number }
+  | { type: "dag_node_status"; task_id: string; node_id: string; node_title: string; agent_id: string; status: string; duration_ms: number | null; output_preview: string | null; ts: string; instance_id: string; _id: number }
+  | { type: "soul_updated"; actor: string; mode: string; content_sha256: string; backup_path: string | null; ts: string; instance_id: string; _id: number };
 
 /** Connection state */
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "error";
