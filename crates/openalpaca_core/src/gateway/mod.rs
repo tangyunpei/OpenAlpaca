@@ -1,4 +1,4 @@
 pub mod persistence;
 mod router;
 
-pub use router::{Gateway, GatewayRequest, GatewayResponse, MessageHandler};
+pub use router::{Gateway, GatewayRequest, GatewayResponse, HandleResult, MessageHandler};

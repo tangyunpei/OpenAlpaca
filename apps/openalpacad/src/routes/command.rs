@@ -84,14 +84,14 @@ pub async fn command_handler(
                 scope: Scope::Global,
             }).await;
 
-            // Check if the response is an error
-            if response.content.starts_with("Error: ") {
+            // Check if the response is an error (structured flag)
+            if response.is_error {
                 (
                     StatusCode::FORBIDDEN,
                     Json(serde_json::json!({
                         "request_id": request_id,
                         "status": "rejected",
-                        "error": response.content.strip_prefix("Error: ").unwrap_or(&response.content)
+                        "error": response.content
                     })),
                 )
             } else {

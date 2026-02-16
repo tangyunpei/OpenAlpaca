@@ -367,6 +367,10 @@ pub struct ChatStreamsConfig {
     pub cleanup_interval_secs: u64,
     /// Seconds after which a stream is considered stale.
     pub stale_timeout_secs: u64,
+    /// Delay in milliseconds between streaming word chunks. 0 = no delay (all deltas at once).
+    pub stream_chunk_delay_ms: u64,
+    /// Number of words per delta chunk sent to SSE clients.
+    pub stream_chunk_words: usize,
 }
 
 impl Default for ChatStreamsConfig {
@@ -374,6 +378,8 @@ impl Default for ChatStreamsConfig {
         Self {
             cleanup_interval_secs: 60,
             stale_timeout_secs: 30,
+            stream_chunk_delay_ms: 30,
+            stream_chunk_words: 3,
         }
     }
 }
@@ -488,6 +494,8 @@ impl DaemonConfig {
         clamp_usize(&mut self.server.wake_channel_capacity, 8, 4096, "server.wake_channel_capacity");
         clamp_u64(&mut self.server.heartbeat_interval_secs, 1, 300, "server.heartbeat_interval_secs");
         clamp_u64(&mut self.server.sse_keep_alive_secs, 1, 300, "server.sse_keep_alive_secs");
+        clamp_u64(&mut self.server.chat_streams.stream_chunk_delay_ms, 0, 500, "server.chat_streams.stream_chunk_delay_ms");
+        clamp_usize(&mut self.server.chat_streams.stream_chunk_words, 1, 50, "server.chat_streams.stream_chunk_words");
     }
 }
 
