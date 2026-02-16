@@ -931,7 +931,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
 
     // Single EventBus for system-wide event distribution
-    let bus = EventBus::default();
+    let bus = EventBus::new(daemon_config.load().server.event_bus_capacity);
 
     // Spawn bridge: SystemEvent (Core) -> ServerEvent (API)
     let eb_bridge = event_broadcaster.clone();
@@ -1770,7 +1770,8 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
 
                 // Daemon config (daemon.toml) hot-reload
                 if is_same_file_path(&changed_path, &daemon_config_path_for_reload) {
-                    let new_cfg = load_daemon_config(&daemon_config_path_for_reload);
+                    let mut new_cfg = load_daemon_config(&daemon_config_path_for_reload);
+                    new_cfg.validate();
                     daemon_config_for_reload.store(Arc::new(new_cfg));
                     info!("Daemon config hot-reloaded from {}", daemon_config_path_for_reload.display());
                 }

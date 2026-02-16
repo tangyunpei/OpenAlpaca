@@ -130,13 +130,15 @@ pub async fn run_agentic_loop(
                     for tc in response.tool_calls.iter().take(calls_this_round) {
                         tool_calls_made += 1;
 
+                        // Tool error convention: errors are prefixed with [tool_error]
+                        // so the LLM sees a consistent format regardless of the tool.
                         let result_text = if let (Some(sbx), Some(policy)) =
                             (sandbox, sandbox_policy)
                         {
                             // Route through sandbox
                             match sbx.execute_tool(agent_id, tc, policy).await {
                                 Ok(output) => output,
-                                Err(err) => format!("Error: {}", err),
+                                Err(err) => format!("[tool_error] {}", err),
                             }
                         } else {
                             tracing::warn!(
@@ -144,7 +146,7 @@ pub async fn run_agentic_loop(
                                 tool = tc.name,
                                 "Sandbox not configured — returning stub for tool call (misconfiguration?)"
                             );
-                            format!("Error: tool '{}' not available — sandbox not configured", tc.name)
+                            format!("[tool_error] tool '{}' not available — sandbox not configured", tc.name)
                         };
 
                         messages.push(ChatMessage::tool_result(&tc.id, &result_text));
@@ -154,7 +156,7 @@ pub async fn run_agentic_loop(
                     for tc in response.tool_calls.iter().skip(calls_this_round) {
                         messages.push(ChatMessage::tool_result(
                             &tc.id,
-                            "Error: max tools per round exceeded",
+                            "[tool_error] max tools per round exceeded",
                         ));
                     }
 
@@ -294,7 +296,7 @@ pub async fn run_agentic_loop_routed(
                         {
                             match sbx.execute_tool(agent_id, tc, policy).await {
                                 Ok(output) => output,
-                                Err(err) => format!("Error: {}", err),
+                                Err(err) => format!("[tool_error] {}", err),
                             }
                         } else {
                             tracing::warn!(
@@ -302,7 +304,7 @@ pub async fn run_agentic_loop_routed(
                                 tool = tc.name,
                                 "Sandbox not configured — returning stub for tool call (misconfiguration?)"
                             );
-                            format!("Error: tool '{}' not available — sandbox not configured", tc.name)
+                            format!("[tool_error] tool '{}' not available — sandbox not configured", tc.name)
                         };
 
                         messages.push(ChatMessage::tool_result(&tc.id, &result_text));
@@ -311,7 +313,7 @@ pub async fn run_agentic_loop_routed(
                     for tc in response.tool_calls.iter().skip(calls_this_round) {
                         messages.push(ChatMessage::tool_result(
                             &tc.id,
-                            "Error: max tools per round exceeded",
+                            "[tool_error] max tools per round exceeded",
                         ));
                     }
 

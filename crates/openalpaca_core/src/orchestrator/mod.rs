@@ -40,6 +40,7 @@ use crate::tools::ToolRegistry;
 use openalpaca_llm::{ChatMessage, LlmRouter, Role};
 use openalpaca_storage::{Database, Task};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
 use dispatcher::TaskDispatcher;
@@ -81,6 +82,8 @@ pub struct Orchestrator {
     bootstrap_path: RwLock<Option<std::path::PathBuf>>,
     /// Daemon-level config (memory limits, costs, execution defaults, etc.).
     pub daemon_config: Arc<ArcSwap<DaemonConfig>>,
+    /// Atomic guard to prevent concurrent bootstrap completion (race condition fix).
+    bootstrap_completing: AtomicBool,
 }
 
 /// Full conversation context for prompt building and summary update.
@@ -154,6 +157,7 @@ impl Orchestrator {
             bootstrap_document: Arc::new(RwLock::new(None)),
             bootstrap_path: RwLock::new(None),
             daemon_config,
+            bootstrap_completing: AtomicBool::new(false),
         }
     }
 
