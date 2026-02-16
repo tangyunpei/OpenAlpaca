@@ -57,6 +57,8 @@ wake_channel_capacity = 256
 [server.chat_streams]
 cleanup_interval_secs = 60
 stale_timeout_secs = 30
+stream_chunk_delay_ms = 30
+stream_chunk_words = 3
 
 [server.embedding_indexer]
 batch_size = 50

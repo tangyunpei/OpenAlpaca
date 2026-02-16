@@ -280,6 +280,13 @@ impl Orchestrator {
                 timestamp: Utc::now(),
             });
 
+            // Store LLM metadata for bridge to read
+            *self.last_llm_metadata.lock().unwrap() = Some(super::LlmMetadata {
+                model: actual_model.to_string(),
+                tokens_in: result.total_input_tokens,
+                tokens_out: result.total_output_tokens,
+            });
+
             // If LLM failed and produced no content, propagate as error
             // so the Gateway doesn't persist an empty assistant message.
             if let LoopFinishReason::Error(ref err) = result.finish_reason {

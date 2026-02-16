@@ -9,7 +9,7 @@ use openalpaca_connectors::TelegramConnector;
 use openalpaca_core::{
     bus::EventBus,
     context::SharedContext,
-    gateway::{Gateway, MessageHandler},
+    gateway::{Gateway, HandleResult, MessageHandler},
     lane::LaneManager,
     security::policy::{Principal, Scope},
 };
@@ -49,8 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _principal: Principal,
             _scope: Scope,
             _lane_key: String,
-        ) -> Result<String, String> {
-            Ok(format!("Echo: {content}"))
+        ) -> Result<HandleResult, String> {
+            Ok(HandleResult::text(format!("Echo: {content}")))
         }
     }
 

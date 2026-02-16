@@ -2060,6 +2060,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
 
     // Step 5.3: Connector Lifecycle (Phase 4.1.8)
     let notif_bus = bus.clone();
+    let chat_bus = bus.clone();
     let connector_manager =
         managers::connector::ConnectorManager::new(db.clone(), bus, gateway.clone());
     connector_manager.start_all().await;
@@ -2084,6 +2085,8 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         gateway.clone(),
         chat_stream_manager.clone(),
         db.clone(),
+        chat_bus,
+        daemon_config.clone(),
     ));
 
     // Step 6.4: Spawn background embedding indexer
