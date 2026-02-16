@@ -33,7 +33,7 @@ fn setup(agents: Vec<SubAgent>) -> TaskDispatcher {
     let bus = EventBus::default();
     let tool_registry = Arc::new(crate::tools::ToolRegistry::new());
     let executor = Arc::new(crate::tools::RegistryToolExecutor::new(tool_registry.clone()));
-    let sandbox = Arc::new(crate::security::sandbox::SandboxManager::new(executor, bus.clone()));
+    let sandbox = Arc::new(crate::security::sandbox::SandboxManager::with_defaults(executor, bus.clone()));
     let gate = Arc::new(crate::security::gate::SecurityGate::new(sandbox));
     let daemon_config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     TaskDispatcher::new(ctx, lane_mgr, bus, None, gate, tool_registry, None, None, daemon_config)

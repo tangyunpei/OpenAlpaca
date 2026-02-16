@@ -1466,6 +1466,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let sandbox_manager = Arc::new(openalpaca_core::security::sandbox::SandboxManager::new(
         registry_executor,
         bus.clone(),
+        &daemon_config.load().security.circuit_breaker,
     ));
     let security_gate = Arc::new(openalpaca_core::security::gate::SecurityGate::new(
         sandbox_manager,

@@ -8,9 +8,10 @@
     providerName: string;
     provider: ProviderInfo;
     onRefresh: () => void;
+    onModelsRefresh?: () => void;
   }
 
-  let { providerName, provider, onRefresh }: Props = $props();
+  let { providerName, provider, onRefresh, onModelsRefresh }: Props = $props();
 
   let showAddDialog = $state(false);
   let backends = $state<CliBackendStatus[]>([]);
@@ -29,6 +30,7 @@
   function handleKeyAdded() {
     showAddDialog = false;
     onRefresh();
+    onModelsRefresh?.();
   }
 
   function relevantBackend(providerName: string): CliBackendStatus | null {

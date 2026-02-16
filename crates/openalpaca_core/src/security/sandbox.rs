@@ -1,12 +1,14 @@
 //! Layer 3: Tool execution sandbox.
 //!
 //! Wraps tool execution with capability checks, input sanitization,
-//! timeout enforcement, and event emission.
+//! circuit breaker protection, timeout enforcement, and event emission.
 
 use crate::agent::subagent::AgentConstraints;
 use crate::bus::EventBus;
+use crate::daemon_config::CircuitBreakerConfig;
 use crate::events::SystemEvent;
 use crate::security::capabilities::CapabilityManager;
+use crate::security::circuit_breaker::{ToolCircuitBreaker, is_transient_tool_error};
 use crate::security::sanitizer::InputSanitizer;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -57,11 +59,30 @@ pub trait ToolExecutor: Send + Sync {
 pub struct SandboxManager {
     executor: Arc<dyn ToolExecutor>,
     bus: EventBus,
+    circuit_breaker: ToolCircuitBreaker,
 }
 
 impl SandboxManager {
-    pub fn new(executor: Arc<dyn ToolExecutor>, bus: EventBus) -> Self {
-        Self { executor, bus }
+    /// Create a new SandboxManager with a specific circuit breaker configuration.
+    pub fn new(
+        executor: Arc<dyn ToolExecutor>,
+        bus: EventBus,
+        circuit_breaker_config: &CircuitBreakerConfig,
+    ) -> Self {
+        let circuit_breaker = ToolCircuitBreaker::new(circuit_breaker_config, bus.clone());
+        Self {
+            executor,
+            bus,
+            circuit_breaker,
+        }
+    }
+
+    /// Create a new SandboxManager with default circuit breaker settings.
+    ///
+    /// Used by internal per-request sandbox instances (query handler, skill handler,
+    /// DAG executor, lead agent) where no custom config is needed.
+    pub fn with_defaults(executor: Arc<dyn ToolExecutor>, bus: EventBus) -> Self {
+        Self::new(executor, bus, &CircuitBreakerConfig::default())
     }
 
     /// Execute a tool call within the sandbox.
@@ -69,8 +90,10 @@ impl SandboxManager {
     /// Flow:
     /// 1. Capability check (deny/allow lists)
     /// 2. Input sanitization (path traversal, command injection)
-    /// 3. Timeout-wrapped execution
-    /// 4. Event emission (ToolExecuted or SecurityViolation)
+    /// 3. Circuit breaker check (block if tool has too many recent failures)
+    /// 4. Timeout-wrapped execution
+    /// 5. Record outcome for circuit breaker
+    /// 6. Event emission (ToolExecuted or SecurityViolation)
     pub async fn execute_tool(
         &self,
         agent_id: &str,
@@ -100,7 +123,13 @@ impl SandboxManager {
             return Err(violation.to_string());
         }
 
-        // 3. Timeout-wrapped execution
+        // 3. Circuit breaker check
+        if let Err(reason) = self.circuit_breaker.check(agent_id, &tool_call.name) {
+            self.emit_tool_executed(agent_id, &tool_call.name, false, 0);
+            return Err(reason);
+        }
+
+        // 4. Timeout-wrapped execution
         let timeout = Duration::from_secs(policy.max_tool_runtime_secs);
         let executor = self.executor.clone();
         let tool_name = tool_call.name.clone();
@@ -114,13 +143,19 @@ impl SandboxManager {
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        match result {
+        // 5. Process result and record for circuit breaker
+        let final_result = match result {
             Ok(Ok(output)) => {
                 self.emit_tool_executed(agent_id, &tool_call.name, true, duration_ms);
+                self.circuit_breaker.record_success(agent_id, &tool_call.name);
                 Ok(output)
             }
             Ok(Err(err)) => {
                 self.emit_tool_executed(agent_id, &tool_call.name, false, duration_ms);
+                if is_transient_tool_error(&err) {
+                    self.circuit_breaker
+                        .record_failure(agent_id, &tool_call.name);
+                }
                 Err(err)
             }
             Err(_timeout) => {
@@ -129,9 +164,14 @@ impl SandboxManager {
                     tool_call.name, policy.max_tool_runtime_secs
                 );
                 self.emit_security_violation(agent_id, &tool_call.name, &reason);
+                // Timeouts are transient — record for circuit breaker
+                self.circuit_breaker
+                    .record_failure(agent_id, &tool_call.name);
                 Err(reason)
             }
-        }
+        };
+
+        final_result
     }
 
     fn emit_security_violation(&self, agent_id: &str, tool_name: &str, reason: &str) {
@@ -157,6 +197,7 @@ impl SandboxManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bus::EventBus;
 
     struct MockExecutor;
 
@@ -183,7 +224,11 @@ mod tests {
     }
 
     fn make_sandbox() -> SandboxManager {
-        SandboxManager::new(Arc::new(MockExecutor), EventBus::default())
+        SandboxManager::new(
+            Arc::new(MockExecutor),
+            EventBus::default(),
+            &CircuitBreakerConfig::default(),
+        )
     }
 
     fn make_policy(agent_id: &str) -> SandboxPolicy {
@@ -244,7 +289,11 @@ mod tests {
     async fn test_security_event_emitted() {
         let bus = EventBus::default();
         let mut rx = bus.subscribe();
-        let sandbox = SandboxManager::new(Arc::new(MockExecutor), bus);
+        let sandbox = SandboxManager::new(
+            Arc::new(MockExecutor),
+            bus,
+            &CircuitBreakerConfig::default(),
+        );
         let mut policy = make_policy("agent1");
         policy.denied_capabilities = vec!["web_search".to_string()];
         let tc = make_tool_call("web_search");
@@ -269,7 +318,11 @@ mod tests {
     async fn test_tool_event_emitted() {
         let bus = EventBus::default();
         let mut rx = bus.subscribe();
-        let sandbox = SandboxManager::new(Arc::new(MockExecutor), bus);
+        let sandbox = SandboxManager::new(
+            Arc::new(MockExecutor),
+            bus,
+            &CircuitBreakerConfig::default(),
+        );
         let policy = make_policy("agent1");
         let tc = make_tool_call("web_search");
 

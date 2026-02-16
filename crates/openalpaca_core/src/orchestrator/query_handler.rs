@@ -209,7 +209,7 @@ impl Orchestrator {
                 self.tool_registry.clone(),
                 ctx_exec,
             ));
-            let per_request_sandbox = SandboxManager::new(contextual_executor, self.bus.clone());
+            let per_request_sandbox = SandboxManager::with_defaults(contextual_executor, self.bus.clone());
 
             let call_start = std::time::Instant::now();
             let result = run_agentic_loop_routed(

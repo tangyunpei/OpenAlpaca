@@ -15,7 +15,7 @@ fn make_tool_registry() -> Arc<ToolRegistry> {
 fn make_security_gate(bus: &EventBus) -> Arc<SecurityGate> {
     let registry = make_tool_registry();
     let executor = Arc::new(RegistryToolExecutor::new(registry));
-    let sandbox = Arc::new(SandboxManager::new(executor, bus.clone()));
+    let sandbox = Arc::new(SandboxManager::with_defaults(executor, bus.clone()));
     Arc::new(SecurityGate::new(sandbox))
 }
 
@@ -581,7 +581,7 @@ fn make_security_gate_with_registry(
     registry: Arc<ToolRegistry>,
 ) -> Arc<SecurityGate> {
     let executor = Arc::new(RegistryToolExecutor::new(registry));
-    let sandbox = Arc::new(SandboxManager::new(executor, bus.clone()));
+    let sandbox = Arc::new(SandboxManager::with_defaults(executor, bus.clone()));
     Arc::new(SecurityGate::new(sandbox))
 }
 
