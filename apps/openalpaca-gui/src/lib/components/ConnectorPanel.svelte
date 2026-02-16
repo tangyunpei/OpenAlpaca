@@ -21,6 +21,13 @@
   let configTargetId = $state<string | null>(null);
   let configToken = $state("");
 
+  // Auto-load connectors when the component mounts and connection is active
+  $effect(() => {
+    if (connectionState === "connected" && connectorsList.length === 0 && !isLoadingConnectors) {
+      refreshConnectors();
+    }
+  });
+
   export async function refreshConnectors() {
     if (connectionState !== "connected") return;
     isLoadingConnectors = true;

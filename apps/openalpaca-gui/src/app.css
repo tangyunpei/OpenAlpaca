@@ -3,22 +3,24 @@
 /* ── Design Tokens ─────────────────────────────────────────────────── */
 
 @theme {
-  --color-background: hsl(233 33% 14%);
-  --color-foreground: hsl(0 0% 92%);
-  --color-card: hsl(219 44% 16%);
-  --color-muted: hsl(219 44% 16%);
-  --color-muted-foreground: hsl(223 16% 60%);
-  --color-border: hsl(0 0% 100% / 0.08);
+  --color-background: hsl(225 20% 11%);
+  --color-foreground: hsl(45 10% 93%);
+  --color-card: hsl(225 18% 15%);
+  --color-muted: hsl(225 15% 18%);
+  --color-muted-foreground: hsl(220 12% 55%);
+  --color-border: hsl(40 10% 100% / 0.08);
   --color-input: hsl(0 0% 100% / 0.1);
-  --color-primary: hsl(214 73% 22%);
-  --color-primary-foreground: hsl(0 0% 92%);
-  --color-accent: hsl(349 79% 59%);
-  --color-accent-foreground: hsl(0 0% 100%);
-  --color-danger: hsl(0 84% 60%);
+  --color-primary: hsl(220 45% 24%);
+  --color-primary-foreground: hsl(45 10% 93%);
+  --color-accent: hsl(38 92% 55%);
+  --color-accent-foreground: hsl(225 20% 11%);
+  --color-danger: hsl(0 72% 55%);
   --color-danger-foreground: hsl(0 0% 100%);
-  --color-success: hsl(160 60% 45%);
-  --color-ring: hsl(349 79% 59%);
-  --color-surface: hsl(219 44% 16%);
+  --color-success: hsl(158 55% 42%);
+  --color-ring: hsl(38 92% 55%);
+  --color-surface: hsl(225 18% 15%);
+  --color-accent-subtle: hsl(38 60% 25%);
+  --color-drawer-backdrop: hsl(225 20% 5% / 0.5);
 
   --radius-lg: 0.5rem;
   --radius-md: calc(0.5rem - 2px);
