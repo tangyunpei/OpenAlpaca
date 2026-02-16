@@ -1,16 +1,23 @@
 //! ChatService — Core chat logic decoupled from route handlers
 //!
 //! Orchestrates gateway calls, stream management, and message persistence.
+//! Simulates progressive token streaming by chunking the complete LLM response
+//! and emitting `Delta` events with a configurable delay.
 
-use crate::chat::stream_manager::{ChatStreamEvent, ChatStreamManager};
+use crate::bus::EventBus;
+use crate::chat::stream_manager::{ChatStreamManager, chunk_by_words};
+use crate::daemon_config::DaemonConfig;
+use crate::events::SystemEvent;
 use crate::gateway::{Gateway, GatewayRequest};
 use crate::security::policy::{Principal, Scope};
 use anyhow::Result;
+use arc_swap::ArcSwap;
+use chrono::Utc;
 use openalpaca_api::events::EventSource;
 use openalpaca_storage::{ConversationMessage, ConversationRepository, Database};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::info;
 
 /// Response returned after sending a chat message.
@@ -25,6 +32,8 @@ pub struct ChatService {
     gateway: Arc<Gateway>,
     stream_manager: Arc<ChatStreamManager>,
     db: Database,
+    bus: EventBus,
+    daemon_config: Arc<ArcSwap<DaemonConfig>>,
 }
 
 impl ChatService {
@@ -32,11 +41,15 @@ impl ChatService {
         gateway: Arc<Gateway>,
         stream_manager: Arc<ChatStreamManager>,
         db: Database,
+        bus: EventBus,
+        daemon_config: Arc<ArcSwap<DaemonConfig>>,
     ) -> Self {
         Self {
             gateway,
             stream_manager,
             db,
+            bus,
+            daemon_config,
         }
     }
 
@@ -44,13 +57,17 @@ impl ChatService {
     ///
     /// Returns immediately with a stream_id. The actual LLM call happens
     /// in a background task that sends events to the stream.
+    ///
+    /// Event sequence (client-visible):
+    /// 1. `Thinking` — emitted AFTER 100ms sleep so the client has time to subscribe
+    /// 2. `Delta { content }` × N — word-chunked pieces of the full response
+    /// 3. `Done { content, model, tokens_in, tokens_out, duration_ms }` — full text + metadata
+    ///
+    /// On error: `Thinking` → `Error { message }`.
     pub fn send_message(&self, content: String, principal: &str) -> Result<ChatSendResponse> {
         let lane_key = format!("{principal}:gui");
 
-        let (stream_id, _rx) = self.stream_manager.create_stream(&lane_key);
-
-        // Emit Thinking event
-        let _ = self.stream_manager.send(&stream_id, ChatStreamEvent::Thinking);
+        let (stream_id, _rx, sink) = self.stream_manager.create_stream(&lane_key);
 
         // Spawn background task for the actual gateway call
         let gateway = self.gateway.clone();
@@ -58,10 +75,16 @@ impl ChatService {
         let sid = stream_id.clone();
         let user_content = content.clone();
         let principal_owned = principal.to_string();
+        let bus = self.bus.clone();
+        let daemon_config = self.daemon_config.clone();
+        let lk = lane_key.clone();
 
         tokio::spawn(async move {
             // Give browser time to connect to SSE endpoint
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Emit Thinking AFTER sleep — client has subscribed by now
+            sink.send_thinking();
 
             let start = Instant::now();
 
@@ -81,32 +104,42 @@ impl ChatService {
             // Note: Message persistence is now handled by Gateway (GatewayPersistence).
             // ChatService only manages the SSE stream events.
 
-            let is_error = response.content.starts_with("Error:");
-
-            if is_error {
-                let _ = stream_manager.send(
-                    &sid,
-                    ChatStreamEvent::Error {
-                        message: response.content,
-                    },
-                );
+            if response.is_error {
+                sink.send_error(&response.content);
             } else {
-                let _ = stream_manager.send(
-                    &sid,
-                    ChatStreamEvent::Done {
-                        content: response.content,
-                        model: "default".to_string(),
-                        tokens_in: 0,
-                        tokens_out: 0,
-                        duration_ms,
-                    },
-                );
+                // Emit delta chunks (simulated progressive streaming)
+                let cfg = daemon_config.load();
+                let delay_ms = cfg.server.chat_streams.stream_chunk_delay_ms;
+                let chunk_words = cfg.server.chat_streams.stream_chunk_words;
+
+                let chunks = chunk_by_words(&response.content, chunk_words);
+                for chunk in &chunks {
+                    sink.send_delta(chunk);
+                    if delay_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    }
+                }
+
+                // Send Done with real metadata
+                let model = response.model.as_deref().unwrap_or("default");
+                let tokens_in = response.tokens_in.unwrap_or(0) as u64;
+                let tokens_out = response.tokens_out.unwrap_or(0) as u64;
+                sink.send_done(&response.content, model, tokens_in, tokens_out, duration_ms);
             }
+
+            // Emit ChatStreamEnded event
+            let status = if response.is_error { "error" } else { "completed" };
+            let _ = bus.publish(SystemEvent::ChatStreamEnded {
+                stream_id: sid.clone(),
+                lane_key: lk,
+                status: status.to_string(),
+                timestamp: Utc::now(),
+            });
 
             info!("Chat stream {sid} completed in {duration_ms}ms");
 
             // Delay removal to allow late SSE subscribers
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
             stream_manager.remove(&sid);
         });
 

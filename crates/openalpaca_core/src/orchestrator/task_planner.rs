@@ -8,25 +8,26 @@ use crate::agent::subagent::SubAgent;
 use openalpaca_llm::{ChatMessage, LlmRouter, RequestContext, RouterRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Duration;
+
+/// Maximum number of recent history messages to include in planning prompts.
+const PLANNING_HISTORY_LIMIT: usize = 6;
+/// Maximum character length for session summary in planning prompts.
+const PLANNING_SUMMARY_MAX_CHARS: usize = 500;
 
 // ── DAG types ────────────────────────────────────────────────────────
 
 /// Status of a node in the task DAG.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DagNodeStatus {
+    #[default]
     Pending,
     Ready,
     Running,
     Completed,
     Failed,
     Skipped,
-}
-
-impl Default for DagNodeStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 /// A node in the task DAG — represents one sub-task.
@@ -54,6 +55,46 @@ pub struct TaskDag {
 }
 
 impl TaskDag {
+    /// Run Kahn's algorithm on the DAG.
+    /// Returns `(visited_count, topological_order)`.
+    fn run_kahns(&self) -> (usize, Vec<String>) {
+        let mut in_degree: HashMap<&str, usize> = HashMap::new();
+        let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+        for node in &self.nodes {
+            in_degree.entry(node.node_id.as_str()).or_insert(0);
+            adj.entry(node.node_id.as_str()).or_default();
+            for dep in &node.depends_on {
+                *in_degree.entry(node.node_id.as_str()).or_insert(0) += 1;
+                adj.entry(dep.as_str())
+                    .or_default()
+                    .push(node.node_id.as_str());
+            }
+        }
+
+        let mut queue: VecDeque<&str> = in_degree
+            .iter()
+            .filter(|&(_, &deg)| deg == 0)
+            .map(|(&id, _)| id)
+            .collect();
+        let mut order = Vec::new();
+
+        while let Some(id) = queue.pop_front() {
+            order.push(id.to_string());
+            if let Some(neighbors) = adj.get(id) {
+                for &neighbor in neighbors {
+                    if let Some(deg) = in_degree.get_mut(neighbor) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push_back(neighbor);
+                        }
+                    }
+                }
+            }
+        }
+
+        (order.len(), order)
+    }
+
     /// Validate the DAG: no cycles, all dependencies exist, all agents available.
     pub fn validate(&self, available_agents: &[SubAgent]) -> Result<(), String> {
         let node_ids: HashSet<&str> = self.nodes.iter().map(|n| n.node_id.as_str()).collect();
@@ -88,39 +129,8 @@ impl TaskDag {
             }
         }
 
-        // Cycle detection via topological sort (Kahn's algorithm)
-        let mut in_degree: HashMap<&str, usize> = HashMap::new();
-        let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
-        for node in &self.nodes {
-            in_degree.entry(node.node_id.as_str()).or_insert(0);
-            adj.entry(node.node_id.as_str()).or_default();
-            for dep in &node.depends_on {
-                *in_degree.entry(node.node_id.as_str()).or_insert(0) += 1;
-                adj.entry(dep.as_str()).or_default().push(node.node_id.as_str());
-            }
-        }
-
-        let mut queue: VecDeque<&str> = in_degree
-            .iter()
-            .filter(|&(_, &deg)| deg == 0)
-            .map(|(&id, _)| id)
-            .collect();
-        let mut visited = 0usize;
-
-        while let Some(id) = queue.pop_front() {
-            visited += 1;
-            if let Some(neighbors) = adj.get(id) {
-                for &neighbor in neighbors {
-                    if let Some(deg) = in_degree.get_mut(neighbor) {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            queue.push_back(neighbor);
-                        }
-                    }
-                }
-            }
-        }
-
+        // Cycle detection via Kahn's algorithm
+        let (visited, _) = self.run_kahns();
         if visited != self.nodes.len() {
             return Err("DAG contains a cycle".to_string());
         }
@@ -169,22 +179,31 @@ impl TaskDag {
         self.skip_dependents(node_id);
     }
 
-    /// Recursively skip nodes that depend on a failed node.
+    /// Iteratively skip nodes that depend (transitively) on a failed node.
     fn skip_dependents(&mut self, failed_id: &str) {
-        let dependents: Vec<String> = self
-            .nodes
-            .iter()
-            .filter(|n| n.depends_on.contains(&failed_id.to_string()))
-            .map(|n| n.node_id.clone())
-            .collect();
+        let mut queue = VecDeque::new();
+        let mut visited = HashSet::new();
+        queue.push_back(failed_id.to_string());
+        visited.insert(failed_id.to_string());
 
-        for dep_id in &dependents {
-            if let Some(node) = self.nodes.iter_mut().find(|n| n.node_id == *dep_id) {
-                if matches!(node.status, DagNodeStatus::Pending | DagNodeStatus::Ready) {
-                    node.status = DagNodeStatus::Skipped;
+        while let Some(current_id) = queue.pop_front() {
+            let dependents: Vec<String> = self
+                .nodes
+                .iter()
+                .filter(|n| n.depends_on.contains(&current_id))
+                .map(|n| n.node_id.clone())
+                .collect();
+
+            for dep_id in dependents {
+                if visited.insert(dep_id.clone()) {
+                    if let Some(node) = self.nodes.iter_mut().find(|n| n.node_id == dep_id)
+                        && matches!(node.status, DagNodeStatus::Pending | DagNodeStatus::Ready)
+                    {
+                        node.status = DagNodeStatus::Skipped;
+                    }
+                    queue.push_back(dep_id);
                 }
             }
-            self.skip_dependents(dep_id);
         }
     }
 
@@ -200,38 +219,7 @@ impl TaskDag {
 
     /// Topological sort — returns node_ids in valid execution order.
     pub fn topological_order(&self) -> Vec<String> {
-        let mut in_degree: HashMap<&str, usize> = HashMap::new();
-        let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
-        for node in &self.nodes {
-            in_degree.entry(node.node_id.as_str()).or_insert(0);
-            adj.entry(node.node_id.as_str()).or_default();
-            for dep in &node.depends_on {
-                *in_degree.entry(node.node_id.as_str()).or_insert(0) += 1;
-                adj.entry(dep.as_str()).or_default().push(node.node_id.as_str());
-            }
-        }
-
-        let mut queue: VecDeque<&str> = in_degree
-            .iter()
-            .filter(|&(_, &deg)| deg == 0)
-            .map(|(&id, _)| id)
-            .collect();
-        let mut order = Vec::new();
-
-        while let Some(id) = queue.pop_front() {
-            order.push(id.to_string());
-            if let Some(neighbors) = adj.get(id) {
-                for &neighbor in neighbors {
-                    if let Some(deg) = in_degree.get_mut(neighbor) {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            queue.push_back(neighbor);
-                        }
-                    }
-                }
-            }
-        }
-
+        let (_, order) = self.run_kahns();
         order
     }
 
@@ -263,40 +251,7 @@ impl TaskDag {
         }
 
         // Cycle detection via Kahn's algorithm
-        let mut in_degree: HashMap<&str, usize> = HashMap::new();
-        let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
-        for node in &self.nodes {
-            in_degree.entry(node.node_id.as_str()).or_insert(0);
-            adj.entry(node.node_id.as_str()).or_default();
-            for dep in &node.depends_on {
-                *in_degree.entry(node.node_id.as_str()).or_insert(0) += 1;
-                adj.entry(dep.as_str())
-                    .or_default()
-                    .push(node.node_id.as_str());
-            }
-        }
-
-        let mut queue: VecDeque<&str> = in_degree
-            .iter()
-            .filter(|&(_, &deg)| deg == 0)
-            .map(|(&id, _)| id)
-            .collect();
-        let mut visited = 0usize;
-
-        while let Some(id) = queue.pop_front() {
-            visited += 1;
-            if let Some(neighbors) = adj.get(id) {
-                for &neighbor in neighbors {
-                    if let Some(deg) = in_degree.get_mut(neighbor) {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            queue.push_back(neighbor);
-                        }
-                    }
-                }
-            }
-        }
-
+        let (visited, _) = self.run_kahns();
         if visited != self.nodes.len() {
             return Err("DAG contains a cycle".to_string());
         }
@@ -344,6 +299,8 @@ pub struct PlannedAssignment {
 pub enum PlanError {
     MalformedResponse(String),
     LlmError(String),
+    /// The LLM call did not complete within the configured timeout.
+    Timeout(u64),
 }
 
 impl std::fmt::Display for PlanError {
@@ -351,14 +308,245 @@ impl std::fmt::Display for PlanError {
         match self {
             PlanError::MalformedResponse(msg) => write!(f, "Malformed response: {}", msg),
             PlanError::LlmError(msg) => write!(f, "LLM error: {}", msg),
+            PlanError::Timeout(secs) => write!(f, "Planning timed out after {}s", secs),
         }
     }
+}
+
+// ── JSON extraction ─────────────────────────────────────────────────
+
+/// Extract a JSON block from LLM output that may contain surrounding prose.
+///
+/// Handles (in order):
+/// 1. Markdown ` ```json ... ``` ` fences
+/// 2. Markdown ` ``` ... ``` ` fences
+/// 3. Brace-matching fallback: outermost `{ ... }` respecting string literals
+/// 4. Returns trimmed input unchanged if nothing matches
+pub(crate) fn extract_json_block(content: &str) -> &str {
+    let trimmed = content.trim();
+
+    // Try ```json ... ``` first
+    if let Some(start) = trimmed.find("```json") {
+        let after_fence = &trimmed[start + 7..];
+        if let Some(end) = after_fence.find("```") {
+            return after_fence[..end].trim();
+        }
+    }
+
+    // Try ``` ... ```
+    if let Some(start) = trimmed.find("```") {
+        let after_fence = &trimmed[start + 3..];
+        if let Some(end) = after_fence.find("```") {
+            return after_fence[..end].trim();
+        }
+    }
+
+    // Brace-matching fallback: find outermost { ... }
+    if let Some(json_slice) = find_outermost_braces(trimmed) {
+        return json_slice;
+    }
+
+    trimmed
+}
+
+/// Find the outermost `{ ... }` in the string, respecting JSON string literals.
+/// Returns the slice from the first `{` to the matching `}` (inclusive).
+fn find_outermost_braces(s: &str) -> Option<&str> {
+    let bytes = s.as_bytes();
+    let mut start = None;
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for (i, &b) in bytes.iter().enumerate() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+        if in_string {
+            if b == b'\\' {
+                escape_next = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => {
+                if depth == 0 {
+                    start = Some(i);
+                }
+                depth += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                if depth == 0
+                    && let Some(s_idx) = start
+                {
+                    return Some(&s[s_idx..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+// ── Planning helpers ─────────────────────────────────────────────────
+
+/// Render the "## Available Agents" prompt section into `out`.
+fn format_agent_list(out: &mut String, agents: &[SubAgent]) {
+    out.push_str("## Available Agents\n");
+    if agents.is_empty() {
+        out.push_str("No agents are currently available.\n");
+    } else {
+        for agent in agents {
+            let desc = agent.description.as_deref().unwrap_or("No description");
+            let skills_str: Vec<String> = agent
+                .skills
+                .iter()
+                .map(|s| format!("{} ({:.1})", s.name, s.proficiency))
+                .collect();
+            out.push_str(&format!(
+                "- ID: \"{}\", Name: \"{}\", Description: \"{}\", Skills: {}\n",
+                agent.id,
+                agent.name,
+                desc,
+                if skills_str.is_empty() {
+                    "none".to_string()
+                } else {
+                    skills_str.join(", ")
+                }
+            ));
+        }
+    }
+}
+
+/// Build the message list for a planning LLM call.
+///
+/// Constructs: `[system_prompt, optional summary, optional active_tasks, history_tail…, user_message]`
+fn build_messages(
+    system_prompt: &str,
+    user_message: &str,
+    history: &[ChatMessage],
+    session_summary: Option<&str>,
+    active_tasks_block: Option<&str>,
+) -> Vec<ChatMessage> {
+    let history_tail = if history.len() > PLANNING_HISTORY_LIMIT {
+        &history[history.len() - PLANNING_HISTORY_LIMIT..]
+    } else {
+        history
+    };
+    let mut messages = Vec::with_capacity(4 + history_tail.len());
+    messages.push(ChatMessage::system(system_prompt));
+
+    if let Some(summary) = session_summary {
+        let capped: String = summary.chars().take(PLANNING_SUMMARY_MAX_CHARS).collect();
+        messages.push(ChatMessage::system(&format!(
+            "### SESSION SUMMARY ###\n{}",
+            capped
+        )));
+    }
+
+    if let Some(tasks_block) = active_tasks_block {
+        messages.push(ChatMessage::system(tasks_block));
+    }
+
+    messages.extend_from_slice(history_tail);
+    messages.push(ChatMessage::user(user_message));
+    messages
+}
+
+/// Internal planning mode — captures the differences between flat and hierarchical.
+enum PlanMode<'a> {
+    Flat,
+    Hierarchical { idle_agents: &'a [SubAgent] },
+}
+
+/// Shared retry loop for both flat and hierarchical planning.
+///
+/// Builds a `RouterRequest` per attempt, calls the router with a timeout,
+/// parses the response, and optionally validates the DAG (hierarchical only).
+async fn plan_inner(
+    router: &LlmRouter,
+    messages: Vec<ChatMessage>,
+    limits: PlannerLimits,
+    mode: PlanMode<'_>,
+) -> Result<TaskPlan, PlanError> {
+    let (max_tokens, log_prefix) = match &mode {
+        PlanMode::Flat => (512u32, "Plan"),
+        PlanMode::Hierarchical { .. } => (2048u32, "Hierarchical plan"),
+    };
+
+    let mut last_error = PlanError::MalformedResponse("no attempts made".to_string());
+    let deadline = Duration::from_secs(limits.timeout_secs);
+
+    for attempt in 0..=limits.max_retries {
+        let request = RouterRequest {
+            model: None,
+            messages: messages.clone(),
+            tools: vec![],
+            temperature: Some(0.0),
+            max_tokens: Some(max_tokens),
+            context: RequestContext::default(),
+        };
+
+        let response = tokio::time::timeout(deadline, router.complete(request))
+            .await
+            .map_err(|_| PlanError::Timeout(limits.timeout_secs))?
+            .map_err(|e| PlanError::LlmError(e.to_string()))?;
+
+        match TaskPlanner::parse_response(&response.content) {
+            Ok(plan) => {
+                if let PlanMode::Hierarchical { idle_agents } = &mode
+                    && let Some(ref dag) = plan.dag
+                    && let Err(e) = dag.validate(idle_agents)
+                {
+                    tracing::warn!(
+                        "DAG validation failed: {e}, falling back to flat assignments"
+                    );
+                    return Ok(TaskPlan {
+                        dag: None,
+                        ..plan
+                    });
+                }
+                return Ok(plan);
+            }
+            Err(PlanError::MalformedResponse(msg)) => {
+                tracing::warn!(
+                    "{log_prefix} attempt {}/{} returned malformed response: {msg}",
+                    attempt + 1,
+                    limits.max_retries + 1,
+                );
+                last_error = PlanError::MalformedResponse(msg);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(last_error)
+}
+
+// ── Planner ─────────────────────────────────────────────────────────
+
+/// Runtime limits for a planning call (timeout + retry budget).
+///
+/// Constructed from `PlannerConfig` in the daemon configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct PlannerLimits {
+    pub timeout_secs: u64,
+    pub max_retries: usize,
 }
 
 pub struct TaskPlanner;
 
 impl TaskPlanner {
     /// Call the LLM to classify a user message and optionally assign agents.
+    ///
+    /// Retries up to `limits.max_retries` times on malformed responses before
+    /// propagating the error. LLM transport and timeout errors are returned
+    /// immediately without retrying.
     pub async fn plan(
         router: &LlmRouter,
         user_message: &str,
@@ -366,52 +554,25 @@ impl TaskPlanner {
         history: &[ChatMessage],
         session_summary: Option<&str>,
         active_tasks_block: Option<&str>,
+        limits: PlannerLimits,
     ) -> Result<TaskPlan, PlanError> {
         let system_prompt = Self::build_system_prompt(idle_agents);
-
-        let history_tail = if history.len() > 12 {
-            &history[history.len() - 12..]
-        } else {
-            history
-        };
-        let mut messages = Vec::with_capacity(4 + history_tail.len());
-        messages.push(ChatMessage::system(&system_prompt));
-
-        // Inject summary before history
-        if let Some(summary) = session_summary {
-            messages.push(ChatMessage::system(&format!(
-                "### SESSION SUMMARY ###\n{}",
-                summary
-            )));
-        }
-
-        // Inject active tasks block
-        if let Some(tasks_block) = active_tasks_block {
-            messages.push(ChatMessage::system(tasks_block));
-        }
-
-        messages.extend_from_slice(history_tail);
-        messages.push(ChatMessage::user(user_message));
-
-        let request = RouterRequest {
-            model: None,
-            messages,
-            tools: vec![],
-            temperature: Some(0.0),
-            max_tokens: Some(1024),
-            context: RequestContext::default(),
-        };
-
-        let response = router
-            .complete(request)
-            .await
-            .map_err(|e| PlanError::LlmError(e.to_string()))?;
-
-        Self::parse_response(&response.content)
+        let messages = build_messages(
+            &system_prompt,
+            user_message,
+            history,
+            session_summary,
+            active_tasks_block,
+        );
+        plan_inner(router, messages, limits, PlanMode::Flat).await
     }
 
     /// Hierarchical planning: decompose a complex task into a DAG of sub-tasks.
     /// Falls back to flat assignment if DAG planning fails or returns simple_query.
+    ///
+    /// Retries up to `limits.max_retries` times on malformed responses. DAG validation
+    /// failures do NOT trigger retries — the plan is returned with `dag: None`
+    /// (existing fallback behaviour). Timeout and LLM errors are returned immediately.
     pub async fn plan_hierarchical(
         router: &LlmRouter,
         user_message: &str,
@@ -419,59 +580,17 @@ impl TaskPlanner {
         history: &[ChatMessage],
         session_summary: Option<&str>,
         active_tasks_block: Option<&str>,
+        limits: PlannerLimits,
     ) -> Result<TaskPlan, PlanError> {
         let system_prompt = Self::build_hierarchical_prompt(idle_agents);
-
-        let history_tail = if history.len() > 12 {
-            &history[history.len() - 12..]
-        } else {
-            history
-        };
-        let mut messages = Vec::with_capacity(4 + history_tail.len());
-        messages.push(ChatMessage::system(&system_prompt));
-
-        if let Some(summary) = session_summary {
-            messages.push(ChatMessage::system(&format!(
-                "### SESSION SUMMARY ###\n{}",
-                summary
-            )));
-        }
-
-        if let Some(tasks_block) = active_tasks_block {
-            messages.push(ChatMessage::system(tasks_block));
-        }
-
-        messages.extend_from_slice(history_tail);
-        messages.push(ChatMessage::user(user_message));
-
-        let request = RouterRequest {
-            model: None,
-            messages,
-            tools: vec![],
-            temperature: Some(0.0),
-            max_tokens: Some(2048),
-            context: RequestContext::default(),
-        };
-
-        let response = router
-            .complete(request)
-            .await
-            .map_err(|e| PlanError::LlmError(e.to_string()))?;
-
-        let plan = Self::parse_response(&response.content)?;
-
-        // Validate DAG if present
-        if let Some(ref dag) = plan.dag {
-            if let Err(e) = dag.validate(idle_agents) {
-                tracing::warn!("DAG validation failed: {e}, falling back to flat assignments");
-                return Ok(TaskPlan {
-                    dag: None,
-                    ..plan
-                });
-            }
-        }
-
-        Ok(plan)
+        let messages = build_messages(
+            &system_prompt,
+            user_message,
+            history,
+            session_summary,
+            active_tasks_block,
+        );
+        plan_inner(router, messages, limits, PlanMode::Hierarchical { idle_agents }).await
     }
 
     /// Build the hierarchical planning prompt with DAG support.
@@ -481,30 +600,7 @@ impl TaskPlanner {
              for complex tasks, decompose into a DAG of sub-tasks.\n\n",
         );
 
-        prompt.push_str("## Available Agents\n");
-        if idle_agents.is_empty() {
-            prompt.push_str("No agents are currently available.\n");
-        } else {
-            for agent in idle_agents {
-                let desc = agent.description.as_deref().unwrap_or("No description");
-                let skills_str: Vec<String> = agent
-                    .skills
-                    .iter()
-                    .map(|s| format!("{} ({:.1})", s.name, s.proficiency))
-                    .collect();
-                prompt.push_str(&format!(
-                    "- ID: \"{}\", Name: \"{}\", Description: \"{}\", Skills: {}\n",
-                    agent.id,
-                    agent.name,
-                    desc,
-                    if skills_str.is_empty() {
-                        "none".to_string()
-                    } else {
-                        skills_str.join(", ")
-                    }
-                ));
-            }
-        }
+        format_agent_list(&mut prompt, idle_agents);
 
         prompt.push_str(
             r#"
@@ -524,15 +620,24 @@ For complex tasks that are dynamic, exploratory, or require adaptive decompositi
 {"classification": "complex_task", "title": "...", "assignments": [], "reasoning": "...", "dag": null, "use_lead_agent": true}
 
 ## When to use `use_lead_agent: true`
-- The task requires exploring options and adjusting strategy based on intermediate results
-- The number and nature of sub-tasks cannot be determined upfront
-- The task needs iterative refinement (e.g., research → evaluate → dig deeper)
-- Results from one step significantly change what steps come next
+Use the lead agent when the task is open-ended or adaptive:
+- **Research & analysis**: "Find the best approach for X" — requires evaluating options
+- **Debugging**: "Fix the failing tests" — requires iterating until resolved
+- **Creative exploration**: "Design a logo concept" — requires back-and-forth refinement
+- The number of sub-tasks cannot be determined before starting
+- Results from one step change what steps come next
 
 ## When to use a DAG (`dag` with nodes, `use_lead_agent: false`)
-- The task has clear, predictable structure (e.g., "translate into 5 languages")
-- All sub-tasks and their dependencies are known upfront
-- Steps can be defined without seeing intermediate results
+Use a DAG when all steps are known upfront:
+- **Translation**: "Translate this into 5 languages" — each language is a known, independent node
+- **Pipeline**: "Read file X, then summarize it, then email the summary" — fixed sequence
+- **Batch processing**: "Run these 3 analyses on the dataset" — parallel independent tasks
+- All sub-tasks and their dependencies can be enumerated now
+- No step's output changes what steps exist
+
+## Grey area — default to lead agent
+If unsure whether the task is predictable or exploratory, prefer `use_lead_agent: true`.
+A lead agent can always execute a simple plan, but a DAG cannot adapt if the plan is wrong.
 
 ## DAG Rules
 - Each node is a sub-task assigned to one agent
@@ -557,33 +662,7 @@ For complex tasks that are dynamic, exploratory, or require adaptive decompositi
             "You are a task router for OpenAlpaca. Classify the user message and, if it requires work, assign agents.\n\n",
         );
 
-        prompt.push_str("## Available Agents\n");
-        if idle_agents.is_empty() {
-            prompt.push_str("No agents are currently available.\n");
-        } else {
-            for agent in idle_agents {
-                let desc = agent
-                    .description
-                    .as_deref()
-                    .unwrap_or("No description");
-                let skills_str: Vec<String> = agent
-                    .skills
-                    .iter()
-                    .map(|s| format!("{} ({:.1})", s.name, s.proficiency))
-                    .collect();
-                prompt.push_str(&format!(
-                    "- ID: \"{}\", Name: \"{}\", Description: \"{}\", Skills: {}\n",
-                    agent.id,
-                    agent.name,
-                    desc,
-                    if skills_str.is_empty() {
-                        "none".to_string()
-                    } else {
-                        skills_str.join(", ")
-                    }
-                ));
-            }
-        }
+        format_agent_list(&mut prompt, idle_agents);
 
         prompt.push_str(
             r#"
@@ -619,22 +698,23 @@ Complex task example:
         let json_str = Self::extract_json(content);
 
         // Primary: direct parse
-        if let Ok(plan) = serde_json::from_str::<TaskPlan>(json_str) {
-            return Ok(plan);
-        }
-
-        // Fallback: LLM may have wrapped the plan in a parent object (e.g. {"available_agents": ..., "classification": ...})
-        // Try extracting known fields from a loose Value
-        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(json_str) {
+        let plan = if let Ok(plan) = serde_json::from_str::<TaskPlan>(json_str) {
+            plan
+        } else if let Ok(obj) = serde_json::from_str::<serde_json::Value>(json_str) {
+            // Fallback: LLM may have wrapped the plan in a parent object
+            // (e.g. {"available_agents": ..., "classification": ...})
             if let Some(classification) = obj.get("classification").and_then(|v| v.as_str()) {
-                return Ok(TaskPlan {
+                TaskPlan {
                     classification: classification.to_string(),
                     title: obj.get("title").and_then(|v| v.as_str()).map(String::from),
                     assignments: obj
                         .get("assignments")
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default(),
-                    reasoning: obj.get("reasoning").and_then(|v| v.as_str()).map(String::from),
+                    reasoning: obj
+                        .get("reasoning")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
                     dag: obj
                         .get("dag")
                         .and_then(|v| serde_json::from_value(v.clone()).ok()),
@@ -642,37 +722,40 @@ Complex task example:
                         .get("use_lead_agent")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false),
-                });
+                }
+            } else {
+                return Err(PlanError::MalformedResponse(format!(
+                    "Failed to parse JSON: missing field `classification` (input: {})",
+                    &content.chars().take(200).collect::<String>()
+                )));
             }
+        } else {
+            return Err(PlanError::MalformedResponse(format!(
+                "Failed to parse JSON: missing field `classification` (input: {})",
+                &content.chars().take(200).collect::<String>()
+            )));
+        };
+
+        // Warn about potentially mis-routed complex tasks
+        if plan.classification == "complex_task"
+            && plan.assignments.is_empty()
+            && plan.dag.is_none()
+            && !plan.use_lead_agent
+        {
+            tracing::warn!(
+                "LLM planner returned complex_task with no assignments, no DAG, \
+                 and use_lead_agent=false — task may be mis-routed. Reasoning: {:?}",
+                plan.reasoning
+            );
         }
 
-        Err(PlanError::MalformedResponse(format!(
-            "Failed to parse JSON: missing field `classification` (input: {})",
-            &content.chars().take(200).collect::<String>()
-        )))
+        Ok(plan)
     }
 
-    /// Extract JSON from a response that may be wrapped in markdown code fences.
+    /// Extract JSON from a response that may be wrapped in markdown code fences
+    /// or surrounded by prose.
     fn extract_json(content: &str) -> &str {
-        let trimmed = content.trim();
-
-        // Try ```json ... ``` first
-        if let Some(start) = trimmed.find("```json") {
-            let after_fence = &trimmed[start + 7..];
-            if let Some(end) = after_fence.find("```") {
-                return after_fence[..end].trim();
-            }
-        }
-
-        // Try ``` ... ```
-        if let Some(start) = trimmed.find("```") {
-            let after_fence = &trimmed[start + 3..];
-            if let Some(end) = after_fence.find("```") {
-                return after_fence[..end].trim();
-            }
-        }
-
-        trimmed
+        extract_json_block(content)
     }
 }
 
@@ -798,6 +881,35 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_json_prose_around_braces() {
+        let input = "Here is my analysis:\n{\"classification\": \"simple_query\", \"title\": null, \"assignments\": [], \"reasoning\": \"test\"}\nHope that helps!";
+        let plan = TaskPlanner::parse_response(input).unwrap();
+        assert_eq!(plan.classification, "simple_query");
+    }
+
+    #[test]
+    fn test_extract_json_braces_with_strings_containing_braces() {
+        let input = r#"Sure! {"classification": "simple_query", "title": null, "assignments": [], "reasoning": "The user said {hello}"}"#;
+        let plan = TaskPlanner::parse_response(input).unwrap();
+        assert_eq!(plan.classification, "simple_query");
+        assert!(plan.reasoning.unwrap().contains("{hello}"));
+    }
+
+    #[test]
+    fn test_extract_json_no_json_at_all() {
+        let result = TaskPlanner::parse_response("No JSON here whatsoever.");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_find_outermost_braces_escaped_quotes() {
+        let input = r#"text {"key": "val with \"escaped\" quotes"} trailing"#;
+        let extracted = extract_json_block(input);
+        assert!(extracted.starts_with('{'));
+        assert!(extracted.ends_with('}'));
+    }
+
+    #[test]
     fn test_parse_response_with_extra_fields() {
         // LLM sometimes echoes back agent info alongside the classification
         let json = r#"{
@@ -823,6 +935,35 @@ mod tests {
             }
             _ => panic!("Expected MalformedResponse"),
         }
+    }
+
+    #[test]
+    fn test_complex_task_empty_parses_ok() {
+        // Verifies parse succeeds even with empty assignments/dag/lead_agent
+        // (the tracing::warn is emitted but not assertable without subscriber)
+        let json = r#"{
+            "classification": "complex_task",
+            "title": "Do something",
+            "assignments": [],
+            "reasoning": "test"
+        }"#;
+        let plan = TaskPlanner::parse_response(json).unwrap();
+        assert_eq!(plan.classification, "complex_task");
+        assert!(!plan.use_lead_agent);
+        assert!(plan.dag.is_none());
+        assert!(plan.assignments.is_empty());
+    }
+
+    #[test]
+    fn test_parse_response_malformed_returns_correct_error_variant() {
+        let result = TaskPlanner::parse_response("garbage text");
+        assert!(matches!(result, Err(PlanError::MalformedResponse(_))));
+    }
+
+    #[test]
+    fn test_parse_response_valid_json_missing_classification_is_malformed() {
+        let result = TaskPlanner::parse_response(r#"{"foo": "bar"}"#);
+        assert!(matches!(result, Err(PlanError::MalformedResponse(_))));
     }
 
     // ── DAG tests ─────────────────────────────────────────────────────
@@ -992,6 +1133,38 @@ mod tests {
     }
 
     #[test]
+    fn test_skip_dependents_diamond_shape() {
+        // n1 -> n2, n1 -> n3, n2 -> n4, n3 -> n4
+        let mut dag = TaskDag {
+            nodes: vec![
+                make_dag_node("n1", "a1", &[]),
+                make_dag_node("n2", "a1", &["n1"]),
+                make_dag_node("n3", "a1", &["n1"]),
+                make_dag_node("n4", "a1", &["n2", "n3"]),
+            ],
+        };
+        dag.fail_node("n1", "error");
+        assert_eq!(dag.nodes[0].status, DagNodeStatus::Failed);
+        assert_eq!(dag.nodes[1].status, DagNodeStatus::Skipped);
+        assert_eq!(dag.nodes[2].status, DagNodeStatus::Skipped);
+        assert_eq!(dag.nodes[3].status, DagNodeStatus::Skipped);
+    }
+
+    #[test]
+    fn test_skip_dependents_does_not_skip_running_nodes() {
+        let mut dag = TaskDag {
+            nodes: vec![
+                make_dag_node("n1", "a1", &[]),
+                make_dag_node("n2", "a1", &["n1"]),
+            ],
+        };
+        dag.mark_running("n2");
+        dag.fail_node("n1", "error");
+        // n2 is Running, so it should NOT be skipped
+        assert_eq!(dag.nodes[1].status, DagNodeStatus::Running);
+    }
+
+    #[test]
     fn test_dag_is_finished() {
         let mut dag = TaskDag {
             nodes: vec![
@@ -1138,6 +1311,10 @@ mod tests {
         assert!(prompt.contains("DAG Rules"));
         assert!(prompt.contains("depends_on"));
         assert!(prompt.contains("workspace_keys"));
+        // Verify concrete examples are present
+        assert!(prompt.contains("Translation"));
+        assert!(prompt.contains("Debugging"));
+        assert!(prompt.contains("Grey area"));
     }
 
     #[test]
@@ -1268,5 +1445,25 @@ mod tests {
         }"#;
         let plan = TaskPlanner::parse_response(json).unwrap();
         assert!(plan.use_lead_agent);
+    }
+
+    // ── PlanError display tests ─────────────────────────────────
+
+    #[test]
+    fn test_plan_error_timeout_display() {
+        let err = PlanError::Timeout(30);
+        assert_eq!(err.to_string(), "Planning timed out after 30s");
+    }
+
+    #[test]
+    fn test_plan_error_llm_error_display() {
+        let err = PlanError::LlmError("connection refused".to_string());
+        assert_eq!(err.to_string(), "LLM error: connection refused");
+    }
+
+    #[test]
+    fn test_plan_error_malformed_display() {
+        let err = PlanError::MalformedResponse("bad json".to_string());
+        assert_eq!(err.to_string(), "Malformed response: bad json");
     }
 }

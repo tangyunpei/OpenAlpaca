@@ -238,6 +238,16 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["server", "chat_streams"],
         field: "stale_timeout_secs",
     },
+    TomlMapping {
+        schema_key: "daemon.server.stream_chunk_delay_ms",
+        section: &["server", "chat_streams"],
+        field: "stream_chunk_delay_ms",
+    },
+    TomlMapping {
+        schema_key: "daemon.server.stream_chunk_words",
+        section: &["server", "chat_streams"],
+        field: "stream_chunk_words",
+    },
     // Server: Embedding Indexer
     TomlMapping {
         schema_key: "daemon.server.embedding_poll_interval_secs",

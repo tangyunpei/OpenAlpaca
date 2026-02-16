@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use openalpaca_core::{
-    gateway::MessageHandler,
+    gateway::{HandleResult, MessageHandler},
     orchestrator::Orchestrator,
     security::policy::{Principal, Scope},
 };
@@ -28,9 +28,23 @@ impl MessageHandler for OrchestratorHandler {
         principal: Principal,
         scope: Scope,
         lane_key: String,
-    ) -> Result<String, String> {
-        self.orchestrator
+    ) -> Result<HandleResult, String> {
+        let result = self
+            .orchestrator
             .handle_message(request_id, source, content, principal, scope, lane_key)
-            .await
+            .await;
+
+        // Always drain metadata (even on error) to prevent unbounded map growth.
+        // Handlers may insert metadata before returning Err (e.g. LLM error with empty content).
+        let meta = self.orchestrator.llm_metadata_map.remove(&request_id).map(|(_, v)| v);
+
+        let content = result?;
+
+        Ok(HandleResult {
+            content,
+            model: meta.as_ref().map(|m| m.model.clone()),
+            tokens_in: meta.as_ref().map(|m| m.tokens_in),
+            tokens_out: meta.as_ref().map(|m| m.tokens_out),
+        })
     }
 }

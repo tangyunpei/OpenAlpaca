@@ -4,6 +4,10 @@ max_rounds = 15
 max_tool_runtime_secs = 60
 max_tools_per_round = 5
 
+# [execution.planner]
+# planning_timeout_secs = 30
+# max_retries = 2
+
 [execution.dag]
 max_concurrent_agents = 3
 max_replans = 3
@@ -57,6 +61,8 @@ wake_channel_capacity = 256
 [server.chat_streams]
 cleanup_interval_secs = 60
 stale_timeout_secs = 30
+stream_chunk_delay_ms = 30
+stream_chunk_words = 3
 
 [server.embedding_indexer]
 batch_size = 50

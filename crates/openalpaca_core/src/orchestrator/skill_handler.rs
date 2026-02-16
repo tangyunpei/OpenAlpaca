@@ -296,6 +296,13 @@ impl Orchestrator {
                 timestamp: Utc::now(),
             });
 
+            // Store LLM metadata for bridge to read (keyed by request_id for concurrency safety)
+            self.llm_metadata_map.insert(request_id, super::LlmMetadata {
+                model: actual_model.to_string(),
+                tokens_in: result.total_input_tokens,
+                tokens_out: result.total_output_tokens,
+            });
+
             if let LoopFinishReason::Error(ref err) = result.finish_reason {
                 if result.final_content.trim().is_empty() {
                     return Err(format!("LLM error: {}", err));
