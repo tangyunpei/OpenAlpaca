@@ -37,21 +37,24 @@ use crate::runner::LoopConfig;
 use crate::security::gate::SecurityGate;
 use crate::security::policy::Principal;
 use crate::tools::ToolRegistry;
+use dashmap::DashMap;
 use openalpaca_llm::{ChatMessage, LlmRouter, Role};
 use openalpaca_storage::{Database, Task};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
+use uuid::Uuid;
 
 use dispatcher::TaskDispatcher;
 use intent::IntentParser;
 
-/// Metadata from the last LLM call, stored by query/skill handlers and
+/// Metadata from an LLM call, stored by query/skill handlers and
 /// read by the bridge to propagate into `HandleResult`.
 ///
 /// This avoids threading metadata through all internal `Result<String, String>`
 /// return paths — the orchestrator keeps returning `Result<String, String>`
-/// internally, and metadata flows through this side-channel.
+/// internally, and metadata flows through this side-channel keyed by request_id
+/// to avoid races between concurrent requests.
 pub struct LlmMetadata {
     pub model: String,
     pub tokens_in: u32,
@@ -96,9 +99,10 @@ pub struct Orchestrator {
     pub daemon_config: Arc<ArcSwap<DaemonConfig>>,
     /// Atomic guard to prevent concurrent bootstrap completion (race condition fix).
     bootstrap_completing: AtomicBool,
-    /// Side-channel for LLM metadata from query/skill handlers → bridge.
-    /// Cleared before each call, populated after LLM response, read by bridge.
-    pub last_llm_metadata: Mutex<Option<LlmMetadata>>,
+    /// Per-request LLM metadata from query/skill handlers → bridge.
+    /// Keyed by request_id to avoid races between concurrent requests.
+    /// Populated after LLM response, removed by bridge after reading.
+    pub llm_metadata_map: DashMap<Uuid, LlmMetadata>,
 }
 
 /// Full conversation context for prompt building and summary update.
@@ -173,7 +177,7 @@ impl Orchestrator {
             bootstrap_path: RwLock::new(None),
             daemon_config,
             bootstrap_completing: AtomicBool::new(false),
-            last_llm_metadata: Mutex::new(None),
+            llm_metadata_map: DashMap::new(),
         }
     }
 

@@ -5,7 +5,7 @@
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -30,21 +30,31 @@ pub enum ChatStreamEvent {
 ///
 /// Created by `ChatStreamManager::create_stream()` and used by background tasks
 /// to emit Thinking/Delta/Done/Error events without needing a reference to the manager.
+/// Each send refreshes `last_active` so that `cleanup_stale()` won't GC active streams.
 #[derive(Clone)]
 pub struct StreamSink {
     stream_id: String,
     tx: broadcast::Sender<ChatStreamEvent>,
+    last_active: Arc<Mutex<Instant>>,
 }
 
 impl StreamSink {
+    /// Send an event and refresh the stream's last_active timestamp.
+    fn send_event(&self, event: ChatStreamEvent) {
+        let _ = self.tx.send(event);
+        if let Ok(mut la) = self.last_active.lock() {
+            *la = Instant::now();
+        }
+    }
+
     /// Send a Thinking event (call after client has subscribed).
     pub fn send_thinking(&self) {
-        let _ = self.tx.send(ChatStreamEvent::Thinking);
+        self.send_event(ChatStreamEvent::Thinking);
     }
 
     /// Send a delta chunk of the response.
     pub fn send_delta(&self, content: &str) {
-        let _ = self.tx.send(ChatStreamEvent::Delta {
+        self.send_event(ChatStreamEvent::Delta {
             content: content.to_string(),
         });
     }
@@ -58,7 +68,7 @@ impl StreamSink {
         tokens_out: u64,
         duration_ms: u64,
     ) {
-        let _ = self.tx.send(ChatStreamEvent::Done {
+        self.send_event(ChatStreamEvent::Done {
             content: content.to_string(),
             model: model.to_string(),
             tokens_in,
@@ -69,7 +79,7 @@ impl StreamSink {
 
     /// Send an error event.
     pub fn send_error(&self, message: &str) {
-        let _ = self.tx.send(ChatStreamEvent::Error {
+        self.send_event(ChatStreamEvent::Error {
             message: message.to_string(),
         });
     }
@@ -133,8 +143,10 @@ struct StreamEntry {
     tx: broadcast::Sender<ChatStreamEvent>,
     #[allow(dead_code)]
     created_at: Instant,
-    /// Updated on every send(); used by cleanup_stale() to avoid GC'ing active streams.
-    last_active: Mutex<Instant>,
+    /// Updated on every send (via StreamSink or ChatStreamManager::send());
+    /// used by cleanup_stale() to avoid GC'ing active streams.
+    /// Shared with StreamSink via Arc so sink sends also refresh it.
+    last_active: Arc<Mutex<Instant>>,
     #[allow(dead_code)]
     lane_key: String,
 }
@@ -159,16 +171,18 @@ impl ChatStreamManager {
         let stream_id = Uuid::new_v4().to_string();
         let now = Instant::now();
         let (tx, rx) = broadcast::channel(128);
+        let last_active = Arc::new(Mutex::new(now));
         let sink = StreamSink {
             stream_id: stream_id.clone(),
             tx: tx.clone(),
+            last_active: last_active.clone(),
         };
         self.streams.insert(
             stream_id.clone(),
             StreamEntry {
                 tx,
                 created_at: now,
-                last_active: Mutex::new(now),
+                last_active,
                 lane_key: lane_key.to_string(),
             },
         );
@@ -321,6 +335,19 @@ mod tests {
 
         // Even with very short max_age based on created_at, the stream should survive
         // because last_active was refreshed
+        mgr.cleanup_stale(Duration::from_secs(3600));
+        assert!(mgr.get_receiver(&stream_id).is_some());
+    }
+
+    #[test]
+    fn test_sink_refreshes_last_active() {
+        let mgr = ChatStreamManager::new();
+        let (stream_id, _rx, sink) = mgr.create_stream("user:gui");
+
+        // Send via sink (not manager) — should still refresh last_active
+        sink.send_delta("hello");
+
+        // Stream should survive cleanup because sink sends refresh last_active
         mgr.cleanup_stale(Duration::from_secs(3600));
         assert!(mgr.get_receiver(&stream_id).is_some());
     }
