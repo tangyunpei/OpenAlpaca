@@ -2,10 +2,12 @@ use super::*;
 use crate::agent::subagent::{
     AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent,
 };
+use crate::agent::template::{AgentTemplate, AgentTemplateFrontmatter};
 use crate::events::SystemEvent;
 use crate::security::policy::{Principal, Scope};
 use crate::security::sandbox::SandboxManager;
 use crate::tools::{RegistryToolExecutor, ToolRegistry};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 fn make_tool_registry() -> Arc<ToolRegistry> {
@@ -43,8 +45,9 @@ fn make_orchestrator() -> Orchestrator {
 
 fn make_orchestrator_with_agents(agents: Vec<SubAgent>) -> Orchestrator {
     let ctx = Arc::new(SharedContext::new());
-    for a in agents {
-        ctx.agent_registry.register(a);
+    for a in &agents {
+        ctx.agent_registry.register_template(template_from_agent(a));
+        ctx.agent_registry.register(a.clone());
     }
     let lanes = Arc::new(LaneManager::new());
     let bus = EventBus::default();
@@ -85,6 +88,7 @@ fn test_update_system_persona_updates_active_snapshot() {
 fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
     SubAgent {
         id: id.to_string(),
+        template_id: id.to_string(),
         name: format!("Agent {}", id),
         description: Some(format!("{} agent", id)),
         icon: None,
@@ -101,6 +105,32 @@ fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
         preset: AgentPreset::default(),
         constraints: AgentConstraints::default(),
         llm_config: AgentLlmConfig::default(),
+    }
+}
+
+/// Create a minimal AgentTemplate from a SubAgent (for test setup).
+fn template_from_agent(agent: &SubAgent) -> AgentTemplate {
+    let is_lead = agent.skills.iter().any(|s| s.name == "lead_orchestration");
+    AgentTemplate {
+        frontmatter: AgentTemplateFrontmatter {
+            id: agent.template_id.clone(),
+            name: agent.name.clone(),
+            description: agent.description.clone().unwrap_or_default(),
+            icon: agent.icon.clone(),
+            singleton: is_lead,
+            skills: agent.skills.iter().map(|s| s.name.clone()).collect(),
+            denied_skills: vec![],
+            temperature: agent.preset.temperature,
+            verbosity: agent.preset.verbosity.clone(),
+            model: agent.llm_config.model.clone(),
+            fallback_models: agent.llm_config.fallback_models.clone(),
+            max_tool_calls: agent.constraints.max_tool_calls,
+            timeout_seconds: agent.constraints.timeout_seconds,
+            max_cost_per_task: agent.constraints.max_cost_per_task,
+            require_confirmation_for: agent.constraints.require_confirmation_for.clone(),
+        },
+        body: String::new(),
+        sections: HashMap::new(),
     }
 }
 
@@ -421,8 +451,9 @@ fn make_orchestrator_with_llm_and_agents(
     agents: Vec<SubAgent>,
 ) -> Orchestrator {
     let ctx = Arc::new(SharedContext::new());
-    for a in agents {
-        ctx.agent_registry.register(a);
+    for a in &agents {
+        ctx.agent_registry.register_template(template_from_agent(a));
+        ctx.agent_registry.register(a.clone());
     }
     let lanes = Arc::new(LaneManager::new());
     let bus = EventBus::default();

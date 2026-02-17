@@ -571,6 +571,7 @@ mod tests {
         use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, SubAgent};
         let agent = SubAgent {
             id: "a1".to_string(),
+            template_id: "a1".to_string(),
             name: "Test Agent".to_string(),
             description: None,
             icon: None,

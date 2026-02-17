@@ -1,10 +1,13 @@
 use super::*;
 use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent};
+use crate::agent::template::{AgentTemplate, AgentTemplateFrontmatter};
 use crate::orchestrator::task_planner::TaskPlan;
+use std::collections::HashMap;
 
 fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
     SubAgent {
         id: id.to_string(),
+        template_id: id.to_string(),
         name: format!("Agent {}", id),
         description: Some(format!("{} agent", id)),
         icon: None,
@@ -24,10 +27,40 @@ fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
     }
 }
 
+/// Create a minimal AgentTemplate from a SubAgent (for test setup).
+/// Templates with "lead_orchestration" skill are marked singleton
+/// (matching production behavior where the lead agent is the singleton).
+fn template_from_agent(agent: &SubAgent) -> AgentTemplate {
+    let is_lead = agent.skills.iter().any(|s| s.name == "lead_orchestration");
+    AgentTemplate {
+        frontmatter: AgentTemplateFrontmatter {
+            id: agent.template_id.clone(),
+            name: agent.name.clone(),
+            description: agent.description.clone().unwrap_or_default(),
+            icon: agent.icon.clone(),
+            singleton: is_lead,
+            skills: agent.skills.iter().map(|s| s.name.clone()).collect(),
+            denied_skills: vec![],
+            temperature: agent.preset.temperature,
+            verbosity: agent.preset.verbosity.clone(),
+            model: agent.llm_config.model.clone(),
+            fallback_models: agent.llm_config.fallback_models.clone(),
+            max_tool_calls: agent.constraints.max_tool_calls,
+            timeout_seconds: agent.constraints.timeout_seconds,
+            max_cost_per_task: agent.constraints.max_cost_per_task,
+            require_confirmation_for: agent.constraints.require_confirmation_for.clone(),
+        },
+        body: String::new(),
+        sections: HashMap::new(),
+    }
+}
+
 fn setup(agents: Vec<SubAgent>) -> TaskDispatcher {
     let ctx = Arc::new(SharedContext::new());
-    for a in agents {
-        ctx.agent_registry.register(a);
+    for a in &agents {
+        // Register both template (for spawn_instance) and instance (for backward compat)
+        ctx.agent_registry.register_template(template_from_agent(a));
+        ctx.agent_registry.register(a.clone());
     }
     let lane_mgr = Arc::new(LaneManager::new());
     let bus = EventBus::default();
@@ -220,7 +253,11 @@ fn test_dispatch_lead_agent_prefers_lead_orchestration_skill() {
 
 #[test]
 fn test_dispatch_lead_agent_fallback_to_any_idle_agent() {
-    // When no agent has "lead_orchestration" skill, any idle agent is used
+    // When no agent has "lead_orchestration" skill, any idle agent template is used.
+    // The worker-01 template is non-singleton, so spawn_instance creates a new instance
+    // with a UUID suffix. We verify that:
+    // 1. dispatch succeeds
+    // 2. a new instance exists for the worker-01 template
     let dispatcher = setup(vec![
         make_agent("worker-01", vec!["web_search"]),
     ]);
@@ -236,9 +273,11 @@ fn test_dispatch_lead_agent_fallback_to_any_idle_agent() {
 
     assert!(result.is_ok());
 
-    // worker-01 should be busy (used as fallback lead)
-    let worker = dispatcher.shared_context.agent_registry.get("worker-01").unwrap();
-    assert_eq!(worker.status.as_str(), "busy");
+    // A new instance spawned from worker-01 template should exist and be busy
+    assert!(dispatcher.shared_context.agent_registry.count_instances_of("worker-01") >= 1);
+    let instances = dispatcher.shared_context.agent_registry.list_instances();
+    let busy_worker = instances.iter().find(|a| a.template_id == "worker-01" && !a.status.is_available());
+    assert!(busy_worker.is_some(), "Expected a busy instance of worker-01");
 }
 
 #[test]

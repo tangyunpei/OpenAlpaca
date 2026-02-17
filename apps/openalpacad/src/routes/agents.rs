@@ -9,6 +9,18 @@
 //! POST /v1/agents/from-toml   -> create agent from raw TOML
 //! POST /v1/agents/from-chat   -> stub (501)
 //! DELETE /v1/agents/{id}      -> delete (archive) agent
+//!
+//! Template endpoints:
+//! GET    /v1/agent-templates              -> list all templates
+//! GET    /v1/agent-templates/{id}         -> get template (JSON)
+//! GET    /v1/agent-templates/{id}/markdown -> get template as raw Markdown
+//! POST   /v1/agent-templates              -> create template (JSON body)
+//! POST   /v1/agent-templates/from-markdown -> create template from raw Markdown
+//! PUT    /v1/agent-templates/{id}         -> update template
+//! DELETE /v1/agent-templates/{id}         -> archive template
+//!
+//! Instance endpoints:
+//! GET    /v1/agent-instances              -> list active instances
 
 use axum::{
     Json,
@@ -21,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use openalpaca_core::agent::AgentConfigFile;
+use openalpaca_core::agent::template::render_agent_markdown;
 use openalpaca_core::events::SystemEvent;
 use openalpaca_storage::{AgentMetrics, SubAgentConfig, SubAgentRepository};
 
@@ -67,6 +80,87 @@ pub struct CreateAgentRequest {
 #[derive(Debug, Deserialize)]
 pub struct CreateAgentFromTomlRequest {
     pub toml_content: String,
+}
+
+// ── Template Request / Response Types ─────────────────────────────
+
+/// JSON representation of an agent template for the REST API.
+#[derive(Debug, Serialize)]
+pub struct TemplateResponse {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    pub singleton: bool,
+    pub skills: Vec<String>,
+    pub denied_skills: Vec<String>,
+    pub temperature: f32,
+    pub verbosity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub fallback_models: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tool_calls: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_cost_per_task: Option<f64>,
+    pub require_confirmation_for: Vec<String>,
+    pub persona: String,
+    pub body: String,
+}
+
+impl TemplateResponse {
+    fn from_template(t: &openalpaca_core::agent::AgentTemplate) -> Self {
+        let persona = openalpaca_core::agent::template::extract_persona(t);
+        let fm = &t.frontmatter;
+        Self {
+            id: fm.id.clone(),
+            name: fm.name.clone(),
+            description: fm.description.clone(),
+            icon: fm.icon.clone(),
+            singleton: fm.singleton,
+            skills: fm.skills.clone(),
+            denied_skills: fm.denied_skills.clone(),
+            temperature: fm.temperature,
+            verbosity: fm.verbosity.clone(),
+            model: fm.model.clone(),
+            fallback_models: fm.fallback_models.clone(),
+            max_tool_calls: fm.max_tool_calls,
+            timeout_seconds: fm.timeout_seconds,
+            max_cost_per_task: fm.max_cost_per_task,
+            require_confirmation_for: fm.require_confirmation_for.clone(),
+            persona,
+            body: t.body.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTemplateRequest {
+    pub config: AgentConfigFile,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTemplateFromMarkdownRequest {
+    pub markdown: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateTemplateRequest {
+    pub config: AgentConfigFile,
+}
+
+/// JSON representation of an active agent instance.
+#[derive(Debug, Serialize)]
+pub struct InstanceResponse {
+    pub id: String,
+    pub template_id: String,
+    pub name: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_task: Option<String>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────
@@ -474,4 +568,262 @@ pub async fn delete_agent_handler(
         )
             .into_response(),
     }
+}
+
+// ── Template Handlers ─────────────────────────────────────────────
+
+/// GET /v1/agent-templates
+pub async fn list_templates_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let templates = state
+        .gateway
+        .shared_context
+        .agent_registry
+        .list_templates();
+
+    let response: Vec<TemplateResponse> = templates
+        .iter()
+        .map(TemplateResponse::from_template)
+        .collect();
+
+    (StatusCode::OK, Json(serde_json::to_value(response).unwrap()))
+}
+
+/// GET /v1/agent-templates/{id}
+pub async fn get_template_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.gateway.shared_context.agent_registry.get_template(&id) {
+        Some(template) => {
+            let response = TemplateResponse::from_template(&template);
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(response).unwrap()),
+            )
+                .into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("Template '{}' not found", id) })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /v1/agent-templates/{id}/markdown
+pub async fn get_template_markdown_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.gateway.shared_context.agent_registry.get_template(&id) {
+        Some(template) => {
+            let markdown = render_agent_markdown(&template);
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+                markdown,
+            )
+                .into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("Template '{}' not found", id) })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /v1/agent-templates
+pub async fn create_template_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateTemplateRequest>,
+) -> impl IntoResponse {
+    let service = match &state.agent_config_service {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "Agent config service not available" })),
+            )
+                .into_response();
+        }
+    };
+
+    match service.create_template_from_toml_config(body.config) {
+        Ok(template_id) => {
+            let _ = state.gateway.bus.publish(SystemEvent::AgentConfigChanged {
+                agent_id: template_id.clone(),
+                action: "created".to_string(),
+                config_version: 0,
+                timestamp: Utc::now(),
+            });
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "template_id": template_id,
+                    "status": "created"
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /v1/agent-templates/from-markdown
+pub async fn create_template_from_markdown_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateTemplateFromMarkdownRequest>,
+) -> impl IntoResponse {
+    let service = match &state.agent_config_service {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "Agent config service not available" })),
+            )
+                .into_response();
+        }
+    };
+
+    match service.create_template_from_markdown(&body.markdown) {
+        Ok(template_id) => {
+            let _ = state.gateway.bus.publish(SystemEvent::AgentConfigChanged {
+                agent_id: template_id.clone(),
+                action: "created".to_string(),
+                config_version: 0,
+                timestamp: Utc::now(),
+            });
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "template_id": template_id,
+                    "status": "created"
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+/// PUT /v1/agent-templates/{id}
+pub async fn update_template_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateTemplateRequest>,
+) -> impl IntoResponse {
+    let service = match &state.agent_config_service {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "Agent config service not available" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Convert JSON config to AgentTemplate
+    let template = body.config.into_template();
+    match service.update_template(&id, template) {
+        Ok(()) => {
+            let _ = state.gateway.bus.publish(SystemEvent::AgentConfigChanged {
+                agent_id: id.clone(),
+                action: "updated".to_string(),
+                config_version: 0,
+                timestamp: Utc::now(),
+            });
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "template_id": id,
+                    "status": "updated"
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+/// DELETE /v1/agent-templates/{id}
+pub async fn delete_template_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let service = match &state.agent_config_service {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "Agent config service not available" })),
+            )
+                .into_response();
+        }
+    };
+
+    match service.delete_template(&id) {
+        Ok(()) => {
+            let _ = state.gateway.bus.publish(SystemEvent::AgentConfigChanged {
+                agent_id: id.clone(),
+                action: "deleted".to_string(),
+                config_version: 0,
+                timestamp: Utc::now(),
+            });
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "template_id": id,
+                    "status": "archived"
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+// ── Instance Handlers ─────────────────────────────────────────────
+
+/// GET /v1/agent-instances
+pub async fn list_instances_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let instances = state
+        .gateway
+        .shared_context
+        .agent_registry
+        .list_instances();
+
+    let response: Vec<InstanceResponse> = instances
+        .iter()
+        .map(|a| InstanceResponse {
+            id: a.id.clone(),
+            template_id: a.template_id.clone(),
+            name: a.name.clone(),
+            status: a.status.as_str().to_string(),
+            current_task: a.current_task.clone(),
+        })
+        .collect();
+
+    (StatusCode::OK, Json(serde_json::to_value(response).unwrap()))
 }

@@ -1,5 +1,4 @@
 use super::{TaskDispatcher, format_task_result, spawn_task_memory_extraction};
-use crate::agent::subagent::AgentStatus;
 use crate::context::{DagSummary, TaskEntryStatus};
 use crate::events::SystemEvent;
 use crate::runner::dag_executor::{DagExecutorConfig, DagFinishReason, execute_dag};
@@ -104,9 +103,9 @@ impl TaskDispatcher {
             let now = Utc::now();
             let runtime_secs = start_time.elapsed().as_secs() as i64;
 
-            // Release all agents back to Idle
+            // Destroy all agent instances (resets singletons to Idle, removes non-singletons)
             for node in &dag.nodes {
-                ctx.agent_registry.update_status(&node.agent_id, AgentStatus::Idle);
+                ctx.agent_registry.destroy_instance(&node.agent_id);
                 bus.publish(SystemEvent::AgentStatusChanged {
                     agent_id: node.agent_id.clone(),
                     status: "idle".to_string(),

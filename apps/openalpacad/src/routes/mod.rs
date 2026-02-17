@@ -16,6 +16,12 @@ pub use agents::{
     agent_action_handler, create_agent_from_chat_handler, create_agent_from_toml_handler,
     create_agent_handler, delete_agent_handler, get_agent_config_handler, get_agent_handler,
     list_agents_handler, update_agent_config_handler,
+    // Template endpoints
+    list_templates_handler, get_template_handler, get_template_markdown_handler,
+    create_template_handler, create_template_from_markdown_handler,
+    update_template_handler, delete_template_handler,
+    // Instance endpoints
+    list_instances_handler,
 };
 pub use auth::generate_link_token_handler;
 pub use chat::{

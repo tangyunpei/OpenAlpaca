@@ -2,6 +2,7 @@ pub mod config;
 pub mod config_service;
 pub mod registry;
 pub mod subagent;
+pub mod template;
 
 use crate::types::{AgentInput, AgentOutput, Capability};
 use async_trait::async_trait;
@@ -10,6 +11,7 @@ pub use config::AgentConfigFile;
 pub use config_service::AgentConfigService;
 pub use registry::AgentRegistry;
 pub use subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent};
+pub use template::{AgentTemplate, AgentTemplateFrontmatter, AgentParseError};
 
 // The core interface for all intelligent agents.
 #[async_trait]

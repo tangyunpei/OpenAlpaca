@@ -99,6 +99,7 @@ mod tests {
     fn make_agent(id: &str, name: &str, skills: Vec<&str>) -> SubAgent {
         SubAgent {
             id: id.to_string(),
+            template_id: id.to_string(),
             name: name.to_string(),
             description: Some(format!("{} agent", name)),
             icon: None,

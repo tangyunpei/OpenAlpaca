@@ -828,6 +828,7 @@ mod tests {
 
         let agents = vec![SubAgent {
             id: "researcher-01".to_string(),
+            template_id: "researcher-01".to_string(),
             name: "Researcher".to_string(),
             description: Some("Research agent".to_string()),
             icon: None,
@@ -975,6 +976,7 @@ mod tests {
     fn make_agent(id: &str) -> SubAgent {
         SubAgent {
             id: id.to_string(),
+            template_id: id.to_string(),
             name: format!("Agent {}", id),
             description: None,
             icon: None,

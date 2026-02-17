@@ -6,7 +6,10 @@
 //! registry with its own model, persona, and constraints. It receives a
 //! `spawn_subagent` tool that delegates work to other agents.
 
-use crate::agent::subagent::{AgentStatus, SubAgent};
+use crate::agent::subagent::SubAgent;
+#[cfg(test)]
+use crate::agent::subagent::AgentStatus;
+use crate::agent::template::AgentTemplate;
 use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
@@ -38,26 +41,33 @@ pub struct LeadAgentResult {
 
 // ── AgentBusyGuard ───────────────────────────────────────────────────
 
-/// RAII guard that restores an agent to Idle status on drop.
-/// Ensures the agent is not permanently stuck in Busy state if the
+/// RAII guard that cleans up an agent instance on drop.
+///
+/// For **non-singleton** instances: calls `destroy_instance()` to remove
+/// the ephemeral instance from the registry entirely.
+///
+/// For **singleton** instances (like lead_agent): calls `destroy_instance()`
+/// which resets the singleton to Idle so it can be reused.
+///
+/// This ensures the instance is not permanently stuck in Busy state if the
 /// subagent loop panics or returns early without cleanup.
 pub(crate) struct AgentBusyGuard {
-    agent_id: String,
+    instance_id: String,
     agent_registry: Arc<crate::agent::registry::AgentRegistry>,
     bus: EventBus,
-    /// Set to true once the agent has been explicitly restored to Idle.
-    /// Prevents double-restore in the normal (non-panic) code path.
+    /// Set to true once the instance has been explicitly cleaned up.
+    /// Prevents double-cleanup in the normal (non-panic) code path.
     restored: bool,
 }
 
 impl AgentBusyGuard {
     pub(crate) fn new(
-        agent_id: String,
+        instance_id: String,
         agent_registry: Arc<crate::agent::registry::AgentRegistry>,
         bus: EventBus,
     ) -> Self {
         Self {
-            agent_id,
+            instance_id,
             agent_registry,
             bus,
             restored: false,
@@ -67,10 +77,9 @@ impl AgentBusyGuard {
     pub(crate) fn restore(&mut self) {
         if !self.restored {
             self.restored = true;
-            self.agent_registry
-                .update_status(&self.agent_id, AgentStatus::Idle);
+            self.agent_registry.destroy_instance(&self.instance_id);
             self.bus.publish(SystemEvent::AgentStatusChanged {
-                agent_id: self.agent_id.clone(),
+                agent_id: self.instance_id.clone(),
                 status: "idle".to_string(),
                 current_task_id: None,
                 timestamp: Utc::now(),
@@ -83,8 +92,8 @@ impl Drop for AgentBusyGuard {
     fn drop(&mut self) {
         if !self.restored {
             tracing::warn!(
-                agent_id = %self.agent_id,
-                "AgentBusyGuard dropped without explicit restore — recovering agent to Idle"
+                instance_id = %self.instance_id,
+                "AgentBusyGuard dropped without explicit restore — destroying instance"
             );
             self.restore();
         }
@@ -156,20 +165,22 @@ impl BuiltInTool for SpawnSubagentTool {
             ));
         }
 
-        // 3. Atomically claim the agent (check idle + set Busy in one lock)
+        // 3. Spawn a new instance from the agent template
+        //    (agent_id is really a template_id — the LLM picks from the template catalog)
         let agent = self
             .shared_context
             .agent_registry
-            .try_claim(agent_id, self.task_id.clone())
+            .spawn_instance(agent_id, self.task_id.clone())
             .map_err(|e| format!("Cannot spawn agent '{}': {}", agent_id, e))?;
+        let instance_id = agent.id.clone();
         self.bus.publish(SystemEvent::AgentStatusChanged {
-            agent_id: agent_id.to_string(),
+            agent_id: instance_id.clone(),
             status: "busy".to_string(),
             current_task_id: Some(self.task_id.clone()),
             timestamp: Utc::now(),
         });
         let mut busy_guard = AgentBusyGuard::new(
-            agent_id.to_string(),
+            instance_id.clone(),
             self.shared_context.agent_registry.clone(),
             self.bus.clone(),
         );
@@ -226,7 +237,7 @@ impl BuiltInTool for SpawnSubagentTool {
             fallback_models: agent.llm_config.fallback_models.clone(),
         };
 
-        let sandbox_policy = SandboxPolicy::from_constraints(agent_id, &agent.constraints);
+        let sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
 
         // 9. Call run_agentic_loop_routed() — blocks until subagent finishes
         let result = run_agentic_loop_routed(
@@ -235,7 +246,7 @@ impl BuiltInTool for SpawnSubagentTool {
             tools,
             &loop_config,
             Some(&sandbox),
-            agent_id,
+            &instance_id,
             Some(&sandbox_policy),
             Some(&self.task_id),
         )
@@ -250,7 +261,7 @@ impl BuiltInTool for SpawnSubagentTool {
                 | crate::runner::LoopFinishReason::MaxRounds
         );
 
-        // 10. Mark agent as Idle (explicit restore; guard is backup for panics)
+        // 10. Destroy instance (explicit restore; guard is backup for panics)
         busy_guard.restore();
 
         // 11. Emit DagNodeCompleted
@@ -258,7 +269,7 @@ impl BuiltInTool for SpawnSubagentTool {
             task_id: self.task_id.clone(),
             node_id: node_id.clone(),
             node_title: objective.chars().take(80).collect(),
-            agent_id: agent_id.to_string(),
+            agent_id: instance_id.clone(),
             success: agent_success,
             duration_ms,
             output_preview: if result.final_content.is_empty() {
@@ -294,10 +305,11 @@ impl BuiltInTool for SpawnSubagentTool {
             _ => None,
         };
 
+        // Use template_id for DB metrics (aggregates across all instances of the same template)
         if let Some(ref db) = self.db {
             let usage_repo = openalpaca_storage::repository::LlmUsageRepository::new(db);
             if let Err(e) = usage_repo.record_and_log(
-                agent_id,
+                agent_id, // template_id for aggregation
                 Some(&self.task_id),
                 &resolved_provider,
                 actual_model,
@@ -308,14 +320,14 @@ impl BuiltInTool for SpawnSubagentTool {
                 call_status,
                 call_error,
             ) {
-                tracing::warn!("Failed to persist LLM usage for subagent '{}': {e}", agent_id);
+                tracing::warn!("Failed to persist LLM usage for subagent '{}' (instance '{}'): {e}", agent_id, instance_id);
             }
 
-            // Agent task history
+            // Agent task history (keyed by template_id for metrics)
             let subagent_repo = openalpaca_storage::SubAgentRepository::new(db);
             let history_entry = openalpaca_storage::AgentTaskHistory {
                 id: Uuid::new_v4().to_string(),
-                agent_id: agent_id.to_string(),
+                agent_id: agent_id.to_string(), // template_id
                 task_id: self.task_id.clone(),
                 role: "subagent".to_string(),
                 status: if agent_success {
@@ -338,8 +350,8 @@ impl BuiltInTool for SpawnSubagentTool {
         }
 
         tracing::info!(
-            "Subagent '{}' completed objective '{}': success={}, rounds={}, tokens={}/{}, duration={}ms",
-            agent_id,
+            "Subagent '{}' (instance '{}') completed objective '{}': success={}, rounds={}, tokens={}/{}, duration={}ms",
+            agent_id, instance_id,
             &objective.chars().take(50).collect::<String>(),
             agent_success,
             result.rounds_used,
@@ -374,6 +386,8 @@ impl BuiltInTool for SpawnSubagentTool {
 }
 
 /// Build the tool definition for `spawn_subagent`, dynamically listing available agents.
+///
+/// Kept for backward compatibility; prefer `spawn_subagent_tool_definition_from_templates`.
 pub fn spawn_subagent_tool_definition(available_agents: &[SubAgent]) -> ToolDefinition {
     let agent_descriptions: Vec<String> = available_agents
         .iter()
@@ -400,7 +414,8 @@ pub fn spawn_subagent_tool_definition(available_agents: &[SubAgent]) -> ToolDefi
         name: "spawn_subagent".to_string(),
         description: format!(
             "Spawn a subagent to work on a specific objective. The subagent runs autonomously \
-             and returns its result. Choose the right agent based on skills.\n\n\
+             and returns its result. Choose the right agent based on skills. Multiple instances \
+             of the same agent can run concurrently.\n\n\
              Available agents:\n{}",
             agents_list
         ),
@@ -409,7 +424,56 @@ pub fn spawn_subagent_tool_definition(available_agents: &[SubAgent]) -> ToolDefi
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "The ID of the agent to spawn (must be from the available agents list)"
+                    "description": "The ID of the agent template to spawn (must be from the available agents list)"
+                },
+                "objective": {
+                    "type": "string",
+                    "description": "A clear, specific objective for the subagent to accomplish"
+                }
+            },
+            "required": ["agent_id", "objective"]
+        }),
+    }
+}
+
+/// Build the tool definition for `spawn_subagent` from agent templates.
+///
+/// This is the preferred variant: the LLM sees template IDs (not instance IDs),
+/// and `spawn_instance()` creates a fresh instance for each invocation.
+pub fn spawn_subagent_tool_definition_from_templates(templates: &[AgentTemplate]) -> ToolDefinition {
+    let agent_descriptions: Vec<String> = templates
+        .iter()
+        .map(|t| {
+            let fm = &t.frontmatter;
+            let skills = fm.skills.join(", ");
+            format!(
+                "- ID: \"{}\", Name: \"{}\", Skills: [{}], Description: \"{}\"",
+                fm.id, fm.name, skills, fm.description
+            )
+        })
+        .collect();
+
+    let agents_list = if agent_descriptions.is_empty() {
+        "No agents available.".to_string()
+    } else {
+        agent_descriptions.join("\n")
+    };
+
+    ToolDefinition {
+        name: "spawn_subagent".to_string(),
+        description: format!(
+            "Spawn a subagent to work on a specific objective. The subagent runs autonomously \
+             and returns its result. Choose the right agent based on skills. Multiple instances \
+             of the same agent can run concurrently.\n\n\
+             Available agents:\n{}",
+            agents_list
+        ),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "The ID of the agent template to spawn (must be from the available agents list)"
                 },
                 "objective": {
                     "type": "string",
@@ -467,6 +531,8 @@ impl ToolExecutor for LeadAgentToolExecutor {
 
 /// Build the system prompt for the Lead Agent, including its persona
 /// and the list of available worker agents.
+///
+/// Kept for backward compatibility; prefer `build_lead_agent_prompt_from_templates`.
 pub fn build_lead_agent_prompt(
     base_persona: &str,
     available_agents: &[SubAgent],
@@ -516,6 +582,63 @@ pub fn build_lead_agent_prompt(
     prompt.push_str(
         "## Guidelines\n\
          - Choose the right agent for each sub-objective based on their skills\n\
+         - You can spawn multiple instances of the same agent concurrently\n\
+         - After each subagent returns, evaluate whether the objective was met\n\
+         - If a subagent fails, try an alternative approach or a different agent\n\
+         - Be efficient: don't spawn agents for work you can synthesize yourself\n\
+         - Use the `workspace_read` and `workspace_write` tools to share context between subagents\n\
+         - When all sub-objectives are complete, produce a final synthesized response\n\
+         - If no agents can help with the task, do your best to respond directly\n",
+    );
+
+    prompt
+}
+
+/// Build the system prompt for the Lead Agent from agent templates.
+///
+/// This is the preferred variant: the LLM sees template IDs and descriptions,
+/// and can spawn multiple instances of the same template concurrently.
+pub fn build_lead_agent_prompt_from_templates(
+    base_persona: &str,
+    templates: &[AgentTemplate],
+) -> String {
+    let mut prompt = String::with_capacity(2048);
+
+    prompt.push_str(base_persona);
+    prompt.push_str("\n\n");
+
+    prompt.push_str(
+        "## Orchestration Role\n\
+         You are a Lead Agent orchestrating a complex task. Your job is to:\n\
+         1. Analyze the user's request and break it into sub-objectives\n\
+         2. Delegate work by spawning subagents using the `spawn_subagent` tool\n\
+         3. Observe each subagent's output and adjust your strategy\n\
+         4. Synthesize all results into a comprehensive final response\n\n",
+    );
+
+    prompt.push_str("## Available Agents\n");
+    if templates.is_empty() {
+        prompt.push_str("No worker agents are currently available.\n");
+    } else {
+        for t in templates {
+            let fm = &t.frontmatter;
+            let skills_str = if fm.skills.is_empty() {
+                "none".to_string()
+            } else {
+                fm.skills.join(", ")
+            };
+            prompt.push_str(&format!(
+                "- **{}** (ID: `{}`): {} | Skills: {}\n",
+                fm.name, fm.id, fm.description, skills_str
+            ));
+        }
+    }
+    prompt.push('\n');
+
+    prompt.push_str(
+        "## Guidelines\n\
+         - Choose the right agent for each sub-objective based on their skills\n\
+         - You can spawn multiple instances of the same agent concurrently\n\
          - After each subagent returns, evaluate whether the objective was met\n\
          - If a subagent fails, try an alternative approach or a different agent\n\
          - Be efficient: don't spawn agents for work you can synthesize yourself\n\
@@ -546,15 +669,15 @@ pub async fn run_lead_agent(
     daemon_config: &Arc<ArcSwap<DaemonConfig>>,
     workspace_id: Option<String>,
 ) -> LeadAgentResult {
-    // 1. List idle worker agents (all agents except the lead itself)
-    let all_agents = shared_context.agent_registry.list_all();
-    let worker_agents: Vec<SubAgent> = all_agents
+    // 1. List worker agent templates (all templates except the lead itself)
+    let all_templates = shared_context.agent_registry.list_templates();
+    let worker_templates: Vec<AgentTemplate> = all_templates
         .into_iter()
-        .filter(|a| a.id != lead_agent.id && a.status.is_available())
+        .filter(|t| t.frontmatter.id != lead_agent.template_id)
         .collect();
 
-    // 2. Build spawn_subagent tool definition with dynamic agent list
-    let spawn_tool_def = spawn_subagent_tool_definition(&worker_agents);
+    // 2. Build spawn_subagent tool definition from templates
+    let spawn_tool_def = spawn_subagent_tool_definition_from_templates(&worker_templates);
 
     // 3. Build tools: spawn_subagent + workspace_read + workspace_write + memory_search
     let mut tools = vec![spawn_tool_def];
@@ -595,8 +718,8 @@ pub async fn run_lead_agent(
     let sandbox = SandboxManager::with_defaults(lead_executor, bus.clone());
     let sandbox_policy = SandboxPolicy::from_constraints(&lead_agent.id, &lead_agent.constraints);
 
-    // 6. Build system prompt
-    let system_prompt = build_lead_agent_prompt(&lead_agent.preset.persona, &worker_agents);
+    // 6. Build system prompt from templates
+    let system_prompt = build_lead_agent_prompt_from_templates(&lead_agent.preset.persona, &worker_templates);
     let tool_guidance = format_tool_guidance(&tools);
     let full_system = format!("{}{}", system_prompt, tool_guidance);
 
@@ -731,6 +854,7 @@ mod tests {
     fn make_agent(id: &str, name: &str, skills: &[&str]) -> SubAgent {
         SubAgent {
             id: id.to_string(),
+            template_id: id.to_string(),
             name: name.to_string(),
             description: Some(format!("{} agent", name)),
             icon: None,

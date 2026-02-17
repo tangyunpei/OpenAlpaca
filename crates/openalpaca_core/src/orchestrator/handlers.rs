@@ -102,7 +102,17 @@ impl Orchestrator {
 
         // 5. Compute result — planner path or heuristic fallback
         let result: Result<String, String> = if let Some(ref router) = self.llm_router {
-            let idle_agents = self.shared_context.agent_registry.list_idle();
+            // Present all templates (not instances) to the planner — templates represent
+            // available capabilities regardless of how many instances are currently running.
+            let templates = self.shared_context.agent_registry.list_templates();
+            let idle_agents: Vec<crate::agent::SubAgent> = templates.iter()
+                .map(|t| {
+                    let mut agent = t.to_subagent(&t.frontmatter.id, "");
+                    agent.status = crate::agent::AgentStatus::Idle;
+                    agent.current_task = None;
+                    agent
+                })
+                .collect();
             let planner_cfg = &self.daemon_config.load().execution.planner;
             let limits = PlannerLimits {
                 timeout_secs: planner_cfg.planning_timeout_secs,
