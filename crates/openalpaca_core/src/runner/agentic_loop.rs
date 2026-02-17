@@ -8,17 +8,21 @@ use std::time::Duration;
 /// Maximum tool result size before truncation (32 KB).
 const MAX_TOOL_RESULT_SIZE: usize = 32 * 1024;
 
-/// Truncate tool result text if it exceeds the limit to prevent blowing up the
-/// LLM context window.
+/// Truncate tool result text if it exceeds the byte limit to prevent blowing
+/// up the LLM context window. Uses byte-aware truncation at char boundaries.
 fn truncate_tool_result(text: String) -> String {
     if text.len() <= MAX_TOOL_RESULT_SIZE {
         return text;
     }
-    let truncated: String = text.chars().take(MAX_TOOL_RESULT_SIZE).collect();
+    // Find the nearest char boundary at or before MAX_TOOL_RESULT_SIZE bytes
+    let mut end = MAX_TOOL_RESULT_SIZE;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
     format!(
         "{}\n\n[... truncated: showing first {} of {} bytes]",
-        truncated,
-        MAX_TOOL_RESULT_SIZE,
+        &text[..end],
+        end,
         text.len()
     )
 }
@@ -146,6 +150,19 @@ pub async fn run_agentic_loop(
                     let calls_this_round = response.tool_calls.len().min(config.max_tools_per_round);
 
                     for tc in response.tool_calls.iter().take(calls_this_round) {
+                        // Enforce max_tool_calls from sandbox policy
+                        if let Some(policy) = sandbox_policy {
+                            if let Some(max_calls) = policy.max_tool_calls {
+                                if tool_calls_made >= max_calls as usize {
+                                    messages.push(ChatMessage::tool_result(
+                                        &tc.id,
+                                        "[tool_error] max_tool_calls limit reached — no more tool calls allowed",
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
+
                         tool_calls_made += 1;
 
                         // Tool error convention: errors are prefixed with [tool_error]
@@ -156,7 +173,7 @@ pub async fn run_agentic_loop(
                             // Route through sandbox
                             match sbx.execute_tool(agent_id, tc, policy).await {
                                 Ok(output) => truncate_tool_result(output),
-                                Err(err) => format!("[tool_error] {}", err),
+                                Err(err) => truncate_tool_result(format!("[tool_error] {}", err)),
                             }
                         } else {
                             tracing::warn!(
@@ -307,6 +324,19 @@ pub async fn run_agentic_loop_routed(
                         response.tool_calls.len().min(config.max_tools_per_round);
 
                     for tc in response.tool_calls.iter().take(calls_this_round) {
+                        // Enforce max_tool_calls from sandbox policy
+                        if let Some(policy) = sandbox_policy {
+                            if let Some(max_calls) = policy.max_tool_calls {
+                                if tool_calls_made >= max_calls as usize {
+                                    messages.push(ChatMessage::tool_result(
+                                        &tc.id,
+                                        "[tool_error] max_tool_calls limit reached — no more tool calls allowed",
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
+
                         tool_calls_made += 1;
 
                         let result_text = if let (Some(sbx), Some(policy)) =
@@ -314,7 +344,7 @@ pub async fn run_agentic_loop_routed(
                         {
                             match sbx.execute_tool(agent_id, tc, policy).await {
                                 Ok(output) => truncate_tool_result(output),
-                                Err(err) => format!("[tool_error] {}", err),
+                                Err(err) => truncate_tool_result(format!("[tool_error] {}", err)),
                             }
                         } else {
                             tracing::warn!(

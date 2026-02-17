@@ -834,6 +834,30 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         sensitive: false,
         backend: ConfigBackend::DaemonToml,
     },
+    // -- Daemon: Providers --
+    ConfigKeyDef {
+        key: "daemon.providers.web_search.api_key",
+        kind: ConfigKind::String,
+        default: None,
+        description: "Brave Search API key (get one at https://brave.com/search/api/)",
+        category: "Daemon",
+        subcategory: Some("Providers"),
+        sensitive: true,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.providers.web_search.timeout_secs",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(60),
+        },
+        default: Some("10"),
+        description: "Brave Search request timeout in seconds",
+        category: "Daemon",
+        subcategory: Some("Providers"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
     // -- Agents --
     ConfigKeyDef {
         key: "ai.default_model",
@@ -1302,8 +1326,8 @@ mod tests {
     #[test]
     fn test_daemon_keys_in_category() {
         let keys = keys_in_category("Daemon");
-        // 42 daemon keys + 1 alias (system.max_agents) + 2 streaming keys = 45 total
-        assert_eq!(keys.len(), 45);
+        // 42 daemon keys + 1 alias (system.max_agents) + 2 streaming keys + 2 providers keys = 47 total
+        assert_eq!(keys.len(), 47);
         assert!(keys.iter().any(|d| d.key == "system.max_agents"));
         assert!(keys.iter().any(|d| d.key == "daemon.dag.max_concurrent_agents"));
         assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.prompt_recent_messages"));
@@ -1388,12 +1412,13 @@ mod tests {
 
         // Daemon subcategories
         let daemon_subs = subcategories_in_category("Daemon");
-        assert_eq!(daemon_subs.len(), 5);
+        assert_eq!(daemon_subs.len(), 6);
         assert!(daemon_subs.contains(&"Orchestrator"));
         assert!(daemon_subs.contains(&"Execution"));
         assert!(daemon_subs.contains(&"DAG"));
         assert!(daemon_subs.contains(&"Security"));
         assert!(daemon_subs.contains(&"Server"));
+        assert!(daemon_subs.contains(&"Providers"));
     }
 
     #[test]

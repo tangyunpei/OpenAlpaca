@@ -36,6 +36,61 @@ pub struct LeadAgentResult {
     pub subagents_spawned: usize,
 }
 
+// ── AgentBusyGuard ───────────────────────────────────────────────────
+
+/// RAII guard that restores an agent to Idle status on drop.
+/// Ensures the agent is not permanently stuck in Busy state if the
+/// subagent loop panics or returns early without cleanup.
+pub(crate) struct AgentBusyGuard {
+    agent_id: String,
+    agent_registry: Arc<crate::agent::registry::AgentRegistry>,
+    bus: EventBus,
+    /// Set to true once the agent has been explicitly restored to Idle.
+    /// Prevents double-restore in the normal (non-panic) code path.
+    restored: bool,
+}
+
+impl AgentBusyGuard {
+    pub(crate) fn new(
+        agent_id: String,
+        agent_registry: Arc<crate::agent::registry::AgentRegistry>,
+        bus: EventBus,
+    ) -> Self {
+        Self {
+            agent_id,
+            agent_registry,
+            bus,
+            restored: false,
+        }
+    }
+
+    pub(crate) fn restore(&mut self) {
+        if !self.restored {
+            self.restored = true;
+            self.agent_registry
+                .update_status(&self.agent_id, AgentStatus::Idle);
+            self.bus.publish(SystemEvent::AgentStatusChanged {
+                agent_id: self.agent_id.clone(),
+                status: "idle".to_string(),
+                current_task_id: None,
+                timestamp: Utc::now(),
+            });
+        }
+    }
+}
+
+impl Drop for AgentBusyGuard {
+    fn drop(&mut self) {
+        if !self.restored {
+            tracing::warn!(
+                agent_id = %self.agent_id,
+                "AgentBusyGuard dropped without explicit restore — recovering agent to Idle"
+            );
+            self.restore();
+        }
+    }
+}
+
 // ── SpawnSubagentTool ────────────────────────────────────────────────
 
 /// Built-in tool that allows the Lead Agent to spawn a subagent.
@@ -100,6 +155,14 @@ impl BuiltInTool for SpawnSubagentTool {
             .get(agent_id)
             .ok_or_else(|| format!("Agent '{}' not found in registry", agent_id))?;
 
+        // Prevent the lead agent from spawning itself (infinite recursion)
+        if agent_id == self.created_by {
+            return Err(format!(
+                "Agent '{}' cannot spawn itself — would cause infinite recursion",
+                agent_id
+            ));
+        }
+
         if !agent.status.is_available() {
             return Err(format!(
                 "Agent '{}' is not available (status: {})",
@@ -107,7 +170,7 @@ impl BuiltInTool for SpawnSubagentTool {
             ));
         }
 
-        // 3. Mark agent as Busy
+        // 3. Mark agent as Busy (with RAII guard for panic safety)
         self.shared_context.agent_registry.update_status(
             agent_id,
             AgentStatus::Busy {
@@ -120,6 +183,11 @@ impl BuiltInTool for SpawnSubagentTool {
             current_task_id: Some(self.task_id.clone()),
             timestamp: Utc::now(),
         });
+        let mut busy_guard = AgentBusyGuard::new(
+            agent_id.to_string(),
+            self.shared_context.agent_registry.clone(),
+            self.bus.clone(),
+        );
 
         // 4. Emit DagNodeStarted (reusing event, node_id = UUID)
         let node_id = Uuid::new_v4().to_string();
@@ -197,16 +265,8 @@ impl BuiltInTool for SpawnSubagentTool {
                 | crate::runner::LoopFinishReason::MaxRounds
         );
 
-        // 10. Mark agent as Idle
-        self.shared_context
-            .agent_registry
-            .update_status(agent_id, AgentStatus::Idle);
-        self.bus.publish(SystemEvent::AgentStatusChanged {
-            agent_id: agent_id.to_string(),
-            status: "idle".to_string(),
-            current_task_id: None,
-            timestamp: now,
-        });
+        // 10. Mark agent as Idle (explicit restore; guard is backup for panics)
+        busy_guard.restore();
 
         // 11. Emit DagNodeCompleted
         self.bus.publish(SystemEvent::DagNodeCompleted {

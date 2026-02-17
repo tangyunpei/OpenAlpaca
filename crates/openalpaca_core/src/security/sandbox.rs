@@ -90,10 +90,11 @@ impl SandboxManager {
     /// Flow:
     /// 1. Capability check (deny/allow lists)
     /// 2. Input sanitization (path traversal, command injection)
-    /// 3. Circuit breaker check (block if tool has too many recent failures)
-    /// 4. Timeout-wrapped execution
-    /// 5. Record outcome for circuit breaker
-    /// 6. Event emission (ToolExecuted or SecurityViolation)
+    /// 3. Confirmation check (fail-closed if tool requires confirmation)
+    /// 4. Circuit breaker check (block if tool has too many recent failures)
+    /// 5. Timeout-wrapped execution
+    /// 6. Record outcome for circuit breaker
+    /// 7. Event emission (ToolExecuted or SecurityViolation)
     pub async fn execute_tool(
         &self,
         agent_id: &str,
@@ -123,13 +124,28 @@ impl SandboxManager {
             return Err(violation.to_string());
         }
 
-        // 3. Circuit breaker check
+        // 3. Confirmation check — fail-closed if tool requires confirmation
+        if policy
+            .require_confirmation_for
+            .iter()
+            .any(|t| t == &tool_call.name)
+        {
+            let reason = format!(
+                "Tool '{}' requires confirmation (configured via require_confirmation_for) \
+                 but no confirmation mechanism is available in this execution context",
+                tool_call.name
+            );
+            self.emit_security_violation(agent_id, &tool_call.name, &reason);
+            return Err(reason);
+        }
+
+        // 4. Circuit breaker check
         if let Err(reason) = self.circuit_breaker.check(agent_id, &tool_call.name) {
             self.emit_tool_executed(agent_id, &tool_call.name, false, 0);
             return Err(reason);
         }
 
-        // 4. Timeout-wrapped execution
+        // 5. Timeout-wrapped execution
         let timeout = Duration::from_secs(policy.max_tool_runtime_secs);
         let executor = self.executor.clone();
         let tool_name = tool_call.name.clone();

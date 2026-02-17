@@ -15,6 +15,53 @@ use std::time::Duration;
 use super::super::task_state::TaskState;
 use uuid::Uuid;
 
+/// Persist a state update with retry (up to 3 attempts) to handle optimistic locking conflicts.
+async fn update_state_with_retry(
+    db: &openalpaca_storage::Database,
+    task_id: &str,
+    mutate: impl Fn(&mut TaskState),
+    context: &str,
+) {
+    const MAX_RETRIES: usize = 3;
+    for attempt in 0..MAX_RETRIES {
+        let repo = openalpaca_storage::repository::TaskRepository::new(db);
+        let existing = match repo.get(task_id) {
+            Ok(Some(t)) => t,
+            _ => return,
+        };
+        let sj = match existing.state_json.as_deref() {
+            Some(s) => s,
+            None => return,
+        };
+        let mut state: TaskState = match serde_json::from_str(sj) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        mutate(&mut state);
+        match repo.update_state(task_id, &state.to_json(), existing.state_version) {
+            Ok(true) => return,
+            Ok(false) => {
+                if attempt < MAX_RETRIES - 1 {
+                    tracing::debug!(
+                        "Pipeline state update version conflict ({}) for task '{}' (attempt {}/{}), retrying",
+                        context, task_id, attempt + 1, MAX_RETRIES
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(10 * (1 << attempt))).await;
+                } else {
+                    tracing::warn!(
+                        "Pipeline state update ({}) for task '{}' failed after {} retries — state may be stale",
+                        context, task_id, MAX_RETRIES
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Pipeline state update ({}) failed for task '{}': {}", context, task_id, e);
+                return;
+            }
+        }
+    }
+}
+
 impl TaskDispatcher {
     /// Spawn a sequential pipeline: agents run in step_order, each receiving
     /// the previous agent's output as additional context.
@@ -106,6 +153,23 @@ impl TaskDispatcher {
                     step + 1, total_agents, agent_id, task_id
                 );
 
+                // Mark agent as Busy (with RAII guard for panic safety)
+                ctx.agent_registry.update_status(
+                    agent_id,
+                    AgentStatus::Busy { task_id: task_id.clone() },
+                );
+                bus.publish(SystemEvent::AgentStatusChanged {
+                    agent_id: agent_id.clone(),
+                    status: "busy".to_string(),
+                    current_task_id: Some(task_id.clone()),
+                    timestamp: Utc::now(),
+                });
+                let mut busy_guard = crate::runner::lead_agent::AgentBusyGuard::new(
+                    agent_id.clone(),
+                    ctx.agent_registry.clone(),
+                    bus.clone(),
+                );
+
                 // Assignment → Running
                 if let (Some(db), Some(assign_id)) = (&db, assignment_id) {
                     let repo = openalpaca_storage::repository::TaskRepository::new(db);
@@ -115,17 +179,10 @@ impl TaskDispatcher {
                     );
                 }
 
-                // Update state_json: mark step running
+                // Update state_json: mark step running (with retry for version conflicts)
                 if let Some(ref db) = db {
-                    let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                    if let Ok(Some(existing)) = repo.get(&task_id) {
-                        if let Some(ref sj) = existing.state_json {
-                            if let Ok(mut state) = serde_json::from_str::<TaskState>(sj) {
-                                state.mark_step_running(step as i32);
-                                let _ = repo.update_state(&task_id, &state.to_json(), existing.state_version);
-                            }
-                        }
-                    }
+                    let step_i = step as i32;
+                    update_state_with_retry(db, &task_id, |s| s.mark_step_running(step_i), "mark_step_running").await;
                 }
 
                 // Emit progress event for this step.
@@ -362,14 +419,8 @@ impl TaskDispatcher {
                     }
                 }
 
-                // Release this agent back to Idle (available for other tasks)
-                ctx.agent_registry.update_status(agent_id, AgentStatus::Idle);
-                bus.publish(SystemEvent::AgentStatusChanged {
-                    agent_id: agent_id.clone(),
-                    status: "idle".to_string(),
-                    current_task_id: None,
-                    timestamp: now,
-                });
+                // Release this agent back to Idle (explicit; guard is backup for panics)
+                busy_guard.restore();
 
                 if agent_success {
                     let raw_content = result.final_content.clone();
@@ -385,35 +436,27 @@ impl TaskDispatcher {
                         raw_content.clone()
                     };
 
-                    // Update state_json: mark step completed + auto-write output to workspace
+                    // Update state_json: mark step completed + auto-write output to workspace (with retry)
                     if let Some(ref db) = db {
-                        let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                        if let Ok(Some(existing)) = repo.get(&task_id) {
-                            if let Some(ref sj) = existing.state_json {
-                                if let Ok(mut state) = serde_json::from_str::<TaskState>(sj) {
-                                    let summary: String = raw_content.chars().take(500).collect();
-                                    state.mark_step_completed(step as i32, &summary);
-                                    // Auto-write agent output to shared workspace
-                                    if !raw_content.is_empty() {
-                                        let ws_key = format!("step_{}_output", step);
-                                        if let Err(e) = state.workspace.write(
-                                            &ws_key,
-                                            &raw_content,
-                                            agent_id,
-                                            crate::orchestrator::task_state::WorkspaceEntryType::Context,
-                                            &[],
-                                        ) {
-                                            tracing::warn!("Failed to auto-write step {} output to workspace: {}", step, e);
-                                        }
-                                    }
-                                    match repo.update_state(&task_id, &state.to_json(), existing.state_version) {
-                                        Ok(false) => tracing::warn!("Version conflict persisting step {} state — data may be stale", step),
-                                        Err(e) => tracing::warn!("Failed to persist step {} state: {}", step, e),
-                                        Ok(true) => {}
-                                    }
+                        let step_i = step as i32;
+                        let raw_clone = raw_content.clone();
+                        let aid = agent_id.clone();
+                        update_state_with_retry(db, &task_id, move |state| {
+                            let summary: String = raw_clone.chars().take(500).collect();
+                            state.mark_step_completed(step_i, &summary);
+                            if !raw_clone.is_empty() {
+                                let ws_key = format!("step_{}_output", step_i);
+                                if let Err(e) = state.workspace.write(
+                                    &ws_key,
+                                    &raw_clone,
+                                    &aid,
+                                    crate::orchestrator::task_state::WorkspaceEntryType::Context,
+                                    &[],
+                                ) {
+                                    tracing::warn!("Failed to auto-write step {} output to workspace: {}", step_i, e);
                                 }
                             }
-                        }
+                        }, "mark_step_completed").await;
                     }
 
                     // Emit progress event showing step completed (step + 1 = "N+1 steps done")
@@ -438,22 +481,15 @@ impl TaskDispatcher {
 
                     final_content = display_content;
                 } else {
-                    // Update state_json: mark step failed
+                    // Update state_json: mark step failed (with retry)
                     if let Some(ref db) = db {
-                        let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                        if let Ok(Some(existing)) = repo.get(&task_id) {
-                            if let Some(ref sj) = existing.state_json {
-                                if let Ok(mut state) = serde_json::from_str::<TaskState>(sj) {
-                                    let error_msg = match &result.finish_reason {
-                                        LoopFinishReason::CostExceeded => "Agent cost limit exceeded".to_string(),
-                                        LoopFinishReason::Error(err) => err.clone(),
-                                        _ => "Agent failed".to_string(),
-                                    };
-                                    state.mark_step_failed(step as i32, &error_msg);
-                                    let _ = repo.update_state(&task_id, &state.to_json(), existing.state_version);
-                                }
-                            }
-                        }
+                        let step_i = step as i32;
+                        let error_msg = match &result.finish_reason {
+                            LoopFinishReason::CostExceeded => "Agent cost limit exceeded".to_string(),
+                            LoopFinishReason::Error(err) => err.clone(),
+                            _ => "Agent failed".to_string(),
+                        };
+                        update_state_with_retry(db, &task_id, |s| s.mark_step_failed(step_i, &error_msg), "mark_step_failed").await;
                     }
 
                     pipeline_success = false;

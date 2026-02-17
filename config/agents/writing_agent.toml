@@ -4,7 +4,7 @@ name = "Writing Agent"
 description = "Focused on content writing, document generation, and text refinement"
 
 [skills]
-assigned = ["text_generate", "markdown_format", "file_write"]
+assigned = ["text_generate", "file_write"]
 denied = ["shell_execute", "web_search"]
 
 [preset]
@@ -15,7 +15,7 @@ verbosity = "detailed"
 [constraints]
 max_tool_calls = 10
 timeout_seconds = 180
-allowed_capabilities = ["text_generate", "markdown_format", "file_write"]
+allowed_capabilities = ["text_generate", "file_write"]
 denied_capabilities = ["shell_execute", "web_search"]
 
 [llm]

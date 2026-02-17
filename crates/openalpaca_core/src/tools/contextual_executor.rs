@@ -10,7 +10,10 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 /// Tools whose arguments need owner_id injection.
-const OWNER_SCOPED_TOOLS: &[&str] = &["memory_search", "update_user"];
+/// All persona-update tools require owner authorization to prevent
+/// subagents in DAG/pipeline contexts from modifying system personality
+/// files without proper ownership verification.
+const OWNER_SCOPED_TOOLS: &[&str] = &["memory_search", "update_user", "update_soul", "update_identity"];
 
 /// Tools that operate on the task workspace (handled directly, not forwarded to registry).
 const WORKSPACE_SCOPED_TOOLS: &[&str] = &["workspace_read", "workspace_write"];

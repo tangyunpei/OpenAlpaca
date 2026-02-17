@@ -104,6 +104,20 @@ impl Orchestrator {
             .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
             .collect();
 
+        if tool_defs.len() < tool_names.len() {
+            let resolved_names: Vec<&str> = tool_defs.iter().map(|d| d.name.as_str()).collect();
+            let missing: Vec<&str> = tool_names
+                .iter()
+                .filter(|n| !resolved_names.contains(&n.as_str()))
+                .map(|n| n.as_str())
+                .collect();
+            tracing::warn!(
+                "Skill '{}' references unknown tools: {:?}",
+                skill_name,
+                missing
+            );
+        }
+
         let (tools_for_loop, policy_opt, config_for_loop);
         if !tool_defs.is_empty() {
             tracing::info!(
@@ -219,7 +233,7 @@ impl Orchestrator {
                 owner_id: owner_id.map(|s| s.to_string()),
                 task_id: None,
                 agent_id: None,
-                db: None,
+                db: self.db.clone(),
             };
             let contextual_executor = Arc::new(ContextualToolExecutor::new(
                 self.tool_registry.clone(),
