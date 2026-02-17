@@ -241,40 +241,18 @@ impl TaskDispatcher {
             return Err("No agents assigned by planner".to_string());
         }
 
-        // Validate ALL planned agents are available (pipeline requires every step)
-        let mut unavailable: Vec<String> = Vec::new();
-        let mut matches: Vec<SkillMatch> = Vec::new();
-
-        for a in &plan.assignments {
-            let is_available = self
-                .shared_context
-                .agent_registry
-                .get(&a.agent_id)
-                .map(|agent| agent.status.is_available())
-                .unwrap_or(false);
-
-            if is_available {
-                matches.push(SkillMatch {
-                    agent_id: a.agent_id.clone(),
-                    agent_name: a.agent_name.clone(),
-                    matched_skills: a.matched_skills.clone(),
-                    role_description: a.role_description.clone(),
-                });
-            } else {
-                unavailable.push(format!("{} ({})", a.agent_name, a.agent_id));
-            }
-        }
-
-        if !unavailable.is_empty() {
-            return Err(format!(
-                "Cannot start pipeline — these agents are unavailable: {}. All agents must be available for a sequential pipeline.",
-                unavailable.join(", ")
-            ));
-        }
-
-        if matches.is_empty() {
-            return Err("No agents assigned by planner".to_string());
-        }
+        // Build matches from plan assignments — availability is checked
+        // atomically via try_claim() inside dispatch_core().
+        let matches: Vec<SkillMatch> = plan
+            .assignments
+            .iter()
+            .map(|a| SkillMatch {
+                agent_id: a.agent_id.clone(),
+                agent_name: a.agent_name.clone(),
+                matched_skills: a.matched_skills.clone(),
+                role_description: a.role_description.clone(),
+            })
+            .collect();
 
         let dag = plan.dag;
         let title = plan

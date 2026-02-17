@@ -148,14 +148,7 @@ impl BuiltInTool for SpawnSubagentTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: objective".to_string())?;
 
-        // 2. Look up agent from registry
-        let agent = self
-            .shared_context
-            .agent_registry
-            .get(agent_id)
-            .ok_or_else(|| format!("Agent '{}' not found in registry", agent_id))?;
-
-        // Prevent the lead agent from spawning itself (infinite recursion)
+        // 2. Prevent the lead agent from spawning itself (infinite recursion)
         if agent_id == self.created_by {
             return Err(format!(
                 "Agent '{}' cannot spawn itself — would cause infinite recursion",
@@ -163,20 +156,12 @@ impl BuiltInTool for SpawnSubagentTool {
             ));
         }
 
-        if !agent.status.is_available() {
-            return Err(format!(
-                "Agent '{}' is not available (status: {})",
-                agent_id, agent.status
-            ));
-        }
-
-        // 3. Mark agent as Busy (with RAII guard for panic safety)
-        self.shared_context.agent_registry.update_status(
-            agent_id,
-            AgentStatus::Busy {
-                task_id: self.task_id.clone(),
-            },
-        );
+        // 3. Atomically claim the agent (check idle + set Busy in one lock)
+        let agent = self
+            .shared_context
+            .agent_registry
+            .try_claim(agent_id, self.task_id.clone())
+            .map_err(|e| format!("Cannot spawn agent '{}': {}", agent_id, e))?;
         self.bus.publish(SystemEvent::AgentStatusChanged {
             agent_id: agent_id.to_string(),
             status: "busy".to_string(),
