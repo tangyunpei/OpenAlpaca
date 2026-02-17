@@ -153,15 +153,8 @@ struct WebSearchTool;
 
 #[async_trait]
 impl BuiltInTool for WebSearchTool {
-    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
-        let query = arguments
-            .get("query")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        Ok(format!(
-            "Web search is not yet configured. Please set up a search provider API key. Query was: {}",
-            query
-        ))
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Err("web_search is not yet implemented. Please configure a search provider.".to_string())
     }
 }
 
@@ -210,10 +203,13 @@ impl BuiltInTool for WebFetchTool {
             return Err(format!("HTTP error: {}", status));
         }
 
-        let body = response
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read response: {}", e))?;
+        let body = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            response.text(),
+        )
+        .await
+        .map_err(|_| "Response body read timed out after 15s".to_string())?
+        .map_err(|e| format!("Failed to read response: {}", e))?;
 
         // Truncate to 8KB
         Ok(body.chars().take(8192).collect())
@@ -246,9 +242,8 @@ struct SummarizeTool;
 
 #[async_trait]
 impl BuiltInTool for SummarizeTool {
-    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
-        let input = arguments.get("text").and_then(|v| v.as_str()).unwrap_or("");
-        Ok(format!("Summary request noted: {}", input))
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Err("summarize is not yet implemented. Use the LLM directly for summarization.".to_string())
     }
 }
 
@@ -278,12 +273,8 @@ struct TextGenerateTool;
 
 #[async_trait]
 impl BuiltInTool for TextGenerateTool {
-    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
-        let input = arguments
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        Ok(format!("Generation request noted: {}", input))
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Err("text_generate is not yet implemented. Use the LLM directly for text generation.".to_string())
     }
 }
 
@@ -319,12 +310,21 @@ impl BuiltInTool for FileReadTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: path".to_string())?;
 
-        // Security: reject absolute paths and .. components
-        validate_workspace_path(path)?;
+        // Security: resolve path, reject traversal and symlink escapes
+        let full_path = resolve_workspace_path(path)?;
 
-        let full_path = std::env::current_dir()
-            .map_err(|e| format!("Cannot determine working directory: {}", e))?
-            .join(path);
+        // Guard against OOM: reject files larger than 10 MB
+        let metadata = tokio::fs::metadata(&full_path)
+            .await
+            .map_err(|e| format!("Cannot access file '{}': {}", path, e))?;
+        if metadata.len() > MAX_FILE_READ_SIZE {
+            return Err(format!(
+                "File '{}' is {} bytes, exceeding the {} byte limit",
+                path,
+                metadata.len(),
+                MAX_FILE_READ_SIZE
+            ));
+        }
 
         tokio::fs::read_to_string(&full_path)
             .await
@@ -395,16 +395,18 @@ impl BuiltInTool for FileWriteTool {
                 .to_string());
         }
 
-        let full_path = std::env::current_dir()
-            .map_err(|e| format!("Cannot determine working directory: {}", e))?
-            .join(path);
-
-        // Create parent directories if needed
-        if let Some(parent) = full_path.parent() {
+        // Create parent directories before resolving (so canonicalize can work)
+        let workspace_root = std::env::current_dir()
+            .map_err(|e| format!("Cannot determine working directory: {}", e))?;
+        let preliminary_path = workspace_root.join(path);
+        if let Some(parent) = preliminary_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| format!("Failed to create directories: {}", e))?;
         }
+
+        // Security: resolve path, reject symlink escapes
+        let full_path = resolve_workspace_path_for_write(path)?;
 
         tokio::fs::write(&full_path, content)
             .await
@@ -472,13 +474,28 @@ impl BuiltInTool for ShellExecuteTool {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         if output.status.success() {
-            Ok(format!("{}{}", stdout, stderr))
+            let mut result = String::new();
+            if !stdout.is_empty() {
+                result.push_str(&stdout);
+            }
+            if !stderr.is_empty() {
+                if !result.is_empty() {
+                    result.push_str("\n\n");
+                }
+                result.push_str("STDERR:\n");
+                result.push_str(&stderr);
+            }
+            Ok(result)
         } else {
             Err(format!(
-                "Command failed (exit {}): {}{}",
+                "Command failed (exit {}):\n{}{}",
                 output.status.code().unwrap_or(-1),
                 stdout,
-                stderr
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!("\nSTDERR:\n{}", stderr)
+                }
             ))
         }
     }
@@ -948,6 +965,101 @@ fn validate_workspace_path(path: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Maximum file size for file_read (10 MB).
+const MAX_FILE_READ_SIZE: u64 = 10 * 1024 * 1024;
+
+/// Resolve a relative path within the workspace and verify it doesn't escape
+/// the workspace boundary via symlinks or normalization.
+///
+/// Returns the canonicalized absolute path on success.
+fn resolve_workspace_path(relative_path: &str) -> Result<std::path::PathBuf, String> {
+    validate_workspace_path(relative_path)?;
+
+    let workspace_root = std::env::current_dir()
+        .map_err(|e| format!("Cannot determine working directory: {}", e))?;
+
+    let full_path = workspace_root.join(relative_path);
+
+    // Canonicalize to resolve symlinks. For reads the file must exist;
+    // for writes the parent must exist (caller handles dir creation).
+    let canonical = full_path.canonicalize().map_err(|e| {
+        format!(
+            "Path resolution failed for '{}': {}",
+            relative_path, e
+        )
+    })?;
+
+    let canonical_root = workspace_root.canonicalize().map_err(|e| {
+        format!("Workspace root canonicalization failed: {}", e)
+    })?;
+
+    if !canonical.starts_with(&canonical_root) {
+        return Err(format!(
+            "Path '{}' resolves outside the workspace boundary",
+            relative_path
+        ));
+    }
+
+    Ok(canonical)
+}
+
+/// Like `resolve_workspace_path` but for write targets where the file may not
+/// yet exist. Canonicalizes the parent directory and verifies it is within
+/// the workspace, then appends the file name.
+fn resolve_workspace_path_for_write(relative_path: &str) -> Result<std::path::PathBuf, String> {
+    validate_workspace_path(relative_path)?;
+
+    let workspace_root = std::env::current_dir()
+        .map_err(|e| format!("Cannot determine working directory: {}", e))?;
+
+    let full_path = workspace_root.join(relative_path);
+
+    // For new files, canonicalize the parent directory
+    let parent = full_path
+        .parent()
+        .ok_or_else(|| "Invalid path: no parent directory".to_string())?;
+
+    let canonical_root = workspace_root.canonicalize().map_err(|e| {
+        format!("Workspace root canonicalization failed: {}", e)
+    })?;
+
+    // If parent exists, canonicalize it; otherwise fall back to the joined path
+    // (parent dirs will be created by the caller)
+    if parent.exists() {
+        let canonical_parent = parent.canonicalize().map_err(|e| {
+            format!(
+                "Parent directory resolution failed for '{}': {}",
+                relative_path, e
+            )
+        })?;
+
+        if !canonical_parent.starts_with(&canonical_root) {
+            return Err(format!(
+                "Path '{}' resolves outside the workspace boundary",
+                relative_path
+            ));
+        }
+
+        // Re-append the file name to the canonical parent
+        let file_name = full_path
+            .file_name()
+            .ok_or_else(|| "Invalid path: no file name".to_string())?;
+        Ok(canonical_parent.join(file_name))
+    } else {
+        // Parent doesn't exist yet — the caller will create it.
+        // Since validate_workspace_path already rejected .. components,
+        // and the parent hasn't been created yet (so no symlinks to resolve),
+        // we can use the non-canonical path. Double-check it starts with the root.
+        if !full_path.starts_with(&workspace_root) {
+            return Err(format!(
+                "Path '{}' resolves outside the workspace boundary",
+                relative_path
+            ));
+        }
+        Ok(full_path)
+    }
 }
 
 /// Check if a path refers to SOUL.md (case-insensitive filename check).
@@ -1765,8 +1877,8 @@ mod tests {
         let result = tool
             .execute(&serde_json::json!({"text": "Hello world"}))
             .await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().contains("Summary request noted"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not yet implemented"));
     }
 
     #[tokio::test]
@@ -1775,8 +1887,8 @@ mod tests {
         let result = tool
             .execute(&serde_json::json!({"prompt": "Write a poem"}))
             .await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().contains("Generation request noted"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not yet implemented"));
     }
 
     #[tokio::test]
@@ -1785,8 +1897,8 @@ mod tests {
         let result = tool
             .execute(&serde_json::json!({"query": "rust language"}))
             .await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().contains("not yet configured"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not yet implemented"));
     }
 
     // --- SoulUpdateTool tests ---

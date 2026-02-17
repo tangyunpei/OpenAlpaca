@@ -57,25 +57,20 @@ impl ToolRegistry {
     }
 
     /// Return tool definitions filtered by skill names.
-    /// If no skill names match any registered tool, return all tools
-    /// (so agents without explicit skills still get tools).
+    /// If `skill_names` is empty, returns all tools (agents without explicit
+    /// skills get everything). If non-empty but no names match, returns an
+    /// empty list — this prevents misconfigured agents from silently receiving
+    /// all tools.
     pub fn definitions_for_skills(&self, skill_names: &[String]) -> Vec<ToolDefinition> {
         if skill_names.is_empty() {
             return self.tools.values().map(|t| t.definition.clone()).collect();
         }
 
-        let matched: Vec<ToolDefinition> = self
-            .tools
+        self.tools
             .values()
             .filter(|t| skill_names.contains(&t.definition.name))
             .map(|t| t.definition.clone())
-            .collect();
-
-        if matched.is_empty() {
-            self.tools.values().map(|t| t.definition.clone()).collect()
-        } else {
-            matched
-        }
+            .collect()
     }
 
     /// Execute a tool by name.
@@ -124,7 +119,7 @@ async fn execute_http(
     timeout_secs: u64,
     arguments: &serde_json::Value,
 ) -> Result<String, String> {
-    // Replace {param_name} placeholders in URL with argument values
+    // Replace {param_name} placeholders in URL with URL-encoded argument values
     let mut url = url_template.to_string();
     if let Some(obj) = arguments.as_object() {
         for (key, value) in obj {
@@ -132,7 +127,8 @@ async fn execute_http(
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            url = url.replace(&format!("{{{}}}", key), &replacement);
+            let encoded = urlencoding::encode(&replacement);
+            url = url.replace(&format!("{{{}}}", key), &encoded);
         }
     }
 
@@ -185,7 +181,8 @@ async fn execute_command(
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            full_args = full_args.replace(&format!("{{{}}}", key), &replacement);
+            let escaped = shell_escape::escape(replacement.into());
+            full_args = full_args.replace(&format!("{{{}}}", key), &escaped);
         }
     }
 
@@ -271,14 +268,14 @@ mod tests {
     }
 
     #[test]
-    fn test_definitions_for_skills_no_match_returns_all() {
+    fn test_definitions_for_skills_no_match_returns_empty() {
         let mut registry = ToolRegistry::new();
         registry.register(make_tool("web_search", "results"));
         registry.register(make_tool("summarize", "summary"));
 
         let skills = vec!["nonexistent_skill".to_string()];
         let defs = registry.definitions_for_skills(&skills);
-        assert_eq!(defs.len(), 2);
+        assert_eq!(defs.len(), 0, "Non-matching skills should return empty list, not all tools");
     }
 
     #[test]

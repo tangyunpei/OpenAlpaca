@@ -1530,6 +1530,12 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     // Load user tools from config/tools/*.toml (D11: use resolved config_base_dir)
     let tools_config_dir = config_base_dir.join("tools");
     for tool in openalpaca_core::tools::config::load_tools_from_dir(&tools_config_dir) {
+        if tool_registry.get(&tool.definition.name).is_some() {
+            warn!(
+                "Custom tool '{}' conflicts with an existing tool name and will override it",
+                tool.definition.name
+            );
+        }
         info!("Registered custom tool: {}", tool.definition.name);
         tool_registry.register(tool);
     }

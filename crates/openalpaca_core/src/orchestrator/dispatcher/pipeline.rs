@@ -159,21 +159,13 @@ impl TaskDispatcher {
                 let sandbox_policy =
                     SandboxPolicy::from_constraints(agent_id, &agent.constraints);
 
-                // Resolve tools (agent skills + workspace tools for task context)
-                let skill_names: Vec<String> =
-                    agent.skills.iter().map(|s| s.name.clone()).collect();
-                let mut tools = tool_registry.definitions_for_skills(&skill_names);
-                // Add workspace tool definitions so agents can read/write shared workspace
-                tools.extend(crate::tools::builtins::workspace_tool_definitions());
-                // Ensure memory_search is always available (owner-scoped via ContextualToolExecutor)
-                if !tools.iter().any(|t| t.name == "memory_search") {
-                    if let Some(mem_tool) = tool_registry.get("memory_search") {
-                        tools.push(mem_tool.definition.clone());
-                    }
-                }
+                // Resolve tools via shared helper
+                let tools = crate::tools::resolve_agent_tools(&agent, &tool_registry);
                 tracing::info!(
                     "Agent '{}' loaded {} tool definitions for skills: {:?}",
-                    agent_id, tools.len(), skill_names
+                    agent_id,
+                    tools.len(),
+                    agent.skills.iter().map(|s| &s.name).collect::<Vec<_>>()
                 );
 
                 // Build system prompt with role description and tool awareness

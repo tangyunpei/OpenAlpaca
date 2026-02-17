@@ -74,7 +74,10 @@ impl ToolCircuitBreaker {
             return Ok(());
         }
 
-        let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.state.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("Circuit breaker mutex poisoned, recovering — a panic may have occurred during state update");
+            poisoned.into_inner()
+        });
         let key = (agent_id.to_string(), tool_name.to_string());
 
         let entry = match map.get_mut(&key) {
@@ -122,7 +125,10 @@ impl ToolCircuitBreaker {
             return;
         }
 
-        let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.state.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("Circuit breaker mutex poisoned, recovering — a panic may have occurred during state update");
+            poisoned.into_inner()
+        });
         let key = (agent_id.to_string(), tool_name.to_string());
 
         if let Some(entry) = map.get_mut(&key) {
@@ -147,7 +153,10 @@ impl ToolCircuitBreaker {
             return false;
         }
 
-        let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.state.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("Circuit breaker mutex poisoned, recovering — a panic may have occurred during state update");
+            poisoned.into_inner()
+        });
         let key = (agent_id.to_string(), tool_name.to_string());
 
         let entry = map.entry(key).or_default();
