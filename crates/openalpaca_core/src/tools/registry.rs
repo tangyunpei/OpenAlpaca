@@ -57,25 +57,23 @@ impl ToolRegistry {
     }
 
     /// Return tool definitions filtered by skill names.
-    /// If no skill names match any registered tool, return all tools
-    /// (so agents without explicit skills still get tools).
+    /// If `skill_names` is empty, returns an empty list (least-privilege:
+    /// agents without explicit skills get no tools from the registry).
+    /// The caller (`resolve_agent_tools`) adds workspace tools separately.
+    /// If non-empty but no names match, also returns empty.
     pub fn definitions_for_skills(&self, skill_names: &[String]) -> Vec<ToolDefinition> {
         if skill_names.is_empty() {
-            return self.tools.values().map(|t| t.definition.clone()).collect();
+            tracing::debug!(
+                "definitions_for_skills called with empty skills — returning empty (least-privilege)"
+            );
+            return Vec::new();
         }
 
-        let matched: Vec<ToolDefinition> = self
-            .tools
+        self.tools
             .values()
             .filter(|t| skill_names.contains(&t.definition.name))
             .map(|t| t.definition.clone())
-            .collect();
-
-        if matched.is_empty() {
-            self.tools.values().map(|t| t.definition.clone()).collect()
-        } else {
-            matched
-        }
+            .collect()
     }
 
     /// Execute a tool by name.
@@ -124,7 +122,7 @@ async fn execute_http(
     timeout_secs: u64,
     arguments: &serde_json::Value,
 ) -> Result<String, String> {
-    // Replace {param_name} placeholders in URL with argument values
+    // Replace {param_name} placeholders in URL with URL-encoded argument values
     let mut url = url_template.to_string();
     if let Some(obj) = arguments.as_object() {
         for (key, value) in obj {
@@ -132,7 +130,8 @@ async fn execute_http(
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            url = url.replace(&format!("{{{}}}", key), &replacement);
+            let encoded = urlencoding::encode(&replacement);
+            url = url.replace(&format!("{{{}}}", key), &encoded);
         }
     }
 
@@ -185,7 +184,8 @@ async fn execute_command(
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            full_args = full_args.replace(&format!("{{{}}}", key), &replacement);
+            let escaped = shell_escape::escape(replacement.into());
+            full_args = full_args.replace(&format!("{{{}}}", key), &escaped);
         }
     }
 
@@ -193,10 +193,7 @@ async fn execute_command(
     let full_command = format!("{} {}", command, full_args);
 
     let output = tokio::time::timeout(timeout, {
-        tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(&full_command)
-            .output()
+        crate::tools::platform::shell_command(&full_command).output()
     })
     .await
     .map_err(|_| format!("Command timed out after {}s", timeout_secs))?
@@ -271,22 +268,22 @@ mod tests {
     }
 
     #[test]
-    fn test_definitions_for_skills_no_match_returns_all() {
+    fn test_definitions_for_skills_no_match_returns_empty() {
         let mut registry = ToolRegistry::new();
         registry.register(make_tool("web_search", "results"));
         registry.register(make_tool("summarize", "summary"));
 
         let skills = vec!["nonexistent_skill".to_string()];
         let defs = registry.definitions_for_skills(&skills);
-        assert_eq!(defs.len(), 2);
+        assert_eq!(defs.len(), 0, "Non-matching skills should return empty list, not all tools");
     }
 
     #[test]
-    fn test_definitions_for_empty_skills_returns_all() {
+    fn test_definitions_for_empty_skills_returns_empty() {
         let mut registry = ToolRegistry::new();
         registry.register(make_tool("web_search", "results"));
         let defs = registry.definitions_for_skills(&[]);
-        assert_eq!(defs.len(), 1);
+        assert_eq!(defs.len(), 0, "Empty skills should return empty list (least-privilege)");
     }
 
     #[tokio::test]

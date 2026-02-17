@@ -1529,7 +1529,27 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
 
     // Load user tools from config/tools/*.toml (D11: use resolved config_base_dir)
     let tools_config_dir = config_base_dir.join("tools");
+    // Security-critical built-in tools that TOML configs must not override.
+    let protected_builtins: &[&str] = &[
+        "update_soul", "update_user", "update_identity",
+        "shell_execute", "file_read", "file_write",
+        "memory_search", "workspace_read", "workspace_write",
+        "spawn_subagent",
+    ];
     for tool in openalpaca_core::tools::config::load_tools_from_dir(&tools_config_dir) {
+        if protected_builtins.contains(&tool.definition.name.as_str()) {
+            warn!(
+                "Custom tool '{}' would override a security-critical built-in — skipping",
+                tool.definition.name
+            );
+            continue;
+        }
+        if tool_registry.get(&tool.definition.name).is_some() {
+            warn!(
+                "Custom tool '{}' conflicts with an existing tool name and will override it",
+                tool.definition.name
+            );
+        }
         info!("Registered custom tool: {}", tool.definition.name);
         tool_registry.register(tool);
     }

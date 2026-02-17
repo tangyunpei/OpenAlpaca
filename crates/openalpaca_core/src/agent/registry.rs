@@ -101,6 +101,31 @@ impl AgentRegistry {
         }
     }
 
+    /// Atomically claim an idle agent by marking it Busy.
+    ///
+    /// Combines the availability check and status update in a single lock
+    /// acquisition, eliminating the TOCTOU race in separate
+    /// `get()` + `is_available()` + `update_status()` sequences.
+    ///
+    /// Returns the cloned `SubAgent` (already updated to Busy) on success.
+    pub fn try_claim(&self, agent_id: &str, task_id: String) -> Result<SubAgent, String> {
+        let mut agents = self.lock_agents();
+        let entry = agents
+            .get_mut(agent_id)
+            .ok_or_else(|| format!("agent '{}' not found", agent_id))?;
+        if !entry.agent.status.is_available() {
+            return Err(format!(
+                "agent '{}' is not available (status: {})",
+                agent_id, entry.agent.status
+            ));
+        }
+        entry.agent.status = AgentStatus::Busy {
+            task_id: task_id.clone(),
+        };
+        entry.agent.current_task = Some(task_id);
+        Ok(entry.agent.clone())
+    }
+
     /// Remove a SubAgent by id. Returns true if it existed.
     pub fn remove(&self, agent_id: &str) -> bool {
         self.lock_agents().remove(agent_id).is_some()
@@ -336,5 +361,68 @@ mod tests {
             .update_config("a1", make_agent("a1", vec!["s3"]), 2)
             .unwrap();
         assert_eq!(v3, 3);
+    }
+
+    #[test]
+    fn test_try_claim_success() {
+        let reg = AgentRegistry::new();
+        reg.register(make_agent("a1", vec!["search"]));
+
+        let agent = reg.try_claim("a1", "task-1".to_string()).unwrap();
+        assert_eq!(agent.id, "a1");
+        assert_eq!(agent.status.as_str(), "busy");
+        assert_eq!(agent.current_task.as_deref(), Some("task-1"));
+
+        // Registry state is also Busy
+        let fetched = reg.get("a1").unwrap();
+        assert_eq!(fetched.status.as_str(), "busy");
+        assert_eq!(fetched.current_task.as_deref(), Some("task-1"));
+    }
+
+    #[test]
+    fn test_try_claim_already_busy() {
+        let reg = AgentRegistry::new();
+        reg.register(make_agent("a1", vec!["search"]));
+
+        // First claim succeeds
+        reg.try_claim("a1", "task-1".to_string()).unwrap();
+
+        // Second claim fails
+        let err = reg.try_claim("a1", "task-2".to_string()).unwrap_err();
+        assert!(err.contains("not available"));
+
+        // Original task_id preserved
+        let fetched = reg.get("a1").unwrap();
+        assert_eq!(fetched.current_task.as_deref(), Some("task-1"));
+    }
+
+    #[test]
+    fn test_try_claim_not_found() {
+        let reg = AgentRegistry::new();
+        let err = reg.try_claim("nonexistent", "task-1".to_string()).unwrap_err();
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn test_try_claim_concurrent() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let reg = Arc::new(AgentRegistry::new());
+        reg.register(make_agent("a1", vec!["search"]));
+
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let reg = reg.clone();
+                thread::spawn(move || reg.try_claim("a1", format!("task-{}", i)))
+            })
+            .collect();
+
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let wins = results.iter().filter(|r| r.is_ok()).count();
+        let losses = results.iter().filter(|r| r.is_err()).count();
+
+        assert_eq!(wins, 1, "Exactly one thread should win the claim");
+        assert_eq!(losses, 9);
     }
 }

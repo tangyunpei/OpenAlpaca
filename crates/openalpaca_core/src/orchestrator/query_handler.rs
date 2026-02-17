@@ -203,7 +203,7 @@ impl Orchestrator {
                 owner_id: owner_id.map(|s| s.to_string()),
                 task_id: None,
                 agent_id: None,
-                db: None,
+                db: self.db.clone(),
             };
             let contextual_executor = Arc::new(ContextualToolExecutor::new(
                 self.tool_registry.clone(),

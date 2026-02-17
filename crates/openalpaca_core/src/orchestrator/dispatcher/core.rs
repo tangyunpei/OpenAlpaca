@@ -32,34 +32,64 @@ impl TaskDispatcher {
         // Create TaskLane
         let task_lane = self.lane_manager.create_task_lane(&task_id);
 
-        // Assign agents
+        // Atomically claim each agent (check idle + set Busy in one lock).
+        // If any claim fails, roll back all previously claimed agents.
         let mut assignments = Vec::new();
+        let mut claimed_ids: Vec<String> = Vec::new();
         let now = Utc::now();
         for skill_match in &matches {
-            task_lane.assign_agent(skill_match.agent_id.clone());
+            match self
+                .shared_context
+                .agent_registry
+                .try_claim(&skill_match.agent_id, task_id.clone())
+            {
+                Ok(_) => {
+                    task_lane.assign_agent(skill_match.agent_id.clone());
+                    claimed_ids.push(skill_match.agent_id.clone());
 
-            // Update agent status to Busy
-            self.shared_context.agent_registry.update_status(
-                &skill_match.agent_id,
-                AgentStatus::Busy {
-                    task_id: task_id.clone(),
-                },
-            );
+                    self.bus.publish(SystemEvent::AgentStatusChanged {
+                        agent_id: skill_match.agent_id.clone(),
+                        status: "busy".to_string(),
+                        current_task_id: Some(task_id.clone()),
+                        timestamp: now,
+                    });
 
-            // Emit AgentStatusChanged
-            self.bus.publish(SystemEvent::AgentStatusChanged {
-                agent_id: skill_match.agent_id.clone(),
-                status: "busy".to_string(),
-                current_task_id: Some(task_id.clone()),
-                timestamp: now,
-            });
-
-            assignments.push(serde_json::json!({
-                "agent_id": skill_match.agent_id,
-                "agent_name": skill_match.agent_name,
-                "matched_skills": skill_match.matched_skills,
-                "role": skill_match.role_description,
-            }));
+                    assignments.push(serde_json::json!({
+                        "agent_id": skill_match.agent_id,
+                        "agent_name": skill_match.agent_name,
+                        "matched_skills": skill_match.matched_skills,
+                        "role": skill_match.role_description,
+                    }));
+                }
+                Err(e) => {
+                    // Roll back all previously claimed agents
+                    tracing::warn!(
+                        "Failed to claim agent '{}' for task '{}': {}. Rolling back {} agents.",
+                        skill_match.agent_id,
+                        task_id,
+                        e,
+                        claimed_ids.len()
+                    );
+                    let rollback_now = Utc::now();
+                    for id in &claimed_ids {
+                        self.shared_context
+                            .agent_registry
+                            .update_status(id, AgentStatus::Idle);
+                        self.bus.publish(SystemEvent::AgentStatusChanged {
+                            agent_id: id.clone(),
+                            status: "idle".to_string(),
+                            current_task_id: None,
+                            timestamp: rollback_now,
+                        });
+                    }
+                    // Task never started — remove from registry entirely
+                    self.shared_context.task_registry.remove(&task_id);
+                    return Err(format!(
+                        "Cannot start task — agent '{}' ({}) unavailable: {}",
+                        skill_match.agent_name, skill_match.agent_id, e
+                    ));
+                }
+            }
         }
 
         // Emit TaskCreated

@@ -11,7 +11,7 @@ use crate::runner::{LoopConfig, LoopFinishReason, LoopResult, run_agentic_loop_r
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::ToolRegistry;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
-use openalpaca_llm::{ChatMessage, LlmRouter, ToolDefinition};
+use openalpaca_llm::{ChatMessage, LlmRouter};
 use openalpaca_storage::repository::LlmUsageRepository;
 use openalpaca_storage::Database;
 use std::collections::HashMap;
@@ -292,7 +292,7 @@ pub async fn execute_dag(
                         // Write output to workspace
                         write_node_output_to_workspace(
                             dag, &node_result, task_id, &db,
-                        );
+                        ).await;
 
                         // Mark completed in DAG
                         dag.complete_node(&node_id, &node_result.final_content);
@@ -568,17 +568,8 @@ async fn execute_single_node(
 
     let sandbox_policy = SandboxPolicy::from_constraints(&agent_id, &agent.constraints);
 
-    // Resolve tools
-    let skill_names: Vec<String> = agent.skills.iter().map(|s| s.name.clone()).collect();
-    let mut tools: Vec<ToolDefinition> = tool_registry.definitions_for_skills(&skill_names);
-    tools.extend(crate::tools::builtins::workspace_tool_definitions());
-
-    // Ensure memory_search is always available (owner-scoped via ContextualToolExecutor)
-    if !tools.iter().any(|t| t.name == "memory_search") {
-        if let Some(mem_tool) = tool_registry.get("memory_search") {
-            tools.push(mem_tool.definition.clone());
-        }
-    }
+    // Resolve tools via shared helper
+    let tools = crate::tools::resolve_agent_tools(&agent, &tool_registry);
 
     // Build system prompt
     let tool_guidance = format_tool_guidance(&tools);
@@ -767,7 +758,7 @@ fn load_workspace_context(
 /// Write a completed node's output to the workspace under its output_key.
 /// Uses a retry loop (max 3 attempts) to handle optimistic locking conflicts
 /// when concurrent nodes complete simultaneously.
-fn write_node_output_to_workspace(
+async fn write_node_output_to_workspace(
     dag: &TaskDag,
     node_result: &NodeResult,
     task_id: &str,
@@ -831,8 +822,8 @@ fn write_node_output_to_workspace(
                         "Workspace write version conflict for key '{}' node '{}' (attempt {}/{}), retrying",
                         key, node_result.node_id, attempt + 1, MAX_RETRIES
                     );
-                    // Brief backoff to reduce collision probability
-                    std::thread::sleep(std::time::Duration::from_millis(10 * (1 << attempt)));
+                    // Brief async backoff to reduce collision probability
+                    tokio::time::sleep(std::time::Duration::from_millis(10 * (1 << attempt))).await;
                 } else {
                     tracing::warn!(
                         "Workspace write for key '{}' node '{}' failed after {} retries — data may be lost",
