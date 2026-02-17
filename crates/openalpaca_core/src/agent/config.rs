@@ -441,7 +441,7 @@ impl AgentConfigFile {
         let agent_id = self.agent.id.clone();
         SubAgentConfig {
             id: agent_id.clone(),
-            template_id: Some(agent_id),
+            template_id: agent_id,
             name: self.agent.name.clone(),
             description: Some(self.agent.description),
             icon: self.agent.icon,

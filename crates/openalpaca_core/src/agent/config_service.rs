@@ -246,10 +246,26 @@ impl AgentConfigService {
     }
 
     /// Delete (archive) a template.
+    ///
+    /// Fails if any busy instances are currently spawned from this template.
     pub fn delete_template(&self, id: &str) -> Result<(), String> {
         // Check template exists
         if self.registry.get_template(id).is_none() {
             return Err(format!("Template '{}' not found", id));
+        }
+
+        // Reject deletion if any busy instances exist for this template
+        let busy_count = self
+            .registry
+            .list_instances()
+            .iter()
+            .filter(|a| a.template_id == id && !a.status.is_available())
+            .count();
+        if busy_count > 0 {
+            return Err(format!(
+                "Cannot delete template '{}': {} busy instance(s)",
+                id, busy_count
+            ));
         }
 
         // 1. Archive Markdown file

@@ -1291,7 +1291,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                                     let now = chrono::Utc::now();
                                     let storage_config = openalpaca_storage::SubAgentConfig {
                                         id: template_id.clone(),
-                                        template_id: Some(template_id.clone()),
+                                        template_id: template_id.clone(),
                                         name: fm.name.clone(),
                                         description: Some(fm.description.clone()),
                                         icon: fm.icon.clone(),
@@ -1354,7 +1354,10 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                                         );
                                     }
 
-                                    info!("Loaded agent config (legacy TOML): {}", path.display());
+                                    warn!(
+                                        "Loaded agent config (legacy TOML): {} — please convert to .md format",
+                                        path.display()
+                                    );
                                 }
                                 Err(e) => {
                                     warn!("Failed to parse agent config {}: {}", path.display(), e);
@@ -2402,6 +2405,14 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         )
         // Agent instance endpoints
         .route("/v1/agent-instances", get(routes::list_instances_handler))
+        .route(
+            "/v1/agent-templates/{id}/instances",
+            post(routes::spawn_instance_handler),
+        )
+        .route(
+            "/v1/agent-instances/{id}",
+            delete(routes::destroy_instance_handler),
+        )
         // Chat routes (Phase 5.6)
         .route("/v1/chat", post(routes::send_chat_handler))
         .route("/v1/chat/history", get(routes::get_chat_history_handler))

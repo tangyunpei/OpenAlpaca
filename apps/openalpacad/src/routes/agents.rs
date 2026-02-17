@@ -21,6 +21,8 @@
 //!
 //! Instance endpoints:
 //! GET    /v1/agent-instances              -> list active instances
+//! POST   /v1/agent-templates/{id}/instances -> spawn instance from template
+//! DELETE /v1/agent-instances/{id}         -> destroy instance
 
 use axum::{
     Json,
@@ -150,6 +152,11 @@ pub struct CreateTemplateFromMarkdownRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpdateTemplateRequest {
     pub config: AgentConfigFile,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SpawnInstanceRequest {
+    pub task_id: String,
 }
 
 /// JSON representation of an active agent instance.
@@ -826,4 +833,79 @@ pub async fn list_instances_handler(
         .collect();
 
     (StatusCode::OK, Json(serde_json::to_value(response).unwrap()))
+}
+
+/// POST /v1/agent-templates/{id}/instances
+///
+/// Spawn a new instance from a template.
+pub async fn spawn_instance_handler(
+    State(state): State<Arc<AppState>>,
+    Path(template_id): Path<String>,
+    Json(body): Json<SpawnInstanceRequest>,
+) -> impl IntoResponse {
+    let registry = &state.gateway.shared_context.agent_registry;
+
+    match registry.spawn_instance(&template_id, body.task_id) {
+        Ok(agent) => {
+            let now = Utc::now();
+            let _ = state.gateway.bus.publish(SystemEvent::AgentStatusChanged {
+                agent_id: agent.id.clone(),
+                status: "busy".to_string(),
+                current_task_id: agent.current_task.clone(),
+                timestamp: now,
+            });
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "instance_id": agent.id,
+                    "template_id": agent.template_id,
+                    "name": agent.name,
+                    "status": agent.status.as_str(),
+                    "current_task": agent.current_task,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+/// DELETE /v1/agent-instances/{id}
+///
+/// Destroy (remove) an agent instance.
+pub async fn destroy_instance_handler(
+    State(state): State<Arc<AppState>>,
+    Path(instance_id): Path<String>,
+) -> impl IntoResponse {
+    let registry = &state.gateway.shared_context.agent_registry;
+
+    if registry.destroy_instance(&instance_id) {
+        let now = Utc::now();
+        let _ = state.gateway.bus.publish(SystemEvent::AgentStatusChanged {
+            agent_id: instance_id.clone(),
+            status: "idle".to_string(),
+            current_task_id: None,
+            timestamp: now,
+        });
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "instance_id": instance_id,
+                "status": "destroyed"
+            })),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("Instance '{}' not found", instance_id)
+            })),
+        )
+            .into_response()
+    }
 }
