@@ -340,6 +340,7 @@ mod tests {
         use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus};
         SubAgent {
             id: id.to_string(),
+            template_id: id.to_string(),
             name: name.to_string(),
             description: Some(format!("Test agent {}", name)),
             icon: None,

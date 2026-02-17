@@ -255,6 +255,7 @@ mod tests {
         let ctx = SharedContext::new();
         let agent = SubAgent {
             id: "a1".to_string(),
+            template_id: "a1".to_string(),
             name: "Test Agent".to_string(),
             description: None,
             icon: None,

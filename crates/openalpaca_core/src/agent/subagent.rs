@@ -3,9 +3,17 @@
 use serde::{Deserialize, Serialize};
 
 /// In-memory SubAgent representation.
+///
+/// In the template+instance model, each `SubAgent` is a runtime **instance**
+/// spawned from an `AgentTemplate`. The `template_id` links back to the
+/// originating template, while `id` is a unique instance identifier
+/// (e.g. `"code_agent::a1b2c3d4"` for non-singletons, or `"lead_agent"` for singletons).
 #[derive(Debug, Clone)]
 pub struct SubAgent {
     pub id: String,
+    /// Template this instance was spawned from (e.g. "code_agent").
+    /// For backward compatibility, defaults to the same value as `id`.
+    pub template_id: String,
     pub name: String,
     pub description: Option<String>,
     pub icon: Option<String>,
@@ -142,6 +150,7 @@ impl SubAgent {
 
         Self {
             id: config.id.clone(),
+            template_id: config.id.clone(), // backward compat: template_id = id
             name: config.name.clone(),
             description: config.description.clone(),
             icon: config.icon.clone(),

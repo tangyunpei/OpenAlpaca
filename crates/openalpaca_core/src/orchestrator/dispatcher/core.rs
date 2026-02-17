@@ -1,5 +1,5 @@
 use super::TaskDispatcher;
-use crate::agent::subagent::{AgentStatus, SubAgent};
+use crate::agent::subagent::SubAgent;
 use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
 use chrono::Utc;
@@ -11,6 +11,9 @@ use uuid::Uuid;
 
 impl TaskDispatcher {
     /// Core dispatch logic shared by both heuristic and LLM-planned paths.
+    ///
+    /// Spawns an agent instance from each matched template. If any spawn fails,
+    /// all previously spawned instances are destroyed (rolled back).
     pub(super) fn dispatch_core(
         &self,
         description: &str,
@@ -32,23 +35,23 @@ impl TaskDispatcher {
         // Create TaskLane
         let task_lane = self.lane_manager.create_task_lane(&task_id);
 
-        // Atomically claim each agent (check idle + set Busy in one lock).
-        // If any claim fails, roll back all previously claimed agents.
+        // Spawn an instance from each matched template.
+        // If any spawn fails, destroy all previously spawned instances.
         let mut assignments = Vec::new();
-        let mut claimed_ids: Vec<String> = Vec::new();
+        let mut spawned_instances: Vec<(String, SubAgent)> = Vec::new(); // (template_id, instance)
         let now = Utc::now();
         for skill_match in &matches {
+            // skill_match.agent_id is a template_id from the skill matcher
             match self
                 .shared_context
                 .agent_registry
-                .try_claim(&skill_match.agent_id, task_id.clone())
+                .spawn_instance(&skill_match.agent_id, task_id.clone())
             {
-                Ok(_) => {
-                    task_lane.assign_agent(skill_match.agent_id.clone());
-                    claimed_ids.push(skill_match.agent_id.clone());
+                Ok(instance) => {
+                    task_lane.assign_agent(instance.id.clone());
 
                     self.bus.publish(SystemEvent::AgentStatusChanged {
-                        agent_id: skill_match.agent_id.clone(),
+                        agent_id: instance.id.clone(),
                         status: "busy".to_string(),
                         current_task_id: Some(task_id.clone()),
                         timestamp: now,
@@ -60,23 +63,25 @@ impl TaskDispatcher {
                         "matched_skills": skill_match.matched_skills,
                         "role": skill_match.role_description,
                     }));
+
+                    spawned_instances.push((skill_match.agent_id.clone(), instance));
                 }
                 Err(e) => {
-                    // Roll back all previously claimed agents
+                    // Roll back: destroy all previously spawned instances
                     tracing::warn!(
-                        "Failed to claim agent '{}' for task '{}': {}. Rolling back {} agents.",
+                        "Failed to spawn agent '{}' for task '{}': {}. Rolling back {} instances.",
                         skill_match.agent_id,
                         task_id,
                         e,
-                        claimed_ids.len()
+                        spawned_instances.len()
                     );
                     let rollback_now = Utc::now();
-                    for id in &claimed_ids {
+                    for (_, inst) in &spawned_instances {
                         self.shared_context
                             .agent_registry
-                            .update_status(id, AgentStatus::Idle);
+                            .destroy_instance(&inst.id);
                         self.bus.publish(SystemEvent::AgentStatusChanged {
-                            agent_id: id.clone(),
+                            agent_id: inst.id.clone(),
                             status: "idle".to_string(),
                             current_task_id: None,
                             timestamp: rollback_now,
@@ -159,31 +164,28 @@ impl TaskDispatcher {
             let _ = repo.update_state(&task_id, &initial_state.to_json(), 0);
         }
 
-        // Collect agents with their assignment IDs and role descriptions for the pipeline
-        let agents_with_assignments: Vec<(SubAgent, Option<String>, String)> = matches
+        // Build agents_with_assignments from spawned instances
+        let agents_with_assignments: Vec<(SubAgent, Option<String>, String)> = spawned_instances
             .iter()
-            .filter_map(|skill_match| {
-                let agent = self.shared_context.agent_registry.get(&skill_match.agent_id)?;
-                let assign_id = assignment_ids.get(&skill_match.agent_id).cloned();
-                Some((agent, assign_id, skill_match.role_description.clone()))
+            .zip(matches.iter())
+            .map(|((template_id, instance), skill_match)| {
+                let assign_id = assignment_ids.get(template_id).cloned();
+                (instance.clone(), assign_id, skill_match.role_description.clone())
             })
             .collect();
 
-        // Verify all agents were collected (guard against race between availability check and registry lookup)
+        // All instances were spawned above; this guard handles the (shouldn't happen) case
         if agents_with_assignments.len() < matches.len() {
             tracing::error!(
-                "Pipeline assembly failed: expected {} agents but got {}. Releasing all agents.",
+                "Pipeline assembly failed: expected {} agents but got {}. Destroying all instances.",
                 matches.len(),
                 agents_with_assignments.len()
             );
-            // Release all agents that were set to Busy
             let now = Utc::now();
-            for skill_match in &matches {
-                self.shared_context
-                    .agent_registry
-                    .update_status(&skill_match.agent_id, AgentStatus::Idle);
+            for (_, inst) in &spawned_instances {
+                self.shared_context.agent_registry.destroy_instance(&inst.id);
                 self.bus.publish(SystemEvent::AgentStatusChanged {
-                    agent_id: skill_match.agent_id.clone(),
+                    agent_id: inst.id.clone(),
                     status: "idle".to_string(),
                     current_task_id: None,
                     timestamp: now,
@@ -192,7 +194,6 @@ impl TaskDispatcher {
             self.shared_context
                 .task_registry
                 .update_status(&task_id, TaskEntryStatus::Failed);
-            // Also update DB to keep it in sync with in-memory registry
             if let Some(ref db) = self.db {
                 let repo = openalpaca_storage::repository::TaskRepository::new(db);
                 if let Err(e) = repo.update_status(&task_id, openalpaca_storage::TaskStatus::Failed) {

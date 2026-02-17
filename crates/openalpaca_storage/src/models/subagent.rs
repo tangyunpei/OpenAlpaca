@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentConfig {
     pub id: String,
+    /// Template this agent was created from (for the template+instance model).
+    /// For legacy agents and templates themselves, this equals `id`.
+    #[serde(default)]
+    pub template_id: Option<String>,
     pub name: String,
     pub description: Option<String>,
     pub icon: Option<String>,

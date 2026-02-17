@@ -1,5 +1,5 @@
 use super::{TaskDispatcher, format_task_result, spawn_task_memory_extraction};
-use crate::agent::subagent::{AgentStatus, SubAgent};
+use crate::agent::subagent::SubAgent;
 use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
 use crate::runner::lead_agent::run_lead_agent;
@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 impl TaskDispatcher {
     /// Dispatch a task using the Lead Agent orchestration pattern.
-    /// Finds a lead agent (by `lead_orchestration` skill or first available agent),
-    /// registers the task, and spawns the lead agent execution loop.
+    /// Spawns a lead agent instance from the "lead_agent" template (singleton),
+    /// registers the task, and runs the lead agent execution loop.
     pub(super) fn dispatch_lead_agent(
         &self,
         description: &str,
@@ -22,43 +22,35 @@ impl TaskDispatcher {
         source: &str,
         workspace_id: Option<String>,
     ) -> Result<String, String> {
-        // Generate task_id first — needed by try_claim
         let task_id = Uuid::new_v4().to_string();
         let now = Utc::now();
 
-        // Atomically claim a lead agent: prefer "lead_orchestration" skill,
-        // fall back to any idle agent.
+        // Spawn a lead agent instance from the singleton template.
+        // Prefer templates with "lead_orchestration" skill, fall back to any template.
         let lead_agent = {
-            let candidates = self
-                .shared_context
-                .agent_registry
-                .find_by_skill("lead_orchestration");
-            let mut claimed = None;
-            for c in candidates {
-                if c.status.is_available()
-                    && let Ok(agent) = self
-                        .shared_context
-                        .agent_registry
-                        .try_claim(&c.id, task_id.clone())
+            let templates = self.shared_context.agent_registry
+                .find_templates_by_skill("lead_orchestration");
+            let mut spawned = None;
+            for t in &templates {
+                if let Ok(agent) = self.shared_context.agent_registry
+                    .spawn_instance(&t.frontmatter.id, task_id.clone())
                 {
-                    claimed = Some(agent);
+                    spawned = Some(agent);
                     break;
                 }
             }
-            if claimed.is_none() {
-                // Fallback: try any idle agent
-                for c in self.shared_context.agent_registry.list_idle() {
-                    if let Ok(agent) = self
-                        .shared_context
-                        .agent_registry
-                        .try_claim(&c.id, task_id.clone())
+            if spawned.is_none() {
+                // Fallback: try spawning from any available template
+                for t in self.shared_context.agent_registry.list_templates() {
+                    if let Ok(agent) = self.shared_context.agent_registry
+                        .spawn_instance(&t.frontmatter.id, task_id.clone())
                     {
-                        claimed = Some(agent);
+                        spawned = Some(agent);
                         break;
                     }
                 }
             }
-            claimed.ok_or_else(|| {
+            spawned.ok_or_else(|| {
                 "No agents available to act as Lead Agent. All agents are busy.".to_string()
             })?
         };
@@ -211,9 +203,8 @@ impl TaskDispatcher {
             let now = Utc::now();
             let runtime_secs = start_time.elapsed().as_secs() as i64;
 
-            // Release lead agent back to Idle
-            ctx.agent_registry
-                .update_status(&lead_agent.id, AgentStatus::Idle);
+            // Destroy lead agent instance (resets singleton to Idle)
+            ctx.agent_registry.destroy_instance(&lead_agent.id);
             bus.publish(SystemEvent::AgentStatusChanged {
                 agent_id: lead_agent.id.clone(),
                 status: "idle".to_string(),

@@ -504,13 +504,12 @@ impl TaskDispatcher {
                 }
             }
 
-            // 3. Release remaining agents that never ran (pipeline broke early)
+            // 3. Destroy remaining agent instances that never ran (pipeline broke early)
             let now = Utc::now();
             if !pipeline_success {
                 for (step, (agent, _, _)) in agents_with_assignments.iter().enumerate() {
                     if step > last_processed_step {
-                        ctx.agent_registry
-                            .update_status(&agent.id, AgentStatus::Idle);
+                        ctx.agent_registry.destroy_instance(&agent.id);
                         bus.publish(SystemEvent::AgentStatusChanged {
                             agent_id: agent.id.clone(),
                             status: "idle".to_string(),
