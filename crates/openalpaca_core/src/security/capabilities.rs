@@ -108,11 +108,12 @@ impl CapabilityManager {
         tool_name: &str,
         constraints: &AgentConstraints,
     ) -> Result<(), SecurityViolation> {
-        // Check deny list first
+        // Check deny list first (case-insensitive)
+        let tool_lower = tool_name.to_lowercase();
         if constraints
             .denied_capabilities
             .iter()
-            .any(|d| d == tool_name)
+            .any(|d| d.to_lowercase() == tool_lower)
         {
             return Err(SecurityViolation::CapabilityDenied {
                 agent_id: agent_id.to_string(),
@@ -120,12 +121,12 @@ impl CapabilityManager {
             });
         }
 
-        // If allow list is non-empty, tool must be on it
+        // If allow list is non-empty, tool must be on it (case-insensitive)
         if !constraints.allowed_capabilities.is_empty()
             && !constraints
                 .allowed_capabilities
                 .iter()
-                .any(|a| a == tool_name)
+                .any(|a| a.to_lowercase() == tool_lower)
         {
             return Err(SecurityViolation::CapabilityNotAllowed {
                 agent_id: agent_id.to_string(),
@@ -260,6 +261,27 @@ mod tests {
         let constraints = default_constraints();
         assert!(
             CapabilityManager::check_agent_capability("agent1", "anything", &constraints).is_ok()
+        );
+    }
+
+    #[test]
+    fn test_capability_check_case_insensitive() {
+        // Deny list with mixed case should match lowercase tool name
+        let constraints = AgentConstraints {
+            denied_capabilities: vec!["Shell_Execute".to_string()],
+            ..default_constraints()
+        };
+        assert!(
+            CapabilityManager::check_agent_capability("agent1", "shell_execute", &constraints).is_err()
+        );
+
+        // Allow list with mixed case should match lowercase tool name
+        let constraints = AgentConstraints {
+            allowed_capabilities: vec!["Web_Search".to_string()],
+            ..default_constraints()
+        };
+        assert!(
+            CapabilityManager::check_agent_capability("agent1", "web_search", &constraints).is_ok()
         );
     }
 

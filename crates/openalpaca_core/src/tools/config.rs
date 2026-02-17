@@ -44,43 +44,72 @@ pub fn load_tools_from_file(path: &Path) -> Result<Vec<RegisteredTool>, String> 
     let config: ToolConfigFile =
         toml::from_str(&content).map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
 
-    let tools = config
-        .tools
-        .into_iter()
-        .map(|tc| {
-            let backend = match tc.backend {
-                ToolBackendConfig::Http {
-                    url,
-                    method,
-                    headers,
-                    timeout_secs,
-                } => ToolBackend::Http {
+    let mut tools = Vec::new();
+    for tc in config.tools {
+        // Validate tool name is non-empty
+        if tc.name.trim().is_empty() {
+            return Err(format!("Tool in {} has empty name", path.display()));
+        }
+
+        let backend = match tc.backend {
+            ToolBackendConfig::Http {
+                url,
+                method,
+                headers,
+                timeout_secs,
+            } => {
+                // Validate URL format
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    return Err(format!(
+                        "Tool '{}': URL must start with http:// or https://, got '{}'",
+                        tc.name, url
+                    ));
+                }
+                // Validate timeout range
+                let t = timeout_secs.unwrap_or(30);
+                if t == 0 || t > 300 {
+                    return Err(format!(
+                        "Tool '{}': timeout_secs {} is out of valid range [1-300]",
+                        tc.name, t
+                    ));
+                }
+                ToolBackend::Http {
                     method: method.unwrap_or_else(|| "GET".to_string()),
                     url,
                     headers: headers.unwrap_or_default(),
-                    timeout_secs: timeout_secs.unwrap_or(30),
-                },
-                ToolBackendConfig::Command {
-                    command,
-                    args_template,
-                    timeout_secs,
-                } => ToolBackend::Command {
-                    command,
-                    args_template,
-                    timeout_secs: timeout_secs.unwrap_or(30),
-                },
-            };
-
-            RegisteredTool {
-                definition: ToolDefinition {
-                    name: tc.name,
-                    description: tc.description,
-                    parameters: tc.parameters,
-                },
-                backend,
+                    timeout_secs: t,
+                }
             }
-        })
-        .collect();
+            ToolBackendConfig::Command {
+                command,
+                args_template,
+                timeout_secs,
+            } => {
+                // Validate timeout range
+                let t = timeout_secs.unwrap_or(30);
+                if t == 0 || t > 300 {
+                    return Err(format!(
+                        "Tool '{}': timeout_secs {} is out of valid range [1-300]",
+                        tc.name, t
+                    ));
+                }
+                ToolBackend::Command {
+                    command,
+                    args_template,
+                    timeout_secs: t,
+                }
+            }
+        };
+
+        tools.push(RegisteredTool {
+            definition: ToolDefinition {
+                name: tc.name,
+                description: tc.description,
+                parameters: tc.parameters,
+            },
+            backend,
+        });
+    }
 
     Ok(tools)
 }

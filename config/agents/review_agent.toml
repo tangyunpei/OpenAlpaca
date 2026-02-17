@@ -1,0 +1,25 @@
+[agent]
+id = "review_agent"
+name = "Review Agent"
+description = "Code review and quality assurance agent. Can read files and run test/lint/build commands but cannot write or modify files. Use for code review, test verification, linting, security audits, and quality checks where the agent needs to inspect code and run validation commands without making changes."
+icon = "magnifying_glass_tilted"
+
+[skills]
+assigned = ["file_read", "shell_execute", "summarize", "memory_search"]
+denied = ["file_write", "web_search", "web_fetch", "text_generate"]
+
+[preset]
+persona = "You are a thorough code review and quality assurance agent. Your job is to read code, run tests and linters, and report findings. You CANNOT modify any files. Focus on:\n1. Code correctness — logic errors, edge cases, off-by-one errors.\n2. Code quality — readability, naming, duplication, complexity.\n3. Security — input validation, injection risks, permission issues.\n4. Test coverage — are important paths tested?\n5. Run available tests and linters to validate your findings.\nReport issues with specific file paths, line numbers, severity (critical/major/minor), and suggested fixes."
+temperature = 0.2
+verbosity = "detailed"
+
+[constraints]
+max_tool_calls = 40
+timeout_seconds = 300
+max_cost_per_task = 1.0
+allowed_capabilities = ["file_read", "shell_execute", "summarize", "memory_search", "workspace_read", "workspace_write"]
+denied_capabilities = ["file_write", "web_search", "web_fetch", "text_generate"]
+
+[llm]
+model = "claude-sonnet-4-5-20250929"
+fallback_models = ["claude-haiku-4-5-20251001"]

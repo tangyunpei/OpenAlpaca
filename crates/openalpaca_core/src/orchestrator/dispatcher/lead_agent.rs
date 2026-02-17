@@ -22,31 +22,46 @@ impl TaskDispatcher {
         source: &str,
         workspace_id: Option<String>,
     ) -> Result<String, String> {
-        // Find the lead agent: look for an agent with "lead_orchestration" skill,
-        // or fall back to using any available agent as the lead
+        // Generate task_id first — needed by try_claim
+        let task_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        // Atomically claim a lead agent: prefer "lead_orchestration" skill,
+        // fall back to any idle agent.
         let lead_agent = {
             let candidates = self
                 .shared_context
                 .agent_registry
                 .find_by_skill("lead_orchestration");
-            let lead = candidates
-                .into_iter()
-                .find(|a| a.status.is_available());
-            match lead {
-                Some(a) => a,
-                None => {
-                    // Fallback: find any idle agent to act as lead
-                    let idle = self.shared_context.agent_registry.list_idle();
-                    idle.into_iter().next().ok_or_else(|| {
-                        "No agents available to act as Lead Agent. All agents are busy."
-                            .to_string()
-                    })?
+            let mut claimed = None;
+            for c in candidates {
+                if c.status.is_available()
+                    && let Ok(agent) = self
+                        .shared_context
+                        .agent_registry
+                        .try_claim(&c.id, task_id.clone())
+                {
+                    claimed = Some(agent);
+                    break;
                 }
             }
+            if claimed.is_none() {
+                // Fallback: try any idle agent
+                for c in self.shared_context.agent_registry.list_idle() {
+                    if let Ok(agent) = self
+                        .shared_context
+                        .agent_registry
+                        .try_claim(&c.id, task_id.clone())
+                    {
+                        claimed = Some(agent);
+                        break;
+                    }
+                }
+            }
+            claimed.ok_or_else(|| {
+                "No agents available to act as Lead Agent. All agents are busy.".to_string()
+            })?
         };
-
-        let task_id = Uuid::new_v4().to_string();
-        let now = Utc::now();
 
         // Register in task_registry
         self.shared_context
@@ -57,13 +72,7 @@ impl TaskDispatcher {
         let task_lane = self.lane_manager.create_task_lane(&task_id);
         task_lane.assign_agent(lead_agent.id.clone());
 
-        // Mark lead agent as Busy
-        self.shared_context.agent_registry.update_status(
-            &lead_agent.id,
-            AgentStatus::Busy {
-                task_id: task_id.clone(),
-            },
-        );
+        // Emit status change (try_claim already set agent to Busy)
         self.bus.publish(SystemEvent::AgentStatusChanged {
             agent_id: lead_agent.id.clone(),
             status: "busy".to_string(),

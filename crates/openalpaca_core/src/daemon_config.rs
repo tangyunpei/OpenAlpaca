@@ -16,6 +16,7 @@ pub struct DaemonConfig {
     pub execution: ExecutionConfig,
     pub security: SecurityConfig,
     pub server: ServerConfig,
+    pub providers: ProvidersConfig,
 }
 
 impl Default for DaemonConfig {
@@ -25,6 +26,7 @@ impl Default for DaemonConfig {
             execution: ExecutionConfig::default(),
             security: SecurityConfig::default(),
             server: ServerConfig::default(),
+            providers: ProvidersConfig::default(),
         }
     }
 }
@@ -423,6 +425,42 @@ impl Default for EmbeddingIndexerConfig {
     }
 }
 
+// ── Providers ────────────────────────────────────────────────────────
+
+/// External service provider configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProvidersConfig {
+    pub web_search: WebSearchProviderConfig,
+}
+
+impl Default for ProvidersConfig {
+    fn default() -> Self {
+        Self {
+            web_search: WebSearchProviderConfig::default(),
+        }
+    }
+}
+
+/// Brave Search API configuration for the `web_search` built-in tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebSearchProviderConfig {
+    /// Brave Search API key. If empty, web_search tool returns a helpful error.
+    pub api_key: String,
+    /// Request timeout in seconds (default: 10, range: 1–60).
+    pub timeout_secs: u64,
+}
+
+impl Default for WebSearchProviderConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            timeout_secs: 10,
+        }
+    }
+}
+
 // ── Validation helpers ───────────────────────────────────────────────
 
 fn clamp_usize(val: &mut usize, min: usize, max: usize, name: &str) {
@@ -520,6 +558,8 @@ impl DaemonConfig {
         clamp_u64(&mut self.server.sse_keep_alive_secs, 1, 300, "server.sse_keep_alive_secs");
         clamp_u64(&mut self.server.chat_streams.stream_chunk_delay_ms, 0, 500, "server.chat_streams.stream_chunk_delay_ms");
         clamp_usize(&mut self.server.chat_streams.stream_chunk_words, 1, 50, "server.chat_streams.stream_chunk_words");
+        // ── Providers ──
+        clamp_u64(&mut self.providers.web_search.timeout_secs, 1, 60, "providers.web_search.timeout_secs");
     }
 }
 
