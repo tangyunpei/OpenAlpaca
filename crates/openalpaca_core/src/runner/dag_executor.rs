@@ -292,7 +292,7 @@ pub async fn execute_dag(
                         // Write output to workspace
                         write_node_output_to_workspace(
                             dag, &node_result, task_id, &db,
-                        );
+                        ).await;
 
                         // Mark completed in DAG
                         dag.complete_node(&node_id, &node_result.final_content);
@@ -758,7 +758,7 @@ fn load_workspace_context(
 /// Write a completed node's output to the workspace under its output_key.
 /// Uses a retry loop (max 3 attempts) to handle optimistic locking conflicts
 /// when concurrent nodes complete simultaneously.
-fn write_node_output_to_workspace(
+async fn write_node_output_to_workspace(
     dag: &TaskDag,
     node_result: &NodeResult,
     task_id: &str,
@@ -822,8 +822,8 @@ fn write_node_output_to_workspace(
                         "Workspace write version conflict for key '{}' node '{}' (attempt {}/{}), retrying",
                         key, node_result.node_id, attempt + 1, MAX_RETRIES
                     );
-                    // Brief backoff to reduce collision probability
-                    std::thread::sleep(std::time::Duration::from_millis(10 * (1 << attempt)));
+                    // Brief async backoff to reduce collision probability
+                    tokio::time::sleep(std::time::Duration::from_millis(10 * (1 << attempt))).await;
                 } else {
                     tracing::warn!(
                         "Workspace write for key '{}' node '{}' failed after {} retries — data may be lost",

@@ -69,7 +69,9 @@ clap = { version = "4.5.57", features = ["derive"] }
 reqwest = { version = "0.13.2", default-features = false, features = [
     "json",
     "rustls",
+    "stream",
 ] }
+url = "2"
 colored = "3.1.1"
 urlencoding = "2.1.3"
 shell-escape = "0.1.5"

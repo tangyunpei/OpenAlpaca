@@ -2,6 +2,7 @@ pub mod builtins;
 pub mod config;
 pub mod contextual_executor;
 pub mod executor;
+pub mod platform;
 pub mod registry;
 
 pub use contextual_executor::{ContextualToolExecutor, ToolExecutionContext};

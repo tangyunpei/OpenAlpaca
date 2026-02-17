@@ -1,10 +1,10 @@
 [agent]
 id = "system_agent"
 name = "System Agent"
-description = "Focused on file operations, system commands, and local tasks"
+description = "System operations agent for file management, directory organization, environment setup, and infrastructure tasks. Use for non-coding file operations like moving/renaming files, managing directories, configuring environments, and running system administration commands. For coding tasks, use code_agent instead."
 
 [skills]
-assigned = ["file_read", "file_write", "shell_execute", "file_organize"]
+assigned = ["file_read", "file_write", "shell_execute"]
 denied = ["web_search"]
 
 [preset]
@@ -16,7 +16,7 @@ verbosity = "concise"
 max_tool_calls = 30
 timeout_seconds = 600
 require_confirmation_for = ["file_delete", "shell_execute"]
-allowed_capabilities = ["file_read", "file_write", "shell_execute", "file_organize"]
+allowed_capabilities = ["file_read", "file_write", "shell_execute"]
 denied_capabilities = ["web_search"]
 
 [llm]

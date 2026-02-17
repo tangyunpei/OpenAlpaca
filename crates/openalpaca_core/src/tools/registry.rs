@@ -57,13 +57,16 @@ impl ToolRegistry {
     }
 
     /// Return tool definitions filtered by skill names.
-    /// If `skill_names` is empty, returns all tools (agents without explicit
-    /// skills get everything). If non-empty but no names match, returns an
-    /// empty list — this prevents misconfigured agents from silently receiving
-    /// all tools.
+    /// If `skill_names` is empty, returns an empty list (least-privilege:
+    /// agents without explicit skills get no tools from the registry).
+    /// The caller (`resolve_agent_tools`) adds workspace tools separately.
+    /// If non-empty but no names match, also returns empty.
     pub fn definitions_for_skills(&self, skill_names: &[String]) -> Vec<ToolDefinition> {
         if skill_names.is_empty() {
-            return self.tools.values().map(|t| t.definition.clone()).collect();
+            tracing::debug!(
+                "definitions_for_skills called with empty skills — returning empty (least-privilege)"
+            );
+            return Vec::new();
         }
 
         self.tools
@@ -190,10 +193,7 @@ async fn execute_command(
     let full_command = format!("{} {}", command, full_args);
 
     let output = tokio::time::timeout(timeout, {
-        tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(&full_command)
-            .output()
+        crate::tools::platform::shell_command(&full_command).output()
     })
     .await
     .map_err(|_| format!("Command timed out after {}s", timeout_secs))?
@@ -279,11 +279,11 @@ mod tests {
     }
 
     #[test]
-    fn test_definitions_for_empty_skills_returns_all() {
+    fn test_definitions_for_empty_skills_returns_empty() {
         let mut registry = ToolRegistry::new();
         registry.register(make_tool("web_search", "results"));
         let defs = registry.definitions_for_skills(&[]);
-        assert_eq!(defs.len(), 1);
+        assert_eq!(defs.len(), 0, "Empty skills should return empty list (least-privilege)");
     }
 
     #[tokio::test]

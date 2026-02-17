@@ -29,6 +29,7 @@ enum CircuitState {
 struct ToolState {
     consecutive_failures: usize,
     state: CircuitState,
+    last_updated: Instant,
 }
 
 impl Default for ToolState {
@@ -36,6 +37,7 @@ impl Default for ToolState {
         Self {
             consecutive_failures: 0,
             state: CircuitState::Closed,
+            last_updated: Instant::now(),
         }
     }
 }
@@ -142,6 +144,7 @@ impl ToolCircuitBreaker {
             }
             entry.consecutive_failures = 0;
             entry.state = CircuitState::Closed;
+            entry.last_updated = Instant::now();
         }
     }
 
@@ -159,8 +162,24 @@ impl ToolCircuitBreaker {
         });
         let key = (agent_id.to_string(), tool_name.to_string());
 
+        // Prune stale entries to prevent unbounded memory growth from dynamic agent IDs.
+        // When the map exceeds 10_000 entries, remove entries idle for more than 1 hour.
+        const MAX_ENTRIES: usize = 10_000;
+        const STALE_THRESHOLD: Duration = Duration::from_secs(3600);
+        if map.len() > MAX_ENTRIES {
+            let now = Instant::now();
+            map.retain(|_, v| now.duration_since(v.last_updated) < STALE_THRESHOLD);
+            if map.len() > MAX_ENTRIES {
+                tracing::warn!(
+                    "Circuit breaker map still has {} entries after pruning stale entries",
+                    map.len()
+                );
+            }
+        }
+
         let entry = map.entry(key).or_default();
         entry.consecutive_failures += 1;
+        entry.last_updated = Instant::now();
 
         match entry.state {
             CircuitState::Closed => {
