@@ -111,4 +111,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "agent_template_id",
         sql: include_str!("020_agent_template_id.sql"),
     },
+    Migration {
+        version: 21,
+        name: "agent_template_id_not_null",
+        sql: include_str!("021_agent_template_id_not_null.sql"),
+    },
 ];

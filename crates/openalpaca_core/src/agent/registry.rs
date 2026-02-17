@@ -153,8 +153,13 @@ impl AgentRegistry {
             Ok(agent)
         } else {
             // Non-singleton: create a fresh instance with unique ID
-            let short_uuid = &uuid::Uuid::new_v4().to_string()[..8];
-            let instance_id = format!("{}::{}", template_id, short_uuid);
+            let instance_id = loop {
+                let short_uuid = &uuid::Uuid::new_v4().to_string()[..8];
+                let candidate = format!("{}::{}", template_id, short_uuid);
+                if !instances.contains_key(&candidate) {
+                    break candidate;
+                }
+            };
             let agent = template.to_subagent(&instance_id, &task_id);
             instances.insert(
                 instance_id,

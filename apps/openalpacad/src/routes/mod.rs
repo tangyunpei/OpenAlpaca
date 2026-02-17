@@ -21,7 +21,7 @@ pub use agents::{
     create_template_handler, create_template_from_markdown_handler,
     update_template_handler, delete_template_handler,
     // Instance endpoints
-    list_instances_handler,
+    list_instances_handler, spawn_instance_handler, destroy_instance_handler,
 };
 pub use auth::generate_link_token_handler;
 pub use chat::{

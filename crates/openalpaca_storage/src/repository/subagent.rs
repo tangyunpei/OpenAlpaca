@@ -262,7 +262,7 @@ impl<'a> SubAgentRepository<'a> {
 
         Ok(SubAgentConfig {
             id: row.get(0)?,
-            template_id: row.get(1)?,
+            template_id: row.get::<_, Option<String>>(1)?.unwrap_or_else(|| row.get::<_, String>(0).unwrap_or_default()),
             name: row.get(2)?,
             persona: row.get(3)?,
             description: row.get(4)?,
@@ -329,7 +329,7 @@ mod tests {
     fn make_config(id: &str, name: &str) -> SubAgentConfig {
         SubAgentConfig {
             id: id.to_string(),
-            template_id: Some(id.to_string()),
+            template_id: id.to_string(),
             name: name.to_string(),
             description: Some("A test agent".to_string()),
             icon: None,
@@ -377,6 +377,7 @@ mod tests {
 
         let fetched = repo.get("sa1").unwrap().unwrap();
         assert_eq!(fetched.id, "sa1");
+        assert_eq!(fetched.template_id, "sa1");
         assert_eq!(fetched.name, "Research Agent");
         assert_eq!(fetched.status, "idle");
         assert_eq!(fetched.description.as_deref(), Some("A test agent"));

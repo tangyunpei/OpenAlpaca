@@ -86,6 +86,14 @@ apps/openalpaca-gui/src-tauri/gen/
 *.db-wal
 *.db-journal
 
+# ============================================
+# Markdown Documentation (Except Manuals)
+# ============================================
+*.md
+!docs/CLI_Manual.md
+!docs/GUI_Manual.md
+!docs/plans/Unified_Memory_System.md
+!config/agents/*.md
 
 # ============================================
 # Agent
@@ -96,13 +104,6 @@ config/llm.toml
 
 
 
-# ============================================
-# Markdown Documentation (Except Manuals)
-# ============================================
-*.md
-!docs/CLI_Manual.md
-!docs/GUI_Manual.md
-!docs/plans/Unified_Memory_System.md
 
 
 # ============================================
