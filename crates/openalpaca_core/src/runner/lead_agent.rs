@@ -148,10 +148,7 @@ impl BuiltInTool for SpawnSubagentTool {
         let sandbox = SandboxManager::with_defaults(contextual_executor, self.bus.clone());
 
         // 6. Resolve tools for subagent's skills
-        let skill_names: Vec<String> = agent.skills.iter().map(|s| s.name.clone()).collect();
-        let mut tools = self.tool_registry.definitions_for_skills(&skill_names);
-        // Add workspace tools so subagent can read/write shared workspace
-        tools.extend(crate::tools::builtins::workspace_tool_definitions());
+        let tools = crate::tools::resolve_agent_tools(&agent, &self.tool_registry);
 
         // 7. Build messages with agent persona + objective
         let tool_guidance = format_tool_guidance(&tools);

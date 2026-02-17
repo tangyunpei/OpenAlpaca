@@ -11,7 +11,7 @@ use crate::runner::{LoopConfig, LoopFinishReason, LoopResult, run_agentic_loop_r
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::ToolRegistry;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
-use openalpaca_llm::{ChatMessage, LlmRouter, ToolDefinition};
+use openalpaca_llm::{ChatMessage, LlmRouter};
 use openalpaca_storage::repository::LlmUsageRepository;
 use openalpaca_storage::Database;
 use std::collections::HashMap;
@@ -568,17 +568,8 @@ async fn execute_single_node(
 
     let sandbox_policy = SandboxPolicy::from_constraints(&agent_id, &agent.constraints);
 
-    // Resolve tools
-    let skill_names: Vec<String> = agent.skills.iter().map(|s| s.name.clone()).collect();
-    let mut tools: Vec<ToolDefinition> = tool_registry.definitions_for_skills(&skill_names);
-    tools.extend(crate::tools::builtins::workspace_tool_definitions());
-
-    // Ensure memory_search is always available (owner-scoped via ContextualToolExecutor)
-    if !tools.iter().any(|t| t.name == "memory_search") {
-        if let Some(mem_tool) = tool_registry.get("memory_search") {
-            tools.push(mem_tool.definition.clone());
-        }
-    }
+    // Resolve tools via shared helper
+    let tools = crate::tools::resolve_agent_tools(&agent, &tool_registry);
 
     // Build system prompt
     let tool_guidance = format_tool_guidance(&tools);

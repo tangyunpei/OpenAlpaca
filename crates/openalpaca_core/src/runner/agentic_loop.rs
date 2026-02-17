@@ -5,6 +5,24 @@ use openalpaca_llm::{
 };
 use std::time::Duration;
 
+/// Maximum tool result size before truncation (32 KB).
+const MAX_TOOL_RESULT_SIZE: usize = 32 * 1024;
+
+/// Truncate tool result text if it exceeds the limit to prevent blowing up the
+/// LLM context window.
+fn truncate_tool_result(text: String) -> String {
+    if text.len() <= MAX_TOOL_RESULT_SIZE {
+        return text;
+    }
+    let truncated: String = text.chars().take(MAX_TOOL_RESULT_SIZE).collect();
+    format!(
+        "{}\n\n[... truncated: showing first {} of {} bytes]",
+        truncated,
+        MAX_TOOL_RESULT_SIZE,
+        text.len()
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct LoopConfig {
     pub max_rounds: usize,
@@ -137,7 +155,7 @@ pub async fn run_agentic_loop(
                         {
                             // Route through sandbox
                             match sbx.execute_tool(agent_id, tc, policy).await {
-                                Ok(output) => output,
+                                Ok(output) => truncate_tool_result(output),
                                 Err(err) => format!("[tool_error] {}", err),
                             }
                         } else {
@@ -295,7 +313,7 @@ pub async fn run_agentic_loop_routed(
                             (sandbox, sandbox_policy)
                         {
                             match sbx.execute_tool(agent_id, tc, policy).await {
-                                Ok(output) => output,
+                                Ok(output) => truncate_tool_result(output),
                                 Err(err) => format!("[tool_error] {}", err),
                             }
                         } else {

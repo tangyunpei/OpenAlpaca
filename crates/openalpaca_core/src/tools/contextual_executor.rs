@@ -85,7 +85,7 @@ impl ContextualToolExecutor {
     /// Handle workspace_write: upserts an entry, persists to DB.
     /// Retries up to 3 times on optimistic locking conflicts, which are
     /// expected during concurrent DAG execution.
-    fn handle_workspace_write(
+    async fn handle_workspace_write(
         &self,
         arguments: &serde_json::Value,
         agent_id: &str,
@@ -109,6 +109,17 @@ impl ContextualToolExecutor {
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: content".to_string())?;
+
+        // Enforce the documented 8KB content size limit
+        const MAX_WORKSPACE_CONTENT_SIZE: usize = 8192;
+        if content.len() > MAX_WORKSPACE_CONTENT_SIZE {
+            return Err(format!(
+                "Content size {} bytes exceeds the {} byte limit",
+                content.len(),
+                MAX_WORKSPACE_CONTENT_SIZE
+            ));
+        }
+
         let entry_type_str = arguments
             .get("entry_type")
             .and_then(|v| v.as_str())
@@ -151,8 +162,8 @@ impl ContextualToolExecutor {
                     "Workspace write version conflict for key '{}' (attempt {}/{}), retrying",
                     key, attempt + 1, MAX_RETRIES
                 );
-                // Brief backoff to reduce collision probability
-                std::thread::sleep(std::time::Duration::from_millis(10 * (1 << attempt)));
+                // Brief async backoff to reduce collision probability
+                tokio::time::sleep(std::time::Duration::from_millis(10 * (1 << attempt))).await;
             }
         }
 
@@ -180,23 +191,27 @@ impl ToolExecutor for ContextualToolExecutor {
 
             return match tool_name {
                 "workspace_read" => self.handle_workspace_read(arguments),
-                "workspace_write" => self.handle_workspace_write(arguments, agent_id),
+                "workspace_write" => self.handle_workspace_write(arguments, agent_id).await,
                 _ => Err(format!("Unknown workspace tool: {}", tool_name)),
             };
         }
 
         // Handle owner-scoped tools (inject owner_id)
         if OWNER_SCOPED_TOOLS.contains(&tool_name) {
-            if let Some(ref owner_id) = self.context.owner_id {
-                let mut args = arguments.clone();
-                if let Some(obj) = args.as_object_mut() {
-                    obj.insert(
-                        "owner_id".to_string(),
-                        serde_json::Value::String(owner_id.clone()),
-                    );
-                }
-                return self.registry.execute(tool_name, &args).await;
+            let owner_id = self.context.owner_id.as_ref().ok_or_else(|| {
+                format!(
+                    "Tool '{}' requires owner_id but none provided in execution context",
+                    tool_name
+                )
+            })?;
+            let mut args = arguments.clone();
+            if let Some(obj) = args.as_object_mut() {
+                obj.insert(
+                    "owner_id".to_string(),
+                    serde_json::Value::String(owner_id.clone()),
+                );
             }
+            return self.registry.execute(tool_name, &args).await;
         }
 
         // Default: pass through to registry

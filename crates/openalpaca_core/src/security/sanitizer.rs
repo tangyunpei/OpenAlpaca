@@ -101,6 +101,8 @@ impl InputSanitizer {
             ("||", "command chaining (||)"),
             ("`", "backtick command substitution"),
             ("$(", "command substitution ($()"),
+            ("\n", "newline (command separator)"),
+            ("\r", "carriage return"),
         ];
 
         for (pattern, desc) in &injection_patterns {
