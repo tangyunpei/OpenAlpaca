@@ -9,6 +9,8 @@ skills:
   - "web_fetch"
   - "summarize"
   - "memory_search"
+  - "workspace_read"
+  - "workspace_write"
 denied_skills:
   - "file_write"
   - "shell_execute"

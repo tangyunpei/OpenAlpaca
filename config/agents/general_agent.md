@@ -12,6 +12,8 @@ skills:
   - "summarize"
   - "text_generate"
   - "memory_search"
+  - "workspace_read"
+  - "workspace_write"
 denied_skills:
   - "update_soul"
   - "update_user"
@@ -24,8 +26,6 @@ fallback_models:
 max_tool_calls: 50
 timeout_seconds: 600
 max_cost_per_task: 5.0
-require_confirmation_for:
-  - "shell_execute"
 ---
 
 ## Persona

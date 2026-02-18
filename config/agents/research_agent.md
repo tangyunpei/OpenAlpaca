@@ -7,6 +7,8 @@ skills:
   - "web_search"
   - "web_fetch"
   - "summarize"
+  - "workspace_read"
+  - "workspace_write"
 denied_skills:
   - "shell_execute"
   - "file_write"

@@ -5,6 +5,8 @@ description: "Focused on content writing, document generation, and text refineme
 skills:
   - "text_generate"
   - "file_write"
+  - "workspace_read"
+  - "workspace_write"
 denied_skills:
   - "shell_execute"
   - "web_search"
