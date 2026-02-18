@@ -101,7 +101,15 @@ impl Orchestrator {
         };
 
         // 5. Compute result — planner path or heuristic fallback
-        let result: Result<String, String> = if let Some(ref router) = self.llm_router {
+        let result: Result<String, String> = if self.is_bootstrapping() {
+            // During bootstrap onboarding, all messages are conversational.
+            // Skip the LLM planner (which would fail to produce JSON from casual chat)
+            // and go directly to simple_query where bootstrap instructions are injected.
+            self.handle_simple_query(
+                request_id, &source, &content, &lane_key, &ctx, owner_id, &scope_ctx,
+            )
+            .await
+        } else if let Some(ref router) = self.llm_router {
             // Present all templates (not instances) to the planner — templates represent
             // available capabilities regardless of how many instances are currently running.
             let templates = self.shared_context.agent_registry.list_templates();
