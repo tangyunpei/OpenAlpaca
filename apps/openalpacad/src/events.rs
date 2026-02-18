@@ -123,13 +123,17 @@ impl EventBroadcaster {
                     name,
                     status,
                     current_task_id,
+                    agent_instance_id,
+                    template_id,
                     ..
                 } => {
                     let detail = serde_json::json!({
                         "agent_id": agent_id,
                         "name": name,
                         "status": status,
-                        "current_task_id": current_task_id
+                        "current_task_id": current_task_id,
+                        "agent_instance_id": agent_instance_id,
+                        "template_id": template_id
                     });
                     repo.log("agent_status_change", None, Some(&detail), None)
                 }
@@ -370,12 +374,16 @@ impl EventBroadcaster {
         name: &str,
         status: &str,
         current_task_id: Option<String>,
+        agent_instance_id: &str,
+        template_id: &str,
     ) {
         let event = ServerEvent::AgentStatus {
             agent_id: agent_id.to_string(),
             name: name.to_string(),
             status: status.to_string(),
             current_task_id,
+            agent_instance_id: agent_instance_id.to_string(),
+            template_id: template_id.to_string(),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };

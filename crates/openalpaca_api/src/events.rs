@@ -61,6 +61,10 @@ pub enum ServerEvent {
         name: String,
         status: String,
         current_task_id: Option<String>,
+        /// The runtime agent instance identifier (e.g. "code_agent::a1b2c3d4").
+        agent_instance_id: String,
+        /// The template this instance was spawned from (e.g. "code_agent").
+        template_id: String,
         ts: DateTime<Utc>,
         instance_id: String,
     },

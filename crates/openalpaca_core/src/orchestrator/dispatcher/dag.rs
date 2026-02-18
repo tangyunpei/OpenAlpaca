@@ -1,4 +1,5 @@
 use super::{TaskDispatcher, format_task_result, spawn_task_memory_extraction};
+use crate::agent::registry::DestroyOutcome;
 use crate::context::{DagSummary, TaskEntryStatus};
 use crate::events::SystemEvent;
 use crate::runner::dag_executor::{DagExecutorConfig, DagFinishReason, execute_dag};
@@ -105,10 +106,20 @@ impl TaskDispatcher {
 
             // Destroy all agent instances (resets singletons to Idle, removes non-singletons)
             for node in &dag.nodes {
-                ctx.agent_registry.destroy_instance(&node.agent_id);
+                let outcome = ctx.agent_registry.destroy_instance(&node.agent_id);
+                let status = match outcome {
+                    DestroyOutcome::ResetToIdle => "idle",
+                    _ => "destroyed",
+                };
+                // Retrieve template_id from instance before it was destroyed
+                // (node.agent_id is the instance_id assigned during spawn)
+                let template_id = node.agent_id.split("::").next()
+                    .unwrap_or(&node.agent_id).to_string();
                 bus.publish(SystemEvent::AgentStatusChanged {
                     agent_id: node.agent_id.clone(),
-                    status: "idle".to_string(),
+                    instance_id: node.agent_id.clone(),
+                    template_id,
+                    status: status.to_string(),
                     current_task_id: None,
                     timestamp: now,
                 });

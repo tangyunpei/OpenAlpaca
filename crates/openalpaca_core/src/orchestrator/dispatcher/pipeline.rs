@@ -1,4 +1,5 @@
 use super::{TaskDispatcher, format_task_result, retrieve_memory_block, spawn_task_memory_extraction};
+use crate::agent::registry::DestroyOutcome;
 use crate::agent::subagent::{AgentStatus, SubAgent};
 use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
@@ -160,12 +161,15 @@ impl TaskDispatcher {
                 );
                 bus.publish(SystemEvent::AgentStatusChanged {
                     agent_id: agent_id.clone(),
+                    instance_id: agent_id.clone(),
+                    template_id: agent.template_id.clone(),
                     status: "busy".to_string(),
                     current_task_id: Some(task_id.clone()),
                     timestamp: Utc::now(),
                 });
                 let mut busy_guard = crate::runner::lead_agent::AgentBusyGuard::new(
                     agent_id.clone(),
+                    agent.template_id.clone(),
                     ctx.agent_registry.clone(),
                     bus.clone(),
                 );
@@ -509,10 +513,16 @@ impl TaskDispatcher {
             if !pipeline_success {
                 for (step, (agent, _, _)) in agents_with_assignments.iter().enumerate() {
                     if step > last_processed_step {
-                        ctx.agent_registry.destroy_instance(&agent.id);
+                        let outcome = ctx.agent_registry.destroy_instance(&agent.id);
+                        let status = match outcome {
+                            DestroyOutcome::ResetToIdle => "idle",
+                            _ => "destroyed",
+                        };
                         bus.publish(SystemEvent::AgentStatusChanged {
                             agent_id: agent.id.clone(),
-                            status: "idle".to_string(),
+                            instance_id: agent.id.clone(),
+                            template_id: agent.template_id.clone(),
+                            status: status.to_string(),
                             current_task_id: None,
                             timestamp: now,
                         });

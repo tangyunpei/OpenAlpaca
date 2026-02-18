@@ -128,6 +128,7 @@ export function subscribeToAgentEvents(): () => void {
           status: latest.status,
           current_task_id: latest.current_task_id,
           ...(latest.name ? { name: latest.name } : {}),
+          ...(latest.template_id ? { template_id: latest.template_id } : {}),
         });
       } else {
         // Create placeholder for unknown agent
@@ -138,6 +139,7 @@ export function subscribeToAgentEvents(): () => void {
           icon: null,
           status: latest.status,
           current_task_id: latest.current_task_id,
+          template_id: latest.template_id || undefined,
           skills_json: "[]",
           preset_json: "{}",
           constraints_json: null,

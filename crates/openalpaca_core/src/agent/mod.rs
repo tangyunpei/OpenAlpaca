@@ -9,7 +9,7 @@ use async_trait::async_trait;
 
 pub use config::AgentConfigFile;
 pub use config_service::AgentConfigService;
-pub use registry::AgentRegistry;
+pub use registry::{AgentRegistry, DestroyOutcome};
 pub use subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent};
 pub use template::{AgentTemplate, AgentTemplateFrontmatter, AgentParseError};
 

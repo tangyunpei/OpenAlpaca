@@ -1,4 +1,5 @@
 use super::TaskDispatcher;
+use crate::agent::registry::DestroyOutcome;
 use crate::agent::subagent::SubAgent;
 use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
@@ -52,7 +53,9 @@ impl TaskDispatcher {
 
                     self.bus.publish(SystemEvent::AgentStatusChanged {
                         agent_id: instance.id.clone(),
-                        status: "busy".to_string(),
+                        instance_id: instance.id.clone(),
+                        template_id: instance.template_id.clone(),
+                        status: "spawned".to_string(),
                         current_task_id: Some(task_id.clone()),
                         timestamp: now,
                     });
@@ -77,12 +80,18 @@ impl TaskDispatcher {
                     );
                     let rollback_now = Utc::now();
                     for (_, inst) in &spawned_instances {
-                        self.shared_context
+                        let outcome = self.shared_context
                             .agent_registry
                             .destroy_instance(&inst.id);
+                        let status = match outcome {
+                            DestroyOutcome::ResetToIdle => "idle",
+                            _ => "destroyed",
+                        };
                         self.bus.publish(SystemEvent::AgentStatusChanged {
                             agent_id: inst.id.clone(),
-                            status: "idle".to_string(),
+                            instance_id: inst.id.clone(),
+                            template_id: inst.template_id.clone(),
+                            status: status.to_string(),
                             current_task_id: None,
                             timestamp: rollback_now,
                         });
@@ -183,10 +192,16 @@ impl TaskDispatcher {
             );
             let now = Utc::now();
             for (_, inst) in &spawned_instances {
-                self.shared_context.agent_registry.destroy_instance(&inst.id);
+                let outcome = self.shared_context.agent_registry.destroy_instance(&inst.id);
+                let status = match outcome {
+                    DestroyOutcome::ResetToIdle => "idle",
+                    _ => "destroyed",
+                };
                 self.bus.publish(SystemEvent::AgentStatusChanged {
                     agent_id: inst.id.clone(),
-                    status: "idle".to_string(),
+                    instance_id: inst.id.clone(),
+                    template_id: inst.template_id.clone(),
+                    status: status.to_string(),
                     current_task_id: None,
                     timestamp: now,
                 });
