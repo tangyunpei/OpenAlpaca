@@ -213,6 +213,9 @@ impl EventBroadcaster {
                     });
                     repo.log("orchestrator_config_changed", None, Some(&detail), None)
                 }
+                ServerEvent::DaemonConfigChanged { .. } => {
+                    repo.log("daemon_config_changed", None, None, None)
+                }
                 ServerEvent::SecurityViolation {
                     agent_id,
                     tool_name,
@@ -450,6 +453,17 @@ impl EventBroadcaster {
     pub fn orchestrator_config_changed(&self, model: &str) {
         let event = ServerEvent::OrchestratorConfigChanged {
             model: model.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a daemon config changed event and persist it
+    pub fn daemon_config_changed(&self) {
+        let event = ServerEvent::DaemonConfigChanged {
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };

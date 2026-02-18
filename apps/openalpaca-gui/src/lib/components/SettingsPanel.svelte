@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import ProviderConfig from "./ProviderConfig.svelte";
+  import WebSearchConfig from "./WebSearchConfig.svelte";
   import UsagePanel from "./UsagePanel.svelte";
   import {
     llmSettings,
@@ -15,6 +16,7 @@
     loadCliBackends,
     refreshModels,
     subscribeToKeyEvents,
+    loadDaemonProviders,
   } from "$lib/stores/settings";
   import type { LlmSettingsResponse, ProviderInfo, ModelEntry } from "$lib/types";
 
@@ -41,6 +43,7 @@
     loadAvailableModels();
     loadDiscoveredCredentials();
     loadCliBackends();
+    loadDaemonProviders();
     unsubKeyEvents = subscribeToKeyEvents();
 
     return () => {
@@ -64,6 +67,7 @@
     loadAvailableModels();
     loadDiscoveredCredentials();
     loadCliBackends();
+    loadDaemonProviders();
   }
 </script>
 
@@ -120,4 +124,8 @@
     LLM not configured. Add a <code class="bg-white/10 px-1.5 rounded">config/llm.toml</code> file to get started.
   </div>
 {/if}
+
+  <!-- Service Providers -->
+  <h3 class="text-sm font-semibold text-muted-foreground mt-6 mb-3">Service Providers</h3>
+  <WebSearchConfig />
 {/if}

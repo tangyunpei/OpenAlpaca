@@ -37,6 +37,7 @@ pub use settings::{
     get_llm_pricing, get_llm_settings, get_llm_usage, get_llm_usage_daily,
     get_orchestrator_config, get_provider_usage, list_models, refresh_models, reorder_keys,
     rescan_credentials, set_key_priority, update_orchestrator_config, upsert_key, validate_key,
+    get_daemon_providers, update_web_search_config,
 };
 pub use preferences::{
     delete_preference_handler, get_preference_handler, list_preferences_handler,

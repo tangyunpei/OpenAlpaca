@@ -1458,8 +1458,12 @@ struct TuiAgentConfigResponse {
 }
 
 /// Run an async future on the current tokio runtime from synchronous code.
+///
+/// Uses `block_in_place` to safely move off the async worker thread before
+/// blocking, which avoids the "Cannot start a runtime from within a runtime"
+/// panic when called inside `#[tokio::main]`.
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    tokio::runtime::Handle::current().block_on(f)
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
 }
 
 /// Fetch agents from the daemon. Returns empty vec on connection failure.

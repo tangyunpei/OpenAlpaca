@@ -6,7 +6,7 @@ use axum::{
     response::IntoResponse,
 };
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use openalpaca_core::events::SystemEvent;
 use openalpaca_llm::settings_service::{
     AddKeyRequest, OrchestratorConfigResponse, ReorderKeysRequest, SetKeyPriorityRequest,
@@ -580,4 +580,99 @@ pub async fn estimate_cost(
         "output_tokens": query.output_tokens,
         "estimated_cost_usd": cost,
     }))).into_response()
+}
+
+// ── Daemon config (providers) endpoints ─────────────────────────────
+
+#[derive(Serialize)]
+struct DaemonProvidersResponse {
+    web_search: WebSearchConfigResponse,
+}
+
+#[derive(Serialize)]
+struct WebSearchConfigResponse {
+    api_key_configured: bool,
+    api_key_hint: String,
+    timeout_secs: u64,
+}
+
+/// GET /v1/daemon/config/providers — read daemon provider configuration
+pub async fn get_daemon_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cfg = state.daemon_config.load();
+    let ws = &cfg.providers.web_search;
+
+    let hint = if ws.api_key.len() > 4 {
+        format!("****{}", &ws.api_key[ws.api_key.len() - 4..])
+    } else if !ws.api_key.is_empty() {
+        "****".to_string()
+    } else {
+        String::new()
+    };
+
+    let resp = DaemonProvidersResponse {
+        web_search: WebSearchConfigResponse {
+            api_key_configured: !ws.api_key.is_empty(),
+            api_key_hint: hint,
+            timeout_secs: ws.timeout_secs,
+        },
+    };
+
+    (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct UpdateWebSearchRequest {
+    pub api_key: Option<String>,
+    pub timeout_secs: Option<u64>,
+}
+
+/// PUT /v1/daemon/config/providers/web-search — update web search provider config
+pub async fn update_web_search_config(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<UpdateWebSearchRequest>,
+) -> impl IntoResponse {
+    use openalpaca_core::daemon_config::load_daemon_config;
+
+    // Load current config from disk (not in-memory) to preserve all fields
+    let mut cfg = load_daemon_config(&state.daemon_config_path);
+
+    // Apply patches
+    if let Some(ref key) = body.api_key {
+        cfg.providers.web_search.api_key = key.clone();
+    }
+    if let Some(timeout) = body.timeout_secs {
+        cfg.providers.web_search.timeout_secs = timeout;
+    }
+
+    // Validate ranges
+    cfg.validate();
+
+    // Serialize and write back
+    let toml_str = match toml::to_string_pretty(&cfg) {
+        Ok(s) => s,
+        Err(e) => {
+            return settings_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SERIALIZE_FAILED",
+                &format!("Failed to serialize config: {}", e),
+            )
+            .into_response();
+        }
+    };
+
+    if let Err(e) = tokio::fs::write(&state.daemon_config_path, &toml_str).await {
+        return settings_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DISK_WRITE_FAILED",
+            &format!("Failed to write daemon.toml: {}", e),
+        )
+        .into_response();
+    }
+
+    // The file watcher will hot-reload the config. Also publish event for GUI.
+    let _ = state.gateway.bus.publish(SystemEvent::DaemonConfigChanged {
+        timestamp: Utc::now(),
+    });
+
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
 }

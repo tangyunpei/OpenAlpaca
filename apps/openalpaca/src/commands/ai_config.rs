@@ -6,7 +6,8 @@
 use anyhow::{Context, Result};
 use openalpaca_llm::cli_backend::{CliBackendConfig, CliBackendsConfig};
 use openalpaca_llm::config::{
-    read_config, write_config, KeyConfig, LlmRouterConfig, OrchestratorLlmConfig, ProviderConfig,
+    read_config, write_config, EmbeddingsConfig, KeyConfig, LlmRouterConfig,
+    OrchestratorLlmConfig, ProviderConfig,
 };
 use openalpaca_llm::credential_discovery::CredentialDiscoveryConfig;
 use openalpaca_llm::key_encryption::KeyEncryptor;
@@ -194,6 +195,26 @@ pub fn delete_ai_value(key: &str) -> Result<()> {
                 }
             }
         }
+        "ai.embeddings.enabled" => {
+            if let Some(ref mut emb) = config.embeddings {
+                emb.enabled = false;
+            }
+        }
+        "ai.embeddings.provider" => {
+            if let Some(ref mut emb) = config.embeddings {
+                emb.provider = String::new();
+            }
+        }
+        "ai.embeddings.model" => {
+            if let Some(ref mut emb) = config.embeddings {
+                emb.model = None;
+            }
+        }
+        "ai.embeddings.dimensions" => {
+            if let Some(ref mut emb) = config.embeddings {
+                emb.dimensions = None;
+            }
+        }
         k if k.ends_with(".enabled") => {
             let provider = extract_provider(k)?;
             if let Some(ref mut providers) = config.providers {
@@ -276,6 +297,10 @@ pub fn list_ai_entries() -> Result<Vec<(String, String, String)>> {
     let keys = [
         "ai.default_model",
         "ai.fallback_models",
+        "ai.embeddings.enabled",
+        "ai.embeddings.provider",
+        "ai.embeddings.model",
+        "ai.embeddings.dimensions",
         "ai.anthropic.enabled",
         "ai.anthropic.api_key",
         "ai.openai.enabled",
@@ -295,6 +320,8 @@ pub fn list_ai_entries() -> Result<Vec<(String, String, String)>> {
         if let Some(val) = read_from_config(key, &config, &encryptor, &store) {
             let kind = if key.ends_with(".enabled") || key.ends_with(".discovery") || key.ends_with(".cli_enabled") {
                 "bool"
+            } else if key.ends_with(".dimensions") {
+                "int"
             } else {
                 "string"
             };
@@ -636,6 +663,58 @@ fn apply_to_config(
                 })
                 .path = Some(value.to_string());
         }
+        "ai.embeddings.enabled" => {
+            config
+                .embeddings
+                .get_or_insert_with(|| EmbeddingsConfig {
+                    enabled: false,
+                    provider: String::new(),
+                    model: None,
+                    dimensions: None,
+                    batch_size: None,
+                })
+                .enabled = value == "true";
+        }
+        "ai.embeddings.provider" => {
+            config
+                .embeddings
+                .get_or_insert_with(|| EmbeddingsConfig {
+                    enabled: false,
+                    provider: String::new(),
+                    model: None,
+                    dimensions: None,
+                    batch_size: None,
+                })
+                .provider = value.to_string();
+        }
+        "ai.embeddings.model" => {
+            config
+                .embeddings
+                .get_or_insert_with(|| EmbeddingsConfig {
+                    enabled: false,
+                    provider: String::new(),
+                    model: None,
+                    dimensions: None,
+                    batch_size: None,
+                })
+                .model = Some(value.to_string());
+        }
+        "ai.embeddings.dimensions" => {
+            let dim: u32 = value
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid dimensions value: {}", value))?;
+            config
+                .embeddings
+                .get_or_insert_with(|| EmbeddingsConfig {
+                    enabled: false,
+                    provider: String::new(),
+                    model: None,
+                    dimensions: None,
+                    batch_size: None,
+                })
+                .dimensions = Some(dim);
+        }
         k if k.starts_with("ai.") && k.ends_with(".enabled") => {
             let provider = extract_provider(k)?;
             let providers = config.providers.get_or_insert_with(HashMap::new);
@@ -792,6 +871,24 @@ fn read_from_config(
             .as_ref()
             .and_then(|cb| cb.codex.as_ref())
             .and_then(|cx| cx.path.clone()),
+        "ai.embeddings.enabled" => config
+            .embeddings
+            .as_ref()
+            .map(|e| e.enabled.to_string()),
+        "ai.embeddings.provider" => config
+            .embeddings
+            .as_ref()
+            .filter(|e| !e.provider.is_empty())
+            .map(|e| e.provider.clone()),
+        "ai.embeddings.model" => config
+            .embeddings
+            .as_ref()
+            .and_then(|e| e.model.clone()),
+        "ai.embeddings.dimensions" => config
+            .embeddings
+            .as_ref()
+            .and_then(|e| e.dimensions)
+            .map(|d| d.to_string()),
         k if k.ends_with(".enabled") => {
             let provider = extract_provider(k).ok()?;
             config
