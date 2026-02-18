@@ -650,6 +650,14 @@ A lead agent can always execute a simple plan, but a DAG cannot adapt if the pla
 - Decompose into distinct stages requiring different skills
 - Express parallelism: if two tasks are independent, give them no shared dependencies
 - Simple queries (greetings, short phrases) should still be "simple_query"
+
+## CRITICAL: complex_task MUST have an execution path
+When you classify a message as "complex_task", you MUST provide exactly one of:
+1. `use_lead_agent: true` — for exploratory, research, or dynamic tasks (PREFERRED default)
+2. `dag` with nodes — for tasks with known, predictable steps
+3. `assignments` with agent list — for simple sequential pipelines
+Returning "complex_task" with empty assignments, no DAG, and use_lead_agent=false is INVALID.
+If in doubt, always set `use_lead_agent: true`.
 "#,
         );
 
@@ -736,7 +744,9 @@ Complex task example:
             )));
         };
 
-        // Warn about potentially mis-routed complex tasks
+        // Safety net: if the LLM returned complex_task but provided no execution
+        // path (no assignments, no DAG, no lead_agent), auto-promote to lead_agent
+        // instead of letting dispatch_planned() fail with "No agents assigned".
         if plan.classification == "complex_task"
             && plan.assignments.is_empty()
             && plan.dag.is_none()
@@ -744,9 +754,13 @@ Complex task example:
         {
             tracing::warn!(
                 "LLM planner returned complex_task with no assignments, no DAG, \
-                 and use_lead_agent=false — task may be mis-routed. Reasoning: {:?}",
+                 and use_lead_agent=false — auto-promoting to use_lead_agent. Reasoning: {:?}",
                 plan.reasoning
             );
+            return Ok(TaskPlan {
+                use_lead_agent: true,
+                ..plan
+            });
         }
 
         Ok(plan)
@@ -939,9 +953,9 @@ mod tests {
     }
 
     #[test]
-    fn test_complex_task_empty_parses_ok() {
-        // Verifies parse succeeds even with empty assignments/dag/lead_agent
-        // (the tracing::warn is emitted but not assertable without subscriber)
+    fn test_complex_task_empty_auto_promotes_to_lead_agent() {
+        // When complex_task has no assignments, no DAG, and no lead_agent,
+        // parse_response auto-promotes to use_lead_agent=true as a safety net.
         let json = r#"{
             "classification": "complex_task",
             "title": "Do something",
@@ -950,7 +964,7 @@ mod tests {
         }"#;
         let plan = TaskPlanner::parse_response(json).unwrap();
         assert_eq!(plan.classification, "complex_task");
-        assert!(!plan.use_lead_agent);
+        assert!(plan.use_lead_agent);
         assert!(plan.dag.is_none());
         assert!(plan.assignments.is_empty());
     }
@@ -1371,8 +1385,9 @@ mod tests {
     // ── use_lead_agent tests ─────────────────────────────────────
 
     #[test]
-    fn test_task_plan_use_lead_agent_defaults_to_false() {
-        // When use_lead_agent is missing from JSON, it should default to false
+    fn test_task_plan_use_lead_agent_defaults_to_false_but_promotes_when_orphaned() {
+        // When use_lead_agent is missing from JSON, serde defaults to false,
+        // but auto-promote kicks in because assignments+dag are also empty.
         let json = r#"{
             "classification": "complex_task",
             "title": "Some task",
@@ -1380,7 +1395,7 @@ mod tests {
             "reasoning": "test"
         }"#;
         let plan = TaskPlanner::parse_response(json).unwrap();
-        assert!(!plan.use_lead_agent);
+        assert!(plan.use_lead_agent);
     }
 
     #[test]
@@ -1400,7 +1415,9 @@ mod tests {
     }
 
     #[test]
-    fn test_task_plan_use_lead_agent_false_explicit() {
+    fn test_task_plan_use_lead_agent_false_explicit_promotes_when_orphaned() {
+        // Even with explicit use_lead_agent=false, if assignments and DAG are
+        // both empty, auto-promote overrides to true as a safety net.
         let json = r#"{
             "classification": "complex_task",
             "title": "Predictable task",
@@ -1409,7 +1426,7 @@ mod tests {
             "use_lead_agent": false
         }"#;
         let plan = TaskPlanner::parse_response(json).unwrap();
-        assert!(!plan.use_lead_agent);
+        assert!(plan.use_lead_agent);
     }
 
     #[test]
