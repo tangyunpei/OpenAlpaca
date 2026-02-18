@@ -238,7 +238,17 @@ impl TaskDispatcher {
         }
 
         if plan.assignments.is_empty() {
-            return Err("No agents assigned by planner".to_string());
+            tracing::warn!(
+                "dispatch_planned: no assignments and use_lead_agent=false \
+                 — last-resort promotion to lead agent"
+            );
+            let title = plan
+                .title
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| generate_title(description));
+            return self.dispatch_lead_agent(
+                description, title, created_by, lane_key, source, workspace_id,
+            );
         }
 
         // Build matches from plan assignments — availability is checked
