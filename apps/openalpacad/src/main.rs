@@ -77,6 +77,7 @@ pub struct AppState {
     pub local_user_id: String,
     pub default_lane_key: String,
     pub daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
+    pub daemon_config_path: PathBuf,
 }
 
 /// Resolve the config base directory.
@@ -1080,6 +1081,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     ..
                 } => {
                     eb_bridge.orchestrator_config_changed(&model);
+                }
+                openalpaca_core::events::SystemEvent::DaemonConfigChanged { .. } => {
+                    eb_bridge.daemon_config_changed();
                 }
                 openalpaca_core::events::SystemEvent::KeyStatusChanged {
                     provider,
@@ -2341,6 +2345,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         local_user_id,
         default_lane_key,
         daemon_config: daemon_config.clone(),
+        daemon_config_path: daemon_config_path.clone(),
     });
 
     // Public routes (no auth required)
@@ -2483,6 +2488,15 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         .route(
             "/v1/orchestrator/config",
             put(routes::update_orchestrator_config),
+        )
+        // Daemon config routes
+        .route(
+            "/v1/daemon/config/providers",
+            get(routes::get_daemon_providers),
+        )
+        .route(
+            "/v1/daemon/config/providers/web-search",
+            put(routes::update_web_search_config),
         )
         // Memory routes
         .route("/v1/memory", get(routes::list_memories_handler))

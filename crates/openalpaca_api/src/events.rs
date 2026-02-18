@@ -105,6 +105,11 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// Event triggered when daemon config changes (e.g. providers.web_search)
+    DaemonConfigChanged {
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
     /// Event triggered when a DAG node starts or completes
     DagNodeStatus {
         task_id: String,

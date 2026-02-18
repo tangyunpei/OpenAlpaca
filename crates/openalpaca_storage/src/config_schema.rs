@@ -879,6 +879,50 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         sensitive: false,
         backend: ConfigBackend::LlmToml,
     },
+    // -- Agents: Embeddings --
+    ConfigKeyDef {
+        key: "ai.embeddings.enabled",
+        kind: ConfigKind::Bool,
+        default: Some("false"),
+        description: "Enable embedding generation for semantic memory search",
+        category: "Agents",
+        subcategory: Some("Embeddings"),
+        sensitive: false,
+        backend: ConfigBackend::LlmToml,
+    },
+    ConfigKeyDef {
+        key: "ai.embeddings.provider",
+        kind: ConfigKind::String,
+        default: None,
+        description: "Embedding provider (e.g. openai, ollama)",
+        category: "Agents",
+        subcategory: Some("Embeddings"),
+        sensitive: false,
+        backend: ConfigBackend::LlmToml,
+    },
+    ConfigKeyDef {
+        key: "ai.embeddings.model",
+        kind: ConfigKind::String,
+        default: Some("text-embedding-3-small"),
+        description: "Embedding model name",
+        category: "Agents",
+        subcategory: Some("Embeddings"),
+        sensitive: false,
+        backend: ConfigBackend::LlmToml,
+    },
+    ConfigKeyDef {
+        key: "ai.embeddings.dimensions",
+        kind: ConfigKind::Int {
+            min: Some(64),
+            max: Some(4096),
+        },
+        default: Some("1536"),
+        description: "Embedding vector dimensions",
+        category: "Agents",
+        subcategory: Some("Embeddings"),
+        sensitive: false,
+        backend: ConfigBackend::LlmToml,
+    },
     // -- API-Keys: Anthropic --
     ConfigKeyDef {
         key: "ai.anthropic.enabled",
@@ -1374,9 +1418,13 @@ mod tests {
     #[test]
     fn test_agents_in_category() {
         let keys = keys_in_category("Agents");
-        assert_eq!(keys.len(), 2);
+        assert_eq!(keys.len(), 6);
         assert!(keys.iter().any(|d| d.key == "ai.default_model"));
         assert!(keys.iter().any(|d| d.key == "ai.fallback_models"));
+        assert!(keys.iter().any(|d| d.key == "ai.embeddings.enabled"));
+        assert!(keys.iter().any(|d| d.key == "ai.embeddings.provider"));
+        assert!(keys.iter().any(|d| d.key == "ai.embeddings.model"));
+        assert!(keys.iter().any(|d| d.key == "ai.embeddings.dimensions"));
         assert!(keys.iter().all(|d| d.backend == ConfigBackend::LlmToml));
     }
 
@@ -1403,8 +1451,9 @@ mod tests {
         assert!(api_subs.contains(&"Codex"));
 
         let agent_subs = subcategories_in_category("Agents");
-        assert_eq!(agent_subs.len(), 1);
+        assert_eq!(agent_subs.len(), 2);
         assert!(agent_subs.contains(&"Orchestrator"));
+        assert!(agent_subs.contains(&"Embeddings"));
 
         // Connectors/System have no subcategories
         assert!(subcategories_in_category("Connectors").is_empty());
@@ -1432,6 +1481,13 @@ mod tests {
         assert_eq!(orch.len(), 2);
         assert!(orch.iter().any(|d| d.key == "ai.default_model"));
         assert!(orch.iter().any(|d| d.key == "ai.fallback_models"));
+
+        let emb = keys_in_subcategory("Agents", "Embeddings");
+        assert_eq!(emb.len(), 4);
+        assert!(emb.iter().any(|d| d.key == "ai.embeddings.enabled"));
+        assert!(emb.iter().any(|d| d.key == "ai.embeddings.provider"));
+        assert!(emb.iter().any(|d| d.key == "ai.embeddings.model"));
+        assert!(emb.iter().any(|d| d.key == "ai.embeddings.dimensions"));
     }
 
     #[test]
