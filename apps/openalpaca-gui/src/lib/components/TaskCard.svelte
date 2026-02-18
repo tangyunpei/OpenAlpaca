@@ -35,7 +35,7 @@
 </script>
 
 <button
-  class="block w-full text-left px-5 py-4 bg-white/[0.03] rounded-[10px] mb-2.5 border border-white/5 transition-all duration-200 cursor-pointer text-foreground font-[inherit] text-[inherit] hover:bg-white/[0.06] hover:translate-x-1 hover:border-primary"
+  class="block w-full text-left px-5 py-4 bg-white/[0.03] rounded-[10px] mb-2.5 border border-white/5 transition-all duration-200 cursor-pointer text-foreground font-[inherit] text-[inherit] hover:bg-white/[0.06] hover:translate-x-1 hover:border-primary hover:shadow-md"
   {onclick}
 >
   <div class="flex justify-between items-center mb-2">
@@ -46,7 +46,7 @@
     <div class="h-1 bg-white/[0.08] rounded-sm overflow-hidden mb-1">
       <div class="h-full bg-accent rounded-sm transition-[width] duration-300 ease-in-out" style="width: {progressPercent}%"></div>
     </div>
-    <span class="text-[0.7rem] text-muted-foreground mb-1.5 block">{task.progress_current}/{task.progress_total}</span>
+    <span class="text-[0.7rem] text-muted-foreground mb-1.5 block">{task.progress_current}/{task.progress_total} <span class="text-accent/80 font-medium">{progressPercent}%</span></span>
   {/if}
   {#if task.assigned_agents && task.assigned_agents.length > 0}
     <div class="flex gap-1.5 flex-wrap mb-1.5">
