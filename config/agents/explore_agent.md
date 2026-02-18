@@ -7,6 +7,7 @@ skills:
   - "file_read"
   - "summarize"
   - "memory_search"
+  - "workspace_read"
 denied_skills:
   - "file_write"
   - "shell_execute"

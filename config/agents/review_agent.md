@@ -8,6 +8,8 @@ skills:
   - "shell_execute"
   - "summarize"
   - "memory_search"
+  - "workspace_read"
+  - "workspace_write"
 denied_skills:
   - "file_write"
   - "web_search"

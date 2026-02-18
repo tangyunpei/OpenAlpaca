@@ -6,6 +6,8 @@ skills:
   - "file_read"
   - "file_write"
   - "shell_execute"
+  - "workspace_read"
+  - "workspace_write"
 denied_skills:
   - "web_search"
 temperature: 0.2
@@ -17,7 +19,6 @@ max_tool_calls: 30
 timeout_seconds: 600
 require_confirmation_for:
   - "file_delete"
-  - "shell_execute"
 ---
 
 ## Persona

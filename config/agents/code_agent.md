@@ -8,6 +8,8 @@ skills:
   - "file_write"
   - "shell_execute"
   - "memory_search"
+  - "workspace_read"
+  - "workspace_write"
 denied_skills:
   - "web_search"
   - "web_fetch"
@@ -19,8 +21,6 @@ fallback_models:
 max_tool_calls: 50
 timeout_seconds: 600
 max_cost_per_task: 3.0
-require_confirmation_for:
-  - "shell_execute"
 ---
 
 ## Persona
