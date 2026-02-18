@@ -5,6 +5,7 @@
   import ConnectorPanel from "./ConnectorPanel.svelte";
   import ConversationsPanel from "./ConversationsPanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
+  import AgentConfigPanel from "./AgentConfigPanel.svelte";
   import type { ServerEvent } from "$lib/daemon";
 
   interface Props {
@@ -16,12 +17,14 @@
 
   let { open, onClose, eventList, connectionState }: Props = $props();
 
-  let drawerTab = $state<"settings" | "connectors" | "conversations" | "events">("settings");
+  let drawerTab = $state<"settings" | "agents" | "connectors" | "conversations" | "events">("settings");
   let connectorPanel: ConnectorPanel | undefined = $state();
   let settingsPanel: SettingsPanel | undefined = $state();
+  let agentConfigPanel: AgentConfigPanel | undefined = $state();
 
   const drawerTabs = [
     { id: "settings" as const, label: "Configuration" },
+    { id: "agents" as const, label: "Agents" },
     { id: "connectors" as const, label: "Connectors" },
     { id: "conversations" as const, label: "Conversations" },
     { id: "events" as const, label: "Event Log" },
@@ -31,6 +34,7 @@
     drawerTab = id;
     if (id === "connectors") connectorPanel?.refreshConnectors();
     if (id === "settings") settingsPanel?.refreshSettings();
+    if (id === "agents") agentConfigPanel?.refreshConfig();
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -102,6 +106,8 @@
     <div class="flex-1 overflow-y-auto p-5 min-h-0">
       {#if drawerTab === "events"}
         <EventLog events={eventList} />
+      {:else if drawerTab === "agents"}
+        <AgentConfigPanel bind:this={agentConfigPanel} />
       {:else if drawerTab === "connectors"}
         <ConnectorPanel bind:this={connectorPanel} connectionState={connectionState} />
       {:else if drawerTab === "conversations"}

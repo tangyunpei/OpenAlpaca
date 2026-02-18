@@ -12,12 +12,14 @@
 
   import AppHeader from "$lib/components/AppHeader.svelte";
   import TaskPanel from "$lib/components/TaskPanel.svelte";
-  import AgentPanel from "$lib/components/AgentPanel.svelte";
+  import AgentStatusPanel from "$lib/components/AgentStatusPanel.svelte";
   import ChatPanel from "$lib/components/ChatPanel.svelte";
   import SettingsDrawer from "$lib/components/SettingsDrawer.svelte";
 
   import { loadTasks, subscribeToTaskEvents } from "$lib/stores/tasks";
   import { loadAgents, subscribeToAgentEvents } from "$lib/stores/agents";
+  import { loadTemplates } from "$lib/stores/templates";
+  import { loadInstances, subscribeToInstanceEvents } from "$lib/stores/instances";
   import { subscribeToKeyEvents } from "$lib/stores/settings";
   import { subscribeToChatEvents } from "$lib/stores/chat";
 
@@ -36,6 +38,8 @@
     if (v === "connected") {
       loadTasks();
       loadAgents();
+      loadTemplates();
+      loadInstances();
     }
   });
   const unsubInfo = connectionInfo.subscribe((v) => (info = v));
@@ -44,6 +48,7 @@
 
   let unsubTaskEvents: (() => void) | null = null;
   let unsubAgentEvents: (() => void) | null = null;
+  let unsubInstanceEvents: (() => void) | null = null;
   let unsubKeyEvents: (() => void) | null = null;
   let unsubChatEvents: (() => void) | null = null;
 
@@ -51,6 +56,7 @@
     connectToDaemon();
     unsubTaskEvents = subscribeToTaskEvents();
     unsubAgentEvents = subscribeToAgentEvents();
+    unsubInstanceEvents = subscribeToInstanceEvents();
     unsubKeyEvents = subscribeToKeyEvents();
     unsubChatEvents = subscribeToChatEvents();
   });
@@ -63,6 +69,7 @@
     unsubError();
     unsubTaskEvents?.();
     unsubAgentEvents?.();
+    unsubInstanceEvents?.();
     unsubKeyEvents?.();
     unsubChatEvents?.();
   });
@@ -74,7 +81,10 @@
   function handleRightTabChange(tab: "tasks" | "agents") {
     rightTab = tab;
     if (tab === "tasks") loadTasks();
-    if (tab === "agents") loadAgents();
+    if (tab === "agents") {
+      loadTemplates();
+      loadInstances();
+    }
   }
 </script>
 
@@ -113,7 +123,7 @@
         {#if rightTab === "tasks"}
           <TaskPanel />
         {:else}
-          <AgentPanel />
+          <AgentStatusPanel />
         {/if}
       </div>
     </div>
