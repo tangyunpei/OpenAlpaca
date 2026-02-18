@@ -382,14 +382,26 @@ pub fn render_user_markdown(doc: &UserDocument) -> String {
     out
 }
 
-/// Returns true if the document has any meaningful content beyond the template defaults.
+/// Returns true if the document has meaningful content beyond the template defaults.
+///
+/// Requires identity to be non-empty AND at least one other section to also be
+/// populated. This prevents bootstrap from completing when only the user's name
+/// has been saved — the agent should gather communication style, expertise,
+/// preferences, etc. before bootstrap is considered done.
 pub fn user_document_has_content(doc: &UserDocument) -> bool {
-    !doc.identity.is_empty()
-        || !doc.communication_style.is_empty()
-        || !doc.expertise.is_empty()
-        || !doc.projects.is_empty()
-        || !doc.preferences.is_empty()
-        || !doc.notes.is_empty()
+    let has_identity = !doc.identity.is_empty();
+    let other_sections = [
+        !doc.communication_style.is_empty(),
+        !doc.expertise.is_empty(),
+        !doc.projects.is_empty(),
+        !doc.preferences.is_empty(),
+        !doc.notes.is_empty(),
+    ];
+    let has_other = other_sections.iter().any(|&filled| filled);
+
+    // Identity alone isn't enough — require at least one other section
+    // to ensure the bootstrap conversation gathered meaningful user info.
+    has_identity && has_other
 }
 
 /// Strip markdown heading markers that could be used for prompt injection.
@@ -675,6 +687,81 @@ Likes to work late. Coffee over tea.
     fn test_has_content_populated() {
         let doc = parse_user_markdown(POPULATED_DOC).expect("should parse");
         assert!(user_document_has_content(&doc));
+    }
+
+    #[test]
+    fn test_has_content_identity_only_is_not_enough() {
+        // Identity alone shouldn't satisfy the content check — bootstrap
+        // needs to gather at least one other section (expertise, preferences, etc.)
+        let doc = UserDocument {
+            frontmatter: UserFrontmatter {
+                title: "USER.md".to_string(),
+                summary: "User profile record".to_string(),
+                read_when: vec!["Bootstrapping a workspace manually".to_string()],
+            },
+            identity: {
+                let mut m = HashMap::new();
+                m.insert("Name".to_string(), "Alice".to_string());
+                m
+            },
+            communication_style: String::new(),
+            expertise: String::new(),
+            projects: String::new(),
+            preferences: String::new(),
+            notes: String::new(),
+        };
+        assert!(
+            !user_document_has_content(&doc),
+            "Identity-only doc should NOT count as having content"
+        );
+    }
+
+    #[test]
+    fn test_has_content_identity_plus_one_section() {
+        // Identity + at least one other section should be enough
+        let doc = UserDocument {
+            frontmatter: UserFrontmatter {
+                title: "USER.md".to_string(),
+                summary: "User profile record".to_string(),
+                read_when: vec!["Bootstrapping a workspace manually".to_string()],
+            },
+            identity: {
+                let mut m = HashMap::new();
+                m.insert("Name".to_string(), "Alice".to_string());
+                m
+            },
+            communication_style: String::new(),
+            expertise: "Rust, Python".to_string(),
+            projects: String::new(),
+            preferences: String::new(),
+            notes: String::new(),
+        };
+        assert!(
+            user_document_has_content(&doc),
+            "Identity + one other section should count as having content"
+        );
+    }
+
+    #[test]
+    fn test_has_content_no_identity_but_other_sections() {
+        // Other sections without identity should NOT count
+        let doc = UserDocument {
+            frontmatter: UserFrontmatter {
+                title: "USER.md".to_string(),
+                summary: "User profile record".to_string(),
+                read_when: vec!["Bootstrapping a workspace manually".to_string()],
+            },
+            identity: HashMap::new(),
+            communication_style: String::new(),
+            expertise: "Rust".to_string(),
+            projects: String::new(),
+            preferences: String::new(),
+            notes: String::new(),
+        };
+        assert!(
+            !user_document_has_content(&doc),
+            "Without identity, other sections alone should not count"
+        );
     }
 
     #[test]
