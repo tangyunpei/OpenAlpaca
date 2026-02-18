@@ -339,8 +339,15 @@ pub async fn agent_action_handler(
         .update_status(&id, core_status);
 
     // 3. Emit event
+    // Derive template_id from the instance or DB record
+    let template_id = state.gateway.shared_context.agent_registry
+        .get_instance(&id)
+        .map(|a| a.template_id.clone())
+        .unwrap_or_else(|| agent.template_id.clone());
     let _ = state.gateway.bus.publish(SystemEvent::AgentStatusChanged {
         agent_id: id.clone(),
+        instance_id: id.clone(),
+        template_id,
         status: new_status.to_string(),
         current_task_id: None,
         timestamp: Utc::now(),
@@ -850,7 +857,9 @@ pub async fn spawn_instance_handler(
             let now = Utc::now();
             let _ = state.gateway.bus.publish(SystemEvent::AgentStatusChanged {
                 agent_id: agent.id.clone(),
-                status: "busy".to_string(),
+                instance_id: agent.id.clone(),
+                template_id: agent.template_id.clone(),
+                status: "spawned".to_string(),
                 current_task_id: agent.current_task.clone(),
                 timestamp: now,
             });
@@ -881,31 +890,50 @@ pub async fn destroy_instance_handler(
     State(state): State<Arc<AppState>>,
     Path(instance_id): Path<String>,
 ) -> impl IntoResponse {
+    use openalpaca_core::agent::DestroyOutcome;
+
     let registry = &state.gateway.shared_context.agent_registry;
 
-    if registry.destroy_instance(&instance_id) {
-        let now = Utc::now();
-        let _ = state.gateway.bus.publish(SystemEvent::AgentStatusChanged {
-            agent_id: instance_id.clone(),
-            status: "idle".to_string(),
-            current_task_id: None,
-            timestamp: now,
+    // Capture template_id before destruction (extract from instance_id format)
+    let template_id = registry.get_instance(&instance_id)
+        .map(|a| a.template_id.clone())
+        .unwrap_or_else(|| {
+            instance_id.split("::").next().unwrap_or(&instance_id).to_string()
         });
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "instance_id": instance_id,
-                "status": "destroyed"
-            })),
-        )
-            .into_response()
-    } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": format!("Instance '{}' not found", instance_id)
-            })),
-        )
-            .into_response()
+
+    let outcome = registry.destroy_instance(&instance_id);
+    match outcome {
+        DestroyOutcome::Removed | DestroyOutcome::ResetToIdle => {
+            let status = match outcome {
+                DestroyOutcome::ResetToIdle => "idle",
+                _ => "destroyed",
+            };
+            let now = Utc::now();
+            let _ = state.gateway.bus.publish(SystemEvent::AgentStatusChanged {
+                agent_id: instance_id.clone(),
+                instance_id: instance_id.clone(),
+                template_id,
+                status: status.to_string(),
+                current_task_id: None,
+                timestamp: now,
+            });
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "instance_id": instance_id,
+                    "status": status
+                })),
+            )
+                .into_response()
+        }
+        DestroyOutcome::NotFound => {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": format!("Instance '{}' not found", instance_id)
+                })),
+            )
+                .into_response()
+        }
     }
 }

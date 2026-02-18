@@ -9,6 +9,18 @@ use super::template::AgentTemplate;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+/// Outcome of a `destroy_instance()` call, allowing callers to emit
+/// the correct lifecycle status ("destroyed" vs "idle").
+#[derive(Debug, Clone, PartialEq)]
+pub enum DestroyOutcome {
+    /// Non-singleton instance was removed from registry entirely.
+    Removed,
+    /// Singleton instance was reset to Idle (still in registry for reuse).
+    ResetToIdle,
+    /// Instance was not found in the registry.
+    NotFound,
+}
+
 /// Internal wrapper that pairs a SubAgent instance with its config version
 /// for optimistic locking on config updates.
 struct RegisteredAgent {
@@ -172,22 +184,27 @@ impl AgentRegistry {
         }
     }
 
-    /// Destroy (remove) an agent instance. Returns true if it existed.
+    /// Destroy (remove) an agent instance.
     ///
     /// For singletons, sets the instance back to Idle instead of removing,
-    /// so it can be re-claimed later.
-    pub fn destroy_instance(&self, instance_id: &str) -> bool {
+    /// so it can be re-claimed later. Returns a `DestroyOutcome` so callers
+    /// can emit the correct lifecycle event status.
+    pub fn destroy_instance(&self, instance_id: &str) -> DestroyOutcome {
         let mut instances = self.lock_instances();
         if let Some(entry) = instances.get_mut(instance_id) {
             if self.is_singleton_instance(&entry.agent.template_id) {
                 // Singleton: reset to Idle instead of removing
                 entry.agent.status = AgentStatus::Idle;
                 entry.agent.current_task = None;
-                return true;
+                return DestroyOutcome::ResetToIdle;
             }
         }
         // Non-singleton: remove entirely
-        instances.remove(instance_id).is_some()
+        if instances.remove(instance_id).is_some() {
+            DestroyOutcome::Removed
+        } else {
+            DestroyOutcome::NotFound
+        }
     }
 
     /// Check if a template_id refers to a singleton template.
@@ -742,7 +759,7 @@ mod tests {
         assert_eq!(reg.count(), 1);
 
         // Destroying non-singleton removes it entirely
-        assert!(reg.destroy_instance(&inst.id));
+        assert_eq!(reg.destroy_instance(&inst.id), DestroyOutcome::Removed);
         assert_eq!(reg.count(), 0);
         assert!(reg.get_instance(&inst.id).is_none());
     }

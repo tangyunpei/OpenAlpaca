@@ -979,18 +979,15 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                 openalpaca_core::events::SystemEvent::TaskFailed { task_id, error, .. } => {
                     eb_bridge.task_status(&task_id, "", "failed", None, None, Some(error));
                 }
-                openalpaca_core::events::SystemEvent::AgentRegistered {
-                    agent_id, name, ..
-                } => {
-                    eb_bridge.agent_status(&agent_id, &name, "idle", None);
-                }
                 openalpaca_core::events::SystemEvent::AgentStatusChanged {
                     agent_id,
+                    instance_id,
+                    template_id,
                     status,
                     current_task_id,
                     ..
                 } => {
-                    eb_bridge.agent_status(&agent_id, "", &status, current_task_id);
+                    eb_bridge.agent_status(&agent_id, "", &status, current_task_id, &instance_id, &template_id);
                 }
                 // ── Forwarded to clients: security & observability ─────────
                 openalpaca_core::events::SystemEvent::SecurityViolation {

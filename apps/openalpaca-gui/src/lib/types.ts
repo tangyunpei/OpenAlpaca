@@ -76,7 +76,7 @@ export interface Skill {
 
 // ── Agent types ─────────────────────────────────────────────────────
 
-export type AgentStatusValue = "idle" | "busy" | "waiting" | "offline" | "error";
+export type AgentStatusValue = "idle" | "busy" | "waiting" | "offline" | "error" | "spawned" | "destroyed";
 
 export interface Agent {
   id: string;
@@ -85,6 +85,7 @@ export interface Agent {
   icon: string | null;
   status: string;
   current_task_id: string | null;
+  template_id?: string;
   skills_json: string;
   preset_json: string;
   constraints_json: string | null;

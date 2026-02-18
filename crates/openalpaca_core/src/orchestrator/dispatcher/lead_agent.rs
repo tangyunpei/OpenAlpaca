@@ -1,4 +1,5 @@
 use super::{TaskDispatcher, format_task_result, spawn_task_memory_extraction};
+use crate::agent::registry::DestroyOutcome;
 use crate::agent::subagent::SubAgent;
 use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
@@ -64,10 +65,12 @@ impl TaskDispatcher {
         let task_lane = self.lane_manager.create_task_lane(&task_id);
         task_lane.assign_agent(lead_agent.id.clone());
 
-        // Emit status change (try_claim already set agent to Busy)
+        // Emit status change — lead agent instance just spawned
         self.bus.publish(SystemEvent::AgentStatusChanged {
             agent_id: lead_agent.id.clone(),
-            status: "busy".to_string(),
+            instance_id: lead_agent.id.clone(),
+            template_id: lead_agent.template_id.clone(),
+            status: "spawned".to_string(),
             current_task_id: Some(task_id.clone()),
             timestamp: now,
         });
@@ -204,10 +207,16 @@ impl TaskDispatcher {
             let runtime_secs = start_time.elapsed().as_secs() as i64;
 
             // Destroy lead agent instance (resets singleton to Idle)
-            ctx.agent_registry.destroy_instance(&lead_agent.id);
+            let outcome = ctx.agent_registry.destroy_instance(&lead_agent.id);
+            let destroy_status = match outcome {
+                DestroyOutcome::ResetToIdle => "idle",
+                _ => "destroyed",
+            };
             bus.publish(SystemEvent::AgentStatusChanged {
                 agent_id: lead_agent.id.clone(),
-                status: "idle".to_string(),
+                instance_id: lead_agent.id.clone(),
+                template_id: lead_agent.template_id.clone(),
+                status: destroy_status.to_string(),
                 current_task_id: None,
                 timestamp: now,
             });

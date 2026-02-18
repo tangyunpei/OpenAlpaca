@@ -53,6 +53,7 @@ pub struct LeadAgentResult {
 /// subagent loop panics or returns early without cleanup.
 pub(crate) struct AgentBusyGuard {
     instance_id: String,
+    template_id: String,
     agent_registry: Arc<crate::agent::registry::AgentRegistry>,
     bus: EventBus,
     /// Set to true once the instance has been explicitly cleaned up.
@@ -63,11 +64,13 @@ pub(crate) struct AgentBusyGuard {
 impl AgentBusyGuard {
     pub(crate) fn new(
         instance_id: String,
+        template_id: String,
         agent_registry: Arc<crate::agent::registry::AgentRegistry>,
         bus: EventBus,
     ) -> Self {
         Self {
             instance_id,
+            template_id,
             agent_registry,
             bus,
             restored: false,
@@ -77,10 +80,16 @@ impl AgentBusyGuard {
     pub(crate) fn restore(&mut self) {
         if !self.restored {
             self.restored = true;
-            self.agent_registry.destroy_instance(&self.instance_id);
+            let outcome = self.agent_registry.destroy_instance(&self.instance_id);
+            let status = match outcome {
+                crate::agent::registry::DestroyOutcome::ResetToIdle => "idle",
+                _ => "destroyed",
+            };
             self.bus.publish(SystemEvent::AgentStatusChanged {
                 agent_id: self.instance_id.clone(),
-                status: "idle".to_string(),
+                instance_id: self.instance_id.clone(),
+                template_id: self.template_id.clone(),
+                status: status.to_string(),
                 current_task_id: None,
                 timestamp: Utc::now(),
             });
@@ -175,12 +184,15 @@ impl BuiltInTool for SpawnSubagentTool {
         let instance_id = agent.id.clone();
         self.bus.publish(SystemEvent::AgentStatusChanged {
             agent_id: instance_id.clone(),
-            status: "busy".to_string(),
+            instance_id: instance_id.clone(),
+            template_id: agent_id.to_string(),
+            status: "spawned".to_string(),
             current_task_id: Some(self.task_id.clone()),
             timestamp: Utc::now(),
         });
         let mut busy_guard = AgentBusyGuard::new(
             instance_id.clone(),
+            agent_id.to_string(),
             self.shared_context.agent_registry.clone(),
             self.bus.clone(),
         );
