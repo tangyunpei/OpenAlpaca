@@ -31,6 +31,9 @@
 
   --animate-pulse: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
   --animate-thinking: thinking 1.5s ease-in-out infinite;
+  --animate-fadeIn: fadeIn 0.3s ease-out;
+  --animate-slideUp: slideUp 0.3s ease-out both;
+  --animate-dotBounce: dotBounce 1.4s ease-in-out infinite;
 
   @keyframes pulse {
     0%, 100% { opacity: 1; }
@@ -40,6 +43,21 @@
   @keyframes thinking {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.4; }
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes slideUp {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes dotBounce {
+    0%, 80%, 100% { transform: translateY(0); }
+    40% { transform: translateY(-6px); }
   }
 }
 
@@ -109,4 +127,40 @@
   .oa-divider {
     @apply border-t border-border;
   }
+
+  /* Typing dots indicator */
+  .oa-typing-dots {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+    padding: 8px 12px;
+  }
+  .oa-typing-dots span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-muted-foreground);
+    animation: dotBounce 1.4s ease-in-out infinite;
+  }
+  .oa-typing-dots span:nth-child(2) { animation-delay: 0.16s; }
+  .oa-typing-dots span:nth-child(3) { animation-delay: 0.32s; }
+
+  /* Skeleton loading placeholder */
+  .oa-skeleton {
+    @apply bg-white/[0.04] rounded-xl animate-pulse;
+  }
+}
+
+/* ── Grain overlay for depth ─────────────────────────────────────── */
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0.018;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
 }

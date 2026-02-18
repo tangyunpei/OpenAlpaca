@@ -106,6 +106,15 @@
       {#each messages as msg (msg.id)}
         <ChatMessageComponent message={msg} />
       {/each}
+      {#if streaming}
+        <div class="px-4 py-1">
+          <div class="oa-typing-dots">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+        </div>
+      {/if}
     {/if}
   </div>
 

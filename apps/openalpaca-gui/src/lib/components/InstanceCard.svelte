@@ -49,7 +49,7 @@
 </script>
 
 <div
-  class="w-[120px] h-[120px] flex flex-col justify-between p-3 bg-white/3 rounded-xl border border-white/5 border-l-4 {borderClass(instance.status)} transition-all duration-200 hover:bg-white/6"
+  class="w-[120px] h-[120px] flex flex-col justify-between p-3 bg-white/3 rounded-xl border border-white/5 border-l-4 {borderClass(instance.status)} transition-all duration-200 hover:bg-white/6 hover:scale-[1.03] hover:shadow-lg"
 >
   <!-- Instance ID -->
   <div class="text-[0.7rem] font-mono text-muted-foreground truncate" title={instance.id}>
@@ -58,7 +58,7 @@
 
   <!-- Status -->
   <div class="flex items-center gap-1.5 mt-auto">
-    <span class="w-2 h-2 rounded-full shrink-0 {statusDotClass(instance.status)}"></span>
+    <span class="w-2 h-2 rounded-full shrink-0 transition-colors duration-300 {statusDotClass(instance.status)} {instance.status === 'busy' ? 'animate-pulse' : ''}"></span>
     <span class="text-xs font-medium text-foreground capitalize">{instance.status}</span>
   </div>
 

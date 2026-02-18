@@ -16,10 +16,10 @@
   import ChatPanel from "$lib/components/ChatPanel.svelte";
   import SettingsDrawer from "$lib/components/SettingsDrawer.svelte";
 
-  import { loadTasks, subscribeToTaskEvents } from "$lib/stores/tasks";
+  import { loadTasks, subscribeToTaskEvents, activeTasks } from "$lib/stores/tasks";
   import { loadAgents, subscribeToAgentEvents } from "$lib/stores/agents";
   import { loadTemplates } from "$lib/stores/templates";
-  import { loadInstances, subscribeToInstanceEvents } from "$lib/stores/instances";
+  import { loadInstances, subscribeToInstanceEvents, instanceList } from "$lib/stores/instances";
   import { subscribeToKeyEvents } from "$lib/stores/settings";
   import { subscribeToChatEvents } from "$lib/stores/chat";
 
@@ -31,6 +31,12 @@
 
   let rightTab = $state<"tasks" | "agents">("tasks");
   let drawerOpen = $state(false);
+
+  // Counts for tab badges
+  let activeTaskCount = $state(0);
+  let instanceCount = $state(0);
+  const unsubActiveCount = activeTasks.subscribe((v) => (activeTaskCount = v.length));
+  const unsubInstanceCount = instanceList.subscribe((v) => (instanceCount = v.length));
 
   // Store subscriptions
   const unsubState = connectionState.subscribe((v) => {
@@ -72,6 +78,8 @@
     unsubInstanceEvents?.();
     unsubKeyEvents?.();
     unsubChatEvents?.();
+    unsubActiveCount();
+    unsubInstanceCount();
   });
 
   function toggleDrawer() {
@@ -92,8 +100,13 @@
   <AppHeader {statusState} {info} onToggleSettings={toggleDrawer} />
 
   {#if error}
-    <div class="mb-4 rounded-lg border border-danger bg-danger/20 px-4 py-3 text-sm text-danger">
-      {error}
+    <div class="mb-4 rounded-lg border border-danger bg-danger/20 px-4 py-3 text-sm text-danger flex items-center justify-between gap-3 animate-fadeIn">
+      <span class="flex-1">{error}</span>
+      <button
+        class="shrink-0 w-6 h-6 flex items-center justify-center rounded bg-transparent text-danger hover:bg-danger/30 transition-colors cursor-pointer border-none text-base leading-none"
+        onclick={() => (error = null)}
+        aria-label="Dismiss error"
+      >&times;</button>
     </div>
   {/if}
 
@@ -110,12 +123,18 @@
           onclick={() => handleRightTabChange('tasks')}
         >
           Tasks
+          {#if activeTaskCount > 0}
+            <span class="ml-1.5 text-[0.65rem] px-1.5 py-px rounded-full bg-accent/20 text-accent font-bold">{activeTaskCount}</span>
+          {/if}
         </button>
         <button
           class="px-6 py-2 border-none bg-transparent text-muted-foreground cursor-pointer text-sm font-medium rounded-md transition-all duration-200 whitespace-nowrap hover:text-foreground {rightTab === 'agents' ? 'bg-white/10 text-white shadow-sm' : ''}"
           onclick={() => handleRightTabChange('agents')}
         >
           Agents
+          {#if instanceCount > 0}
+            <span class="ml-1.5 text-[0.65rem] px-1.5 py-px rounded-full bg-accent/20 text-accent font-bold">{instanceCount}</span>
+          {/if}
         </button>
       </div>
 
