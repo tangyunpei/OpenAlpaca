@@ -503,11 +503,20 @@ async fn plan_inner(
                     && let Some(ref dag) = plan.dag
                     && let Err(e) = dag.validate(idle_agents)
                 {
-                    tracing::warn!(
-                        "DAG validation failed: {e}, falling back to flat assignments"
-                    );
+                    let promoted = plan.assignments.is_empty() && !plan.use_lead_agent;
+                    if promoted {
+                        tracing::warn!(
+                            "DAG validation failed ({e}) and plan has no flat assignments \
+                             — auto-promoting to use_lead_agent"
+                        );
+                    } else {
+                        tracing::warn!(
+                            "DAG validation failed: {e}, falling back to flat assignments"
+                        );
+                    }
                     return Ok(TaskPlan {
                         dag: None,
+                        use_lead_agent: plan.use_lead_agent || promoted,
                         ..plan
                     });
                 }

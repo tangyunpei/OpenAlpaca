@@ -299,13 +299,14 @@ fn test_dispatch_lead_agent_fails_no_agents() {
 }
 
 #[test]
-fn test_dispatch_planned_use_lead_agent_false_goes_normal_path() {
-    // When use_lead_agent is false, the normal validation path is used
+fn test_dispatch_planned_empty_assignments_promotes_to_lead_agent() {
+    // When use_lead_agent is false and assignments are empty,
+    // dispatch_planned auto-promotes to lead agent as a last-resort safety net.
     let dispatcher = setup(vec![make_agent("a1", vec!["web_search"])]);
     let plan = TaskPlan {
         classification: "complex_task".to_string(),
         title: Some("Normal test".to_string()),
-        assignments: vec![], // empty → should fail in normal path
+        assignments: vec![], // empty → last-resort lead agent promotion
         reasoning: None,
         dag: None,
         use_lead_agent: false,
@@ -320,7 +321,7 @@ fn test_dispatch_planned_use_lead_agent_false_goes_normal_path() {
         None,
     );
 
-    // Should fail because assignments is empty and use_lead_agent is false
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("No agents assigned"));
+    // Should succeed — dispatched to lead agent as last-resort fallback
+    assert!(result.is_ok());
+    assert!(result.unwrap().contains("Lead Agent"));
 }
