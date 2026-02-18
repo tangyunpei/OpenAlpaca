@@ -171,6 +171,12 @@ impl TaskDispatcher {
         tokio::spawn(async move {
             let start_time = std::time::Instant::now();
 
+            tracing::info!(
+                task_id = %task_id,
+                lead_agent = %lead_agent.id,
+                "Lead agent background execution starting"
+            );
+
             // Update task status → Running
             ctx.task_registry
                 .update_status(&task_id, TaskEntryStatus::Running);
@@ -185,6 +191,8 @@ impl TaskDispatcher {
                 let repo = openalpaca_storage::repository::TaskRepository::new(db);
                 let _ = repo.update_status(&task_id, openalpaca_storage::TaskStatus::Running);
             }
+
+            tracing::info!(task_id = %task_id, "Task status: queued → running");
 
             // Run the lead agent
             let result = run_lead_agent(
@@ -205,6 +213,16 @@ impl TaskDispatcher {
 
             let now = Utc::now();
             let runtime_secs = start_time.elapsed().as_secs() as i64;
+
+            tracing::info!(
+                task_id = %task_id,
+                success = result.success,
+                rounds = result.loop_result.rounds_used,
+                subagents = result.subagents_spawned,
+                runtime_secs = runtime_secs,
+                finish_reason = ?result.loop_result.finish_reason,
+                "Lead agent execution returned"
+            );
 
             // Destroy lead agent instance (resets singleton to Idle)
             let outcome = ctx.agent_registry.destroy_instance(&lead_agent.id);
@@ -308,6 +326,7 @@ impl TaskDispatcher {
 
             // Update task status
             if result.success {
+                tracing::info!(task_id = %task_id, "Task status: running → completed");
                 ctx.task_registry
                     .update_status(&task_id, TaskEntryStatus::Completed);
                 if let Some(ref db) = db {
@@ -324,6 +343,11 @@ impl TaskDispatcher {
                     timestamp: now,
                 });
             } else {
+                tracing::warn!(
+                    task_id = %task_id,
+                    finish_reason = ?result.loop_result.finish_reason,
+                    "Task status: running → failed"
+                );
                 ctx.task_registry
                     .update_status(&task_id, TaskEntryStatus::Failed);
                 if let Some(ref db) = db {

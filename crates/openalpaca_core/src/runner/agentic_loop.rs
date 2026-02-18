@@ -94,8 +94,17 @@ pub async fn run_agentic_loop(
     let mut last_assistant_content = String::new();
     let mut last_model: Option<String> = None;
 
+    tracing::info!(
+        agent_id = agent_id,
+        tools_count = tools.len(),
+        max_rounds = config.max_rounds,
+        max_cost = config.max_cost,
+        "Agentic loop started (direct provider)"
+    );
+
     loop {
         if rounds >= config.max_rounds {
+            tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop exiting: max rounds reached");
             return LoopResult {
                 final_content: last_assistant_content,
                 rounds_used: rounds,
@@ -109,6 +118,7 @@ pub async fn run_agentic_loop(
 
         let estimated_cost = estimate_cost(total_input, total_output);
         if estimated_cost > config.max_cost {
+            tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop exiting: cost limit exceeded");
             return LoopResult {
                 final_content: last_assistant_content,
                 rounds_used: rounds,
@@ -128,12 +138,24 @@ pub async fn run_agentic_loop(
             max_tokens: None,
         };
 
+        tracing::debug!(agent_id = agent_id, round = rounds + 1, messages_count = messages.len(), "LLM call starting");
+
         match provider.chat(request).await {
             Ok(response) => {
                 total_input += response.usage.input_tokens;
                 total_output += response.usage.output_tokens;
                 rounds += 1;
                 last_model = Some(response.model.clone());
+
+                tracing::debug!(
+                    agent_id = agent_id,
+                    round = rounds,
+                    model = %response.model,
+                    input_tokens = response.usage.input_tokens,
+                    output_tokens = response.usage.output_tokens,
+                    finish_reason = ?response.finish_reason,
+                    "LLM call completed"
+                );
 
                 // Capture last content before any branching
                 if !response.content.is_empty() {
@@ -165,6 +187,14 @@ pub async fn run_agentic_loop(
 
                         tool_calls_made += 1;
 
+                        tracing::debug!(
+                            agent_id = agent_id,
+                            round = rounds,
+                            tool = %tc.name,
+                            tool_call_number = tool_calls_made,
+                            "Executing tool"
+                        );
+
                         // Tool error convention: errors are prefixed with [tool_error]
                         // so the LLM sees a consistent format regardless of the tool.
                         let result_text = if let (Some(sbx), Some(policy)) =
@@ -184,6 +214,15 @@ pub async fn run_agentic_loop(
                             format!("[tool_error] tool '{}' not available — sandbox not configured", tc.name)
                         };
 
+                        tracing::debug!(
+                            agent_id = agent_id,
+                            round = rounds,
+                            tool = %tc.name,
+                            success = !result_text.starts_with("[tool_error]"),
+                            result_len = result_text.len(),
+                            "Tool execution completed"
+                        );
+
                         messages.push(ChatMessage::tool_result(&tc.id, &result_text));
                     }
 
@@ -199,6 +238,15 @@ pub async fn run_agentic_loop(
                 }
 
                 // No tool calls or stop -> done
+                tracing::info!(
+                    agent_id = agent_id,
+                    rounds = rounds,
+                    total_input_tokens = total_input,
+                    total_output_tokens = total_output,
+                    tool_calls = tool_calls_made,
+                    content_len = response.content.len(),
+                    "Agentic loop completed successfully"
+                );
                 return LoopResult {
                     final_content: response.content,
                     rounds_used: rounds,
@@ -210,6 +258,12 @@ pub async fn run_agentic_loop(
                 };
             }
             Err(e) => {
+                tracing::warn!(
+                    agent_id = agent_id,
+                    rounds = rounds,
+                    error = %e,
+                    "Agentic loop exiting: LLM error"
+                );
                 return LoopResult {
                     final_content: last_assistant_content,
                     rounds_used: rounds,
@@ -252,8 +306,17 @@ pub async fn run_agentic_loop_routed(
         task_id: task_id.map(|s| s.to_string()),
     };
 
+    tracing::info!(
+        agent_id = agent_id,
+        tools_count = tools.len(),
+        max_rounds = config.max_rounds,
+        max_cost = config.max_cost,
+        "Agentic loop started"
+    );
+
     loop {
         if rounds >= config.max_rounds {
+            tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop exiting: max rounds reached");
             return LoopResult {
                 final_content: last_assistant_content,
                 rounds_used: rounds,
@@ -269,6 +332,7 @@ pub async fn run_agentic_loop_routed(
         if let Some(usage) = router.cost_tracker.get_agent_usage(agent_id).await
             && usage.total_cost_usd > config.max_cost
         {
+            tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop exiting: cost limit exceeded");
             return LoopResult {
                 final_content: last_assistant_content,
                 rounds_used: rounds,
@@ -283,6 +347,7 @@ pub async fn run_agentic_loop_routed(
         // Also check simple estimate as a fallback
         let estimated_cost = estimate_cost(total_input, total_output);
         if estimated_cost > config.max_cost {
+            tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop exiting: cost limit exceeded (estimate)");
             return LoopResult {
                 final_content: last_assistant_content,
                 rounds_used: rounds,
@@ -303,12 +368,24 @@ pub async fn run_agentic_loop_routed(
             context: context.clone(),
         };
 
+        tracing::debug!(agent_id = agent_id, round = rounds + 1, messages_count = messages.len(), "LLM call starting");
+
         match router.complete(request).await {
             Ok(response) => {
                 total_input += response.usage.input_tokens;
                 total_output += response.usage.output_tokens;
                 rounds += 1;
                 last_model = Some(response.model.clone());
+
+                tracing::debug!(
+                    agent_id = agent_id,
+                    round = rounds,
+                    model = %response.model,
+                    input_tokens = response.usage.input_tokens,
+                    output_tokens = response.usage.output_tokens,
+                    finish_reason = ?response.finish_reason,
+                    "LLM call completed"
+                );
 
                 // Capture last content before any branching
                 if !response.content.is_empty() {
@@ -339,6 +416,14 @@ pub async fn run_agentic_loop_routed(
 
                         tool_calls_made += 1;
 
+                        tracing::debug!(
+                            agent_id = agent_id,
+                            round = rounds,
+                            tool = %tc.name,
+                            tool_call_number = tool_calls_made,
+                            "Executing tool"
+                        );
+
                         let result_text = if let (Some(sbx), Some(policy)) =
                             (sandbox, sandbox_policy)
                         {
@@ -355,6 +440,15 @@ pub async fn run_agentic_loop_routed(
                             format!("[tool_error] tool '{}' not available — sandbox not configured", tc.name)
                         };
 
+                        tracing::debug!(
+                            agent_id = agent_id,
+                            round = rounds,
+                            tool = %tc.name,
+                            success = !result_text.starts_with("[tool_error]"),
+                            result_len = result_text.len(),
+                            "Tool execution completed"
+                        );
+
                         messages.push(ChatMessage::tool_result(&tc.id, &result_text));
                     }
 
@@ -368,6 +462,15 @@ pub async fn run_agentic_loop_routed(
                     continue;
                 }
 
+                tracing::info!(
+                    agent_id = agent_id,
+                    rounds = rounds,
+                    total_input_tokens = total_input,
+                    total_output_tokens = total_output,
+                    tool_calls = tool_calls_made,
+                    content_len = response.content.len(),
+                    "Agentic loop completed successfully"
+                );
                 return LoopResult {
                     final_content: response.content,
                     rounds_used: rounds,
@@ -379,6 +482,12 @@ pub async fn run_agentic_loop_routed(
                 };
             }
             Err(e) => {
+                tracing::warn!(
+                    agent_id = agent_id,
+                    rounds = rounds,
+                    error = %e,
+                    "Agentic loop exiting: LLM error"
+                );
                 return LoopResult {
                     final_content: last_assistant_content,
                     rounds_used: rounds,

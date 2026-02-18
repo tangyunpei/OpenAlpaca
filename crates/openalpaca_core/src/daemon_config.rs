@@ -272,7 +272,7 @@ pub struct PlannerConfig {
 impl Default for PlannerConfig {
     fn default() -> Self {
         Self {
-            planning_timeout_secs: 30,
+            planning_timeout_secs: 60,
             max_retries: 2,
         }
     }
@@ -604,7 +604,7 @@ mod tests {
         assert_eq!(config.orchestrator.costs.summary_max_daily_cost_usd, 0.50);
         assert_eq!(config.execution.agent_defaults.max_rounds, 15);
         assert_eq!(config.execution.lead_agent_defaults.max_rounds, 30);
-        assert_eq!(config.execution.planner.planning_timeout_secs, 30);
+        assert_eq!(config.execution.planner.planning_timeout_secs, 60);
         assert_eq!(config.execution.planner.max_retries, 2);
         assert_eq!(config.execution.dag.max_concurrent_agents, 3);
         assert_eq!(config.security.max_input_length, 32768);
