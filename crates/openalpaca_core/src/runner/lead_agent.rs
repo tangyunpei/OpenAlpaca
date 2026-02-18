@@ -166,6 +166,13 @@ impl BuiltInTool for SpawnSubagentTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: objective".to_string())?;
 
+        tracing::info!(
+            target_agent = agent_id,
+            objective_preview = &objective[..objective.len().min(80)],
+            task_id = %self.task_id,
+            "Lead agent spawning subagent"
+        );
+
         // 2. Prevent the lead agent from spawning itself (infinite recursion)
         if agent_id == self.created_by {
             return Err(format!(
@@ -681,12 +688,25 @@ pub async fn run_lead_agent(
     daemon_config: &Arc<ArcSwap<DaemonConfig>>,
     workspace_id: Option<String>,
 ) -> LeadAgentResult {
+    tracing::info!(
+        lead_agent = %lead_agent.id,
+        task_id = task_id,
+        "Lead agent starting execution"
+    );
+
     // 1. List worker agent templates (all templates except the lead itself)
     let all_templates = shared_context.agent_registry.list_templates();
     let worker_templates: Vec<AgentTemplate> = all_templates
         .into_iter()
         .filter(|t| t.frontmatter.id != lead_agent.template_id)
         .collect();
+
+    tracing::info!(
+        lead_agent = %lead_agent.id,
+        task_id = task_id,
+        worker_templates = worker_templates.len(),
+        "Lead agent found worker templates"
+    );
 
     // 2. Build spawn_subagent tool definition from templates
     let spawn_tool_def = spawn_subagent_tool_definition_from_templates(&worker_templates);
@@ -817,6 +837,15 @@ pub async fn run_lead_agent(
     };
 
     // 9. Run the agentic loop
+    tracing::info!(
+        lead_agent = %lead_agent.id,
+        task_id = task_id,
+        tools_count = tools.len(),
+        max_rounds = loop_config.max_rounds,
+        max_cost = loop_config.max_cost,
+        "Lead agent entering agentic loop"
+    );
+
     let result = run_agentic_loop_routed(
         router.as_ref(),
         messages,

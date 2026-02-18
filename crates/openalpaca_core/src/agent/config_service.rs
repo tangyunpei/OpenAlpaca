@@ -43,12 +43,16 @@ impl AgentConfigService {
         config: AgentConfigFile,
         expected_version: u64,
     ) -> Result<u64, String> {
-        // 1. Write TOML to disk (Write-Ahead)
-        let toml_content = toml::to_string_pretty(&config)
-            .map_err(|e| format!("Failed to serialize config: {e}"))?;
-        let toml_path = self.config_dir.join(format!("{id}.toml"));
-        std::fs::write(&toml_path, &toml_content)
-            .map_err(|e| format!("Failed to write config: {e}"))?;
+        // 1. Write TOML to disk (Write-Ahead) — only if no .md template exists.
+        // Agents with .md templates use Markdown as the source of truth.
+        let md_path = self.config_dir.join(format!("{id}.md"));
+        if !md_path.exists() {
+            let toml_content = toml::to_string_pretty(&config)
+                .map_err(|e| format!("Failed to serialize config: {e}"))?;
+            let toml_path = self.config_dir.join(format!("{id}.toml"));
+            std::fs::write(&toml_path, &toml_content)
+                .map_err(|e| format!("Failed to write config: {e}"))?;
+        }
 
         // 2. Update in-memory registry with optimistic locking
         let subagent = config.clone().into_subagent();
@@ -73,14 +77,18 @@ impl AgentConfigService {
             return Err(format!("Agent '{}' already exists", agent_id));
         }
 
-        // 1. Write TOML to disk (Write-Ahead)
-        std::fs::create_dir_all(&self.config_dir)
-            .map_err(|e| format!("Failed to create config dir: {e}"))?;
-        let toml_content = toml::to_string_pretty(&config)
-            .map_err(|e| format!("Failed to serialize config: {e}"))?;
-        let toml_path = self.config_dir.join(format!("{agent_id}.toml"));
-        std::fs::write(&toml_path, &toml_content)
-            .map_err(|e| format!("Failed to write config: {e}"))?;
+        // 1. Write TOML to disk (Write-Ahead) — only if no .md template exists.
+        // Agents with .md templates use Markdown as the source of truth.
+        let md_path = self.config_dir.join(format!("{agent_id}.md"));
+        if !md_path.exists() {
+            std::fs::create_dir_all(&self.config_dir)
+                .map_err(|e| format!("Failed to create config dir: {e}"))?;
+            let toml_content = toml::to_string_pretty(&config)
+                .map_err(|e| format!("Failed to serialize config: {e}"))?;
+            let toml_path = self.config_dir.join(format!("{agent_id}.toml"));
+            std::fs::write(&toml_path, &toml_content)
+                .map_err(|e| format!("Failed to write config: {e}"))?;
+        }
 
         // 2. Register in memory
         let subagent = config.clone().into_subagent();

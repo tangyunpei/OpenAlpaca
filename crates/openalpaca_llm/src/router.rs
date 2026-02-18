@@ -349,6 +349,10 @@ impl LlmRouter {
             | Err(LlmRouterError::NoApiCompatibleKeys) => {
                 self.try_fallback(model, &request).await
             }
+            // Transient errors (529 Overloaded, 500+) should also try fallback models
+            Err(LlmRouterError::Llm(ref llm_err)) if llm_err.is_transient() => {
+                self.try_fallback(model, &request).await
+            }
             Err(e) => Err(e),
         }
     }
@@ -445,6 +449,18 @@ impl LlmRouter {
                     );
                     pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
                         .await;
+                    continue;
+                }
+                Err(e) if e.is_transient() => {
+                    tracing::warn!(
+                        model = model,
+                        error = %e,
+                        "Transient LLM error, retrying with next key"
+                    );
+                    pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
+                        .await;
+                    // Brief backoff before retry to avoid hammering an overloaded service
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     continue;
                 }
                 Err(e) => {

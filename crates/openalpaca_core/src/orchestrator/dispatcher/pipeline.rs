@@ -400,11 +400,13 @@ impl TaskDispatcher {
                 }
 
                 // Record per-agent history and metrics
+                // Use template_id for DB operations — the agent table stores template IDs,
+                // not instance IDs (e.g., "general_agent" not "general_agent::69dc734d").
                 if let Some(ref db) = db {
                     let subagent_repo = openalpaca_storage::SubAgentRepository::new(db);
                     let history_entry = openalpaca_storage::AgentTaskHistory {
                         id: Uuid::new_v4().to_string(),
-                        agent_id: agent_id.clone(),
+                        agent_id: agent.template_id.clone(),
                         task_id: task_id.clone(),
                         role: "executor".to_string(),
                         status: if agent_success { "completed" } else { "failed" }
@@ -417,9 +419,9 @@ impl TaskDispatcher {
                     }
                     if agent_success {
                         let _ =
-                            subagent_repo.increment_completed(agent_id, agent_runtime);
+                            subagent_repo.increment_completed(&agent.template_id, agent_runtime);
                     } else {
-                        let _ = subagent_repo.increment_failed(agent_id);
+                        let _ = subagent_repo.increment_failed(&agent.template_id);
                     }
                 }
 

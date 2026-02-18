@@ -124,6 +124,24 @@ impl<'a> MemoryRepository<'a> {
         })
     }
 
+    /// Escape a raw query string for safe use with SQLite FTS5 MATCH.
+    ///
+    /// Wraps each whitespace-delimited token in double quotes so FTS5
+    /// treats commas, parentheses, and reserved words (`AND`/`OR`/`NOT`) as
+    /// literal search terms rather than operators.
+    fn escape_fts5_query(query: &str) -> String {
+        query
+            .split_whitespace()
+            .filter(|w| !w.is_empty())
+            .map(|word| {
+                // Escape internal double quotes by doubling them
+                let escaped = word.replace('"', "\"\"");
+                format!("\"{escaped}\"")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// Full-text search with optional kind/scope/scope_id filters.
     pub fn search_fts(
         &self,
@@ -134,6 +152,11 @@ impl<'a> MemoryRepository<'a> {
         scope_filter: Option<MemoryScope>,
         scope_id_filter: Option<&str>,
     ) -> Result<Vec<MemoryV2>> {
+        let safe_query = Self::escape_fts5_query(query);
+        if safe_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
         self.db.with_connection(|conn| {
             let mut sql = format!(
                 "SELECT {ALL_COLUMNS} FROM memory m
@@ -141,7 +164,7 @@ impl<'a> MemoryRepository<'a> {
                  WHERE memory_fts MATCH ?1 AND m.owner_id = ?2"
             );
             let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-                Box::new(query.to_string()),
+                Box::new(safe_query),
                 Box::new(owner_id.to_string()),
             ];
             let mut param_idx = 3;
