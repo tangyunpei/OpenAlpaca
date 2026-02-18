@@ -445,6 +445,20 @@ pub fn delete_daemon_value(key: &str) -> Result<()> {
     Ok(())
 }
 
+/// Clear all daemon config values, resetting to runtime defaults.
+///
+/// Writes a minimal empty TOML file. The daemon runtime fills in defaults
+/// via `DaemonConfig::default()` when the file has no overrides.
+pub fn clear_daemon_config() -> Result<()> {
+    let path = daemon_config_path()?;
+    if !path.exists() {
+        return Ok(());
+    }
+    std::fs::write(&path, "# Reset to defaults\n")
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(())
+}
+
 /// List all currently set daemon config values.
 ///
 /// Returns `Vec<(key, value, kind)>` matching the format used by `ai_config::list_ai_entries`.

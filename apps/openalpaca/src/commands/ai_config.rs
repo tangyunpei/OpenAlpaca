@@ -331,8 +331,10 @@ pub fn list_ai_entries() -> Result<Vec<(String, String, String)>> {
     Ok(entries)
 }
 
-/// Clear only the managed AI fields (orchestrator, provider enabled/keys[0]/base_url).
-/// Preserves: models, limits, fallback_chains, credential_discovery, cli_backends.
+/// Clear all AI/LLM configuration in `llm.toml`, resetting to defaults.
+///
+/// Deletes keychain secrets for provider keys, then sets every section to `None`.
+/// The runtime will fall back to built-in defaults on next load.
 pub fn clear_ai_config() -> Result<()> {
     let path = llm_config_path()?;
     if !path.exists() {
@@ -340,12 +342,10 @@ pub fn clear_ai_config() -> Result<()> {
     }
     let mut config = read_config(&path).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    config.orchestrator = None;
-
+    // Delete keychain secrets before clearing providers
     if let Some(ref mut providers) = config.providers {
         let store = secret_store();
         for (_name, prov) in providers.iter_mut() {
-            // Delete keychain secrets before clearing
             if let Some(ref keys) = prov.keys {
                 for k in keys {
                     if let Some(ref sref) = k.secret_ref {
@@ -353,14 +353,22 @@ pub fn clear_ai_config() -> Result<()> {
                     }
                 }
             }
-            prov.enabled = None;
-            prov.base_url = None;
-            prov.keys = None;
         }
     }
 
+    // Clear all sections
+    config.orchestrator = None;
+    config.providers = None;
     config.credential_discovery = None;
     config.cli_backends = None;
+    config.embeddings = None;
+    config.models = None;
+    config.fallback_chains = None;
+    config.limits = None;
+    config.security = None;
+    config.timeouts = None;
+    config.endpoints = None;
+    config.env_vars = None;
 
     write_config(&path, &config).map_err(|e| anyhow::anyhow!("{}", e))?;
     Ok(())
