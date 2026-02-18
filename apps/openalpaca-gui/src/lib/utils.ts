@@ -47,6 +47,7 @@ export function getStatusColor(status: string): string {
     case "busy":
     case "queued":
     case "pending":
+    case "spawned":
       return "status-warning";
     case "paused":
     case "waiting":
