@@ -445,6 +445,8 @@ fn cmd_reset(
 
         if confirm {
             db.factory_reset()?;
+            ai_config::clear_ai_config()?;
+            daemon_config_cli::clear_daemon_config()?;
             println!("All configuration and data wiped (Factory Reset).");
         } else {
             println!("Cancelled.");
@@ -470,6 +472,7 @@ fn cmd_reset(
         if confirm {
             repo.clear_all()?;
             ai_config::clear_ai_config()?;
+            daemon_config_cli::clear_daemon_config()?;
             println!("Config reset (agents and data preserved).");
         } else {
             println!("Cancelled.");
@@ -554,10 +557,12 @@ fn run_interactive(repo: &ConfigRepository, db: &Database) -> Result<()> {
 
                     if input == "yes" || input == "y" {
                         db.factory_reset()?;
+                        let _ = ai_config::clear_ai_config();
+                        let _ = daemon_config_cli::clear_daemon_config();
                         config_map.clear();
                         println!(
                             "{}",
-                            style("Database wiped (Factory Reset). Exiting.").green()
+                            style("All configuration wiped (Factory Reset). Exiting.").green()
                         );
                         break;
                     } else {
