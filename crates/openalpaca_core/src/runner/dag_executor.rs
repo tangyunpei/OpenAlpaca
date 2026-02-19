@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::bus::EventBus;
@@ -113,6 +114,7 @@ pub async fn execute_dag(
     db: Option<Database>,
     created_by: &str,
     daemon_config: &Arc<ArcSwap<DaemonConfig>>,
+    cancel_token: Option<CancellationToken>,
 ) -> DagExecutionResult {
     let start = Instant::now();
 
@@ -144,6 +146,24 @@ pub async fn execute_dag(
     mark_ready_nodes(dag);
 
     loop {
+        // Check cancellation
+        if let Some(ref token) = cancel_token {
+            if token.is_cancelled() {
+                tracing::info!("DAG execution cancelled for task '{}' — aborting {} running tasks", task_id, running_count);
+                join_set.abort_all();
+                return DagExecutionResult {
+                    success: false,
+                    node_results,
+                    total_input_tokens,
+                    total_output_tokens,
+                    total_duration: start.elapsed(),
+                    finish_reason: DagFinishReason::Aborted {
+                        reason: "Task cancelled by user".to_string(),
+                    },
+                };
+            }
+        }
+
         // Check total timeout
         if start.elapsed() > config.total_timeout {
             tracing::warn!("DAG execution timed out for task '{}' — aborting {} running tasks", task_id, running_count);
@@ -251,6 +271,7 @@ pub async fn execute_dag(
             let created_by_owned = created_by.to_string();
             let node_timeout = config.node_timeout;
             let daemon_config_clone = daemon_config.clone();
+            let token_clone = cancel_token.clone();
 
             join_set.spawn(async move {
                 execute_single_node(
@@ -265,6 +286,7 @@ pub async fn execute_dag(
                     agent,
                     node_timeout,
                     daemon_config_clone,
+                    token_clone,
                 )
                 .await
             });
@@ -537,6 +559,7 @@ async fn execute_single_node(
     agent: SubAgent,
     node_timeout: Duration,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
+    cancel_token: Option<CancellationToken>,
 ) -> NodeResult {
     let agent_id = agent.id.clone();
 
@@ -606,6 +629,7 @@ async fn execute_single_node(
         &agent_id,
         Some(&sandbox_policy),
         Some(&task_id),
+        cancel_token,
     )
     .await;
 
@@ -641,6 +665,7 @@ async fn execute_single_node(
     let call_status = match &result.finish_reason {
         LoopFinishReason::Complete | LoopFinishReason::MaxRounds => "success",
         LoopFinishReason::CostExceeded => "cost_exceeded",
+        LoopFinishReason::Cancelled => "cancelled",
         LoopFinishReason::Error(_) => "error",
     };
     let call_error = match &result.finish_reason {

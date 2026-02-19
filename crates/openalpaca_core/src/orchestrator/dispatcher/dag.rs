@@ -7,6 +7,7 @@ use chrono::Utc;
 use openalpaca_storage::{ConversationMessage, ConversationRepository};
 use super::super::task_planner::TaskDag;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 impl TaskDispatcher {
     /// Spawn DAG-parallel execution: independent nodes run concurrently.
@@ -38,6 +39,10 @@ impl TaskDispatcher {
         let embedder = self.embedder.clone();
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
+
+        // Create cancellation token for this task
+        let cancel_token = CancellationToken::new();
+        ctx.register_cancellation_token(&task_id, cancel_token.clone());
 
         tokio::spawn(async move {
             let start_time = std::time::Instant::now();
@@ -98,8 +103,12 @@ impl TaskDispatcher {
                 db.clone(),
                 &created_by,
                 &daemon_config,
+                Some(cancel_token),
             )
             .await;
+
+            // Cleanup cancellation token
+            ctx.remove_cancellation_token(&task_id);
 
             let now = Utc::now();
             let runtime_secs = start_time.elapsed().as_secs() as i64;

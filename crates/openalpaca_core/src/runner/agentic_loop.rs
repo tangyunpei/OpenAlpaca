@@ -4,6 +4,7 @@ use openalpaca_llm::{
     RouterRequest, ToolDefinition,
 };
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 /// Maximum tool result size before truncation (32 KB).
 const MAX_TOOL_RESULT_SIZE: usize = 32 * 1024;
@@ -69,6 +70,7 @@ pub enum LoopFinishReason {
     Complete,
     MaxRounds,
     CostExceeded,
+    Cancelled,
     Error(String),
 }
 
@@ -292,6 +294,7 @@ pub async fn run_agentic_loop_routed(
     agent_id: &str,
     sandbox_policy: Option<&SandboxPolicy>,
     task_id: Option<&str>,
+    cancel_token: Option<CancellationToken>,
 ) -> LoopResult {
     let mut messages = initial_messages;
     let mut rounds = 0usize;
@@ -315,6 +318,22 @@ pub async fn run_agentic_loop_routed(
     );
 
     loop {
+        // Check cancellation before each round
+        if let Some(ref token) = cancel_token {
+            if token.is_cancelled() {
+                tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop cancelled");
+                return LoopResult {
+                    final_content: last_assistant_content,
+                    rounds_used: rounds,
+                    total_input_tokens: total_input,
+                    total_output_tokens: total_output,
+                    tool_calls_made,
+                    finish_reason: LoopFinishReason::Cancelled,
+                    model_used: last_model.clone(),
+                };
+            }
+        }
+
         if rounds >= config.max_rounds {
             tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop exiting: max rounds reached");
             return LoopResult {
@@ -370,7 +389,29 @@ pub async fn run_agentic_loop_routed(
 
         tracing::debug!(agent_id = agent_id, round = rounds + 1, messages_count = messages.len(), "LLM call starting");
 
-        match router.complete(request).await {
+        // Race LLM call against cancellation token (if present).
+        // This allows interrupting long-running LLM calls (10-60s) mid-flight.
+        let llm_result = if let Some(ref token) = cancel_token {
+            tokio::select! {
+                result = router.complete(request) => result,
+                _ = token.cancelled() => {
+                    tracing::info!(agent_id = agent_id, round = rounds + 1, "LLM call interrupted by cancellation");
+                    return LoopResult {
+                        final_content: last_assistant_content,
+                        rounds_used: rounds,
+                        total_input_tokens: total_input,
+                        total_output_tokens: total_output,
+                        tool_calls_made,
+                        finish_reason: LoopFinishReason::Cancelled,
+                        model_used: last_model.clone(),
+                    };
+                }
+            }
+        } else {
+            router.complete(request).await
+        };
+
+        match llm_result {
             Ok(response) => {
                 total_input += response.usage.input_tokens;
                 total_output += response.usage.output_tokens;

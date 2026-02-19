@@ -367,6 +367,15 @@ pub async fn task_action_handler(
                     })),
                 );
             }
+
+            // Trigger actual cancellation of the running task
+            let cancelled = state.gateway.shared_context.cancel_task(&id);
+            if cancelled {
+                tracing::info!(task_id = %id, "Task cancellation triggered via API");
+            } else {
+                tracing::warn!(task_id = %id, "No cancellation token found — task may have already completed");
+            }
+
             TaskStatus::Cancelled
         }
         "pause" => {
