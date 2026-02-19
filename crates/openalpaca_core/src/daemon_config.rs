@@ -288,6 +288,7 @@ pub struct DagConfig {
     pub max_retries_per_node: usize,
     pub replan_after_every_n_nodes: usize,
     pub max_replans: usize,
+    pub replan_enabled: bool,
 }
 
 impl Default for DagConfig {
@@ -299,6 +300,7 @@ impl Default for DagConfig {
             max_retries_per_node: 1,
             replan_after_every_n_nodes: 2,
             max_replans: 3,
+            replan_enabled: false,
         }
     }
 }

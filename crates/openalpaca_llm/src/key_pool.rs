@@ -143,11 +143,13 @@ impl ApiKey {
     }
 }
 
-/// Guard returned by `acquire()` — holds the key id and secret for use.
+/// Guard returned by `acquire()` — holds the key id, secret, and rate limit for use.
 #[derive(Debug, Clone)]
 pub struct KeyGuard {
     pub id: String,
     pub secret: String,
+    /// Per-key RPM limit from config (if configured).
+    pub rate_limit: Option<u32>,
 }
 
 /// Errors from key pool operations.
@@ -253,6 +255,7 @@ impl KeyPool {
                 return Ok(KeyGuard {
                     id: key.id.clone(),
                     secret: key.secret.clone(),
+                    rate_limit: key.rate_limit,
                 });
             }
         }
@@ -291,6 +294,7 @@ impl KeyPool {
                 return Ok(KeyGuard {
                     id: key.id.clone(),
                     secret: key.secret.clone(),
+                    rate_limit: key.rate_limit,
                 });
             }
         }
@@ -329,6 +333,7 @@ impl KeyPool {
                     return Ok(KeyGuard {
                         id: key.id.clone(),
                         secret: key.secret.clone(),
+                        rate_limit: key.rate_limit,
                     });
                 }
             }
@@ -341,6 +346,7 @@ impl KeyPool {
                 return Ok(KeyGuard {
                     id: key.id.clone(),
                     secret: key.secret.clone(),
+                    rate_limit: key.rate_limit,
                 });
             }
         }
@@ -375,6 +381,7 @@ impl KeyPool {
                     return Ok(KeyGuard {
                         id: key.id.clone(),
                         secret: key.secret.clone(),
+                        rate_limit: key.rate_limit,
                     });
                 }
             }
@@ -387,6 +394,7 @@ impl KeyPool {
                 return Ok(KeyGuard {
                     id: key.id.clone(),
                     secret: key.secret.clone(),
+                    rate_limit: key.rate_limit,
                 });
             }
         }

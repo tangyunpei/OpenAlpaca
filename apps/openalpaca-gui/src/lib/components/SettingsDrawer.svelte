@@ -68,8 +68,8 @@
 
   <!-- Drawer panel -->
   <div
-    transition:fly={{ x: 480, duration: 300, easing: cubicOut }}
-    class="fixed top-0 right-0 z-50 h-full w-[480px] max-w-[90vw] flex flex-col bg-card/95 backdrop-blur-2xl border-l border-border"
+    transition:fly={{ x: 640, duration: 300, easing: cubicOut }}
+    class="fixed top-0 right-0 z-50 h-full w-[640px] max-w-[90vw] flex flex-col bg-card/95 backdrop-blur-2xl border-l border-border"
     style="box-shadow: -8px 0 32px rgba(0, 0, 0, 0.4);"
   >
     <!-- Drawer header -->
@@ -87,41 +87,48 @@
       </button>
     </div>
 
-    <!-- Internal tab nav -->
-    <div class="flex px-4 pt-1 gap-1 border-b border-border shrink-0 overflow-x-auto flex-nowrap">
-      {#each drawerTabs as tab}
-        <button
-          class="px-3 py-2.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap cursor-pointer bg-transparent border-x-0 border-t-0 flex items-center gap-1.5
-                 {drawerTab === tab.id
-                   ? 'border-accent text-accent'
-                   : 'border-transparent text-muted-foreground hover:text-foreground'}"
-          onclick={() => handleDrawerTabChange(tab.id)}
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0">
-            <path d={tab.icon} />
-          </svg>
-          {tab.label}
-        </button>
-      {/each}
-    </div>
+    <!-- Body: vertical nav rail + content -->
+    <div class="flex flex-1 min-h-0">
+      <!-- Vertical nav rail -->
+      <nav class="w-12 shrink-0 border-r border-border bg-white/[0.01] flex flex-col items-center py-3 gap-1">
+        {#each drawerTabs as tab}
+          <button
+            class="relative w-9 h-9 flex items-center justify-center rounded-lg transition-all duration-200 cursor-pointer border-none
+                   {drawerTab === tab.id
+                     ? 'bg-accent/15 text-accent'
+                     : 'bg-transparent text-muted-foreground hover:text-foreground hover:bg-white/5'}"
+            onclick={() => handleDrawerTabChange(tab.id)}
+            title={tab.label}
+            aria-label={tab.label}
+          >
+            {#if drawerTab === tab.id}
+              <span class="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-r-full bg-accent"></span>
+            {/if}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d={tab.icon} />
+            </svg>
+          </button>
+        {/each}
+      </nav>
 
-    <!-- Tab content -->
-    <div class="flex-1 overflow-y-auto p-5 min-h-0">
-      {#key drawerTab}
-        <div class="animate-fadeIn">
-          {#if drawerTab === "events"}
-            <EventLog events={eventList} />
-          {:else if drawerTab === "agents"}
-            <AgentConfigPanel bind:this={agentConfigPanel} />
-          {:else if drawerTab === "connectors"}
-            <ConnectorPanel bind:this={connectorPanel} connectionState={connectionState} />
-          {:else if drawerTab === "conversations"}
-            <ConversationsPanel />
-          {:else if drawerTab === "settings"}
-            <SettingsPanel bind:this={settingsPanel} />
-          {/if}
-        </div>
-      {/key}
+      <!-- Tab content -->
+      <div class="flex-1 overflow-y-auto p-5 min-h-0">
+        {#key drawerTab}
+          <div class="animate-fadeIn">
+            {#if drawerTab === "events"}
+              <EventLog events={eventList} />
+            {:else if drawerTab === "agents"}
+              <AgentConfigPanel bind:this={agentConfigPanel} />
+            {:else if drawerTab === "connectors"}
+              <ConnectorPanel bind:this={connectorPanel} connectionState={connectionState} />
+            {:else if drawerTab === "conversations"}
+              <ConversationsPanel />
+            {:else if drawerTab === "settings"}
+              <SettingsPanel bind:this={settingsPanel} />
+            {/if}
+          </div>
+        {/key}
+      </div>
     </div>
   </div>
 {/if}

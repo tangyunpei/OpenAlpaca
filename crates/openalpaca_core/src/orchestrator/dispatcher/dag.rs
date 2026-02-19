@@ -25,10 +25,17 @@ impl TaskDispatcher {
         let router = match &self.llm_router {
             Some(r) => r.clone(),
             None => {
-                tracing::warn!(
+                tracing::error!(
                     "No LLM router configured — cannot execute DAG for task '{}'",
                     task_id
                 );
+                // Fail the task instead of silently returning
+                self.shared_context.task_registry.update_status(&task_id, TaskEntryStatus::Failed);
+                self.bus.publish(SystemEvent::TaskFailed {
+                    task_id: task_id.clone(),
+                    error: "No LLM router configured".to_string(),
+                    timestamp: Utc::now(),
+                });
                 return;
             }
         };
@@ -85,7 +92,7 @@ impl TaskDispatcher {
                 total_timeout: Duration::from_secs(dag_cfg.total_timeout_secs),
                 max_retries_per_node: dag_cfg.max_retries_per_node,
                 replan_config: crate::orchestrator::replanner::ReplanConfig {
-                    enabled: false,
+                    enabled: dag_cfg.replan_enabled,
                     replan_after_every_n_nodes: dag_cfg.replan_after_every_n_nodes,
                     max_replans: dag_cfg.max_replans,
                 },

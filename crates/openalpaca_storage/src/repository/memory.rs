@@ -734,6 +734,10 @@ impl<'a> MemoryRepository<'a> {
     /// After applying decay, resets the reference timestamp so the next run only
     /// decays over the newly elapsed interval (avoiding compounding).
     /// Returns the number of memories updated.
+    ///
+    /// NOTE: The decay is computed in Rust (not SQL) because SQLite's `EXP()`
+    /// math function requires `SQLITE_ENABLE_MATH_FUNCTIONS` at compile time,
+    /// which the `bundled` rusqlite feature does not enable by default.
     pub fn apply_importance_decay(
         &self,
         owner_id: &str,
@@ -743,16 +747,40 @@ impl<'a> MemoryRepository<'a> {
         self.db.with_connection_mut(|conn| {
             let tx = conn.transaction()?;
 
-            // Apply decay using elapsed time since last reference point
-            let updated = tx.execute(
-                "UPDATE memory SET
-                    importance = MAX(?1, importance * EXP(-0.693147 * (julianday('now') - julianday(COALESCE(last_accessed_at, created_at))) / ?2)),
-                    last_accessed_at = datetime('now')
-                 WHERE owner_id = ?3
+            // Step 1: Fetch candidate memories with their elapsed days
+            let mut stmt = tx.prepare(
+                "SELECT id, importance,
+                        julianday('now') - julianday(COALESCE(last_accessed_at, created_at)) AS elapsed_days
+                 FROM memory
+                 WHERE owner_id = ?1
                    AND kind != 'kb_chunk'
-                   AND importance > ?1",
-                rusqlite::params![min_importance, half_life_days, owner_id],
+                   AND importance > ?2",
             )?;
+
+            let rows: Vec<(i64, f64, f64)> = stmt
+                .query_map(rusqlite::params![owner_id, min_importance], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            drop(stmt);
+
+            // Step 2: Compute decay in Rust and batch-update
+            let ln2: f64 = std::f64::consts::LN_2;
+            let mut updated: usize = 0;
+
+            let mut update_stmt = tx.prepare(
+                "UPDATE memory SET importance = ?1, last_accessed_at = datetime('now') WHERE id = ?2",
+            )?;
+
+            for (id, importance, elapsed_days) in &rows {
+                let decay_factor = (-ln2 * elapsed_days / half_life_days).exp();
+                let new_importance = (importance * decay_factor).max(min_importance);
+
+                update_stmt.execute(rusqlite::params![new_importance, id])?;
+                updated += 1;
+            }
+            drop(update_stmt);
 
             tx.commit()?;
             Ok(updated)

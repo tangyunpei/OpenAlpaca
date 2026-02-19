@@ -17,8 +17,18 @@ pub struct AnthropicProvider {
 
 impl AnthropicProvider {
     pub fn new(api_key: String, model: Option<String>, max_tokens: Option<u32>) -> Self {
+        Self::with_client(reqwest::Client::new(), api_key, model, max_tokens)
+    }
+
+    /// Create with a shared `reqwest::Client` (for connection pool reuse).
+    pub fn with_client(
+        client: reqwest::Client,
+        api_key: String,
+        model: Option<String>,
+        max_tokens: Option<u32>,
+    ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client,
             api_key,
             model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
@@ -261,7 +271,7 @@ impl LlmProvider for AnthropicProvider {
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1000);
+                .unwrap_or(1);
             return Err(LlmError::RateLimited {
                 retry_after_ms: retry_after * 1000,
             });

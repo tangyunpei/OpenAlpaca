@@ -6,6 +6,7 @@ use crate::cost_tracker::{CallRecord, CostTracker};
 use crate::error::LlmError;
 use crate::key_pool::{ApiKey, CallResult, KeyPool, KeyPoolError, KeyStatus, ProviderType, SelectionStrategy};
 use crate::model_registry::{ModelEntry, ModelInfo, ModelRegistry};
+use crate::rate_limiter::{RateLimitConfig, RateLimiterRegistry, CircuitState, backoff_with_jitter};
 use crate::types::*;
 use crate::LlmProvider;
 use tracing;
@@ -14,11 +15,6 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-
-/// Maximum concurrent LLM API calls to prevent rate-limit stampedes.
-/// When parallel subagents all call the API simultaneously, this limits
-/// how many can be in-flight at once. Others queue with backpressure.
-const DEFAULT_MAX_CONCURRENT_LLM_CALLS: usize = 4;
 
 /// Context for a router request (agent/task identification).
 #[derive(Debug, Clone, Default)]
@@ -85,6 +81,8 @@ pub struct LlmRouter {
     /// Limits concurrent in-flight LLM API calls to prevent rate-limit stampedes
     /// when parallel subagents all call the API simultaneously.
     concurrency_limiter: Arc<Semaphore>,
+    /// Per-key rate limiters (RPM/TPM token buckets + concurrency) and circuit breaker.
+    rate_limiter_registry: Arc<RateLimiterRegistry>,
 }
 
 impl LlmRouter {
@@ -95,6 +93,7 @@ impl LlmRouter {
         cost_tracker: Arc<CostTracker>,
         default_model: String,
     ) -> Self {
+        let rate_config = RateLimitConfig::default();
         let dm = DashMap::new();
         for (k, v) in providers {
             dm.insert(k, v);
@@ -107,11 +106,12 @@ impl LlmRouter {
             default_model: ArcSwap::from_pointee(default_model),
             cli_backends: DashMap::new(),
             runtime_config: ArcSwap::from_pointee(LlmRuntimeConfig::default()),
-            concurrency_limiter: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_LLM_CALLS)),
+            concurrency_limiter: Arc::new(Semaphore::new(rate_config.global_concurrency)),
+            rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_config)),
         }
     }
 
-    /// Create a router with an explicit runtime config.
+    /// Create a router with an explicit runtime config and rate limit config.
     pub fn new_with_runtime(
         providers: HashMap<ProviderType, ProviderEntry>,
         model_registry: ModelRegistry,
@@ -119,6 +119,7 @@ impl LlmRouter {
         cost_tracker: Arc<CostTracker>,
         default_model: String,
         runtime_config: LlmRuntimeConfig,
+        rate_limit_config: RateLimitConfig,
     ) -> Self {
         let dm = DashMap::new();
         for (k, v) in providers {
@@ -132,7 +133,8 @@ impl LlmRouter {
             default_model: ArcSwap::from_pointee(default_model),
             cli_backends: DashMap::new(),
             runtime_config: ArcSwap::from_pointee(runtime_config),
-            concurrency_limiter: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_LLM_CALLS)),
+            concurrency_limiter: Arc::new(Semaphore::new(rate_limit_config.global_concurrency)),
+            rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_limit_config)),
         }
     }
 
@@ -158,6 +160,7 @@ impl LlmRouter {
 
         let model_registry = ModelRegistry::with_defaults();
         let cost_tracker = Arc::new(CostTracker::new(ModelRegistry::with_defaults()));
+        let rate_config = RateLimitConfig::default();
 
         Self {
             providers,
@@ -167,7 +170,8 @@ impl LlmRouter {
             default_model: ArcSwap::from_pointee(default_model),
             cli_backends: DashMap::new(),
             runtime_config: ArcSwap::from_pointee(LlmRuntimeConfig::default()),
-            concurrency_limiter: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_LLM_CALLS)),
+            concurrency_limiter: Arc::new(Semaphore::new(rate_config.global_concurrency)),
+            rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_config)),
         }
     }
 
@@ -421,17 +425,29 @@ impl LlmRouter {
         model: &str,
         request: &RouterRequest,
     ) -> Result<ChatResponse, LlmRouterError> {
+        // 1. Check global circuit breaker
+        if let Err(CircuitState::Open) = self.rate_limiter_registry.check_circuit().await {
+            tracing::warn!(
+                model = model,
+                "Circuit breaker is Open — failing fast without calling API"
+            );
+            return Err(LlmRouterError::MaxRetriesExceeded);
+        }
+
         let pool = entry.key_pool.load();
         let max_retries = pool.len().max(1);
+        let estimated_tokens = estimate_request_tokens(request);
+        let rate_config = self.rate_limiter_registry.config();
+        let backoff_base = std::time::Duration::from_millis(rate_config.backoff_base_ms);
+        let backoff_cap = std::time::Duration::from_millis(rate_config.backoff_cap_ms);
 
         // Allow up to 2 rate-limit wait cycles before giving up.
-        // This handles parallel agents that burn through keys simultaneously.
         let mut rate_limit_waits = 0;
         const MAX_RATE_LIMIT_WAITS: u32 = 2;
         const MAX_RATE_LIMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
         loop {
-            for _attempt in 0..max_retries {
+            for attempt in 0..max_retries {
                 let key_guard = match pool.acquire().await {
                     Ok(guard) => guard,
                     Err(KeyPoolError::NoApiCompatibleKeys) => {
@@ -442,6 +458,13 @@ impl LlmRouter {
                         break;
                     }
                 };
+
+                // 2. Per-key rate limiting: concurrency + RPM + TPM token buckets
+                let key_limiter = self.rate_limiter_registry.get_or_create(
+                    &key_guard.id,
+                    key_guard.rate_limit,
+                );
+                let _key_permit = key_limiter.acquire(estimated_tokens).await;
 
                 let chat_request = ChatRequest {
                     messages: request.messages.clone(),
@@ -459,6 +482,7 @@ impl LlmRouter {
                     Ok(response) => {
                         pool.report_result(&key_guard.id, CallResult::Success)
                             .await;
+                        self.rate_limiter_registry.report_success().await;
 
                         // Record cost
                         let cost = self.cost_tracker.calculate_cost(
@@ -488,7 +512,8 @@ impl LlmRouter {
                             CallResult::RateLimited { retry_after_ms },
                         )
                         .await;
-                        // Try next key
+                        self.rate_limiter_registry.report_failure().await;
+                        // Try next key — token bucket naturally throttles re-requests
                         continue;
                     }
                     Err(e) if e.is_auth_error() => {
@@ -501,20 +526,29 @@ impl LlmRouter {
                         continue;
                     }
                     Err(e) if e.is_transient() => {
+                        // Exponential backoff with full jitter
+                        let backoff = backoff_with_jitter(
+                            backoff_base,
+                            attempt as u32,
+                            backoff_cap,
+                        );
                         tracing::warn!(
                             model = model,
                             error = %e,
-                            "Transient LLM error, retrying with next key"
+                            attempt = attempt,
+                            backoff_ms = backoff.as_millis() as u64,
+                            "Transient LLM error, retrying with exponential backoff"
                         );
                         pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
                             .await;
-                        // Brief backoff before retry to avoid hammering an overloaded service
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        self.rate_limiter_registry.report_failure().await;
+                        tokio::time::sleep(backoff).await;
                         continue;
                     }
                     Err(e) => {
                         pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
                             .await;
+                        self.rate_limiter_registry.report_failure().await;
                         return Err(LlmRouterError::Llm(e));
                     }
                 }
@@ -543,6 +577,7 @@ impl LlmRouter {
             }
         }
 
+        self.rate_limiter_registry.report_failure().await;
         Err(LlmRouterError::MaxRetriesExceeded)
     }
 
@@ -602,6 +637,19 @@ impl LlmRouter {
 
         Err(LlmRouterError::AllFallbacksFailed)
     }
+}
+
+/// Rough estimate of tokens in a request.
+///
+/// Uses 1 token ≈ 4 bytes heuristic. Intentionally overestimates slightly,
+/// which is the safe direction for rate limiting (better to be conservative
+/// than to exceed TPM limits).
+fn estimate_request_tokens(request: &RouterRequest) -> u32 {
+    let msg_bytes: usize = request.messages.iter().map(|m| m.content.len()).sum();
+    let tool_bytes: usize = request.tools.iter()
+        .map(|t| t.description.len() + t.parameters.to_string().len())
+        .sum();
+    ((msg_bytes + tool_bytes) / 4).max(100) as u32
 }
 
 /// Maximum prompt size (in bytes) for CLI backend fallback.

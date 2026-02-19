@@ -81,10 +81,19 @@ impl TaskDispatcher {
         let router = match &self.llm_router {
             Some(r) => r.clone(),
             None => {
-                tracing::warn!(
+                tracing::error!(
                     "No LLM router configured — cannot execute pipeline for task '{}'",
                     task_id
                 );
+                // Fail the task instead of silently returning
+                self.shared_context.task_registry.update_status(
+                    &task_id, crate::context::TaskEntryStatus::Failed,
+                );
+                self.bus.publish(crate::events::SystemEvent::TaskFailed {
+                    task_id: task_id.clone(),
+                    error: "No LLM router configured".to_string(),
+                    timestamp: chrono::Utc::now(),
+                });
                 return;
             }
         };
