@@ -49,7 +49,7 @@
 </script>
 
 <div
-  class="w-[120px] h-[120px] flex flex-col justify-between p-3 bg-white/3 rounded-xl border border-white/5 border-l-4 {borderClass(instance.status)} transition-all duration-200 hover:bg-white/6 hover:scale-[1.03] hover:shadow-lg"
+  class="w-[120px] h-[120px] flex flex-col justify-between p-3 bg-white/3 rounded-2xl border border-white/5 border-l-4 {borderClass(instance.status)} transition-all duration-150 hover:bg-white/6 hover:scale-[1.02] hover:shadow-md"
 >
   <!-- Instance ID -->
   <div class="text-[0.7rem] font-mono text-muted-foreground truncate" title={instance.id}>
@@ -65,7 +65,7 @@
   <!-- Task ID (if present) -->
   {#if instance.current_task}
     <div class="text-[0.65rem] text-muted-foreground truncate mt-1" title={instance.current_task}>
-      <span class="font-mono bg-white/5 px-1 rounded">{instance.current_task.slice(0, 8)}</span>
+      <span class="font-mono px-1 rounded {instance.status === 'busy' ? 'bg-accent/10 text-accent/80' : 'bg-white/5'}">{instance.current_task.slice(0, 8)}</span>
     </div>
   {:else}
     <div class="h-4"></div>

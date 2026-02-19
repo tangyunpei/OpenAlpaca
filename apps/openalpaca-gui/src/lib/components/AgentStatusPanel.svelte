@@ -36,6 +36,15 @@
 
   let loading = $derived(tLoading || iLoading);
 
+  /** Sort templates so the lead agent (with lead_orchestration skill) always appears first */
+  let sortedTemplates = $derived(
+    [...templates].sort((a, b) => {
+      const aLead = a.skills?.includes("lead_orchestration") ? 1 : 0;
+      const bLead = b.skills?.includes("lead_orchestration") ? 1 : 0;
+      return bLead - aLead;
+    }),
+  );
+
   /** Total active instances across all templates */
   let totalInstances = $derived(
     Array.from(grouped.values()).reduce((sum, list) => sum + list.length, 0),
@@ -93,7 +102,7 @@
 </div>
 
 <!-- Template Sections -->
-<div class="max-h-[calc(100vh-240px)] overflow-y-auto pr-1">
+<div class="pr-1">
   {#if loading && templates.length === 0}
     <!-- Skeleton placeholders while loading -->
     {#each [0, 1, 2] as i}
@@ -106,11 +115,12 @@
       </div>
     {/each}
   {:else}
-    {#each templates as template, idx (template.id)}
+    {#each sortedTemplates as template, idx (template.id)}
       <div style="animation: slideUp 0.3s ease-out both; animation-delay: {idx * 60}ms;">
         <TemplateSection
           {template}
           instances={grouped.get(template.id) || []}
+          isLead={template.skills?.includes("lead_orchestration") ?? false}
         />
       </div>
     {:else}
