@@ -281,8 +281,15 @@ pub struct TaskPlan {
     pub dag: Option<TaskDag>,
     /// When true, the task should be executed by a Lead Agent (full agentic loop
     /// with dynamic subagent spawning) instead of a static DAG or sequential pipeline.
-    #[serde(default)]
+    /// Defaults to `true` (lead agent is the safer fallback for uncertain tasks).
+    #[serde(default = "default_use_lead_agent")]
     pub use_lead_agent: bool,
+}
+
+/// Serde default for `use_lead_agent`: returns `true` so that missing
+/// or omitted `use_lead_agent` fields default to lead agent mode (the safer option).
+fn default_use_lead_agent() -> bool {
+    true
 }
 
 /// An agent assignment decided by the LLM planner.
@@ -619,14 +626,14 @@ Respond with ONLY a single JSON object. No markdown, no explanation, no other te
 For simple queries:
 {"classification": "simple_query", "title": null, "assignments": [], "reasoning": "...", "dag": null, "use_lead_agent": false}
 
-For complex tasks with predictable structure (steps are known upfront), provide a DAG of sub-tasks:
+For complex tasks that are dynamic, exploratory, or require adaptive decomposition, use the lead agent (PREFERRED for most complex tasks):
+{"classification": "complex_task", "title": "...", "assignments": [], "reasoning": "...", "dag": null, "use_lead_agent": true}
+
+For complex tasks where ALL steps are known upfront and predictable, provide a DAG of sub-tasks:
 {"classification": "complex_task", "title": "...", "assignments": [], "reasoning": "...", "dag": {"nodes": [
   {"node_id": "node_1", "title": "Research topic", "description": "Search for...", "agent_id": "...", "agent_name": "...", "depends_on": [], "workspace_keys": [], "output_key": "research_results"},
   {"node_id": "node_2", "title": "Write summary", "description": "Using the research...", "agent_id": "...", "agent_name": "...", "depends_on": ["node_1"], "workspace_keys": ["research_results"], "output_key": "summary"}
 ]}, "use_lead_agent": false}
-
-For complex tasks that are dynamic, exploratory, or require adaptive decomposition, use the lead agent:
-{"classification": "complex_task", "title": "...", "assignments": [], "reasoning": "...", "dag": null, "use_lead_agent": true}
 
 ## When to use `use_lead_agent: true`
 Use the lead agent when the task is open-ended or adaptive:
@@ -738,7 +745,7 @@ Complex task example:
                     use_lead_agent: obj
                         .get("use_lead_agent")
                         .and_then(|v| v.as_bool())
-                        .unwrap_or(false),
+                        .unwrap_or(true),
                 }
             } else {
                 return Err(PlanError::MalformedResponse(format!(
@@ -1493,5 +1500,55 @@ mod tests {
     fn test_plan_error_malformed_display() {
         let err = PlanError::MalformedResponse("bad json".to_string());
         assert_eq!(err.to_string(), "Malformed response: bad json");
+    }
+
+    #[test]
+    fn test_missing_use_lead_agent_defaults_true() {
+        // When the LLM omits use_lead_agent entirely, it should default to true
+        // (lead agent is the safer fallback for complex tasks).
+        let json = r#"{
+            "classification": "complex_task",
+            "title": "Research something",
+            "assignments": [{"agent_id": "a1", "agent_name": "Agent A", "role_description": "do stuff", "matched_skills": ["search"]}],
+            "reasoning": "needs research"
+        }"#;
+        let plan = TaskPlanner::parse_response(json).unwrap();
+        assert_eq!(plan.classification, "complex_task");
+        assert!(plan.use_lead_agent, "Missing use_lead_agent should default to true");
+    }
+
+    #[test]
+    fn test_explicit_false_with_dag_stays_false() {
+        // When the LLM explicitly sets use_lead_agent: false AND provides a DAG,
+        // we respect the explicit choice.
+        let json = r#"{
+            "classification": "complex_task",
+            "title": "Translate documents",
+            "assignments": [],
+            "reasoning": "Known steps, using DAG",
+            "dag": {"nodes": [
+                {"node_id": "n1", "title": "Translate EN", "description": "...", "agent_id": "translator-01", "agent_name": "Translator", "depends_on": [], "workspace_keys": [], "output_key": "en"},
+                {"node_id": "n2", "title": "Translate FR", "description": "...", "agent_id": "translator-01", "agent_name": "Translator", "depends_on": [], "workspace_keys": [], "output_key": "fr"}
+            ]},
+            "use_lead_agent": false
+        }"#;
+        let plan = TaskPlanner::parse_response(json).unwrap();
+        assert_eq!(plan.classification, "complex_task");
+        assert!(!plan.use_lead_agent, "Explicit false with DAG should stay false");
+        assert!(plan.dag.is_some());
+    }
+
+    #[test]
+    fn test_explicit_true_use_lead_agent() {
+        let json = r#"{
+            "classification": "complex_task",
+            "title": "Debug failing tests",
+            "assignments": [],
+            "reasoning": "Exploratory task",
+            "use_lead_agent": true
+        }"#;
+        let plan = TaskPlanner::parse_response(json).unwrap();
+        assert!(plan.use_lead_agent);
+        assert!(plan.dag.is_none());
     }
 }

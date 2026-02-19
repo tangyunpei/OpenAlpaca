@@ -7,6 +7,8 @@ singleton: true
 skills:
   - "lead_orchestration"
   - "spawn_subagent"
+  - "check_subagent_status"
+  - "wait_for_subagents"
   - "memory_search"
   - "workspace_read"
   - "workspace_write"
