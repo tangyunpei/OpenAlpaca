@@ -436,6 +436,32 @@ impl KeyPool {
         self.keys.is_empty()
     }
 
+    /// Returns the shortest remaining cooldown duration among API-compatible
+    /// rate-limited keys, or `None` if no keys are cooling down.
+    /// Useful for waiting until the next key becomes available.
+    pub async fn shortest_cooldown(&self) -> Option<Duration> {
+        let now = Instant::now();
+        let mut shortest: Option<Duration> = None;
+
+        for key_lock in &self.keys {
+            let key = key_lock.read().await;
+            if !key.is_api_compatible_key() {
+                continue;
+            }
+            if let Some(until) = key.rate_state.cooldown_until {
+                if until > now {
+                    let remaining = until - now;
+                    shortest = Some(match shortest {
+                        Some(prev) => prev.min(remaining),
+                        None => remaining,
+                    });
+                }
+            }
+        }
+
+        shortest
+    }
+
     /// Get the status of all keys.
     pub async fn key_statuses(&self) -> Vec<KeyStatus> {
         let mut statuses = Vec::with_capacity(self.keys.len());

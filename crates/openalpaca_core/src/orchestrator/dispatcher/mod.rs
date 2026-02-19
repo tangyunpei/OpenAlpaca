@@ -238,9 +238,8 @@ impl TaskDispatcher {
         }
 
         if plan.assignments.is_empty() {
-            tracing::warn!(
-                "dispatch_planned: no assignments and use_lead_agent=false \
-                 — last-resort promotion to lead agent"
+            tracing::info!(
+                "dispatch_planned: no agent assignments provided, routing to lead agent"
             );
             let title = plan
                 .title

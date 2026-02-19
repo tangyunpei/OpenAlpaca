@@ -13,6 +13,12 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
+
+/// Maximum concurrent LLM API calls to prevent rate-limit stampedes.
+/// When parallel subagents all call the API simultaneously, this limits
+/// how many can be in-flight at once. Others queue with backpressure.
+const DEFAULT_MAX_CONCURRENT_LLM_CALLS: usize = 4;
 
 /// Context for a router request (agent/task identification).
 #[derive(Debug, Clone, Default)]
@@ -76,6 +82,9 @@ pub struct LlmRouter {
     cli_backends: DashMap<ProviderType, Arc<dyn LlmProvider>>,
     /// Hot-swappable runtime config (timeouts, endpoints, env vars, provider defaults).
     runtime_config: ArcSwap<LlmRuntimeConfig>,
+    /// Limits concurrent in-flight LLM API calls to prevent rate-limit stampedes
+    /// when parallel subagents all call the API simultaneously.
+    concurrency_limiter: Arc<Semaphore>,
 }
 
 impl LlmRouter {
@@ -98,6 +107,7 @@ impl LlmRouter {
             default_model: ArcSwap::from_pointee(default_model),
             cli_backends: DashMap::new(),
             runtime_config: ArcSwap::from_pointee(LlmRuntimeConfig::default()),
+            concurrency_limiter: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_LLM_CALLS)),
         }
     }
 
@@ -122,6 +132,7 @@ impl LlmRouter {
             default_model: ArcSwap::from_pointee(default_model),
             cli_backends: DashMap::new(),
             runtime_config: ArcSwap::from_pointee(runtime_config),
+            concurrency_limiter: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_LLM_CALLS)),
         }
     }
 
@@ -156,6 +167,7 @@ impl LlmRouter {
             default_model: ArcSwap::from_pointee(default_model),
             cli_backends: DashMap::new(),
             runtime_config: ArcSwap::from_pointee(LlmRuntimeConfig::default()),
+            concurrency_limiter: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_LLM_CALLS)),
         }
     }
 
@@ -342,15 +354,42 @@ impl LlmRouter {
         let default = self.default_model();
         let model = request.model.as_deref().unwrap_or(&default);
 
+        // Acquire concurrency permit — limits parallel in-flight API calls
+        // to prevent rate-limit stampedes from parallel subagents.
+        let _permit = self.concurrency_limiter.acquire().await
+            .map_err(|_| LlmRouterError::MaxRetriesExceeded)?;
+
         match self.try_model(model, &request).await {
             Ok(response) => Ok(response),
-            Err(LlmRouterError::AllKeysRateLimited)
-            | Err(LlmRouterError::MaxRetriesExceeded)
-            | Err(LlmRouterError::NoApiCompatibleKeys) => {
+            Err(LlmRouterError::NoApiCompatibleKeys) => {
+                tracing::warn!(
+                    model = model,
+                    "No API-compatible keys configured (only managed/OAuth tokens). \
+                     Add an API key (sk-ant-api*) to avoid CLI fallback. Trying fallback chain."
+                );
+                self.try_fallback(model, &request).await
+            }
+            Err(LlmRouterError::AllKeysRateLimited) => {
+                tracing::warn!(
+                    model = model,
+                    "All API keys are rate-limited. Trying fallback chain."
+                );
+                self.try_fallback(model, &request).await
+            }
+            Err(LlmRouterError::MaxRetriesExceeded) => {
+                tracing::warn!(
+                    model = model,
+                    "Max retries exceeded across all keys. Trying fallback chain."
+                );
                 self.try_fallback(model, &request).await
             }
             // Transient errors (529 Overloaded, 500+) should also try fallback models
             Err(LlmRouterError::Llm(ref llm_err)) if llm_err.is_transient() => {
+                tracing::warn!(
+                    model = model,
+                    error = %llm_err,
+                    "Transient API error. Trying fallback chain."
+                );
                 self.try_fallback(model, &request).await
             }
             Err(e) => Err(e),
@@ -385,89 +424,122 @@ impl LlmRouter {
         let pool = entry.key_pool.load();
         let max_retries = pool.len().max(1);
 
-        for _attempt in 0..max_retries {
-            let key_guard = pool
-                .acquire()
-                .await
-                .map_err(|e| match e {
-                    KeyPoolError::NoApiCompatibleKeys => LlmRouterError::NoApiCompatibleKeys,
-                    _ => LlmRouterError::AllKeysRateLimited,
-                })?;
+        // Allow up to 2 rate-limit wait cycles before giving up.
+        // This handles parallel agents that burn through keys simultaneously.
+        let mut rate_limit_waits = 0;
+        const MAX_RATE_LIMIT_WAITS: u32 = 2;
+        const MAX_RATE_LIMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-            let chat_request = ChatRequest {
-                messages: request.messages.clone(),
-                tools: request.tools.clone(),
-                model: Some(model.to_string()),
-                temperature: request.temperature,
-                max_tokens: request.max_tokens,
-            };
+        loop {
+            for _attempt in 0..max_retries {
+                let key_guard = match pool.acquire().await {
+                    Ok(guard) => guard,
+                    Err(KeyPoolError::NoApiCompatibleKeys) => {
+                        return Err(LlmRouterError::NoApiCompatibleKeys);
+                    }
+                    Err(_) => {
+                        // AllKeysRateLimited — break to the wait-for-cooldown logic below
+                        break;
+                    }
+                };
 
-            match entry
-                .provider
-                .chat_with_key(&key_guard.secret, chat_request)
-                .await
-            {
-                Ok(response) => {
-                    pool.report_result(&key_guard.id, CallResult::Success)
-                        .await;
+                let chat_request = ChatRequest {
+                    messages: request.messages.clone(),
+                    tools: request.tools.clone(),
+                    model: Some(model.to_string()),
+                    temperature: request.temperature,
+                    max_tokens: request.max_tokens,
+                };
 
-                    // Record cost
-                    let cost = self.cost_tracker.calculate_cost(
-                        model,
-                        response.usage.input_tokens,
-                        response.usage.output_tokens,
-                    );
-                    let record = CallRecord {
-                        agent_id: request
-                            .context
-                            .agent_id
-                            .clone()
-                            .unwrap_or_else(|| "unknown".to_string()),
-                        task_id: request.context.task_id.clone(),
-                        model: model.to_string(),
-                        input_tokens: response.usage.input_tokens,
-                        output_tokens: response.usage.output_tokens,
-                        cost_usd: cost,
-                    };
-                    self.cost_tracker.record(&record).await;
+                match entry
+                    .provider
+                    .chat_with_key(&key_guard.secret, chat_request)
+                    .await
+                {
+                    Ok(response) => {
+                        pool.report_result(&key_guard.id, CallResult::Success)
+                            .await;
 
-                    return Ok(response);
-                }
-                Err(LlmError::RateLimited { retry_after_ms }) => {
-                    pool.report_result(
-                        &key_guard.id,
-                        CallResult::RateLimited { retry_after_ms },
-                    )
-                    .await;
-                    // Try next key
-                    continue;
-                }
-                Err(e) if e.is_auth_error() => {
-                    tracing::warn!(
-                        "Authentication error for key '{}', trying next key",
-                        key_guard.id
-                    );
-                    pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
+                        // Record cost
+                        let cost = self.cost_tracker.calculate_cost(
+                            model,
+                            response.usage.input_tokens,
+                            response.usage.output_tokens,
+                        );
+                        let record = CallRecord {
+                            agent_id: request
+                                .context
+                                .agent_id
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            task_id: request.context.task_id.clone(),
+                            model: model.to_string(),
+                            input_tokens: response.usage.input_tokens,
+                            output_tokens: response.usage.output_tokens,
+                            cost_usd: cost,
+                        };
+                        self.cost_tracker.record(&record).await;
+
+                        return Ok(response);
+                    }
+                    Err(LlmError::RateLimited { retry_after_ms }) => {
+                        pool.report_result(
+                            &key_guard.id,
+                            CallResult::RateLimited { retry_after_ms },
+                        )
                         .await;
-                    continue;
+                        // Try next key
+                        continue;
+                    }
+                    Err(e) if e.is_auth_error() => {
+                        tracing::warn!(
+                            "Authentication error for key '{}', trying next key",
+                            key_guard.id
+                        );
+                        pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
+                            .await;
+                        continue;
+                    }
+                    Err(e) if e.is_transient() => {
+                        tracing::warn!(
+                            model = model,
+                            error = %e,
+                            "Transient LLM error, retrying with next key"
+                        );
+                        pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
+                            .await;
+                        // Brief backoff before retry to avoid hammering an overloaded service
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        continue;
+                    }
+                    Err(e) => {
+                        pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
+                            .await;
+                        return Err(LlmRouterError::Llm(e));
+                    }
                 }
-                Err(e) if e.is_transient() => {
-                    tracing::warn!(
-                        model = model,
-                        error = %e,
-                        "Transient LLM error, retrying with next key"
-                    );
-                    pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
-                        .await;
-                    // Brief backoff before retry to avoid hammering an overloaded service
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    continue;
-                }
-                Err(e) => {
-                    pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
-                        .await;
-                    return Err(LlmRouterError::Llm(e));
-                }
+            }
+
+            // All keys exhausted or rate-limited — wait for cooldown if we haven't exceeded wait limit
+            if rate_limit_waits >= MAX_RATE_LIMIT_WAITS {
+                break;
+            }
+
+            if let Some(cooldown) = pool.shortest_cooldown().await {
+                let wait = cooldown.min(MAX_RATE_LIMIT_WAIT);
+                tracing::info!(
+                    model = model,
+                    wait_secs = wait.as_secs(),
+                    attempt = rate_limit_waits + 1,
+                    max_attempts = MAX_RATE_LIMIT_WAITS,
+                    "All keys rate-limited, waiting for cooldown before retry"
+                );
+                tokio::time::sleep(wait).await;
+                rate_limit_waits += 1;
+                continue;
+            } else {
+                // No cooldowns active — keys are genuinely exhausted
+                break;
             }
         }
 
@@ -494,7 +566,8 @@ impl LlmRouter {
         if let Some(pt) = provider_type {
             if let Some(cli_backend) = self.cli_backends.get(&pt) {
                 tracing::info!("Falling back to CLI backend for {:?}", pt);
-                let flattened = flatten_messages(&request.messages);
+                let truncated = truncate_messages_for_cli(&request.messages);
+                let flattened = flatten_messages(&truncated);
                 let cli_request = ChatRequest {
                     messages: vec![ChatMessage::user(&flattened)],
                     tools: vec![],
@@ -529,6 +602,48 @@ impl LlmRouter {
 
         Err(LlmRouterError::AllFallbacksFailed)
     }
+}
+
+/// Maximum prompt size (in bytes) for CLI backend fallback.
+/// CLI backends shell out to `claude -p "..."` which is slow on large prompts.
+const CLI_MAX_PROMPT_BYTES: usize = 16 * 1024;
+
+/// Truncate a message history for CLI fallback to avoid timeouts.
+///
+/// Keeps the first message (system prompt) and the last 2 messages (most recent context),
+/// dropping middle messages when the total flattened size exceeds `CLI_MAX_PROMPT_BYTES`.
+pub fn truncate_messages_for_cli(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    if messages.is_empty() {
+        return vec![];
+    }
+
+    let total_size: usize = messages.iter().map(|m| m.content.len() + 20).sum();
+    if total_size <= CLI_MAX_PROMPT_BYTES {
+        return messages.to_vec();
+    }
+
+    let mut result = Vec::new();
+
+    // Always keep the first message (system prompt)
+    result.push(messages[0].clone());
+
+    // Keep the last 2 messages (most recent context)
+    let kept_tail = 2.min(messages.len().saturating_sub(1));
+    let dropped = messages.len().saturating_sub(1 + kept_tail);
+
+    if dropped > 0 {
+        result.push(ChatMessage::user(&format!(
+            "[... {} earlier messages omitted for CLI fallback (total history was {}KB) ...]",
+            dropped,
+            total_size / 1024,
+        )));
+    }
+
+    for msg in messages.iter().rev().take(kept_tail).rev() {
+        result.push(msg.clone());
+    }
+
+    result
 }
 
 /// Flatten messages into a single prompt string for CLI backends.
@@ -1069,5 +1184,47 @@ mod tests {
         assert!(flattened.contains("[System] You are helpful."));
         assert!(flattened.contains("Hello"));
         assert!(flattened.contains("[Assistant] Hi!"));
+    }
+
+    #[test]
+    fn test_truncate_messages_for_cli_small_input() {
+        let messages = vec![
+            ChatMessage { role: Role::System, content: "System prompt".to_string(), tool_calls: None, tool_call_id: None },
+            ChatMessage::user("Hello"),
+            ChatMessage { role: Role::Assistant, content: "Hi!".to_string(), tool_calls: None, tool_call_id: None },
+        ];
+        let result = truncate_messages_for_cli(&messages);
+        // Small input — no truncation needed
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].content, "System prompt");
+        assert_eq!(result[1].content, "Hello");
+        assert_eq!(result[2].content, "Hi!");
+    }
+
+    #[test]
+    fn test_truncate_messages_for_cli_large_input() {
+        let big_content = "x".repeat(8 * 1024); // 8KB per message
+        let messages = vec![
+            ChatMessage { role: Role::System, content: "System prompt".to_string(), tool_calls: None, tool_call_id: None },
+            ChatMessage::user(&big_content),          // middle — should be dropped
+            ChatMessage { role: Role::Assistant, content: big_content.clone(), tool_calls: None, tool_call_id: None }, // middle — should be dropped
+            ChatMessage::user(&big_content),          // middle — should be dropped
+            ChatMessage { role: Role::Tool, content: "tool result".to_string(), tool_calls: None, tool_call_id: None }, // second-to-last — kept
+            ChatMessage::user("What next?"),           // last — kept
+        ];
+        // Total > 16KB, so truncation should fire
+        let result = truncate_messages_for_cli(&messages);
+        // Should keep: system (1) + omission notice (1) + last 2 (2) = 4
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].content, "System prompt");
+        assert!(result[1].content.contains("earlier messages omitted"));
+        assert_eq!(result[2].content, "tool result");
+        assert_eq!(result[3].content, "What next?");
+    }
+
+    #[test]
+    fn test_truncate_messages_for_cli_empty() {
+        let result = truncate_messages_for_cli(&[]);
+        assert!(result.is_empty());
     }
 }
