@@ -100,7 +100,8 @@ apps/openalpaca-gui/src-tauri/gen/
 # Agent
 # ============================================
 .claude/
-.claude/*   config/.master_key
+.claude/*   
+config/.master_key
 config/llm.toml
 
 
@@ -110,5 +111,4 @@ config/llm.toml
 # ============================================
 # Embedding Model
 # ============================================
-.fastembed_cache/*
-.fastembed_cache/*/*
+.fastembed_cache
