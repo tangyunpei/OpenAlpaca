@@ -23,6 +23,14 @@
 
   let inputText = $state("");
   let messagesContainer: HTMLDivElement | undefined = $state();
+  let textareaEl: HTMLTextAreaElement | undefined = $state();
+
+  /** Auto-resize textarea to fit content */
+  function autoResize() {
+    if (!textareaEl) return;
+    textareaEl.style.height = "auto";
+    textareaEl.style.height = Math.min(textareaEl.scrollHeight, 120) + "px";
+  }
 
   const unsubMessages = chatMessages.subscribe((v) => {
     messages = v;
@@ -66,6 +74,7 @@
     const text = inputText.trim();
     if (!text || streaming) return;
     inputText = "";
+    if (textareaEl) textareaEl.style.height = "auto";
     sendChatMessage(text);
   }
 
@@ -120,8 +129,10 @@
 
   <div class="flex gap-2 px-4 py-3 border-t border-primary shrink-0">
     <textarea
+      bind:this={textareaEl}
       bind:value={inputText}
       onkeydown={handleKeydown}
+      oninput={autoResize}
       placeholder="Type a message..."
       disabled={streaming}
       rows={1}

@@ -96,7 +96,7 @@
   }
 </script>
 
-<main class="w-full min-h-screen flex flex-col px-8 py-5 max-sm:px-3">
+<main class="w-full h-screen flex flex-col px-8 py-5 max-sm:px-3 overflow-hidden">
   <AppHeader {statusState} {info} onToggleSettings={toggleDrawer} />
 
   {#if error}
@@ -110,12 +110,12 @@
     </div>
   {/if}
 
-  <div class="flex flex-1 min-h-0 max-[900px]:flex-col">
-    <aside class="flex-1 min-w-[300px] border-r border-primary h-[calc(100vh-120px)] overflow-hidden max-[900px]:min-w-full max-[900px]:h-[50vh] max-[900px]:border-r-0 max-[900px]:border-b max-[900px]:border-primary">
+  <div class="flex flex-1 min-h-0 max-[900px]:flex-col overflow-hidden">
+    <aside class="flex-1 min-w-[300px] border-r border-primary min-h-0 max-[900px]:min-w-full max-[900px]:flex-[0_0_50%] max-[900px]:border-r-0 max-[900px]:border-b max-[900px]:border-primary">
       <ChatPanel />
     </aside>
 
-    <div class="flex-[0_1_900px] max-w-[900px] min-w-0 pl-6 max-[900px]:flex-auto max-[900px]:max-w-full max-[900px]:pl-0 max-[900px]:pt-4">
+    <div class="flex-1 max-w-[50%] min-w-0 pl-6 overflow-y-auto min-h-0 max-[900px]:flex-auto max-[900px]:max-w-full max-[900px]:pl-0 max-[900px]:pt-4">
       <!-- Tasks / Agents switcher -->
       <div class="flex bg-black/25 p-1 rounded-[10px] mx-auto mb-6 gap-1 w-fit border border-white/5 backdrop-blur-[10px]">
         <button
