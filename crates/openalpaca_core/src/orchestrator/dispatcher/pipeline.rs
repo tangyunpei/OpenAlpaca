@@ -5,6 +5,7 @@ use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
 use crate::middleware::prompt::format_tool_guidance;
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
+use tokio_util::sync::CancellationToken;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 use chrono::Utc;
@@ -95,6 +96,10 @@ impl TaskDispatcher {
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
 
+        // Create cancellation token for this task
+        let cancel_token = CancellationToken::new();
+        ctx.register_cancellation_token(&task_id, cancel_token.clone());
+
         tokio::spawn(async move {
             let start_time = std::time::Instant::now();
             let total_agents = agents_with_assignments.len();
@@ -132,6 +137,19 @@ impl TaskDispatcher {
             let mut total_output_tokens: u32 = 0;
 
             for (step, (agent, assignment_id, role_description)) in agents_with_assignments.iter().enumerate() {
+                // Check cancellation before starting each pipeline step
+                if cancel_token.is_cancelled() {
+                    tracing::info!(
+                        task_id = %task_id,
+                        step = step + 1,
+                        total = total_agents,
+                        "Pipeline cancelled before step"
+                    );
+                    pipeline_success = false;
+                    pipeline_error = Some("Pipeline cancelled by user".to_string());
+                    break;
+                }
+
                 last_processed_step = step;
                 let agent_id = &agent.id;
 
@@ -307,6 +325,7 @@ impl TaskDispatcher {
                     agent_id,
                     Some(&sandbox_policy),
                     Some(&task_id),
+                    Some(cancel_token.clone()),
                 )
                 .await;
 
@@ -347,6 +366,7 @@ impl TaskDispatcher {
                 let call_status = match &result.finish_reason {
                     LoopFinishReason::Complete | LoopFinishReason::MaxRounds => "success",
                     LoopFinishReason::CostExceeded => "cost_exceeded",
+                    LoopFinishReason::Cancelled => "cancelled",
                     LoopFinishReason::Error(_) => "error",
                 };
                 let call_error = match &result.finish_reason {
@@ -509,6 +529,9 @@ impl TaskDispatcher {
                     break;
                 }
             }
+
+            // Cleanup cancellation token
+            ctx.remove_cancellation_token(&task_id);
 
             // 3. Destroy remaining agent instances that never ran (pipeline broke early)
             let now = Utc::now();

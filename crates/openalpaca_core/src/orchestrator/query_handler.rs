@@ -221,6 +221,7 @@ impl Orchestrator {
                 "orchestrator",
                 policy_opt.as_ref(),
                 None,
+                None, // cancel_token — interactive queries are not cancellable
             )
             .await;
             let latency_ms = call_start.elapsed().as_millis() as i64;
@@ -246,6 +247,7 @@ impl Orchestrator {
             let call_status = match &result.finish_reason {
                 LoopFinishReason::Complete | LoopFinishReason::MaxRounds => "success",
                 LoopFinishReason::CostExceeded => "cost_exceeded",
+                LoopFinishReason::Cancelled => "cancelled",
                 LoopFinishReason::Error(_) => "error",
             };
             let call_error = match &result.finish_reason {

@@ -17,6 +17,7 @@ use arc_swap::ArcSwap;
 use crate::events::SystemEvent;
 use crate::middleware::prompt::format_tool_guidance;
 use crate::runner::{LoopConfig, LoopResult, run_agentic_loop_routed};
+use tokio_util::sync::CancellationToken;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy, ToolExecutor};
 use crate::tools::registry::BuiltInTool;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext, ToolRegistry};
@@ -124,6 +125,10 @@ pub struct SpawnSubagentTool {
     created_by: String,
     /// Tracks how many subagents have been spawned (for observability).
     spawn_count: AtomicUsize,
+    /// Cancellation token from the parent lead agent task.
+    /// Child tokens are created for each subagent so they auto-cancel
+    /// when the parent task is cancelled.
+    cancel_token: Option<CancellationToken>,
 }
 
 impl SpawnSubagentTool {
@@ -135,6 +140,7 @@ impl SpawnSubagentTool {
         db: Option<Database>,
         task_id: String,
         created_by: String,
+        cancel_token: Option<CancellationToken>,
     ) -> Self {
         Self {
             router,
@@ -145,6 +151,7 @@ impl SpawnSubagentTool {
             task_id,
             created_by,
             spawn_count: AtomicUsize::new(0),
+            cancel_token,
         }
     }
 
@@ -258,7 +265,10 @@ impl BuiltInTool for SpawnSubagentTool {
 
         let sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
 
-        // 9. Call run_agentic_loop_routed() — blocks until subagent finishes
+        // 9. Call run_agentic_loop_routed() — blocks until subagent finishes.
+        //    Create a child cancellation token so subagents auto-cancel
+        //    when the parent lead agent task is cancelled.
+        let child_token = self.cancel_token.as_ref().map(|t| t.child_token());
         let result = run_agentic_loop_routed(
             self.router.as_ref(),
             messages,
@@ -268,6 +278,7 @@ impl BuiltInTool for SpawnSubagentTool {
             &instance_id,
             Some(&sandbox_policy),
             Some(&self.task_id),
+            child_token,
         )
         .await;
 
@@ -687,6 +698,7 @@ pub async fn run_lead_agent(
     created_by: &str,
     daemon_config: &Arc<ArcSwap<DaemonConfig>>,
     workspace_id: Option<String>,
+    cancel_token: Option<CancellationToken>,
 ) -> LeadAgentResult {
     tracing::info!(
         lead_agent = %lead_agent.id,
@@ -728,6 +740,7 @@ pub async fn run_lead_agent(
         db.clone(),
         task_id.to_string(),
         created_by.to_string(),
+        cancel_token.clone(),
     ));
 
     let ctx_exec = ToolExecutionContext {
@@ -855,6 +868,7 @@ pub async fn run_lead_agent(
         &lead_agent.id,
         Some(&sandbox_policy),
         Some(task_id),
+        cancel_token,
     )
     .await;
 
@@ -1038,6 +1052,7 @@ mod tests {
             task_id: "task-1".to_string(),
             created_by: "user-1".to_string(),
             spawn_count: AtomicUsize::new(0),
+            cancel_token: None,
         });
 
         let executor = LeadAgentToolExecutor::new(spawn_tool, contextual);
