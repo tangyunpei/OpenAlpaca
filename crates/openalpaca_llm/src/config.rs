@@ -113,6 +113,7 @@ pub struct LlmRouterConfig {
     pub models: Option<HashMap<String, ModelConfigEntry>>,
     pub fallback_chains: Option<HashMap<String, Vec<String>>>,
     pub limits: Option<LimitsConfig>,
+    pub rate_limits: Option<crate::rate_limiter::RateLimitConfig>,
     pub credential_discovery: Option<crate::credential_discovery::CredentialDiscoveryConfig>,
     pub cli_backends: Option<crate::cli_backend::CliBackendsConfig>,
     pub embeddings: Option<EmbeddingsConfig>,
@@ -422,6 +423,16 @@ fn build_router_from_hierarchical(
     let runtime_config = LlmRuntimeConfig::from(&config);
     let mut providers_map: HashMap<ProviderType, ProviderEntry> = HashMap::new();
 
+    // Shared HTTP client for all providers (connection pool reuse).
+    // Only built when at least one provider feature is enabled (requires reqwest).
+    #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+    let shared_client = reqwest::Client::builder()
+        .pool_max_idle_per_host(10)
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
     // Build provider entries
     if let Some(ref providers) = config.providers {
         for (provider_name, provider_config) in providers {
@@ -577,8 +588,8 @@ fn build_router_from_hierarchical(
                         .or_else(|| prov_defaults.map(|d| d.default_model.clone()));
                     let max_tokens = provider_config.default_max_tokens
                         .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(crate::providers::anthropic::AnthropicProvider::new(
-                        key, model, max_tokens,
+                    Box::new(crate::providers::anthropic::AnthropicProvider::with_client(
+                        shared_client.clone(), key, model, max_tokens,
                     ))
                 }
                 #[cfg(feature = "openai")]
@@ -596,8 +607,8 @@ fn build_router_from_hierarchical(
                         .or_else(|| prov_defaults.and_then(|d| d.base_url.clone()));
                     let max_tokens = provider_config.default_max_tokens
                         .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(crate::providers::openai::OpenAiProvider::new(
-                        key, model, base_url, max_tokens,
+                    Box::new(crate::providers::openai::OpenAiProvider::with_client(
+                        shared_client.clone(), key, model, base_url, max_tokens,
                     ))
                 }
                 #[cfg(feature = "ollama")]
@@ -607,8 +618,8 @@ fn build_router_from_hierarchical(
                         .unwrap_or_else(|| "llama3".to_string());
                     let base_url = provider_config.base_url.clone()
                         .or_else(|| prov_defaults.and_then(|d| d.base_url.clone()));
-                    Box::new(crate::providers::ollama::OllamaProvider::new(
-                        model, base_url,
+                    Box::new(crate::providers::ollama::OllamaProvider::with_client(
+                        shared_client.clone(), model, base_url,
                     ))
                 }
                 #[allow(unreachable_patterns)]
@@ -656,6 +667,7 @@ fn build_router_from_hierarchical(
     }
 
     let cost_tracker = Arc::new(CostTracker::new(ModelRegistry::with_defaults()));
+    let rate_limit_config = config.rate_limits.unwrap_or_default();
 
     let router = LlmRouter::new_with_runtime(
         providers_map,
@@ -664,6 +676,7 @@ fn build_router_from_hierarchical(
         cost_tracker,
         default_model,
         runtime_config,
+        rate_limit_config,
     );
 
     // Register CLI backends if detected

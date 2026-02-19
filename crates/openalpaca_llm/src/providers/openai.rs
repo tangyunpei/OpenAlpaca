@@ -22,8 +22,19 @@ impl OpenAiProvider {
         base_url: Option<String>,
         max_tokens: Option<u32>,
     ) -> Self {
+        Self::with_client(reqwest::Client::new(), api_key, model, base_url, max_tokens)
+    }
+
+    /// Create with a shared `reqwest::Client` (for connection pool reuse).
+    pub fn with_client(
+        client: reqwest::Client,
+        api_key: String,
+        model: Option<String>,
+        base_url: Option<String>,
+        max_tokens: Option<u32>,
+    ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client,
             api_key: Some(api_key),
             model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
@@ -36,8 +47,17 @@ impl OpenAiProvider {
         model: String,
         base_url: String,
     ) -> Self {
+        Self::new_without_auth_with_client(reqwest::Client::new(), model, base_url)
+    }
+
+    /// Create a provider without auth, using a shared client.
+    pub fn new_without_auth_with_client(
+        client: reqwest::Client,
+        model: String,
+        base_url: String,
+    ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client,
             api_key: None,
             model,
             base_url,

@@ -200,10 +200,12 @@ pub async fn execute_dag(
                 break;
             }
 
-            // Verify node is still in a dispatchable state (may have changed during replanning)
+            // Verify node is still in a dispatchable state (may have changed during replanning).
+            // Accept both Pending and Ready — mark_ready_nodes() promotes Pending → Ready
+            // when dependencies are satisfied, so Ready is a valid dispatchable state.
             if let Some(current_node) = dag.nodes.iter().find(|n| n.node_id == node_id) {
-                if current_node.status != DagNodeStatus::Pending {
-                    tracing::debug!("Node '{}' is no longer Pending (now {:?}), skipping", node_id, current_node.status);
+                if !matches!(current_node.status, DagNodeStatus::Pending | DagNodeStatus::Ready) {
+                    tracing::debug!("Node '{}' is not dispatchable (now {:?}), skipping", node_id, current_node.status);
                     continue;
                 }
             } else {
@@ -503,7 +505,44 @@ pub async fn execute_dag(
                     }
                 }
                 Err(join_error) => {
-                    tracing::error!("JoinSet error: {}", join_error);
+                    tracing::error!("JoinSet task panicked or was cancelled: {}", join_error);
+
+                    // A tokio task panicked/cancelled — we can't determine which node
+                    // from the JoinError alone. Find nodes still in Running status
+                    // and check if they have a corresponding task in the join set.
+                    // Since running_count was already decremented above, at least one
+                    // Running node has no live task. Fail the first Running node found.
+                    let running_node_ids: Vec<String> = dag.nodes.iter()
+                        .filter(|n| n.status == DagNodeStatus::Running)
+                        .map(|n| n.node_id.clone())
+                        .collect();
+
+                    // If the number of Running nodes exceeds running_count, the excess
+                    // node(s) are the ones whose task panicked.
+                    if running_node_ids.len() > running_count {
+                        for nid in &running_node_ids[..running_node_ids.len() - running_count] {
+                            let error_msg = format!("Agent task panicked: {}", join_error);
+                            dag.fail_node(nid, &error_msg);
+                            tracing::error!("Marked DAG node '{}' as failed due to JoinSet panic", nid);
+
+                            bus.publish(SystemEvent::DagNodeCompleted {
+                                task_id: task_id.to_string(),
+                                node_id: nid.clone(),
+                                node_title: dag.nodes.iter()
+                                    .find(|n| n.node_id == *nid)
+                                    .map(|n| n.title.clone())
+                                    .unwrap_or_default(),
+                                agent_id: dag.nodes.iter()
+                                    .find(|n| n.node_id == *nid)
+                                    .map(|n| n.agent_id.clone())
+                                    .unwrap_or_default(),
+                                success: false,
+                                duration_ms: 0,
+                                output_preview: Some(format!("Task panicked: {}", join_error)),
+                                timestamp: Utc::now(),
+                            });
+                        }
+                    }
                 }
             }
         } else if running_count == 0 {

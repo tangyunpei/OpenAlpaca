@@ -211,7 +211,7 @@ impl TaskDispatcher {
             .skill_matcher
             .match_skills(required_skills, &self.shared_context.agent_registry)?;
         let title = generate_title(description);
-        self.dispatch_core(description, title, matches, created_by, lane_key, source, None, workspace_id)
+        self.dispatch_core(description, title, matches, created_by, lane_key, source, workspace_id)
     }
 
     /// Dispatch a complex task using an LLM-generated plan.
@@ -226,7 +226,7 @@ impl TaskDispatcher {
         source: &str,
         workspace_id: Option<String>,
     ) -> Result<String, String> {
-        // Lead Agent path: dynamic orchestration for complex/exploratory tasks
+        // 1. Lead Agent path: dynamic orchestration for complex/exploratory tasks
         if plan.use_lead_agent {
             let title = plan
                 .title
@@ -237,9 +237,27 @@ impl TaskDispatcher {
             );
         }
 
+        // 2. DAG path: planner emits assignments=[] with agent info in dag.nodes[].agent_id.
+        //    Must check DAG presence BEFORE the empty-assignments fallback, otherwise
+        //    DAG plans are silently rerouted to lead agent.
+        if let Some(dag) = plan.dag {
+            tracing::info!(
+                "dispatch_planned: DAG with {} nodes, routing to DAG-parallel execution",
+                dag.nodes.len()
+            );
+            let title = plan
+                .title
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| generate_title(description));
+            return self.dispatch_dag_planned(
+                description, title, dag, created_by, lane_key, source, workspace_id,
+            );
+        }
+
+        // 3. No DAG and no assignments — fallback to lead agent
         if plan.assignments.is_empty() {
             tracing::info!(
-                "dispatch_planned: no agent assignments provided, routing to lead agent"
+                "dispatch_planned: no agent assignments and no DAG, routing to lead agent"
             );
             let title = plan
                 .title
@@ -250,8 +268,7 @@ impl TaskDispatcher {
             );
         }
 
-        // Build matches from plan assignments — availability is checked
-        // atomically via try_claim() inside dispatch_core().
+        // 4. Sequential pipeline: assignments provided, no DAG
         let matches: Vec<SkillMatch> = plan
             .assignments
             .iter()
@@ -263,13 +280,12 @@ impl TaskDispatcher {
             })
             .collect();
 
-        let dag = plan.dag;
         let title = plan
             .title
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| generate_title(description));
 
-        self.dispatch_core(description, title, matches, created_by, lane_key, source, dag, workspace_id)
+        self.dispatch_core(description, title, matches, created_by, lane_key, source, workspace_id)
     }
 }
 

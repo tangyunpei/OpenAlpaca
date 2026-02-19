@@ -19,17 +19,22 @@ pub struct OllamaProvider {
 
 impl OllamaProvider {
     pub fn new(model: String, base_url: Option<String>) -> Self {
+        Self::with_client(reqwest::Client::new(), model, base_url)
+    }
+
+    /// Create with a shared `reqwest::Client` (for connection pool reuse).
+    pub fn with_client(client: reqwest::Client, model: String, base_url: Option<String>) -> Self {
         let url = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         #[cfg(feature = "openai")]
         {
             Self {
-                inner: super::openai::OpenAiProvider::new_without_auth(model, url),
+                inner: super::openai::OpenAiProvider::new_without_auth_with_client(client, model, url),
             }
         }
         #[cfg(not(feature = "openai"))]
         {
             Self {
-                client: reqwest::Client::new(),
+                client,
                 model,
                 base_url: url,
             }

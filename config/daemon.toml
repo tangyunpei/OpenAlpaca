@@ -10,6 +10,7 @@ max_replans = 3
 max_retries_per_node = 1
 node_timeout_secs = 300
 replan_after_every_n_nodes = 2
+replan_enabled = false
 total_timeout_secs = 1800
 
 [execution.lead_agent_defaults]
