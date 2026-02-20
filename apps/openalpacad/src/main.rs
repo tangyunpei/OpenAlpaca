@@ -2232,13 +2232,20 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         let idx_db = db.clone();
         let idx_uid = local_user_id.clone();
         let idx_daemon_config = daemon_config.clone();
+        let idx_cancel = cancel_token.clone();
         tokio::spawn(async move {
             // Re-reads poll interval and batch size from ArcSwap each tick for hot-reload support.
             loop {
                 let ei_cfg = idx_daemon_config.load();
                 let poll_secs = ei_cfg.server.embedding_indexer.poll_interval_secs;
                 let batch_size = ei_cfg.server.embedding_indexer.batch_size;
-                tokio::time::sleep(tokio::time::Duration::from_secs(poll_secs)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(poll_secs)) => {}
+                    _ = idx_cancel.cancelled() => {
+                        tracing::info!("Embedding indexer shutting down");
+                        break;
+                    }
+                }
                 let repo = openalpaca_storage::MemoryRepository::new(&idx_db);
                 let missing = match repo.list_missing_embeddings(&idx_uid, batch_size) {
                     Ok(m) => m,
@@ -2333,7 +2340,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         event_broadcaster,
         db,
         shutdown_tx,
-        connector_manager,
+        connector_manager: connector_manager.clone(),
         gateway,
         llm_settings_service,
         agent_config_service: Some(agent_config_service),
@@ -2533,10 +2540,17 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     // Re-reads interval from ArcSwap each tick for hot-reload support.
     let heartbeat_state = state.clone();
     let heartbeat_dc = daemon_config.clone();
+    let heartbeat_cancel = cancel_token.clone();
     let _heartbeat_task = tokio::spawn(async move {
         loop {
             let secs = heartbeat_dc.load().server.heartbeat_interval_secs;
-            tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(secs)) => {}
+                _ = heartbeat_cancel.cancelled() => {
+                    tracing::info!("Heartbeat task shutting down");
+                    break;
+                }
+            }
             heartbeat_state.event_broadcaster.heartbeat();
         }
     });
@@ -2545,12 +2559,19 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     // Re-reads interval and stale timeout from ArcSwap each tick for hot-reload support.
     let cleanup_csm = chat_stream_manager;
     let cleanup_dc = daemon_config.clone();
+    let cleanup_cancel = cancel_token.clone();
     let _chat_cleanup_task = tokio::spawn(async move {
         loop {
             let cfg = cleanup_dc.load();
             let cleanup_secs = cfg.server.chat_streams.cleanup_interval_secs;
             let stale_secs = cfg.server.chat_streams.stale_timeout_secs;
-            tokio::time::sleep(tokio::time::Duration::from_secs(cleanup_secs)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(cleanup_secs)) => {}
+                _ = cleanup_cancel.cancelled() => {
+                    tracing::info!("Chat cleanup task shutting down");
+                    break;
+                }
+            }
             cleanup_csm.cleanup_stale(std::time::Duration::from_secs(stale_secs));
         }
     });
@@ -2558,24 +2579,26 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     // Step 7: Run server with graceful shutdown
     info!("Daemon ready (instance: {instance_id})");
 
-    let server = axum::serve(listener, app);
-
-    // Handle graceful shutdown on SIGINT/SIGTERM
-    tokio::select! {
-        result = server => {
-            if let Err(e) = result {
-                error!("Server error: {e}");
+    let cancel_for_server = cancel_token.clone();
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        tokio::select! {
+            _ = shutdown_signal() => {
+                info!("Shutdown signal received (OS)");
+            }
+            _ = shutdown_rx.recv() => {
+                info!("Shutdown signal received (API)");
             }
         }
-        _ = shutdown_signal() => {
-            info!("Shutdown signal received (OS)");
-            cancel_token.cancel();
-        }
-        _ = shutdown_rx.recv() => {
-            info!("Shutdown signal received (API)");
-            cancel_token.cancel();
-        }
+        cancel_for_server.cancel();
+    });
+
+    if let Err(e) = server.await {
+        error!("Server error: {e}");
     }
+
+    // Shutdown connectors
+    info!("Shutting down connectors...");
+    connector_manager.shutdown_all().await;
 
     // Shutdown WakeManager (stops watchers + scheduler)
     if let Err(e) = wake_manager.shutdown().await {

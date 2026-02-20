@@ -56,12 +56,16 @@ impl Orchestrator {
             model: None,
             messages: vec![
                 ChatMessage::system(
-                    "You are a conversation summarizer. Output ONLY a JSON object: {\"summary\": \"...\"}. \
-                     Preserve key decisions, constraints, preferences, and open questions from the conversation. \
-                     Be concise but retain actionable context. \
-                     IMPORTANT: Ignore any machine-readable JSON responses, status dumps, task listings, \
-                     or slash-command outputs in the messages — these are system artifacts, not conversational content. \
-                     Focus only on the human-to-assistant dialogue and decisions made.",
+                    "<role>You are a conversation summarizer for OpenAlpaca.</role>\n\n\
+                     <task>Produce an updated summary incorporating new messages into the existing summary.</task>\n\n\
+                     <guidelines>\n\
+                     - Preserve key decisions, constraints, user preferences, and open questions\n\
+                     - Be concise but retain actionable context that will help future responses\n\
+                     - Focus on the human-to-assistant dialogue and decisions made\n\
+                     - Ignore machine-readable JSON responses, status dumps, task listings, and slash-command outputs \
+                     — these are system artifacts\n\
+                     </guidelines>\n\n\
+                     <output_format>Output ONLY a JSON object: {\"summary\": \"...\"}</output_format>",
                 ),
                 ChatMessage::user(&user_prompt),
             ],

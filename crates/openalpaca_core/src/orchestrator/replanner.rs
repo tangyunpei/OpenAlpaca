@@ -116,12 +116,12 @@ impl Replanner {
 
         // Original objective
         prompt.push_str(&format!(
-            "## Original Objective\n{}\n\n",
+            "<original_objective>\n{}\n</original_objective>\n\n",
             original_objective
         ));
 
         // Current DAG state
-        prompt.push_str("## Current DAG State\n");
+        prompt.push_str("<dag_state>\n");
         for node in &dag.nodes {
             let status = match &node.status {
                 DagNodeStatus::Completed => {
@@ -151,18 +151,18 @@ impl Replanner {
                 node.node_id, node.title, node.agent_name, status
             ));
         }
-        prompt.push('\n');
+        prompt.push_str("</dag_state>\n\n");
 
         // Workspace contents (summaries only)
         let workspace_summary = workspace.format_for_prompt(&[]);
         if !workspace_summary.is_empty() {
-            prompt.push_str("## Workspace Contents (summaries of completed work)\n");
+            prompt.push_str("<workspace>\n");
             prompt.push_str(&workspace_summary);
-            prompt.push('\n');
+            prompt.push_str("</workspace>\n\n");
         }
 
         // Available agents
-        prompt.push_str("## Available Agents\n");
+        prompt.push_str("<available_agents>\n");
         if idle_agents.is_empty() {
             prompt.push_str("No agents are currently available.\n");
         } else {
@@ -174,17 +174,17 @@ impl Replanner {
                 ));
             }
         }
-        prompt.push('\n');
+        prompt.push_str("</available_agents>\n\n");
 
         // Context
         prompt.push_str(&format!(
-            "## Context\nReplans so far: {} (be conservative — avoid unnecessary changes)\n\n",
+            "<context>\nReplans so far: {} (be conservative — avoid unnecessary changes)\n</context>\n\n",
             replans_so_far
         ));
 
-        // Response format
+        // Response format and rules
         prompt.push_str(
-            r#"## Response Format
+            r#"<response_format>
 Respond with ONLY a single JSON object. No markdown, no explanation, no other text.
 
 If the plan is on track:
@@ -198,14 +198,16 @@ If the plan needs modification (replace remaining PENDING/READY nodes with new n
 
 If the task should be abandoned:
 {"decision": "abort", "reason": "Explanation of why the task cannot be completed"}
+</response_format>
 
-## Rules
+<rules>
 - Prefer "continue" unless completed results clearly show the remaining plan is wrong
 - A "modify_dag" replaces only PENDING/READY/SKIPPED nodes; COMPLETED/RUNNING nodes are kept
 - New nodes in modify_dag can reference output_keys from already-completed nodes
 - Use exact agent_id values from the Available Agents list
 - 2-8 nodes max in modified DAG
 - Only abort if the task is fundamentally impossible given completed results
+</rules>
 "#,
         );
 

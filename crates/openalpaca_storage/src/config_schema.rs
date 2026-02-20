@@ -636,6 +636,19 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         sensitive: false,
         backend: ConfigBackend::DaemonToml,
     },
+    ConfigKeyDef {
+        key: "daemon.execution.lead_max_concurrent_subagents",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(32),
+        },
+        default: Some("5"),
+        description: "Maximum concurrent subagents per lead agent",
+        category: "Daemon",
+        subcategory: Some("Execution"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
     // -- Daemon: DAG (cont.) --
     ConfigKeyDef {
         key: "daemon.dag.node_timeout_secs",
@@ -1370,8 +1383,8 @@ mod tests {
     #[test]
     fn test_daemon_keys_in_category() {
         let keys = keys_in_category("Daemon");
-        // 42 daemon keys + 1 alias (system.max_agents) + 2 streaming keys + 2 providers keys = 47 total
-        assert_eq!(keys.len(), 47);
+        // 42 daemon keys + 1 alias (system.max_agents) + 2 streaming keys + 2 providers keys + 1 lead_max_concurrent_subagents = 48 total
+        assert_eq!(keys.len(), 48);
         assert!(keys.iter().any(|d| d.key == "system.max_agents"));
         assert!(keys.iter().any(|d| d.key == "daemon.dag.max_concurrent_agents"));
         assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.prompt_recent_messages"));

@@ -24,12 +24,6 @@ pub enum SecurityViolation {
     },
     /// User input was blocked by sanitization.
     InputBlocked { reason: String },
-    /// Tool execution violated sandbox policy.
-    SandboxViolation {
-        agent_id: String,
-        tool_name: String,
-        reason: String,
-    },
     /// Agent tried to use a model it's not authorized for.
     UnauthorizedModelAccess {
         agent_id: String,
@@ -59,15 +53,6 @@ impl fmt::Display for SecurityViolation {
                 capability, agent_id
             ),
             Self::InputBlocked { reason } => write!(f, "Input blocked: {}", reason),
-            Self::SandboxViolation {
-                agent_id,
-                tool_name,
-                reason,
-            } => write!(
-                f,
-                "Sandbox violation: agent='{}', tool='{}', reason='{}'",
-                agent_id, tool_name, reason
-            ),
             Self::UnauthorizedModelAccess {
                 agent_id,
                 model_id,
@@ -148,8 +133,13 @@ impl CapabilityManager {
         model_id: &str,
         constraints: &AgentConstraints,
     ) -> Result<(), SecurityViolation> {
-        // Check deny list first
-        if constraints.denied_models.iter().any(|d| d == model_id) {
+        // Check deny list first (case-insensitive, matching tool access checks)
+        let model_lower = model_id.to_lowercase();
+        if constraints
+            .denied_models
+            .iter()
+            .any(|d| d.to_lowercase() == model_lower)
+        {
             return Err(SecurityViolation::UnauthorizedModelAccess {
                 agent_id: agent_id.to_string(),
                 model_id: model_id.to_string(),
@@ -157,9 +147,12 @@ impl CapabilityManager {
             });
         }
 
-        // If allow list is non-empty, model must be on it
+        // If allow list is non-empty, model must be on it (case-insensitive)
         if !constraints.allowed_models.is_empty()
-            && !constraints.allowed_models.iter().any(|a| a == model_id)
+            && !constraints
+                .allowed_models
+                .iter()
+                .any(|a| a.to_lowercase() == model_lower)
         {
             return Err(SecurityViolation::UnauthorizedModelAccess {
                 agent_id: agent_id.to_string(),
@@ -343,5 +336,32 @@ mod tests {
         let s = format!("{}", v);
         assert!(s.contains("a1"));
         assert!(s.contains("gpt-4o"));
+    }
+
+    #[test]
+    fn test_model_access_case_insensitive() {
+        // Deny list with different case should still match
+        let constraints = AgentConstraints {
+            denied_models: vec!["GPT-4o".to_string()],
+            ..default_constraints()
+        };
+        assert!(
+            CapabilityManager::check_model_access("agent1", "gpt-4o", &constraints).is_err()
+        );
+        assert!(
+            CapabilityManager::check_model_access("agent1", "GPT-4O", &constraints).is_err()
+        );
+
+        // Allow list with different case should still match
+        let constraints = AgentConstraints {
+            allowed_models: vec!["Claude-Sonnet-4-5-20250929".to_string()],
+            ..default_constraints()
+        };
+        assert!(
+            CapabilityManager::check_model_access("agent1", "claude-sonnet-4-5-20250929", &constraints).is_ok()
+        );
+        assert!(
+            CapabilityManager::check_model_access("agent1", "CLAUDE-SONNET-4-5-20250929", &constraints).is_ok()
+        );
     }
 }

@@ -179,6 +179,11 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["execution", "lead_agent_defaults"],
         field: "max_tool_runtime_secs",
     },
+    TomlMapping {
+        schema_key: "daemon.execution.lead_max_concurrent_subagents",
+        section: &["execution", "lead_agent_defaults"],
+        field: "max_concurrent_subagents",
+    },
     // DAG (cont.)
     TomlMapping {
         schema_key: "daemon.dag.node_timeout_secs",

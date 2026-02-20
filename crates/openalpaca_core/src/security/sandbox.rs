@@ -60,6 +60,8 @@ pub struct SandboxManager {
     executor: Arc<dyn ToolExecutor>,
     bus: EventBus,
     circuit_breaker: ToolCircuitBreaker,
+    /// Optional database for persisting security violation audit logs.
+    db: Option<openalpaca_storage::Database>,
 }
 
 impl SandboxManager {
@@ -74,6 +76,23 @@ impl SandboxManager {
             executor,
             bus,
             circuit_breaker,
+            db: None,
+        }
+    }
+
+    /// Create a new SandboxManager with a database for audit logging.
+    pub fn with_db(
+        executor: Arc<dyn ToolExecutor>,
+        bus: EventBus,
+        circuit_breaker_config: &CircuitBreakerConfig,
+        db: openalpaca_storage::Database,
+    ) -> Self {
+        let circuit_breaker = ToolCircuitBreaker::new(circuit_breaker_config, bus.clone());
+        Self {
+            executor,
+            bus,
+            circuit_breaker,
+            db: Some(db),
         }
     }
 
@@ -197,6 +216,24 @@ impl SandboxManager {
             reason: reason.to_string(),
             timestamp: Utc::now(),
         });
+
+        // Best-effort persistence to event_log for audit trail
+        if let Some(ref db) = self.db {
+            let detail = serde_json::json!({
+                "tool_name": tool_name,
+                "reason": reason,
+            });
+            let result = serde_json::json!({ "outcome": "denied" });
+            let repo = openalpaca_storage::repository::EventLogRepository::new(db);
+            if let Err(e) = repo.log(
+                "security_violation",
+                Some(agent_id),
+                Some(&detail),
+                Some(&result),
+            ) {
+                tracing::warn!("Failed to persist security violation to event_log: {e}");
+            }
+        }
     }
 
     fn emit_tool_executed(&self, agent_id: &str, tool_name: &str, success: bool, duration_ms: u64) {

@@ -1,9 +1,11 @@
+use crate::agent::subagent::AgentConstraints;
+use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use openalpaca_llm::{
     ChatMessage, ChatRequest, FinishReason, LlmProvider, LlmRouter, RequestContext,
     RouterRequest, ToolDefinition,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 /// Maximum tool result size before truncation (32 KB).
@@ -28,6 +30,12 @@ fn truncate_tool_result(text: String) -> String {
     )
 }
 
+/// Format a tool error message with the standard `[tool_error]` prefix.
+/// Centralizes the error format so the LLM always sees a consistent pattern.
+fn format_tool_error(msg: &str) -> String {
+    format!("[tool_error] {}", msg)
+}
+
 #[derive(Debug, Clone)]
 pub struct LoopConfig {
     pub max_rounds: usize,
@@ -38,6 +46,14 @@ pub struct LoopConfig {
     pub model: Option<String>,
     /// Fallback models (informational — fallback is handled by router's fallback chain).
     pub fallback_models: Vec<String>,
+    /// Agent model constraints for access control enforcement.
+    pub agent_constraints: Option<AgentConstraints>,
+    /// Input token rate ($ per 1M tokens) for cost estimation fallback.
+    /// Set from model registry pricing when available.
+    pub fallback_input_rate: f64,
+    /// Output token rate ($ per 1M tokens) for cost estimation fallback.
+    /// Set from model registry pricing when available.
+    pub fallback_output_rate: f64,
 }
 
 impl Default for LoopConfig {
@@ -49,7 +65,99 @@ impl Default for LoopConfig {
             max_cost: 1.00,
             model: None,
             fallback_models: Vec::new(),
+            agent_constraints: None,
+            fallback_input_rate: FALLBACK_INPUT_RATE,
+            fallback_output_rate: FALLBACK_OUTPUT_RATE,
         }
+    }
+}
+
+impl LoopConfig {
+    /// Build from daemon defaults + agent-level overrides.
+    /// Works with both `AgentDefaults` and `LeadAgentDefaults` since they share the
+    /// same field names. Pass the raw field values to keep the factory generic.
+    ///
+    /// Validates the agent's configured model against its model access constraints.
+    /// If the model is denied, falls back to `None` (router default) with a warning.
+    pub fn from_defaults(
+        max_rounds: usize,
+        max_tools_per_round: usize,
+        max_tool_runtime_secs: u64,
+        max_cost: f64,
+        agent: &crate::agent::subagent::SubAgent,
+    ) -> Self {
+        // Validate the agent's configured model against its model access constraints
+        let model = if let Some(ref model_id) = agent.llm_config.model {
+            match CapabilityManager::check_model_access(&agent.id, model_id, &agent.constraints) {
+                Ok(()) => Some(model_id.clone()),
+                Err(violation) => {
+                    tracing::warn!(
+                        agent_id = %agent.id,
+                        model = %model_id,
+                        "Model access denied for agent, falling back to router default: {}",
+                        violation,
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        Self {
+            max_rounds,
+            max_tools_per_round,
+            max_tool_runtime: Duration::from_secs(
+                agent.constraints.timeout_seconds.unwrap_or(max_tool_runtime_secs),
+            ),
+            max_cost: agent.constraints.max_cost_per_task.unwrap_or(max_cost),
+            model,
+            fallback_models: agent.llm_config.fallback_models.clone(),
+            agent_constraints: Some(agent.constraints.clone()),
+            fallback_input_rate: FALLBACK_INPUT_RATE,
+            fallback_output_rate: FALLBACK_OUTPUT_RATE,
+        }
+    }
+
+    /// Set cost estimation rates from model registry pricing.
+    /// If the model is found in the registry, uses its actual pricing.
+    /// Otherwise keeps the default fallback rates (Sonnet-like).
+    pub fn with_model_pricing(mut self, registry: &openalpaca_llm::ModelRegistry, model_id: Option<&str>) -> Self {
+        if let Some(model) = model_id {
+            if let Some(pricing) = registry.get_pricing(model) {
+                self.fallback_input_rate = pricing.input_price_per_million;
+                self.fallback_output_rate = pricing.output_price_per_million;
+            }
+        }
+        self
+    }
+
+    /// Build from `AgentDefaults` + agent constraint overrides.
+    pub fn from_agent(
+        defaults: &crate::daemon_config::AgentDefaults,
+        agent: &crate::agent::subagent::SubAgent,
+    ) -> Self {
+        Self::from_defaults(
+            defaults.max_rounds,
+            defaults.max_tools_per_round,
+            defaults.max_tool_runtime_secs,
+            defaults.max_cost,
+            agent,
+        )
+    }
+
+    /// Build from `LeadAgentDefaults` + agent constraint overrides.
+    pub fn from_lead_agent(
+        defaults: &crate::daemon_config::LeadAgentDefaults,
+        agent: &crate::agent::subagent::SubAgent,
+    ) -> Self {
+        Self::from_defaults(
+            defaults.max_rounds,
+            defaults.max_tools_per_round,
+            defaults.max_tool_runtime_secs,
+            defaults.max_cost,
+            agent,
+        )
     }
 }
 
@@ -63,6 +171,8 @@ pub struct LoopResult {
     pub finish_reason: LoopFinishReason,
     /// Actual model from API response (may differ from requested due to fallback).
     pub model_used: Option<String>,
+    /// Wall-clock time for the entire loop execution.
+    pub elapsed: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,6 +198,7 @@ pub async fn run_agentic_loop(
     agent_id: &str,
     sandbox_policy: Option<&SandboxPolicy>,
 ) -> LoopResult {
+    let start = Instant::now();
     let mut messages = initial_messages;
     let mut rounds = 0usize;
     let mut total_input = 0u32;
@@ -115,10 +226,11 @@ pub async fn run_agentic_loop(
                 tool_calls_made,
                 finish_reason: LoopFinishReason::MaxRounds,
                 model_used: last_model.clone(),
+                elapsed: start.elapsed(),
             };
         }
 
-        let estimated_cost = estimate_cost(total_input, total_output);
+        let estimated_cost = estimate_cost(total_input, total_output, config.fallback_input_rate, config.fallback_output_rate);
         if estimated_cost > config.max_cost {
             tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop exiting: cost limit exceeded");
             return LoopResult {
@@ -129,6 +241,7 @@ pub async fn run_agentic_loop(
                 tool_calls_made,
                 finish_reason: LoopFinishReason::CostExceeded,
                 model_used: last_model.clone(),
+                elapsed: start.elapsed(),
             };
         }
 
@@ -178,10 +291,8 @@ pub async fn run_agentic_loop(
                         if let Some(policy) = sandbox_policy {
                             if let Some(max_calls) = policy.max_tool_calls {
                                 if tool_calls_made >= max_calls as usize {
-                                    messages.push(ChatMessage::tool_result(
-                                        &tc.id,
-                                        "[tool_error] max_tool_calls limit reached — no more tool calls allowed",
-                                    ));
+                                    let err = format_tool_error("max_tool_calls limit reached — no more tool calls allowed");
+                                    messages.push(ChatMessage::tool_result(&tc.id, &err));
                                     continue;
                                 }
                             }
@@ -197,7 +308,7 @@ pub async fn run_agentic_loop(
                             "Executing tool"
                         );
 
-                        // Tool error convention: errors are prefixed with [tool_error]
+                        // Tool error convention: errors use format_tool_error()
                         // so the LLM sees a consistent format regardless of the tool.
                         let result_text = if let (Some(sbx), Some(policy)) =
                             (sandbox, sandbox_policy)
@@ -205,7 +316,7 @@ pub async fn run_agentic_loop(
                             // Route through sandbox
                             match sbx.execute_tool(agent_id, tc, policy).await {
                                 Ok(output) => truncate_tool_result(output),
-                                Err(err) => truncate_tool_result(format!("[tool_error] {}", err)),
+                                Err(err) => truncate_tool_result(format_tool_error(&err.to_string())),
                             }
                         } else {
                             tracing::warn!(
@@ -213,7 +324,7 @@ pub async fn run_agentic_loop(
                                 tool = tc.name,
                                 "Sandbox not configured — returning stub for tool call (misconfiguration?)"
                             );
-                            format!("[tool_error] tool '{}' not available — sandbox not configured", tc.name)
+                            format_tool_error(&format!("tool '{}' not available — sandbox not configured", tc.name))
                         };
 
                         tracing::debug!(
@@ -230,10 +341,8 @@ pub async fn run_agentic_loop(
 
                     // If we truncated, add error for remaining tool calls
                     for tc in response.tool_calls.iter().skip(calls_this_round) {
-                        messages.push(ChatMessage::tool_result(
-                            &tc.id,
-                            "[tool_error] max tools per round exceeded",
-                        ));
+                        let err = format_tool_error("max tools per round exceeded");
+                        messages.push(ChatMessage::tool_result(&tc.id, &err));
                     }
 
                     continue;
@@ -257,6 +366,7 @@ pub async fn run_agentic_loop(
                     tool_calls_made,
                     finish_reason: LoopFinishReason::Complete,
                     model_used: last_model.clone(),
+                    elapsed: start.elapsed(),
                 };
             }
             Err(e) => {
@@ -274,6 +384,7 @@ pub async fn run_agentic_loop(
                     tool_calls_made,
                     finish_reason: LoopFinishReason::Error(e.to_string()),
                     model_used: last_model.clone(),
+                    elapsed: start.elapsed(),
                 };
             }
         }
@@ -296,6 +407,7 @@ pub async fn run_agentic_loop_routed(
     task_id: Option<&str>,
     cancel_token: Option<CancellationToken>,
 ) -> LoopResult {
+    let start = Instant::now();
     let mut messages = initial_messages;
     let mut rounds = 0usize;
     let mut total_input = 0u32;
@@ -330,6 +442,7 @@ pub async fn run_agentic_loop_routed(
                     tool_calls_made,
                     finish_reason: LoopFinishReason::Cancelled,
                     model_used: last_model.clone(),
+                    elapsed: start.elapsed(),
                 };
             }
         }
@@ -344,6 +457,7 @@ pub async fn run_agentic_loop_routed(
                 tool_calls_made,
                 finish_reason: LoopFinishReason::MaxRounds,
                 model_used: last_model.clone(),
+                elapsed: start.elapsed(),
             };
         }
 
@@ -360,11 +474,12 @@ pub async fn run_agentic_loop_routed(
                 tool_calls_made,
                 finish_reason: LoopFinishReason::CostExceeded,
                 model_used: last_model.clone(),
+                elapsed: start.elapsed(),
             };
         }
 
         // Also check simple estimate as a fallback
-        let estimated_cost = estimate_cost(total_input, total_output);
+        let estimated_cost = estimate_cost(total_input, total_output, config.fallback_input_rate, config.fallback_output_rate);
         if estimated_cost > config.max_cost {
             tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop exiting: cost limit exceeded (estimate)");
             return LoopResult {
@@ -375,6 +490,7 @@ pub async fn run_agentic_loop_routed(
                 tool_calls_made,
                 finish_reason: LoopFinishReason::CostExceeded,
                 model_used: last_model.clone(),
+                elapsed: start.elapsed(),
             };
         }
 
@@ -404,6 +520,7 @@ pub async fn run_agentic_loop_routed(
                         tool_calls_made,
                         finish_reason: LoopFinishReason::Cancelled,
                         model_used: last_model.clone(),
+                        elapsed: start.elapsed(),
                     };
                 }
             }
@@ -413,6 +530,34 @@ pub async fn run_agentic_loop_routed(
 
         match llm_result {
             Ok(response) => {
+                // Enforce model access constraints: if the router resolved to a
+                // model the agent is not allowed to use (e.g., via fallback chain),
+                // abort with an error rather than processing the response.
+                if let Some(ref constraints) = config.agent_constraints {
+                    if let Err(violation) = CapabilityManager::check_model_access(
+                        agent_id, &response.model, constraints,
+                    ) {
+                        tracing::warn!(
+                            agent_id = agent_id,
+                            model = %response.model,
+                            "Model access denied at runtime: {}",
+                            violation,
+                        );
+                        return LoopResult {
+                            final_content: last_assistant_content,
+                            rounds_used: rounds,
+                            total_input_tokens: total_input,
+                            total_output_tokens: total_output,
+                            tool_calls_made,
+                            finish_reason: LoopFinishReason::Error(format!(
+                                "Model access denied: {}", violation
+                            )),
+                            model_used: Some(response.model),
+                            elapsed: start.elapsed(),
+                        };
+                    }
+                }
+
                 total_input += response.usage.input_tokens;
                 total_output += response.usage.output_tokens;
                 rounds += 1;
@@ -446,10 +591,8 @@ pub async fn run_agentic_loop_routed(
                         if let Some(policy) = sandbox_policy {
                             if let Some(max_calls) = policy.max_tool_calls {
                                 if tool_calls_made >= max_calls as usize {
-                                    messages.push(ChatMessage::tool_result(
-                                        &tc.id,
-                                        "[tool_error] max_tool_calls limit reached — no more tool calls allowed",
-                                    ));
+                                    let err = format_tool_error("max_tool_calls limit reached — no more tool calls allowed");
+                                    messages.push(ChatMessage::tool_result(&tc.id, &err));
                                     continue;
                                 }
                             }
@@ -470,7 +613,7 @@ pub async fn run_agentic_loop_routed(
                         {
                             match sbx.execute_tool(agent_id, tc, policy).await {
                                 Ok(output) => truncate_tool_result(output),
-                                Err(err) => truncate_tool_result(format!("[tool_error] {}", err)),
+                                Err(err) => truncate_tool_result(format_tool_error(&err.to_string())),
                             }
                         } else {
                             tracing::warn!(
@@ -478,7 +621,7 @@ pub async fn run_agentic_loop_routed(
                                 tool = tc.name,
                                 "Sandbox not configured — returning stub for tool call (misconfiguration?)"
                             );
-                            format!("[tool_error] tool '{}' not available — sandbox not configured", tc.name)
+                            format_tool_error(&format!("tool '{}' not available — sandbox not configured", tc.name))
                         };
 
                         tracing::debug!(
@@ -494,10 +637,8 @@ pub async fn run_agentic_loop_routed(
                     }
 
                     for tc in response.tool_calls.iter().skip(calls_this_round) {
-                        messages.push(ChatMessage::tool_result(
-                            &tc.id,
-                            "[tool_error] max tools per round exceeded",
-                        ));
+                        let err = format_tool_error("max tools per round exceeded");
+                        messages.push(ChatMessage::tool_result(&tc.id, &err));
                     }
 
                     continue;
@@ -520,6 +661,7 @@ pub async fn run_agentic_loop_routed(
                     tool_calls_made,
                     finish_reason: LoopFinishReason::Complete,
                     model_used: last_model.clone(),
+                    elapsed: start.elapsed(),
                 };
             }
             Err(e) => {
@@ -537,6 +679,7 @@ pub async fn run_agentic_loop_routed(
                     tool_calls_made,
                     finish_reason: LoopFinishReason::Error(e.to_string()),
                     model_used: last_model.clone(),
+                    elapsed: start.elapsed(),
                 };
             }
         }
@@ -548,9 +691,9 @@ pub async fn run_agentic_loop_routed(
 const FALLBACK_INPUT_RATE: f64 = 3.0; // $ per 1M tokens
 const FALLBACK_OUTPUT_RATE: f64 = 15.0; // $ per 1M tokens
 
-fn estimate_cost(input_tokens: u32, output_tokens: u32) -> f64 {
-    (input_tokens as f64 * FALLBACK_INPUT_RATE / 1_000_000.0)
-        + (output_tokens as f64 * FALLBACK_OUTPUT_RATE / 1_000_000.0)
+fn estimate_cost(input_tokens: u32, output_tokens: u32, input_rate: f64, output_rate: f64) -> f64 {
+    (input_tokens as f64 * input_rate / 1_000_000.0)
+        + (output_tokens as f64 * output_rate / 1_000_000.0)
 }
 
 #[cfg(test)]

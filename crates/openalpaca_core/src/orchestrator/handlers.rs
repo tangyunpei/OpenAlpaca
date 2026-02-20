@@ -204,13 +204,17 @@ impl Orchestrator {
             .await
         };
 
-        // 6. Summary update ONCE, AFTER result, for ALL normal turns (D7)
-        self.maybe_update_summary(&lane_key, &ctx).await;
-
-        // 7. Automatic user trait extraction (post-response, fire-and-forget cost)
-        if let Ok(ref response_text) = result {
-            self.maybe_extract_user_traits(&lane_key, &content, response_text, owner_id)
-                .await;
+        // 6 + 7. Summary update and user trait extraction run concurrently
+        // (both are fire-and-forget LLM calls that don't affect the response).
+        {
+            let summary_fut = self.maybe_update_summary(&lane_key, &ctx);
+            let extract_fut = async {
+                if let Ok(ref response_text) = result {
+                    self.maybe_extract_user_traits(&lane_key, &content, response_text, owner_id)
+                        .await;
+                }
+            };
+            tokio::join!(summary_fut, extract_fut);
         }
 
         // 8. Check if bootstrap onboarding is complete

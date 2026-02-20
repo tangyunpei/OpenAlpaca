@@ -12,14 +12,12 @@ use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::ToolRegistry;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 use openalpaca_llm::{ChatMessage, LlmRouter};
-use openalpaca_storage::repository::LlmUsageRepository;
 use openalpaca_storage::Database;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use crate::bus::EventBus;
 use crate::context::{DagSummary, SharedContext};
@@ -216,7 +214,7 @@ pub async fn execute_dag(
             dag.mark_running(&node_id);
             running_count += 1;
 
-            persist_dag_state(dag, task_id, &db);
+            persist_dag_state(dag, task_id, &db).await;
 
             // Emit DagNodeStarted event
             bus.publish(SystemEvent::DagNodeStarted {
@@ -234,7 +232,7 @@ pub async fn execute_dag(
                     tracing::error!("Agent '{}' not found for node '{}'", agent_id_str, node_id);
                     dag.fail_node(&node_id, &format!("Agent '{}' not found", agent_id_str));
                     running_count -= 1;
-                    persist_dag_state(dag, task_id, &db);
+                    persist_dag_state(dag, task_id, &db).await;
 
                     // Emit DagNodeCompleted for the failed node so clients see it resolve
                     bus.publish(SystemEvent::DagNodeCompleted {
@@ -347,7 +345,7 @@ pub async fn execute_dag(
                         }
                     }
 
-                    persist_dag_state(dag, task_id, &db);
+                    persist_dag_state(dag, task_id, &db).await;
 
                     // Emit progress event
                     let completed = dag.completed_count();
@@ -451,7 +449,7 @@ pub async fn execute_dag(
                                     Ok(merged) => {
                                         *dag = merged;
                                         mark_ready_nodes(dag);
-                                        persist_dag_state(dag, task_id, &db);
+                                        persist_dag_state(dag, task_id, &db).await;
 
                                         bus.publish(SystemEvent::TaskReplanned {
                                             task_id: task_id.to_string(),
@@ -614,19 +612,11 @@ async fn execute_single_node(
     ));
     let per_request_sandbox = SandboxManager::with_defaults(contextual_executor, bus.clone());
 
-    // Build LoopConfig — agent constraints override daemon defaults
-    let ad = &daemon_config.load().execution.agent_defaults;
-    let loop_config = LoopConfig {
-        max_rounds: ad.max_rounds,
-        max_tools_per_round: ad.max_tools_per_round,
-        max_tool_runtime: std::cmp::min(
-            node_timeout,
-            Duration::from_secs(agent.constraints.timeout_seconds.unwrap_or(ad.max_tool_runtime_secs)),
-        ),
-        max_cost: agent.constraints.max_cost_per_task.unwrap_or(ad.max_cost),
-        model: agent.llm_config.model.clone(),
-        fallback_models: agent.llm_config.fallback_models.clone(),
-    };
+    // Build LoopConfig — agent constraints override daemon defaults, cap at node timeout
+    let mut loop_config = LoopConfig::from_agent(
+        &daemon_config.load().execution.agent_defaults, &agent,
+    ).with_model_pricing(router.model_registry(), agent.llm_config.model.as_deref());
+    loop_config.max_tool_runtime = std::cmp::min(node_timeout, loop_config.max_tool_runtime);
 
     let sandbox_policy = SandboxPolicy::from_constraints(&agent_id, &agent.constraints);
 
@@ -636,8 +626,21 @@ async fn execute_single_node(
     // Build system prompt
     let tool_guidance = format_tool_guidance(&tools);
     let system_prompt = format!(
-        "{}\n\nYour role: {}\n\nSub-task: {}\n\nComplete your assigned sub-task to the best of your ability.{}",
-        agent.preset.persona, node.description, node.title, tool_guidance
+        "<identity>\n{}\n</identity>\n\n\
+         <assignment>\n\
+         Sub-task: {}\n\
+         Description: {}\n\
+         </assignment>\n\n\
+         <scope>\n\
+         You are responsible for completing only the sub-task described above. \
+         Do not attempt work outside your assignment. Your output will be stored \
+         in the workspace for downstream nodes that depend on your results.\n\
+         </scope>\n\n\
+         <output-format>\n\
+         Provide a complete, self-contained result for your sub-task. Other agents \
+         will consume your output, so be specific and include all relevant details.\n\
+         </output-format>{}",
+        agent.preset.persona, node.title, node.description, tool_guidance
     );
 
     // Build messages: system + task + workspace context for this node
@@ -650,9 +653,12 @@ async fn execute_single_node(
     let workspace_context = load_workspace_context(&task_id, &db, &node.workspace_keys);
     if !workspace_context.is_empty() {
         messages.push(ChatMessage::user(&format!(
-            "The following shared workspace contains results from previous sub-tasks. \
-             Use this information to complete your assigned sub-task. You can also use the \
-             workspace_read and workspace_write tools to access or update entries.\n\n{}",
+            "<workspace>\n\
+             The following entries contain results from upstream sub-tasks. \
+             Use this data to complete your assignment. You can also call \
+             workspace_read and workspace_write to access or update entries.\n\n\
+             {}\n\
+             </workspace>",
             workspace_context
         )));
     }
@@ -686,79 +692,16 @@ async fn execute_single_node(
     );
 
     // Record LLM usage
-    let default_model = router.default_model();
-    let actual_model = result.model_used.as_deref()
-        .or(loop_config.model.as_deref())
-        .unwrap_or(&default_model);
-    let resolved_provider = router.model_registry()
-        .resolve_provider(actual_model)
-        .map(|p| p.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    let call_cost = router.cost_tracker.calculate_cost(
-        actual_model,
-        result.total_input_tokens,
-        result.total_output_tokens,
+    crate::orchestrator::dispatcher::usage::record_llm_usage(
+        &router, &result, loop_config.model.as_deref(),
+        &agent_id, &task_id, agent_start.elapsed().as_millis() as i64,
+        db.as_ref(), &bus,
     );
-    let call_latency_ms = agent_start.elapsed().as_millis() as i64;
-
-    let call_status = match &result.finish_reason {
-        LoopFinishReason::Complete | LoopFinishReason::MaxRounds => "success",
-        LoopFinishReason::CostExceeded => "cost_exceeded",
-        LoopFinishReason::Cancelled => "cancelled",
-        LoopFinishReason::Error(_) => "error",
-    };
-    let call_error = match &result.finish_reason {
-        LoopFinishReason::Error(msg) => Some(msg.as_str()),
-        _ => None,
-    };
-
-    if let Some(db) = &db {
-        let usage_repo = LlmUsageRepository::new(db);
-        if let Err(e) = usage_repo.record_and_log(
-            &agent_id,
-            Some(&task_id),
-            &resolved_provider,
-            actual_model,
-            result.total_input_tokens as i32,
-            result.total_output_tokens as i32,
-            call_cost,
-            call_latency_ms,
-            call_status,
-            call_error,
-        ) {
-            tracing::warn!("Failed to persist LLM usage for node '{}': {e}", node.node_id);
-        }
-    }
-
-    bus.publish(SystemEvent::LlmCallCompleted {
-        agent_id: agent_id.clone(),
-        model: actual_model.to_string(),
-        input_tokens: result.total_input_tokens,
-        output_tokens: result.total_output_tokens,
-        cost_usd: call_cost,
-        timestamp: Utc::now(),
-    });
 
     // Record agent history
     if let Some(db) = &db {
-        let subagent_repo = openalpaca_storage::SubAgentRepository::new(db);
-        let history_entry = openalpaca_storage::AgentTaskHistory {
-            id: Uuid::new_v4().to_string(),
-            agent_id: agent_id.clone(),
-            task_id: task_id.clone(),
-            role: format!("dag_node:{}", node.node_id),
-            status: if success { "completed" } else { "failed" }.to_string(),
-            runtime_seconds: Some(agent_runtime),
-            completed_at: Utc::now(),
-        };
-        if let Err(e) = subagent_repo.add_history(&history_entry) {
-            tracing::warn!("Failed to record agent task history: {e}");
-        }
-        if success {
-            let _ = subagent_repo.increment_completed(&agent_id, agent_runtime);
-        } else {
-            let _ = subagent_repo.increment_failed(&agent_id);
-        }
+        let role = format!("dag_node:{}", node.node_id);
+        crate::orchestrator::dispatcher::usage::record_agent_history(db, &agent_id, &task_id, &role, success, agent_runtime);
     }
 
     NodeResult {
@@ -930,7 +873,7 @@ fn load_workspace_snapshot(task_id: &str, db: &Option<Database>) -> TaskWorkspac
 /// Persist the current DAG state back to the task's state_json.
 /// Uses a retry loop (max 3 attempts) to handle optimistic locking conflicts
 /// when concurrent nodes trigger DAG state updates simultaneously.
-fn persist_dag_state(dag: &TaskDag, task_id: &str, db: &Option<Database>) {
+async fn persist_dag_state(dag: &TaskDag, task_id: &str, db: &Option<Database>) {
     let Some(db) = db else { return };
 
     const MAX_RETRIES: usize = 3;
@@ -959,6 +902,8 @@ fn persist_dag_state(dag: &TaskDag, task_id: &str, db: &Option<Database>) {
                         "DAG state persist version conflict for task '{}' (attempt {}/{}), retrying",
                         task_id, attempt + 1, MAX_RETRIES
                     );
+                    // Brief async backoff to reduce collision probability
+                    tokio::time::sleep(Duration::from_millis(10 * (1 << attempt))).await;
                 } else {
                     tracing::warn!(
                         "DAG state persist for task '{}' failed after {} retries — state may be stale",

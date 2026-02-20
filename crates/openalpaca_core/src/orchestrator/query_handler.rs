@@ -136,7 +136,7 @@ impl Orchestrator {
             // Inject session summary if available
             if let Some(ref summary) = ctx.summary {
                 messages.push(ChatMessage::system(&format!(
-                    "### SESSION SUMMARY ###\nThe following summarizes earlier parts of this conversation:\n{}",
+                    "<session_summary>\nThe following summarizes earlier parts of this conversation:\n{}\n</session_summary>",
                     summary
                 )));
             }
@@ -177,7 +177,7 @@ impl Orchestrator {
                         tracing::warn!("Failed to track memory access: {e}");
                     }
 
-                    let mut block = String::from("### RETRIEVED MEMORY ###\n");
+                    let mut block = String::from("<retrieved_memory>\n");
                     let mut budget = 2000usize;
                     for m in &memories {
                         let entry = format!(
@@ -191,6 +191,7 @@ impl Orchestrator {
                         budget -= entry.len();
                         block.push_str(&entry);
                     }
+                    block.push_str("</retrieved_memory>");
                     messages.push(ChatMessage::system(&block));
                 }
             }
@@ -328,7 +329,7 @@ impl Orchestrator {
         Ok(validated)
     }
 
-    /// Build a lightweight `### AVAILABLE SKILLS ###` block for system prompt injection.
+    /// Build a lightweight `<available_skills>` block for system prompt injection.
     ///
     /// Lists all registered skills with their slash commands and descriptions.
     /// Budget: ~500 chars. Returns empty string if no skills are loaded.
@@ -338,7 +339,7 @@ impl Orchestrator {
             return String::new();
         }
 
-        let mut block = String::from("### AVAILABLE SKILLS ###\nThe user can invoke these specialized skills with slash commands:\n");
+        let mut block = String::from("<available_skills>\nThe user can invoke these specialized skills with slash commands:\n");
         let mut budget = 500usize;
         for (name, description, command) in &summaries {
             let line = if let Some(cmd) = command {
@@ -352,6 +353,7 @@ impl Orchestrator {
             budget -= line.len();
             block.push_str(&line);
         }
+        block.push_str("</available_skills>");
         block
     }
 }

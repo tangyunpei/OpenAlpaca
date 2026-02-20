@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Once};
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 static VEC_INIT: Once = Once::new();
 
@@ -79,7 +79,10 @@ impl Database {
 
     /// Get the current schema version
     pub fn schema_version(&self) -> Result<i32> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| {
+            error!("Database mutex poisoned, recovering");
+            p.into_inner()
+        });
 
         // Check if schema_version table exists
         let exists: bool = conn.query_row(
@@ -116,16 +119,25 @@ impl Database {
             return Ok(());
         }
 
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap_or_else(|p| {
+            error!("Database mutex poisoned, recovering");
+            p.into_inner()
+        });
+
+        let tx = conn
+            .transaction()
+            .context("Failed to begin migration transaction")?;
 
         for migration in pending {
             info!(
                 "Running migration {}: {}",
                 migration.version, migration.name
             );
-            conn.execute_batch(migration.sql)
+            tx.execute_batch(migration.sql)
                 .with_context(|| format!("Failed to run migration {}", migration.name))?;
         }
+
+        tx.commit().context("Failed to commit migration transaction")?;
 
         info!(
             "Migrations complete, schema version: {}",
@@ -143,7 +155,10 @@ impl Database {
     where
         F: FnOnce(&Connection) -> Result<T>,
     {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| {
+            error!("Database mutex poisoned, recovering");
+            p.into_inner()
+        });
         f(&conn)
     }
 
@@ -152,46 +167,52 @@ impl Database {
     where
         F: FnOnce(&mut Connection) -> Result<T>,
     {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap_or_else(|p| {
+            error!("Database mutex poisoned, recovering");
+            p.into_inner()
+        });
         f(&mut conn)
     }
 
     /// Wipe all content from the database (Factory Reset)
     pub fn factory_reset(&self) -> Result<()> {
-        self.with_connection(|conn| {
-            // Disable foreign keys temporarily to allow truncating in any order,
-            // though we try to do it effectively.
-            // conn.execute("PRAGMA foreign_keys = OFF", [])?;
+        self.with_connection_mut(|conn| {
+            let tx = conn
+                .transaction()
+                .context("Failed to begin factory_reset transaction")?;
 
             // Note: SQLite doesn't have TRUNCATE, so we use DELETE.
-            // Order matters if FKs are ON.
+            // Order matters because FKs are ON.
 
             // 0. LLM Usage (no FKs, safe to delete first)
-            conn.execute("DELETE FROM llm_call_log", [])?;
-            conn.execute("DELETE FROM llm_usage_daily", [])?;
+            tx.execute("DELETE FROM llm_call_log", [])?;
+            tx.execute("DELETE FROM llm_usage_daily", [])?;
 
             // 0. SubAgent System (FK to agent and task)
-            conn.execute("DELETE FROM agent_task_history", [])?;
-            conn.execute("DELETE FROM agent_metrics", [])?;
+            tx.execute("DELETE FROM agent_task_history", [])?;
+            tx.execute("DELETE FROM agent_metrics", [])?;
 
             // 1. Task System
-            conn.execute("DELETE FROM task_agent_assignment", [])?;
-            conn.execute("DELETE FROM task", [])?;
+            tx.execute("DELETE FROM task_agent_assignment", [])?;
+            tx.execute("DELETE FROM task", [])?;
 
             // 1. Identity, Config & Preference System
-            conn.execute("DELETE FROM preference", [])?;
-            conn.execute("DELETE FROM conversation_map", [])?;
-            conn.execute("DELETE FROM link_token", [])?;
-            conn.execute("DELETE FROM external_identity", [])?;
-            conn.execute("DELETE FROM global_user", [])?;
-            conn.execute("DELETE FROM system_config", [])?;
+            tx.execute("DELETE FROM preference", [])?;
+            tx.execute("DELETE FROM conversation_map", [])?;
+            tx.execute("DELETE FROM link_token", [])?;
+            tx.execute("DELETE FROM external_identity", [])?;
+            tx.execute("DELETE FROM global_user", [])?;
+            tx.execute("DELETE FROM system_config", [])?;
 
             // 2. Connector & Agent data
             // Triggers on memory should clean up memory_fts automatically
-            conn.execute("DELETE FROM memory", [])?;
-            conn.execute("DELETE FROM memory_vec", [])?;
-            conn.execute("DELETE FROM event_log", [])?;
-            conn.execute("DELETE FROM agent", [])?;
+            tx.execute("DELETE FROM memory", [])?;
+            tx.execute("DELETE FROM memory_vec", [])?;
+            tx.execute("DELETE FROM event_log", [])?;
+            tx.execute("DELETE FROM agent", [])?;
+
+            tx.commit()
+                .context("Failed to commit factory_reset transaction")?;
 
             Ok(())
         })
