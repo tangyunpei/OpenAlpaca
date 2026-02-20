@@ -1482,13 +1482,13 @@ mod tests {
             "claude-sonnet-4-5-20250929",
         );
 
-        // 1 available key * 2 per-key concurrency = 2, capped by global (4) = 2
+        // 1 available key * 5 per-key concurrency = 5, capped by global (10) = 5
         let info = router.estimated_llm_capacity(None).await;
         assert_eq!(info.available_api_keys, 1);
-        assert_eq!(info.per_key_concurrency, 2);
-        assert_eq!(info.key_capacity, 2);
+        assert_eq!(info.per_key_concurrency, 5);
+        assert_eq!(info.key_capacity, 5);
         assert!(!info.has_cli_fallback);
-        assert_eq!(info.effective_capacity, 2);
+        assert_eq!(info.effective_capacity, 5);
     }
 
     #[tokio::test]
@@ -1536,12 +1536,12 @@ mod tests {
             "claude-sonnet-4-5-20250929".to_string(),
         );
 
-        // 3 keys * 2 per-key = 6, capped by global concurrency (4) = 4
+        // 3 keys * 5 per-key = 15, capped by global concurrency (10) = 10
         let info = router.estimated_llm_capacity(None).await;
         assert_eq!(info.available_api_keys, 3);
-        assert_eq!(info.key_capacity, 6);
+        assert_eq!(info.key_capacity, 15);
         assert!(!info.has_cli_fallback);
-        assert_eq!(info.effective_capacity, 4);
+        assert_eq!(info.effective_capacity, 10);
     }
 
     #[tokio::test]
@@ -1594,11 +1594,11 @@ mod tests {
             "claude-sonnet-4-5-20250929".to_string(),
         );
 
-        // 1 available key * 2 per-key = 2, capped by global (4) = 2
+        // 1 available key * 5 per-key = 5, capped by global (10) = 5
         let info = router.estimated_llm_capacity(None).await;
         assert_eq!(info.available_api_keys, 1);
-        assert_eq!(info.key_capacity, 2);
-        assert_eq!(info.effective_capacity, 2);
+        assert_eq!(info.key_capacity, 5);
+        assert_eq!(info.effective_capacity, 5);
     }
 
     #[tokio::test]
@@ -1636,12 +1636,12 @@ mod tests {
         );
         router.register_cli_backend(ProviderType::Anthropic, cli_provider);
 
-        // 1 key * 2 per-key = 2, CLI NOT counted as parallel bandwidth
+        // 1 key * 5 per-key = 5, CLI NOT counted as parallel bandwidth
         let info = router.estimated_llm_capacity(None).await;
         assert_eq!(info.available_api_keys, 1);
-        assert_eq!(info.key_capacity, 2);
+        assert_eq!(info.key_capacity, 5);
         assert!(info.has_cli_fallback);
-        assert_eq!(info.effective_capacity, 2); // was 3, now correctly 2
+        assert_eq!(info.effective_capacity, 5);
     }
 
     #[tokio::test]

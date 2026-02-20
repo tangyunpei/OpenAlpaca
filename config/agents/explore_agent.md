@@ -18,7 +18,7 @@ temperature: 0.2
 verbosity: "concise"
 model: "claude-haiku-4-5-20251001"
 fallback_models:
-  - "claude-sonnet-4-5-20250929"
+  - ""claude-sonnet-4-6"
 max_tool_calls: 40
 timeout_seconds: 120
 max_cost_per_task: 0.25

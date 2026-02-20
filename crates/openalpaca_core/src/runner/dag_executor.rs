@@ -688,7 +688,8 @@ async fn execute_single_node(
     // Build LoopConfig — agent constraints override daemon defaults, cap at node timeout
     let mut loop_config =
         LoopConfig::from_agent(&daemon_config.load().execution.agent_defaults, &agent)
-            .with_model_pricing(router.model_registry(), agent.llm_config.model.as_deref());
+            .with_model_pricing(router.model_registry(), agent.llm_config.model.as_deref())
+            .with_context_window(router.model_registry(), agent.llm_config.model.as_deref());
     loop_config.max_tool_runtime = std::cmp::min(node_timeout, loop_config.max_tool_runtime);
 
     let sandbox_policy = SandboxPolicy::from_constraints(&agent_id, &agent.constraints);

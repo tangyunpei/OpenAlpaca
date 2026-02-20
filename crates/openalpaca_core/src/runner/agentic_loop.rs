@@ -37,6 +37,91 @@ fn format_tool_error(msg: &str) -> String {
     format!("[tool_error] {}", msg)
 }
 
+/// Estimate tokens in a message list using the 1 token ≈ 4 bytes heuristic.
+/// Consistent with `estimate_request_tokens` in the LLM router.
+fn estimate_messages_tokens(messages: &[ChatMessage]) -> u32 {
+    let bytes: usize = messages
+        .iter()
+        .map(|m| {
+            m.content.len()
+                + m.tool_calls.as_ref().map_or(0, |tcs| {
+                    tcs.iter()
+                        .map(|tc| tc.name.len() + tc.arguments.to_string().len())
+                        .sum()
+                })
+        })
+        .sum();
+    (bytes / 4).max(100) as u32
+}
+
+/// Compress context by replacing older rounds with a compact summary.
+///
+/// Preserves:
+/// - Message 0 (system prompt)
+/// - Message 1 (initial user query)
+/// - The last `tail_keep × 3` messages (most recent rounds)
+///
+/// Everything in between is replaced with a single user message summarizing
+/// what happened in those earlier rounds (tool calls made, brief results).
+fn compress_context(messages: &mut Vec<ChatMessage>, tail_keep: usize) {
+    // Each "round" is roughly: 1 assistant message + N tool results ≈ 3 messages
+    let keep_tail = tail_keep * 3;
+    if messages.len() <= 2 + keep_tail {
+        return; // Nothing to compress
+    }
+
+    let compress_end = messages.len() - keep_tail;
+
+    // Build summary from messages[2..compress_end]
+    let mut summary_parts = Vec::new();
+    for msg in &messages[2..compress_end] {
+        match msg.role {
+            openalpaca_llm::Role::Assistant => {
+                if !msg.content.is_empty() {
+                    summary_parts.push(format!(
+                        "- Agent: {}",
+                        truncate_for_summary(&msg.content, 200)
+                    ));
+                }
+                if let Some(ref tcs) = msg.tool_calls {
+                    for tc in tcs {
+                        summary_parts.push(format!("- Called: {}", tc.name));
+                    }
+                }
+            }
+            openalpaca_llm::Role::Tool => {
+                summary_parts.push(format!(
+                    "- Result: {}",
+                    truncate_for_summary(&msg.content, 300)
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    let summary = format!(
+        "[Context compressed: {} earlier messages summarized]\n{}",
+        compress_end - 2,
+        summary_parts.join("\n")
+    );
+
+    // Replace messages[2..compress_end] with a single user message
+    messages.splice(
+        2..compress_end,
+        std::iter::once(ChatMessage::user(&summary)),
+    );
+}
+
+/// Truncate text for inclusion in a compressed summary.
+fn truncate_for_summary(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        text.to_string()
+    } else {
+        let end = text.floor_char_boundary(max_chars);
+        format!("{}...", &text[..end])
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LoopConfig {
     pub max_rounds: usize,
@@ -55,6 +140,16 @@ pub struct LoopConfig {
     /// Output token rate ($ per 1M tokens) for cost estimation fallback.
     /// Set from model registry pricing when available.
     pub fallback_output_rate: f64,
+    /// Maximum estimated input tokens before triggering context compression.
+    /// When `> 0` and estimated tokens exceed this, older rounds are compressed
+    /// into a summary, preserving the system prompt + initial query + recent rounds.
+    /// Default: `0` (disabled — auto-set from model context window × 0.6 via
+    /// `with_context_window()`).
+    pub max_context_tokens: u32,
+    /// Number of most recent conversation rounds to always preserve during
+    /// context compression. Each "round" is roughly 3 messages (assistant +
+    /// tool results). Default: `4`.
+    pub context_tail_keep: usize,
 }
 
 impl Default for LoopConfig {
@@ -69,6 +164,8 @@ impl Default for LoopConfig {
             agent_constraints: None,
             fallback_input_rate: FALLBACK_INPUT_RATE,
             fallback_output_rate: FALLBACK_OUTPUT_RATE,
+            max_context_tokens: 0,
+            context_tail_keep: 4,
         }
     }
 }
@@ -120,6 +217,8 @@ impl LoopConfig {
             agent_constraints: Some(agent.constraints.clone()),
             fallback_input_rate: FALLBACK_INPUT_RATE,
             fallback_output_rate: FALLBACK_OUTPUT_RATE,
+            max_context_tokens: 0,
+            context_tail_keep: 4,
         }
     }
 
@@ -136,6 +235,24 @@ impl LoopConfig {
         {
             self.fallback_input_rate = pricing.input_price_per_million;
             self.fallback_output_rate = pricing.output_price_per_million;
+        }
+        self
+    }
+
+    /// Set context compression budget from model registry.
+    /// Uses 60% of the model's context window as the compression trigger threshold.
+    /// Only sets the budget if `max_context_tokens` is still 0 (not explicitly configured).
+    pub fn with_context_window(
+        mut self,
+        registry: &openalpaca_llm::ModelRegistry,
+        model_id: Option<&str>,
+    ) -> Self {
+        if self.max_context_tokens == 0
+            && let Some(model) = model_id
+            && let Some(info) = registry.get_model_info(model)
+            && info.context_window > 0
+        {
+            self.max_context_tokens = (info.context_window as f64 * 0.6) as u32;
         }
         self
     }
@@ -287,6 +404,28 @@ pub async fn run_agentic_loop(
                 model_used: last_model.clone(),
                 elapsed: start.elapsed(),
             };
+        }
+
+        // Context compression: if estimated tokens exceed the budget,
+        // compress older rounds into a summary to reduce cost and latency.
+        if config.max_context_tokens > 0 {
+            let est = estimate_messages_tokens(&messages);
+            if est > config.max_context_tokens {
+                tracing::info!(
+                    agent_id = agent_id,
+                    estimated_tokens = est,
+                    max_context_tokens = config.max_context_tokens,
+                    messages_before = messages.len(),
+                    "Compressing context: token budget exceeded"
+                );
+                compress_context(&mut messages, config.context_tail_keep);
+                tracing::info!(
+                    agent_id = agent_id,
+                    messages_after = messages.len(),
+                    estimated_tokens_after = estimate_messages_tokens(&messages),
+                    "Context compressed"
+                );
+            }
         }
 
         let request = ChatRequest {
@@ -576,6 +715,28 @@ pub async fn run_agentic_loop_routed(
                 model_used: last_model.clone(),
                 elapsed: start.elapsed(),
             };
+        }
+
+        // Context compression: if estimated tokens exceed the budget,
+        // compress older rounds into a summary to reduce cost and latency.
+        if config.max_context_tokens > 0 {
+            let est = estimate_messages_tokens(&messages);
+            if est > config.max_context_tokens {
+                tracing::info!(
+                    agent_id = agent_id,
+                    estimated_tokens = est,
+                    max_context_tokens = config.max_context_tokens,
+                    messages_before = messages.len(),
+                    "Compressing context: token budget exceeded"
+                );
+                compress_context(&mut messages, config.context_tail_keep);
+                tracing::info!(
+                    agent_id = agent_id,
+                    messages_after = messages.len(),
+                    estimated_tokens_after = estimate_messages_tokens(&messages),
+                    "Context compressed"
+                );
+            }
         }
 
         let request = RouterRequest {

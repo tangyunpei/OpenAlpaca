@@ -15,7 +15,7 @@ denied_skills:
   - "web_fetch"
 temperature: 0.3
 verbosity: "detailed"
-model: "claude-sonnet-4-5-20250929"
+model: "claude-sonnet-4-6"
 fallback_models:
   - "claude-opus-4-6"
 max_tool_calls: 50

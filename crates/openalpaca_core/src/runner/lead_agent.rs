@@ -456,6 +456,10 @@ impl BuiltInTool for SpawnSubagentTool {
                 .with_model_pricing(
                     self.router.model_registry(),
                     agent.llm_config.model.as_deref(),
+                )
+                .with_context_window(
+                    self.router.model_registry(),
+                    agent.llm_config.model.as_deref(),
                 );
 
         let sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
@@ -478,68 +482,24 @@ impl BuiltInTool for SpawnSubagentTool {
         let db = self.db.clone();
         let agent_id_owned = agent_id.to_string();
         let objective_preview: String = objective.chars().take(50).collect();
-        let execution_semaphore = self.execution_semaphore.clone();
-        let available_api_keys = self.available_api_keys;
-
         tokio::task::spawn(async move {
             // Hold the concurrency permit for the lifetime of this subagent.
             // It is automatically released when this async block completes.
             let _permit = permit;
 
-            // Gate execution: wait for an LLM execution slot.
-            // The subagent is Queued until a slot opens up.
-            // Use tokio::select! so queued subagents cancel immediately
-            // when the parent task is cancelled, rather than waiting for
-            // a slot that may never open.
-            let _exec_permit = if let Some(ref token) = child_token {
-                tokio::select! {
-                    permit = execution_semaphore.acquire() => {
-                        match permit {
-                            Ok(p) => p,
-                            Err(_) => {
-                                tracker.fail(&run_id_clone, "Execution semaphore closed".to_string());
-                                busy_guard.restore();
-                                return;
-                            }
-                        }
-                    }
-                    _ = token.cancelled() => {
-                        tracker.fail(
-                            &run_id_clone,
-                            "Cancelled while queued (parent task was cancelled)".to_string(),
-                        );
-                        busy_guard.restore();
-                        return;
-                    }
-                }
-            } else {
-                match execution_semaphore.acquire().await {
-                    Ok(p) => p,
-                    Err(_) => {
-                        tracker.fail(&run_id_clone, "Execution semaphore closed".to_string());
-                        busy_guard.restore();
-                        return;
-                    }
-                }
-            };
-            tracker.set_status(&run_id_clone, SubagentStatus::Running);
-
-            // Stagger delay after acquiring execution slot, before LLM calls.
-            // Spreads RPM load when few API keys are available.
-            let stagger_ms: u64 = match available_api_keys {
-                0..=1 => 500, // 1 key: aggressive stagger
-                2 => 200,     // 2 keys: moderate stagger
-                _ => 0,       // 3+ keys: no stagger needed
-            };
-            if stagger_ms > 0 {
-                tracing::debug!(
-                    stagger_ms = stagger_ms,
-                    available_api_keys = available_api_keys,
-                    run_id = %run_id_clone,
-                    "Stagger delay before subagent LLM execution"
+            // Check for cancellation before starting.
+            if let Some(ref token) = child_token
+                && token.is_cancelled()
+            {
+                tracker.fail(
+                    &run_id_clone,
+                    "Cancelled before starting (parent task was cancelled)".to_string(),
                 );
-                tokio::time::sleep(Duration::from_millis(stagger_ms)).await;
+                busy_guard.restore();
+                return;
             }
+
+            tracker.set_status(&run_id_clone, SubagentStatus::Running);
 
             let result = run_agentic_loop_routed(
                 router.as_ref(),
@@ -1069,22 +1029,6 @@ pub async fn run_lead_agent(
     // 4. Build LeadAgentToolExecutor with shared SubagentTracker
     let tracker = Arc::new(SubagentTracker::new());
 
-    // Query LLM capacity to size the execution semaphore.
-    // Reserve 1 slot for the lead agent's own LLM calls.
-    let capacity_info = router.estimated_llm_capacity(None).await;
-    let exec_slots = capacity_info.effective_capacity.saturating_sub(1).max(1);
-    let available_api_keys = capacity_info.available_api_keys;
-
-    tracing::info!(
-        effective_capacity = capacity_info.effective_capacity,
-        exec_slots = exec_slots,
-        available_api_keys = available_api_keys,
-        task_id = task_id,
-        "Lead agent computed execution gate: {} exec slots ({} capacity - 1 reserved)",
-        exec_slots,
-        capacity_info.effective_capacity,
-    );
-
     let spawn_tool = Arc::new(SpawnSubagentTool::new(
         router.clone(),
         tool_registry.clone(),
@@ -1103,8 +1047,6 @@ pub async fn run_lead_agent(
             .execution
             .lead_agent_defaults
             .max_concurrent_subagents,
-        exec_slots,
-        available_api_keys,
     ));
 
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
@@ -1214,6 +1156,10 @@ pub async fn run_lead_agent(
         lead_agent,
     )
     .with_model_pricing(
+        router.model_registry(),
+        lead_agent.llm_config.model.as_deref(),
+    )
+    .with_context_window(
         router.model_registry(),
         lead_agent.llm_config.model.as_deref(),
     );
@@ -1361,10 +1307,6 @@ mod tests {
             concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(
                 DEFAULT_MAX_CONCURRENT_SUBAGENTS,
             )),
-            execution_semaphore: Arc::new(tokio::sync::Semaphore::new(
-                DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-            )),
-            available_api_keys: 1,
         });
         let check_status_tool = Arc::new(CheckSubagentStatusTool {
             tracker: tracker.clone(),

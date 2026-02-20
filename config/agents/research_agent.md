@@ -14,9 +14,9 @@ denied_skills:
   - "file_write"
 temperature: 0.3
 verbosity: "detailed"
-model: "claude-sonnet-4-5-20250929"
+model: "claude-sonnet-4-6"
 fallback_models:
-  - "claude-haiku-4-5-20251001"
+  - "claude-opus-4-6"
 max_tool_calls: 20
 timeout_seconds: 300
 max_cost_per_task: 0.5
