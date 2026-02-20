@@ -176,6 +176,15 @@ impl ConnectorManager {
         Ok(())
     }
 
+    /// Stop all running connectors (used during daemon shutdown)
+    pub async fn shutdown_all(&self) {
+        let mut guard = self.handles.lock().await;
+        for (name, handle) in guard.drain() {
+            handle.shutdown().await;
+            info!("Stopped connector: {}", name);
+        }
+    }
+
     /// Stop a running connector
     pub async fn stop(&self, name: &str) -> Result<()> {
         let mut guard = self.handles.lock().await;

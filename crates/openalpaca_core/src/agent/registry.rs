@@ -189,10 +189,19 @@ impl AgentRegistry {
     /// For singletons, sets the instance back to Idle instead of removing,
     /// so it can be re-claimed later. Returns a `DestroyOutcome` so callers
     /// can emit the correct lifecycle event status.
+    ///
+    /// Lock ordering: templates then instances (consistent with `spawn_instance`).
     pub fn destroy_instance(&self, instance_id: &str) -> DestroyOutcome {
+        // Acquire templates first to maintain consistent lock ordering with
+        // spawn_instance (templates -> instances), preventing deadlocks.
+        let templates = self.lock_templates();
         let mut instances = self.lock_instances();
         if let Some(entry) = instances.get_mut(instance_id) {
-            if self.is_singleton_instance(&entry.agent.template_id) {
+            let is_singleton = templates
+                .get(&entry.agent.template_id)
+                .map(|t| t.frontmatter.singleton)
+                .unwrap_or(false);
+            if is_singleton {
                 // Singleton: reset to Idle instead of removing
                 entry.agent.status = AgentStatus::Idle;
                 entry.agent.current_task = None;
@@ -205,14 +214,6 @@ impl AgentRegistry {
         } else {
             DestroyOutcome::NotFound
         }
-    }
-
-    /// Check if a template_id refers to a singleton template.
-    fn is_singleton_instance(&self, template_id: &str) -> bool {
-        self.lock_templates()
-            .get(template_id)
-            .map(|t| t.frontmatter.singleton)
-            .unwrap_or(false)
     }
 
     /// Get an instance by instance_id.
@@ -343,11 +344,6 @@ impl AgentRegistry {
     /// Number of active instances.
     pub fn count(&self) -> usize {
         self.lock_instances().len()
-    }
-
-    /// List all instances (backward compat for `list_all()`).
-    pub fn list_all(&self) -> Vec<SubAgent> {
-        self.list_instances()
     }
 
     /// List idle instances. For the template model, this is mainly
@@ -481,12 +477,12 @@ mod tests {
     }
 
     #[test]
-    fn test_list_all() {
+    fn test_list_instances() {
         let reg = AgentRegistry::new();
         reg.register(make_agent("a1", vec![]));
         reg.register(make_agent("a2", vec![]));
 
-        let all = reg.list_all();
+        let all = reg.list_instances();
         assert_eq!(all.len(), 2);
     }
 

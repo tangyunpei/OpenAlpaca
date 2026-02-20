@@ -61,6 +61,25 @@ pub enum LlmRouterError {
     Llm(#[from] LlmError),
 }
 
+/// Structured LLM capacity information for adaptive concurrency decisions.
+///
+/// Returned by [`LlmRouter::estimated_llm_capacity`] so callers can base
+/// stagger delay on the raw key count and reserve slots for the lead agent.
+#[derive(Debug, Clone)]
+pub struct LlmCapacityInfo {
+    /// Number of API-compatible keys currently available (not in cooldown).
+    pub available_api_keys: usize,
+    /// Max concurrent calls allowed per key (from rate limiter config).
+    pub per_key_concurrency: usize,
+    /// `available_api_keys * per_key_concurrency`.
+    pub key_capacity: usize,
+    /// Whether a CLI fallback backend is registered for this provider.
+    pub has_cli_fallback: bool,
+    /// Effective parallel capacity: `min(key_capacity, global_available)`.
+    /// When `key_capacity == 0` and `has_cli_fallback`, this is 1 (fallback only).
+    pub effective_capacity: usize,
+}
+
 /// A provider entry with its key pool (swappable for hot-reload).
 pub struct ProviderEntry {
     pub provider: Arc<dyn LlmProvider>,
@@ -258,6 +277,67 @@ impl LlmRouter {
     /// Check if a CLI backend is registered for a provider type.
     pub fn has_cli_backend(&self, provider_type: ProviderType) -> bool {
         self.cli_backends.contains_key(&provider_type)
+    }
+
+    /// Estimate the parallel LLM capacity given the current state of API keys
+    /// and rate limiters.
+    ///
+    /// Returns a [`LlmCapacityInfo`] struct so callers can base stagger delay
+    /// on the raw key count and reserve slots for the lead agent.
+    ///
+    /// CLI fallback is **not** counted as parallel bandwidth — it is only used
+    /// when all API keys are exhausted (see `try_fallback()`). When
+    /// `key_capacity == 0` and a CLI backend exists, `effective_capacity` is 1
+    /// so at least one subagent can proceed via fallback.
+    ///
+    /// Used by `SpawnSubagentTool` to dynamically reduce parallelism when
+    /// the number of available API keys cannot support `max_concurrent_subagents`.
+    pub async fn estimated_llm_capacity(&self, model: Option<&str>) -> LlmCapacityInfo {
+        let zero = LlmCapacityInfo {
+            available_api_keys: 0,
+            per_key_concurrency: 0,
+            key_capacity: 0,
+            has_cli_fallback: false,
+            effective_capacity: 0,
+        };
+
+        let default = self.default_model();
+        let model_id = model.unwrap_or(&default);
+
+        let provider_type = match self.model_registry.resolve_provider(model_id) {
+            Some(pt) => pt,
+            None => return zero,
+        };
+
+        let available_keys = match self.providers.get(&provider_type) {
+            Some(entry) => {
+                let pool = entry.value().key_pool.load();
+                pool.available_api_key_count().await
+            }
+            None => return zero,
+        };
+
+        let per_key = self.rate_limiter_registry.config().per_key_concurrency;
+        let key_capacity = available_keys * per_key;
+        let has_cli_fallback = self.cli_backends.contains_key(&provider_type);
+
+        let effective_capacity = if key_capacity > 0 {
+            let global_available = self.concurrency_limiter.available_permits();
+            key_capacity.min(global_available)
+        } else if has_cli_fallback {
+            // All keys exhausted but CLI fallback can handle 1 request
+            1
+        } else {
+            0
+        };
+
+        LlmCapacityInfo {
+            available_api_keys: available_keys,
+            per_key_concurrency: per_key,
+            key_capacity,
+            has_cli_fallback,
+            effective_capacity,
+        }
     }
 
     /// List models confirmed by provider API refresh (for GUI dropdowns).
@@ -1274,5 +1354,197 @@ mod tests {
     fn test_truncate_messages_for_cli_empty() {
         let result = truncate_messages_for_cli(&[]);
         assert!(result.is_empty());
+    }
+
+    // ── estimated_llm_capacity tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_estimated_llm_capacity_single_key() {
+        // Single provider, single key, default rate config (per_key_concurrency=2, global=4)
+        let provider = Arc::new(MockProvider::new(
+            "anthropic",
+            vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+        ));
+        let router = make_router_with_mock(
+            provider,
+            ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929",
+        );
+
+        // 1 available key * 2 per-key concurrency = 2, capped by global (4) = 2
+        let info = router.estimated_llm_capacity(None).await;
+        assert_eq!(info.available_api_keys, 1);
+        assert_eq!(info.per_key_concurrency, 2);
+        assert_eq!(info.key_capacity, 2);
+        assert!(!info.has_cli_fallback);
+        assert_eq!(info.effective_capacity, 2);
+    }
+
+    #[tokio::test]
+    async fn test_estimated_llm_capacity_multiple_keys() {
+        let provider = Arc::new(MockProvider::new(
+            "anthropic",
+            vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+        ));
+
+        let key_pool = KeyPool::new(
+            vec![
+                ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string()),
+                ApiKey::new("k2".to_string(), ProviderType::Anthropic, "sk-2".to_string()),
+                ApiKey::new("k3".to_string(), ProviderType::Anthropic, "sk-3".to_string()),
+            ],
+            SelectionStrategy::RoundRobin,
+        );
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            ProviderType::Anthropic,
+            ProviderEntry {
+                provider,
+                key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+            },
+        );
+
+        let router = LlmRouter::new(
+            providers,
+            ModelRegistry::with_defaults(),
+            HashMap::new(),
+            Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+
+        // 3 keys * 2 per-key = 6, capped by global concurrency (4) = 4
+        let info = router.estimated_llm_capacity(None).await;
+        assert_eq!(info.available_api_keys, 3);
+        assert_eq!(info.key_capacity, 6);
+        assert!(!info.has_cli_fallback);
+        assert_eq!(info.effective_capacity, 4);
+    }
+
+    #[tokio::test]
+    async fn test_estimated_llm_capacity_rate_limited_keys() {
+        let provider = Arc::new(MockProvider::new(
+            "anthropic",
+            vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+        ));
+
+        let key_pool = KeyPool::new(
+            vec![
+                ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string()),
+                ApiKey::new("k2".to_string(), ProviderType::Anthropic, "sk-2".to_string()),
+            ],
+            SelectionStrategy::RoundRobin,
+        );
+
+        // Rate-limit one key
+        key_pool.report_result("k1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            ProviderType::Anthropic,
+            ProviderEntry {
+                provider,
+                key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+            },
+        );
+
+        let router = LlmRouter::new(
+            providers,
+            ModelRegistry::with_defaults(),
+            HashMap::new(),
+            Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+
+        // 1 available key * 2 per-key = 2, capped by global (4) = 2
+        let info = router.estimated_llm_capacity(None).await;
+        assert_eq!(info.available_api_keys, 1);
+        assert_eq!(info.key_capacity, 2);
+        assert_eq!(info.effective_capacity, 2);
+    }
+
+    #[tokio::test]
+    async fn test_estimated_llm_capacity_unknown_model() {
+        let provider = Arc::new(MockProvider::new("anthropic", vec![]));
+        let router = make_router_with_mock(
+            provider,
+            ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929",
+        );
+
+        let info = router.estimated_llm_capacity(Some("nonexistent-model")).await;
+        assert_eq!(info.effective_capacity, 0);
+        assert_eq!(info.available_api_keys, 0);
+    }
+
+    #[tokio::test]
+    async fn test_estimated_llm_capacity_with_cli_fallback() {
+        // Single key + CLI backend: CLI is fallback-only, NOT added to parallel capacity
+        let provider = Arc::new(MockProvider::new(
+            "anthropic",
+            vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+        ));
+        let cli_provider = Arc::new(MockProvider::new(
+            "claude_cli",
+            vec![Ok(MockProvider::ok_response("claude_cli"))],
+        ));
+
+        let router = make_router_with_mock(
+            provider,
+            ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929",
+        );
+        router.register_cli_backend(ProviderType::Anthropic, cli_provider);
+
+        // 1 key * 2 per-key = 2, CLI NOT counted as parallel bandwidth
+        let info = router.estimated_llm_capacity(None).await;
+        assert_eq!(info.available_api_keys, 1);
+        assert_eq!(info.key_capacity, 2);
+        assert!(info.has_cli_fallback);
+        assert_eq!(info.effective_capacity, 2); // was 3, now correctly 2
+    }
+
+    #[tokio::test]
+    async fn test_estimated_llm_capacity_all_keys_limited_with_cli() {
+        // All keys rate-limited but CLI available — CLI provides fallback capacity of 1
+        let provider = Arc::new(MockProvider::new(
+            "anthropic",
+            vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+        ));
+        let cli_provider = Arc::new(MockProvider::new(
+            "claude_cli",
+            vec![Ok(MockProvider::ok_response("claude_cli"))],
+        ));
+
+        let key_pool = KeyPool::new(
+            vec![ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string())],
+            SelectionStrategy::RoundRobin,
+        );
+        key_pool.report_result("k1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            ProviderType::Anthropic,
+            ProviderEntry {
+                provider,
+                key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+            },
+        );
+
+        let router = LlmRouter::new(
+            providers,
+            ModelRegistry::with_defaults(),
+            HashMap::new(),
+            Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+        router.register_cli_backend(ProviderType::Anthropic, cli_provider);
+
+        // 0 available keys, CLI fallback = effective capacity 1
+        let info = router.estimated_llm_capacity(None).await;
+        assert_eq!(info.available_api_keys, 0);
+        assert_eq!(info.key_capacity, 0);
+        assert!(info.has_cli_fallback);
+        assert_eq!(info.effective_capacity, 1);
     }
 }

@@ -1,12 +1,11 @@
-use super::{TaskDispatcher, format_task_result, spawn_task_memory_extraction};
+use super::{TaskDispatcher, finalize_task, format_task_result, persist_conversation, spawn_task_memory_extraction};
+use super::usage;
 use crate::agent::registry::DestroyOutcome;
 use crate::agent::subagent::SubAgent;
 use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
 use crate::runner::lead_agent::run_lead_agent;
-use crate::runner::LoopFinishReason;
 use chrono::Utc;
-use openalpaca_storage::{ConversationMessage, ConversationRepository};
 use super::super::task_state::TaskState;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -151,25 +150,7 @@ impl TaskDispatcher {
         created_by: String,
         workspace_id: Option<String>,
     ) {
-        let router = match &self.llm_router {
-            Some(r) => r.clone(),
-            None => {
-                tracing::error!(
-                    "No LLM router configured — cannot execute lead agent for task '{}'",
-                    task_id
-                );
-                // Fail the task instead of silently returning
-                self.shared_context.task_registry.update_status(
-                    &task_id, crate::context::TaskEntryStatus::Failed,
-                );
-                self.bus.publish(crate::events::SystemEvent::TaskFailed {
-                    task_id: task_id.clone(),
-                    error: "No LLM router configured".to_string(),
-                    timestamp: chrono::Utc::now(),
-                });
-                return;
-            }
-        };
+        let Some(router) = self.require_router(&task_id) else { return };
 
         let bus = self.bus.clone();
         let ctx = self.shared_context.clone();
@@ -280,130 +261,44 @@ impl TaskDispatcher {
             let db_summary = final_content.chars().take(2000).collect::<String>();
 
             // Persist LLM usage for the lead agent's own loop
-            let default_model = router.default_model();
-            let actual_model = result
-                .loop_result
-                .model_used
-                .as_deref()
-                .or(lead_agent.llm_config.model.as_deref())
-                .unwrap_or(&default_model);
-            let resolved_provider = router
-                .model_registry()
-                .resolve_provider(actual_model)
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            let call_cost = router.cost_tracker.calculate_cost(
-                actual_model,
-                result.loop_result.total_input_tokens,
-                result.loop_result.total_output_tokens,
+            usage::record_llm_usage(
+                &router, &result.loop_result, lead_agent.llm_config.model.as_deref(),
+                &lead_agent.id, &task_id, start_time.elapsed().as_millis() as i64,
+                db.as_ref(), &bus,
             );
 
+            // Record agent task history
             if let Some(ref db) = db {
-                let usage_repo =
-                    openalpaca_storage::repository::LlmUsageRepository::new(db);
-                if let Err(e) = usage_repo.record_and_log(
-                    &lead_agent.id,
-                    Some(&task_id),
-                    &resolved_provider,
-                    actual_model,
-                    result.loop_result.total_input_tokens as i32,
-                    result.loop_result.total_output_tokens as i32,
-                    call_cost,
-                    start_time.elapsed().as_millis() as i64,
-                    if result.success { "success" } else { "error" },
-                    match &result.loop_result.finish_reason {
-                        LoopFinishReason::Error(msg) => Some(msg.as_str()),
-                        _ => None,
-                    },
-                ) {
-                    tracing::warn!("Failed to persist LLM usage for lead agent: {e}");
-                }
-
-                // Record agent task history
-                let subagent_repo = openalpaca_storage::SubAgentRepository::new(db);
-                let history_entry = openalpaca_storage::AgentTaskHistory {
-                    id: Uuid::new_v4().to_string(),
-                    agent_id: lead_agent.id.clone(),
-                    task_id: task_id.clone(),
-                    role: "lead_agent".to_string(),
-                    status: if result.success { "completed" } else { "failed" }
-                        .to_string(),
-                    runtime_seconds: Some(runtime_secs),
-                    completed_at: now,
-                };
-                if let Err(e) = subagent_repo.add_history(&history_entry) {
-                    tracing::warn!("Failed to record lead agent task history: {e}");
-                }
-                if result.success {
-                    let _ = subagent_repo
-                        .increment_completed(&lead_agent.id, runtime_secs);
-                } else {
-                    let _ = subagent_repo.increment_failed(&lead_agent.id);
-                }
+                usage::record_agent_history(db, &lead_agent.id, &task_id, "lead_agent", result.success, runtime_secs);
             }
 
             // Update task status
             if result.success {
                 tracing::info!(task_id = %task_id, "Task status: running → completed");
-                ctx.task_registry
-                    .update_status(&task_id, TaskEntryStatus::Completed);
-                if let Some(ref db) = db {
-                    let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                    let _ = repo.update_status(
-                        &task_id,
-                        openalpaca_storage::TaskStatus::Completed,
-                    );
-                    let _ = repo.set_result(&task_id, &db_summary);
-                }
-                bus.publish(SystemEvent::TaskCompleted {
-                    task_id: task_id.clone(),
-                    result_summary: Some(db_summary.clone()),
-                    timestamp: now,
-                });
             } else {
                 tracing::warn!(
                     task_id = %task_id,
                     finish_reason = ?result.loop_result.finish_reason,
                     "Task status: running → failed"
                 );
-                ctx.task_registry
-                    .update_status(&task_id, TaskEntryStatus::Failed);
-                if let Some(ref db) = db {
-                    let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                    let _ = repo
-                        .update_status(&task_id, openalpaca_storage::TaskStatus::Failed);
-                    let _ = repo.set_result(&task_id, &db_summary);
-                }
-                bus.publish(SystemEvent::TaskFailed {
-                    task_id: task_id.clone(),
-                    error: db_summary.clone(),
-                    timestamp: now,
-                });
             }
+            finalize_task(&ctx, &bus, db.as_ref(), &task_id, &db_summary, result.success);
 
             // Persist final result to conversation
             if let Some(ref db) = db {
-                let content =
-                    format_task_result(&task_title, &final_content, result.success);
-                let conv_repo = ConversationRepository::new(db);
-                let _ = conv_repo.get_or_create_conversation(&lane_key, &source);
-                let _ = conv_repo.insert(&ConversationMessage {
-                    id: 0,
-                    lane_key: lane_key.clone(),
-                    role: "assistant".to_string(),
-                    content,
-                    source: Some(source.clone()),
-                    model: Some(actual_model.to_string()),
-                    tokens_in: Some(
-                        result.loop_result.total_input_tokens as i64,
-                    ),
-                    tokens_out: Some(
-                        result.loop_result.total_output_tokens as i64,
-                    ),
-                    duration_ms: Some(runtime_secs * 1000),
-                    created_at: String::new(),
-                });
-                let _ = conv_repo.increment_message_count(&lane_key);
+                let content = format_task_result(&task_title, &final_content, result.success);
+                // Resolve model name for conversation record
+                let default_model = router.default_model();
+                let actual_model = result.loop_result.model_used.as_deref()
+                    .or(lead_agent.llm_config.model.as_deref())
+                    .unwrap_or(&default_model);
+                persist_conversation(
+                    db, &lane_key, &source, content,
+                    Some(actual_model.to_string()),
+                    result.loop_result.total_input_tokens as i64,
+                    result.loop_result.total_output_tokens as i64,
+                    runtime_secs,
+                );
             }
 
             // Memory extraction from lead agent output (non-blocking)

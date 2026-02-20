@@ -69,9 +69,9 @@ impl Orchestrator {
         let asst_trunc: String = assistant_response.chars().take(400).collect();
 
         let user_prompt = format!(
-            "## Conversation Turn\nUser: {}\nAssistant: {}\n\n\
-             Analyze this conversation turn and extract any user traits.\n\
-             Output ONLY a JSON object with this schema:\n\
+            "<conversation_turn>\nUser: {}\nAssistant: {}\n</conversation_turn>\n\n\
+             Analyze this conversation turn and extract any user traits.\n\n\
+             <output_schema>\n\
              {{\n\
                \"extractions\": [\n\
                  {{\n\
@@ -83,17 +83,19 @@ impl Orchestrator {
                    \"action\": \"set\" or \"update\"\n\
                  }}\n\
                ]\n\
-             }}\n\n\
-             Rules:\n\
+             }}\n\
+             </output_schema>\n\n\
+             <extraction_rules>\n\
              - \"target\": \"profile\" for stable identity traits (name, timezone, expertise, style). Requires confidence >= 0.8.\n\
              - \"target\": \"memory\" for situational preferences. Confidence >= 0.5.\n\
              - For identity fields, use \"identity.<Key>\" (e.g. \"identity.Name\").\n\
              - \"action\": \"set\" (default) fills only empty profile fields. \"action\": \"update\" replaces existing values.\n\
              - Use \"update\" ONLY when the user explicitly states a change to something previously known \
              (e.g. \"I moved to Tokyo\", \"call me Alex now\", \"I switched to vim\"). Requires confidence >= 0.9.\n\
-             - Only extract what is clearly stated or strongly implied. Do not hallucinate.\n\
+             - Only extract information that is clearly stated or strongly implied in the conversation.\n\
+             - Be conservative. Prefer fewer high-confidence extractions over many low-confidence ones.\n\
              - If nothing can be extracted, return {{\"extractions\": []}}.\n\
-             - Be conservative. Prefer fewer high-confidence extractions over many low-confidence ones.",
+             </extraction_rules>",
             user_trunc, asst_trunc
         );
 
@@ -101,8 +103,8 @@ impl Orchestrator {
             model: None,
             messages: vec![
                 ChatMessage::system(
-                    "You are a user trait extractor. Output ONLY valid JSON matching the schema. \
-                     No markdown fences, no commentary.",
+                    "<role>You are a user trait extractor for OpenAlpaca.</role>\n\
+                     <output_format>Output ONLY valid JSON matching the schema. No markdown fences, no commentary.</output_format>",
                 ),
                 ChatMessage::user(&user_prompt),
             ],

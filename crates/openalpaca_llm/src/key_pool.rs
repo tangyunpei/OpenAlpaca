@@ -444,6 +444,20 @@ impl KeyPool {
         self.keys.is_empty()
     }
 
+    /// Count API-compatible keys that are currently available (not in cooldown).
+    /// Used by the router to estimate how many parallel LLM calls can proceed
+    /// without contention, so spawn concurrency can be adapted dynamically.
+    pub async fn available_api_key_count(&self) -> usize {
+        let mut count = 0;
+        for key_lock in &self.keys {
+            let key = key_lock.read().await;
+            if key.is_api_compatible_key() && key.is_available() {
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Returns the shortest remaining cooldown duration among API-compatible
     /// rate-limited keys, or `None` if no keys are cooling down.
     /// Useful for waiting until the next key becomes available.
@@ -828,5 +842,61 @@ mod tests {
         // acquire_any() should succeed
         let guard = pool.acquire_any().await.unwrap();
         assert_eq!(guard.id, "managed1");
+    }
+
+    // ── available_api_key_count tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_available_api_key_count_all_healthy() {
+        let pool = KeyPool::new(
+            vec![make_api_key("a1"), make_api_key("a2"), make_api_key("a3")],
+            SelectionStrategy::RoundRobin,
+        );
+        assert_eq!(pool.available_api_key_count().await, 3);
+    }
+
+    #[tokio::test]
+    async fn test_available_api_key_count_excludes_managed() {
+        let pool = KeyPool::new(
+            vec![make_managed_key("m1"), make_api_key("a1")],
+            SelectionStrategy::RoundRobin,
+        );
+        assert_eq!(pool.available_api_key_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_available_api_key_count_excludes_cooldown() {
+        let pool = KeyPool::new(
+            vec![make_api_key("a1"), make_api_key("a2")],
+            SelectionStrategy::RoundRobin,
+        );
+        pool.report_result("a1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+        assert_eq!(pool.available_api_key_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_available_api_key_count_empty_pool() {
+        let pool = KeyPool::new(vec![], SelectionStrategy::RoundRobin);
+        assert_eq!(pool.available_api_key_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_available_api_key_count_all_managed() {
+        let pool = KeyPool::new(
+            vec![make_managed_key("m1"), make_managed_key("m2")],
+            SelectionStrategy::RoundRobin,
+        );
+        assert_eq!(pool.available_api_key_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_available_api_key_count_all_rate_limited() {
+        let pool = KeyPool::new(
+            vec![make_api_key("a1"), make_api_key("a2")],
+            SelectionStrategy::RoundRobin,
+        );
+        pool.report_result("a1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+        pool.report_result("a2", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+        assert_eq!(pool.available_api_key_count().await, 0);
     }
 }

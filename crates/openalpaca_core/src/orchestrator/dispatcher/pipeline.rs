@@ -1,4 +1,5 @@
-use super::{TaskDispatcher, format_task_result, retrieve_memory_block, spawn_task_memory_extraction};
+use super::{TaskDispatcher, finalize_task, format_task_result, persist_conversation, retrieve_memory_block, spawn_task_memory_extraction};
+use super::usage;
 use crate::agent::registry::DestroyOutcome;
 use crate::agent::subagent::{AgentStatus, SubAgent};
 use crate::context::TaskEntryStatus;
@@ -10,12 +11,8 @@ use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 use chrono::Utc;
 use openalpaca_llm::ChatMessage;
-use openalpaca_storage::repository::LlmUsageRepository;
-use openalpaca_storage::{ConversationMessage, ConversationRepository};
 use std::sync::Arc;
-use std::time::Duration;
 use super::super::task_state::TaskState;
-use uuid::Uuid;
 
 /// Persist a state update with retry (up to 3 attempts) to handle optimistic locking conflicts.
 async fn update_state_with_retry(
@@ -78,25 +75,7 @@ impl TaskDispatcher {
         created_by: String,
         workspace_id: Option<String>,
     ) {
-        let router = match &self.llm_router {
-            Some(r) => r.clone(),
-            None => {
-                tracing::error!(
-                    "No LLM router configured — cannot execute pipeline for task '{}'",
-                    task_id
-                );
-                // Fail the task instead of silently returning
-                self.shared_context.task_registry.update_status(
-                    &task_id, crate::context::TaskEntryStatus::Failed,
-                );
-                self.bus.publish(crate::events::SystemEvent::TaskFailed {
-                    task_id: task_id.clone(),
-                    error: "No LLM router configured".to_string(),
-                    timestamp: chrono::Utc::now(),
-                });
-                return;
-            }
-        };
+        let Some(router) = self.require_router(&task_id) else { return };
 
         let bus = self.bus.clone();
         let ctx = self.shared_context.clone();
@@ -232,17 +211,9 @@ impl TaskDispatcher {
                 }
 
                 // Build LoopConfig — agent constraints override daemon defaults
-                let ad = &daemon_config.load().execution.agent_defaults;
-                let loop_config = LoopConfig {
-                    max_rounds: ad.max_rounds,
-                    max_tools_per_round: ad.max_tools_per_round,
-                    max_tool_runtime: Duration::from_secs(
-                        agent.constraints.timeout_seconds.unwrap_or(ad.max_tool_runtime_secs),
-                    ),
-                    max_cost: agent.constraints.max_cost_per_task.unwrap_or(ad.max_cost),
-                    model: agent.llm_config.model.clone(),
-                    fallback_models: agent.llm_config.fallback_models.clone(),
-                };
+                let loop_config = LoopConfig::from_agent(
+                    &daemon_config.load().execution.agent_defaults, agent,
+                ).with_model_pricing(router.model_registry(), agent.llm_config.model.as_deref());
 
                 let sandbox_policy =
                     SandboxPolicy::from_constraints(agent_id, &agent.constraints);
@@ -258,9 +229,28 @@ impl TaskDispatcher {
 
                 // Build system prompt with role description and tool awareness
                 let tool_guidance = format_tool_guidance(&tools);
+                let is_last_step = step == total_agents - 1;
+                let output_note = if is_last_step {
+                    "Your output is the final result delivered to the user. Make it complete and polished."
+                } else {
+                    "Your output will be passed to the next agent in the pipeline. Be thorough and \
+                     include all relevant details so the next agent can build on your work."
+                };
                 let system_prompt = format!(
-                    "{}\n\nYour role: {}\n\nComplete your assigned role to the best of your ability.{}",
-                    agent.preset.persona, role_description, tool_guidance
+                    "<identity>\n{}\n</identity>\n\n\
+                     <assignment>\n\
+                     Role: {}\n\
+                     Pipeline step: {} of {}\n\
+                     </assignment>\n\n\
+                     <scope>\n\
+                     Focus on completing your assigned role. Do not attempt work outside your role description.\n\
+                     </scope>\n\n\
+                     <output-format>\n\
+                     {}\n\
+                     </output-format>{}",
+                    agent.preset.persona, role_description,
+                    step + 1, total_agents,
+                    output_note, tool_guidance
                 );
 
                 // Build messages: system + task + workspace context
@@ -308,17 +298,21 @@ impl TaskDispatcher {
 
                 if !workspace_context.is_empty() {
                     messages.push(ChatMessage::user(&format!(
-                        "The following shared workspace contains results from previous agents. \
-                         Use this information to complete your role. You can also use the \
-                         workspace_read and workspace_write tools to access or update entries.\n\n{}",
+                        "<workspace>\n\
+                         Results from previous pipeline agents. Use this data to complete your role. \
+                         You can also call workspace_read and workspace_write to access or update entries.\n\n\
+                         {}\n\
+                         </workspace>",
                         workspace_context
                     )));
                 } else if let Some(ref prev) = previous_output {
                     // Backward compat: if workspace is empty but previous_output exists
                     messages.push(ChatMessage::user(&format!(
-                        "## Previous Agent Output\n\
-                         The previous agent produced the following result. \
-                         Use this information to complete your role:\n\n{}",
+                        "<previous-agent-output>\n\
+                         The previous agent in the pipeline produced this result. \
+                         Build on this output to complete your role.\n\n\
+                         {}\n\
+                         </previous-agent-output>",
                         prev
                     )));
                 }
@@ -339,7 +333,6 @@ impl TaskDispatcher {
                 .await;
 
                 let agent_runtime = agent_start.elapsed().as_secs() as i64;
-                let now = Utc::now();
 
                 tracing::info!(
                     "Agent '{}' finished step {}/{}: reason={:?}, rounds={}, tokens={}/{}",
@@ -357,58 +350,11 @@ impl TaskDispatcher {
                 total_output_tokens += result.total_output_tokens;
 
                 // Persist LLM usage to DB and emit event (regardless of success/failure)
-                let default_model = router.default_model();
-                let actual_model = result.model_used.as_deref()
-                    .or(loop_config.model.as_deref())
-                    .unwrap_or(&default_model);
-                let resolved_provider = router.model_registry()
-                    .resolve_provider(actual_model)
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                let call_cost = router.cost_tracker.calculate_cost(
-                    actual_model,
-                    result.total_input_tokens,
-                    result.total_output_tokens,
+                usage::record_llm_usage(
+                    &router, &result, loop_config.model.as_deref(),
+                    agent_id, &task_id, agent_start.elapsed().as_millis() as i64,
+                    db.as_ref(), &bus,
                 );
-                let call_latency_ms = agent_start.elapsed().as_millis() as i64;
-
-                let call_status = match &result.finish_reason {
-                    LoopFinishReason::Complete | LoopFinishReason::MaxRounds => "success",
-                    LoopFinishReason::CostExceeded => "cost_exceeded",
-                    LoopFinishReason::Cancelled => "cancelled",
-                    LoopFinishReason::Error(_) => "error",
-                };
-                let call_error = match &result.finish_reason {
-                    LoopFinishReason::Error(msg) => Some(msg.as_str()),
-                    _ => None,
-                };
-
-                if let Some(ref db) = db {
-                    let usage_repo = LlmUsageRepository::new(db);
-                    if let Err(e) = usage_repo.record_and_log(
-                        agent_id,
-                        Some(&task_id),
-                        &resolved_provider,
-                        actual_model,
-                        result.total_input_tokens as i32,
-                        result.total_output_tokens as i32,
-                        call_cost,
-                        call_latency_ms,
-                        call_status,
-                        call_error,
-                    ) {
-                        tracing::warn!("Failed to persist LLM usage: {e}");
-                    }
-                }
-
-                bus.publish(SystemEvent::LlmCallCompleted {
-                    agent_id: agent_id.clone(),
-                    model: actual_model.to_string(),
-                    input_tokens: result.total_input_tokens,
-                    output_tokens: result.total_output_tokens,
-                    cost_usd: call_cost,
-                    timestamp: Utc::now(),
-                });
 
                 // Assignment → Completed or Failed
                 if let (Some(db), Some(assign_id)) = (&db, assignment_id) {
@@ -432,26 +378,7 @@ impl TaskDispatcher {
                 // Use template_id for DB operations — the agent table stores template IDs,
                 // not instance IDs (e.g., "general_agent" not "general_agent::69dc734d").
                 if let Some(ref db) = db {
-                    let subagent_repo = openalpaca_storage::SubAgentRepository::new(db);
-                    let history_entry = openalpaca_storage::AgentTaskHistory {
-                        id: Uuid::new_v4().to_string(),
-                        agent_id: agent.template_id.clone(),
-                        task_id: task_id.clone(),
-                        role: "executor".to_string(),
-                        status: if agent_success { "completed" } else { "failed" }
-                            .to_string(),
-                        runtime_seconds: Some(agent_runtime),
-                        completed_at: now,
-                    };
-                    if let Err(e) = subagent_repo.add_history(&history_entry) {
-                        tracing::warn!("Failed to record agent task history: {e}");
-                    }
-                    if agent_success {
-                        let _ =
-                            subagent_repo.increment_completed(&agent.template_id, agent_runtime);
-                    } else {
-                        let _ = subagent_repo.increment_failed(&agent.template_id);
-                    }
+                    usage::record_agent_history(db, &agent.template_id, &task_id, "executor", agent_success, agent_runtime);
                 }
 
                 // Release this agent back to Idle (explicit; guard is backup for panics)
@@ -571,38 +498,7 @@ impl TaskDispatcher {
                 pipeline_error.clone().unwrap_or_default()
             };
 
-            if pipeline_success {
-                ctx.task_registry
-                    .update_status(&task_id, TaskEntryStatus::Completed);
-                if let Some(ref db) = db {
-                    let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                    let _ = repo.update_status(
-                        &task_id,
-                        openalpaca_storage::TaskStatus::Completed,
-                    );
-                    let _ = repo.set_result(&task_id, &db_summary);
-                }
-                bus.publish(SystemEvent::TaskCompleted {
-                    task_id: task_id.clone(),
-                    result_summary: Some(db_summary.clone()),
-                    timestamp: now,
-                });
-            } else {
-                let err = pipeline_error.clone().unwrap_or_default();
-                ctx.task_registry
-                    .update_status(&task_id, TaskEntryStatus::Failed);
-                if let Some(ref db) = db {
-                    let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                    let _ =
-                        repo.update_status(&task_id, openalpaca_storage::TaskStatus::Failed);
-                    let _ = repo.set_result(&task_id, &err);
-                }
-                bus.publish(SystemEvent::TaskFailed {
-                    task_id: task_id.clone(),
-                    error: err,
-                    timestamp: now,
-                });
-            }
+            finalize_task(&ctx, &bus, db.as_ref(), &task_id, &db_summary, pipeline_success);
 
             // 5. Persist final result to conversation (single message for entire pipeline)
             let runtime_secs = start_time.elapsed().as_secs() as i64;
@@ -618,25 +514,8 @@ impl TaskDispatcher {
                 } else {
                     pipeline_error.unwrap_or_default()
                 };
-                let content =
-                    format_task_result(&task_title, &chat_text, pipeline_success);
-                let conv_repo = ConversationRepository::new(db);
-                // Ensure conversation master row exists and update counters
-                // (mirrors Gateway persistence pattern)
-                let _ = conv_repo.get_or_create_conversation(&lane_key, &source);
-                let _ = conv_repo.insert(&ConversationMessage {
-                    id: 0,
-                    lane_key: lane_key.clone(),
-                    role: "assistant".to_string(),
-                    content,
-                    source: Some(source.clone()),
-                    model: None,
-                    tokens_in: Some(total_input_tokens as i64),
-                    tokens_out: Some(total_output_tokens as i64),
-                    duration_ms: Some(runtime_secs * 1000),
-                    created_at: String::new(),
-                });
-                let _ = conv_repo.increment_message_count(&lane_key);
+                let content = format_task_result(&task_title, &chat_text, pipeline_success);
+                persist_conversation(db, &lane_key, &source, content, None, total_input_tokens as i64, total_output_tokens as i64, runtime_secs);
             }
 
             // Memory extraction from pipeline output (non-blocking)
