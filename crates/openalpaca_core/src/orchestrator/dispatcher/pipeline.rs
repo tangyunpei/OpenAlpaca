@@ -472,13 +472,17 @@ impl TaskDispatcher {
             // 3. Destroy remaining agent instances that never ran (pipeline broke early)
             let now = Utc::now();
             if !pipeline_success {
-                for (step, (agent, _, _)) in agents_with_assignments.iter().enumerate() {
+                for (step, (agent, assignment_id, _)) in agents_with_assignments.iter().enumerate() {
                     if step > last_processed_step {
                         let outcome = ctx.agent_registry.destroy_instance(&agent.id);
                         let status = match outcome {
                             DestroyOutcome::ResetToIdle => "idle",
                             _ => "destroyed",
                         };
+                        if let (Some(db), Some(assign_id)) = (&db, assignment_id) {
+                            let repo = openalpaca_storage::repository::TaskRepository::new(db);
+                            let _ = repo.update_assignment_status(assign_id, openalpaca_storage::AssignmentStatus::Failed);
+                        }
                         bus.publish(SystemEvent::AgentStatusChanged {
                             agent_id: agent.id.clone(),
                             instance_id: agent.id.clone(),

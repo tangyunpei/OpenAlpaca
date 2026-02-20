@@ -238,6 +238,7 @@ pub struct SpawnSubagentTool {
     db: Option<Database>,
     task_id: String,
     created_by: String,
+    lead_template_id: String,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     /// Tracks how many subagents have been spawned (for observability).
     spawn_count: AtomicUsize,
@@ -270,6 +271,7 @@ impl SpawnSubagentTool {
         db: Option<Database>,
         task_id: String,
         created_by: String,
+        lead_template_id: String,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
         cancel_token: Option<CancellationToken>,
         tracker: Arc<SubagentTracker>,
@@ -286,6 +288,7 @@ impl SpawnSubagentTool {
             db,
             task_id,
             created_by,
+            lead_template_id,
             daemon_config,
             spawn_count: AtomicUsize::new(0),
             cancel_token,
@@ -324,7 +327,7 @@ impl BuiltInTool for SpawnSubagentTool {
         );
 
         // 2. Prevent recursion: direct self-spawning and depth limit
-        if agent_id == self.created_by {
+        if agent_id == self.lead_template_id {
             return Err(format!(
                 "Agent '{}' cannot spawn itself — would cause infinite recursion",
                 agent_id
@@ -1043,6 +1046,7 @@ pub async fn run_lead_agent(
         db.clone(),
         task_id.to_string(),
         created_by.to_string(),
+        lead_agent.template_id.clone(),
         daemon_config.clone(),
         cancel_token.clone(),
         tracker.clone(),
@@ -1296,6 +1300,7 @@ mod tests {
             db: None,
             task_id: "task-1".to_string(),
             created_by: "user-1".to_string(),
+            lead_template_id: "test-lead".to_string(),
             daemon_config: Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
             spawn_count: AtomicUsize::new(0),
             cancel_token: None,

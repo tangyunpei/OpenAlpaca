@@ -218,6 +218,12 @@ impl TaskDispatcher {
                 self.shared_context.task_registry.update_status(
                     task_id, crate::context::TaskEntryStatus::Failed,
                 );
+                if let Some(ref db) = self.db {
+                    let repo = openalpaca_storage::repository::TaskRepository::new(db);
+                    if let Err(e) = repo.update_status(task_id, openalpaca_storage::TaskStatus::Failed) {
+                        tracing::warn!("require_router: failed to update DB status for task '{}': {e}", task_id);
+                    }
+                }
                 self.bus.publish(crate::events::SystemEvent::TaskFailed {
                     task_id: task_id.to_string(),
                     error: "No LLM router configured".to_string(),
@@ -407,8 +413,12 @@ pub(super) fn finalize_task(
         ctx.task_registry.update_status(task_id, crate::context::TaskEntryStatus::Completed);
         if let Some(db) = db {
             let repo = openalpaca_storage::repository::TaskRepository::new(db);
-            let _ = repo.update_status(task_id, openalpaca_storage::TaskStatus::Completed);
-            let _ = repo.set_result(task_id, summary);
+            if let Err(e) = repo.update_status(task_id, openalpaca_storage::TaskStatus::Completed) {
+                tracing::warn!("finalize_task: failed to update status for task '{}': {e}", task_id);
+            }
+            if let Err(e) = repo.set_result(task_id, summary) {
+                tracing::warn!("finalize_task: failed to set result for task '{}': {e}", task_id);
+            }
         }
         bus.publish(crate::events::SystemEvent::TaskCompleted {
             task_id: task_id.to_string(),
@@ -419,8 +429,12 @@ pub(super) fn finalize_task(
         ctx.task_registry.update_status(task_id, crate::context::TaskEntryStatus::Failed);
         if let Some(db) = db {
             let repo = openalpaca_storage::repository::TaskRepository::new(db);
-            let _ = repo.update_status(task_id, openalpaca_storage::TaskStatus::Failed);
-            let _ = repo.set_result(task_id, summary);
+            if let Err(e) = repo.update_status(task_id, openalpaca_storage::TaskStatus::Failed) {
+                tracing::warn!("finalize_task: failed to update status for task '{}': {e}", task_id);
+            }
+            if let Err(e) = repo.set_result(task_id, summary) {
+                tracing::warn!("finalize_task: failed to set result for task '{}': {e}", task_id);
+            }
         }
         bus.publish(crate::events::SystemEvent::TaskFailed {
             task_id: task_id.to_string(),

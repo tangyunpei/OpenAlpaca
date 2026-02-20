@@ -515,9 +515,9 @@ impl LlmRouter {
         }
 
         let pool = entry.key_pool.load();
-        let max_retries = pool.len().max(1);
-        let estimated_tokens = estimate_request_tokens(request);
         let rate_config = self.rate_limiter_registry.config();
+        let max_retries = pool.len().max(rate_config.max_transient_retries);
+        let estimated_tokens = estimate_request_tokens(request);
         let backoff_base = std::time::Duration::from_millis(rate_config.backoff_base_ms);
         let backoff_cap = std::time::Duration::from_millis(rate_config.backoff_cap_ms);
 
@@ -657,7 +657,6 @@ impl LlmRouter {
             }
         }
 
-        self.rate_limiter_registry.report_failure().await;
         Err(LlmRouterError::MaxRetriesExceeded)
     }
 
