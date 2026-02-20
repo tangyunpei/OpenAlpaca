@@ -375,10 +375,10 @@ fn default_tpm() -> u32 {
     40_000
 }
 fn default_per_key_concurrency() -> usize {
-    2
+    5
 }
 fn default_global_concurrency() -> usize {
-    4
+    10
 }
 fn default_backoff_base_ms() -> u64 {
     500
@@ -733,8 +733,8 @@ mod tests {
         let config = RateLimitConfig::default();
         assert_eq!(config.default_rpm, 50);
         assert_eq!(config.default_tpm, 40_000);
-        assert_eq!(config.per_key_concurrency, 2);
-        assert_eq!(config.global_concurrency, 4);
+        assert_eq!(config.per_key_concurrency, 5);
+        assert_eq!(config.global_concurrency, 10);
         assert_eq!(config.backoff_base_ms, 500);
         assert_eq!(config.backoff_cap_ms, 30_000);
         assert_eq!(config.circuit_breaker_threshold, 5);
@@ -768,7 +768,7 @@ mod tests {
         let parsed: RateLimitConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed.default_rpm, 50);
         assert_eq!(parsed.default_tpm, 40_000);
-        assert_eq!(parsed.per_key_concurrency, 2);
+        assert_eq!(parsed.per_key_concurrency, 5);
     }
 
     // ── KeyRateLimiter tests ──────────────────────────────────────

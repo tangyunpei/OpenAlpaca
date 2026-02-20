@@ -264,6 +264,10 @@ impl TaskDispatcher {
                         .with_model_pricing(
                             router.model_registry(),
                             agent.llm_config.model.as_deref(),
+                        )
+                        .with_context_window(
+                            router.model_registry(),
+                            agent.llm_config.model.as_deref(),
                         );
 
                 let sandbox_policy = SandboxPolicy::from_constraints(agent_id, &agent.constraints);
