@@ -1,12 +1,12 @@
-use async_trait::async_trait;
-use base64::Engine as _;
 use crate::middleware::soul::{parse_soul_markdown, render_soul_markdown};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+use async_trait::async_trait;
+use base64::Engine as _;
 use openalpaca_llm::ToolDefinition;
 use std::sync::Arc;
 
 use super::SoulToolContext;
-use super::helpers::{unique_backup_path, prune_backups};
+use super::helpers::{prune_backups, unique_backup_path};
 
 struct SoulUpdateTool {
     ctx: SoulToolContext,
@@ -334,9 +334,9 @@ pub(super) fn update_soul_tool(ctx: SoulToolContext) -> RegisteredTool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::helpers::{prune_backups, unique_backup_path};
     use super::*;
     use crate::bus::EventBus;
-    use super::super::helpers::{unique_backup_path, prune_backups};
 
     /// Helper: create a SoulUpdateTool backed by a temp directory with a valid SOUL file.
     fn make_soul_tool() -> (SoulUpdateTool, tempfile::TempDir) {
@@ -774,7 +774,10 @@ Remember everything.
 
         // File should be unchanged
         let after = std::fs::read_to_string(dir.path().join("SOUL.md")).unwrap();
-        assert_eq!(original, after, "SOUL.md should not be modified on type error");
+        assert_eq!(
+            original, after,
+            "SOUL.md should not be modified on type error"
+        );
 
         // No backup directory should be created
         assert!(

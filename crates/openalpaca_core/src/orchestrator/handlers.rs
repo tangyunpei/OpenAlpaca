@@ -1,4 +1,4 @@
-use super::{principal_id, role_label, ConversationContext, Orchestrator};
+use super::{ConversationContext, Orchestrator, principal_id, role_label};
 use crate::events::SystemEvent;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::security::gate::SecurityGate;
@@ -51,7 +51,9 @@ impl Orchestrator {
         let scope_ctx = MemoryScopeContext::new(workspace_id);
 
         // 3. Try slash commands, task queries, and skill invocations first
-        let intent = self.intent_parser.parse_with_skills(&content, &self.skill_catalog);
+        let intent = self
+            .intent_parser
+            .parse_with_skills(&content, &self.skill_catalog);
         match &intent {
             Intent::TaskQuery { .. } | Intent::TaskControl { .. } => {
                 self.bus.publish(SystemEvent::IntentClassified {
@@ -113,7 +115,8 @@ impl Orchestrator {
             // Present all templates (not instances) to the planner — templates represent
             // available capabilities regardless of how many instances are currently running.
             let templates = self.shared_context.agent_registry.list_templates();
-            let idle_agents: Vec<crate::agent::SubAgent> = templates.iter()
+            let idle_agents: Vec<crate::agent::SubAgent> = templates
+                .iter()
                 .map(|t| {
                     let mut agent = t.to_subagent(&t.frontmatter.id, "");
                     agent.status = crate::agent::AgentStatus::Idle;
@@ -171,7 +174,8 @@ impl Orchestrator {
                                     "Dispatch planned failed: {e}, falling back to simple_query"
                                 );
                                 self.handle_simple_query(
-                                    request_id, &source, &content, &lane_key, &ctx, owner_id, &scope_ctx,
+                                    request_id, &source, &content, &lane_key, &ctx, owner_id,
+                                    &scope_ctx,
                                 )
                                 .await
                             }
@@ -183,7 +187,8 @@ impl Orchestrator {
                             _other
                         );
                         self.dispatch_with_heuristic(
-                            request_id, &source, &content, &principal, &lane_key, &ctx, owner_id, &scope_ctx,
+                            request_id, &source, &content, &principal, &lane_key, &ctx, owner_id,
+                            &scope_ctx,
                         )
                         .await
                     }
@@ -191,7 +196,8 @@ impl Orchestrator {
                 Err(e) => {
                     tracing::warn!("LLM planning failed: {}, falling back to heuristic", e);
                     self.dispatch_with_heuristic(
-                        request_id, &source, &content, &principal, &lane_key, &ctx, owner_id, &scope_ctx,
+                        request_id, &source, &content, &principal, &lane_key, &ctx, owner_id,
+                        &scope_ctx,
                     )
                     .await
                 }
@@ -224,7 +230,11 @@ impl Orchestrator {
     }
 
     /// Augment a task description with conversation context (summary + recent exchanges).
-    pub(super) fn augment_with_context(&self, description: &str, ctx: &ConversationContext) -> String {
+    pub(super) fn augment_with_context(
+        &self,
+        description: &str,
+        ctx: &ConversationContext,
+    ) -> String {
         if let Some(ref summary) = ctx.summary {
             let recent_excerpt: String = ctx
                 .recent_messages
@@ -251,6 +261,7 @@ impl Orchestrator {
     }
 
     /// Fallback dispatch using keyword-based intent classification and greedy skill matching.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn dispatch_with_heuristic(
         &self,
         request_id: Uuid,
@@ -262,7 +273,9 @@ impl Orchestrator {
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
     ) -> Result<String, String> {
-        let intent = self.intent_parser.parse_with_skills(content, &self.skill_catalog);
+        let intent = self
+            .intent_parser
+            .parse_with_skills(content, &self.skill_catalog);
 
         self.bus.publish(SystemEvent::IntentClassified {
             request_id,
@@ -272,8 +285,10 @@ impl Orchestrator {
 
         match intent {
             Intent::SimpleQuery { query } => {
-                self.handle_simple_query(request_id, source, &query, lane_key, ctx, owner_id, scope_ctx)
-                    .await
+                self.handle_simple_query(
+                    request_id, source, &query, lane_key, ctx, owner_id, scope_ctx,
+                )
+                .await
             }
             Intent::TaskQuery { task_id } => {
                 self.handle_task_query(task_id, &principal_id(principal))
@@ -312,14 +327,22 @@ impl Orchestrator {
             }
             Intent::TaskControl { task_id, action } => self.handle_task_control(&task_id, &action),
             Intent::RememberCommand { content } => {
-                self.handle_remember_command(&content, owner_id, scope_ctx).await
+                self.handle_remember_command(&content, owner_id, scope_ctx)
+                    .await
             }
             Intent::ForgetCommand { content } => {
                 self.handle_forget_command(&content, owner_id).await
             }
             Intent::SkillInvocation { skill_name, query } => {
                 self.handle_skill_invocation(
-                    request_id, source, &skill_name, &query, lane_key, ctx, owner_id, scope_ctx,
+                    request_id,
+                    source,
+                    &skill_name,
+                    &query,
+                    lane_key,
+                    ctx,
+                    owner_id,
+                    scope_ctx,
                 )
                 .await
             }

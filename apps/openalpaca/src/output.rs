@@ -48,17 +48,11 @@ pub fn print_list<T: Serialize + TableRow>(items: &[T], format: OutputFormat) {
 pub fn print_detail<T: Serialize>(item: &T, format: OutputFormat) {
     match format {
         OutputFormat::Json => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(item).unwrap_or_default()
-            );
+            println!("{}", serde_json::to_string_pretty(item).unwrap_or_default());
         }
         OutputFormat::Table => {
             // For detail view, just pretty-print the JSON with indentation
-            println!(
-                "{}",
-                serde_json::to_string_pretty(item).unwrap_or_default()
-            );
+            println!("{}", serde_json::to_string_pretty(item).unwrap_or_default());
         }
     }
 }

@@ -17,14 +17,9 @@ pub struct ChatSendResponse {
     pub lane_key: String,
 }
 
+#[derive(Default)]
 pub struct StreamOptions {
     pub verbose: bool,
-}
-
-impl Default for StreamOptions {
-    fn default() -> Self {
-        Self { verbose: false }
-    }
 }
 
 pub struct UsageInfo {
@@ -133,15 +128,14 @@ async fn stream_sse_events(
     }
 
     // Check for delegation: zero tokens AND content contains delegation marker
-    if let Some(ref content) = state.done_content {
-        if is_delegation(&state.usage, content) {
-            if let Some(title) = parse_task_title(content) {
-                return Ok(StreamResult::Delegation {
-                    usage: state.usage,
-                    task_title: title,
-                });
-            }
-        }
+    if let Some(ref content) = state.done_content
+        && is_delegation(&state.usage, content)
+        && let Some(title) = parse_task_title(content)
+    {
+        return Ok(StreamResult::Delegation {
+            usage: state.usage,
+            task_title: title,
+        });
     }
 
     Ok(StreamResult::Response(state.usage))
@@ -166,11 +160,7 @@ fn parse_task_title(content: &str) -> Option<String> {
     // Title ends at newline or end of string
     let end = rest.find('\n').unwrap_or(rest.len());
     let title = rest[..end].trim().to_string();
-    if title.is_empty() {
-        None
-    } else {
-        Some(title)
-    }
+    if title.is_empty() { None } else { Some(title) }
 }
 
 fn find_event_boundary(buf: &str) -> Option<usize> {
@@ -180,11 +170,7 @@ fn find_event_boundary(buf: &str) -> Option<usize> {
     buf.find("\n\n")
 }
 
-fn process_sse_event(
-    event_text: &str,
-    verbose: bool,
-    state: &mut SseState,
-) -> Result<()> {
+fn process_sse_event(event_text: &str, verbose: bool, state: &mut SseState) -> Result<()> {
     let mut event_type = String::new();
     let mut data = String::new();
 
@@ -206,23 +192,22 @@ fn process_sse_event(
             }
         }
         "delta" => {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data) {
-                if let Some(content) = parsed["content"].as_str() {
-                    print!("{}", content);
-                    std::io::stdout().flush()?;
-                    state.had_delta = true;
-                }
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data)
+                && let Some(content) = parsed["content"].as_str()
+            {
+                print!("{}", content);
+                std::io::stdout().flush()?;
+                state.had_delta = true;
             }
         }
         "done" => {
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data) {
                 // BUG FIX: Print done.content if no delta events printed it
-                if !state.had_delta {
-                    if let Some(content) = parsed["content"].as_str() {
-                        if !content.is_empty() {
-                            print!("{}", content);
-                        }
-                    }
+                if !state.had_delta
+                    && let Some(content) = parsed["content"].as_str()
+                    && !content.is_empty()
+                {
+                    print!("{}", content);
                 }
 
                 // Capture content for delegation detection
@@ -267,18 +252,16 @@ fn process_sse_event(
 pub async fn poll_task_completion(client: &DaemonClient, task_title: &str) -> Result<()> {
     // Find the task by title
     let tasks: serde_json::Value = client.get("/v1/tasks?limit=5").await?;
-    let task_id = tasks
-        .as_array()
-        .and_then(|arr| {
-            arr.iter().find_map(|t| {
-                let title = t["title"].as_str().unwrap_or("");
-                if title == task_title {
-                    t["id"].as_str().map(|s| s.to_string())
-                } else {
-                    None
-                }
-            })
-        });
+    let task_id = tasks.as_array().and_then(|arr| {
+        arr.iter().find_map(|t| {
+            let title = t["title"].as_str().unwrap_or("");
+            if title == task_title {
+                t["id"].as_str().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+    });
 
     let task_id = match task_id {
         Some(id) => id,
@@ -299,10 +282,7 @@ pub async fn poll_task_completion(client: &DaemonClient, task_title: &str) -> Re
             }
         }
 
-        let resp: serde_json::Value = match client
-            .get(&format!("/v1/tasks/{}", task_id))
-            .await
-        {
+        let resp: serde_json::Value = match client.get(&format!("/v1/tasks/{}", task_id)).await {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("{}", format!("(poll error: {}, retrying...)", e).dimmed());
@@ -318,32 +298,33 @@ pub async fn poll_task_completion(client: &DaemonClient, task_title: &str) -> Re
             "completed" => {
                 let summary = task["result_summary"].as_str().unwrap_or("");
                 // Calculate duration from created_at → completed_at
-                let duration_str = match (task["created_at"].as_str(), task["completed_at"].as_str()) {
-                    (Some(start), Some(end)) => {
-                        match (chrono::DateTime::parse_from_rfc3339(start), chrono::DateTime::parse_from_rfc3339(end)) {
-                            (Ok(s), Ok(e)) => {
-                                let secs = (e - s).num_seconds().max(0);
-                                format!(" in {}s", secs)
+                let duration_str =
+                    match (task["created_at"].as_str(), task["completed_at"].as_str()) {
+                        (Some(start), Some(end)) => {
+                            match (
+                                chrono::DateTime::parse_from_rfc3339(start),
+                                chrono::DateTime::parse_from_rfc3339(end),
+                            ) {
+                                (Ok(s), Ok(e)) => {
+                                    let secs = (e - s).num_seconds().max(0);
+                                    format!(" in {}s", secs)
+                                }
+                                _ => String::new(),
                             }
-                            _ => String::new(),
                         }
-                    }
-                    _ => String::new(),
-                };
-                println!(
-                    "{}",
-                    format!("[Task completed{}]", duration_str).green()
-                );
+                        _ => String::new(),
+                    };
+                println!("{}", format!("[Task completed{}]", duration_str).green());
                 if !summary.is_empty() {
                     println!("{} {}", "Result:".bold(), summary);
                 }
                 // Print per-assignment results if available
                 if let Some(assignments) = resp["assignments"].as_array() {
                     for a in assignments {
-                        if let Some(output) = a["result_output"].as_str() {
-                            if !output.is_empty() {
-                                println!("{}", output);
-                            }
+                        if let Some(output) = a["result_output"].as_str()
+                            && !output.is_empty()
+                        {
+                            println!("{}", output);
                         }
                     }
                 }

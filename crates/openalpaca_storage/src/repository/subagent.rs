@@ -1,7 +1,7 @@
 //! Repository for SubAgent configuration, metrics, and task history
 
-use crate::models::subagent::{AgentMetrics, AgentTaskHistory, SubAgentConfig};
 use crate::Database;
+use crate::models::subagent::{AgentMetrics, AgentTaskHistory, SubAgentConfig};
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{OptionalExtension, Row};
@@ -262,15 +262,23 @@ impl<'a> SubAgentRepository<'a> {
 
         Ok(SubAgentConfig {
             id: row.get(0)?,
-            template_id: row.get::<_, Option<String>>(1)?.unwrap_or_else(|| row.get::<_, String>(0).unwrap_or_default()),
+            template_id: row
+                .get::<_, Option<String>>(1)?
+                .unwrap_or_else(|| row.get::<_, String>(0).unwrap_or_default()),
             name: row.get(2)?,
             persona: row.get(3)?,
             description: row.get(4)?,
             icon: row.get(5)?,
-            status: row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "idle".to_string()),
+            status: row
+                .get::<_, Option<String>>(6)?
+                .unwrap_or_else(|| "idle".to_string()),
             current_task_id: row.get(7)?,
-            skills_json: row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "[]".to_string()),
-            preset_json: row.get::<_, Option<String>>(9)?.unwrap_or_else(|| "{}".to_string()),
+            skills_json: row
+                .get::<_, Option<String>>(8)?
+                .unwrap_or_else(|| "[]".to_string()),
+            preset_json: row
+                .get::<_, Option<String>>(9)?
+                .unwrap_or_else(|| "{}".to_string()),
             constraints_json: row.get(10)?,
             llm_config_json: row.get(11)?,
             created_at: parse_datetime(&created_str),
@@ -484,7 +492,8 @@ mod tests {
         let repo = SubAgentRepository::new(&db);
 
         repo.upsert(&make_config("sa1", "Agent")).unwrap();
-        repo.upsert_metrics(&AgentMetrics::new_empty("sa1")).unwrap();
+        repo.upsert_metrics(&AgentMetrics::new_empty("sa1"))
+            .unwrap();
 
         repo.increment_completed("sa1", 120).unwrap();
 
@@ -501,7 +510,8 @@ mod tests {
         let repo = SubAgentRepository::new(&db);
 
         repo.upsert(&make_config("sa1", "Agent")).unwrap();
-        repo.upsert_metrics(&AgentMetrics::new_empty("sa1")).unwrap();
+        repo.upsert_metrics(&AgentMetrics::new_empty("sa1"))
+            .unwrap();
 
         // Complete one, fail one
         repo.increment_completed("sa1", 60).unwrap();

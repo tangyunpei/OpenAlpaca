@@ -17,6 +17,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 impl Orchestrator {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn handle_simple_query(
         &self,
         request_id: Uuid,
@@ -43,25 +44,30 @@ impl Orchestrator {
         let mut system_prompt = PromptAssembler::assemble(&system_persona, &agent_persona);
 
         // Inject bootstrap instructions if in first-run mode
-        if let Ok(guard) = self.bootstrap_document.read() {
-            if let Some(ref doc) = *guard {
-                let block = bootstrap_to_prompt_block(doc);
-                if !block.is_empty() {
-                    system_prompt.push('\n');
-                    system_prompt.push_str(&block);
-                }
+        if let Ok(guard) = self.bootstrap_document.read()
+            && let Some(ref doc) = *guard
+        {
+            let block = bootstrap_to_prompt_block(doc);
+            if !block.is_empty() {
+                system_prompt.push('\n');
+                system_prompt.push_str(&block);
             }
         }
 
         // Inject agent identity if available
-        if let Ok(guard) = self.identity_document.read() {
-            if let Some(ref doc) = *guard {
-                let identity_budget = self.daemon_config.load().orchestrator.prompt_budgets.identity_budget;
-                let id_block = identity_to_prompt_block(doc, Some(identity_budget));
-                if !id_block.is_empty() {
-                    system_prompt.push('\n');
-                    system_prompt.push_str(&id_block);
-                }
+        if let Ok(guard) = self.identity_document.read()
+            && let Some(ref doc) = *guard
+        {
+            let identity_budget = self
+                .daemon_config
+                .load()
+                .orchestrator
+                .prompt_budgets
+                .identity_budget;
+            let id_block = identity_to_prompt_block(doc, Some(identity_budget));
+            if !id_block.is_empty() {
+                system_prompt.push('\n');
+                system_prompt.push_str(&id_block);
             }
         }
 
@@ -123,13 +129,18 @@ impl Orchestrator {
             messages.push(ChatMessage::system(&system_prompt));
 
             // Inject user profile if available
-            if let Ok(guard) = self.user_document.read() {
-                if let Some(ref doc) = *guard {
-                    let user_budget = self.daemon_config.load().orchestrator.prompt_budgets.user_profile_budget;
-                    let profile_block = user_to_prompt_block(doc, Some(user_budget));
-                    if !profile_block.is_empty() {
-                        messages.push(ChatMessage::system(&profile_block));
-                    }
+            if let Ok(guard) = self.user_document.read()
+                && let Some(ref doc) = *guard
+            {
+                let user_budget = self
+                    .daemon_config
+                    .load()
+                    .orchestrator
+                    .prompt_budgets
+                    .user_profile_budget;
+                let profile_block = user_to_prompt_block(doc, Some(user_budget));
+                if !profile_block.is_empty() {
+                    messages.push(ChatMessage::system(&profile_block));
                 }
             }
 
@@ -172,7 +183,13 @@ impl Orchestrator {
                 if !memories.is_empty() {
                     // Track access for importance decay + boost
                     let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-                    let boost = self.daemon_config.load().orchestrator.memory.decay.access_boost;
+                    let boost = self
+                        .daemon_config
+                        .load()
+                        .orchestrator
+                        .memory
+                        .decay
+                        .access_boost;
                     if let Err(e) = repo.touch_accessed(&ids, boost) {
                         tracing::warn!("Failed to track memory access: {e}");
                     }
@@ -210,7 +227,8 @@ impl Orchestrator {
                 self.tool_registry.clone(),
                 ctx_exec,
             ));
-            let per_request_sandbox = SandboxManager::with_defaults(contextual_executor, self.bus.clone());
+            let per_request_sandbox =
+                SandboxManager::with_defaults(contextual_executor, self.bus.clone());
 
             let call_start = std::time::Instant::now();
             let result = run_agentic_loop_routed(
@@ -284,18 +302,21 @@ impl Orchestrator {
             });
 
             // Store LLM metadata for bridge to read (keyed by request_id for concurrency safety)
-            self.llm_metadata_map.insert(request_id, super::LlmMetadata {
-                model: actual_model.to_string(),
-                tokens_in: result.total_input_tokens,
-                tokens_out: result.total_output_tokens,
-            });
+            self.llm_metadata_map.insert(
+                request_id,
+                super::LlmMetadata {
+                    model: actual_model.to_string(),
+                    tokens_in: result.total_input_tokens,
+                    tokens_out: result.total_output_tokens,
+                },
+            );
 
             // If LLM failed and produced no content, propagate as error
             // so the Gateway doesn't persist an empty assistant message.
-            if let LoopFinishReason::Error(ref err) = result.finish_reason {
-                if result.final_content.trim().is_empty() {
-                    return Err(format!("LLM error: {}", err));
-                }
+            if let LoopFinishReason::Error(ref err) = result.finish_reason
+                && result.final_content.trim().is_empty()
+            {
+                return Err(format!("LLM error: {}", err));
             }
 
             // LLM chat responses are free-form text, not structured JSON
@@ -339,7 +360,9 @@ impl Orchestrator {
             return String::new();
         }
 
-        let mut block = String::from("<available_skills>\nThe user can invoke these specialized skills with slash commands:\n");
+        let mut block = String::from(
+            "<available_skills>\nThe user can invoke these specialized skills with slash commands:\n",
+        );
         let mut budget = 500usize;
         for (name, description, command) in &summaries {
             let line = if let Some(cmd) = command {

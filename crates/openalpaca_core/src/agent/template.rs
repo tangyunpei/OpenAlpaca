@@ -66,7 +66,10 @@ pub enum AgentParseError {
     MissingFrontmatter,
     UnterminatedFrontmatter,
     MissingField(&'static str),
-    InvalidValue { field: &'static str, message: String },
+    InvalidValue {
+        field: &'static str,
+        message: String,
+    },
 }
 
 impl fmt::Display for AgentParseError {
@@ -234,25 +237,22 @@ fn parse_agent_frontmatter_lines(
             continue;
         }
         // "skills:" list (must come before "denied_skills:" check)
-        if trimmed == "skills:" || trimmed.starts_with("skills:") {
-            let rest = trimmed.strip_prefix("skills:").unwrap_or("");
-            if rest.trim().is_empty() {
-                skills = parse_yaml_list(lines, &mut idx);
-            } else {
-                // Inline value (shouldn't happen for lists, but handle gracefully)
-                skills = vec![strip_outer_quotes(rest)];
-                idx += 1;
-            }
+        if trimmed == "skills:" {
+            skills = parse_yaml_list(lines, &mut idx);
             continue;
         }
-        if trimmed.starts_with("denied_skills:") {
-            let rest = trimmed.strip_prefix("denied_skills:").unwrap_or("");
-            if rest.trim().is_empty() {
-                denied_skills = parse_yaml_list(lines, &mut idx);
-            } else {
-                denied_skills = vec![strip_outer_quotes(rest)];
-                idx += 1;
-            }
+        if let Some(rest) = trimmed.strip_prefix("skills: ") {
+            skills = vec![strip_outer_quotes(rest)];
+            idx += 1;
+            continue;
+        }
+        if trimmed == "denied_skills:" {
+            denied_skills = parse_yaml_list(lines, &mut idx);
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("denied_skills: ") {
+            denied_skills = vec![strip_outer_quotes(rest)];
+            idx += 1;
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("temperature:") {
@@ -485,11 +485,7 @@ impl AgentTemplate {
     ///
     /// The instance gets `instance_id` as its `id`, the template's `id` as `template_id`,
     /// and is set to `Busy` with the given `task_id`.
-    pub fn to_subagent(
-        &self,
-        instance_id: &str,
-        task_id: &str,
-    ) -> super::subagent::SubAgent {
+    pub fn to_subagent(&self, instance_id: &str, task_id: &str) -> super::subagent::SubAgent {
         use super::subagent::*;
 
         let fm = &self.frontmatter;
@@ -525,14 +521,18 @@ impl AgentTemplate {
                 temperature: fm.temperature,
                 verbosity: fm.verbosity.clone(),
             },
-            constraints: AgentConstraints {
-                max_tool_calls: fm.max_tool_calls,
-                timeout_seconds: fm.timeout_seconds,
-                max_cost_per_task: fm.max_cost_per_task,
-                require_confirmation_for: fm.require_confirmation_for.clone(),
-                allowed_capabilities,
-                denied_capabilities,
-                ..Default::default()
+            constraints: {
+                let mut c = AgentConstraints {
+                    max_tool_calls: fm.max_tool_calls,
+                    timeout_seconds: fm.timeout_seconds,
+                    max_cost_per_task: fm.max_cost_per_task,
+                    require_confirmation_for: fm.require_confirmation_for.clone(),
+                    allowed_capabilities,
+                    denied_capabilities,
+                    ..Default::default()
+                };
+                c.normalize();
+                c
             },
             llm_config: AgentLlmConfig {
                 model: fm.model.clone(),
@@ -620,7 +620,10 @@ sub-objectives, delegate to specialized agents, and synthesize results.
         let fm = parse_agent_frontmatter(VALID_AGENT).expect("should parse");
         assert_eq!(fm.id, "code_agent");
         assert_eq!(fm.name, "Code Agent");
-        assert_eq!(fm.description, "Software development agent for coding tasks");
+        assert_eq!(
+            fm.description,
+            "Software development agent for coding tasks"
+        );
         assert_eq!(fm.icon, Some("code".to_string()));
         assert!(!fm.singleton);
         assert_eq!(fm.skills, vec!["file_read", "file_write", "shell_execute"]);

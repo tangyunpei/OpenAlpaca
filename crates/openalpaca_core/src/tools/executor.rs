@@ -59,7 +59,9 @@ mod tests {
 
         let executor = RegistryToolExecutor::new(Arc::new(registry));
 
-        let result = executor.execute("echo", &serde_json::json!({"msg": "hi"})).await;
+        let result = executor
+            .execute("echo", &serde_json::json!({"msg": "hi"}))
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("echo:"));
     }

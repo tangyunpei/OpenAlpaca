@@ -1,7 +1,7 @@
 //! Repository for task and task assignment operations
 
-use crate::models::task::{AssignmentStatus, Task, TaskAgentAssignment, TaskStatus};
 use crate::Database;
+use crate::models::task::{AssignmentStatus, Task, TaskAgentAssignment, TaskStatus};
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{OptionalExtension, Row};
@@ -250,11 +250,12 @@ impl<'a> TaskRepository<'a> {
     pub fn set_result(&self, id: &str, result_summary: &str) -> Result<bool> {
         self.db.with_connection(|conn| {
             let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            let rows = conn.execute(
-                "UPDATE task SET result_summary = ?1, updated_at = ?2 WHERE id = ?3",
-                rusqlite::params![result_summary, now, id],
-            )
-            .context("Failed to set task result")?;
+            let rows = conn
+                .execute(
+                    "UPDATE task SET result_summary = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![result_summary, now, id],
+                )
+                .context("Failed to set task result")?;
             Ok(rows > 0)
         })
     }
@@ -264,11 +265,13 @@ impl<'a> TaskRepository<'a> {
     pub fn update_state(&self, id: &str, state_json: &str, expected_version: i32) -> Result<bool> {
         self.db.with_connection(|conn| {
             let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            let rows = conn.execute(
-                "UPDATE task SET state_json = ?1, state_version = ?2, updated_at = ?3
+            let rows = conn
+                .execute(
+                    "UPDATE task SET state_json = ?1, state_version = ?2, updated_at = ?3
                  WHERE id = ?4 AND state_version = ?5",
-                rusqlite::params![state_json, expected_version + 1, now, id, expected_version],
-            ).context("Failed to update task state")?;
+                    rusqlite::params![state_json, expected_version + 1, now, id, expected_version],
+                )
+                .context("Failed to update task state")?;
             Ok(rows > 0)
         })
     }
@@ -330,8 +333,13 @@ impl<'a> TaskRepository<'a> {
             let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
             let (started_clause, completed_clause) = match status {
-                AssignmentStatus::Running => ("started_at = COALESCE(started_at, ?3)", "completed_at = completed_at"),
-                AssignmentStatus::Completed | AssignmentStatus::Failed => ("started_at = started_at", "completed_at = ?3"),
+                AssignmentStatus::Running => (
+                    "started_at = COALESCE(started_at, ?3)",
+                    "completed_at = completed_at",
+                ),
+                AssignmentStatus::Completed | AssignmentStatus::Failed => {
+                    ("started_at = started_at", "completed_at = ?3")
+                }
                 _ => ("started_at = started_at", "completed_at = completed_at"),
             };
 
@@ -340,7 +348,8 @@ impl<'a> TaskRepository<'a> {
                 started_clause, completed_clause
             );
 
-            let rows = conn.execute(&sql, rusqlite::params![status.as_str(), id, now])
+            let rows = conn
+                .execute(&sql, rusqlite::params![status.as_str(), id, now])
                 .context("Failed to update assignment status")?;
             Ok(rows > 0)
         })
@@ -604,9 +613,10 @@ mod tests {
         assert_eq!(assignments[0].status, AssignmentStatus::Pending);
 
         // Update assignment status
-        assert!(repo
-            .update_assignment_status("a1", AssignmentStatus::Running)
-            .unwrap());
+        assert!(
+            repo.update_assignment_status("a1", AssignmentStatus::Running)
+                .unwrap()
+        );
         let assignments = repo.get_assignments("t1").unwrap();
         assert_eq!(assignments[0].status, AssignmentStatus::Running);
         assert!(assignments[0].started_at.is_some());
@@ -620,20 +630,33 @@ mod tests {
         repo.create(&make_task("t1", "Task")).unwrap();
 
         // Version 0 → 1 should succeed
-        assert!(repo.update_state("t1", r#"{"objective":"test"}"#, 0).unwrap());
+        assert!(
+            repo.update_state("t1", r#"{"objective":"test"}"#, 0)
+                .unwrap()
+        );
 
         let task = repo.get("t1").unwrap().unwrap();
         assert_eq!(task.state_version, 1);
         assert_eq!(task.state_json.as_deref(), Some(r#"{"objective":"test"}"#));
 
         // Stale version 0 should fail (current is 1)
-        assert!(!repo.update_state("t1", r#"{"objective":"stale"}"#, 0).unwrap());
+        assert!(
+            !repo
+                .update_state("t1", r#"{"objective":"stale"}"#, 0)
+                .unwrap()
+        );
 
         // Version 1 → 2 should succeed
-        assert!(repo.update_state("t1", r#"{"objective":"updated"}"#, 1).unwrap());
+        assert!(
+            repo.update_state("t1", r#"{"objective":"updated"}"#, 1)
+                .unwrap()
+        );
         let task = repo.get("t1").unwrap().unwrap();
         assert_eq!(task.state_version, 2);
-        assert_eq!(task.state_json.as_deref(), Some(r#"{"objective":"updated"}"#));
+        assert_eq!(
+            task.state_json.as_deref(),
+            Some(r#"{"objective":"updated"}"#)
+        );
     }
 
     #[test]

@@ -1,12 +1,15 @@
-use super::{TaskDispatcher, finalize_task, format_task_result, persist_conversation, spawn_task_memory_extraction};
+use super::super::task_state::TaskState;
 use super::usage;
+use super::{
+    TaskDispatcher, finalize_task, format_task_result, persist_conversation,
+    spawn_task_memory_extraction,
+};
 use crate::agent::registry::DestroyOutcome;
 use crate::agent::subagent::SubAgent;
 use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
 use crate::runner::lead_agent::run_lead_agent;
 use chrono::Utc;
-use super::super::task_state::TaskState;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -29,11 +32,15 @@ impl TaskDispatcher {
         // Spawn a lead agent instance from the singleton template.
         // Prefer templates with "lead_orchestration" skill, fall back to any template.
         let lead_agent = {
-            let templates = self.shared_context.agent_registry
+            let templates = self
+                .shared_context
+                .agent_registry
                 .find_templates_by_skill("lead_orchestration");
             let mut spawned = None;
             for t in &templates {
-                if let Ok(agent) = self.shared_context.agent_registry
+                if let Ok(agent) = self
+                    .shared_context
+                    .agent_registry
                     .spawn_instance(&t.frontmatter.id, task_id.clone())
                 {
                     spawned = Some(agent);
@@ -43,7 +50,9 @@ impl TaskDispatcher {
             if spawned.is_none() {
                 // Fallback: try spawning from any available template
                 for t in self.shared_context.agent_registry.list_templates() {
-                    if let Ok(agent) = self.shared_context.agent_registry
+                    if let Ok(agent) = self
+                        .shared_context
+                        .agent_registry
                         .spawn_instance(&t.frontmatter.id, task_id.clone())
                     {
                         spawned = Some(agent);
@@ -139,6 +148,7 @@ impl TaskDispatcher {
 
     /// Spawn the lead agent execution in a background tokio task.
     /// The lead agent runs a full agentic loop with `spawn_subagent` tool access.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_lead_agent_execution(
         &self,
         task_id: String,
@@ -150,7 +160,9 @@ impl TaskDispatcher {
         created_by: String,
         workspace_id: Option<String>,
     ) {
-        let Some(router) = self.require_router(&task_id) else { return };
+        let Some(router) = self.require_router(&task_id) else {
+            return;
+        };
 
         let bus = self.bus.clone();
         let ctx = self.shared_context.clone();
@@ -262,14 +274,26 @@ impl TaskDispatcher {
 
             // Persist LLM usage for the lead agent's own loop
             usage::record_llm_usage(
-                &router, &result.loop_result, lead_agent.llm_config.model.as_deref(),
-                &lead_agent.id, &task_id, start_time.elapsed().as_millis() as i64,
-                db.as_ref(), &bus,
+                &router,
+                &result.loop_result,
+                lead_agent.llm_config.model.as_deref(),
+                &lead_agent.id,
+                &task_id,
+                start_time.elapsed().as_millis() as i64,
+                db.as_ref(),
+                &bus,
             );
 
             // Record agent task history
             if let Some(ref db) = db {
-                usage::record_agent_history(db, &lead_agent.id, &task_id, "lead_agent", result.success, runtime_secs);
+                usage::record_agent_history(
+                    db,
+                    &lead_agent.id,
+                    &task_id,
+                    "lead_agent",
+                    result.success,
+                    runtime_secs,
+                );
             }
 
             // Update task status
@@ -282,18 +306,31 @@ impl TaskDispatcher {
                     "Task status: running → failed"
                 );
             }
-            finalize_task(&ctx, &bus, db.as_ref(), &task_id, &db_summary, result.success);
+            finalize_task(
+                &ctx,
+                &bus,
+                db.as_ref(),
+                &task_id,
+                &db_summary,
+                result.success,
+            );
 
             // Persist final result to conversation
             if let Some(ref db) = db {
                 let content = format_task_result(&task_title, &final_content, result.success);
                 // Resolve model name for conversation record
                 let default_model = router.default_model();
-                let actual_model = result.loop_result.model_used.as_deref()
+                let actual_model = result
+                    .loop_result
+                    .model_used
+                    .as_deref()
                     .or(lead_agent.llm_config.model.as_deref())
                     .unwrap_or(&default_model);
                 persist_conversation(
-                    db, &lane_key, &source, content,
+                    db,
+                    &lane_key,
+                    &source,
+                    content,
                     Some(actual_model.to_string()),
                     result.loop_result.total_input_tokens as i64,
                     result.loop_result.total_output_tokens as i64,

@@ -271,37 +271,37 @@ async fn task_status(task_id: &str, format: OutputFormat) -> Result<()> {
                 println!("{} {}", "Completed:".dimmed(), completed);
             }
 
-            if let Some(ref assignments) = detail.assignments {
-                if !assignments.is_empty() {
-                    println!();
-                    println!("{}", "Pipeline Steps:".dimmed());
-                    let mut sorted = assignments.clone();
-                    sorted.sort_by_key(|a| a.step_order.unwrap_or(0));
-                    for a in &sorted {
-                        let step_label = a
-                            .step_order
-                            .map(|s| format!("[{}]", s))
-                            .unwrap_or_else(|| "[-]".to_string());
-                        println!(
-                            "  {} {} {} ({})",
-                            step_label.dimmed(),
-                            status_color(&a.status),
-                            a.agent_id,
-                            a.role
-                        );
-                        if let Some(ref output) = a.result_output {
-                            let mut lines = output.lines();
-                            let first_three: Vec<&str> = lines.by_ref().take(3).collect();
-                            let has_more = lines.next().is_some();
-                            let preview: String = first_three
-                                .iter()
-                                .map(|l| format!("    {}", l))
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            println!("{}", preview.dimmed());
-                            if has_more {
-                                println!("    {}", "...".dimmed());
-                            }
+            if let Some(ref assignments) = detail.assignments
+                && !assignments.is_empty()
+            {
+                println!();
+                println!("{}", "Pipeline Steps:".dimmed());
+                let mut sorted = assignments.clone();
+                sorted.sort_by_key(|a| a.step_order.unwrap_or(0));
+                for a in &sorted {
+                    let step_label = a
+                        .step_order
+                        .map(|s| format!("[{}]", s))
+                        .unwrap_or_else(|| "[-]".to_string());
+                    println!(
+                        "  {} {} {} ({})",
+                        step_label.dimmed(),
+                        status_color(&a.status),
+                        a.agent_id,
+                        a.role
+                    );
+                    if let Some(ref output) = a.result_output {
+                        let mut lines = output.lines();
+                        let first_three: Vec<&str> = lines.by_ref().take(3).collect();
+                        let has_more = lines.next().is_some();
+                        let preview: String = first_three
+                            .iter()
+                            .map(|l| format!("    {}", l))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        println!("{}", preview.dimmed());
+                        if has_more {
+                            println!("    {}", "...".dimmed());
                         }
                     }
                 }
@@ -322,15 +322,15 @@ async fn task_log(task_id: &str, limit: usize) -> Result<()> {
         .iter()
         .filter(|e| {
             // Match by task_id in event or in payload
-            if let Some(ref tid) = e.task_id {
-                if tid == task_id {
-                    return true;
-                }
+            if let Some(ref tid) = e.task_id
+                && tid == task_id
+            {
+                return true;
             }
-            if let Some(tid) = e.payload.get("task_id").and_then(|v| v.as_str()) {
-                if tid == task_id {
-                    return true;
-                }
+            if let Some(tid) = e.payload.get("task_id").and_then(|v| v.as_str())
+                && tid == task_id
+            {
+                return true;
             }
             false
         })
@@ -373,9 +373,10 @@ async fn create_task(description: Option<String>, priority: i32) -> Result<()> {
     let title = match description {
         Some(d) => d,
         None => {
-            let input: String = dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                .with_prompt("Task title")
-                .interact_text()?;
+            let input: String =
+                dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                    .with_prompt("Task title")
+                    .interact_text()?;
             input
         }
     };

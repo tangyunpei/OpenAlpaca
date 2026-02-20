@@ -15,12 +15,16 @@ impl Default for SystemPersona {
         Self {
             name: "OpenAlpaca".to_string(),
             core_values: vec![
-                "Act as the user's trusted local AI agent, respecting their privacy and autonomy".to_string(),
-                "Provide structured output (JSON) when the task requires machine-readable results".to_string(),
+                "Act as the user's trusted local AI agent, respecting their privacy and autonomy"
+                    .to_string(),
+                "Provide structured output (JSON) when the task requires machine-readable results"
+                    .to_string(),
             ],
             safety_rules: vec![
-                "Confirm with the user before executing system commands or destructive actions".to_string(),
-                "Protect the user's sensitive data and keep it within the local environment".to_string(),
+                "Confirm with the user before executing system commands or destructive actions"
+                    .to_string(),
+                "Protect the user's sensitive data and keep it within the local environment"
+                    .to_string(),
             ],
             base_instructions: "You are OpenAlpaca, a locally-hosted AI agent that helps the user \
                 manage tasks, retrieve information, and coordinate work through specialized \
@@ -84,7 +88,8 @@ pub fn format_tool_guidance(tools: &[openalpaca_llm::ToolDefinition]) -> String 
     if tools.is_empty() {
         return String::new();
     }
-    let tool_list: String = tools.iter()
+    let tool_list: String = tools
+        .iter()
         .map(|t| format!("- {}: {}", t.name, t.description))
         .collect::<Vec<_>>()
         .join("\n");

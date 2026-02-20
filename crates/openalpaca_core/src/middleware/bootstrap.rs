@@ -342,7 +342,8 @@ _Good luck out there. Make it count._
 
     #[test]
     fn test_parse_multiple_read_when() {
-        let multi = "---\nsummary: \"test\"\nread_when:\n  - first run\n  - manual reset\n---\nBody\n";
+        let multi =
+            "---\nsummary: \"test\"\nread_when:\n  - first run\n  - manual reset\n---\nBody\n";
         let doc = parse_bootstrap_markdown(multi).expect("should parse");
         assert_eq!(doc.frontmatter.read_when, vec!["first run", "manual reset"]);
     }

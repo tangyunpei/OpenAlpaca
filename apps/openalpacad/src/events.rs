@@ -242,7 +242,12 @@ impl EventBroadcaster {
                         "consecutive_failures": consecutive_failures,
                         "reset_after_secs": reset_after_secs
                     });
-                    repo.log("circuit_breaker_tripped", Some(agent_id), Some(&detail), None)
+                    repo.log(
+                        "circuit_breaker_tripped",
+                        Some(agent_id),
+                        Some(&detail),
+                        None,
+                    )
                 }
                 ServerEvent::ToolExecuted {
                     agent_id,
@@ -277,9 +282,7 @@ impl EventBroadcaster {
                     repo.log("llm_call_completed", Some(agent_id), Some(&detail), None)
                 }
                 ServerEvent::SkillCatalogUpdated {
-                    skill_name,
-                    action,
-                    ..
+                    skill_name, action, ..
                 } => {
                     let detail = serde_json::json!({
                         "skill_name": skill_name,
@@ -487,6 +490,7 @@ impl EventBroadcaster {
     }
 
     /// Broadcast a DAG node status event and persist it
+    #[allow(clippy::too_many_arguments)]
     pub fn dag_node_status(
         &self,
         task_id: &str,
@@ -549,13 +553,7 @@ impl EventBroadcaster {
     }
 
     /// Broadcast a tool executed event and persist it
-    pub fn tool_executed(
-        &self,
-        agent_id: &str,
-        tool_name: &str,
-        success: bool,
-        duration_ms: u64,
-    ) {
+    pub fn tool_executed(&self, agent_id: &str, tool_name: &str, success: bool, duration_ms: u64) {
         let event = ServerEvent::ToolExecuted {
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),

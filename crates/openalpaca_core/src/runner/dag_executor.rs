@@ -3,14 +3,16 @@
 
 use crate::agent::subagent::SubAgent;
 use crate::daemon_config::DaemonConfig;
-use crate::orchestrator::replanner::{ReplanConfig, ReplanDecision, Replanner, merge_replanned_dag};
+use crate::orchestrator::replanner::{
+    ReplanConfig, ReplanDecision, Replanner, merge_replanned_dag,
+};
 use crate::orchestrator::task_planner::{DagNode, DagNodeStatus, TaskDag};
-use arc_swap::ArcSwap;
 use crate::orchestrator::task_state::{TaskState, TaskWorkspace, WorkspaceEntryType};
 use crate::runner::{LoopConfig, LoopFinishReason, LoopResult, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::ToolRegistry;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
+use arc_swap::ArcSwap;
 use openalpaca_llm::{ChatMessage, LlmRouter};
 use openalpaca_storage::Database;
 use std::collections::HashMap;
@@ -145,26 +147,34 @@ pub async fn execute_dag(
 
     loop {
         // Check cancellation
-        if let Some(ref token) = cancel_token {
-            if token.is_cancelled() {
-                tracing::info!("DAG execution cancelled for task '{}' — aborting {} running tasks", task_id, running_count);
-                join_set.abort_all();
-                return DagExecutionResult {
-                    success: false,
-                    node_results,
-                    total_input_tokens,
-                    total_output_tokens,
-                    total_duration: start.elapsed(),
-                    finish_reason: DagFinishReason::Aborted {
-                        reason: "Task cancelled by user".to_string(),
-                    },
-                };
-            }
+        if let Some(ref token) = cancel_token
+            && token.is_cancelled()
+        {
+            tracing::info!(
+                "DAG execution cancelled for task '{}' — aborting {} running tasks",
+                task_id,
+                running_count
+            );
+            join_set.abort_all();
+            return DagExecutionResult {
+                success: false,
+                node_results,
+                total_input_tokens,
+                total_output_tokens,
+                total_duration: start.elapsed(),
+                finish_reason: DagFinishReason::Aborted {
+                    reason: "Task cancelled by user".to_string(),
+                },
+            };
         }
 
         // Check total timeout
         if start.elapsed() > config.total_timeout {
-            tracing::warn!("DAG execution timed out for task '{}' — aborting {} running tasks", task_id, running_count);
+            tracing::warn!(
+                "DAG execution timed out for task '{}' — aborting {} running tasks",
+                task_id,
+                running_count
+            );
             join_set.abort_all();
             return DagExecutionResult {
                 success: false,
@@ -193,6 +203,14 @@ pub async fn execute_dag(
             break;
         }
 
+        // Build index for O(1) node lookups by ID (owned keys to avoid borrowing dag)
+        let node_index: std::collections::HashMap<String, usize> = dag
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.node_id.clone(), i))
+            .collect();
+
         for (node_id, agent_id_str, node_snapshot) in ready_info {
             if running_count >= config.max_concurrent_agents {
                 break;
@@ -201,9 +219,16 @@ pub async fn execute_dag(
             // Verify node is still in a dispatchable state (may have changed during replanning).
             // Accept both Pending and Ready — mark_ready_nodes() promotes Pending → Ready
             // when dependencies are satisfied, so Ready is a valid dispatchable state.
-            if let Some(current_node) = dag.nodes.iter().find(|n| n.node_id == node_id) {
-                if !matches!(current_node.status, DagNodeStatus::Pending | DagNodeStatus::Ready) {
-                    tracing::debug!("Node '{}' is not dispatchable (now {:?}), skipping", node_id, current_node.status);
+            if let Some(&idx) = node_index.get(&node_id) {
+                if !matches!(
+                    dag.nodes[idx].status,
+                    DagNodeStatus::Pending | DagNodeStatus::Ready
+                ) {
+                    tracing::debug!(
+                        "Node '{}' is not dispatchable (now {:?}), skipping",
+                        node_id,
+                        dag.nodes[idx].status
+                    );
                     continue;
                 }
             } else {
@@ -253,9 +278,18 @@ pub async fn execute_dag(
                         total_nodes: total,
                         completed_nodes: completed,
                         running_nodes: running_count,
-                        failed_nodes: dag.nodes.iter().filter(|n| n.status == DagNodeStatus::Failed).count(),
+                        failed_nodes: dag
+                            .nodes
+                            .iter()
+                            .filter(|n| n.status == DagNodeStatus::Failed)
+                            .count(),
                     };
-                    ctx.task_registry.update_progress(task_id, completed as i32, total as i32, Some(dag_summary));
+                    ctx.task_registry.update_progress(
+                        task_id,
+                        completed as i32,
+                        total as i32,
+                        Some(dag_summary),
+                    );
 
                     continue;
                 }
@@ -308,13 +342,12 @@ pub async fn execute_dag(
                     if node_result.success {
                         tracing::info!(
                             "DAG node '{}' completed successfully for task '{}'",
-                            node_id, task_id
+                            node_id,
+                            task_id
                         );
 
                         // Write output to workspace
-                        write_node_output_to_workspace(
-                            dag, &node_result, task_id, &db,
-                        ).await;
+                        write_node_output_to_workspace(dag, &node_result, task_id, &db).await;
 
                         // Mark completed in DAG
                         dag.complete_node(&node_id, &node_result.final_content);
@@ -325,7 +358,9 @@ pub async fn execute_dag(
                         if *retries < config.max_retries_per_node {
                             tracing::warn!(
                                 "DAG node '{}' failed, retrying ({}/{})",
-                                node_id, *retries + 1, config.max_retries_per_node
+                                node_id,
+                                *retries + 1,
+                                config.max_retries_per_node
                             );
                             *retries += 1;
                             // Reset to Pending for retry
@@ -338,7 +373,8 @@ pub async fn execute_dag(
                         } else {
                             tracing::error!(
                                 "DAG node '{}' failed permanently for task '{}'",
-                                node_id, task_id
+                                node_id,
+                                task_id
                             );
                             let error = node_result.final_content.clone();
                             dag.fail_node(&node_id, &error);
@@ -379,7 +415,11 @@ pub async fn execute_dag(
                         total_nodes: total,
                         completed_nodes: completed,
                         running_nodes: running_count,
-                        failed_nodes: dag.nodes.iter().filter(|n| n.status == DagNodeStatus::Failed).count(),
+                        failed_nodes: dag
+                            .nodes
+                            .iter()
+                            .filter(|n| n.status == DagNodeStatus::Failed)
+                            .count(),
                     };
                     ctx.task_registry.update_progress(
                         task_id,
@@ -408,7 +448,9 @@ pub async fn execute_dag(
 
                         tracing::info!(
                             "Running replan #{} for task '{}' ({} nodes completed)",
-                            replan_attempt, task_id, dag.completed_count()
+                            replan_attempt,
+                            task_id,
+                            dag.completed_count()
                         );
 
                         match Replanner::evaluate(
@@ -423,7 +465,10 @@ pub async fn execute_dag(
                         {
                             Ok(ReplanDecision::Continue) => {
                                 replans_done += 1;
-                                tracing::info!("Replan #{}: plan is on track, continuing", replan_attempt);
+                                tracing::info!(
+                                    "Replan #{}: plan is on track, continuing",
+                                    replan_attempt
+                                );
                                 bus.publish(SystemEvent::TaskReplanned {
                                     task_id: task_id.to_string(),
                                     replan_number: replan_attempt,
@@ -435,14 +480,23 @@ pub async fn execute_dag(
                             }
                             Ok(ReplanDecision::ModifyDag { dag: new_dag }) => {
                                 replans_done += 1;
-                                let old_pending = dag.nodes.iter()
-                                    .filter(|n| !matches!(n.status, DagNodeStatus::Completed | DagNodeStatus::Running))
+                                let old_pending = dag
+                                    .nodes
+                                    .iter()
+                                    .filter(|n| {
+                                        !matches!(
+                                            n.status,
+                                            DagNodeStatus::Completed | DagNodeStatus::Running
+                                        )
+                                    })
                                     .count();
                                 let new_count = new_dag.nodes.len();
 
                                 tracing::info!(
                                     "Replan #{}: modifying DAG — removing {} pending nodes, adding {} new nodes",
-                                    replan_attempt, old_pending, new_count
+                                    replan_attempt,
+                                    old_pending,
+                                    new_count
                                 );
 
                                 match merge_replanned_dag(dag, &new_dag, &idle_agents) {
@@ -463,7 +517,8 @@ pub async fn execute_dag(
                                     Err(e) => {
                                         tracing::warn!(
                                             "Replan #{}: merged DAG validation failed: {}, continuing without changes",
-                                            replan_attempt, e
+                                            replan_attempt,
+                                            e
                                         );
                                     }
                                 }
@@ -471,7 +526,10 @@ pub async fn execute_dag(
                             Ok(ReplanDecision::Abort { reason }) => {
                                 tracing::warn!(
                                     "Replan #{}: aborting task '{}': {} — aborting {} running tasks",
-                                    replan_attempt, task_id, reason, running_count
+                                    replan_attempt,
+                                    task_id,
+                                    reason,
+                                    running_count
                                 );
                                 join_set.abort_all();
                                 bus.publish(SystemEvent::TaskReplanned {
@@ -496,7 +554,11 @@ pub async fn execute_dag(
                                 replan_errors += 1;
                                 tracing::warn!(
                                     "Replan #{} failed for task '{}': {}, continuing without changes (errors: {}/{})",
-                                    replan_attempt, task_id, e, replan_errors, config.replan_config.max_replans
+                                    replan_attempt,
+                                    task_id,
+                                    e,
+                                    replan_errors,
+                                    config.replan_config.max_replans
                                 );
                             }
                         }
@@ -510,7 +572,9 @@ pub async fn execute_dag(
                     // and check if they have a corresponding task in the join set.
                     // Since running_count was already decremented above, at least one
                     // Running node has no live task. Fail the first Running node found.
-                    let running_node_ids: Vec<String> = dag.nodes.iter()
+                    let running_node_ids: Vec<String> = dag
+                        .nodes
+                        .iter()
                         .filter(|n| n.status == DagNodeStatus::Running)
                         .map(|n| n.node_id.clone())
                         .collect();
@@ -521,16 +585,23 @@ pub async fn execute_dag(
                         for nid in &running_node_ids[..running_node_ids.len() - running_count] {
                             let error_msg = format!("Agent task panicked: {}", join_error);
                             dag.fail_node(nid, &error_msg);
-                            tracing::error!("Marked DAG node '{}' as failed due to JoinSet panic", nid);
+                            tracing::error!(
+                                "Marked DAG node '{}' as failed due to JoinSet panic",
+                                nid
+                            );
 
                             bus.publish(SystemEvent::DagNodeCompleted {
                                 task_id: task_id.to_string(),
                                 node_id: nid.clone(),
-                                node_title: dag.nodes.iter()
+                                node_title: dag
+                                    .nodes
+                                    .iter()
                                     .find(|n| n.node_id == *nid)
                                     .map(|n| n.title.clone())
                                     .unwrap_or_default(),
-                                agent_id: dag.nodes.iter()
+                                agent_id: dag
+                                    .nodes
+                                    .iter()
                                     .find(|n| n.node_id == *nid)
                                     .map(|n| n.agent_id.clone())
                                     .unwrap_or_default(),
@@ -549,7 +620,10 @@ pub async fn execute_dag(
     }
 
     // Determine overall result
-    let all_completed = dag.nodes.iter().all(|n| n.status == DagNodeStatus::Completed);
+    let all_completed = dag
+        .nodes
+        .iter()
+        .all(|n| n.status == DagNodeStatus::Completed);
     let any_failed = dag.nodes.iter().any(|n| n.status == DagNodeStatus::Failed);
 
     let finish_reason = if all_completed {
@@ -607,15 +681,14 @@ async fn execute_single_node(
         agent_id: Some(agent_id.clone()),
         db: db.clone(),
     };
-    let contextual_executor = Arc::new(ContextualToolExecutor::new(
-        tool_registry.clone(), ctx_exec,
-    ));
+    let contextual_executor =
+        Arc::new(ContextualToolExecutor::new(tool_registry.clone(), ctx_exec));
     let per_request_sandbox = SandboxManager::with_defaults(contextual_executor, bus.clone());
 
     // Build LoopConfig — agent constraints override daemon defaults, cap at node timeout
-    let mut loop_config = LoopConfig::from_agent(
-        &daemon_config.load().execution.agent_defaults, &agent,
-    ).with_model_pricing(router.model_registry(), agent.llm_config.model.as_deref());
+    let mut loop_config =
+        LoopConfig::from_agent(&daemon_config.load().execution.agent_defaults, &agent)
+            .with_model_pricing(router.model_registry(), agent.llm_config.model.as_deref());
     loop_config.max_tool_runtime = std::cmp::min(node_timeout, loop_config.max_tool_runtime);
 
     let sandbox_policy = SandboxPolicy::from_constraints(&agent_id, &agent.constraints);
@@ -682,8 +755,12 @@ async fn execute_single_node(
 
     tracing::info!(
         "DAG node '{}' (agent '{}'): reason={:?}, rounds={}, tokens={}/{}",
-        node.node_id, agent_id, result.finish_reason,
-        result.rounds_used, result.total_input_tokens, result.total_output_tokens
+        node.node_id,
+        agent_id,
+        result.finish_reason,
+        result.rounds_used,
+        result.total_input_tokens,
+        result.total_output_tokens
     );
 
     let success = matches!(
@@ -693,15 +770,27 @@ async fn execute_single_node(
 
     // Record LLM usage
     crate::orchestrator::dispatcher::usage::record_llm_usage(
-        &router, &result, loop_config.model.as_deref(),
-        &agent_id, &task_id, agent_start.elapsed().as_millis() as i64,
-        db.as_ref(), &bus,
+        &router,
+        &result,
+        loop_config.model.as_deref(),
+        &agent_id,
+        &task_id,
+        agent_start.elapsed().as_millis() as i64,
+        db.as_ref(),
+        &bus,
     );
 
     // Record agent history
     if let Some(db) = &db {
         let role = format!("dag_node:{}", node.node_id);
-        crate::orchestrator::dispatcher::usage::record_agent_history(db, &agent_id, &task_id, &role, success, agent_runtime);
+        crate::orchestrator::dispatcher::usage::record_agent_history(
+            db,
+            &agent_id,
+            &task_id,
+            &role,
+            success,
+            agent_runtime,
+        );
     }
 
     NodeResult {
@@ -802,8 +891,15 @@ async fn write_node_output_to_workspace(
         };
 
         // Collect workspace_keys from nodes that haven't completed yet
-        let protected_keys: Vec<String> = dag.nodes.iter()
-            .filter(|n| matches!(n.status, DagNodeStatus::Pending | DagNodeStatus::Ready | DagNodeStatus::Running))
+        let protected_keys: Vec<String> = dag
+            .nodes
+            .iter()
+            .filter(|n| {
+                matches!(
+                    n.status,
+                    DagNodeStatus::Pending | DagNodeStatus::Ready | DagNodeStatus::Running
+                )
+            })
             .flat_map(|n| n.workspace_keys.iter().cloned())
             .collect();
 
@@ -816,7 +912,9 @@ async fn write_node_output_to_workspace(
         ) {
             tracing::warn!(
                 "Failed to write workspace entry '{}' for node '{}': {}",
-                key, node_result.node_id, e
+                key,
+                node_result.node_id,
+                e
             );
             return;
         }
@@ -827,21 +925,28 @@ async fn write_node_output_to_workspace(
                 if attempt < MAX_RETRIES - 1 {
                     tracing::debug!(
                         "Workspace write version conflict for key '{}' node '{}' (attempt {}/{}), retrying",
-                        key, node_result.node_id, attempt + 1, MAX_RETRIES
+                        key,
+                        node_result.node_id,
+                        attempt + 1,
+                        MAX_RETRIES
                     );
                     // Brief async backoff to reduce collision probability
                     tokio::time::sleep(std::time::Duration::from_millis(10 * (1 << attempt))).await;
                 } else {
                     tracing::warn!(
                         "Workspace write for key '{}' node '{}' failed after {} retries — data may be lost",
-                        key, node_result.node_id, MAX_RETRIES
+                        key,
+                        node_result.node_id,
+                        MAX_RETRIES
                     );
                 }
             }
             Err(e) => {
                 tracing::warn!(
                     "Failed to persist workspace entry '{}' for node '{}': {}",
-                    key, node_result.node_id, e
+                    key,
+                    node_result.node_id,
+                    e
                 );
                 return;
             }
@@ -900,22 +1005,22 @@ async fn persist_dag_state(dag: &TaskDag, task_id: &str, db: &Option<Database>) 
                 if attempt < MAX_RETRIES - 1 {
                     tracing::debug!(
                         "DAG state persist version conflict for task '{}' (attempt {}/{}), retrying",
-                        task_id, attempt + 1, MAX_RETRIES
+                        task_id,
+                        attempt + 1,
+                        MAX_RETRIES
                     );
                     // Brief async backoff to reduce collision probability
                     tokio::time::sleep(Duration::from_millis(10 * (1 << attempt))).await;
                 } else {
                     tracing::warn!(
                         "DAG state persist for task '{}' failed after {} retries — state may be stale",
-                        task_id, MAX_RETRIES
+                        task_id,
+                        MAX_RETRIES
                     );
                 }
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to persist DAG state for task '{}': {}",
-                    task_id, e
-                );
+                tracing::warn!("Failed to persist DAG state for task '{}': {}", task_id, e);
                 return;
             }
         }
@@ -959,10 +1064,7 @@ mod tests {
     #[test]
     fn test_mark_ready_nodes_after_completion() {
         let mut dag = TaskDag {
-            nodes: vec![
-                make_node("n1", "a1", &[]),
-                make_node("n2", "a1", &["n1"]),
-            ],
+            nodes: vec![make_node("n1", "a1", &[]), make_node("n2", "a1", &["n1"])],
         };
         dag.nodes[0].status = DagNodeStatus::Completed;
         mark_ready_nodes(&mut dag);

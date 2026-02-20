@@ -21,9 +21,7 @@ impl MemoryScopeContext {
 
     /// Create a scope context with no workspace (Global-only).
     pub fn global_only() -> Self {
-        Self {
-            workspace_id: None,
-        }
+        Self { workspace_id: None }
     }
 
     /// Determine the default scope and scope_id for a memory write.

@@ -36,7 +36,11 @@ impl MessageHandler for OrchestratorHandler {
 
         // Always drain metadata (even on error) to prevent unbounded map growth.
         // Handlers may insert metadata before returning Err (e.g. LLM error with empty content).
-        let meta = self.orchestrator.llm_metadata_map.remove(&request_id).map(|(_, v)| v);
+        let meta = self
+            .orchestrator
+            .llm_metadata_map
+            .remove(&request_id)
+            .map(|(_, v)| v);
 
         let content = result?;
 

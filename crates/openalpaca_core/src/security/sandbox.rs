@@ -179,10 +179,12 @@ impl SandboxManager {
         let duration_ms = start.elapsed().as_millis() as u64;
 
         // 5. Process result and record for circuit breaker
-        let final_result = match result {
+
+        match result {
             Ok(Ok(output)) => {
                 self.emit_tool_executed(agent_id, &tool_call.name, true, duration_ms);
-                self.circuit_breaker.record_success(agent_id, &tool_call.name);
+                self.circuit_breaker
+                    .record_success(agent_id, &tool_call.name);
                 Ok(output)
             }
             Ok(Err(err)) => {
@@ -204,9 +206,7 @@ impl SandboxManager {
                     .record_failure(agent_id, &tool_call.name);
                 Err(reason)
             }
-        };
-
-        final_result
+        }
     }
 
     fn emit_security_violation(&self, agent_id: &str, tool_name: &str, reason: &str) {
@@ -405,6 +405,10 @@ mod tests {
 
         let result = sandbox.execute_tool("agent1", &tc, &policy).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not in the allowed tools list"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("not in the allowed tools list")
+        );
     }
 }

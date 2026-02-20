@@ -59,7 +59,9 @@ impl fmt::Display for SkillParseError {
         match self {
             Self::MissingFrontmatter => write!(f, "Missing YAML frontmatter"),
             Self::UnterminatedFrontmatter => write!(f, "Unterminated YAML frontmatter"),
-            Self::MissingField(field) => write!(f, "Missing required frontmatter field '{}'", field),
+            Self::MissingField(field) => {
+                write!(f, "Missing required frontmatter field '{}'", field)
+            }
             Self::InvalidYaml(msg) => write!(f, "Invalid YAML: {}", msg),
         }
     }
@@ -293,7 +295,10 @@ pub fn render_skill_markdown(doc: &SkillDocument) -> String {
     // -- Frontmatter --
     out.push_str("---\n");
     out.push_str(&format!("name: \"{}\"\n", doc.frontmatter.name));
-    out.push_str(&format!("description: \"{}\"\n", doc.frontmatter.description));
+    out.push_str(&format!(
+        "description: \"{}\"\n",
+        doc.frontmatter.description
+    ));
     if let Some(ref cmd) = doc.frontmatter.command {
         out.push_str(&format!("command: \"{}\"\n", cmd));
     }
@@ -392,7 +397,10 @@ description: "A minimal skill"
     fn test_parse_skill_frontmatter_only() {
         let fm = parse_skill_frontmatter(VALID_SKILL).expect("valid skill should parse");
         assert_eq!(fm.name, "Code Review");
-        assert_eq!(fm.description, "Review code for bugs, style issues, and improvements");
+        assert_eq!(
+            fm.description,
+            "Review code for bugs, style issues, and improvements"
+        );
         assert_eq!(fm.command, Some("review".to_string()));
         assert_eq!(fm.trigger_patterns, vec!["review.*code", "code review"]);
         assert_eq!(fm.tools_required, vec!["file_read"]);
@@ -474,12 +482,18 @@ description: "A minimal skill"
         let reparsed = parse_skill_markdown(&rendered).expect("rendered should re-parse");
         assert_eq!(doc.frontmatter, reparsed.frontmatter);
         // Body may differ in whitespace but sections should match
-        assert_eq!(doc.sections.keys().collect::<Vec<_>>().len(),
-                   reparsed.sections.keys().collect::<Vec<_>>().len());
+        assert_eq!(
+            doc.sections.keys().collect::<Vec<_>>().len(),
+            reparsed.sections.keys().collect::<Vec<_>>().len()
+        );
         for (key, value) in &doc.sections {
             let reparsed_value = reparsed.sections.get(key).expect("section should exist");
-            assert_eq!(value.trim(), reparsed_value.trim(),
-                "Section '{}' content should match", key);
+            assert_eq!(
+                value.trim(),
+                reparsed_value.trim(),
+                "Section '{}' content should match",
+                key
+            );
         }
     }
 

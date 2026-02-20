@@ -11,9 +11,9 @@ pub(crate) mod usage;
 use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
-use arc_swap::ArcSwap;
 use crate::lane::LaneManager;
 use crate::security::gate::SecurityGate;
+use arc_swap::ArcSwap;
 use openalpaca_llm::LlmRouter;
 use openalpaca_storage::Database;
 use std::sync::Arc;
@@ -21,11 +21,11 @@ use uuid::Uuid;
 
 use crate::tools::ToolRegistry;
 
+use super::skill_matcher::{SkillMatch, SkillMatcher};
+use super::task_planner::TaskPlan;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::memory::task_extraction::{TaskExtractionParams, extract_task_memories};
 use openalpaca_storage::repository::MemoryRepository;
-use super::skill_matcher::{SkillMatch, SkillMatcher};
-use super::task_planner::TaskPlan;
 
 /// Retrieve relevant user memories as a formatted block for agent prompts.
 /// Mirrors the retrieval pattern used in `handle_simple_query()`.
@@ -117,6 +117,7 @@ pub(super) async fn retrieve_memory_block(
 
 /// Spawn a background task to extract memories from a completed task output.
 /// Fire-and-forget: does not block the caller. Only runs for successful tasks.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_task_memory_extraction(
     db: &Database,
     router: &Arc<LlmRouter>,
@@ -181,6 +182,7 @@ pub struct TaskDispatcher {
 }
 
 impl TaskDispatcher {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         shared_context: Arc<SharedContext>,
         lane_manager: Arc<LaneManager>,
@@ -215,13 +217,18 @@ impl TaskDispatcher {
                     "No LLM router configured — cannot execute task '{}'",
                     task_id
                 );
-                self.shared_context.task_registry.update_status(
-                    task_id, crate::context::TaskEntryStatus::Failed,
-                );
+                self.shared_context
+                    .task_registry
+                    .update_status(task_id, crate::context::TaskEntryStatus::Failed);
                 if let Some(ref db) = self.db {
                     let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                    if let Err(e) = repo.update_status(task_id, openalpaca_storage::TaskStatus::Failed) {
-                        tracing::warn!("require_router: failed to update DB status for task '{}': {e}", task_id);
+                    if let Err(e) =
+                        repo.update_status(task_id, openalpaca_storage::TaskStatus::Failed)
+                    {
+                        tracing::warn!(
+                            "require_router: failed to update DB status for task '{}': {e}",
+                            task_id
+                        );
                     }
                 }
                 self.bus.publish(crate::events::SystemEvent::TaskFailed {
@@ -236,6 +243,7 @@ impl TaskDispatcher {
 
     /// Dispatch a complex task using heuristic skill matching:
     /// Matches required skills to idle agents, then delegates to dispatch_core.
+    #[allow(clippy::too_many_arguments)]
     pub fn dispatch(
         &self,
         _request_id: Uuid,
@@ -259,7 +267,15 @@ impl TaskDispatcher {
                 e
             })?;
         let title = generate_title(description);
-        self.dispatch_core(description, title, matches, created_by, lane_key, source, workspace_id)
+        self.dispatch_core(
+            description,
+            title,
+            matches,
+            created_by,
+            lane_key,
+            source,
+            workspace_id,
+        )
     }
 
     /// Dispatch a complex task using an LLM-generated plan.
@@ -290,7 +306,12 @@ impl TaskDispatcher {
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| generate_title(description));
             return self.dispatch_lead_agent(
-                description, title, created_by, lane_key, source, workspace_id,
+                description,
+                title,
+                created_by,
+                lane_key,
+                source,
+                workspace_id,
             );
         }
 
@@ -311,7 +332,13 @@ impl TaskDispatcher {
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| generate_title(description));
             return self.dispatch_dag_planned(
-                description, title, dag, created_by, lane_key, source, workspace_id,
+                description,
+                title,
+                dag,
+                created_by,
+                lane_key,
+                source,
+                workspace_id,
             );
         }
 
@@ -328,7 +355,12 @@ impl TaskDispatcher {
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| generate_title(description));
             return self.dispatch_lead_agent(
-                description, title, created_by, lane_key, source, workspace_id,
+                description,
+                title,
+                created_by,
+                lane_key,
+                source,
+                workspace_id,
             );
         }
 
@@ -356,7 +388,15 @@ impl TaskDispatcher {
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| generate_title(description));
 
-        self.dispatch_core(description, title, matches, created_by, lane_key, source, workspace_id)
+        self.dispatch_core(
+            description,
+            title,
+            matches,
+            created_by,
+            lane_key,
+            source,
+            workspace_id,
+        )
     }
 }
 
@@ -410,14 +450,21 @@ pub(super) fn finalize_task(
 ) {
     let now = chrono::Utc::now();
     if success {
-        ctx.task_registry.update_status(task_id, crate::context::TaskEntryStatus::Completed);
+        ctx.task_registry
+            .update_status(task_id, crate::context::TaskEntryStatus::Completed);
         if let Some(db) = db {
             let repo = openalpaca_storage::repository::TaskRepository::new(db);
             if let Err(e) = repo.update_status(task_id, openalpaca_storage::TaskStatus::Completed) {
-                tracing::warn!("finalize_task: failed to update status for task '{}': {e}", task_id);
+                tracing::warn!(
+                    "finalize_task: failed to update status for task '{}': {e}",
+                    task_id
+                );
             }
             if let Err(e) = repo.set_result(task_id, summary) {
-                tracing::warn!("finalize_task: failed to set result for task '{}': {e}", task_id);
+                tracing::warn!(
+                    "finalize_task: failed to set result for task '{}': {e}",
+                    task_id
+                );
             }
         }
         bus.publish(crate::events::SystemEvent::TaskCompleted {
@@ -426,14 +473,21 @@ pub(super) fn finalize_task(
             timestamp: now,
         });
     } else {
-        ctx.task_registry.update_status(task_id, crate::context::TaskEntryStatus::Failed);
+        ctx.task_registry
+            .update_status(task_id, crate::context::TaskEntryStatus::Failed);
         if let Some(db) = db {
             let repo = openalpaca_storage::repository::TaskRepository::new(db);
             if let Err(e) = repo.update_status(task_id, openalpaca_storage::TaskStatus::Failed) {
-                tracing::warn!("finalize_task: failed to update status for task '{}': {e}", task_id);
+                tracing::warn!(
+                    "finalize_task: failed to update status for task '{}': {e}",
+                    task_id
+                );
             }
             if let Err(e) = repo.set_result(task_id, summary) {
-                tracing::warn!("finalize_task: failed to set result for task '{}': {e}", task_id);
+                tracing::warn!(
+                    "finalize_task: failed to set result for task '{}': {e}",
+                    task_id
+                );
             }
         }
         bus.publish(crate::events::SystemEvent::TaskFailed {

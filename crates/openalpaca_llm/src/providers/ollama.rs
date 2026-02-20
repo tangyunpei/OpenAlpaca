@@ -1,6 +1,6 @@
+use crate::LlmProvider;
 use crate::error::LlmError;
 use crate::types::*;
-use crate::LlmProvider;
 use async_trait::async_trait;
 
 const DEFAULT_BASE_URL: &str = "http://localhost:11434/v1";
@@ -28,7 +28,9 @@ impl OllamaProvider {
         #[cfg(feature = "openai")]
         {
             Self {
-                inner: super::openai::OpenAiProvider::new_without_auth_with_client(client, model, url),
+                inner: super::openai::OpenAiProvider::new_without_auth_with_client(
+                    client, model, url,
+                ),
             }
         }
         #[cfg(not(feature = "openai"))]

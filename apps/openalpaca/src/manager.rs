@@ -55,7 +55,7 @@ pub fn is_daemon_running() -> bool {
         // Verify PID existence
         let mut s = System::new();
         s.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-        if s.process(sysinfo::Pid::from_u32(d.pid as u32)).is_some() {
+        if s.process(sysinfo::Pid::from_u32(d.pid)).is_some() {
             return true;
         }
     }

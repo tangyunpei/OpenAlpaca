@@ -5,6 +5,7 @@ use openalpaca_llm::{
     ChatMessage, ChatRequest, FinishReason, LlmProvider, LlmRouter, LlmRouterError, RequestContext,
     RouterRequest, ToolDefinition,
 };
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -108,7 +109,10 @@ impl LoopConfig {
             max_rounds,
             max_tools_per_round,
             max_tool_runtime: Duration::from_secs(
-                agent.constraints.timeout_seconds.unwrap_or(max_tool_runtime_secs),
+                agent
+                    .constraints
+                    .timeout_seconds
+                    .unwrap_or(max_tool_runtime_secs),
             ),
             max_cost: agent.constraints.max_cost_per_task.unwrap_or(max_cost),
             model,
@@ -122,12 +126,16 @@ impl LoopConfig {
     /// Set cost estimation rates from model registry pricing.
     /// If the model is found in the registry, uses its actual pricing.
     /// Otherwise keeps the default fallback rates (Sonnet-like).
-    pub fn with_model_pricing(mut self, registry: &openalpaca_llm::ModelRegistry, model_id: Option<&str>) -> Self {
-        if let Some(model) = model_id {
-            if let Some(pricing) = registry.get_pricing(model) {
-                self.fallback_input_rate = pricing.input_price_per_million;
-                self.fallback_output_rate = pricing.output_price_per_million;
-            }
+    pub fn with_model_pricing(
+        mut self,
+        registry: &openalpaca_llm::ModelRegistry,
+        model_id: Option<&str>,
+    ) -> Self {
+        if let Some(model) = model_id
+            && let Some(pricing) = registry.get_pricing(model)
+        {
+            self.fallback_input_rate = pricing.input_price_per_million;
+            self.fallback_output_rate = pricing.output_price_per_million;
         }
         self
     }
@@ -189,6 +197,7 @@ pub enum LoopFinishReason {
 /// When `sandbox` is `Some`, tool calls are routed through the SandboxManager
 /// with capability checks, input sanitization, and timeout enforcement.
 /// When `sandbox` is `None`, falls back to stub behavior (backward compat).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_agentic_loop(
     provider: &dyn LlmProvider,
     initial_messages: Vec<ChatMessage>,
@@ -197,6 +206,7 @@ pub async fn run_agentic_loop(
     sandbox: Option<&SandboxManager>,
     agent_id: &str,
     sandbox_policy: Option<&SandboxPolicy>,
+    cancel_token: Option<CancellationToken>,
 ) -> LoopResult {
     let start = Instant::now();
     let mut messages = initial_messages;
@@ -216,8 +226,33 @@ pub async fn run_agentic_loop(
     );
 
     loop {
+        // Check cancellation before each round
+        if let Some(ref token) = cancel_token
+            && token.is_cancelled()
+        {
+            tracing::info!(
+                agent_id = agent_id,
+                rounds = rounds,
+                "Agentic loop cancelled"
+            );
+            return LoopResult {
+                final_content: last_assistant_content,
+                rounds_used: rounds,
+                total_input_tokens: total_input,
+                total_output_tokens: total_output,
+                tool_calls_made,
+                finish_reason: LoopFinishReason::Cancelled,
+                model_used: last_model.clone(),
+                elapsed: start.elapsed(),
+            };
+        }
+
         if rounds >= config.max_rounds {
-            tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop exiting: max rounds reached");
+            tracing::info!(
+                agent_id = agent_id,
+                rounds = rounds,
+                "Agentic loop exiting: max rounds reached"
+            );
             return LoopResult {
                 final_content: last_assistant_content,
                 rounds_used: rounds,
@@ -230,9 +265,18 @@ pub async fn run_agentic_loop(
             };
         }
 
-        let estimated_cost = estimate_cost(total_input, total_output, config.fallback_input_rate, config.fallback_output_rate);
+        let estimated_cost = estimate_cost(
+            total_input,
+            total_output,
+            config.fallback_input_rate,
+            config.fallback_output_rate,
+        );
         if estimated_cost > config.max_cost {
-            tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop exiting: cost limit exceeded");
+            tracing::info!(
+                agent_id = agent_id,
+                rounds = rounds,
+                "Agentic loop exiting: cost limit exceeded"
+            );
             return LoopResult {
                 final_content: last_assistant_content,
                 rounds_used: rounds,
@@ -253,9 +297,36 @@ pub async fn run_agentic_loop(
             max_tokens: None,
         };
 
-        tracing::debug!(agent_id = agent_id, round = rounds + 1, messages_count = messages.len(), "LLM call starting");
+        tracing::debug!(
+            agent_id = agent_id,
+            round = rounds + 1,
+            messages_count = messages.len(),
+            "LLM call starting"
+        );
 
-        match provider.chat(request).await {
+        // Race LLM call against cancellation token (if present)
+        let llm_result = if let Some(ref token) = cancel_token {
+            tokio::select! {
+                result = provider.chat(request) => result,
+                _ = token.cancelled() => {
+                    tracing::info!(agent_id = agent_id, round = rounds + 1, "LLM call interrupted by cancellation");
+                    return LoopResult {
+                        final_content: last_assistant_content,
+                        rounds_used: rounds,
+                        total_input_tokens: total_input,
+                        total_output_tokens: total_output,
+                        tool_calls_made,
+                        finish_reason: LoopFinishReason::Cancelled,
+                        model_used: last_model.clone(),
+                        elapsed: start.elapsed(),
+                    };
+                }
+            }
+        } else {
+            provider.chat(request).await
+        };
+
+        match llm_result {
             Ok(response) => {
                 total_input += response.usage.input_tokens;
                 total_output += response.usage.output_tokens;
@@ -284,18 +355,20 @@ pub async fn run_agentic_loop(
                     messages.push(ChatMessage::assistant_with_tools(&response));
 
                     // Enforce max_tools_per_round
-                    let calls_this_round = response.tool_calls.len().min(config.max_tools_per_round);
+                    let calls_this_round =
+                        response.tool_calls.len().min(config.max_tools_per_round);
 
                     for tc in response.tool_calls.iter().take(calls_this_round) {
                         // Enforce max_tool_calls from sandbox policy
-                        if let Some(policy) = sandbox_policy {
-                            if let Some(max_calls) = policy.max_tool_calls {
-                                if tool_calls_made >= max_calls as usize {
-                                    let err = format_tool_error("max_tool_calls limit reached — no more tool calls allowed");
-                                    messages.push(ChatMessage::tool_result(&tc.id, &err));
-                                    continue;
-                                }
-                            }
+                        if let Some(policy) = sandbox_policy
+                            && let Some(max_calls) = policy.max_tool_calls
+                            && tool_calls_made >= max_calls as usize
+                        {
+                            let err = format_tool_error(
+                                "max_tool_calls limit reached — no more tool calls allowed",
+                            );
+                            messages.push(ChatMessage::tool_result(&tc.id, &err));
+                            continue;
                         }
 
                         tool_calls_made += 1;
@@ -316,7 +389,9 @@ pub async fn run_agentic_loop(
                             // Route through sandbox
                             match sbx.execute_tool(agent_id, tc, policy).await {
                                 Ok(output) => truncate_tool_result(output),
-                                Err(err) => truncate_tool_result(format_tool_error(&err.to_string())),
+                                Err(err) => {
+                                    truncate_tool_result(format_tool_error(&err.to_string()))
+                                }
                             }
                         } else {
                             tracing::warn!(
@@ -324,7 +399,10 @@ pub async fn run_agentic_loop(
                                 tool = tc.name,
                                 "Sandbox not configured — returning stub for tool call (misconfiguration?)"
                             );
-                            format_tool_error(&format!("tool '{}' not available — sandbox not configured", tc.name))
+                            format_tool_error(&format!(
+                                "tool '{}' not available — sandbox not configured",
+                                tc.name
+                            ))
                         };
 
                         tracing::debug!(
@@ -423,9 +501,12 @@ pub async fn run_agentic_loop_routed(
         task_id: task_id.map(|s| s.to_string()),
     };
 
+    // Wrap tools in Arc once — they don't change between rounds
+    let tools_arc = Arc::new(tools);
+
     tracing::info!(
         agent_id = agent_id,
-        tools_count = tools.len(),
+        tools_count = tools_arc.len(),
         max_rounds = config.max_rounds,
         max_cost = config.max_cost,
         "Agentic loop started"
@@ -433,24 +514,32 @@ pub async fn run_agentic_loop_routed(
 
     loop {
         // Check cancellation before each round
-        if let Some(ref token) = cancel_token {
-            if token.is_cancelled() {
-                tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop cancelled");
-                return LoopResult {
-                    final_content: last_assistant_content,
-                    rounds_used: rounds,
-                    total_input_tokens: total_input,
-                    total_output_tokens: total_output,
-                    tool_calls_made,
-                    finish_reason: LoopFinishReason::Cancelled,
-                    model_used: last_model.clone(),
-                    elapsed: start.elapsed(),
-                };
-            }
+        if let Some(ref token) = cancel_token
+            && token.is_cancelled()
+        {
+            tracing::info!(
+                agent_id = agent_id,
+                rounds = rounds,
+                "Agentic loop cancelled"
+            );
+            return LoopResult {
+                final_content: last_assistant_content,
+                rounds_used: rounds,
+                total_input_tokens: total_input,
+                total_output_tokens: total_output,
+                tool_calls_made,
+                finish_reason: LoopFinishReason::Cancelled,
+                model_used: last_model.clone(),
+                elapsed: start.elapsed(),
+            };
         }
 
         if rounds >= config.max_rounds {
-            tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop exiting: max rounds reached");
+            tracing::info!(
+                agent_id = agent_id,
+                rounds = rounds,
+                "Agentic loop exiting: max rounds reached"
+            );
             return LoopResult {
                 final_content: last_assistant_content,
                 rounds_used: rounds,
@@ -463,27 +552,20 @@ pub async fn run_agentic_loop_routed(
             };
         }
 
-        // Check cost via router's cost tracker (agent-level)
-        if let Some(usage) = router.cost_tracker.get_agent_usage(agent_id).await
-            && usage.total_cost_usd > config.max_cost
-        {
-            tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop exiting: cost limit exceeded");
-            return LoopResult {
-                final_content: last_assistant_content,
-                rounds_used: rounds,
-                total_input_tokens: total_input,
-                total_output_tokens: total_output,
-                tool_calls_made,
-                finish_reason: LoopFinishReason::CostExceeded,
-                model_used: last_model.clone(),
-                elapsed: start.elapsed(),
-            };
-        }
-
-        // Also check simple estimate as a fallback
-        let estimated_cost = estimate_cost(total_input, total_output, config.fallback_input_rate, config.fallback_output_rate);
+        // Check cost using local token tracking (avoids per-round async lock acquisition)
+        let estimated_cost = estimate_cost(
+            total_input,
+            total_output,
+            config.fallback_input_rate,
+            config.fallback_output_rate,
+        );
         if estimated_cost > config.max_cost {
-            tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop exiting: cost limit exceeded (estimate)");
+            tracing::info!(
+                agent_id = agent_id,
+                rounds = rounds,
+                estimated_cost,
+                "Agentic loop exiting: cost limit exceeded"
+            );
             return LoopResult {
                 final_content: last_assistant_content,
                 rounds_used: rounds,
@@ -499,13 +581,18 @@ pub async fn run_agentic_loop_routed(
         let request = RouterRequest {
             model: config.model.clone(),
             messages: messages.clone(),
-            tools: tools.clone(),
+            tools: Arc::clone(&tools_arc),
             temperature: None,
             max_tokens: None,
             context: context.clone(),
         };
 
-        tracing::debug!(agent_id = agent_id, round = rounds + 1, messages_count = messages.len(), "LLM call starting");
+        tracing::debug!(
+            agent_id = agent_id,
+            round = rounds + 1,
+            messages_count = messages.len(),
+            "LLM call starting"
+        );
 
         // Race LLM call against cancellation token (if present).
         // This allows interrupting long-running LLM calls (10-60s) mid-flight.
@@ -536,29 +623,32 @@ pub async fn run_agentic_loop_routed(
                 // Enforce model access constraints: if the router resolved to a
                 // model the agent is not allowed to use (e.g., via fallback chain),
                 // abort with an error rather than processing the response.
-                if let Some(ref constraints) = config.agent_constraints {
-                    if let Err(violation) = CapabilityManager::check_model_access(
-                        agent_id, &response.model, constraints,
-                    ) {
-                        tracing::warn!(
-                            agent_id = agent_id,
-                            model = %response.model,
-                            "Model access denied at runtime: {}",
-                            violation,
-                        );
-                        return LoopResult {
-                            final_content: last_assistant_content,
-                            rounds_used: rounds,
-                            total_input_tokens: total_input,
-                            total_output_tokens: total_output,
-                            tool_calls_made,
-                            finish_reason: LoopFinishReason::Error(format!(
-                                "Model access denied: {}", violation
-                            )),
-                            model_used: Some(response.model),
-                            elapsed: start.elapsed(),
-                        };
-                    }
+                if let Some(ref constraints) = config.agent_constraints
+                    && let Err(violation) = CapabilityManager::check_model_access(
+                        agent_id,
+                        &response.model,
+                        constraints,
+                    )
+                {
+                    tracing::warn!(
+                        agent_id = agent_id,
+                        model = %response.model,
+                        "Model access denied at runtime: {}",
+                        violation,
+                    );
+                    return LoopResult {
+                        final_content: last_assistant_content,
+                        rounds_used: rounds,
+                        total_input_tokens: total_input,
+                        total_output_tokens: total_output,
+                        tool_calls_made,
+                        finish_reason: LoopFinishReason::Error(format!(
+                            "Model access denied: {}",
+                            violation
+                        )),
+                        model_used: Some(response.model),
+                        elapsed: start.elapsed(),
+                    };
                 }
 
                 total_input += response.usage.input_tokens;
@@ -591,14 +681,15 @@ pub async fn run_agentic_loop_routed(
 
                     for tc in response.tool_calls.iter().take(calls_this_round) {
                         // Enforce max_tool_calls from sandbox policy
-                        if let Some(policy) = sandbox_policy {
-                            if let Some(max_calls) = policy.max_tool_calls {
-                                if tool_calls_made >= max_calls as usize {
-                                    let err = format_tool_error("max_tool_calls limit reached — no more tool calls allowed");
-                                    messages.push(ChatMessage::tool_result(&tc.id, &err));
-                                    continue;
-                                }
-                            }
+                        if let Some(policy) = sandbox_policy
+                            && let Some(max_calls) = policy.max_tool_calls
+                            && tool_calls_made >= max_calls as usize
+                        {
+                            let err = format_tool_error(
+                                "max_tool_calls limit reached — no more tool calls allowed",
+                            );
+                            messages.push(ChatMessage::tool_result(&tc.id, &err));
+                            continue;
                         }
 
                         tool_calls_made += 1;
@@ -616,7 +707,9 @@ pub async fn run_agentic_loop_routed(
                         {
                             match sbx.execute_tool(agent_id, tc, policy).await {
                                 Ok(output) => truncate_tool_result(output),
-                                Err(err) => truncate_tool_result(format_tool_error(&err.to_string())),
+                                Err(err) => {
+                                    truncate_tool_result(format_tool_error(&err.to_string()))
+                                }
                             }
                         } else {
                             tracing::warn!(
@@ -624,7 +717,10 @@ pub async fn run_agentic_loop_routed(
                                 tool = tc.name,
                                 "Sandbox not configured — returning stub for tool call (misconfiguration?)"
                             );
-                            format_tool_error(&format!("tool '{}' not available — sandbox not configured", tc.name))
+                            format_tool_error(&format!(
+                                "tool '{}' not available — sandbox not configured",
+                                tc.name
+                            ))
                         };
 
                         tracing::debug!(
@@ -848,7 +944,17 @@ mod tests {
         let messages = vec![ChatMessage::user("hello")];
         let config = LoopConfig::default();
 
-        let result = run_agentic_loop(&provider, messages, vec![], &config, None, "test", None).await;
+        let result = run_agentic_loop(
+            &provider,
+            messages,
+            vec![],
+            &config,
+            None,
+            "test",
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(result.finish_reason, LoopFinishReason::Complete);
         assert_eq!(result.rounds_used, 1);
@@ -866,7 +972,17 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_agentic_loop(&provider, messages, vec![], &config, None, "test", None).await;
+        let result = run_agentic_loop(
+            &provider,
+            messages,
+            vec![],
+            &config,
+            None,
+            "test",
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(result.finish_reason, LoopFinishReason::MaxRounds);
         assert_eq!(result.rounds_used, 3);
@@ -883,20 +999,39 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_agentic_loop(&provider, messages, vec![], &config, None, "test", None).await;
+        let result = run_agentic_loop(
+            &provider,
+            messages,
+            vec![],
+            &config,
+            None,
+            "test",
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(result.finish_reason, LoopFinishReason::CostExceeded);
     }
 
     #[tokio::test]
     async fn test_handles_provider_error() {
-        let provider = MockProvider::new(vec![Err(LlmError::Http(
-            "connection refused".to_string(),
-        ))]);
+        let provider =
+            MockProvider::new(vec![Err(LlmError::Http("connection refused".to_string()))]);
         let messages = vec![ChatMessage::user("hello")];
         let config = LoopConfig::default();
 
-        let result = run_agentic_loop(&provider, messages, vec![], &config, None, "test", None).await;
+        let result = run_agentic_loop(
+            &provider,
+            messages,
+            vec![],
+            &config,
+            None,
+            "test",
+            None,
+            None,
+        )
+        .await;
 
         match result.finish_reason {
             LoopFinishReason::Error(msg) => assert!(msg.contains("connection refused")),
@@ -914,7 +1049,17 @@ mod tests {
         let messages = vec![ChatMessage::user("search something")];
         let config = LoopConfig::default();
 
-        let result = run_agentic_loop(&provider, messages, vec![], &config, None, "test", None).await;
+        let result = run_agentic_loop(
+            &provider,
+            messages,
+            vec![],
+            &config,
+            None,
+            "test",
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(result.finish_reason, LoopFinishReason::Complete);
         assert_eq!(result.rounds_used, 2);
@@ -931,7 +1076,17 @@ mod tests {
         let messages = vec![ChatMessage::user("test")];
         let config = LoopConfig::default();
 
-        let result = run_agentic_loop(&provider, messages, vec![], &config, None, "test", None).await;
+        let result = run_agentic_loop(
+            &provider,
+            messages,
+            vec![],
+            &config,
+            None,
+            "test",
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(result.rounds_used, 2);
         assert_eq!(result.total_input_tokens, 30); // 20 + 10
@@ -960,10 +1115,8 @@ mod tests {
             }
         }
 
-        let sandbox = SandboxManager::with_defaults(
-            std::sync::Arc::new(TestExecutor),
-            EventBus::default(),
-        );
+        let sandbox =
+            SandboxManager::with_defaults(std::sync::Arc::new(TestExecutor), EventBus::default());
         let policy = SandboxPolicy {
             agent_id: "test_agent".to_string(),
             allowed_capabilities: vec![],
@@ -981,9 +1134,16 @@ mod tests {
         let config = LoopConfig::default();
 
         let result = run_agentic_loop(
-            &provider, messages, vec![], &config,
-            Some(&sandbox), "test_agent", Some(&policy),
-        ).await;
+            &provider,
+            messages,
+            vec![],
+            &config,
+            Some(&sandbox),
+            "test_agent",
+            Some(&policy),
+            None,
+        )
+        .await;
 
         assert_eq!(result.finish_reason, LoopFinishReason::Complete);
         assert_eq!(result.tool_calls_made, 1);
@@ -1011,10 +1171,8 @@ mod tests {
             }
         }
 
-        let sandbox = SandboxManager::with_defaults(
-            std::sync::Arc::new(TestExecutor),
-            EventBus::default(),
-        );
+        let sandbox =
+            SandboxManager::with_defaults(std::sync::Arc::new(TestExecutor), EventBus::default());
         let policy = SandboxPolicy {
             agent_id: "test_agent".to_string(),
             allowed_capabilities: vec![],
@@ -1032,9 +1190,16 @@ mod tests {
         let config = LoopConfig::default();
 
         let result = run_agentic_loop(
-            &provider, messages, vec![], &config,
-            Some(&sandbox), "test_agent", Some(&policy),
-        ).await;
+            &provider,
+            messages,
+            vec![],
+            &config,
+            Some(&sandbox),
+            "test_agent",
+            Some(&policy),
+            None,
+        )
+        .await;
 
         assert_eq!(result.finish_reason, LoopFinishReason::Complete);
         assert_eq!(result.tool_calls_made, 1);
@@ -1083,7 +1248,17 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_agentic_loop(&provider, messages, vec![], &config, None, "test", None).await;
+        let result = run_agentic_loop(
+            &provider,
+            messages,
+            vec![],
+            &config,
+            None,
+            "test",
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(result.finish_reason, LoopFinishReason::Complete);
         // Only 2 tool calls should have been counted (the 3rd was truncated)

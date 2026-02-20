@@ -53,60 +53,72 @@ impl ModelRegistry {
         let mut models = HashMap::new();
 
         // Anthropic models (discovered: false — only for internal routing/pricing)
-        for id in &[
-            "claude-opus-4-20250514",
-            "claude-opus-4-6",
-        ] {
-            models.insert(id.to_string(), ModelInfo {
+        for id in &["claude-opus-4-20250514", "claude-opus-4-6"] {
+            models.insert(
+                id.to_string(),
+                ModelInfo {
+                    provider: ProviderType::Anthropic,
+                    input_price_per_million: 15.0,
+                    output_price_per_million: 75.0,
+                    context_window: 200_000,
+                    discovered: false,
+                },
+            );
+        }
+        for id in &["claude-sonnet-4-5-20250929", "claude-sonnet-4-20250514"] {
+            models.insert(
+                id.to_string(),
+                ModelInfo {
+                    provider: ProviderType::Anthropic,
+                    input_price_per_million: 3.0,
+                    output_price_per_million: 15.0,
+                    context_window: 200_000,
+                    discovered: false,
+                },
+            );
+        }
+        models.insert(
+            "claude-haiku-4-5-20251001".to_string(),
+            ModelInfo {
                 provider: ProviderType::Anthropic,
-                input_price_per_million: 15.0,
-                output_price_per_million: 75.0,
+                input_price_per_million: 1.0,
+                output_price_per_million: 5.0,
                 context_window: 200_000,
                 discovered: false,
-            });
-        }
-        for id in &[
-            "claude-sonnet-4-5-20250929",
-            "claude-sonnet-4-20250514",
-        ] {
-            models.insert(id.to_string(), ModelInfo {
-                provider: ProviderType::Anthropic,
-                input_price_per_million: 3.0,
-                output_price_per_million: 15.0,
-                context_window: 200_000,
-                discovered: false,
-            });
-        }
-        models.insert("claude-haiku-4-5-20251001".to_string(), ModelInfo {
-            provider: ProviderType::Anthropic,
-            input_price_per_million: 1.0,
-            output_price_per_million: 5.0,
-            context_window: 200_000,
-            discovered: false,
-        });
+            },
+        );
 
         // OpenAI models
-        models.insert("gpt-5.2".to_string(), ModelInfo {
-            provider: ProviderType::OpenAI,
-            input_price_per_million: 1.75,
-            output_price_per_million: 14.0,
-            context_window: 128_000,
-            discovered: false,
-        });
-        models.insert("gpt-5-mini".to_string(), ModelInfo {
-            provider: ProviderType::OpenAI,
-            input_price_per_million: 0.25,
-            output_price_per_million: 2.0,
-            context_window: 128_000,
-            discovered: false,
-        });
-        models.insert("gpt-5-nano".to_string(), ModelInfo {
-            provider: ProviderType::OpenAI,
-            input_price_per_million: 0.05,
-            output_price_per_million: 0.40,
-            context_window: 128_000,
-            discovered: false,
-        });
+        models.insert(
+            "gpt-5.2".to_string(),
+            ModelInfo {
+                provider: ProviderType::OpenAI,
+                input_price_per_million: 1.75,
+                output_price_per_million: 14.0,
+                context_window: 128_000,
+                discovered: false,
+            },
+        );
+        models.insert(
+            "gpt-5-mini".to_string(),
+            ModelInfo {
+                provider: ProviderType::OpenAI,
+                input_price_per_million: 0.25,
+                output_price_per_million: 2.0,
+                context_window: 128_000,
+                discovered: false,
+            },
+        );
+        models.insert(
+            "gpt-5-nano".to_string(),
+            ModelInfo {
+                provider: ProviderType::OpenAI,
+                input_price_per_million: 0.05,
+                output_price_per_million: 0.40,
+                context_window: 128_000,
+                discovered: false,
+            },
+        );
 
         Self {
             models: RwLock::new(models),
@@ -138,7 +150,10 @@ impl ModelRegistry {
 
     /// Reload model registry entries from config (hot-reload).
     /// Config models override any existing entries.
-    pub fn reload_from_config(&self, config_models: &HashMap<String, crate::config::ModelConfigEntry>) {
+    pub fn reload_from_config(
+        &self,
+        config_models: &HashMap<String, crate::config::ModelConfigEntry>,
+    ) {
         for (model_id, entry) in config_models {
             if let Some(provider) = crate::config::parse_provider_type_pub(&entry.provider) {
                 self.register(
@@ -171,10 +186,14 @@ impl ModelRegistry {
 
     /// Get pricing info for a model.
     pub fn get_pricing(&self, model_id: &str) -> Option<PricingInfo> {
-        self.models.read().unwrap().get(model_id).map(|info| PricingInfo {
-            input_price_per_million: info.input_price_per_million,
-            output_price_per_million: info.output_price_per_million,
-        })
+        self.models
+            .read()
+            .unwrap()
+            .get(model_id)
+            .map(|info| PricingInfo {
+                input_price_per_million: info.input_price_per_million,
+                output_price_per_million: info.output_price_per_million,
+            })
     }
 
     /// Get full model info (cloned).
@@ -306,53 +325,77 @@ mod tests {
     #[test]
     fn test_custom_registry() {
         let mut models = HashMap::new();
-        models.insert("my-model".to_string(), ModelInfo {
-            provider: ProviderType::Ollama,
-            input_price_per_million: 0.0,
-            output_price_per_million: 0.0,
-            context_window: 4096,
-            discovered: false,
-        });
+        models.insert(
+            "my-model".to_string(),
+            ModelInfo {
+                provider: ProviderType::Ollama,
+                input_price_per_million: 0.0,
+                output_price_per_million: 0.0,
+                context_window: 4096,
+                discovered: false,
+            },
+        );
         let registry = ModelRegistry::new(models);
-        assert_eq!(registry.resolve_provider("my-model"), Some(ProviderType::Ollama));
+        assert_eq!(
+            registry.resolve_provider("my-model"),
+            Some(ProviderType::Ollama)
+        );
         assert_eq!(registry.resolve_provider("gpt-5.2"), None);
     }
 
     #[test]
     fn test_register_model() {
         let registry = ModelRegistry::new(HashMap::new());
-        registry.register("new-model".to_string(), ModelInfo {
-            provider: ProviderType::OpenAI,
-            input_price_per_million: 1.0,
-            output_price_per_million: 2.0,
-            context_window: 32_000,
-            discovered: false,
-        });
-        assert_eq!(registry.resolve_provider("new-model"), Some(ProviderType::OpenAI));
+        registry.register(
+            "new-model".to_string(),
+            ModelInfo {
+                provider: ProviderType::OpenAI,
+                input_price_per_million: 1.0,
+                output_price_per_million: 2.0,
+                context_window: 32_000,
+                discovered: false,
+            },
+        );
+        assert_eq!(
+            registry.resolve_provider("new-model"),
+            Some(ProviderType::OpenAI)
+        );
     }
 
     #[test]
     fn test_register_if_absent() {
         let registry = ModelRegistry::with_defaults();
         // Should not overwrite existing
-        registry.register_if_absent("gpt-5.2".to_string(), ModelInfo {
-            provider: ProviderType::Ollama,
-            input_price_per_million: 0.0,
-            output_price_per_million: 0.0,
-            context_window: 0,
-            discovered: false,
-        });
-        assert_eq!(registry.resolve_provider("gpt-5.2"), Some(ProviderType::OpenAI));
+        registry.register_if_absent(
+            "gpt-5.2".to_string(),
+            ModelInfo {
+                provider: ProviderType::Ollama,
+                input_price_per_million: 0.0,
+                output_price_per_million: 0.0,
+                context_window: 0,
+                discovered: false,
+            },
+        );
+        assert_eq!(
+            registry.resolve_provider("gpt-5.2"),
+            Some(ProviderType::OpenAI)
+        );
 
         // Should add new
-        registry.register_if_absent("new-model".to_string(), ModelInfo {
-            provider: ProviderType::Ollama,
-            input_price_per_million: 0.0,
-            output_price_per_million: 0.0,
-            context_window: 4096,
-            discovered: false,
-        });
-        assert_eq!(registry.resolve_provider("new-model"), Some(ProviderType::Ollama));
+        registry.register_if_absent(
+            "new-model".to_string(),
+            ModelInfo {
+                provider: ProviderType::Ollama,
+                input_price_per_million: 0.0,
+                output_price_per_million: 0.0,
+                context_window: 4096,
+                discovered: false,
+            },
+        );
+        assert_eq!(
+            registry.resolve_provider("new-model"),
+            Some(ProviderType::Ollama)
+        );
     }
 
     #[test]
@@ -364,26 +407,32 @@ mod tests {
         assert!(!info.discovered);
 
         // register_discovered marks existing model as discovered, preserves pricing
-        registry.register_discovered("gpt-5.2".to_string(), ModelInfo {
-            provider: ProviderType::OpenAI,
-            input_price_per_million: 0.0,
-            output_price_per_million: 0.0,
-            context_window: 0,
-            discovered: true,
-        });
+        registry.register_discovered(
+            "gpt-5.2".to_string(),
+            ModelInfo {
+                provider: ProviderType::OpenAI,
+                input_price_per_million: 0.0,
+                output_price_per_million: 0.0,
+                context_window: 0,
+                discovered: true,
+            },
+        );
         let info = registry.get_model_info("gpt-5.2").unwrap();
         assert!(info.discovered);
         // Pricing preserved from defaults
         assert!((info.input_price_per_million - 1.75).abs() < 0.01);
 
         // register_discovered inserts new model with discovered=true
-        registry.register_discovered("new-api-model".to_string(), ModelInfo {
-            provider: ProviderType::Anthropic,
-            input_price_per_million: 0.0,
-            output_price_per_million: 0.0,
-            context_window: 0,
-            discovered: false, // even if passed false, method forces true
-        });
+        registry.register_discovered(
+            "new-api-model".to_string(),
+            ModelInfo {
+                provider: ProviderType::Anthropic,
+                input_price_per_million: 0.0,
+                output_price_per_million: 0.0,
+                context_window: 0,
+                discovered: false, // even if passed false, method forces true
+            },
+        );
         let info = registry.get_model_info("new-api-model").unwrap();
         assert!(info.discovered);
     }
@@ -397,13 +446,16 @@ mod tests {
         assert!(discovered.is_empty());
 
         // Mark one model as discovered
-        registry.register_discovered("gpt-5.2".to_string(), ModelInfo {
-            provider: ProviderType::OpenAI,
-            input_price_per_million: 0.0,
-            output_price_per_million: 0.0,
-            context_window: 0,
-            discovered: true,
-        });
+        registry.register_discovered(
+            "gpt-5.2".to_string(),
+            ModelInfo {
+                provider: ProviderType::OpenAI,
+                input_price_per_million: 0.0,
+                output_price_per_million: 0.0,
+                context_window: 0,
+                discovered: true,
+            },
+        );
 
         let discovered = registry.list_discovered_models();
         assert_eq!(discovered.len(), 1);
@@ -421,8 +473,10 @@ mod tests {
         assert!(!models.is_empty());
         // Should be sorted by provider then id
         for w in models.windows(2) {
-            assert!(w[0].provider <= w[1].provider
-                || (w[0].provider == w[1].provider && w[0].id <= w[1].id));
+            assert!(
+                w[0].provider <= w[1].provider
+                    || (w[0].provider == w[1].provider && w[0].id <= w[1].id)
+            );
         }
     }
 }

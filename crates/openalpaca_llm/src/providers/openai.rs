@@ -1,6 +1,6 @@
+use crate::LlmProvider;
 use crate::error::LlmError;
 use crate::types::*;
-use crate::LlmProvider;
 use async_trait::async_trait;
 
 const DEFAULT_MODEL: &str = "gpt-4o";
@@ -43,10 +43,7 @@ impl OpenAiProvider {
     }
 
     /// Create a provider without auth (for OpenAI-compatible APIs like Ollama).
-    pub fn new_without_auth(
-        model: String,
-        base_url: String,
-    ) -> Self {
+    pub fn new_without_auth(model: String, base_url: String) -> Self {
         Self::new_without_auth_with_client(reqwest::Client::new(), model, base_url)
     }
 
@@ -65,14 +62,8 @@ impl OpenAiProvider {
         }
     }
 
-    pub(crate) fn build_request_body(
-        &self,
-        request: &ChatRequest,
-    ) -> serde_json::Value {
-        let model = request
-            .model
-            .as_deref()
-            .unwrap_or(&self.model);
+    pub(crate) fn build_request_body(&self, request: &ChatRequest) -> serde_json::Value {
+        let model = request.model.as_deref().unwrap_or(&self.model);
         let max_tokens = request.max_tokens.unwrap_or(self.max_tokens);
 
         let messages: Vec<serde_json::Value> = request
@@ -148,10 +139,7 @@ impl OpenAiProvider {
     }
 
     pub(crate) fn parse_response(&self, body: serde_json::Value) -> Result<ChatResponse, LlmError> {
-        let model = body["model"]
-            .as_str()
-            .unwrap_or(&self.model)
-            .to_string();
+        let model = body["model"].as_str().unwrap_or(&self.model).to_string();
 
         let usage = Usage {
             input_tokens: body["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
@@ -162,10 +150,7 @@ impl OpenAiProvider {
         let choice = &body["choices"][0];
         let message = &choice["message"];
 
-        let content = message["content"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let content = message["content"].as_str().unwrap_or("").to_string();
 
         let finish_reason_str = choice["finish_reason"].as_str().unwrap_or("stop");
         let finish_reason = match finish_reason_str {
@@ -183,9 +168,7 @@ impl OpenAiProvider {
                     .as_str()
                     .unwrap_or_default()
                     .to_string();
-                let args_str = tc["function"]["arguments"]
-                    .as_str()
-                    .unwrap_or("{}");
+                let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
                 let arguments: serde_json::Value = serde_json::from_str(args_str)
                     .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                 tool_calls.push(ToolCall {
@@ -257,7 +240,11 @@ impl LlmProvider for OpenAiProvider {
         Ok(models)
     }
 
-    async fn chat_with_key(&self, key: &str, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+    async fn chat_with_key(
+        &self,
+        key: &str,
+        request: ChatRequest,
+    ) -> Result<ChatResponse, LlmError> {
         let body = self.build_request_body(&request);
         let url = format!("{}/chat/completions", self.base_url);
 
@@ -315,12 +302,7 @@ mod tests {
 
     #[test]
     fn test_request_format() {
-        let provider = OpenAiProvider::new(
-            "test-key".to_string(),
-            None,
-            None,
-            None,
-        );
+        let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
         let request = ChatRequest {
             messages: vec![
                 ChatMessage::system("You are helpful."),

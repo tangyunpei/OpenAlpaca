@@ -5,7 +5,10 @@ use tracing::{error, info};
 
 use crate::models::ScheduledTask;
 use crate::scheduler::WakeScheduler;
-use crate::watcher::{EventWatcher, filesystem::{FileWatchHandle, FilesystemWatcher}};
+use crate::watcher::{
+    EventWatcher,
+    filesystem::{FileWatchHandle, FilesystemWatcher},
+};
 use openalpaca_api::events::WakeEvent;
 
 /// Central manager for the Wake Module

@@ -1,6 +1,6 @@
+use crate::LlmProvider;
 use crate::error::LlmError;
 use crate::types::*;
-use crate::LlmProvider;
 use async_trait::async_trait;
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-5-20250929";
@@ -35,14 +35,8 @@ impl AnthropicProvider {
         }
     }
 
-    fn build_request_body(
-        &self,
-        request: &ChatRequest,
-    ) -> serde_json::Value {
-        let model = request
-            .model
-            .as_deref()
-            .unwrap_or(&self.model);
+    fn build_request_body(&self, request: &ChatRequest) -> serde_json::Value {
+        let model = request.model.as_deref().unwrap_or(&self.model);
         let max_tokens = request.max_tokens.unwrap_or(self.max_tokens);
 
         // Extract system message (Anthropic uses top-level system field)
@@ -138,14 +132,15 @@ impl AnthropicProvider {
     }
 
     fn parse_response(&self, body: serde_json::Value) -> Result<ChatResponse, LlmError> {
-        let model = body["model"]
-            .as_str()
-            .unwrap_or(&self.model)
-            .to_string();
+        let model = body["model"].as_str().unwrap_or(&self.model).to_string();
 
         let base_input = body["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
-        let cache_creation = body["usage"]["cache_creation_input_tokens"].as_u64().unwrap_or(0) as u32;
-        let cache_read = body["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0) as u32;
+        let cache_creation = body["usage"]["cache_creation_input_tokens"]
+            .as_u64()
+            .unwrap_or(0) as u32;
+        let cache_read = body["usage"]["cache_read_input_tokens"]
+            .as_u64()
+            .unwrap_or(0) as u32;
 
         let usage = Usage {
             input_tokens: base_input + cache_creation + cache_read,
@@ -178,14 +173,8 @@ impl AnthropicProvider {
                     }
                     Some("tool_use") => {
                         tool_calls.push(ToolCall {
-                            id: block["id"]
-                                .as_str()
-                                .unwrap_or_default()
-                                .to_string(),
-                            name: block["name"]
-                                .as_str()
-                                .unwrap_or_default()
-                                .to_string(),
+                            id: block["id"].as_str().unwrap_or_default().to_string(),
+                            name: block["name"].as_str().unwrap_or_default().to_string(),
                             arguments: block["input"].clone(),
                         });
                     }
@@ -249,7 +238,11 @@ impl LlmProvider for AnthropicProvider {
         Ok(models)
     }
 
-    async fn chat_with_key(&self, key: &str, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+    async fn chat_with_key(
+        &self,
+        key: &str,
+        request: ChatRequest,
+    ) -> Result<ChatResponse, LlmError> {
         let body = self.build_request_body(&request);
 
         let response = self
@@ -301,11 +294,7 @@ mod tests {
 
     #[test]
     fn test_request_serialization() {
-        let provider = AnthropicProvider::new(
-            "test-key".to_string(),
-            None,
-            None,
-        );
+        let provider = AnthropicProvider::new("test-key".to_string(), None, None);
         let request = ChatRequest {
             messages: vec![
                 ChatMessage::system("You are helpful."),
@@ -386,7 +375,10 @@ mod tests {
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].id, "toolu_01");
         assert_eq!(response.tool_calls[0].name, "web_search");
-        assert_eq!(response.tool_calls[0].arguments["query"], "Rust programming");
+        assert_eq!(
+            response.tool_calls[0].arguments["query"],
+            "Rust programming"
+        );
         assert_eq!(response.finish_reason, FinishReason::ToolUse);
     }
 

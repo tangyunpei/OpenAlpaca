@@ -38,11 +38,11 @@ pub enum ToolBackendConfig {
 
 /// Load tools from a single TOML file.
 pub fn load_tools_from_file(path: &Path) -> Result<Vec<RegisteredTool>, String> {
-    let content =
-        std::fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-    let config: ToolConfigFile =
-        toml::from_str(&content).map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+    let config: ToolConfigFile = toml::from_str(&content)
+        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
 
     let mut tools = Vec::new();
     for tc in config.tools {
@@ -170,7 +170,12 @@ timeout_secs = 10
         assert_eq!(config.tools[0].name, "weather_lookup");
         assert_eq!(config.tools[0].description, "Get weather");
         match &config.tools[0].backend {
-            ToolBackendConfig::Http { url, method, timeout_secs, .. } => {
+            ToolBackendConfig::Http {
+                url,
+                method,
+                timeout_secs,
+                ..
+            } => {
                 assert!(url.contains("example.com"));
                 assert_eq!(method.as_deref(), Some("GET"));
                 assert_eq!(*timeout_secs, Some(10));
@@ -199,7 +204,11 @@ timeout_secs = 15
         let config: ToolConfigFile = toml::from_str(toml_str).unwrap();
         assert_eq!(config.tools.len(), 1);
         match &config.tools[0].backend {
-            ToolBackendConfig::Command { command, args_template, timeout_secs } => {
+            ToolBackendConfig::Command {
+                command,
+                args_template,
+                timeout_secs,
+            } => {
                 assert_eq!(command, "git");
                 assert_eq!(args_template.as_deref(), Some("log --oneline -n {count}"));
                 assert_eq!(*timeout_secs, Some(15));

@@ -89,7 +89,11 @@ impl Orchestrator {
         }
     }
 
-    pub(super) fn handle_task_control(&self, task_id: &str, action: &str) -> Result<String, String> {
+    pub(super) fn handle_task_control(
+        &self,
+        task_id: &str,
+        action: &str,
+    ) -> Result<String, String> {
         // Fetch current state
         let entry = self
             .shared_context

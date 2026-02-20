@@ -3,7 +3,7 @@
 use crate::Database;
 use crate::models::memory::{MemoryKind, MemoryScope, MemorySource, MemoryV2};
 use anyhow::{Context, Result};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 /// Default L2 distance threshold for vector search (768-dim embeddings).
 /// Distances above this are considered irrelevant. L2 distance of 1.5 with
@@ -70,12 +70,10 @@ fn row_to_memory_v2(row: &rusqlite::Row<'_>) -> Result<MemoryV2> {
     })
 }
 
-const ALL_COLUMNS: &str =
-    "m.id, m.owner_id, m.kind, m.scope, m.scope_id, m.source, m.content, m.content_hash, m.importance, m.confidence, m.created_at, m.metadata, m.updated_at, m.supersedes_id, m.last_accessed_at";
+const ALL_COLUMNS: &str = "m.id, m.owner_id, m.kind, m.scope, m.scope_id, m.source, m.content, m.content_hash, m.importance, m.confidence, m.created_at, m.metadata, m.updated_at, m.supersedes_id, m.last_accessed_at";
 
 /// Unqualified columns for non-JOIN queries (uses implicit table alias).
-const ALL_COLUMNS_PLAIN: &str =
-    "id, owner_id, kind, scope, scope_id, source, content, content_hash, importance, confidence, created_at, metadata, updated_at, supersedes_id, last_accessed_at";
+const ALL_COLUMNS_PLAIN: &str = "id, owner_id, kind, scope, scope_id, source, content, content_hash, importance, confidence, created_at, metadata, updated_at, supersedes_id, last_accessed_at";
 
 impl<'a> MemoryRepository<'a> {
     pub fn new(db: &'a Database) -> Self {
@@ -163,10 +161,8 @@ impl<'a> MemoryRepository<'a> {
                  JOIN memory_fts fts ON m.id = fts.rowid
                  WHERE memory_fts MATCH ?1 AND m.owner_id = ?2"
             );
-            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-                Box::new(safe_query),
-                Box::new(owner_id.to_string()),
-            ];
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                vec![Box::new(safe_query), Box::new(owner_id.to_string())];
             let mut param_idx = 3;
 
             if let Some(kind) = kind_filter {
@@ -193,7 +189,8 @@ impl<'a> MemoryRepository<'a> {
             // Fix: the LIMIT placeholder needs its index
             let sql = sql.replacen("LIMIT ?", &format!("LIMIT ?{limit_idx}"), 1);
 
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
             let mut stmt = conn.prepare(&sql)?;
             let mut rows = stmt.query(param_refs.as_slice())?;
 
@@ -219,13 +216,17 @@ impl<'a> MemoryRepository<'a> {
     }
 
     /// List memory IDs that are missing vector embeddings.
-    pub fn list_missing_embeddings(&self, owner_id: &str, limit: usize) -> Result<Vec<(i64, String)>> {
+    pub fn list_missing_embeddings(
+        &self,
+        owner_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(i64, String)>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT m.id, m.content FROM memory m
                  LEFT JOIN memory_vec v ON m.id = v.memory_id
                  WHERE m.owner_id = ?1 AND v.memory_id IS NULL
-                 LIMIT ?2"
+                 LIMIT ?2",
             )?;
             let rows = stmt.query_map(rusqlite::params![owner_id, limit as i64], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
@@ -238,11 +239,15 @@ impl<'a> MemoryRepository<'a> {
     pub fn embedding_stats(&self, owner_id: &str) -> Result<(i64, i64)> {
         self.db.with_connection(|conn| {
             let total: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM memory WHERE owner_id = ?1", [owner_id], |r| r.get(0)
+                "SELECT COUNT(*) FROM memory WHERE owner_id = ?1",
+                [owner_id],
+                |r| r.get(0),
             )?;
             let embedded: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM memory m JOIN memory_vec v ON m.id = v.memory_id
-                 WHERE m.owner_id = ?1", [owner_id], |r| r.get(0)
+                 WHERE m.owner_id = ?1",
+                [owner_id],
+                |r| r.get(0),
             )?;
             Ok((total, embedded))
         })
@@ -275,11 +280,8 @@ impl<'a> MemoryRepository<'a> {
                  ) v ON m.id = v.memory_id
                  WHERE m.owner_id = ?3"
             );
-            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-                Box::new(blob),
-                Box::new(k),
-                Box::new(owner_id.to_string()),
-            ];
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                vec![Box::new(blob), Box::new(k), Box::new(owner_id.to_string())];
             let mut param_idx = 4;
 
             // Distance threshold filtering
@@ -317,6 +319,7 @@ impl<'a> MemoryRepository<'a> {
     }
 
     /// Hybrid search: combine FTS + vector results, dedup by memory_id.
+    #[allow(clippy::too_many_arguments)]
     pub fn search_hybrid(
         &self,
         owner_id: &str,
@@ -328,16 +331,27 @@ impl<'a> MemoryRepository<'a> {
         scope_id_filter: Option<&str>,
     ) -> Result<Vec<MemoryV2>> {
         // 1. FTS results (always available)
-        let fts_results = self.search_fts(owner_id, query, limit, kind_filter, scope_filter, scope_id_filter)?;
+        let fts_results = self.search_fts(
+            owner_id,
+            query,
+            limit,
+            kind_filter,
+            scope_filter,
+            scope_id_filter,
+        )?;
 
         // 2. Vec results (only if embedding provided)
         let vec_results = match embedding {
-            Some(emb) => self.search_vec(
-                owner_id, emb, limit,
-                Some(DEFAULT_VEC_DISTANCE_THRESHOLD),
-                scope_filter,
-                scope_id_filter,
-            ).unwrap_or_default(),
+            Some(emb) => self
+                .search_vec(
+                    owner_id,
+                    emb,
+                    limit,
+                    Some(DEFAULT_VEC_DISTANCE_THRESHOLD),
+                    scope_filter,
+                    scope_id_filter,
+                )
+                .unwrap_or_default(),
             None => vec![],
         };
 
@@ -347,7 +361,9 @@ impl<'a> MemoryRepository<'a> {
         for m in fts_results.into_iter().chain(vec_results.into_iter()) {
             if seen.insert(m.id) {
                 merged.push(m);
-                if merged.len() >= limit { break; }
+                if merged.len() >= limit {
+                    break;
+                }
             }
         }
         Ok(merged)
@@ -437,11 +453,10 @@ impl<'a> MemoryRepository<'a> {
             // Count query
             let (count_sql, total): (String, i64) = if let Some(ref kind) = kind_filter {
                 let sql = "SELECT COUNT(*) FROM memory WHERE owner_id = ?1 AND kind = ?2";
-                let total = conn.query_row(
-                    sql,
-                    rusqlite::params![owner_id, kind.as_str()],
-                    |r| r.get(0),
-                )?;
+                let total =
+                    conn.query_row(sql, rusqlite::params![owner_id, kind.as_str()], |r| {
+                        r.get(0)
+                    })?;
                 (sql.to_string(), total)
             } else {
                 let sql = "SELECT COUNT(*) FROM memory WHERE owner_id = ?1";
@@ -451,9 +466,7 @@ impl<'a> MemoryRepository<'a> {
             let _ = count_sql;
 
             // Data query
-            let mut sql = format!(
-                "SELECT {ALL_COLUMNS_PLAIN} FROM memory WHERE owner_id = ?1"
-            );
+            let mut sql = format!("SELECT {ALL_COLUMNS_PLAIN} FROM memory WHERE owner_id = ?1");
             let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
                 vec![Box::new(owner_id.to_string())];
             let mut param_idx = 2;
@@ -539,8 +552,7 @@ impl<'a> MemoryRepository<'a> {
                  importance = MIN(1.0, importance + ?1) \
                  WHERE id IN ({placeholders})"
             );
-            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
-                vec![Box::new(access_boost)];
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(access_boost)];
             for id in ids {
                 params.push(Box::new(*id) as Box<dyn rusqlite::types::ToSql>);
             }
@@ -578,7 +590,11 @@ impl<'a> MemoryRepository<'a> {
             );
             let mut stmt = conn.prepare(&sql)?;
             let mut rows = stmt.query(rusqlite::params![
-                blob, k, owner_id, distance_threshold, limit as i64
+                blob,
+                k,
+                owner_id,
+                distance_threshold,
+                limit as i64
             ])?;
             let mut results = Vec::new();
             while let Some(row) = rows.next()? {
@@ -637,7 +653,11 @@ impl<'a> MemoryRepository<'a> {
                     .collect();
                 let intersection = new_words.intersection(&old_words).count();
                 let union = new_words.union(&old_words).count();
-                let jaccard = if union > 0 { intersection as f64 / union as f64 } else { 0.0 };
+                let jaccard = if union > 0 {
+                    intersection as f64 / union as f64
+                } else {
+                    0.0
+                };
                 (m, jaccard)
             })
             .collect();
@@ -655,6 +675,7 @@ impl<'a> MemoryRepository<'a> {
     /// The old memory gets `importance = 0.1` and `updated_at = now` so decay will prune it.
     ///
     /// Returns the new memory's id, or 0 if the new content already exists (hash collision).
+    #[allow(clippy::too_many_arguments)]
     pub fn supersede(
         &self,
         existing_id: i64,
@@ -716,10 +737,7 @@ impl<'a> MemoryRepository<'a> {
             )?;
 
             // Remove old memory's embedding so it no longer matches vector searches
-            tx.execute(
-                "DELETE FROM memory_vec WHERE memory_id = ?1",
-                [existing_id],
-            )?;
+            tx.execute("DELETE FROM memory_vec WHERE memory_id = ?1", [existing_id])?;
 
             tx.commit()?;
             Ok(new_id)
@@ -1124,7 +1142,9 @@ mod tests {
         query_emb[0] = 0.9;
         query_emb[1] = 0.4;
 
-        let results = repo.search_vec("owner-1", &query_emb, 5, None, None, None).unwrap();
+        let results = repo
+            .search_vec("owner-1", &query_emb, 5, None, None, None)
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, id);
         assert!(results[0].content.contains("Rust"));
@@ -1168,11 +1188,15 @@ mod tests {
         repo.insert_embedding(id_b, &emb).unwrap();
 
         let query = vec![0.1f32; 768];
-        let a_results = repo.search_vec("owner-A", &query, 10, None, None, None).unwrap();
+        let a_results = repo
+            .search_vec("owner-A", &query, 10, None, None, None)
+            .unwrap();
         assert_eq!(a_results.len(), 1);
         assert!(a_results[0].content.contains("Secret A"));
 
-        let b_results = repo.search_vec("owner-B", &query, 10, None, None, None).unwrap();
+        let b_results = repo
+            .search_vec("owner-B", &query, 10, None, None, None)
+            .unwrap();
         assert_eq!(b_results.len(), 1);
         assert!(b_results[0].content.contains("Secret B"));
     }
@@ -1291,7 +1315,11 @@ mod tests {
         // Should appear only once despite matching both FTS and vec
         let ids: Vec<i64> = results.iter().map(|m| m.id).collect();
         let unique: std::collections::HashSet<i64> = ids.iter().copied().collect();
-        assert_eq!(ids.len(), unique.len(), "Hybrid search should dedup results");
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "Hybrid search should dedup results"
+        );
         assert!(results.iter().any(|m| m.id == id));
     }
 
@@ -1327,7 +1355,11 @@ mod tests {
         let old_results = repo
             .search_fts("owner-1", "old", 10, None, None, None)
             .unwrap();
-        assert_eq!(old_results.len(), 0, "Old keyword should NOT be found after update");
+        assert_eq!(
+            old_results.len(),
+            0,
+            "Old keyword should NOT be found after update"
+        );
 
         // New keyword should match
         let new_results = repo
@@ -1389,7 +1421,10 @@ mod tests {
                 .map_err(Into::into)
             })
             .unwrap();
-        assert_eq!(vec_count_after, 0, "Embedding should be deleted with memory");
+        assert_eq!(
+            vec_count_after, 0,
+            "Embedding should be deleted with memory"
+        );
     }
 
     #[test]
@@ -1449,7 +1484,10 @@ mod tests {
                     .map_err(Into::into)
             })
             .unwrap();
-        assert_eq!(vec_count_after, 0, "All embeddings should be deleted with clear");
+        assert_eq!(
+            vec_count_after, 0,
+            "All embeddings should be deleted with clear"
+        );
     }
 
     #[test]
@@ -1498,12 +1536,16 @@ mod tests {
         assert_eq!(items.len(), 2);
 
         // Filter by kind=fact
-        let (items, total) = repo.list_paginated("owner-1", 10, 0, Some(MemoryKind::Fact)).unwrap();
+        let (items, total) = repo
+            .list_paginated("owner-1", 10, 0, Some(MemoryKind::Fact))
+            .unwrap();
         assert_eq!(total, 3);
         assert_eq!(items.len(), 3);
 
         // Filter by kind=preference
-        let (items, total) = repo.list_paginated("owner-1", 10, 0, Some(MemoryKind::Preference)).unwrap();
+        let (items, total) = repo
+            .list_paginated("owner-1", 10, 0, Some(MemoryKind::Preference))
+            .unwrap();
         assert_eq!(total, 2);
         assert_eq!(items.len(), 2);
 
@@ -1542,7 +1584,10 @@ mod tests {
             "Importance should be 0.6 after 0.1 boost, got {}",
             mem.importance
         );
-        assert!(mem.last_accessed_at.is_some(), "last_accessed_at should be set");
+        assert!(
+            mem.last_accessed_at.is_some(),
+            "last_accessed_at should be set"
+        );
 
         // Touch again: should be 0.7
         repo.touch_accessed(&[id], 0.1).unwrap();

@@ -117,9 +117,7 @@ impl TokenManager {
         let interval_secs = tm.config.refresh_interval_secs.unwrap_or(30);
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(
-                std::time::Duration::from_secs(interval_secs),
-            );
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             // Skip the initial tick (we already did initial discovery)
             interval.tick().await;
 
@@ -192,13 +190,14 @@ impl TokenManager {
                     CredentialSource::Codex => discover_codex().await,
                 };
 
-                if let Some(refreshed_cred) = refreshed {
-                    if !refreshed_cred.token.is_expired() {
-                        let mut tokens = self.tokens.write().await;
-                        tokens.insert(cred.source, refreshed_cred.token.clone());
-                        self.inject_credential(settings_service, router, &refreshed_cred).await;
-                        continue;
-                    }
+                if let Some(refreshed_cred) = refreshed
+                    && !refreshed_cred.token.is_expired()
+                {
+                    let mut tokens = self.tokens.write().await;
+                    tokens.insert(cred.source, refreshed_cred.token.clone());
+                    self.inject_credential(settings_service, router, &refreshed_cred)
+                        .await;
+                    continue;
                 }
 
                 tracing::debug!(
@@ -225,11 +224,7 @@ impl TokenManager {
 
         // Build a discovered key
         let key_id = format!("auto_{:?}", cred.source).to_lowercase();
-        let mut api_key = ApiKey::new(
-            key_id,
-            provider_type,
-            cred.token.access_token.clone(),
-        );
+        let mut api_key = ApiKey::new(key_id, provider_type, cred.token.access_token.clone());
         api_key.priority = KeyPriority::Fallback;
         api_key.source = match cred.source {
             CredentialSource::ClaudeCode => KeySource::ClaudeCode,
@@ -238,37 +233,34 @@ impl TokenManager {
         api_key.notes = Some(format!("Auto-discovered from {:?}", cred.source));
 
         // Get base config keys from settings service
-        let base_pool_keys = settings_service
-            .build_key_pool_for_provider(provider_type);
+        let base_pool_keys = settings_service.build_key_pool_for_provider(provider_type);
 
         match base_pool_keys {
             Ok(_base_pool) => {
                 // Create a merged pool: base config keys + discovered key
                 let merged_keys = vec![api_key];
-                let merged_pool = self.build_merged_pool(
-                    settings_service,
-                    provider_type,
-                    merged_keys,
-                ).await;
+                let merged_pool = self
+                    .build_merged_pool(settings_service, provider_type, merged_keys)
+                    .await;
 
-                if let Some(pool) = merged_pool {
-                    if !router.reload_keys(provider_type, pool) {
-                        // Provider not configured — register it
-                        tracing::info!(
-                            "Registering auto-discovered provider {:?}",
-                            provider_type
-                        );
-                        self.register_auto_provider(router, provider_type, cred).await;
-                    }
+                if let Some(pool) = merged_pool
+                    && !router.reload_keys(provider_type, pool)
+                {
+                    // Provider not configured — register it
+                    tracing::info!("Registering auto-discovered provider {:?}", provider_type);
+                    self.register_auto_provider(router, provider_type, cred)
+                        .await;
                 }
             }
             Err(e) => {
                 tracing::debug!(
                     "Could not build base pool for {:?}: {}, registering standalone",
-                    provider_type, e
+                    provider_type,
+                    e
                 );
                 // No existing config — register a new provider with just the discovered key
-                self.register_auto_provider(router, provider_type, cred).await;
+                self.register_auto_provider(router, provider_type, cred)
+                    .await;
             }
         }
     }
@@ -320,11 +312,7 @@ impl TokenManager {
         cred: &DiscoveredCredential,
     ) {
         let key_id = format!("auto_{:?}", cred.source).to_lowercase();
-        let mut api_key = ApiKey::new(
-            key_id,
-            provider_type,
-            cred.token.access_token.clone(),
-        );
+        let mut api_key = ApiKey::new(key_id, provider_type, cred.token.access_token.clone());
         api_key.priority = KeyPriority::Fallback;
         api_key.source = match cred.source {
             CredentialSource::ClaudeCode => KeySource::ClaudeCode,
@@ -336,22 +324,20 @@ impl TokenManager {
         // Build the provider implementation
         let provider: Option<Arc<dyn crate::LlmProvider>> = match provider_type {
             #[cfg(feature = "anthropic")]
-            ProviderType::Anthropic => {
-                Some(Arc::new(crate::providers::anthropic::AnthropicProvider::new(
+            ProviderType::Anthropic => Some(Arc::new(
+                crate::providers::anthropic::AnthropicProvider::new(
                     cred.token.access_token.clone(),
                     None,
                     None,
-                )))
-            }
+                ),
+            )),
             #[cfg(feature = "openai")]
-            ProviderType::OpenAI => {
-                Some(Arc::new(crate::providers::openai::OpenAiProvider::new(
-                    cred.token.access_token.clone(),
-                    None,
-                    None,
-                    None,
-                )))
-            }
+            ProviderType::OpenAI => Some(Arc::new(crate::providers::openai::OpenAiProvider::new(
+                cred.token.access_token.clone(),
+                None,
+                None,
+                None,
+            ))),
             _ => None,
         };
 
@@ -368,16 +354,16 @@ impl TokenManager {
 pub async fn discover_all(config: &CredentialDiscoveryConfig) -> Vec<DiscoveredCredential> {
     let mut results = Vec::new();
 
-    if config.claude_code.unwrap_or(true) {
-        if let Some(cred) = discover_claude_code().await {
-            results.push(cred);
-        }
+    if config.claude_code.unwrap_or(true)
+        && let Some(cred) = discover_claude_code().await
+    {
+        results.push(cred);
     }
 
-    if config.codex.unwrap_or(true) {
-        if let Some(cred) = discover_codex().await {
-            results.push(cred);
-        }
+    if config.codex.unwrap_or(true)
+        && let Some(cred) = discover_codex().await
+    {
+        results.push(cred);
     }
 
     results
@@ -389,32 +375,43 @@ pub async fn discover_claude_code() -> Option<DiscoveredCredential> {
     let cred_path = home.join(".claude").join(".credentials.json");
 
     match tokio::fs::read(&cred_path).await {
-        Ok(data) => {
-            match serde_json::from_slice::<OAuthToken>(&data) {
-                Ok(token) => {
-                    tracing::debug!("Discovered Claude Code credentials at {}", cred_path.display());
-                    Some(DiscoveredCredential {
-                        source: CredentialSource::ClaudeCode,
-                        token,
-                        provider_type: ProviderType::Anthropic,
-                    })
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        "Failed to parse Claude Code credentials at {}: {}",
-                        cred_path.display(), e
-                    );
-                    None
-                }
+        Ok(data) => match serde_json::from_slice::<OAuthToken>(&data) {
+            Ok(token) => {
+                tracing::debug!(
+                    "Discovered Claude Code credentials at {}",
+                    cred_path.display()
+                );
+                Some(DiscoveredCredential {
+                    source: CredentialSource::ClaudeCode,
+                    token,
+                    provider_type: ProviderType::Anthropic,
+                })
             }
-        }
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to parse Claude Code credentials at {}: {}",
+                    cred_path.display(),
+                    e
+                );
+                None
+            }
+        },
         Err(e) => {
-            tracing::debug!("Claude Code credentials not found at {}: {}", cred_path.display(), e);
+            tracing::debug!(
+                "Claude Code credentials not found at {}: {}",
+                cred_path.display(),
+                e
+            );
 
             // Fallback: try macOS Keychain
             #[cfg(target_os = "macos")]
             {
-                return discover_from_keychain("Claude Code-credentials", ProviderType::Anthropic, CredentialSource::ClaudeCode).await;
+                return discover_from_keychain(
+                    "Claude Code-credentials",
+                    ProviderType::Anthropic,
+                    CredentialSource::ClaudeCode,
+                )
+                .await;
             }
 
             #[cfg(not(target_os = "macos"))]
@@ -429,27 +426,30 @@ pub async fn discover_codex() -> Option<DiscoveredCredential> {
     let cred_path = home.join(".codex").join("auth.json");
 
     match tokio::fs::read(&cred_path).await {
-        Ok(data) => {
-            match serde_json::from_slice::<OAuthToken>(&data) {
-                Ok(token) => {
-                    tracing::debug!("Discovered Codex credentials at {}", cred_path.display());
-                    Some(DiscoveredCredential {
-                        source: CredentialSource::Codex,
-                        token,
-                        provider_type: ProviderType::OpenAI,
-                    })
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        "Failed to parse Codex credentials at {}: {}",
-                        cred_path.display(), e
-                    );
-                    None
-                }
+        Ok(data) => match serde_json::from_slice::<OAuthToken>(&data) {
+            Ok(token) => {
+                tracing::debug!("Discovered Codex credentials at {}", cred_path.display());
+                Some(DiscoveredCredential {
+                    source: CredentialSource::Codex,
+                    token,
+                    provider_type: ProviderType::OpenAI,
+                })
             }
-        }
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to parse Codex credentials at {}: {}",
+                    cred_path.display(),
+                    e
+                );
+                None
+            }
+        },
         Err(e) => {
-            tracing::debug!("Codex credentials not found at {}: {}", cred_path.display(), e);
+            tracing::debug!(
+                "Codex credentials not found at {}: {}",
+                cred_path.display(),
+                e
+            );
             None
         }
     }
@@ -462,7 +462,7 @@ async fn discover_from_keychain(
     provider_type: ProviderType,
     source: CredentialSource,
 ) -> Option<DiscoveredCredential> {
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     let output = timeout(
         Duration::from_secs(1),
@@ -477,7 +477,10 @@ async fn discover_from_keychain(
             let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
             match serde_json::from_str::<OAuthToken>(&raw) {
                 Ok(token) => {
-                    tracing::debug!("Discovered credentials from macOS Keychain: {}", service_name);
+                    tracing::debug!(
+                        "Discovered credentials from macOS Keychain: {}",
+                        service_name
+                    );
                     Some(DiscoveredCredential {
                         source,
                         token,
@@ -485,7 +488,11 @@ async fn discover_from_keychain(
                     })
                 }
                 Err(e) => {
-                    tracing::debug!("Failed to parse Keychain credential for {}: {}", service_name, e);
+                    tracing::debug!(
+                        "Failed to parse Keychain credential for {}: {}",
+                        service_name,
+                        e
+                    );
                     None
                 }
             }
@@ -495,7 +502,11 @@ async fn discover_from_keychain(
             None
         }
         Ok(Err(e)) => {
-            tracing::debug!("Failed to run security command for '{}': {}", service_name, e);
+            tracing::debug!(
+                "Failed to run security command for '{}': {}",
+                service_name,
+                e
+            );
             None
         }
         Err(_) => {
@@ -507,9 +518,7 @@ async fn discover_from_keychain(
 
 /// Get the user's home directory.
 fn dirs_path() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(PathBuf::from)
+    std::env::var("HOME").ok().map(PathBuf::from)
 }
 
 #[cfg(test)]

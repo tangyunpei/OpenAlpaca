@@ -37,8 +37,7 @@ enum ServerEvent {
 
 pub async fn run(count: usize) -> Result<()> {
     // Read discovery file
-    let disc = discovery::read_discovery()?
-        .context("Daemon is not running (no discovery file)")?;
+    let disc = discovery::read_discovery()?.context("Daemon is not running (no discovery file)")?;
 
     discovery::ensure_not_expired(&disc)?;
 
@@ -58,7 +57,10 @@ pub async fn run(count: usize) -> Result<()> {
         .await
         .context("Failed to connect to daemon WebSocket")?;
 
-    println!("{} Connected! Streaming events (Ctrl+C to stop)", "✓".green());
+    println!(
+        "{} Connected! Streaming events (Ctrl+C to stop)",
+        "✓".green()
+    );
     println!();
 
     let (_, mut read) = ws_stream.split();
@@ -121,7 +123,9 @@ fn print_event(event: &ServerEvent) {
                 format!("[{}...]", &instance_id[..8]).dimmed()
             );
         }
-        ServerEvent::Log { level, message, ts, .. } => {
+        ServerEvent::Log {
+            level, message, ts, ..
+        } => {
             let time = ts.format("%H:%M:%S").to_string();
             let level_colored = match level.as_str() {
                 "error" => level.red(),
@@ -129,14 +133,14 @@ fn print_event(event: &ServerEvent) {
                 "info" => level.green(),
                 _ => level.normal(),
             };
-            println!(
-                "{} 📝 {} {}",
-                time.dimmed(),
-                level_colored,
-                message
-            );
+            println!("{} 📝 {} {}", time.dimmed(), level_colored, message);
         }
-        ServerEvent::CommandReceived { request_id, command, ts, .. } => {
+        ServerEvent::CommandReceived {
+            request_id,
+            command,
+            ts,
+            ..
+        } => {
             let time = ts.format("%H:%M:%S").to_string();
             println!(
                 "{} ⚡ {} {} {}",

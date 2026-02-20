@@ -1,7 +1,7 @@
-use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use crate::daemon_config::DaemonConfig;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+use arc_swap::ArcSwap;
+use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use std::sync::Arc;
 
@@ -28,12 +28,10 @@ impl BuiltInTool for WebSearchTool {
         let ws_cfg = &cfg.providers.web_search;
 
         if ws_cfg.api_key.is_empty() {
-            return Err(
-                "web_search is not configured. \
+            return Err("web_search is not configured. \
                  Set providers.web_search.api_key in daemon.toml \
                  with your Brave Search API key."
-                    .to_string(),
-            );
+                .to_string());
         }
 
         let client = reqwest::Client::new();
@@ -100,9 +98,7 @@ impl BuiltInTool for WebSearchTool {
     }
 }
 
-pub(super) fn web_search_tool(
-    daemon_config: Arc<ArcSwap<DaemonConfig>>,
-) -> RegisteredTool {
+pub(super) fn web_search_tool(daemon_config: Arc<ArcSwap<DaemonConfig>>) -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "web_search".to_string(),
@@ -141,8 +137,16 @@ mod tests {
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("not configured"), "Error should guide user: {}", err);
-        assert!(err.contains("api_key"), "Error should mention api_key: {}", err);
+        assert!(
+            err.contains("not configured"),
+            "Error should guide user: {}",
+            err
+        );
+        assert!(
+            err.contains("api_key"),
+            "Error should mention api_key: {}",
+            err
+        );
     }
 
     #[tokio::test]

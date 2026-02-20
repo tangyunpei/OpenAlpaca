@@ -200,10 +200,8 @@ pub async fn list_agents_handler(
             }
         };
 
-        let filtered: Vec<SubAgentConfig> = all
-            .into_iter()
-            .filter(|c| ids.contains(&c.id))
-            .collect();
+        let filtered: Vec<SubAgentConfig> =
+            all.into_iter().filter(|c| ids.contains(&c.id)).collect();
 
         return (
             StatusCode::OK,
@@ -238,13 +236,7 @@ pub async fn get_agent_handler(
             let metrics = repo.get_metrics(&id).unwrap_or(None);
             (
                 StatusCode::OK,
-                Json(
-                    serde_json::to_value(AgentResponse {
-                        agent,
-                        metrics,
-                    })
-                    .unwrap(),
-                ),
+                Json(serde_json::to_value(AgentResponse { agent, metrics }).unwrap()),
             )
         }
         Ok(None) => (
@@ -340,7 +332,10 @@ pub async fn agent_action_handler(
 
     // 3. Emit event
     // Derive template_id from the instance or DB record
-    let template_id = state.gateway.shared_context.agent_registry
+    let template_id = state
+        .gateway
+        .shared_context
+        .agent_registry
         .get_instance(&id)
         .map(|a| a.template_id.clone())
         .unwrap_or_else(|| agent.template_id.clone());
@@ -587,21 +582,18 @@ pub async fn delete_agent_handler(
 // ── Template Handlers ─────────────────────────────────────────────
 
 /// GET /v1/agent-templates
-pub async fn list_templates_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let templates = state
-        .gateway
-        .shared_context
-        .agent_registry
-        .list_templates();
+pub async fn list_templates_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let templates = state.gateway.shared_context.agent_registry.list_templates();
 
     let response: Vec<TemplateResponse> = templates
         .iter()
         .map(TemplateResponse::from_template)
         .collect();
 
-    (StatusCode::OK, Json(serde_json::to_value(response).unwrap()))
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(response).unwrap()),
+    )
 }
 
 /// GET /v1/agent-templates/{id}
@@ -609,7 +601,12 @@ pub async fn get_template_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.gateway.shared_context.agent_registry.get_template(&id) {
+    match state
+        .gateway
+        .shared_context
+        .agent_registry
+        .get_template(&id)
+    {
         Some(template) => {
             let response = TemplateResponse::from_template(&template);
             (
@@ -631,12 +628,20 @@ pub async fn get_template_markdown_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.gateway.shared_context.agent_registry.get_template(&id) {
+    match state
+        .gateway
+        .shared_context
+        .agent_registry
+        .get_template(&id)
+    {
         Some(template) => {
             let markdown = render_agent_markdown(&template);
             (
                 StatusCode::OK,
-                [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/markdown; charset=utf-8",
+                )],
                 markdown,
             )
                 .into_response()
@@ -819,14 +824,8 @@ pub async fn delete_template_handler(
 // ── Instance Handlers ─────────────────────────────────────────────
 
 /// GET /v1/agent-instances
-pub async fn list_instances_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let instances = state
-        .gateway
-        .shared_context
-        .agent_registry
-        .list_instances();
+pub async fn list_instances_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let instances = state.gateway.shared_context.agent_registry.list_instances();
 
     let response: Vec<InstanceResponse> = instances
         .iter()
@@ -839,7 +838,10 @@ pub async fn list_instances_handler(
         })
         .collect();
 
-    (StatusCode::OK, Json(serde_json::to_value(response).unwrap()))
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(response).unwrap()),
+    )
 }
 
 /// POST /v1/agent-templates/{id}/instances
@@ -895,10 +897,15 @@ pub async fn destroy_instance_handler(
     let registry = &state.gateway.shared_context.agent_registry;
 
     // Capture template_id before destruction (extract from instance_id format)
-    let template_id = registry.get_instance(&instance_id)
+    let template_id = registry
+        .get_instance(&instance_id)
         .map(|a| a.template_id.clone())
         .unwrap_or_else(|| {
-            instance_id.split("::").next().unwrap_or(&instance_id).to_string()
+            instance_id
+                .split("::")
+                .next()
+                .unwrap_or(&instance_id)
+                .to_string()
         });
 
     let outcome = registry.destroy_instance(&instance_id);
@@ -926,14 +933,12 @@ pub async fn destroy_instance_handler(
             )
                 .into_response()
         }
-        DestroyOutcome::NotFound => {
-            (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "error": format!("Instance '{}' not found", instance_id)
-                })),
-            )
-                .into_response()
-        }
+        DestroyOutcome::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("Instance '{}' not found", instance_id)
+            })),
+        )
+            .into_response(),
     }
 }

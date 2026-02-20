@@ -24,9 +24,15 @@ pub enum ConfigKind {
     /// Accepts only the listed values.
     Enum(&'static [&'static str]),
     /// Validated integer range.
-    Int { min: Option<i64>, max: Option<i64> },
+    Int {
+        min: Option<i64>,
+        max: Option<i64>,
+    },
     /// Validated floating-point range.
-    Float { min: Option<f64>, max: Option<f64> },
+    Float {
+        min: Option<f64>,
+        max: Option<f64>,
+    },
 }
 
 impl ConfigKind {
@@ -73,15 +79,15 @@ impl ConfigKind {
                     .trim()
                     .parse()
                     .map_err(|_| format!("expected an integer, got '{}'", value))?;
-                if let Some(lo) = min {
-                    if n < *lo {
-                        return Err(format!("value {} is below minimum {}", n, lo));
-                    }
+                if let Some(lo) = min
+                    && n < *lo
+                {
+                    return Err(format!("value {} is below minimum {}", n, lo));
                 }
-                if let Some(hi) = max {
-                    if n > *hi {
-                        return Err(format!("value {} is above maximum {}", n, hi));
-                    }
+                if let Some(hi) = max
+                    && n > *hi
+                {
+                    return Err(format!("value {} is above maximum {}", n, hi));
                 }
                 Ok(())
             }
@@ -90,15 +96,15 @@ impl ConfigKind {
                     .trim()
                     .parse()
                     .map_err(|_| format!("expected a number, got '{}'", value))?;
-                if let Some(lo) = min {
-                    if n < *lo {
-                        return Err(format!("value {} is below minimum {}", n, lo));
-                    }
+                if let Some(lo) = min
+                    && n < *lo
+                {
+                    return Err(format!("value {} is below minimum {}", n, lo));
                 }
-                if let Some(hi) = max {
-                    if n > *hi {
-                        return Err(format!("value {} is above maximum {}", n, hi));
-                    }
+                if let Some(hi) = max
+                    && n > *hi
+                {
+                    return Err(format!("value {} is above maximum {}", n, hi));
                 }
                 Ok(())
             }
@@ -1220,11 +1226,9 @@ pub fn validate_openai_api_key(value: &str) -> Result<(), String> {
         );
     }
     if !trimmed.starts_with("sk-") {
-        return Err(
-            "Invalid key prefix. OpenAI API keys start with `sk-`.\n\
+        return Err("Invalid key prefix. OpenAI API keys start with `sk-`.\n\
              Get your key at https://platform.openai.com/api-keys"
-                .to_string(),
-        );
+            .to_string());
     }
     if trimmed.len() < 20 {
         return Err(format!(
@@ -1386,33 +1390,99 @@ mod tests {
         // 42 daemon keys + 1 alias (system.max_agents) + 2 streaming keys + 2 providers keys + 1 lead_max_concurrent_subagents = 48 total
         assert_eq!(keys.len(), 48);
         assert!(keys.iter().any(|d| d.key == "system.max_agents"));
-        assert!(keys.iter().any(|d| d.key == "daemon.dag.max_concurrent_agents"));
-        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.prompt_recent_messages"));
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.dag.max_concurrent_agents")
+        );
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.orchestrator.prompt_recent_messages")
+        );
         assert!(keys.iter().any(|d| d.key == "daemon.execution.max_rounds"));
-        assert!(keys.iter().any(|d| d.key == "daemon.security.max_input_length"));
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.security.max_input_length")
+        );
         // New keys
-        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.summary_min_new_older_messages"));
-        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.msg_trunc_chars"));
-        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.extract_max_daily_cost_usd"));
-        assert!(keys.iter().any(|d| d.key == "daemon.execution.max_tools_per_round"));
-        assert!(keys.iter().any(|d| d.key == "daemon.execution.lead_max_tools_per_round"));
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.orchestrator.summary_min_new_older_messages")
+        );
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.orchestrator.msg_trunc_chars")
+        );
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.orchestrator.extract_max_daily_cost_usd")
+        );
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.execution.max_tools_per_round")
+        );
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.execution.lead_max_tools_per_round")
+        );
         assert!(keys.iter().any(|d| d.key == "daemon.dag.node_timeout_secs"));
-        assert!(keys.iter().any(|d| d.key == "daemon.dag.max_retries_per_node"));
-        assert!(keys.iter().any(|d| d.key == "daemon.server.heartbeat_interval_secs"));
-        assert!(keys.iter().any(|d| d.key == "daemon.server.embedding_batch_size"));
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.dag.max_retries_per_node")
+        );
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.server.heartbeat_interval_secs")
+        );
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.server.embedding_batch_size")
+        );
         // Memory lifecycle keys
-        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.task_extract_enabled"));
-        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.task_extract_max_daily_cost_usd"));
-        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.task_extract_min_content_len"));
-        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.supersession_distance_threshold"));
-        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.fts_jaccard_threshold"));
-        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.decay_poll_interval_secs"));
-        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.decay_half_life_days"));
-        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.decay_min_importance"));
-        assert!(keys.iter().any(|d| d.key == "daemon.orchestrator.decay_soft_cap"));
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.orchestrator.task_extract_enabled")
+        );
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.orchestrator.task_extract_max_daily_cost_usd")
+        );
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.orchestrator.task_extract_min_content_len")
+        );
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.orchestrator.supersession_distance_threshold")
+        );
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.orchestrator.fts_jaccard_threshold")
+        );
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.orchestrator.decay_poll_interval_secs")
+        );
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.orchestrator.decay_half_life_days")
+        );
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.orchestrator.decay_min_importance")
+        );
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.orchestrator.decay_soft_cap")
+        );
         // Streaming keys
-        assert!(keys.iter().any(|d| d.key == "daemon.server.stream_chunk_delay_ms"));
-        assert!(keys.iter().any(|d| d.key == "daemon.server.stream_chunk_words"));
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.server.stream_chunk_delay_ms")
+        );
+        assert!(
+            keys.iter()
+                .any(|d| d.key == "daemon.server.stream_chunk_words")
+        );
         assert!(keys.iter().all(|d| d.backend == ConfigBackend::DaemonToml));
     }
 
@@ -1553,15 +1623,51 @@ mod tests {
     fn test_daemon_server_keys() {
         let server_keys = keys_in_subcategory("Daemon", "Server");
         assert_eq!(server_keys.len(), 10);
-        assert!(server_keys.iter().any(|d| d.key == "daemon.server.heartbeat_interval_secs"));
-        assert!(server_keys.iter().any(|d| d.key == "daemon.server.sse_keep_alive_secs"));
-        assert!(server_keys.iter().any(|d| d.key == "daemon.server.event_broadcaster_capacity"));
-        assert!(server_keys.iter().any(|d| d.key == "daemon.server.wake_channel_capacity"));
-        assert!(server_keys.iter().any(|d| d.key == "daemon.server.cleanup_interval_secs"));
-        assert!(server_keys.iter().any(|d| d.key == "daemon.server.stale_timeout_secs"));
-        assert!(server_keys.iter().any(|d| d.key == "daemon.server.embedding_poll_interval_secs"));
-        assert!(server_keys.iter().any(|d| d.key == "daemon.server.embedding_batch_size"));
-        assert!(server_keys.iter().all(|d| d.backend == ConfigBackend::DaemonToml));
+        assert!(
+            server_keys
+                .iter()
+                .any(|d| d.key == "daemon.server.heartbeat_interval_secs")
+        );
+        assert!(
+            server_keys
+                .iter()
+                .any(|d| d.key == "daemon.server.sse_keep_alive_secs")
+        );
+        assert!(
+            server_keys
+                .iter()
+                .any(|d| d.key == "daemon.server.event_broadcaster_capacity")
+        );
+        assert!(
+            server_keys
+                .iter()
+                .any(|d| d.key == "daemon.server.wake_channel_capacity")
+        );
+        assert!(
+            server_keys
+                .iter()
+                .any(|d| d.key == "daemon.server.cleanup_interval_secs")
+        );
+        assert!(
+            server_keys
+                .iter()
+                .any(|d| d.key == "daemon.server.stale_timeout_secs")
+        );
+        assert!(
+            server_keys
+                .iter()
+                .any(|d| d.key == "daemon.server.embedding_poll_interval_secs")
+        );
+        assert!(
+            server_keys
+                .iter()
+                .any(|d| d.key == "daemon.server.embedding_batch_size")
+        );
+        assert!(
+            server_keys
+                .iter()
+                .all(|d| d.backend == ConfigBackend::DaemonToml)
+        );
     }
 
     #[test]

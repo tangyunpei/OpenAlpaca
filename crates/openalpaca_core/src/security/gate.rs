@@ -5,9 +5,9 @@
 //! - Layer 3: SandboxManager (tool execution with timeout + events)
 
 use crate::security::capabilities::CapabilityManager;
+use crate::security::policy::{Principal, Scope};
 use crate::security::sandbox::SandboxManager;
 use crate::security::sanitizer::InputSanitizer;
-use crate::security::policy::{Principal, Scope};
 use crate::types::Capability;
 use std::sync::Arc;
 
@@ -27,8 +27,7 @@ impl SecurityGate {
         capability: &Capability,
         scope: &Scope,
     ) -> Result<(), String> {
-        CapabilityManager::check_principal(principal, capability, scope)
-            .map_err(|v| v.to_string())
+        CapabilityManager::check_principal(principal, capability, scope).map_err(|v| v.to_string())
     }
 
     /// Layer 2: Sanitize user input.

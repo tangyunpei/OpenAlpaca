@@ -128,10 +128,10 @@ impl Gateway {
         lane.record_message();
 
         // Persist user message
-        if let Some(ref p) = self.persistence {
-            if let Err(e) = p.persist_user_message(&lane_key_str, &req.content, &source_name) {
-                tracing::warn!("Failed to persist user message: {e}");
-            }
+        if let Some(ref p) = self.persistence
+            && let Err(e) = p.persist_user_message(&lane_key_str, &req.content, &source_name)
+        {
+            tracing::warn!("Failed to persist user message: {e}");
         }
 
         let start = std::time::Instant::now();
@@ -139,16 +139,28 @@ impl Gateway {
         // Delegate to the handler
         match self
             .handler
-            .handle(request_id, source_name.clone(), req.content, req.principal, req.scope, lane_key_str.clone())
+            .handle(
+                request_id,
+                source_name.clone(),
+                req.content,
+                req.principal,
+                req.scope,
+                lane_key_str.clone(),
+            )
             .await
         {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 // Persist assistant message
-                if let Some(ref p) = self.persistence {
-                    if let Err(e) = p.persist_assistant_message(&lane_key_str, &result.content, Some(duration_ms), &source_name) {
-                        tracing::warn!("Failed to persist assistant message: {e}");
-                    }
+                if let Some(ref p) = self.persistence
+                    && let Err(e) = p.persist_assistant_message(
+                        &lane_key_str,
+                        &result.content,
+                        Some(duration_ms),
+                        &source_name,
+                    )
+                {
+                    tracing::warn!("Failed to persist assistant message: {e}");
                 }
                 GatewayResponse {
                     lane_key: key,
@@ -355,7 +367,9 @@ mod tests {
 
         let event = rx.try_recv().unwrap();
         match event {
-            SystemEvent::UserRequest { content, source, .. } => {
+            SystemEvent::UserRequest {
+                content, source, ..
+            } => {
                 assert_eq!(content, "hello bus");
                 assert_eq!(source, "api");
             }
@@ -497,7 +511,10 @@ mod tests {
         assert_eq!(messages[1].content, "Echo: hello from telegram");
 
         // Verify conversation master record
-        let conv = repo.get_conversation_by_lane("alice:telegram").unwrap().unwrap();
+        let conv = repo
+            .get_conversation_by_lane("alice:telegram")
+            .unwrap()
+            .unwrap();
         assert_eq!(conv.source, "telegram");
         assert_eq!(conv.message_count, 2);
     }
@@ -515,10 +532,11 @@ mod tests {
         );
 
         // Register a task in shared context
-        assert!(gw
-            .shared_context
-            .task_registry
-            .register("task-1".into(), "integration test".into()));
+        assert!(
+            gw.shared_context
+                .task_registry
+                .register("task-1".into(), "integration test".into())
+        );
 
         // Handle messages from multiple sources
         let r1 = gw
@@ -568,7 +586,9 @@ mod tests {
         assert_eq!(shared.task_registry.count(), 1);
 
         // Agent registry
-        use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, SubAgent};
+        use crate::agent::subagent::{
+            AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, SubAgent,
+        };
         let agent = SubAgent {
             id: "a1".to_string(),
             template_id: "a1".to_string(),

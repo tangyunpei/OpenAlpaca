@@ -1,20 +1,24 @@
 //! LLM Router: routes requests to the correct provider with key rotation,
 //! fallback chains, and cost tracking.
 
+use crate::LlmProvider;
 use crate::config::LlmRuntimeConfig;
 use crate::cost_tracker::{CallRecord, CostTracker};
 use crate::error::LlmError;
-use crate::key_pool::{ApiKey, CallResult, KeyPool, KeyPoolError, KeyStatus, ProviderType, SelectionStrategy};
+use crate::key_pool::{
+    ApiKey, CallResult, KeyPool, KeyPoolError, KeyStatus, ProviderType, SelectionStrategy,
+};
 use crate::model_registry::{ModelEntry, ModelInfo, ModelRegistry};
-use crate::rate_limiter::{RateLimitConfig, RateLimiterRegistry, CircuitState, backoff_with_jitter};
+use crate::rate_limiter::{
+    CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter,
+};
 use crate::types::*;
-use crate::LlmProvider;
-use tracing;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+use tracing;
 
 /// Context for a router request (agent/task identification).
 #[derive(Debug, Clone, Default)]
@@ -27,7 +31,7 @@ pub struct RequestContext {
 pub struct RouterRequest {
     pub model: Option<String>,
     pub messages: Vec<ChatMessage>,
-    pub tools: Vec<ToolDefinition>,
+    pub tools: Arc<Vec<ToolDefinition>>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     pub context: RequestContext,
@@ -164,7 +168,11 @@ impl LlmRouter {
         default_model: String,
     ) -> Self {
         let key_pool = KeyPool::new(
-            vec![ApiKey::new("default".to_string(), provider_type, String::new())],
+            vec![ApiKey::new(
+                "default".to_string(),
+                provider_type,
+                String::new(),
+            )],
             SelectionStrategy::RoundRobin,
         );
 
@@ -261,11 +269,7 @@ impl LlmRouter {
     }
 
     /// Register a CLI backend for fallback.
-    pub fn register_cli_backend(
-        &self,
-        provider_type: ProviderType,
-        backend: Arc<dyn LlmProvider>,
-    ) {
+    pub fn register_cli_backend(&self, provider_type: ProviderType, backend: Arc<dyn LlmProvider>) {
         self.cli_backends.insert(provider_type, backend);
     }
 
@@ -365,12 +369,14 @@ impl LlmRouter {
                 Ok(guard) => guard.secret.clone(),
                 Err(_) => {
                     // No API-compatible key — fall back to hardcoded defaults
-                    let count = self.model_registry
+                    let count = self
+                        .model_registry
                         .mark_defaults_discovered_for_provider(provider_type);
                     if count > 0 {
                         tracing::info!(
                             "No API key for {:?}, marked {} default models as discovered",
-                            provider_type, count
+                            provider_type,
+                            count
                         );
                     }
                     continue;
@@ -381,11 +387,13 @@ impl LlmRouter {
                 Ok(model_ids) => {
                     let count = model_ids.len();
                     if count == 0 {
-                        let dc = self.model_registry
+                        let dc = self
+                            .model_registry
                             .mark_defaults_discovered_for_provider(provider_type);
                         tracing::info!(
                             "Provider {:?} returned 0 models, marked {} defaults",
-                            provider_type, dc
+                            provider_type,
+                            dc
                         );
                         continue;
                     }
@@ -419,7 +427,10 @@ impl LlmRouter {
         provider_type: ProviderType,
         key: &str,
     ) -> Result<Vec<String>, LlmError> {
-        let entry = self.providers.get(&provider_type).ok_or(LlmError::NotConfigured)?;
+        let entry = self
+            .providers
+            .get(&provider_type)
+            .ok_or(LlmError::NotConfigured)?;
         entry.value().provider.list_models_with_key(key).await
     }
 
@@ -440,7 +451,10 @@ impl LlmRouter {
 
         // Acquire concurrency permit — limits parallel in-flight API calls
         // to prevent rate-limit stampedes from parallel subagents.
-        let _permit = self.concurrency_limiter.acquire().await
+        let _permit = self
+            .concurrency_limiter
+            .acquire()
+            .await
             .map_err(|_| LlmRouterError::MaxRetriesExceeded)?;
 
         match self.try_model(model, &request).await {
@@ -540,15 +554,14 @@ impl LlmRouter {
                 };
 
                 // 2. Per-key rate limiting: concurrency + RPM + TPM token buckets
-                let key_limiter = self.rate_limiter_registry.get_or_create(
-                    &key_guard.id,
-                    key_guard.rate_limit,
-                );
+                let key_limiter = self
+                    .rate_limiter_registry
+                    .get_or_create(&key_guard.id, key_guard.rate_limit);
                 let _key_permit = key_limiter.acquire(estimated_tokens).await;
 
                 let chat_request = ChatRequest {
                     messages: request.messages.clone(),
-                    tools: request.tools.clone(),
+                    tools: (*request.tools).clone(),
                     model: Some(model.to_string()),
                     temperature: request.temperature,
                     max_tokens: request.max_tokens,
@@ -560,8 +573,7 @@ impl LlmRouter {
                     .await
                 {
                     Ok(response) => {
-                        pool.report_result(&key_guard.id, CallResult::Success)
-                            .await;
+                        pool.report_result(&key_guard.id, CallResult::Success).await;
                         self.rate_limiter_registry.report_success().await;
 
                         // Record cost
@@ -607,11 +619,8 @@ impl LlmRouter {
                     }
                     Err(e) if e.is_transient() => {
                         // Exponential backoff with full jitter
-                        let backoff = backoff_with_jitter(
-                            backoff_base,
-                            attempt as u32,
-                            backoff_cap,
-                        );
+                        let backoff =
+                            backoff_with_jitter(backoff_base, attempt as u32, backoff_cap);
                         tracing::warn!(
                             model = model,
                             error = %e,
@@ -677,39 +686,39 @@ impl LlmRouter {
 
         // 2. Try CLI backend fallback
         let provider_type = self.model_registry.resolve_provider(original_model);
-        if let Some(pt) = provider_type {
-            if let Some(cli_backend) = self.cli_backends.get(&pt) {
-                tracing::info!("Falling back to CLI backend for {:?}", pt);
-                let truncated = truncate_messages_for_cli(&request.messages);
-                let flattened = flatten_messages(&truncated);
-                let cli_request = ChatRequest {
-                    messages: vec![ChatMessage::user(&flattened)],
-                    tools: vec![],
-                    model: Some(original_model.to_string()),
-                    temperature: request.temperature,
-                    max_tokens: request.max_tokens,
-                };
-                match cli_backend.chat(cli_request).await {
-                    Ok(response) => {
-                        // Record with zero cost (CLI fallback)
-                        let record = CallRecord {
-                            agent_id: request
-                                .context
-                                .agent_id
-                                .clone()
-                                .unwrap_or_else(|| "unknown".to_string()),
-                            task_id: request.context.task_id.clone(),
-                            model: format!("{}_cli", original_model),
-                            input_tokens: 0,
-                            output_tokens: 0,
-                            cost_usd: 0.0,
-                        };
-                        self.cost_tracker.record(&record).await;
-                        return Ok(response);
-                    }
-                    Err(e) => {
-                        tracing::warn!("CLI backend fallback failed for {:?}: {}", pt, e);
-                    }
+        if let Some(pt) = provider_type
+            && let Some(cli_backend) = self.cli_backends.get(&pt)
+        {
+            tracing::info!("Falling back to CLI backend for {:?}", pt);
+            let truncated = truncate_messages_for_cli(&request.messages);
+            let flattened = flatten_messages(&truncated);
+            let cli_request = ChatRequest {
+                messages: vec![ChatMessage::user(&flattened)],
+                tools: vec![],
+                model: Some(original_model.to_string()),
+                temperature: request.temperature,
+                max_tokens: request.max_tokens,
+            };
+            match cli_backend.chat(cli_request).await {
+                Ok(response) => {
+                    // Record with zero cost (CLI fallback)
+                    let record = CallRecord {
+                        agent_id: request
+                            .context
+                            .agent_id
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        task_id: request.context.task_id.clone(),
+                        model: format!("{}_cli", original_model),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cost_usd: 0.0,
+                    };
+                    self.cost_tracker.record(&record).await;
+                    return Ok(response);
+                }
+                Err(e) => {
+                    tracing::warn!("CLI backend fallback failed for {:?}: {}", pt, e);
                 }
             }
         }
@@ -725,7 +734,9 @@ impl LlmRouter {
 /// than to exceed TPM limits).
 fn estimate_request_tokens(request: &RouterRequest) -> u32 {
     let msg_bytes: usize = request.messages.iter().map(|m| m.content.len()).sum();
-    let tool_bytes: usize = request.tools.iter()
+    let tool_bytes: usize = request
+        .tools
+        .iter()
         .map(|t| t.description.len() + t.parameters.to_string().len())
         .sum();
     ((msg_bytes + tool_bytes) / 4).max(100) as u32
@@ -837,10 +848,17 @@ mod tests {
             if idx < self.responses.len() {
                 self.responses[idx].clone()
             } else {
-                self.responses.last().cloned().unwrap_or(Err(LlmError::NotConfigured))
+                self.responses
+                    .last()
+                    .cloned()
+                    .unwrap_or(Err(LlmError::NotConfigured))
             }
         }
-        async fn chat_with_key(&self, _key: &str, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        async fn chat_with_key(
+            &self,
+            _key: &str,
+            request: ChatRequest,
+        ) -> Result<ChatResponse, LlmError> {
             self.chat(request).await
         }
     }
@@ -849,7 +867,7 @@ mod tests {
         RouterRequest {
             model: model.map(|m| m.to_string()),
             messages: vec![ChatMessage::user("test")],
-            tools: vec![],
+            tools: Arc::new(vec![]),
             temperature: None,
             max_tokens: None,
             context: RequestContext::default(),
@@ -887,15 +905,25 @@ mod tests {
         let provider = Arc::new(MockProvider::new(
             "anthropic",
             vec![
-                Err(LlmError::RateLimited { retry_after_ms: 1000 }),
+                Err(LlmError::RateLimited {
+                    retry_after_ms: 1000,
+                }),
                 Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929")),
             ],
         ));
 
         let key_pool = KeyPool::new(
             vec![
-                ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string()),
-                ApiKey::new("k2".to_string(), ProviderType::Anthropic, "sk-2".to_string()),
+                ApiKey::new(
+                    "k1".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-1".to_string(),
+                ),
+                ApiKey::new(
+                    "k2".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-2".to_string(),
+                ),
             ],
             SelectionStrategy::RoundRobin,
         );
@@ -926,7 +954,9 @@ mod tests {
         // Anthropic provider always rate-limits
         let anthropic = Arc::new(MockProvider::new(
             "anthropic",
-            vec![Err(LlmError::RateLimited { retry_after_ms: 1000 })],
+            vec![Err(LlmError::RateLimited {
+                retry_after_ms: 1000,
+            })],
         ));
         let openai = Arc::new(MockProvider::new(
             "openai",
@@ -939,7 +969,11 @@ mod tests {
             ProviderEntry {
                 provider: anthropic,
                 key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
-                    vec![ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string())],
+                    vec![ApiKey::new(
+                        "k1".to_string(),
+                        ProviderType::Anthropic,
+                        "sk-1".to_string(),
+                    )],
                     SelectionStrategy::RoundRobin,
                 ))),
             },
@@ -949,7 +983,11 @@ mod tests {
             ProviderEntry {
                 provider: openai,
                 key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
-                    vec![ApiKey::new("k1".to_string(), ProviderType::OpenAI, "sk-1".to_string())],
+                    vec![ApiKey::new(
+                        "k1".to_string(),
+                        ProviderType::OpenAI,
+                        "sk-1".to_string(),
+                    )],
                     SelectionStrategy::RoundRobin,
                 ))),
             },
@@ -1015,11 +1053,17 @@ mod tests {
     async fn test_all_failed_no_fallback() {
         let provider = Arc::new(MockProvider::new(
             "anthropic",
-            vec![Err(LlmError::RateLimited { retry_after_ms: 1000 })],
+            vec![Err(LlmError::RateLimited {
+                retry_after_ms: 1000,
+            })],
         ));
 
         let key_pool = KeyPool::new(
-            vec![ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string())],
+            vec![ApiKey::new(
+                "k1".to_string(),
+                ProviderType::Anthropic,
+                "sk-1".to_string(),
+            )],
             SelectionStrategy::RoundRobin,
         );
 
@@ -1055,7 +1099,11 @@ mod tests {
         ));
 
         let key_pool = KeyPool::new(
-            vec![ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string())],
+            vec![ApiKey::new(
+                "k1".to_string(),
+                ProviderType::Anthropic,
+                "sk-1".to_string(),
+            )],
             SelectionStrategy::RoundRobin,
         );
 
@@ -1083,8 +1131,16 @@ mod tests {
         // Hot-reload with new key pool
         let new_pool = KeyPool::new(
             vec![
-                ApiKey::new("k_new_1".to_string(), ProviderType::Anthropic, "sk-new-1".to_string()),
-                ApiKey::new("k_new_2".to_string(), ProviderType::Anthropic, "sk-new-2".to_string()),
+                ApiKey::new(
+                    "k_new_1".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-new-1".to_string(),
+                ),
+                ApiKey::new(
+                    "k_new_2".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-new-2".to_string(),
+                ),
             ],
             SelectionStrategy::RoundRobin,
         );
@@ -1106,7 +1162,11 @@ mod tests {
             vec![Ok(MockProvider::ok_response("gpt-5.2"))],
         ));
         let pool = KeyPool::new(
-            vec![ApiKey::new("k1".to_string(), ProviderType::OpenAI, "sk-1".to_string())],
+            vec![ApiKey::new(
+                "k1".to_string(),
+                ProviderType::OpenAI,
+                "sk-1".to_string(),
+            )],
             SelectionStrategy::RoundRobin,
         );
 
@@ -1118,9 +1178,16 @@ mod tests {
             "gpt-5.2".to_string(),
         );
 
-        assert!(!router.reload_keys(ProviderType::OpenAI, KeyPool::new(vec![], SelectionStrategy::RoundRobin)));
+        assert!(!router.reload_keys(
+            ProviderType::OpenAI,
+            KeyPool::new(vec![], SelectionStrategy::RoundRobin)
+        ));
         assert!(router.register_provider(ProviderType::OpenAI, provider, pool));
-        assert!(router.configured_providers().contains(&ProviderType::OpenAI));
+        assert!(
+            router
+                .configured_providers()
+                .contains(&ProviderType::OpenAI)
+        );
     }
 
     #[tokio::test]
@@ -1128,7 +1195,9 @@ mod tests {
         // API provider always rate-limits
         let api_provider = Arc::new(MockProvider::new(
             "anthropic",
-            vec![Err(LlmError::RateLimited { retry_after_ms: 1000 })],
+            vec![Err(LlmError::RateLimited {
+                retry_after_ms: 1000,
+            })],
         ));
         let cli_provider = Arc::new(MockProvider::new(
             "claude_cli",
@@ -1141,7 +1210,11 @@ mod tests {
             ProviderEntry {
                 provider: api_provider,
                 key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
-                    vec![ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string())],
+                    vec![ApiKey::new(
+                        "k1".to_string(),
+                        ProviderType::Anthropic,
+                        "sk-1".to_string(),
+                    )],
                     SelectionStrategy::RoundRobin,
                 ))),
             },
@@ -1192,14 +1265,24 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for KeyAwareMockProvider {
-        fn name(&self) -> &str { "key_aware_mock" }
-        fn supports_tools(&self) -> bool { false }
+        fn name(&self) -> &str {
+            "key_aware_mock"
+        }
+        fn supports_tools(&self) -> bool {
+            false
+        }
         async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
             Err(LlmError::NotConfigured)
         }
-        async fn chat_with_key(&self, key: &str, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
+        async fn chat_with_key(
+            &self,
+            key: &str,
+            _req: ChatRequest,
+        ) -> Result<ChatResponse, LlmError> {
             if key.starts_with("sk-ant-oat") {
-                Err(LlmError::AuthenticationFailed("managed token cannot auth against HTTP API".into()))
+                Err(LlmError::AuthenticationFailed(
+                    "managed token cannot auth against HTTP API".into(),
+                ))
             } else {
                 Ok(MockProvider::ok_response("claude-haiku"))
             }
@@ -1216,10 +1299,7 @@ mod tests {
         );
         managed_key.source = crate::key_pool::KeySource::ClaudeCode;
 
-        let key_pool = KeyPool::new(
-            vec![managed_key],
-            SelectionStrategy::RoundRobin,
-        );
+        let key_pool = KeyPool::new(vec![managed_key], SelectionStrategy::RoundRobin);
 
         let key_aware = Arc::new(KeyAwareMockProvider);
         let cli_provider = Arc::new(MockProvider::new(
@@ -1269,10 +1349,7 @@ mod tests {
         );
         api_key.source = crate::key_pool::KeySource::ApiConsole;
 
-        let key_pool = KeyPool::new(
-            vec![managed_key, api_key],
-            SelectionStrategy::RoundRobin,
-        );
+        let key_pool = KeyPool::new(vec![managed_key, api_key], SelectionStrategy::RoundRobin);
 
         let key_aware = Arc::new(KeyAwareMockProvider);
 
@@ -1303,9 +1380,19 @@ mod tests {
     #[test]
     fn test_flatten_messages() {
         let messages = vec![
-            ChatMessage { role: Role::System, content: "You are helpful.".to_string(), tool_calls: None, tool_call_id: None },
+            ChatMessage {
+                role: Role::System,
+                content: "You are helpful.".to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+            },
             ChatMessage::user("Hello"),
-            ChatMessage { role: Role::Assistant, content: "Hi!".to_string(), tool_calls: None, tool_call_id: None },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "Hi!".to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+            },
         ];
         let flattened = flatten_messages(&messages);
         assert!(flattened.contains("[System] You are helpful."));
@@ -1316,9 +1403,19 @@ mod tests {
     #[test]
     fn test_truncate_messages_for_cli_small_input() {
         let messages = vec![
-            ChatMessage { role: Role::System, content: "System prompt".to_string(), tool_calls: None, tool_call_id: None },
+            ChatMessage {
+                role: Role::System,
+                content: "System prompt".to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+            },
             ChatMessage::user("Hello"),
-            ChatMessage { role: Role::Assistant, content: "Hi!".to_string(), tool_calls: None, tool_call_id: None },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "Hi!".to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+            },
         ];
         let result = truncate_messages_for_cli(&messages);
         // Small input — no truncation needed
@@ -1332,12 +1429,27 @@ mod tests {
     fn test_truncate_messages_for_cli_large_input() {
         let big_content = "x".repeat(8 * 1024); // 8KB per message
         let messages = vec![
-            ChatMessage { role: Role::System, content: "System prompt".to_string(), tool_calls: None, tool_call_id: None },
-            ChatMessage::user(&big_content),          // middle — should be dropped
-            ChatMessage { role: Role::Assistant, content: big_content.clone(), tool_calls: None, tool_call_id: None }, // middle — should be dropped
-            ChatMessage::user(&big_content),          // middle — should be dropped
-            ChatMessage { role: Role::Tool, content: "tool result".to_string(), tool_calls: None, tool_call_id: None }, // second-to-last — kept
-            ChatMessage::user("What next?"),           // last — kept
+            ChatMessage {
+                role: Role::System,
+                content: "System prompt".to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage::user(&big_content), // middle — should be dropped
+            ChatMessage {
+                role: Role::Assistant,
+                content: big_content.clone(),
+                tool_calls: None,
+                tool_call_id: None,
+            }, // middle — should be dropped
+            ChatMessage::user(&big_content), // middle — should be dropped
+            ChatMessage {
+                role: Role::Tool,
+                content: "tool result".to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+            }, // second-to-last — kept
+            ChatMessage::user("What next?"), // last — kept
         ];
         // Total > 16KB, so truncation should fire
         let result = truncate_messages_for_cli(&messages);
@@ -1388,9 +1500,21 @@ mod tests {
 
         let key_pool = KeyPool::new(
             vec![
-                ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string()),
-                ApiKey::new("k2".to_string(), ProviderType::Anthropic, "sk-2".to_string()),
-                ApiKey::new("k3".to_string(), ProviderType::Anthropic, "sk-3".to_string()),
+                ApiKey::new(
+                    "k1".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-1".to_string(),
+                ),
+                ApiKey::new(
+                    "k2".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-2".to_string(),
+                ),
+                ApiKey::new(
+                    "k3".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-3".to_string(),
+                ),
             ],
             SelectionStrategy::RoundRobin,
         );
@@ -1429,14 +1553,29 @@ mod tests {
 
         let key_pool = KeyPool::new(
             vec![
-                ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string()),
-                ApiKey::new("k2".to_string(), ProviderType::Anthropic, "sk-2".to_string()),
+                ApiKey::new(
+                    "k1".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-1".to_string(),
+                ),
+                ApiKey::new(
+                    "k2".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-2".to_string(),
+                ),
             ],
             SelectionStrategy::RoundRobin,
         );
 
         // Rate-limit one key
-        key_pool.report_result("k1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+        key_pool
+            .report_result(
+                "k1",
+                CallResult::RateLimited {
+                    retry_after_ms: 60_000,
+                },
+            )
+            .await;
 
         let mut providers = HashMap::new();
         providers.insert(
@@ -1471,7 +1610,9 @@ mod tests {
             "claude-sonnet-4-5-20250929",
         );
 
-        let info = router.estimated_llm_capacity(Some("nonexistent-model")).await;
+        let info = router
+            .estimated_llm_capacity(Some("nonexistent-model"))
+            .await;
         assert_eq!(info.effective_capacity, 0);
         assert_eq!(info.available_api_keys, 0);
     }
@@ -1516,10 +1657,21 @@ mod tests {
         ));
 
         let key_pool = KeyPool::new(
-            vec![ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string())],
+            vec![ApiKey::new(
+                "k1".to_string(),
+                ProviderType::Anthropic,
+                "sk-1".to_string(),
+            )],
             SelectionStrategy::RoundRobin,
         );
-        key_pool.report_result("k1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+        key_pool
+            .report_result(
+                "k1",
+                CallResult::RateLimited {
+                    retry_after_ms: 60_000,
+                },
+            )
+            .await;
 
         let mut providers = HashMap::new();
         providers.insert(

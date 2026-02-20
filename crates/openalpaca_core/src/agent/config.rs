@@ -1,6 +1,8 @@
 //! TOML-based agent configuration file structure
 
-use super::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent};
+use super::subagent::{
+    AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent,
+};
 use super::template::{AgentTemplate, AgentTemplateFrontmatter, extract_persona};
 use chrono::Utc;
 use openalpaca_storage::SubAgentConfig;
@@ -82,7 +84,11 @@ impl AgentConfigFile {
 
         let skills = AgentSkillsConfig {
             assigned,
-            denied: if denied.is_empty() { None } else { Some(denied) },
+            denied: if denied.is_empty() {
+                None
+            } else {
+                Some(denied)
+            },
         };
 
         let preset = AgentPresetConfig {
@@ -186,7 +192,11 @@ impl AgentConfigFile {
         let preset = AgentPreset {
             persona: self.preset.persona.clone(),
             temperature: self.preset.temperature.unwrap_or(0.5),
-            verbosity: self.preset.verbosity.clone().unwrap_or_else(|| "normal".to_string()),
+            verbosity: self
+                .preset
+                .verbosity
+                .clone()
+                .unwrap_or_else(|| "normal".to_string()),
         };
 
         // Merge skills.denied into denied_capabilities
@@ -202,7 +212,7 @@ impl AgentConfigFile {
                         denied.push(d.clone());
                     }
                 }
-                AgentConstraints {
+                let mut constraints = AgentConstraints {
                     max_tool_calls: c.max_tool_calls,
                     timeout_seconds: c.timeout_seconds,
                     max_cost_per_task: c.max_cost_per_task,
@@ -214,11 +224,17 @@ impl AgentConfigFile {
                     denied_capabilities: denied,
                     allowed_models: c.allowed_models.clone().unwrap_or_default(),
                     denied_models: c.denied_models.clone().unwrap_or_default(),
-                }
+                };
+                constraints.normalize();
+                constraints
             })
-            .unwrap_or_else(|| AgentConstraints {
-                denied_capabilities: skills_denied,
-                ..Default::default()
+            .unwrap_or_else(|| {
+                let mut constraints = AgentConstraints {
+                    denied_capabilities: skills_denied,
+                    ..Default::default()
+                };
+                constraints.normalize();
+                constraints
             });
 
         let llm_config = self
@@ -356,7 +372,11 @@ impl AgentConfigFile {
             skills: self.skills.assigned.clone(),
             denied_skills: skills_denied,
             temperature: self.preset.temperature.unwrap_or(0.5),
-            verbosity: self.preset.verbosity.clone().unwrap_or_else(|| "normal".to_string()),
+            verbosity: self
+                .preset
+                .verbosity
+                .clone()
+                .unwrap_or_else(|| "normal".to_string()),
             model: self.llm.as_ref().and_then(|l| l.model.clone()),
             fallback_models: self
                 .llm
@@ -401,7 +421,11 @@ impl AgentConfigFile {
         let preset = AgentPreset {
             persona: self.preset.persona.clone(),
             temperature: self.preset.temperature.unwrap_or(0.5),
-            verbosity: self.preset.verbosity.clone().unwrap_or_else(|| "normal".to_string()),
+            verbosity: self
+                .preset
+                .verbosity
+                .clone()
+                .unwrap_or_else(|| "normal".to_string()),
         };
 
         let skills_denied2 = self.skills.denied.clone().unwrap_or_default();
@@ -413,7 +437,7 @@ impl AgentConfigFile {
                     denied.push(d.clone());
                 }
             }
-            AgentConstraints {
+            let mut constraints = AgentConstraints {
                 max_tool_calls: c.max_tool_calls,
                 timeout_seconds: c.timeout_seconds,
                 max_cost_per_task: c.max_cost_per_task,
@@ -422,15 +446,15 @@ impl AgentConfigFile {
                 denied_capabilities: denied,
                 allowed_models: c.allowed_models.clone().unwrap_or_default(),
                 denied_models: c.denied_models.clone().unwrap_or_default(),
-            }
+            };
+            constraints.normalize();
+            constraints
         });
 
-        let llm_config = self.llm.as_ref().map(|l| {
-            AgentLlmConfig {
-                model: l.model.clone(),
-                fallback_models: l.fallback_models.clone().unwrap_or_default(),
-                overrides: l.overrides.clone().unwrap_or_default(),
-            }
+        let llm_config = self.llm.as_ref().map(|l| AgentLlmConfig {
+            model: l.model.clone(),
+            fallback_models: l.fallback_models.clone().unwrap_or_default(),
+            overrides: l.overrides.clone().unwrap_or_default(),
         });
         let llm_config_json = llm_config
             .as_ref()
@@ -495,7 +519,10 @@ require_confirmation_for = ["file_delete"]
         assert_eq!(config.agent.id, "test_agent");
         assert_eq!(config.skills.assigned.len(), 2);
         assert_eq!(config.preset.temperature, Some(0.3));
-        assert_eq!(config.constraints.as_ref().unwrap().max_tool_calls, Some(20));
+        assert_eq!(
+            config.constraints.as_ref().unwrap().max_tool_calls,
+            Some(20)
+        );
     }
 
     #[test]
@@ -524,7 +551,12 @@ require_confirmation_for = ["file_delete"]
         let config: AgentConfigFile = toml::from_str(sample_toml()).unwrap();
         let agent = config.into_subagent();
         // skills.denied = ["shell_execute"] should be merged
-        assert!(agent.constraints.denied_capabilities.contains(&"shell_execute".to_string()));
+        assert!(
+            agent
+                .constraints
+                .denied_capabilities
+                .contains(&"shell_execute".to_string())
+        );
     }
 
     #[test]
@@ -549,10 +581,23 @@ denied_capabilities = ["file_write"]
 "#;
         let config: AgentConfigFile = toml::from_str(toml_str).unwrap();
         let agent = config.into_subagent();
-        assert_eq!(agent.constraints.allowed_capabilities, vec!["web_search", "summarize"]);
+        assert_eq!(
+            agent.constraints.allowed_capabilities,
+            vec!["web_search", "summarize"]
+        );
         // "file_write" from denied_capabilities + "shell_execute" from skills.denied
-        assert!(agent.constraints.denied_capabilities.contains(&"file_write".to_string()));
-        assert!(agent.constraints.denied_capabilities.contains(&"shell_execute".to_string()));
+        assert!(
+            agent
+                .constraints
+                .denied_capabilities
+                .contains(&"file_write".to_string())
+        );
+        assert!(
+            agent
+                .constraints
+                .denied_capabilities
+                .contains(&"shell_execute".to_string())
+        );
     }
 
     #[test]
@@ -573,7 +618,12 @@ persona = "test"
         let config: AgentConfigFile = toml::from_str(toml_str).unwrap();
         let agent = config.into_subagent();
         // skills.denied should still be captured even without [constraints]
-        assert!(agent.constraints.denied_capabilities.contains(&"shell_execute".to_string()));
+        assert!(
+            agent
+                .constraints
+                .denied_capabilities
+                .contains(&"shell_execute".to_string())
+        );
     }
 
     // ── Template bridge tests ──────────────────────────────────────
@@ -620,12 +670,21 @@ You are a bridge testing assistant.
         assert_eq!(config.agent.name, "Bridge Agent");
         assert_eq!(config.agent.icon, Some("bridge".to_string()));
         assert_eq!(config.skills.assigned, vec!["web_search", "summarize"]);
-        assert_eq!(config.skills.denied, Some(vec!["shell_execute".to_string()]));
+        assert_eq!(
+            config.skills.denied,
+            Some(vec!["shell_execute".to_string()])
+        );
         assert_eq!(config.preset.temperature, Some(0.3));
         assert_eq!(config.preset.verbosity, Some("detailed".to_string()));
         assert!(config.preset.persona.contains("bridge testing assistant"));
-        assert_eq!(config.constraints.as_ref().unwrap().max_tool_calls, Some(20));
-        assert_eq!(config.llm.as_ref().unwrap().model, Some("claude-sonnet-4-5-20250929".to_string()));
+        assert_eq!(
+            config.constraints.as_ref().unwrap().max_tool_calls,
+            Some(20)
+        );
+        assert_eq!(
+            config.llm.as_ref().unwrap().model,
+            Some("claude-sonnet-4-5-20250929".to_string())
+        );
         assert_eq!(
             config.llm.as_ref().unwrap().fallback_models,
             Some(vec!["claude-haiku-4-5-20251001".to_string()])
@@ -642,7 +701,12 @@ You are a bridge testing assistant.
         assert_eq!(agent.template_id, "bridge_agent");
         assert_eq!(agent.skills.len(), 2);
         assert_eq!(agent.preset.temperature, 0.3);
-        assert!(agent.constraints.denied_capabilities.contains(&"shell_execute".to_string()));
+        assert!(
+            agent
+                .constraints
+                .denied_capabilities
+                .contains(&"shell_execute".to_string())
+        );
         assert!(agent.status.is_available());
     }
 
@@ -657,7 +721,13 @@ You are a bridge testing assistant.
         assert_eq!(template.frontmatter.denied_skills, vec!["shell_execute"]);
         assert_eq!(template.frontmatter.temperature, 0.3);
         assert_eq!(template.frontmatter.max_tool_calls, Some(20));
-        assert!(template.sections.get("Persona").unwrap().contains("test assistant"));
+        assert!(
+            template
+                .sections
+                .get("Persona")
+                .unwrap()
+                .contains("test assistant")
+        );
         assert!(!template.frontmatter.singleton);
     }
 
@@ -672,6 +742,11 @@ You are a bridge testing assistant.
         assert_eq!(agent.id, "test_agent");
         assert_eq!(agent.skills.len(), 2);
         assert_eq!(agent.preset.temperature, 0.3);
-        assert!(agent.constraints.denied_capabilities.contains(&"shell_execute".to_string()));
+        assert!(
+            agent
+                .constraints
+                .denied_capabilities
+                .contains(&"shell_execute".to_string())
+        );
     }
 }

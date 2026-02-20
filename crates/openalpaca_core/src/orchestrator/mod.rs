@@ -27,7 +27,6 @@ mod tests;
 use crate::bus::EventBus;
 use crate::context::{SharedContext, TaskEntry};
 use crate::daemon_config::DaemonConfig;
-use arc_swap::ArcSwap;
 use crate::lane::LaneManager;
 use crate::middleware::bootstrap::BootstrapDocument;
 use crate::middleware::identity::IdentityDocument;
@@ -37,6 +36,7 @@ use crate::runner::LoopConfig;
 use crate::security::gate::SecurityGate;
 use crate::security::policy::Principal;
 use crate::tools::ToolRegistry;
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use openalpaca_llm::{ChatMessage, LlmRouter, Role};
 use openalpaca_storage::{Database, Task};
@@ -129,6 +129,7 @@ pub(super) fn role_label(role: &Role) -> &'static str {
 }
 
 impl Orchestrator {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         shared_context: Arc<SharedContext>,
         lane_manager: Arc<LaneManager>,
@@ -221,17 +222,19 @@ impl Orchestrator {
     /// so that `PromptAssembler::assemble()` uses the chosen name.
     pub fn update_identity_document(&self, doc: Option<IdentityDocument>) {
         // Update system persona name if identity provides one
-        if let Some(ref identity) = doc {
-            if !identity.name.is_empty() {
-                match self.system_persona.write() {
-                    Ok(mut guard) => {
-                        guard.name = identity.name.clone();
-                    }
-                    Err(poisoned) => {
-                        tracing::warn!("System persona lock poisoned during identity name update; recovering");
-                        let mut guard = poisoned.into_inner();
-                        guard.name = identity.name.clone();
-                    }
+        if let Some(ref identity) = doc
+            && !identity.name.is_empty()
+        {
+            match self.system_persona.write() {
+                Ok(mut guard) => {
+                    guard.name = identity.name.clone();
+                }
+                Err(poisoned) => {
+                    tracing::warn!(
+                        "System persona lock poisoned during identity name update; recovering"
+                    );
+                    let mut guard = poisoned.into_inner();
+                    guard.name = identity.name.clone();
                 }
             }
         }
@@ -330,27 +333,25 @@ pub(super) fn db_task_to_json(task: &Task) -> String {
     });
 
     // Parse state_json to extract DAG node details if available
-    if let Some(ref sj) = task.state_json {
-        if let Ok(state) = serde_json::from_str::<task_state::TaskState>(sj) {
-            if let Some(ref dag) = state.dag {
-                let nodes_summary: Vec<serde_json::Value> = dag
-                    .nodes
-                    .iter()
-                    .map(|n| {
-                        serde_json::json!({
-                            "node_id": n.node_id,
-                            "title": n.title,
-                            "agent_id": n.agent_id,
-                            "status": n.status,
-                        })
-                    })
-                    .collect();
-                obj.as_object_mut().unwrap().insert(
-                    "dag_nodes".to_string(),
-                    serde_json::json!(nodes_summary),
-                );
-            }
-        }
+    if let Some(ref sj) = task.state_json
+        && let Ok(state) = serde_json::from_str::<task_state::TaskState>(sj)
+        && let Some(ref dag) = state.dag
+    {
+        let nodes_summary: Vec<serde_json::Value> = dag
+            .nodes
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "node_id": n.node_id,
+                    "title": n.title,
+                    "agent_id": n.agent_id,
+                    "status": n.status,
+                })
+            })
+            .collect();
+        obj.as_object_mut()
+            .unwrap()
+            .insert("dag_nodes".to_string(), serde_json::json!(nodes_summary));
     }
 
     obj.to_string()

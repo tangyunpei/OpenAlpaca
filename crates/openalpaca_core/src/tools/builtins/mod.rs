@@ -1,14 +1,14 @@
+mod file_ops;
 mod helpers;
-mod web_search;
-mod web_fetch;
+mod memory_search;
+mod shell_execute;
 mod summarize;
 mod text_generate;
-mod file_ops;
-mod shell_execute;
-mod memory_search;
+mod update_identity;
 mod update_soul;
 mod update_user;
-mod update_identity;
+mod web_fetch;
+mod web_search;
 
 use crate::bus::EventBus;
 use crate::daemon_config::DaemonConfig;
@@ -17,16 +17,16 @@ use openalpaca_llm::ToolDefinition;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use self::web_search::web_search_tool;
-use self::web_fetch::web_fetch_tool;
+use self::file_ops::{file_read_tool, file_write_tool};
+use self::memory_search::memory_search_tool;
+use self::shell_execute::shell_execute_tool;
 use self::summarize::summarize_tool;
 use self::text_generate::text_generate_tool;
-use self::file_ops::{file_read_tool, file_write_tool};
-use self::shell_execute::shell_execute_tool;
-use self::memory_search::memory_search_tool;
+use self::update_identity::update_identity_tool;
 use self::update_soul::update_soul_tool;
 use self::update_user::update_user_tool;
-use self::update_identity::update_identity_tool;
+use self::web_fetch::web_fetch_tool;
+use self::web_search::web_search_tool;
 
 use super::registry::RegisteredTool;
 
@@ -132,7 +132,9 @@ pub fn workspace_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "workspace_read".to_string(),
-            description: "Read entries from the shared task workspace. If key is empty, returns all entries.".to_string(),
+            description:
+                "Read entries from the shared task workspace. If key is empty, returns all entries."
+                    .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -146,7 +148,8 @@ pub fn workspace_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "workspace_write".to_string(),
-            description: "Write an entry to the shared task workspace for other agents to read.".to_string(),
+            description: "Write an entry to the shared task workspace for other agents to read."
+                .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
