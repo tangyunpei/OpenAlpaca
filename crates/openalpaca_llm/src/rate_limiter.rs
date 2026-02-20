@@ -131,7 +131,7 @@ pub fn backoff_with_jitter(base: Duration, attempt: u32, cap: Duration) -> Durat
         return Duration::ZERO;
     }
 
-    let jitter_ms: u64 = rand::rng().random_range(0..capped_ms);
+    let jitter_ms: u64 = rand::rng().random_range(1..=capped_ms);
     Duration::from_millis(jitter_ms)
 }
 
@@ -357,6 +357,12 @@ pub struct RateLimitConfig {
     /// Default: 30.
     #[serde(default = "default_circuit_breaker_recovery_secs")]
     pub circuit_breaker_recovery_secs: u64,
+
+    /// Maximum transient retries per `execute_with_retry` call.
+    /// Decoupled from key pool size so even a single-key setup gets enough attempts.
+    /// Default: 3.
+    #[serde(default = "default_max_transient_retries")]
+    pub max_transient_retries: usize,
 }
 
 fn default_rpm() -> u32 { 50 }
@@ -367,6 +373,7 @@ fn default_backoff_base_ms() -> u64 { 500 }
 fn default_backoff_cap_ms() -> u64 { 30_000 }
 fn default_circuit_breaker_threshold() -> u32 { 5 }
 fn default_circuit_breaker_recovery_secs() -> u64 { 30 }
+fn default_max_transient_retries() -> usize { 3 }
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
@@ -379,6 +386,7 @@ impl Default for RateLimitConfig {
             backoff_cap_ms: default_backoff_cap_ms(),
             circuit_breaker_threshold: default_circuit_breaker_threshold(),
             circuit_breaker_recovery_secs: default_circuit_breaker_recovery_secs(),
+            max_transient_retries: default_max_transient_retries(),
         }
     }
 }
@@ -517,10 +525,11 @@ mod tests {
     fn test_backoff_base_case() {
         let base = Duration::from_millis(500);
         let cap = Duration::from_secs(30);
-        // Attempt 0: result should be in [0, 500ms)
+        // Attempt 0: result should be in [1ms, 500ms]
         for _ in 0..100 {
             let d = backoff_with_jitter(base, 0, cap);
-            assert!(d < base, "Expected < 500ms, got {:?}", d);
+            assert!(d >= Duration::from_millis(1), "Expected >= 1ms, got {:?}", d);
+            assert!(d <= base, "Expected <= 500ms, got {:?}", d);
         }
     }
 
@@ -697,6 +706,7 @@ mod tests {
         assert_eq!(config.backoff_cap_ms, 30_000);
         assert_eq!(config.circuit_breaker_threshold, 5);
         assert_eq!(config.circuit_breaker_recovery_secs, 30);
+        assert_eq!(config.max_transient_retries, 3);
     }
 
     #[test]
@@ -710,6 +720,7 @@ mod tests {
             backoff_cap_ms: 60_000,
             circuit_breaker_threshold: 10,
             circuit_breaker_recovery_secs: 60,
+            max_transient_retries: 3,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: RateLimitConfig = serde_json::from_str(&json).unwrap();

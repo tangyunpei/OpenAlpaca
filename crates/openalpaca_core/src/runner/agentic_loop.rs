@@ -2,7 +2,7 @@ use crate::agent::subagent::AgentConstraints;
 use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use openalpaca_llm::{
-    ChatMessage, ChatRequest, FinishReason, LlmProvider, LlmRouter, RequestContext,
+    ChatMessage, ChatRequest, FinishReason, LlmProvider, LlmRouter, LlmRouterError, RequestContext,
     RouterRequest, ToolDefinition,
 };
 use std::time::{Duration, Instant};
@@ -415,6 +415,8 @@ pub async fn run_agentic_loop_routed(
     let mut tool_calls_made = 0usize;
     let mut last_assistant_content = String::new();
     let mut last_model: Option<String> = None;
+    let mut consecutive_llm_errors: usize = 0;
+    const MAX_LLM_RETRIES: usize = 3;
 
     let context = RequestContext {
         agent_id: Some(agent_id.to_string()),
@@ -530,6 +532,7 @@ pub async fn run_agentic_loop_routed(
 
         match llm_result {
             Ok(response) => {
+                consecutive_llm_errors = 0;
                 // Enforce model access constraints: if the router resolved to a
                 // model the agent is not allowed to use (e.g., via fallback chain),
                 // abort with an error rather than processing the response.
@@ -665,6 +668,51 @@ pub async fn run_agentic_loop_routed(
                 };
             }
             Err(e) => {
+                let is_transient = matches!(
+                    e,
+                    LlmRouterError::MaxRetriesExceeded
+                        | LlmRouterError::AllKeysRateLimited
+                        | LlmRouterError::AllFallbacksFailed
+                ) || matches!(&e, LlmRouterError::Llm(inner) if inner.is_transient());
+
+                if is_transient
+                    && consecutive_llm_errors < MAX_LLM_RETRIES
+                    && rounds < config.max_rounds
+                {
+                    consecutive_llm_errors += 1;
+                    let backoff_secs = (1u64 << consecutive_llm_errors).min(30);
+                    tracing::warn!(
+                        agent_id = agent_id,
+                        rounds = rounds,
+                        error = %e,
+                        attempt = consecutive_llm_errors,
+                        max_attempts = MAX_LLM_RETRIES,
+                        backoff_secs = backoff_secs,
+                        "Transient LLM error, retrying after backoff"
+                    );
+                    if let Some(ref token) = cancel_token {
+                        tokio::select! {
+                            () = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
+                            () = token.cancelled() => {
+                                tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop cancelled during retry backoff");
+                                return LoopResult {
+                                    final_content: last_assistant_content,
+                                    rounds_used: rounds,
+                                    total_input_tokens: total_input,
+                                    total_output_tokens: total_output,
+                                    tool_calls_made,
+                                    finish_reason: LoopFinishReason::Cancelled,
+                                    model_used: last_model.clone(),
+                                    elapsed: start.elapsed(),
+                                };
+                            }
+                        }
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    }
+                    continue;
+                }
+
                 tracing::warn!(
                     agent_id = agent_id,
                     rounds = rounds,

@@ -265,13 +265,14 @@ impl LlmProvider for AnthropicProvider {
 
         let status = response.status().as_u16();
 
-        if status == 429 {
+        if status == 429 || status == 529 {
+            let default_retry = if status == 529 { 30 } else { 1 };
             let retry_after = response
                 .headers()
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1);
+                .unwrap_or(default_retry);
             return Err(LlmError::RateLimited {
                 retry_after_ms: retry_after * 1000,
             });
