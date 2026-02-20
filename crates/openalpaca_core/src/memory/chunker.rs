@@ -10,7 +10,11 @@ pub struct Chunk {
 /// Chunk markdown into segments at heading/paragraph boundaries.
 /// Default `max_chunk_chars` is 500.
 pub fn chunk_markdown(content: &str, source_file: &str, max_chunk_chars: usize) -> Vec<Chunk> {
-    let max_chunk_chars = if max_chunk_chars == 0 { 500 } else { max_chunk_chars };
+    let max_chunk_chars = if max_chunk_chars == 0 {
+        500
+    } else {
+        max_chunk_chars
+    };
     let mut chunks = Vec::new();
     let mut index = 0;
 
@@ -172,7 +176,11 @@ mod tests {
         let long_paragraph = "A".repeat(600);
         let md = format!("## Big Section\n{}", long_paragraph);
         let chunks = chunk_markdown(&md, "test.md", 500);
-        assert!(chunks.len() >= 2, "Long section should be split: got {} chunks", chunks.len());
+        assert!(
+            chunks.len() >= 2,
+            "Long section should be split: got {} chunks",
+            chunks.len()
+        );
     }
 
     #[test]
@@ -182,7 +190,11 @@ mod tests {
         for chunk in &chunks {
             assert_eq!(chunk.source_file, "docs/readme.md");
         }
-        assert!(chunks.iter().any(|c| c.section.as_deref() == Some("## Section One")));
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.section.as_deref() == Some("## Section One"))
+        );
     }
 
     #[test]

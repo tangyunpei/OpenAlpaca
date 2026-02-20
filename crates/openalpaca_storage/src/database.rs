@@ -20,12 +20,11 @@ static VEC_INIT: Once = Once::new();
 /// `sqlite3_auto_extension` expects. This is the documented pattern from
 /// the sqlite-vec crate.
 fn ensure_vec_extension() {
-    VEC_INIT.call_once(|| {
-        unsafe {
-            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-                sqlite3_vec_init as *const (),
-            )));
-        }
+    VEC_INIT.call_once(|| unsafe {
+        #[allow(clippy::missing_transmute_annotations)]
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+            sqlite3_vec_init as *const (),
+        )));
     });
 }
 
@@ -137,7 +136,8 @@ impl Database {
                 .with_context(|| format!("Failed to run migration {}", migration.name))?;
         }
 
-        tx.commit().context("Failed to commit migration transaction")?;
+        tx.commit()
+            .context("Failed to commit migration transaction")?;
 
         info!(
             "Migrations complete, schema version: {}",

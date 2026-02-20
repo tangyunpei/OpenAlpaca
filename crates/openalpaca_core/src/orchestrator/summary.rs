@@ -2,6 +2,7 @@ use super::{ConversationContext, Orchestrator};
 use openalpaca_llm::{ChatMessage, RequestContext, RouterRequest};
 use openalpaca_storage::ConversationRepository;
 use openalpaca_storage::repository::LlmUsageRepository;
+use std::sync::Arc;
 
 impl Orchestrator {
     /// Incrementally update the conversation summary if enough new older messages exist.
@@ -44,7 +45,10 @@ impl Orchestrator {
         }
         user_prompt.push_str("## New Messages\n");
         for (_, role, content) in &new_older {
-            let truncated: String = content.chars().take(dcfg.orchestrator.memory.msg_trunc_chars).collect();
+            let truncated: String = content
+                .chars()
+                .take(dcfg.orchestrator.memory.msg_trunc_chars)
+                .collect();
             user_prompt.push_str(&format!("{}: {}\n", role, truncated));
         }
         user_prompt.push_str(&format!(
@@ -69,7 +73,7 @@ impl Orchestrator {
                 ),
                 ChatMessage::user(&user_prompt),
             ],
-            tools: vec![],
+            tools: Arc::new(vec![]),
             temperature: Some(0.0),
             max_tokens: Some(512),
             context: RequestContext {
@@ -180,7 +184,10 @@ impl Orchestrator {
             tracing::warn!("Failed to persist summary LLM usage: {e}");
         }
 
-        let new_summary: String = new_summary.chars().take(dcfg.orchestrator.memory.summary_max_chars).collect();
+        let new_summary: String = new_summary
+            .chars()
+            .take(dcfg.orchestrator.memory.summary_max_chars)
+            .collect();
         let new_last_id = new_older
             .last()
             .map(|(id, _, _)| *id)
@@ -205,7 +212,9 @@ impl Orchestrator {
                         new_last_id,
                     ) {
                         Ok(true) => tracing::debug!("Summary updated on retry"),
-                        Ok(false) => tracing::warn!("Summary update: version conflict persists, discarding"),
+                        Ok(false) => {
+                            tracing::warn!("Summary update: version conflict persists, discarding")
+                        }
                         Err(e) => tracing::warn!("Summary retry failed: {e}"),
                     }
                 }

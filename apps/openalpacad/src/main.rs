@@ -14,8 +14,9 @@ mod middleware;
 mod notification;
 mod routes;
 
-use ::tokio::sync::mpsc;
+use ::tokio::sync::{broadcast, mpsc};
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use axum::{
     Router,
     extract::State,
@@ -23,7 +24,6 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use events::EventBroadcaster;
-use arc_swap::ArcSwap;
 use openalpaca_core::{
     agent::AgentConfigService,
     bus::EventBus,
@@ -33,11 +33,11 @@ use openalpaca_core::{
     gateway::Gateway,
     lane::LaneManager,
     middleware::{
-        bootstrap::{parse_bootstrap_markdown, BootstrapDocument},
-        identity::{parse_identity_markdown, identity_document_has_content, IdentityDocument},
+        bootstrap::{BootstrapDocument, parse_bootstrap_markdown},
+        identity::{IdentityDocument, identity_document_has_content, parse_identity_markdown},
         prompt::SystemPersona,
         soul::{parse_soul_markdown, soul_to_system_persona},
-        user::{parse_user_markdown, user_document_has_content, UserDocument},
+        user::{UserDocument, parse_user_markdown, user_document_has_content},
     },
     orchestrator::Orchestrator,
     tools::builtins::{IdentityToolContext, SoulToolContext, UserToolContext},
@@ -236,7 +236,10 @@ fn bootstrap_system_persona(config_base_dir: &Path) -> (SystemPersona, PathBuf) 
         Ok(path) => path,
         Err(e) => {
             warn!("SOUL template bootstrap failed: {e}");
-            config_base_dir.join("orchestrator").join("templates").join("SOUL_temp.md")
+            config_base_dir
+                .join("orchestrator")
+                .join("templates")
+                .join("SOUL_temp.md")
         }
     };
 
@@ -582,10 +585,7 @@ fn ensure_bootstrap_template_file(config_base_dir: &Path) -> Result<PathBuf> {
                 template_path.display()
             )
         })?;
-        info!(
-            "Bootstrap created template: {}",
-            template_path.display()
-        );
+        info!("Bootstrap created template: {}", template_path.display());
     }
 
     Ok(template_path)
@@ -864,19 +864,18 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     // Step 4.5: Bootstrap BOOTSTRAP.md for first-run onboarding
     let identity_has_content = initial_identity_document
         .as_ref()
-        .map_or(false, |d| identity_document_has_content(d));
+        .is_some_and(identity_document_has_content);
     let user_has_content = initial_user_document
         .as_ref()
-        .map_or(false, |d| user_document_has_content(d));
-    let (initial_bootstrap_document, bootstrap_path) = bootstrap_bootstrap_document(
-        &config_base_dir,
-        identity_has_content,
-        user_has_content,
-    );
+        .is_some_and(user_document_has_content);
+    let (initial_bootstrap_document, bootstrap_path) =
+        bootstrap_bootstrap_document(&config_base_dir, identity_has_content, user_has_content);
 
     // Load daemon config (orchestrator memory/cost limits, execution defaults, server intervals)
     let daemon_config_path = config_base_dir.join("daemon.toml");
-    let daemon_config = Arc::new(ArcSwap::from_pointee(load_daemon_config(&daemon_config_path)));
+    let daemon_config = Arc::new(ArcSwap::from_pointee(load_daemon_config(
+        &daemon_config_path,
+    )));
     info!("Daemon config loaded from {}", daemon_config_path.display());
 
     // Step 5: Create event broadcaster for WebSocket streaming
@@ -916,10 +915,10 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     if identity_path.exists() {
         watch_paths.push(identity_path.clone());
     }
-    if let Some(ref bp) = bootstrap_path {
-        if bp.exists() {
-            watch_paths.push(bp.clone());
-        }
+    if let Some(ref bp) = bootstrap_path
+        && bp.exists()
+    {
+        watch_paths.push(bp.clone());
     }
     let skills_dir = config_base_dir.join("skills");
     if skills_dir.exists() {
@@ -944,14 +943,26 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     // Shutdown channel for API-triggered shutdown
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
 
+    // Cancellation token for coordinated shutdown of all background tasks
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+
     // Single EventBus for system-wide event distribution
     let bus = EventBus::new(daemon_config.load().server.event_bus_capacity);
 
     // Spawn bridge: SystemEvent (Core) -> ServerEvent (API)
     let eb_bridge = event_broadcaster.clone();
     let mut system_rx = bus.subscribe();
+    let bridge_cancel = cancel_token.clone();
     tokio::spawn(async move {
-        while let Ok(event) = system_rx.recv().await {
+        loop {
+            let event = tokio::select! {
+                result = system_rx.recv() => match result {
+                    Ok(ev) => ev,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                },
+                _ = bridge_cancel.cancelled() => break,
+            };
             match event {
                 openalpaca_core::events::SystemEvent::ConnectorStatus { id, status, .. } => {
                     eb_bridge.connector_status(&id, &status);
@@ -998,7 +1009,14 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     current_task_id,
                     ..
                 } => {
-                    eb_bridge.agent_status(&agent_id, "", &status, current_task_id, &instance_id, &template_id);
+                    eb_bridge.agent_status(
+                        &agent_id,
+                        "",
+                        &status,
+                        current_task_id,
+                        &instance_id,
+                        &template_id,
+                    );
                 }
                 // ── Forwarded to clients: security & observability ─────────
                 openalpaca_core::events::SystemEvent::SecurityViolation {
@@ -1035,7 +1053,13 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     tracing::info!(
                         "LLM call: agent={agent_id}, model={model}, tokens={input_tokens}/{output_tokens}, cost=${cost_usd:.6}"
                     );
-                    eb_bridge.llm_call_completed(&agent_id, &model, input_tokens, output_tokens, cost_usd);
+                    eb_bridge.llm_call_completed(
+                        &agent_id,
+                        &model,
+                        input_tokens,
+                        output_tokens,
+                        cost_usd,
+                    );
                 }
                 openalpaca_core::events::SystemEvent::CircuitBreakerTripped {
                     agent_id,
@@ -1047,7 +1071,12 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     tracing::warn!(
                         "Circuit breaker tripped: agent={agent_id}, tool={tool_name}, failures={consecutive_failures}"
                     );
-                    eb_bridge.circuit_breaker_tripped(&agent_id, &tool_name, consecutive_failures, reset_after_secs);
+                    eb_bridge.circuit_breaker_tripped(
+                        &agent_id,
+                        &tool_name,
+                        consecutive_failures,
+                        reset_after_secs,
+                    );
                 }
                 openalpaca_core::events::SystemEvent::SkillCatalogUpdated {
                     skill_name,
@@ -1064,7 +1093,13 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     nodes_removed,
                     ..
                 } => {
-                    eb_bridge.task_replanned(&task_id, replan_number, &decision, nodes_added, nodes_removed);
+                    eb_bridge.task_replanned(
+                        &task_id,
+                        replan_number,
+                        &decision,
+                        nodes_added,
+                        nodes_removed,
+                    );
                 }
 
                 // ── Forwarded to clients: config changes ──────────────────
@@ -1077,8 +1112,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     eb_bridge.agent_config_changed(&agent_id, &action, config_version);
                 }
                 openalpaca_core::events::SystemEvent::OrchestratorConfigChanged {
-                    model,
-                    ..
+                    model, ..
                 } => {
                     eb_bridge.orchestrator_config_changed(&model);
                 }
@@ -1128,21 +1162,41 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     eb_bridge.soul_updated(&actor, &mode, &content_sha256, backup_path);
                 }
                 openalpaca_core::events::SystemEvent::DagNodeStarted {
-                    task_id, node_id, node_title, agent_id, ..
+                    task_id,
+                    node_id,
+                    node_title,
+                    agent_id,
+                    ..
                 } => {
                     eb_bridge.dag_node_status(
-                        &task_id, &node_id, &node_title, &agent_id,
-                        "started", None, None,
+                        &task_id,
+                        &node_id,
+                        &node_title,
+                        &agent_id,
+                        "started",
+                        None,
+                        None,
                     );
                 }
                 openalpaca_core::events::SystemEvent::DagNodeCompleted {
-                    task_id, node_id, node_title, agent_id,
-                    success, duration_ms, output_preview, ..
+                    task_id,
+                    node_id,
+                    node_title,
+                    agent_id,
+                    success,
+                    duration_ms,
+                    output_preview,
+                    ..
                 } => {
                     let status = if success { "completed" } else { "failed" };
                     eb_bridge.dag_node_status(
-                        &task_id, &node_id, &node_title, &agent_id,
-                        status, Some(duration_ms), output_preview,
+                        &task_id,
+                        &node_id,
+                        &node_title,
+                        &agent_id,
+                        status,
+                        Some(duration_ms),
+                        output_preview,
                     );
                 }
 
@@ -1162,9 +1216,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     intent_type,
                     ..
                 } => {
-                    tracing::debug!(
-                        "Intent classified: request={request_id}, type={intent_type}"
-                    );
+                    tracing::debug!("Intent classified: request={request_id}, type={intent_type}");
                 }
                 openalpaca_core::events::SystemEvent::UserProfileUpdated {
                     actor,
@@ -1227,8 +1279,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                 }
                 openalpaca_core::events::SystemEvent::Error { code, message, .. } => {
                     tracing::error!("System error: code={code}, message={message}");
-                }
-                // NO catch-all: compiler will flag any missing SystemEvent variant
+                } // NO catch-all: compiler will flag any missing SystemEvent variant
             }
         }
     });
@@ -1256,7 +1307,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                                     let is_singleton = template.frontmatter.singleton;
 
                                     // Register template in the template catalog
-                                    shared_context.agent_registry.register_template(template.clone());
+                                    shared_context
+                                        .agent_registry
+                                        .register_template(template.clone());
 
                                     // For singleton templates, also register as a legacy
                                     // agent so existing code (config service, REST API) can
@@ -1271,9 +1324,13 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                                     // Persist template metadata to DB as SubAgentConfig
                                     // (backward compatible — reuses existing table)
                                     let repo = openalpaca_storage::SubAgentRepository::new(&db);
-                                    let persona = openalpaca_core::agent::template::extract_persona(&template);
+                                    let persona = openalpaca_core::agent::template::extract_persona(
+                                        &template,
+                                    );
                                     let fm = &template.frontmatter;
-                                    let skills: Vec<openalpaca_core::agent::Skill> = fm.skills.iter()
+                                    let skills: Vec<openalpaca_core::agent::Skill> = fm
+                                        .skills
+                                        .iter()
                                         .map(|s| openalpaca_core::agent::Skill {
                                             name: s.clone(),
                                             category: "assigned".to_string(),
@@ -1289,7 +1346,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                                         max_tool_calls: fm.max_tool_calls,
                                         timeout_seconds: fm.timeout_seconds,
                                         max_cost_per_task: fm.max_cost_per_task,
-                                        require_confirmation_for: fm.require_confirmation_for.clone(),
+                                        require_confirmation_for: fm
+                                            .require_confirmation_for
+                                            .clone(),
                                         allowed_capabilities: fm.skills.clone(),
                                         denied_capabilities: fm.denied_skills.clone(),
                                         ..Default::default()
@@ -1308,10 +1367,18 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                                         icon: fm.icon.clone(),
                                         status: "idle".to_string(),
                                         current_task_id: None,
-                                        skills_json: serde_json::to_string(&skills).unwrap_or_else(|_| "[]".to_string()),
-                                        preset_json: serde_json::to_string(&preset).unwrap_or_else(|_| "{}".to_string()),
-                                        constraints_json: Some(serde_json::to_string(&constraints).unwrap_or_else(|_| "{}".to_string())),
-                                        llm_config_json: Some(serde_json::to_string(&llm_config).unwrap_or_else(|_| "{}".to_string())),
+                                        skills_json: serde_json::to_string(&skills)
+                                            .unwrap_or_else(|_| "[]".to_string()),
+                                        preset_json: serde_json::to_string(&preset)
+                                            .unwrap_or_else(|_| "{}".to_string()),
+                                        constraints_json: Some(
+                                            serde_json::to_string(&constraints)
+                                                .unwrap_or_else(|_| "{}".to_string()),
+                                        ),
+                                        llm_config_json: Some(
+                                            serde_json::to_string(&llm_config)
+                                                .unwrap_or_else(|_| "{}".to_string()),
+                                        ),
                                         persona: Some(persona),
                                         created_at: now,
                                         updated_at: Some(now),
@@ -1321,7 +1388,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                                     // Initialize metrics row if not exists
                                     if let Ok(None) = repo.get_metrics(&template_id) {
                                         let _ = repo.upsert_metrics(
-                                            &openalpaca_storage::AgentMetrics::new_empty(&template_id),
+                                            &openalpaca_storage::AgentMetrics::new_empty(
+                                                &template_id,
+                                            ),
                                         );
                                     }
 
@@ -1332,7 +1401,11 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                                     );
                                 }
                                 Err(e) => {
-                                    warn!("Failed to parse agent template {}: {}", path.display(), e);
+                                    warn!(
+                                        "Failed to parse agent template {}: {}",
+                                        path.display(),
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -1346,7 +1419,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                 Some("toml") => {
                     match std::fs::read_to_string(&path) {
                         Ok(content) => {
-                            match toml::from_str::<openalpaca_core::agent::AgentConfigFile>(&content) {
+                            match toml::from_str::<openalpaca_core::agent::AgentConfigFile>(
+                                &content,
+                            ) {
                                 Ok(agent_config) => {
                                     // Register in-memory
                                     let subagent = agent_config.clone().into_subagent();
@@ -1457,7 +1532,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                         &temp_keyring,
                     ) {
                         Ok(0) => info!("No keys needed reverse migration"),
-                        Ok(n) => info!("Reverse-migrated {n} secret(s) from OS keychain to local encrypted storage"),
+                        Ok(n) => info!(
+                            "Reverse-migrated {n} secret(s) from OS keychain to local encrypted storage"
+                        ),
                         Err(e) => warn!(
                             "Reverse migration failed: {e}. Keys with secret_ref may not be available. \
                              Set [security] use_keychain = true to use OS keychain, or re-add keys."
@@ -1532,7 +1609,6 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     }
 
     // Step 5.2.3c: Credential Discovery & Token Manager
-    let cancel_token = tokio_util::sync::CancellationToken::new();
 
     let llm_config: Option<openalpaca_llm::LlmRouterConfig> = {
         let p = config_base_dir.join("llm.toml");
@@ -1648,9 +1724,15 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let tools_config_dir = config_base_dir.join("tools");
     // Security-critical built-in tools that TOML configs must not override.
     let protected_builtins: &[&str] = &[
-        "update_soul", "update_user", "update_identity",
-        "shell_execute", "file_read", "file_write",
-        "memory_search", "workspace_read", "workspace_write",
+        "update_soul",
+        "update_user",
+        "update_identity",
+        "shell_execute",
+        "file_read",
+        "file_write",
+        "memory_search",
+        "workspace_read",
+        "workspace_write",
         "spawn_subagent",
     ];
     for tool in openalpaca_core::tools::config::load_tools_from_dir(&tools_config_dir) {
@@ -1673,9 +1755,7 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     info!("Tool registry: {} tools loaded", tool_registry.count());
 
     if tool_registry.get("update_soul").is_none() {
-        anyhow::bail!(
-            "update_soul tool failed to register — SOUL.md updates will not work"
-        );
+        anyhow::bail!("update_soul tool failed to register — SOUL.md updates will not work");
     }
 
     let tool_registry = Arc::new(tool_registry);
@@ -1699,7 +1779,11 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         let skills_dir = config_base_dir.join("skills");
         if skills_dir.exists() {
             let count = catalog.scan_directory(&skills_dir);
-            info!("Skill catalog: loaded {} skill(s) from {}", count, skills_dir.display());
+            info!(
+                "Skill catalog: loaded {} skill(s) from {}",
+                count,
+                skills_dir.display()
+            );
         }
         Arc::new(catalog)
     };
@@ -1754,7 +1838,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)),
     );
     let recent_identity_hashes: Arc<tokio::sync::Mutex<std::collections::VecDeque<String>>> =
-        Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)));
+        Arc::new(tokio::sync::Mutex::new(
+            std::collections::VecDeque::with_capacity(8),
+        ));
 
     let hashes_for_watcher = recent_soul_hashes.clone();
     let user_hashes_for_watcher = recent_user_hashes.clone();
@@ -1769,14 +1855,20 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
     let bus_for_watcher = bus.clone();
     let llm_config_path_for_reload = llm_config_path.clone();
     let secret_store_for_reload = secret_store.clone();
-    let recent_llm_hashes: Arc<tokio::sync::Mutex<std::collections::VecDeque<String>>> =
-        Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)));
+    let recent_llm_hashes: Arc<tokio::sync::Mutex<std::collections::VecDeque<String>>> = Arc::new(
+        tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)),
+    );
     let llm_hashes_for_watcher = recent_llm_hashes.clone();
     let daemon_config_for_reload = daemon_config.clone();
     let daemon_config_path_for_reload = daemon_config_path.clone();
     let fs_watch_handle_for_watcher = fs_watch_handle.clone();
+    let wake_cancel = cancel_token.clone();
     tokio::spawn(async move {
-        while let Some(event) = wake_rx.recv().await {
+        loop {
+            let event = tokio::select! {
+                Some(ev) = wake_rx.recv() => ev,
+                _ = wake_cancel.cancelled() => break,
+            };
             info!("Received WakeEvent: {:?}", event);
 
             if let openalpaca_api::events::WakeEvent::FileChanged { path, .. } = &event {
@@ -1863,7 +1955,8 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
 
                 // IDENTITY.md file watcher
                 if is_same_file_path(&changed_path, &identity_path_for_reload) {
-                    let should_skip = if let Ok(content) = std::fs::read(&identity_path_for_reload) {
+                    let should_skip = if let Ok(content) = std::fs::read(&identity_path_for_reload)
+                    {
                         use sha2::{Digest, Sha256};
                         let file_hash = format!("{:x}", Sha256::digest(&content));
                         let mut ring = identity_hashes_for_watcher.lock().await;
@@ -1884,7 +1977,8 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     if !should_skip {
                         match load_identity_document_from_file(&identity_path_for_reload) {
                             Ok(doc) => {
-                                orchestrator_for_identity_reload.update_identity_document(Some(doc));
+                                orchestrator_for_identity_reload
+                                    .update_identity_document(Some(doc));
                                 info!(
                                     "Identity reloaded (watcher): {}",
                                     identity_path_for_reload.display()
@@ -1901,32 +1995,35 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                 }
 
                 // BOOTSTRAP.md file watcher — if deleted externally, clear bootstrap state
-                if let Some(ref bp) = bootstrap_path_for_watcher {
-                    if is_same_file_path(&changed_path, bp) {
-                        if !bp.exists() {
-                            // File was deleted (by agent completion or manual user action)
-                            orchestrator_for_bootstrap_reload.update_bootstrap_document(None);
-                            info!("Bootstrap document cleared (file deleted): {}", bp.display());
-                            // Stop polling the deleted path to avoid log spam
-                            if let Some(ref handle) = fs_watch_handle_for_watcher {
-                                if let Err(e) = handle.unwatch_path(bp) {
-                                    warn!("Failed to unwatch bootstrap path: {e}");
-                                }
+                if let Some(ref bp) = bootstrap_path_for_watcher
+                    && is_same_file_path(&changed_path, bp)
+                {
+                    if !bp.exists() {
+                        // File was deleted (by agent completion or manual user action)
+                        orchestrator_for_bootstrap_reload.update_bootstrap_document(None);
+                        info!(
+                            "Bootstrap document cleared (file deleted): {}",
+                            bp.display()
+                        );
+                        // Stop polling the deleted path to avoid log spam
+                        if let Some(ref handle) = fs_watch_handle_for_watcher
+                            && let Err(e) = handle.unwatch_path(bp)
+                        {
+                            warn!("Failed to unwatch bootstrap path: {e}");
+                        }
+                    } else {
+                        // File was modified — reload
+                        match load_bootstrap_document_from_file(bp) {
+                            Ok(doc) => {
+                                orchestrator_for_bootstrap_reload
+                                    .update_bootstrap_document(Some(doc));
+                                info!("Bootstrap reloaded (watcher): {}", bp.display());
                             }
-                        } else {
-                            // File was modified — reload
-                            match load_bootstrap_document_from_file(bp) {
-                                Ok(doc) => {
-                                    orchestrator_for_bootstrap_reload
-                                        .update_bootstrap_document(Some(doc));
-                                    info!("Bootstrap reloaded (watcher): {}", bp.display());
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "BOOTSTRAP parse failed for {}: {e}; keeping last state",
-                                        bp.display()
-                                    );
-                                }
+                            Err(e) => {
+                                warn!(
+                                    "BOOTSTRAP parse failed for {}: {e}; keeping last state",
+                                    bp.display()
+                                );
                             }
                         }
                     }
@@ -1935,21 +2032,23 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                 // LLM config (llm.toml) hot-reload
                 if is_same_file_path(&changed_path, &llm_config_path_for_reload) {
                     // Dedup: skip if this write was from settings_service
-                    let should_skip = if let Ok(content) = std::fs::read(&llm_config_path_for_reload) {
-                        use sha2::{Digest, Sha256};
-                        let hash = format!("{:x}", Sha256::digest(&content));
-                        let hashes = llm_hashes_for_watcher.lock().await;
-                        hashes.contains(&hash)
-                    } else {
-                        false
-                    };
+                    let should_skip =
+                        if let Ok(content) = std::fs::read(&llm_config_path_for_reload) {
+                            use sha2::{Digest, Sha256};
+                            let hash = format!("{:x}", Sha256::digest(&content));
+                            let hashes = llm_hashes_for_watcher.lock().await;
+                            hashes.contains(&hash)
+                        } else {
+                            false
+                        };
 
                     if !should_skip {
                         if let Some(ref router) = llm_router_for_reload {
                             match openalpaca_llm::read_config(&llm_config_path_for_reload) {
                                 Ok(new_config) => {
                                     // 1. Reload runtime config (timeouts, endpoints, env vars, provider defaults)
-                                    let runtime = openalpaca_llm::LlmRuntimeConfig::from(&new_config);
+                                    let runtime =
+                                        openalpaca_llm::LlmRuntimeConfig::from(&new_config);
                                     router.reload_runtime_config(runtime);
 
                                     // 2. Reload model registry entries from config
@@ -1968,7 +2067,11 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                                             if provider_config.enabled == Some(false) {
                                                 continue;
                                             }
-                                            if let Some(provider_type) = openalpaca_llm::config::parse_provider_type_pub(provider_name) {
+                                            if let Some(provider_type) =
+                                                openalpaca_llm::config::parse_provider_type_pub(
+                                                    provider_name,
+                                                )
+                                            {
                                                 match openalpaca_llm::settings_service::build_key_pool_from_provider_config(
                                                     provider_config,
                                                     provider_type,
@@ -1985,7 +2088,10 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                                         }
                                     }
 
-                                    info!("LLM config hot-reloaded from {}", llm_config_path_for_reload.display());
+                                    info!(
+                                        "LLM config hot-reloaded from {}",
+                                        llm_config_path_for_reload.display()
+                                    );
                                 }
                                 Err(e) => {
                                     warn!(
@@ -2005,30 +2111,34 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                     let mut new_cfg = load_daemon_config(&daemon_config_path_for_reload);
                     new_cfg.validate();
                     daemon_config_for_reload.store(Arc::new(new_cfg));
-                    info!("Daemon config hot-reloaded from {}", daemon_config_path_for_reload.display());
+                    info!(
+                        "Daemon config hot-reloaded from {}",
+                        daemon_config_path_for_reload.display()
+                    );
                 }
 
                 // Skills directory hot-reload
                 if changed_path.starts_with(&skills_dir_for_watcher) {
                     // Determine which skill folder changed
-                    if let Ok(relative) = changed_path.strip_prefix(&skills_dir_for_watcher) {
-                        if let Some(skill_folder) = relative.components().next() {
-                            let skill_dir = skills_dir_for_watcher.join(skill_folder);
-                            match skill_catalog_for_watcher.reload_skill(&skill_dir) {
-                                Ok(()) => {
-                                    let skill_name = skill_folder.as_os_str().to_string_lossy().to_string();
-                                    info!("Skill hot-reloaded: {}", skill_dir.display());
-                                    bus_for_watcher.publish(openalpaca_core::events::SystemEvent::SkillCatalogUpdated {
+                    if let Ok(relative) = changed_path.strip_prefix(&skills_dir_for_watcher)
+                        && let Some(skill_folder) = relative.components().next()
+                    {
+                        let skill_dir = skills_dir_for_watcher.join(skill_folder);
+                        match skill_catalog_for_watcher.reload_skill(&skill_dir) {
+                            Ok(()) => {
+                                let skill_name =
+                                    skill_folder.as_os_str().to_string_lossy().to_string();
+                                info!("Skill hot-reloaded: {}", skill_dir.display());
+                                bus_for_watcher.publish(
+                                    openalpaca_core::events::SystemEvent::SkillCatalogUpdated {
                                         skill_name,
                                         action: "reloaded".to_string(),
                                         timestamp: chrono::Utc::now(),
-                                    });
-                                }
-                                Err(e) => warn!(
-                                    "Skill reload failed for {}: {}",
-                                    skill_dir.display(),
-                                    e
-                                ),
+                                    },
+                                );
+                            }
+                            Err(e) => {
+                                warn!("Skill reload failed for {}: {}", skill_dir.display(), e)
                             }
                         }
                     }
@@ -2048,8 +2158,17 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         let orchestrator_for_soul = orchestrator.clone();
         let soul_path_for_bus = soul_path.clone();
         let hashes_for_bus = recent_soul_hashes.clone();
+        let soul_cancel = cancel_token.clone();
         tokio::spawn(async move {
-            while let Ok(event) = soul_rx.recv().await {
+            loop {
+                let event = tokio::select! {
+                    result = soul_rx.recv() => match result {
+                        Ok(ev) => ev,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    },
+                    _ = soul_cancel.cancelled() => break,
+                };
                 if let openalpaca_core::events::SystemEvent::SoulUpdated {
                     actor,
                     content_sha256,
@@ -2096,8 +2215,17 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         let orchestrator_for_user = orchestrator.clone();
         let user_path_for_bus = user_path.clone();
         let user_hashes_for_bus = recent_user_hashes.clone();
+        let user_cancel = cancel_token.clone();
         tokio::spawn(async move {
-            while let Ok(event) = user_rx.recv().await {
+            loop {
+                let event = tokio::select! {
+                    result = user_rx.recv() => match result {
+                        Ok(ev) => ev,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    },
+                    _ = user_cancel.cancelled() => break,
+                };
                 if let openalpaca_core::events::SystemEvent::UserProfileUpdated {
                     actor,
                     content_sha256,
@@ -2143,8 +2271,17 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         let orchestrator_for_identity = orchestrator.clone();
         let identity_path_for_bus = identity_path.clone();
         let identity_hashes_for_bus = recent_identity_hashes.clone();
+        let identity_cancel = cancel_token.clone();
         tokio::spawn(async move {
-            while let Ok(event) = identity_rx.recv().await {
+            loop {
+                let event = tokio::select! {
+                    result = identity_rx.recv() => match result {
+                        Ok(ev) => ev,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    },
+                    _ = identity_cancel.cancelled() => break,
+                };
                 if let openalpaca_core::events::SystemEvent::IdentityUpdated {
                     actor,
                     content_sha256,
@@ -2211,8 +2348,12 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
             .flatten()
             .map(teloxide::Bot::new);
         let notif_rx = notif_bus.subscribe();
-        let dispatcher =
-            notification::NotificationDispatcher::new(notif_rx, telegram_bot, db.clone());
+        let dispatcher = notification::NotificationDispatcher::new(
+            notif_rx,
+            telegram_bot,
+            db.clone(),
+            cancel_token.clone(),
+        );
         tokio::spawn(dispatcher.run());
     }
 
@@ -2262,7 +2403,9 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
                         for ((id, _), embedding) in missing.iter().zip(embeddings.iter()) {
                             if embedding.len() == idx_emb.dimensions() as usize {
                                 if let Err(e) = repo.insert_embedding(*id, embedding) {
-                                    tracing::warn!("Failed to insert embedding for memory #{id}: {e}");
+                                    tracing::warn!(
+                                        "Failed to insert embedding for memory #{id}: {e}"
+                                    );
                                 }
                                 count += 1;
                             }
@@ -2415,9 +2558,18 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
             "/v1/agent-templates/from-markdown",
             post(routes::create_template_from_markdown_handler),
         )
-        .route("/v1/agent-templates/{id}", get(routes::get_template_handler))
-        .route("/v1/agent-templates/{id}", put(routes::update_template_handler))
-        .route("/v1/agent-templates/{id}", delete(routes::delete_template_handler))
+        .route(
+            "/v1/agent-templates/{id}",
+            get(routes::get_template_handler),
+        )
+        .route(
+            "/v1/agent-templates/{id}",
+            put(routes::update_template_handler),
+        )
+        .route(
+            "/v1/agent-templates/{id}",
+            delete(routes::delete_template_handler),
+        )
         .route(
             "/v1/agent-templates/{id}/markdown",
             get(routes::get_template_markdown_handler),
@@ -2592,6 +2744,17 @@ async fn async_main(config_base_dir: std::path::PathBuf) -> Result<()> {
         cancel_for_server.cancel();
     });
 
+    // Force-exit watchdog: if graceful shutdown takes too long, exit the process.
+    // This prevents the daemon from hanging indefinitely on open connections or
+    // unresponsive cleanup steps.
+    let watchdog_cancel = cancel_token.clone();
+    tokio::spawn(async move {
+        watchdog_cancel.cancelled().await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        warn!("Graceful shutdown timed out after 10s, forcing exit");
+        std::process::exit(1);
+    });
+
     if let Err(e) = server.await {
         error!("Server error: {e}");
     }
@@ -2735,7 +2898,12 @@ mod tests {
 
         assert_eq!(persona.name, "OpenAlpaca");
         assert!(soul_path.exists());
-        assert!(dir.join("orchestrator").join("templates").join("SOUL_temp.md").exists());
+        assert!(
+            dir.join("orchestrator")
+                .join("templates")
+                .join("SOUL_temp.md")
+                .exists()
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

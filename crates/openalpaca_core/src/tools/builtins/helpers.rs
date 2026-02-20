@@ -37,16 +37,13 @@ pub(super) fn resolve_workspace_path(relative_path: &str) -> Result<PathBuf, Str
 
     // Canonicalize to resolve symlinks. For reads the file must exist;
     // for writes the parent must exist (caller handles dir creation).
-    let canonical = full_path.canonicalize().map_err(|e| {
-        format!(
-            "Path resolution failed for '{}': {}",
-            relative_path, e
-        )
-    })?;
+    let canonical = full_path
+        .canonicalize()
+        .map_err(|e| format!("Path resolution failed for '{}': {}", relative_path, e))?;
 
-    let canonical_root = workspace_root.canonicalize().map_err(|e| {
-        format!("Workspace root canonicalization failed: {}", e)
-    })?;
+    let canonical_root = workspace_root
+        .canonicalize()
+        .map_err(|e| format!("Workspace root canonicalization failed: {}", e))?;
 
     if !canonical.starts_with(&canonical_root) {
         return Err(format!(
@@ -74,9 +71,9 @@ pub(super) fn resolve_workspace_path_for_write(relative_path: &str) -> Result<Pa
         .parent()
         .ok_or_else(|| "Invalid path: no parent directory".to_string())?;
 
-    let canonical_root = workspace_root.canonicalize().map_err(|e| {
-        format!("Workspace root canonicalization failed: {}", e)
-    })?;
+    let canonical_root = workspace_root
+        .canonicalize()
+        .map_err(|e| format!("Workspace root canonicalization failed: {}", e))?;
 
     // If parent exists, canonicalize it; otherwise fall back to the joined path
     // (parent dirs will be created by the caller)

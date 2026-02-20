@@ -194,11 +194,11 @@ impl CircuitBreaker {
             CircuitState::Closed => Ok(()),
             CircuitState::Open => {
                 // Check if recovery timeout has elapsed
-                if let Some(last) = inner.last_failure {
-                    if last.elapsed() >= inner.recovery_timeout {
-                        inner.state = CircuitState::HalfOpen;
-                        return Ok(());
-                    }
+                if let Some(last) = inner.last_failure
+                    && last.elapsed() >= inner.recovery_timeout
+                {
+                    inner.state = CircuitState::HalfOpen;
+                    return Ok(());
                 }
                 Err(CircuitState::Open)
             }
@@ -290,7 +290,10 @@ impl KeyRateLimiter {
     /// Returns the concurrency permit (held until the API call completes).
     pub async fn acquire(&self, estimated_tokens: u32) -> SemaphorePermit<'_> {
         // 1. Concurrency permit (blocks if too many in-flight for this key)
-        let permit = self.concurrency.acquire().await
+        let permit = self
+            .concurrency
+            .acquire()
+            .await
             .expect("KeyRateLimiter semaphore should never be closed");
 
         // 2. RPM token (blocks until within RPM budget)
@@ -365,15 +368,33 @@ pub struct RateLimitConfig {
     pub max_transient_retries: usize,
 }
 
-fn default_rpm() -> u32 { 50 }
-fn default_tpm() -> u32 { 40_000 }
-fn default_per_key_concurrency() -> usize { 2 }
-fn default_global_concurrency() -> usize { 4 }
-fn default_backoff_base_ms() -> u64 { 500 }
-fn default_backoff_cap_ms() -> u64 { 30_000 }
-fn default_circuit_breaker_threshold() -> u32 { 5 }
-fn default_circuit_breaker_recovery_secs() -> u64 { 30 }
-fn default_max_transient_retries() -> usize { 3 }
+fn default_rpm() -> u32 {
+    50
+}
+fn default_tpm() -> u32 {
+    40_000
+}
+fn default_per_key_concurrency() -> usize {
+    2
+}
+fn default_global_concurrency() -> usize {
+    4
+}
+fn default_backoff_base_ms() -> u64 {
+    500
+}
+fn default_backoff_cap_ms() -> u64 {
+    30_000
+}
+fn default_circuit_breaker_threshold() -> u32 {
+    5
+}
+fn default_circuit_breaker_recovery_secs() -> u64 {
+    30
+}
+fn default_max_transient_retries() -> usize {
+    3
+}
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
@@ -419,11 +440,7 @@ impl RateLimiterRegistry {
     ///
     /// If the key has a configured `rate_limit` (RPM), that value is used.
     /// Otherwise, `default_rpm` from config is used.
-    pub fn get_or_create(
-        &self,
-        key_id: &str,
-        key_rate_limit: Option<u32>,
-    ) -> Arc<KeyRateLimiter> {
+    pub fn get_or_create(&self, key_id: &str, key_rate_limit: Option<u32>) -> Arc<KeyRateLimiter> {
         self.limiters
             .entry(key_id.to_string())
             .or_insert_with(|| {
@@ -506,7 +523,10 @@ mod tests {
         // Wait 100ms → should refill ~10 tokens
         tokio::time::sleep(Duration::from_millis(100)).await;
         let avail = bucket.available().await;
-        assert!(avail >= 8.0, "Expected ~10 tokens after 100ms at 100/sec, got {avail}");
+        assert!(
+            avail >= 8.0,
+            "Expected ~10 tokens after 100ms at 100/sec, got {avail}"
+        );
         assert!(avail <= 12.0);
     }
 
@@ -516,7 +536,10 @@ mod tests {
         // Wait a long time — should not exceed capacity
         tokio::time::sleep(Duration::from_millis(200)).await;
         let avail = bucket.available().await;
-        assert!(avail <= 5.0, "Tokens should not exceed capacity, got {avail}");
+        assert!(
+            avail <= 5.0,
+            "Tokens should not exceed capacity, got {avail}"
+        );
     }
 
     // ── backoff_with_jitter tests ─────────────────────────────────
@@ -528,7 +551,11 @@ mod tests {
         // Attempt 0: result should be in [1ms, 500ms]
         for _ in 0..100 {
             let d = backoff_with_jitter(base, 0, cap);
-            assert!(d >= Duration::from_millis(1), "Expected >= 1ms, got {:?}", d);
+            assert!(
+                d >= Duration::from_millis(1),
+                "Expected >= 1ms, got {:?}",
+                d
+            );
             assert!(d <= base, "Expected <= 500ms, got {:?}", d);
         }
     }
@@ -657,7 +684,10 @@ mod tests {
         let limiter = registry.get_or_create("key1", None);
         // Should have default RPM bucket
         let available = limiter.rpm_bucket.available().await;
-        assert!((available - 50.0).abs() < 1.0, "Expected ~50 RPM, got {available}");
+        assert!(
+            (available - 50.0).abs() < 1.0,
+            "Expected ~50 RPM, got {available}"
+        );
     }
 
     #[tokio::test]
@@ -677,7 +707,10 @@ mod tests {
         let registry = RateLimiterRegistry::new(RateLimitConfig::default());
         let limiter = registry.get_or_create("key_custom", Some(100));
         let available = limiter.rpm_bucket.available().await;
-        assert!((available - 100.0).abs() < 1.0, "Expected ~100 RPM, got {available}");
+        assert!(
+            (available - 100.0).abs() < 1.0,
+            "Expected ~100 RPM, got {available}"
+        );
     }
 
     #[tokio::test]

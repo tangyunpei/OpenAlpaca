@@ -11,6 +11,7 @@ use std::path::Path;
 /// Root config loaded from `config/daemon.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct DaemonConfig {
     pub orchestrator: OrchestratorConfig,
     pub execution: ExecutionConfig,
@@ -19,36 +20,15 @@ pub struct DaemonConfig {
     pub providers: ProvidersConfig,
 }
 
-impl Default for DaemonConfig {
-    fn default() -> Self {
-        Self {
-            orchestrator: OrchestratorConfig::default(),
-            execution: ExecutionConfig::default(),
-            security: SecurityConfig::default(),
-            server: ServerConfig::default(),
-            providers: ProvidersConfig::default(),
-        }
-    }
-}
-
 // ── Orchestrator ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct OrchestratorConfig {
     pub memory: MemoryConfig,
     pub costs: CostsConfig,
     pub prompt_budgets: PromptBudgetsConfig,
-}
-
-impl Default for OrchestratorConfig {
-    fn default() -> Self {
-        Self {
-            memory: MemoryConfig::default(),
-            costs: CostsConfig::default(),
-            prompt_budgets: PromptBudgetsConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,24 +160,13 @@ impl Default for PromptBudgetsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct ExecutionConfig {
     pub agent_defaults: AgentDefaults,
     pub lead_agent_defaults: LeadAgentDefaults,
     pub skill_defaults: SkillDefaults,
     pub planner: PlannerConfig,
     pub dag: DagConfig,
-}
-
-impl Default for ExecutionConfig {
-    fn default() -> Self {
-        Self {
-            agent_defaults: AgentDefaults::default(),
-            lead_agent_defaults: LeadAgentDefaults::default(),
-            skill_defaults: SkillDefaults::default(),
-            planner: PlannerConfig::default(),
-            dag: DagConfig::default(),
-        }
-    }
 }
 
 /// Fallback defaults for regular agents (when agent TOML `[constraints]` are absent).
@@ -435,16 +404,9 @@ impl Default for EmbeddingIndexerConfig {
 /// External service provider configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct ProvidersConfig {
     pub web_search: WebSearchProviderConfig,
-}
-
-impl Default for ProvidersConfig {
-    fn default() -> Self {
-        Self {
-            web_search: WebSearchProviderConfig::default(),
-        }
-    }
 }
 
 /// Brave Search API configuration for the `web_search` built-in tool.
@@ -485,67 +447,317 @@ impl DaemonConfig {
     /// Invalid values are clamped to the nearest valid boundary with a warning log.
     pub fn validate(&mut self) {
         // ── Orchestrator > Memory ──
-        clamp_val(&mut self.orchestrator.memory.prompt_recent_messages, 1, 200, "prompt_recent_messages");
-        clamp_val(&mut self.orchestrator.memory.summary_min_new_older_messages, 1, 200, "summary_min_new_older_messages");
-        clamp_val(&mut self.orchestrator.memory.summary_max_chars, 100, 32000, "summary_max_chars");
-        clamp_val(&mut self.orchestrator.memory.msg_trunc_chars, 100, 32000, "msg_trunc_chars");
-        clamp_val(&mut self.orchestrator.memory.supersession_distance_threshold, 0.0, 10.0, "supersession_distance_threshold");
-        clamp_val(&mut self.orchestrator.memory.fts_jaccard_threshold, 0.0, 1.0, "fts_jaccard_threshold");
-        clamp_val(&mut self.orchestrator.memory.profile_confidence_threshold, 0.0, 1.0, "profile_confidence_threshold");
-        clamp_val(&mut self.orchestrator.memory.profile_update_confidence_threshold, 0.0, 1.0, "profile_update_confidence_threshold");
-        clamp_val(&mut self.orchestrator.memory.memory_confidence_threshold, 0.0, 1.0, "memory_confidence_threshold");
+        clamp_val(
+            &mut self.orchestrator.memory.prompt_recent_messages,
+            1,
+            200,
+            "prompt_recent_messages",
+        );
+        clamp_val(
+            &mut self.orchestrator.memory.summary_min_new_older_messages,
+            1,
+            200,
+            "summary_min_new_older_messages",
+        );
+        clamp_val(
+            &mut self.orchestrator.memory.summary_max_chars,
+            100,
+            32000,
+            "summary_max_chars",
+        );
+        clamp_val(
+            &mut self.orchestrator.memory.msg_trunc_chars,
+            100,
+            32000,
+            "msg_trunc_chars",
+        );
+        clamp_val(
+            &mut self.orchestrator.memory.supersession_distance_threshold,
+            0.0,
+            10.0,
+            "supersession_distance_threshold",
+        );
+        clamp_val(
+            &mut self.orchestrator.memory.fts_jaccard_threshold,
+            0.0,
+            1.0,
+            "fts_jaccard_threshold",
+        );
+        clamp_val(
+            &mut self.orchestrator.memory.profile_confidence_threshold,
+            0.0,
+            1.0,
+            "profile_confidence_threshold",
+        );
+        clamp_val(
+            &mut self.orchestrator.memory.profile_update_confidence_threshold,
+            0.0,
+            1.0,
+            "profile_update_confidence_threshold",
+        );
+        clamp_val(
+            &mut self.orchestrator.memory.memory_confidence_threshold,
+            0.0,
+            1.0,
+            "memory_confidence_threshold",
+        );
         // ── Orchestrator > Memory > Decay ──
-        clamp_val(&mut self.orchestrator.memory.decay.poll_interval_secs, 60, 86400, "decay.poll_interval_secs");
-        clamp_val(&mut self.orchestrator.memory.decay.half_life_days, 1.0, 365.0, "decay.half_life_days");
-        clamp_val(&mut self.orchestrator.memory.decay.min_importance, 0.0, 1.0, "decay.min_importance");
-        clamp_val(&mut self.orchestrator.memory.decay.soft_cap, 10, 100_000, "decay.soft_cap");
-        clamp_val(&mut self.orchestrator.memory.decay.access_boost, 0.0, 1.0, "decay.access_boost");
+        clamp_val(
+            &mut self.orchestrator.memory.decay.poll_interval_secs,
+            60,
+            86400,
+            "decay.poll_interval_secs",
+        );
+        clamp_val(
+            &mut self.orchestrator.memory.decay.half_life_days,
+            1.0,
+            365.0,
+            "decay.half_life_days",
+        );
+        clamp_val(
+            &mut self.orchestrator.memory.decay.min_importance,
+            0.0,
+            1.0,
+            "decay.min_importance",
+        );
+        clamp_val(
+            &mut self.orchestrator.memory.decay.soft_cap,
+            10,
+            100_000,
+            "decay.soft_cap",
+        );
+        clamp_val(
+            &mut self.orchestrator.memory.decay.access_boost,
+            0.0,
+            1.0,
+            "decay.access_boost",
+        );
         // ── Orchestrator > Costs ──
-        clamp_val(&mut self.orchestrator.costs.summary_max_daily_cost_usd, 0.0, 100.0, "summary_max_daily_cost_usd");
-        clamp_val(&mut self.orchestrator.costs.extract_max_daily_cost_usd, 0.0, 100.0, "extract_max_daily_cost_usd");
-        clamp_val(&mut self.orchestrator.costs.extract_every_n_turns, 1, 100, "extract_every_n_turns");
-        clamp_val(&mut self.orchestrator.costs.task_extract_max_daily_cost_usd, 0.0, 100.0, "task_extract_max_daily_cost_usd");
+        clamp_val(
+            &mut self.orchestrator.costs.summary_max_daily_cost_usd,
+            0.0,
+            100.0,
+            "summary_max_daily_cost_usd",
+        );
+        clamp_val(
+            &mut self.orchestrator.costs.extract_max_daily_cost_usd,
+            0.0,
+            100.0,
+            "extract_max_daily_cost_usd",
+        );
+        clamp_val(
+            &mut self.orchestrator.costs.extract_every_n_turns,
+            1,
+            100,
+            "extract_every_n_turns",
+        );
+        clamp_val(
+            &mut self.orchestrator.costs.task_extract_max_daily_cost_usd,
+            0.0,
+            100.0,
+            "task_extract_max_daily_cost_usd",
+        );
         // ── Orchestrator > Prompt Budgets ──
-        clamp_val(&mut self.orchestrator.prompt_budgets.identity_budget, 50, 5000, "identity_budget");
-        clamp_val(&mut self.orchestrator.prompt_budgets.user_profile_budget, 100, 10000, "user_profile_budget");
+        clamp_val(
+            &mut self.orchestrator.prompt_budgets.identity_budget,
+            50,
+            5000,
+            "identity_budget",
+        );
+        clamp_val(
+            &mut self.orchestrator.prompt_budgets.user_profile_budget,
+            100,
+            10000,
+            "user_profile_budget",
+        );
         // ── Execution > Agent Defaults ──
-        clamp_val(&mut self.execution.agent_defaults.max_rounds, 1, 100, "agent_defaults.max_rounds");
-        clamp_val(&mut self.execution.agent_defaults.max_tools_per_round, 1, 50, "agent_defaults.max_tools_per_round");
-        clamp_val(&mut self.execution.agent_defaults.max_tool_runtime_secs, 1, 600, "agent_defaults.max_tool_runtime_secs");
-        clamp_val(&mut self.execution.agent_defaults.max_cost, 0.0, 1000.0, "agent_defaults.max_cost");
+        clamp_val(
+            &mut self.execution.agent_defaults.max_rounds,
+            1,
+            100,
+            "agent_defaults.max_rounds",
+        );
+        clamp_val(
+            &mut self.execution.agent_defaults.max_tools_per_round,
+            1,
+            50,
+            "agent_defaults.max_tools_per_round",
+        );
+        clamp_val(
+            &mut self.execution.agent_defaults.max_tool_runtime_secs,
+            1,
+            600,
+            "agent_defaults.max_tool_runtime_secs",
+        );
+        clamp_val(
+            &mut self.execution.agent_defaults.max_cost,
+            0.0,
+            1000.0,
+            "agent_defaults.max_cost",
+        );
         // ── Execution > Lead Agent Defaults ──
-        clamp_val(&mut self.execution.lead_agent_defaults.max_rounds, 1, 200, "lead_agent_defaults.max_rounds");
-        clamp_val(&mut self.execution.lead_agent_defaults.max_tools_per_round, 1, 50, "lead_agent_defaults.max_tools_per_round");
-        clamp_val(&mut self.execution.lead_agent_defaults.max_tool_runtime_secs, 1, 3600, "lead_agent_defaults.max_tool_runtime_secs");
-        clamp_val(&mut self.execution.lead_agent_defaults.max_cost, 0.0, 1000.0, "lead_agent_defaults.max_cost");
-        clamp_val(&mut self.execution.lead_agent_defaults.max_concurrent_subagents, 1, 32, "lead_agent_defaults.max_concurrent_subagents");
+        clamp_val(
+            &mut self.execution.lead_agent_defaults.max_rounds,
+            1,
+            200,
+            "lead_agent_defaults.max_rounds",
+        );
+        clamp_val(
+            &mut self.execution.lead_agent_defaults.max_tools_per_round,
+            1,
+            50,
+            "lead_agent_defaults.max_tools_per_round",
+        );
+        clamp_val(
+            &mut self.execution.lead_agent_defaults.max_tool_runtime_secs,
+            1,
+            3600,
+            "lead_agent_defaults.max_tool_runtime_secs",
+        );
+        clamp_val(
+            &mut self.execution.lead_agent_defaults.max_cost,
+            0.0,
+            1000.0,
+            "lead_agent_defaults.max_cost",
+        );
+        clamp_val(
+            &mut self.execution.lead_agent_defaults.max_concurrent_subagents,
+            1,
+            32,
+            "lead_agent_defaults.max_concurrent_subagents",
+        );
         // ── Execution > Skill Defaults ──
-        clamp_val(&mut self.execution.skill_defaults.max_rounds, 1, 100, "skill_defaults.max_rounds");
-        clamp_val(&mut self.execution.skill_defaults.max_tools_per_round, 1, 50, "skill_defaults.max_tools_per_round");
+        clamp_val(
+            &mut self.execution.skill_defaults.max_rounds,
+            1,
+            100,
+            "skill_defaults.max_rounds",
+        );
+        clamp_val(
+            &mut self.execution.skill_defaults.max_tools_per_round,
+            1,
+            50,
+            "skill_defaults.max_tools_per_round",
+        );
         // ── Execution > Planner ──
-        clamp_val(&mut self.execution.planner.planning_timeout_secs, 5, 120, "planner.planning_timeout_secs");
-        clamp_val(&mut self.execution.planner.max_retries, 0, 5, "planner.max_retries");
+        clamp_val(
+            &mut self.execution.planner.planning_timeout_secs,
+            5,
+            120,
+            "planner.planning_timeout_secs",
+        );
+        clamp_val(
+            &mut self.execution.planner.max_retries,
+            0,
+            5,
+            "planner.max_retries",
+        );
         // ── Execution > DAG ──
-        clamp_val(&mut self.execution.dag.max_concurrent_agents, 1, 32, "dag.max_concurrent_agents");
-        clamp_val(&mut self.execution.dag.node_timeout_secs, 10, 3600, "dag.node_timeout_secs");
-        clamp_val(&mut self.execution.dag.total_timeout_secs, 60, 7200, "dag.total_timeout_secs");
-        clamp_val(&mut self.execution.dag.max_retries_per_node, 0, 10, "dag.max_retries_per_node");
-        clamp_val(&mut self.execution.dag.replan_after_every_n_nodes, 1, 50, "dag.replan_after_every_n_nodes");
-        clamp_val(&mut self.execution.dag.max_replans, 0, 50, "dag.max_replans");
+        clamp_val(
+            &mut self.execution.dag.max_concurrent_agents,
+            1,
+            32,
+            "dag.max_concurrent_agents",
+        );
+        clamp_val(
+            &mut self.execution.dag.node_timeout_secs,
+            10,
+            3600,
+            "dag.node_timeout_secs",
+        );
+        clamp_val(
+            &mut self.execution.dag.total_timeout_secs,
+            60,
+            7200,
+            "dag.total_timeout_secs",
+        );
+        clamp_val(
+            &mut self.execution.dag.max_retries_per_node,
+            0,
+            10,
+            "dag.max_retries_per_node",
+        );
+        clamp_val(
+            &mut self.execution.dag.replan_after_every_n_nodes,
+            1,
+            50,
+            "dag.replan_after_every_n_nodes",
+        );
+        clamp_val(
+            &mut self.execution.dag.max_replans,
+            0,
+            50,
+            "dag.max_replans",
+        );
         // ── Security ──
-        clamp_val(&mut self.security.max_input_length, 1024, 1_048_576, "security.max_input_length");
-        clamp_val(&mut self.security.circuit_breaker.failure_threshold, 1, 100, "circuit_breaker.failure_threshold");
-        clamp_val(&mut self.security.circuit_breaker.reset_timeout_secs, 10, 3600, "circuit_breaker.reset_timeout_secs");
+        clamp_val(
+            &mut self.security.max_input_length,
+            1024,
+            1_048_576,
+            "security.max_input_length",
+        );
+        clamp_val(
+            &mut self.security.circuit_breaker.failure_threshold,
+            1,
+            100,
+            "circuit_breaker.failure_threshold",
+        );
+        clamp_val(
+            &mut self.security.circuit_breaker.reset_timeout_secs,
+            10,
+            3600,
+            "circuit_breaker.reset_timeout_secs",
+        );
         // ── Server ──
-        clamp_val(&mut self.server.event_bus_capacity, 64, 65536, "server.event_bus_capacity");
-        clamp_val(&mut self.server.event_broadcaster_capacity, 8, 4096, "server.event_broadcaster_capacity");
-        clamp_val(&mut self.server.wake_channel_capacity, 8, 4096, "server.wake_channel_capacity");
-        clamp_val(&mut self.server.heartbeat_interval_secs, 1, 300, "server.heartbeat_interval_secs");
-        clamp_val(&mut self.server.sse_keep_alive_secs, 1, 300, "server.sse_keep_alive_secs");
-        clamp_val(&mut self.server.chat_streams.stream_chunk_delay_ms, 0, 500, "server.chat_streams.stream_chunk_delay_ms");
-        clamp_val(&mut self.server.chat_streams.stream_chunk_words, 1, 50, "server.chat_streams.stream_chunk_words");
+        clamp_val(
+            &mut self.server.event_bus_capacity,
+            64,
+            65536,
+            "server.event_bus_capacity",
+        );
+        clamp_val(
+            &mut self.server.event_broadcaster_capacity,
+            8,
+            4096,
+            "server.event_broadcaster_capacity",
+        );
+        clamp_val(
+            &mut self.server.wake_channel_capacity,
+            8,
+            4096,
+            "server.wake_channel_capacity",
+        );
+        clamp_val(
+            &mut self.server.heartbeat_interval_secs,
+            1,
+            300,
+            "server.heartbeat_interval_secs",
+        );
+        clamp_val(
+            &mut self.server.sse_keep_alive_secs,
+            1,
+            300,
+            "server.sse_keep_alive_secs",
+        );
+        clamp_val(
+            &mut self.server.chat_streams.stream_chunk_delay_ms,
+            0,
+            500,
+            "server.chat_streams.stream_chunk_delay_ms",
+        );
+        clamp_val(
+            &mut self.server.chat_streams.stream_chunk_words,
+            1,
+            50,
+            "server.chat_streams.stream_chunk_words",
+        );
         // ── Providers ──
-        clamp_val(&mut self.providers.web_search.timeout_secs, 1, 60, "providers.web_search.timeout_secs");
+        clamp_val(
+            &mut self.providers.web_search.timeout_secs,
+            1,
+            60,
+            "providers.web_search.timeout_secs",
+        );
     }
 }
 
@@ -569,10 +781,7 @@ pub fn load_daemon_config(path: &Path) -> DaemonConfig {
             }
         },
         Err(_) => {
-            tracing::info!(
-                "No daemon config at {}; using defaults",
-                path.display()
-            );
+            tracing::info!("No daemon config at {}; using defaults", path.display());
             DaemonConfig::default()
         }
     }
@@ -650,10 +859,25 @@ max_concurrent_agents = 8
         config.validate();
 
         // All defaults should be within valid ranges
-        assert_eq!(config.orchestrator.memory.prompt_recent_messages, original.orchestrator.memory.prompt_recent_messages);
-        assert_eq!(config.orchestrator.memory.summary_max_chars, original.orchestrator.memory.summary_max_chars);
-        assert_eq!(config.execution.dag.max_concurrent_agents, original.execution.dag.max_concurrent_agents);
-        assert_eq!(config.security.max_input_length, original.security.max_input_length);
-        assert_eq!(config.server.event_bus_capacity, original.server.event_bus_capacity);
+        assert_eq!(
+            config.orchestrator.memory.prompt_recent_messages,
+            original.orchestrator.memory.prompt_recent_messages
+        );
+        assert_eq!(
+            config.orchestrator.memory.summary_max_chars,
+            original.orchestrator.memory.summary_max_chars
+        );
+        assert_eq!(
+            config.execution.dag.max_concurrent_agents,
+            original.execution.dag.max_concurrent_agents
+        );
+        assert_eq!(
+            config.security.max_input_length,
+            original.security.max_input_length
+        );
+        assert_eq!(
+            config.server.event_bus_capacity,
+            original.server.event_bus_capacity
+        );
     }
 }

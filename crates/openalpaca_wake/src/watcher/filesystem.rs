@@ -114,7 +114,9 @@ impl EventWatcher for FilesystemWatcher {
                             // Use try_send to avoid blocking the watcher thread
                             if let Err(e) = tx_clone.try_send(wake_event) {
                                 // Drop if channel full (backpressure)
-                                debug!("Filesystem wake event dropped (channel full or closed): {e}");
+                                debug!(
+                                    "Filesystem wake event dropped (channel full or closed): {e}"
+                                );
                             }
                         }
                     }
@@ -212,8 +214,10 @@ mod tests {
         let file_path = dir_path.join("custom_poll_trigger.txt");
 
         let (tx, mut rx) = mpsc::channel(10);
-        let watcher =
-            FilesystemWatcher::with_poll_interval(vec![dir_path.clone()], Duration::from_millis(500));
+        let watcher = FilesystemWatcher::with_poll_interval(
+            vec![dir_path.clone()],
+            Duration::from_millis(500),
+        );
 
         watcher.start(tx).await.unwrap();
 
@@ -236,7 +240,10 @@ mod tests {
         })
         .await;
 
-        assert!(result.is_ok(), "Timed out waiting for file event with custom poll interval");
+        assert!(
+            result.is_ok(),
+            "Timed out waiting for file event with custom poll interval"
+        );
         assert!(result.unwrap(), "Stream closed or event not found");
 
         watcher.stop().await.unwrap();

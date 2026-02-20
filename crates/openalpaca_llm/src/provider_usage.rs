@@ -54,6 +54,12 @@ pub struct ProviderUsageTracker {
     runtime_config: Arc<ArcSwap<LlmRuntimeConfig>>,
 }
 
+impl Default for ProviderUsageTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProviderUsageTracker {
     pub fn new() -> Self {
         Self {
@@ -74,20 +80,16 @@ impl ProviderUsageTracker {
     }
 
     /// Get usage for a credential source, fetching if stale.
-    pub async fn get_usage(
-        &self,
-        source: CredentialSource,
-        token: &str,
-    ) -> Option<ExternalUsage> {
+    pub async fn get_usage(&self, source: CredentialSource, token: &str) -> Option<ExternalUsage> {
         let rt = self.runtime_config.load();
         let cache_ttl = Duration::from_secs(rt.timeouts.usage_cache_ttl_secs);
         // Check cache first
         {
             let cache = self.cache.read().await;
-            if let Some(cached) = cache.get(&source) {
-                if !cached.is_stale(cache_ttl) {
-                    return Some(cached.data.clone());
-                }
+            if let Some(cached) = cache.get(&source)
+                && !cached.is_stale(cache_ttl)
+            {
+                return Some(cached.data.clone());
             }
         }
 
@@ -97,10 +99,13 @@ impl ProviderUsageTracker {
         // Update cache
         {
             let mut cache = self.cache.write().await;
-            cache.insert(source, CachedUsage {
-                data: usage.clone(),
-                fetched_at: Instant::now(),
-            });
+            cache.insert(
+                source,
+                CachedUsage {
+                    data: usage.clone(),
+                    fetched_at: Instant::now(),
+                },
+            );
         }
 
         Some(usage)
@@ -108,11 +113,7 @@ impl ProviderUsageTracker {
 
     /// Fetch usage from the external provider API.
     #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
-    async fn fetch_usage(
-        &self,
-        source: CredentialSource,
-        token: &str,
-    ) -> Option<ExternalUsage> {
+    async fn fetch_usage(&self, source: CredentialSource, token: &str) -> Option<ExternalUsage> {
         let result = match source {
             CredentialSource::ClaudeCode => self.fetch_anthropic_usage(token).await,
             CredentialSource::Codex => self.fetch_openai_usage(token).await,
@@ -129,11 +130,7 @@ impl ProviderUsageTracker {
 
     /// When no HTTP client features are enabled, always return None.
     #[cfg(not(any(feature = "anthropic", feature = "openai", feature = "ollama")))]
-    async fn fetch_usage(
-        &self,
-        _source: CredentialSource,
-        _token: &str,
-    ) -> Option<ExternalUsage> {
+    async fn fetch_usage(&self, _source: CredentialSource, _token: &str) -> Option<ExternalUsage> {
         None
     }
 
@@ -145,20 +142,22 @@ impl ProviderUsageTracker {
         let url = &rt.endpoints.anthropic_usage;
         let result = tokio::time::timeout(
             fetch_timeout,
-            self.client
-                .get(url.as_str())
-                .bearer_auth(token)
-                .send(),
+            self.client.get(url.as_str()).bearer_auth(token).send(),
         )
         .await;
 
         match result {
             Ok(Ok(response)) => {
                 if !response.status().is_success() {
-                    return Err(format!("Anthropic usage API returned {}", response.status()));
+                    return Err(format!(
+                        "Anthropic usage API returned {}",
+                        response.status()
+                    ));
                 }
 
-                let body: String = response.text().await
+                let body: String = response
+                    .text()
+                    .await
                     .map_err(|e| format!("Failed to read response: {}", e))?;
 
                 parse_anthropic_usage_response(&body)
@@ -176,10 +175,7 @@ impl ProviderUsageTracker {
         let url = &rt.endpoints.openai_usage;
         let result = tokio::time::timeout(
             fetch_timeout,
-            self.client
-                .get(url.as_str())
-                .bearer_auth(token)
-                .send(),
+            self.client.get(url.as_str()).bearer_auth(token).send(),
         )
         .await;
 
@@ -189,7 +185,9 @@ impl ProviderUsageTracker {
                     return Err(format!("OpenAI usage API returned {}", response.status()));
                 }
 
-                let body: String = response.text().await
+                let body: String = response
+                    .text()
+                    .await
                     .map_err(|e| format!("Failed to read response: {}", e))?;
 
                 parse_openai_usage_response(&body)
@@ -216,7 +214,7 @@ fn parse_anthropic_usage_response(body: &str) -> Result<ExternalUsage, String> {
     let now = chrono_like_now();
 
     Ok(ExternalUsage {
-        period: parsed.period.unwrap_or_else(|| current_period()),
+        period: parsed.period.unwrap_or_else(current_period),
         cost_usd: parsed.total_cost.unwrap_or(0.0),
         token_count: parsed.total_tokens.unwrap_or(0),
         rate_limit_remaining: None,
@@ -234,8 +232,8 @@ fn parse_openai_usage_response(body: &str) -> Result<ExternalUsage, String> {
         total_tokens: Option<u64>,
     }
 
-    let parsed: OpenAIUsage = serde_json::from_str(body)
-        .map_err(|e| format!("Failed to parse OpenAI usage: {}", e))?;
+    let parsed: OpenAIUsage =
+        serde_json::from_str(body).map_err(|e| format!("Failed to parse OpenAI usage: {}", e))?;
 
     let now = chrono_like_now();
 
@@ -282,7 +280,9 @@ mod tests {
     async fn test_cache_empty_returns_none_without_fetch() {
         let tracker = ProviderUsageTracker::new();
         // Without a valid token, fetch will fail and return None
-        let result = tracker.get_usage(CredentialSource::ClaudeCode, "invalid-token").await;
+        let result = tracker
+            .get_usage(CredentialSource::ClaudeCode, "invalid-token")
+            .await;
         // Should gracefully return None (or possibly Some if mock succeeds)
         // Main thing: no panic
         let _ = result;

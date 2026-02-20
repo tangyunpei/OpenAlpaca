@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use std::sync::Arc;
 
@@ -8,7 +8,10 @@ struct TextGenerateTool;
 #[async_trait]
 impl BuiltInTool for TextGenerateTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
-        Err("text_generate is not yet implemented. Use the LLM directly for text generation.".to_string())
+        Err(
+            "text_generate is not yet implemented. Use the LLM directly for text generation."
+                .to_string(),
+        )
     }
 }
 

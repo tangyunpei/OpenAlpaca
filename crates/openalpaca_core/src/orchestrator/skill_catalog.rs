@@ -38,6 +38,12 @@ pub struct SkillCatalog {
     command_index: RwLock<HashMap<String, String>>,
 }
 
+impl Default for SkillCatalog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SkillCatalog {
     pub fn new() -> Self {
         Self {
@@ -55,7 +61,11 @@ impl SkillCatalog {
         let read_dir = match std::fs::read_dir(dir) {
             Ok(rd) => rd,
             Err(e) => {
-                tracing::warn!("SkillCatalog: failed to read skills directory {}: {}", dir.display(), e);
+                tracing::warn!(
+                    "SkillCatalog: failed to read skills directory {}: {}",
+                    dir.display(),
+                    e
+                );
                 return 0;
             }
         };
@@ -75,11 +85,7 @@ impl SkillCatalog {
             match self.load_entry(&skill_md, &child_path) {
                 Ok(()) => count += 1,
                 Err(e) => {
-                    tracing::warn!(
-                        "SkillCatalog: failed to load {}: {}",
-                        skill_md.display(),
-                        e
-                    );
+                    tracing::warn!("SkillCatalog: failed to load {}: {}", skill_md.display(), e);
                 }
             }
         }
@@ -89,28 +95,26 @@ impl SkillCatalog {
 
     /// Load a single SKILL.md entry (Level 1 — frontmatter only).
     fn load_entry(&self, skill_md: &Path, skill_dir: &Path) -> Result<(), String> {
-        let content = std::fs::read_to_string(skill_md)
-            .map_err(|e| format!("read error: {}", e))?;
+        let content =
+            std::fs::read_to_string(skill_md).map_err(|e| format!("read error: {}", e))?;
 
-        let frontmatter = parse_skill_frontmatter(&content)
-            .map_err(|e| format!("parse error: {}", e))?;
+        let frontmatter =
+            parse_skill_frontmatter(&content).map_err(|e| format!("parse error: {}", e))?;
 
         // Compile trigger patterns
         let compiled_triggers: Vec<Regex> = frontmatter
             .trigger_patterns
             .iter()
-            .filter_map(|pattern| {
-                match Regex::new(&format!("(?i){}", pattern)) {
-                    Ok(re) => Some(re),
-                    Err(e) => {
-                        tracing::warn!(
-                            "SkillCatalog: invalid trigger pattern '{}' in {}: {}",
-                            pattern,
-                            frontmatter.name,
-                            e
-                        );
-                        None
-                    }
+            .filter_map(|pattern| match Regex::new(&format!("(?i){}", pattern)) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    tracing::warn!(
+                        "SkillCatalog: invalid trigger pattern '{}' in {}: {}",
+                        pattern,
+                        frontmatter.name,
+                        e
+                    );
+                    None
                 }
             })
             .collect();
@@ -126,10 +130,10 @@ impl SkillCatalog {
 
         // Insert entry and command index atomically (matching remove()'s lock order)
         if let Ok(mut entries) = self.entries.write() {
-            if let Some(ref cmd) = entry.frontmatter.command {
-                if let Ok(mut idx) = self.command_index.write() {
-                    idx.insert(cmd.to_lowercase(), key.clone());
-                }
+            if let Some(ref cmd) = entry.frontmatter.command
+                && let Ok(mut idx) = self.command_index.write()
+            {
+                idx.insert(cmd.to_lowercase(), key.clone());
             }
             entries.insert(key, entry);
         }
@@ -214,7 +218,8 @@ impl SkillCatalog {
     /// Re-reads and fully parses the SKILL.md file. Does not cache the result —
     /// the caller decides how long to keep it.
     pub fn load_full(&self, name: &str) -> Result<SkillDocument, String> {
-        let entry = self.get(name)
+        let entry = self
+            .get(name)
             .ok_or_else(|| format!("Skill '{}' not found in catalog", name))?;
 
         let content = std::fs::read_to_string(&entry.skill_md_path)
@@ -229,12 +234,11 @@ impl SkillCatalog {
         let key = name.to_lowercase();
         if let Ok(mut entries) = self.entries.write() {
             // Remove command index entry first
-            if let Some(entry) = entries.get(&key) {
-                if let Some(ref cmd) = entry.frontmatter.command {
-                    if let Ok(mut idx) = self.command_index.write() {
-                        idx.remove(&cmd.to_lowercase());
-                    }
-                }
+            if let Some(entry) = entries.get(&key)
+                && let Some(ref cmd) = entry.frontmatter.command
+                && let Ok(mut idx) = self.command_index.write()
+            {
+                idx.remove(&cmd.to_lowercase());
             }
             // Then remove the entry from the same lock scope
             entries.remove(&key);
@@ -267,10 +271,9 @@ impl SkillCatalog {
         }
 
         // Read frontmatter to get the name for removal of old entry
-        let content = std::fs::read_to_string(&skill_md)
-            .map_err(|e| format!("read error: {}", e))?;
-        let fm = parse_skill_frontmatter(&content)
-            .map_err(|e| format!("parse error: {}", e))?;
+        let content =
+            std::fs::read_to_string(&skill_md).map_err(|e| format!("read error: {}", e))?;
+        let fm = parse_skill_frontmatter(&content).map_err(|e| format!("parse error: {}", e))?;
 
         // Remove old entries for this directory (handles renames)
         let old_keys: Vec<String> = match self.entries.read() {
@@ -383,7 +386,9 @@ Walk through the code step by step.
         assert_eq!(entry.frontmatter.command, Some("review".to_string()));
 
         // Case insensitive
-        let entry2 = catalog.get("code review").expect("should find case-insensitive");
+        let entry2 = catalog
+            .get("code review")
+            .expect("should find case-insensitive");
         assert_eq!(entry2.frontmatter.name, "Code Review");
 
         assert!(catalog.get("nonexistent").is_none());
@@ -398,10 +403,14 @@ Walk through the code step by step.
         let catalog = SkillCatalog::new();
         catalog.scan_directory(tmp.path());
 
-        let entry = catalog.get_by_command("review").expect("should find /review");
+        let entry = catalog
+            .get_by_command("review")
+            .expect("should find /review");
         assert_eq!(entry.frontmatter.name, "Code Review");
 
-        let entry2 = catalog.get_by_command("explain-code").expect("should find /explain-code");
+        let entry2 = catalog
+            .get_by_command("explain-code")
+            .expect("should find /explain-code");
         assert_eq!(entry2.frontmatter.name, "Explain Code");
 
         assert!(catalog.get_by_command("nonexistent").is_none());
@@ -491,7 +500,10 @@ Walk through the code step by step.
         catalog.scan_directory(tmp.path());
 
         let entry = catalog.get("Code Review").unwrap();
-        assert_eq!(entry.frontmatter.description, "Review code for bugs and style issues");
+        assert_eq!(
+            entry.frontmatter.description,
+            "Review code for bugs and style issues"
+        );
 
         // Overwrite with updated content
         let updated = REVIEW_SKILL.replace(
@@ -500,7 +512,9 @@ Walk through the code step by step.
         );
         std::fs::write(skill_dir.join("SKILL.md"), updated).unwrap();
 
-        catalog.reload_skill(&skill_dir).expect("reload should succeed");
+        catalog
+            .reload_skill(&skill_dir)
+            .expect("reload should succeed");
 
         let entry2 = catalog.get("Code Review").unwrap();
         assert_eq!(entry2.frontmatter.description, "Updated description");

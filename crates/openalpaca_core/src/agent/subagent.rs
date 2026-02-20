@@ -118,17 +118,36 @@ pub struct AgentConstraints {
     pub denied_models: Vec<String>,
 }
 
+impl AgentConstraints {
+    /// Pre-lowercase all constraint list entries so that capability/model
+    /// checks can compare against an already-normalized set.
+    pub fn normalize(&mut self) {
+        for s in &mut self.allowed_capabilities {
+            *s = s.to_lowercase();
+        }
+        for s in &mut self.denied_capabilities {
+            *s = s.to_lowercase();
+        }
+        for s in &mut self.allowed_models {
+            *s = s.to_lowercase();
+        }
+        for s in &mut self.denied_models {
+            *s = s.to_lowercase();
+        }
+    }
+}
+
 impl SubAgent {
     /// Hydrate from a storage SubAgentConfig.
     pub fn from_config(config: &openalpaca_storage::SubAgentConfig) -> Self {
         let skills: Vec<Skill> = serde_json::from_str(&config.skills_json).unwrap_or_default();
-        let preset: AgentPreset =
-            serde_json::from_str(&config.preset_json).unwrap_or_default();
-        let constraints: AgentConstraints = config
+        let preset: AgentPreset = serde_json::from_str(&config.preset_json).unwrap_or_default();
+        let mut constraints: AgentConstraints = config
             .constraints_json
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
+        constraints.normalize();
         let llm_config: AgentLlmConfig = config
             .llm_config_json
             .as_deref()
@@ -197,10 +216,12 @@ mod tests {
     #[test]
     fn test_agent_status_is_available() {
         assert!(AgentStatus::Idle.is_available());
-        assert!(!AgentStatus::Busy {
-            task_id: "t1".into()
-        }
-        .is_available());
+        assert!(
+            !AgentStatus::Busy {
+                task_id: "t1".into()
+            }
+            .is_available()
+        );
     }
 
     #[test]

@@ -17,13 +17,15 @@ static CACHE: LazyLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> =
 ///
 /// Results are cached by canonical start path for the process lifetime.
 pub fn detect_workspace_root(start_dir: &Path) -> Option<PathBuf> {
-    let canonical = start_dir.canonicalize().unwrap_or_else(|_| start_dir.to_path_buf());
+    let canonical = start_dir
+        .canonicalize()
+        .unwrap_or_else(|_| start_dir.to_path_buf());
 
     // Check cache first
-    if let Ok(cache) = CACHE.lock() {
-        if let Some(cached) = cache.get(&canonical) {
-            return cached.clone();
-        }
+    if let Ok(cache) = CACHE.lock()
+        && let Some(cached) = cache.get(&canonical)
+    {
+        return cached.clone();
     }
 
     let result = walk_up_for_marker(&canonical);

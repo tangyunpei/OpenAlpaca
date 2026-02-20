@@ -192,7 +192,16 @@ fn classify_heading(title: &str) -> Section {
     }
 }
 
-fn parse_sections(lines: &[String]) -> (HashMap<String, String>, String, String, String, String, String) {
+fn parse_sections(
+    lines: &[String],
+) -> (
+    HashMap<String, String>,
+    String,
+    String,
+    String,
+    String,
+    String,
+) {
     let mut section = Section::Other;
     let mut identity = HashMap::new();
     let mut comm_lines: Vec<String> = Vec::new();
@@ -218,10 +227,10 @@ fn parse_sections(lines: &[String]) -> (HashMap<String, String>, String, String,
 
         match section {
             Section::Identity => {
-                if let Some((key, value)) = parse_identity_line(trimmed) {
-                    if !value.is_empty() {
-                        identity.insert(key, value);
-                    }
+                if let Some((key, value)) = parse_identity_line(trimmed)
+                    && !value.is_empty()
+                {
+                    identity.insert(key, value);
                 }
             }
             Section::CommunicationStyle => {
@@ -333,7 +342,9 @@ pub fn render_user_markdown(doc: &UserDocument) -> String {
     // -- Communication Style --
     out.push_str("## Communication Style\n\n");
     if doc.communication_style.is_empty() {
-        out.push_str("(How they like to communicate -- terse vs verbose, formal vs casual, etc.)\n");
+        out.push_str(
+            "(How they like to communicate -- terse vs verbose, formal vs casual, etc.)\n",
+        );
     } else {
         out.push_str(&doc.communication_style);
         out.push('\n');
@@ -343,7 +354,9 @@ pub fn render_user_markdown(doc: &UserDocument) -> String {
     // -- Expertise & Background --
     out.push_str("## Expertise & Background\n\n");
     if doc.expertise.is_empty() {
-        out.push_str("(Technical background, domains of expertise, skill level in various areas)\n");
+        out.push_str(
+            "(Technical background, domains of expertise, skill level in various areas)\n",
+        );
     } else {
         out.push_str(&doc.expertise);
         out.push('\n');
@@ -438,10 +451,10 @@ pub fn user_to_prompt_block(doc: &UserDocument, budget: Option<usize>) -> String
         let known_keys = ["Name", "What to call them", "Pronouns", "Timezone"];
         let mut parts = Vec::new();
         for key in &known_keys {
-            if let Some(value) = doc.identity.get(*key) {
-                if !value.is_empty() {
-                    parts.push(format!("{}: {}", key, sanitize_prompt_field(value)));
-                }
+            if let Some(value) = doc.identity.get(*key)
+                && !value.is_empty()
+            {
+                parts.push(format!("{}: {}", key, sanitize_prompt_field(value)));
             }
         }
         // Extra keys
@@ -590,7 +603,9 @@ Likes to work late. Coffee over tea.
         );
         // All sections should be empty (template placeholders are parenthesized hints)
         assert!(doc.identity.is_empty());
-        assert!(!user_document_has_content(&doc) || doc.communication_style.contains("How they like"));
+        assert!(
+            !user_document_has_content(&doc) || doc.communication_style.contains("How they like")
+        );
     }
 
     #[test]
@@ -601,10 +616,7 @@ Likes to work late. Coffee over tea.
             doc.identity.get("What to call them"),
             Some(&"Alex".to_string())
         );
-        assert_eq!(
-            doc.identity.get("Pronouns"),
-            Some(&"they/them".to_string())
-        );
+        assert_eq!(doc.identity.get("Pronouns"), Some(&"they/them".to_string()));
         assert_eq!(
             doc.identity.get("Timezone"),
             Some(&"PST (UTC-8)".to_string())
@@ -766,7 +778,10 @@ Likes to work late. Coffee over tea.
 
     #[test]
     fn test_unknown_sections_tolerated() {
-        let with_extra = format!("{}\n\n## Extra Section\nSome future content.\n", POPULATED_DOC);
+        let with_extra = format!(
+            "{}\n\n## Extra Section\nSome future content.\n",
+            POPULATED_DOC
+        );
         let doc = parse_user_markdown(&with_extra).expect("unknown section should be tolerated");
         assert_eq!(doc.identity.get("Name"), Some(&"Alex".to_string()));
     }

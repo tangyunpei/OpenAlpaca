@@ -1,3 +1,6 @@
+use super::super::skill_matcher::SkillMatch;
+use super::super::task_planner::TaskDag;
+use super::super::task_state::TaskState;
 use super::TaskDispatcher;
 use crate::agent::registry::DestroyOutcome;
 use crate::agent::subagent::SubAgent;
@@ -5,9 +8,6 @@ use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
 use chrono::Utc;
 use std::collections::HashMap;
-use super::super::skill_matcher::SkillMatch;
-use super::super::task_planner::TaskDag;
-use super::super::task_state::TaskState;
 use uuid::Uuid;
 
 impl TaskDispatcher {
@@ -18,6 +18,7 @@ impl TaskDispatcher {
     ///
     /// DAG execution uses `dispatch_dag_planned()` instead — this method is
     /// exclusively for sequential pipelines.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn dispatch_core(
         &self,
         description: &str,
@@ -82,7 +83,8 @@ impl TaskDispatcher {
                     );
                     let rollback_now = Utc::now();
                     for (_, inst) in &spawned_instances {
-                        let outcome = self.shared_context
+                        let outcome = self
+                            .shared_context
                             .agent_registry
                             .destroy_instance(&inst.id);
                         let status = match outcome {
@@ -167,8 +169,15 @@ impl TaskDispatcher {
         // Initialize state_json for working memory
         if let Some(ref db) = self.db {
             let repo = openalpaca_storage::repository::TaskRepository::new(db);
-            let step_info: Vec<(String, String, String)> = matches.iter()
-                .map(|m| (m.agent_id.clone(), m.agent_name.clone(), m.role_description.clone()))
+            let step_info: Vec<(String, String, String)> = matches
+                .iter()
+                .map(|m| {
+                    (
+                        m.agent_id.clone(),
+                        m.agent_name.clone(),
+                        m.role_description.clone(),
+                    )
+                })
                 .collect();
             let initial_state = TaskState::initial(description, &step_info);
             let _ = repo.update_state(&task_id, &initial_state.to_json(), 0);
@@ -180,7 +189,11 @@ impl TaskDispatcher {
             .zip(matches.iter())
             .map(|((template_id, instance), skill_match)| {
                 let assign_id = assignment_ids.get(template_id).cloned();
-                (instance.clone(), assign_id, skill_match.role_description.clone())
+                (
+                    instance.clone(),
+                    assign_id,
+                    skill_match.role_description.clone(),
+                )
             })
             .collect();
 
@@ -193,7 +206,10 @@ impl TaskDispatcher {
             );
             let now = Utc::now();
             for (_, inst) in &spawned_instances {
-                let outcome = self.shared_context.agent_registry.destroy_instance(&inst.id);
+                let outcome = self
+                    .shared_context
+                    .agent_registry
+                    .destroy_instance(&inst.id);
                 let status = match outcome {
                     DestroyOutcome::ResetToIdle => "idle",
                     _ => "destroyed",
@@ -218,13 +234,12 @@ impl TaskDispatcher {
             });
             if let Some(ref db) = self.db {
                 let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                if let Err(e) = repo.update_status(&task_id, openalpaca_storage::TaskStatus::Failed) {
+                if let Err(e) = repo.update_status(&task_id, openalpaca_storage::TaskStatus::Failed)
+                {
                     tracing::warn!("Failed to update task status to Failed in DB: {e}");
                 }
             }
-            return Err(
-                "Pipeline assembly failed: some agents became unavailable".to_string(),
-            );
+            return Err("Pipeline assembly failed: some agents became unavailable".to_string());
         }
 
         // Launch sequential pipeline execution
@@ -240,22 +255,35 @@ impl TaskDispatcher {
         );
 
         // Build human-readable response for chat
-        let agent_list: Vec<String> = assignments.iter().map(|a| {
-            format!("- {} ({})", a["agent_name"].as_str().unwrap_or("Unknown"),
-                    a["matched_skills"].as_array().map(|s|
-                        s.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
-                    ).unwrap_or_default())
-        }).collect();
+        let agent_list: Vec<String> = assignments
+            .iter()
+            .map(|a| {
+                format!(
+                    "- {} ({})",
+                    a["agent_name"].as_str().unwrap_or("Unknown"),
+                    a["matched_skills"]
+                        .as_array()
+                        .map(|s| s
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "))
+                        .unwrap_or_default()
+                )
+            })
+            .collect();
 
         Ok(format!(
             "I've created a task and assigned it to the following agents:\n\n{}\n\nTask: {}\nYou'll see the results here when the task completes.",
-            agent_list.join("\n"), title
+            agent_list.join("\n"),
+            title
         ))
     }
 
     /// Dispatch a DAG-only plan: spawn one agent instance per DAG node, rewrite
     /// node `agent_id` fields from template IDs to spawned instance IDs, then
     /// hand off to DAG-parallel execution.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn dispatch_dag_planned(
         &self,
         description: &str,
@@ -316,7 +344,8 @@ impl TaskDispatcher {
                     );
                     let rollback_now = Utc::now();
                     for inst in &spawned_instances {
-                        let outcome = self.shared_context
+                        let outcome = self
+                            .shared_context
                             .agent_registry
                             .destroy_instance(&inst.id);
                         let status = match outcome {
@@ -374,18 +403,16 @@ impl TaskDispatcher {
                 .nodes
                 .iter()
                 .enumerate()
-                .map(|(i, node)| {
-                    openalpaca_storage::TaskAgentAssignment {
-                        id: Uuid::new_v4().to_string(),
-                        task_id: task_id.clone(),
-                        agent_id: node.agent_id.clone(),
-                        role: node.description.clone(),
-                        status: openalpaca_storage::AssignmentStatus::Pending,
-                        step_order: Some(i as i32),
-                        started_at: None,
-                        completed_at: None,
-                        result_output: None,
-                    }
+                .map(|(i, node)| openalpaca_storage::TaskAgentAssignment {
+                    id: Uuid::new_v4().to_string(),
+                    task_id: task_id.clone(),
+                    agent_id: node.agent_id.clone(),
+                    role: node.description.clone(),
+                    status: openalpaca_storage::AssignmentStatus::Pending,
+                    step_order: Some(i as i32),
+                    started_at: None,
+                    completed_at: None,
+                    result_output: None,
                 })
                 .collect();
 
@@ -400,7 +427,13 @@ impl TaskDispatcher {
             let step_info: Vec<(String, String, String)> = dag
                 .nodes
                 .iter()
-                .map(|n| (n.agent_id.clone(), n.agent_name.clone(), n.description.clone()))
+                .map(|n| {
+                    (
+                        n.agent_id.clone(),
+                        n.agent_name.clone(),
+                        n.description.clone(),
+                    )
+                })
                 .collect();
             let mut initial_state = TaskState::initial(description, &step_info);
             initial_state.dag = Some(dag.clone());

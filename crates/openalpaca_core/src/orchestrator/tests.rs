@@ -286,8 +286,8 @@ async fn test_full_lifecycle_events() {
 async fn test_simple_query_with_mock_llm() {
     use async_trait::async_trait;
     use openalpaca_llm::{
-        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, LlmRouter,
-        ProviderType, Usage,
+        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, LlmRouter, ProviderType,
+        Usage,
     };
 
     struct MockLlm;
@@ -400,9 +400,7 @@ async fn test_security_gate_replaces_trust_gate() {
 /// Helper: create a mock LLM that returns a fixed response string.
 fn make_planning_mock_llm(response: &str) -> Arc<LlmRouter> {
     use async_trait::async_trait;
-    use openalpaca_llm::{
-        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, Usage,
-    };
+    use openalpaca_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, Usage};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct PlanningMockLlm {
@@ -479,10 +477,8 @@ fn make_orchestrator_with_llm_and_agents(
 async fn test_llm_planning_complex_task() {
     let plan_json = r#"{"classification": "complex_task", "title": "Research Rust patterns", "assignments": [{"agent_id": "a1", "agent_name": "Agent a1", "role_description": "Research agent", "matched_skills": ["web_search"]}], "reasoning": "User wants research"}"#;
     let router = make_planning_mock_llm(plan_json);
-    let orch = make_orchestrator_with_llm_and_agents(
-        router,
-        vec![make_agent("a1", vec!["web_search"])],
-    );
+    let orch =
+        make_orchestrator_with_llm_and_agents(router, vec![make_agent("a1", vec!["web_search"])]);
 
     let result = orch
         .handle_message(
@@ -533,10 +529,8 @@ async fn test_llm_planning_simple_query() {
 async fn test_llm_planning_fallback_on_malformed() {
     // LLM returns garbage — should fall back to keyword heuristic
     let router = make_planning_mock_llm("this is not valid json at all");
-    let orch = make_orchestrator_with_llm_and_agents(
-        router,
-        vec![make_agent("a1", vec!["web_search"])],
-    );
+    let orch =
+        make_orchestrator_with_llm_and_agents(router, vec![make_agent("a1", vec!["web_search"])]);
 
     let result = orch
         .handle_message(
@@ -668,8 +662,8 @@ fn make_orchestrator_with_tools_and_llm(
 #[tokio::test]
 async fn test_tool_intent_detected_and_executes() {
     use openalpaca_llm::{
-        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider,
-        ToolCall as LlmToolCall, Usage,
+        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, ToolCall as LlmToolCall,
+        Usage,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -749,8 +743,8 @@ async fn test_tool_intent_detected_and_executes() {
 #[tokio::test]
 async fn test_tool_max_rounds_enforcement() {
     use openalpaca_llm::{
-        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider,
-        ToolCall as LlmToolCall, Usage,
+        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, ToolCall as LlmToolCall,
+        Usage,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 

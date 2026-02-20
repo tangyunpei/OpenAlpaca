@@ -22,9 +22,12 @@ impl KeyEncryptor {
             let bytes = hex::decode(&hex_key)
                 .map_err(|e| format!("Invalid OPENALPACA_MASTER_KEY hex: {e}"))?;
             if bytes.len() != 32 {
-                return Err(format!("OPENALPACA_MASTER_KEY must be 32 bytes (64 hex chars), got {}", bytes.len()));
+                return Err(format!(
+                    "OPENALPACA_MASTER_KEY must be 32 bytes (64 hex chars), got {}",
+                    bytes.len()
+                ));
             }
-            let key = Key::<Aes256Gcm>::from_slice(&bytes).clone();
+            let key = *Key::<Aes256Gcm>::from_slice(&bytes);
             return Ok(Self { key });
         }
 
@@ -34,22 +37,25 @@ impl KeyEncryptor {
             let hex_key = std::fs::read_to_string(&key_path)
                 .map_err(|e| format!("Failed to read master key file: {e}"))?;
             let hex_key = hex_key.trim();
-            let bytes = hex::decode(hex_key)
-                .map_err(|e| format!("Invalid master key file hex: {e}"))?;
+            let bytes =
+                hex::decode(hex_key).map_err(|e| format!("Invalid master key file hex: {e}"))?;
             if bytes.len() != 32 {
-                return Err(format!("Master key file must contain 32 bytes, got {}", bytes.len()));
+                return Err(format!(
+                    "Master key file must contain 32 bytes, got {}",
+                    bytes.len()
+                ));
             }
-            let key = Key::<Aes256Gcm>::from_slice(&bytes).clone();
+            let key = *Key::<Aes256Gcm>::from_slice(&bytes);
             return Ok(Self { key });
         }
 
         // 3. Auto-generate via ensure_at
-        let dir = key_path.parent()
+        let dir = key_path
+            .parent()
             .ok_or_else(|| "Cannot determine parent directory for master key".to_string())?;
         let hex_key = Self::ensure_at(dir)?;
-        let bytes = hex::decode(&hex_key)
-            .map_err(|e| format!("Invalid generated key hex: {e}"))?;
-        let key = Key::<Aes256Gcm>::from_slice(&bytes).clone();
+        let bytes = hex::decode(&hex_key).map_err(|e| format!("Invalid generated key hex: {e}"))?;
+        let key = *Key::<Aes256Gcm>::from_slice(&bytes);
         Ok(Self { key })
     }
 
@@ -67,8 +73,9 @@ impl KeyEncryptor {
         match std::fs::read_to_string(&key_path) {
             Ok(contents) => {
                 let hex_key = contents.trim().to_string();
-                let bytes = hex::decode(&hex_key)
-                    .map_err(|e| format!("Invalid master key hex at {}: {e}", key_path.display()))?;
+                let bytes = hex::decode(&hex_key).map_err(|e| {
+                    format!("Invalid master key hex at {}: {e}", key_path.display())
+                })?;
                 if bytes.len() != 32 {
                     return Err(format!(
                         "Master key at {} must be 32 bytes, got {}",
@@ -124,8 +131,9 @@ impl KeyEncryptor {
                 let contents = std::fs::read_to_string(&key_path)
                     .map_err(|e| format!("Failed to re-read {}: {e}", key_path.display()))?;
                 let hex_key = contents.trim().to_string();
-                let bytes = hex::decode(&hex_key)
-                    .map_err(|e| format!("Invalid master key hex at {}: {e}", key_path.display()))?;
+                let bytes = hex::decode(&hex_key).map_err(|e| {
+                    format!("Invalid master key hex at {}: {e}", key_path.display())
+                })?;
                 if bytes.len() != 32 {
                     return Err(format!(
                         "Master key at {} must be 32 bytes, got {}",
@@ -199,8 +207,7 @@ impl KeyEncryptor {
             return Ok(proj.data_dir().join(".master_key"));
         }
         // Fallback to CWD (should not happen on supported platforms)
-        let cwd = std::env::current_dir()
-            .map_err(|e| format!("Failed to get current dir: {e}"))?;
+        let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current dir: {e}"))?;
         Ok(cwd.join("config").join(".master_key"))
     }
 }
@@ -213,12 +220,15 @@ pub fn acquire_config_write_lock() -> Result<file_lock::FileLock, String> {
     } else {
         std::env::current_dir().map_err(|e| format!("Failed to get current dir: {e}"))?
     };
-    std::fs::create_dir_all(&lock_dir)
-        .map_err(|e| format!("Failed to create lock dir: {e}"))?;
+    std::fs::create_dir_all(&lock_dir).map_err(|e| format!("Failed to create lock dir: {e}"))?;
     let lock_path = lock_dir.join("llm.toml.lock");
     let opts = file_lock::FileOptions::new().write(true).create(true);
-    file_lock::FileLock::lock(&lock_path, true, opts)
-        .map_err(|e| format!("Failed to acquire config write lock at {}: {e}", lock_path.display()))
+    file_lock::FileLock::lock(&lock_path, true, opts).map_err(|e| {
+        format!(
+            "Failed to acquire config write lock at {}: {e}",
+            lock_path.display()
+        )
+    })
 }
 
 /// Simple hex encoding/decoding (avoids pulling in the `hex` crate).
@@ -228,7 +238,7 @@ mod hex {
     }
 
     pub fn decode(s: &str) -> Result<Vec<u8>, String> {
-        if s.len() % 2 != 0 {
+        if !s.len().is_multiple_of(2) {
             return Err("Odd hex string length".to_string());
         }
         (0..s.len())

@@ -23,7 +23,10 @@ impl InputSanitizer {
     /// are checked for injection patterns).
     ///
     /// Pass `None` for `max_input_length` to use the compiled default (32768 bytes).
-    pub fn sanitize_user_input(input: &str, max_input_length: Option<usize>) -> Result<String, SecurityViolation> {
+    pub fn sanitize_user_input(
+        input: &str,
+        max_input_length: Option<usize>,
+    ) -> Result<String, SecurityViolation> {
         let max_len = max_input_length.unwrap_or(MAX_INPUT_LENGTH);
         // Check length
         if input.len() > max_len {
@@ -82,7 +85,10 @@ impl InputSanitizer {
         Ok(())
     }
 
-    fn check_value_safety(value: &serde_json::Value, check_injection: bool) -> Result<(), SecurityViolation> {
+    fn check_value_safety(
+        value: &serde_json::Value,
+        check_injection: bool,
+    ) -> Result<(), SecurityViolation> {
         match value {
             serde_json::Value::String(s) => Self::check_string_safety(s, check_injection),
             serde_json::Value::Array(arr) => {

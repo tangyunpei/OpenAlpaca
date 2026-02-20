@@ -107,8 +107,8 @@ impl AgentConfigService {
 
     /// Create an agent from raw TOML content.
     pub fn create_agent_from_toml(&self, toml_content: &str) -> Result<String, String> {
-        let config: AgentConfigFile = toml::from_str(toml_content)
-            .map_err(|e| format!("Invalid TOML: {e}"))?;
+        let config: AgentConfigFile =
+            toml::from_str(toml_content).map_err(|e| format!("Invalid TOML: {e}"))?;
         self.create_agent(config)
     }
 
@@ -206,7 +206,10 @@ impl AgentConfigService {
     ///
     /// Converts the TOML config to a template, writes .md, and registers it.
     /// This is the migration bridge: old TOML → new Markdown.
-    pub fn create_template_from_toml_config(&self, config: AgentConfigFile) -> Result<String, String> {
+    pub fn create_template_from_toml_config(
+        &self,
+        config: AgentConfigFile,
+    ) -> Result<String, String> {
         let template = config.into_template();
         self.create_template(template)
     }

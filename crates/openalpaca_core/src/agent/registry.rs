@@ -26,6 +26,7 @@ pub enum DestroyOutcome {
 struct RegisteredAgent {
     agent: SubAgent,
     config_version: u64,
+    is_singleton: bool,
 }
 
 /// Registry for tracking agent templates and runtime instances.
@@ -122,19 +123,20 @@ impl AgentRegistry {
     /// For **singleton** templates: if an idle instance already exists, claims it.
     /// If a busy instance exists, returns an error. If no instance exists, creates one
     /// with `id == template_id` for backward compatibility.
-    pub fn spawn_instance(
-        &self,
-        template_id: &str,
-        task_id: String,
-    ) -> Result<SubAgent, String> {
-        let templates = self.lock_templates();
-        let template = templates
-            .get(template_id)
-            .ok_or_else(|| format!("template '{}' not found", template_id))?;
+    pub fn spawn_instance(&self, template_id: &str, task_id: String) -> Result<SubAgent, String> {
+        // Extract what we need from the template, then drop the templates lock
+        // before acquiring instances, to avoid holding both locks simultaneously.
+        let (is_singleton, template_clone) = {
+            let templates = self.lock_templates();
+            let template = templates
+                .get(template_id)
+                .ok_or_else(|| format!("template '{}' not found", template_id))?;
+            (template.frontmatter.singleton, template.clone())
+        }; // templates lock dropped here
 
         let mut instances = self.lock_instances();
 
-        if template.frontmatter.singleton {
+        if is_singleton {
             // Singleton: look for existing instance of this template
             if let Some(entry) = instances
                 .values_mut()
@@ -154,12 +156,13 @@ impl AgentRegistry {
                 return Ok(entry.agent.clone());
             }
             // No instance yet — create with stable ID = template_id
-            let agent = template.to_subagent(template_id, &task_id);
+            let agent = template_clone.to_subagent(template_id, &task_id);
             instances.insert(
                 template_id.to_string(),
                 RegisteredAgent {
                     agent: agent.clone(),
                     config_version: 0,
+                    is_singleton: true,
                 },
             );
             Ok(agent)
@@ -172,12 +175,13 @@ impl AgentRegistry {
                     break candidate;
                 }
             };
-            let agent = template.to_subagent(&instance_id, &task_id);
+            let agent = template_clone.to_subagent(&instance_id, &task_id);
             instances.insert(
                 instance_id,
                 RegisteredAgent {
                     agent: agent.clone(),
                     config_version: 0,
+                    is_singleton: false,
                 },
             );
             Ok(agent)
@@ -190,23 +194,17 @@ impl AgentRegistry {
     /// so it can be re-claimed later. Returns a `DestroyOutcome` so callers
     /// can emit the correct lifecycle event status.
     ///
-    /// Lock ordering: templates then instances (consistent with `spawn_instance`).
+    /// Uses the cached `is_singleton` field on `RegisteredAgent` to avoid
+    /// needing the templates lock.
     pub fn destroy_instance(&self, instance_id: &str) -> DestroyOutcome {
-        // Acquire templates first to maintain consistent lock ordering with
-        // spawn_instance (templates -> instances), preventing deadlocks.
-        let templates = self.lock_templates();
         let mut instances = self.lock_instances();
-        if let Some(entry) = instances.get_mut(instance_id) {
-            let is_singleton = templates
-                .get(&entry.agent.template_id)
-                .map(|t| t.frontmatter.singleton)
-                .unwrap_or(false);
-            if is_singleton {
-                // Singleton: reset to Idle instead of removing
-                entry.agent.status = AgentStatus::Idle;
-                entry.agent.current_task = None;
-                return DestroyOutcome::ResetToIdle;
-            }
+        if let Some(entry) = instances.get_mut(instance_id)
+            && entry.is_singleton
+        {
+            // Singleton: reset to Idle instead of removing
+            entry.agent.status = AgentStatus::Idle;
+            entry.agent.current_task = None;
+            return DestroyOutcome::ResetToIdle;
         }
         // Non-singleton: remove entirely
         if instances.remove(instance_id).is_some() {
@@ -259,6 +257,7 @@ impl AgentRegistry {
             RegisteredAgent {
                 agent,
                 config_version: 0,
+                is_singleton: false,
             },
         );
         true
@@ -266,9 +265,7 @@ impl AgentRegistry {
 
     /// Get a SubAgent by id. Searches instances first.
     pub fn get(&self, agent_id: &str) -> Option<SubAgent> {
-        self.lock_instances()
-            .get(agent_id)
-            .map(|r| r.agent.clone())
+        self.lock_instances().get(agent_id).map(|r| r.agent.clone())
     }
 
     /// Get a SubAgent and its config_version by id.
@@ -376,7 +373,7 @@ impl Default for AgentRegistry {
 mod tests {
     use super::*;
     use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, Skill};
-    use crate::agent::template::{parse_agent_markdown, AgentTemplate, AgentTemplateFrontmatter};
+    use crate::agent::template::{AgentTemplate, AgentTemplateFrontmatter, parse_agent_markdown};
 
     fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
         SubAgent {
@@ -630,7 +627,9 @@ mod tests {
     #[test]
     fn test_try_claim_not_found() {
         let reg = AgentRegistry::new();
-        let err = reg.try_claim("nonexistent", "task-1".to_string()).unwrap_err();
+        let err = reg
+            .try_claim("nonexistent", "task-1".to_string())
+            .unwrap_err();
         assert!(err.contains("not found"));
     }
 
@@ -725,7 +724,9 @@ mod tests {
         assert_eq!(inst1.status.as_str(), "busy");
 
         // Second spawn fails (singleton is busy)
-        let err = reg.spawn_instance("lead_agent", "task-2".into()).unwrap_err();
+        let err = reg
+            .spawn_instance("lead_agent", "task-2".into())
+            .unwrap_err();
         assert!(err.contains("busy"));
 
         // Release singleton

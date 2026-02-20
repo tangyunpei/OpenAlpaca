@@ -12,10 +12,10 @@ pub mod paths;
 pub mod repository;
 
 pub use database::Database;
-pub use models::{Conversation, ConversationMessage};
 pub use models::{Agent, EventLog, Memory, MemoryRole};
 pub use models::{AgentMetrics, AgentTaskHistory, SubAgentConfig};
 pub use models::{AssignmentStatus, Task, TaskAgentAssignment, TaskStatus};
+pub use models::{Conversation, ConversationMessage};
 pub use models::{ConversationMap, ExternalIdentity, GlobalUser, LinkToken};
 pub use models::{MemoryKind, MemoryScope, MemorySource, MemoryV2};
 pub use repository::{

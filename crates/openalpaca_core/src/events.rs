@@ -220,9 +220,7 @@ pub enum SystemEvent {
         timestamp: DateTime<Utc>,
     },
     /// The daemon configuration was changed (e.g. providers.web_search)
-    DaemonConfigChanged {
-        timestamp: DateTime<Utc>,
-    },
+    DaemonConfigChanged { timestamp: DateTime<Utc> },
     /// An LLM API key status changed (add/remove/reorder/priority)
     KeyStatusChanged {
         provider: String,

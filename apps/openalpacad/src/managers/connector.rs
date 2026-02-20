@@ -49,7 +49,12 @@ impl ConnectorManager {
             if enabled {
                 let token_key = format!("{}.token", name);
                 if let Ok(Some(token)) = config_repo.get(&token_key) {
-                    match factory.spawn(token, self.db.clone(), self.bus.clone(), self.gateway.clone()) {
+                    match factory.spawn(
+                        token,
+                        self.db.clone(),
+                        self.bus.clone(),
+                        self.gateway.clone(),
+                    ) {
                         Ok(handle) => {
                             handles.insert(name.to_string(), handle);
                             self.broadcast_status(name, "active");
@@ -209,7 +214,12 @@ impl ConnectorManager {
 
             if let Some(token) = config_repo.get(&token_key)? {
                 let handle = factory
-                    .spawn(token, self.db.clone(), self.bus.clone(), self.gateway.clone())
+                    .spawn(
+                        token,
+                        self.db.clone(),
+                        self.bus.clone(),
+                        self.gateway.clone(),
+                    )
                     .map_err(|e| anyhow::anyhow!("Failed to spawn {}: {}", name, e))?;
 
                 _guard.insert(name.to_string(), handle);

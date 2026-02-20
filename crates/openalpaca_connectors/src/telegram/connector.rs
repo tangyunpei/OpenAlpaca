@@ -27,7 +27,12 @@ pub struct TelegramConnector {
 
 impl TelegramConnector {
     /// Create a new TelegramConnector with the given bot token.
-    pub fn new(token: String, db: Arc<Database>, bus: Arc<EventBus>, gateway: Arc<Gateway>) -> Self {
+    pub fn new(
+        token: String,
+        db: Arc<Database>,
+        bus: Arc<EventBus>,
+        gateway: Arc<Gateway>,
+    ) -> Self {
         let bot = Bot::new(token);
         Self {
             bot,
@@ -51,7 +56,6 @@ impl TelegramConnector {
 
         let mut dispatcher = Dispatcher::builder(self.bot, handler)
             .dependencies(dptree::deps![db, bus, gateway])
-            .enable_ctrlc_handler()
             .build();
 
         let token = dispatcher.shutdown_token();
@@ -146,11 +150,9 @@ impl TelegramConnector {
             id: chat_id.0.to_string(),
         };
 
-        if let Err(e) = openalpaca_core::security::policy::TrustGate::check(
-            &principal,
-            &capability,
-            &scope,
-        ) {
+        if let Err(e) =
+            openalpaca_core::security::policy::TrustGate::check(&principal, &capability, &scope)
+        {
             warn!("TrustGate denied request: {}", e);
             bot.send_message(chat_id, format_denial_message(&e)).await?;
             return Ok(());
@@ -158,22 +160,26 @@ impl TelegramConnector {
 
         // Extract global_id before principal is consumed by gateway
         let global_id_for_pref = match &principal {
-            openalpaca_core::security::policy::Principal::User { global_id } => Some(global_id.clone()),
+            openalpaca_core::security::policy::Principal::User { global_id } => {
+                Some(global_id.clone())
+            }
             _ => None,
         };
 
         // Step 4: Route through Gateway (replaces manual pipeline)
-        let response = gateway.handle_event(GatewayRequest {
-            source: EventSource::Telegram {
-                chat_id: chat_id.0.to_string(),
-                user_id: user_id.clone(),
-            },
-            content: text.clone(),
-            principal,
-            scope: Scope::Conversation {
-                id: chat_id.0.to_string(),
-            },
-        }).await;
+        let response = gateway
+            .handle_event(GatewayRequest {
+                source: EventSource::Telegram {
+                    chat_id: chat_id.0.to_string(),
+                    user_id: user_id.clone(),
+                },
+                content: text.clone(),
+                principal,
+                scope: Scope::Conversation {
+                    id: chat_id.0.to_string(),
+                },
+            })
+            .await;
 
         // Step 4.5: Map external Telegram chat_id to internal lane_key
         let lane_key = response.lane_key.to_string();
@@ -188,7 +194,9 @@ impl TelegramConnector {
         // Step 5.2: Persist telegram.last_chat_id for cross-channel delivery
         if let Some(ref gid) = global_id_for_pref {
             let pref_repo = PreferenceRepository::new(&db);
-            if let Err(e) = pref_repo.set(gid, "telegram.last_chat_id", &chat_id.0.to_string(), None) {
+            if let Err(e) =
+                pref_repo.set(gid, "telegram.last_chat_id", &chat_id.0.to_string(), None)
+            {
                 warn!("Failed to persist telegram.last_chat_id: {e}");
             }
         }
@@ -304,7 +312,7 @@ impl Connector for TelegramConnector {
     }
 
     async fn shutdown(&self) -> Result<(), ConnectorError> {
-        // Teloxide handles shutdown via Ctrl+C handler
+        // Shutdown is handled via ShutdownToken in ConnectorHandle::shutdown()
         info!("Telegram connector shutdown requested");
         Ok(())
     }

@@ -75,14 +75,17 @@ pub async fn command_handler(
                 .unwrap_or("Hello from process command")
                 .to_string();
 
-            let response = state.gateway.handle_event(GatewayRequest {
-                source: EventSource::Api {
-                    request_id: request_id.clone(),
-                },
-                content,
-                principal: Principal::System,
-                scope: Scope::Global,
-            }).await;
+            let response = state
+                .gateway
+                .handle_event(GatewayRequest {
+                    source: EventSource::Api {
+                        request_id: request_id.clone(),
+                    },
+                    content,
+                    principal: Principal::System,
+                    scope: Scope::Global,
+                })
+                .await;
 
             // Check if the response is an error (structured flag)
             if response.is_error {

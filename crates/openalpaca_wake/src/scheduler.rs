@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -67,10 +67,7 @@ impl WakeScheduler {
             let job_id = job_id.clone();
             let tag = tag.clone();
             Box::pin(async move {
-                let event = WakeEvent::Timer {
-                    job_id,
-                    tag,
-                };
+                let event = WakeEvent::Timer { job_id, tag };
                 if let Err(e) = tx.try_send(event) {
                     warn!("Cron wake event dropped: {}", e);
                 }
@@ -150,7 +147,7 @@ impl WakeScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     #[tokio::test]
     async fn test_schedule_once_robust() {

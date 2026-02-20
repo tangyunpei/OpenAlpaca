@@ -1,18 +1,21 @@
-use super::{TaskDispatcher, finalize_task, format_task_result, persist_conversation, retrieve_memory_block, spawn_task_memory_extraction};
+use super::super::task_state::TaskState;
 use super::usage;
+use super::{
+    TaskDispatcher, finalize_task, format_task_result, persist_conversation, retrieve_memory_block,
+    spawn_task_memory_extraction,
+};
 use crate::agent::registry::DestroyOutcome;
 use crate::agent::subagent::{AgentStatus, SubAgent};
 use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
 use crate::middleware::prompt::format_tool_guidance;
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
-use tokio_util::sync::CancellationToken;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 use chrono::Utc;
 use openalpaca_llm::ChatMessage;
 use std::sync::Arc;
-use super::super::task_state::TaskState;
+use tokio_util::sync::CancellationToken;
 
 /// Persist a state update with retry (up to 3 attempts) to handle optimistic locking conflicts.
 async fn update_state_with_retry(
@@ -43,27 +46,56 @@ async fn update_state_with_retry(
                 if attempt < MAX_RETRIES - 1 {
                     tracing::debug!(
                         "Pipeline state update version conflict ({}) for task '{}' (attempt {}/{}), retrying",
-                        context, task_id, attempt + 1, MAX_RETRIES
+                        context,
+                        task_id,
+                        attempt + 1,
+                        MAX_RETRIES
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(10 * (1 << attempt))).await;
                 } else {
                     tracing::warn!(
                         "Pipeline state update ({}) for task '{}' failed after {} retries — state may be stale",
-                        context, task_id, MAX_RETRIES
+                        context,
+                        task_id,
+                        MAX_RETRIES
                     );
                 }
             }
             Err(e) => {
-                tracing::warn!("Pipeline state update ({}) failed for task '{}': {}", context, task_id, e);
+                tracing::warn!(
+                    "Pipeline state update ({}) failed for task '{}': {}",
+                    context,
+                    task_id,
+                    e
+                );
                 return;
             }
         }
     }
 }
 
+/// Fetch the current workspace context string from the task's state in SQLite.
+/// Returns an empty string if the DB is absent, the task doesn't exist, or parsing fails.
+fn fetch_workspace_context(db: Option<&openalpaca_storage::Database>, task_id: &str) -> String {
+    let Some(db) = db else {
+        return String::new();
+    };
+    let repo = openalpaca_storage::repository::TaskRepository::new(db);
+    match repo.get(task_id) {
+        Ok(Some(existing)) => existing
+            .state_json
+            .as_deref()
+            .and_then(|sj| serde_json::from_str::<TaskState>(sj).ok())
+            .map(|state| state.workspace.format_for_prompt(&[]))
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
 impl TaskDispatcher {
     /// Spawn a sequential pipeline: agents run in step_order, each receiving
     /// the previous agent's output as additional context.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_agent_pipeline(
         &self,
         task_id: String,
@@ -75,7 +107,9 @@ impl TaskDispatcher {
         created_by: String,
         workspace_id: Option<String>,
     ) {
-        let Some(router) = self.require_router(&task_id) else { return };
+        let Some(router) = self.require_router(&task_id) else {
+            return;
+        };
 
         let bus = self.bus.clone();
         let ctx = self.shared_context.clone();
@@ -93,7 +127,8 @@ impl TaskDispatcher {
             let total_agents = agents_with_assignments.len();
 
             // 1. Update task status → Running
-            ctx.task_registry.update_status(&task_id, TaskEntryStatus::Running);
+            ctx.task_registry
+                .update_status(&task_id, TaskEntryStatus::Running);
             bus.publish(SystemEvent::TaskUpdated {
                 task_id: task_id.clone(),
                 status: "running".to_string(),
@@ -108,12 +143,8 @@ impl TaskDispatcher {
             }
 
             // Set initial pipeline progress in TaskRegistry (no DAG summary for sequential)
-            ctx.task_registry.update_progress(
-                &task_id,
-                0,
-                total_agents as i32,
-                None,
-            );
+            ctx.task_registry
+                .update_progress(&task_id, 0, total_agents as i32, None);
 
             // 2. Run agents sequentially — each receives the previous agent's output
             let mut previous_output: Option<String> = None;
@@ -124,7 +155,13 @@ impl TaskDispatcher {
             let mut total_input_tokens: u32 = 0;
             let mut total_output_tokens: u32 = 0;
 
-            for (step, (agent, assignment_id, role_description)) in agents_with_assignments.iter().enumerate() {
+            // Cache workspace context to avoid re-fetching from SQLite on every step.
+            // Refreshed after each step completes (agent may have written to workspace).
+            let mut cached_workspace_context = fetch_workspace_context(db.as_ref(), &task_id);
+
+            for (step, (agent, assignment_id, role_description)) in
+                agents_with_assignments.iter().enumerate()
+            {
                 // Check cancellation before starting each pipeline step
                 if cancel_token.is_cancelled() {
                     tracing::info!(
@@ -150,20 +187,25 @@ impl TaskDispatcher {
                     agent_id: Some(agent_id.clone()),
                     db: db.clone(),
                 };
-                let contextual_executor = Arc::new(ContextualToolExecutor::new(
-                    tool_registry.clone(), ctx_exec,
-                ));
-                let per_request_sandbox = SandboxManager::with_defaults(contextual_executor, bus.clone());
+                let contextual_executor =
+                    Arc::new(ContextualToolExecutor::new(tool_registry.clone(), ctx_exec));
+                let per_request_sandbox =
+                    SandboxManager::with_defaults(contextual_executor, bus.clone());
 
                 tracing::info!(
                     "Pipeline step {}/{}: agent '{}' starting on task '{}'",
-                    step + 1, total_agents, agent_id, task_id
+                    step + 1,
+                    total_agents,
+                    agent_id,
+                    task_id
                 );
 
                 // Mark agent as Busy (with RAII guard for panic safety)
                 ctx.agent_registry.update_status(
                     agent_id,
-                    AgentStatus::Busy { task_id: task_id.clone() },
+                    AgentStatus::Busy {
+                        task_id: task_id.clone(),
+                    },
                 );
                 bus.publish(SystemEvent::AgentStatusChanged {
                     agent_id: agent_id.clone(),
@@ -192,7 +234,13 @@ impl TaskDispatcher {
                 // Update state_json: mark step running (with retry for version conflicts)
                 if let Some(ref db) = db {
                     let step_i = step as i32;
-                    update_state_with_retry(db, &task_id, |s| s.mark_step_running(step_i), "mark_step_running").await;
+                    update_state_with_retry(
+                        db,
+                        &task_id,
+                        |s| s.mark_step_running(step_i),
+                        "mark_step_running",
+                    )
+                    .await;
                 }
 
                 // Emit progress event for this step.
@@ -211,15 +259,17 @@ impl TaskDispatcher {
                 }
 
                 // Build LoopConfig — agent constraints override daemon defaults
-                let loop_config = LoopConfig::from_agent(
-                    &daemon_config.load().execution.agent_defaults, agent,
-                ).with_model_pricing(router.model_registry(), agent.llm_config.model.as_deref());
+                let loop_config =
+                    LoopConfig::from_agent(&daemon_config.load().execution.agent_defaults, agent)
+                        .with_model_pricing(
+                            router.model_registry(),
+                            agent.llm_config.model.as_deref(),
+                        );
 
-                let sandbox_policy =
-                    SandboxPolicy::from_constraints(agent_id, &agent.constraints);
+                let sandbox_policy = SandboxPolicy::from_constraints(agent_id, &agent.constraints);
 
                 // Resolve tools via shared helper
-                let tools = crate::tools::resolve_agent_tools(&agent, &tool_registry);
+                let tools = crate::tools::resolve_agent_tools(agent, &tool_registry);
                 tracing::info!(
                     "Agent '{}' loaded {} tool definitions for skills: {:?}",
                     agent_id,
@@ -248,53 +298,45 @@ impl TaskDispatcher {
                      <output-format>\n\
                      {}\n\
                      </output-format>{}",
-                    agent.preset.persona, role_description,
-                    step + 1, total_agents,
-                    output_note, tool_guidance
+                    agent.preset.persona,
+                    role_description,
+                    step + 1,
+                    total_agents,
+                    output_note,
+                    tool_guidance
                 );
 
                 // Build messages: system + task + workspace context
-                let mut messages = vec![
-                    ChatMessage::system(&system_prompt),
-                ];
+                let mut messages = vec![ChatMessage::system(&system_prompt)];
 
                 // Inject memory context for the first agent in the pipeline
-                if step == 0 {
-                    if let Some(ref db) = db {
-                        let scope_ctx = workspace_id.as_ref().map(|ws| {
-                            crate::memory::scope_context::MemoryScopeContext::new(Some(ws.clone()))
-                        });
-                        let access_boost = daemon_config.load().orchestrator.memory.decay.access_boost;
-                        if let Some(block) = retrieve_memory_block(
-                            db, embedder.as_ref(), &created_by, &description, 5, scope_ctx.as_ref(), access_boost,
-                        ).await {
-                            messages.push(ChatMessage::system(&block));
-                        }
+                if step == 0
+                    && let Some(ref db) = db
+                {
+                    let scope_ctx = workspace_id.as_ref().map(|ws| {
+                        crate::memory::scope_context::MemoryScopeContext::new(Some(ws.clone()))
+                    });
+                    let access_boost = daemon_config.load().orchestrator.memory.decay.access_boost;
+                    if let Some(block) = retrieve_memory_block(
+                        db,
+                        embedder.as_ref(),
+                        &created_by,
+                        &description,
+                        5,
+                        scope_ctx.as_ref(),
+                        access_boost,
+                    )
+                    .await
+                    {
+                        messages.push(ChatMessage::system(&block));
                     }
                 }
 
                 messages.push(ChatMessage::user(&description));
 
                 // Inject shared workspace context (supplements previous_output for backward compat)
-                // Load current workspace from TaskState
-                let workspace_context = if let Some(ref db) = db {
-                    let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                    if let Ok(Some(existing)) = repo.get(&task_id) {
-                        if let Some(ref sj) = existing.state_json {
-                            if let Ok(state) = serde_json::from_str::<TaskState>(sj) {
-                                state.workspace.format_for_prompt(&[])
-                            } else {
-                                String::new()
-                            }
-                        } else {
-                            String::new()
-                        }
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                };
+                // Uses cached value to avoid redundant SQLite + JSON deserialization per step.
+                let workspace_context = &cached_workspace_context;
 
                 if !workspace_context.is_empty() {
                     messages.push(ChatMessage::user(&format!(
@@ -336,8 +378,13 @@ impl TaskDispatcher {
 
                 tracing::info!(
                     "Agent '{}' finished step {}/{}: reason={:?}, rounds={}, tokens={}/{}",
-                    agent_id, step + 1, total_agents, result.finish_reason,
-                    result.rounds_used, result.total_input_tokens, result.total_output_tokens
+                    agent_id,
+                    step + 1,
+                    total_agents,
+                    result.finish_reason,
+                    result.rounds_used,
+                    result.total_input_tokens,
+                    result.total_output_tokens
                 );
 
                 let agent_success = matches!(
@@ -351,9 +398,14 @@ impl TaskDispatcher {
 
                 // Persist LLM usage to DB and emit event (regardless of success/failure)
                 usage::record_llm_usage(
-                    &router, &result, loop_config.model.as_deref(),
-                    agent_id, &task_id, agent_start.elapsed().as_millis() as i64,
-                    db.as_ref(), &bus,
+                    &router,
+                    &result,
+                    loop_config.model.as_deref(),
+                    agent_id,
+                    &task_id,
+                    agent_start.elapsed().as_millis() as i64,
+                    db.as_ref(),
+                    &bus,
                 );
 
                 // Assignment → Completed or Failed
@@ -378,7 +430,14 @@ impl TaskDispatcher {
                 // Use template_id for DB operations — the agent table stores template IDs,
                 // not instance IDs (e.g., "general_agent" not "general_agent::69dc734d").
                 if let Some(ref db) = db {
-                    usage::record_agent_history(db, &agent.template_id, &task_id, "executor", agent_success, agent_runtime);
+                    usage::record_agent_history(
+                        db,
+                        &agent.template_id,
+                        &task_id,
+                        "executor",
+                        agent_success,
+                        agent_runtime,
+                    );
                 }
 
                 // Release this agent back to Idle (explicit; guard is backup for panics)
@@ -391,7 +450,8 @@ impl TaskDispatcher {
                     let display_content = if raw_content.is_empty() {
                         format!(
                             "Agent completed in {} rounds ({} tool calls, {} tokens used)",
-                            result.rounds_used, result.tool_calls_made,
+                            result.rounds_used,
+                            result.tool_calls_made,
                             result.total_input_tokens + result.total_output_tokens
                         )
                     } else {
@@ -431,9 +491,19 @@ impl TaskDispatcher {
                     });
                     if let Some(ref db) = db {
                         let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                        let _ = repo.update_progress(&task_id, (step + 1) as i32, total_agents as i32);
+                        let _ =
+                            repo.update_progress(&task_id, (step + 1) as i32, total_agents as i32);
                     }
-                    ctx.task_registry.update_progress(&task_id, (step + 1) as i32, total_agents as i32, None);
+                    ctx.task_registry.update_progress(
+                        &task_id,
+                        (step + 1) as i32,
+                        total_agents as i32,
+                        None,
+                    );
+
+                    // Refresh cached workspace context after step completion
+                    // (agent may have written entries via workspace_write tool)
+                    cached_workspace_context = fetch_workspace_context(db.as_ref(), &task_id);
 
                     // Only pass actual content to next agent (not synthetic metadata)
                     if !raw_content.is_empty() {
@@ -447,18 +517,24 @@ impl TaskDispatcher {
                     if let Some(ref db) = db {
                         let step_i = step as i32;
                         let error_msg = match &result.finish_reason {
-                            LoopFinishReason::CostExceeded => "Agent cost limit exceeded".to_string(),
+                            LoopFinishReason::CostExceeded => {
+                                "Agent cost limit exceeded".to_string()
+                            }
                             LoopFinishReason::Error(err) => err.clone(),
                             _ => "Agent failed".to_string(),
                         };
-                        update_state_with_retry(db, &task_id, |s| s.mark_step_failed(step_i, &error_msg), "mark_step_failed").await;
+                        update_state_with_retry(
+                            db,
+                            &task_id,
+                            |s| s.mark_step_failed(step_i, &error_msg),
+                            "mark_step_failed",
+                        )
+                        .await;
                     }
 
                     pipeline_success = false;
                     pipeline_error = Some(match &result.finish_reason {
-                        LoopFinishReason::CostExceeded => {
-                            "Agent cost limit exceeded".to_string()
-                        }
+                        LoopFinishReason::CostExceeded => "Agent cost limit exceeded".to_string(),
                         LoopFinishReason::Error(err) => err.clone(),
                         _ => "Agent failed".to_string(),
                     });
@@ -472,7 +548,8 @@ impl TaskDispatcher {
             // 3. Destroy remaining agent instances that never ran (pipeline broke early)
             let now = Utc::now();
             if !pipeline_success {
-                for (step, (agent, assignment_id, _)) in agents_with_assignments.iter().enumerate() {
+                for (step, (agent, assignment_id, _)) in agents_with_assignments.iter().enumerate()
+                {
                     if step > last_processed_step {
                         let outcome = ctx.agent_registry.destroy_instance(&agent.id);
                         let status = match outcome {
@@ -481,7 +558,10 @@ impl TaskDispatcher {
                         };
                         if let (Some(db), Some(assign_id)) = (&db, assignment_id) {
                             let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                            let _ = repo.update_assignment_status(assign_id, openalpaca_storage::AssignmentStatus::Failed);
+                            let _ = repo.update_assignment_status(
+                                assign_id,
+                                openalpaca_storage::AssignmentStatus::Failed,
+                            );
                         }
                         bus.publish(SystemEvent::AgentStatusChanged {
                             agent_id: agent.id.clone(),
@@ -502,7 +582,14 @@ impl TaskDispatcher {
                 pipeline_error.clone().unwrap_or_default()
             };
 
-            finalize_task(&ctx, &bus, db.as_ref(), &task_id, &db_summary, pipeline_success);
+            finalize_task(
+                &ctx,
+                &bus,
+                db.as_ref(),
+                &task_id,
+                &db_summary,
+                pipeline_success,
+            );
 
             // 5. Persist final result to conversation (single message for entire pipeline)
             let runtime_secs = start_time.elapsed().as_secs() as i64;
@@ -519,7 +606,16 @@ impl TaskDispatcher {
                     pipeline_error.unwrap_or_default()
                 };
                 let content = format_task_result(&task_title, &chat_text, pipeline_success);
-                persist_conversation(db, &lane_key, &source, content, None, total_input_tokens as i64, total_output_tokens as i64, runtime_secs);
+                persist_conversation(
+                    db,
+                    &lane_key,
+                    &source,
+                    content,
+                    None,
+                    total_input_tokens as i64,
+                    total_output_tokens as i64,
+                    runtime_secs,
+                );
             }
 
             // Memory extraction from pipeline output (non-blocking)

@@ -1,8 +1,8 @@
 //! KB ingestion pipeline: ingest markdown files into memory as KbChunk entries.
 
 use anyhow::Result;
-use openalpaca_storage::{Database, MemoryKind, MemoryScope, MemorySource};
 use openalpaca_storage::repository::MemoryRepository;
+use openalpaca_storage::{Database, MemoryKind, MemoryScope, MemorySource};
 use std::path::Path;
 
 use super::chunker::chunk_markdown;
@@ -62,8 +62,8 @@ pub fn ingest_directory(
                 MemorySource::Ingestion,
                 &chunk.content,
                 Some(&metadata),
-                0.6,  // default importance for KB chunks
-                0.9,  // high confidence for ingested content
+                0.6, // default importance for KB chunks
+                0.9, // high confidence for ingested content
             )?;
 
             if row_id > 0 {

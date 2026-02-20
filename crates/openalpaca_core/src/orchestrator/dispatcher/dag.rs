@@ -1,15 +1,19 @@
-use super::{TaskDispatcher, finalize_task, format_task_result, persist_conversation, spawn_task_memory_extraction};
+use super::super::task_planner::TaskDag;
+use super::{
+    TaskDispatcher, finalize_task, format_task_result, persist_conversation,
+    spawn_task_memory_extraction,
+};
 use crate::agent::registry::DestroyOutcome;
 use crate::context::{DagSummary, TaskEntryStatus};
 use crate::events::SystemEvent;
 use crate::runner::dag_executor::{DagExecutorConfig, DagFinishReason, execute_dag};
 use chrono::Utc;
-use super::super::task_planner::TaskDag;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 impl TaskDispatcher {
     /// Spawn DAG-parallel execution: independent nodes run concurrently.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_dag_execution(
         &self,
         task_id: String,
@@ -21,7 +25,9 @@ impl TaskDispatcher {
         source: String,
         workspace_id: Option<String>,
     ) {
-        let Some(router) = self.require_router(&task_id) else { return };
+        let Some(router) = self.require_router(&task_id) else {
+            return;
+        };
 
         let bus = self.bus.clone();
         let ctx = self.shared_context.clone();
@@ -39,7 +45,8 @@ impl TaskDispatcher {
             let node_count = dag.nodes.len();
 
             // Update task status → Running
-            ctx.task_registry.update_status(&task_id, TaskEntryStatus::Running);
+            ctx.task_registry
+                .update_status(&task_id, TaskEntryStatus::Running);
             bus.publish(SystemEvent::TaskUpdated {
                 task_id: task_id.clone(),
                 status: "running".to_string(),
@@ -112,8 +119,12 @@ impl TaskDispatcher {
                 };
                 // Retrieve template_id from instance before it was destroyed
                 // (node.agent_id is the instance_id assigned during spawn)
-                let template_id = node.agent_id.split("::").next()
-                    .unwrap_or(&node.agent_id).to_string();
+                let template_id = node
+                    .agent_id
+                    .split("::")
+                    .next()
+                    .unwrap_or(&node.agent_id)
+                    .to_string();
                 bus.publish(SystemEvent::AgentStatusChanged {
                     agent_id: node.agent_id.clone(),
                     instance_id: node.agent_id.clone(),
@@ -131,7 +142,7 @@ impl TaskDispatcher {
                     .iter()
                     .filter(|nr| nr.success && !nr.final_content.is_empty())
                     .map(|nr| nr.final_content.clone())
-                    .last()
+                    .next_back()
                     .unwrap_or_else(|| {
                         format!(
                             "DAG completed: {}/{} nodes succeeded ({} tokens used)",
@@ -156,12 +167,28 @@ impl TaskDispatcher {
             let db_summary = final_content.chars().take(2000).collect::<String>();
 
             // Update task status
-            finalize_task(&ctx, &bus, db.as_ref(), &task_id, &db_summary, result.success);
+            finalize_task(
+                &ctx,
+                &bus,
+                db.as_ref(),
+                &task_id,
+                &db_summary,
+                result.success,
+            );
 
             // Persist final result to conversation
             if let Some(ref db) = db {
                 let content = format_task_result(&task_title, &final_content, result.success);
-                persist_conversation(db, &lane_key, &source, content, None, result.total_input_tokens as i64, result.total_output_tokens as i64, runtime_secs);
+                persist_conversation(
+                    db,
+                    &lane_key,
+                    &source,
+                    content,
+                    None,
+                    result.total_input_tokens as i64,
+                    result.total_output_tokens as i64,
+                    runtime_secs,
+                );
             }
 
             // Memory extraction from DAG output (non-blocking)
@@ -183,7 +210,11 @@ impl TaskDispatcher {
 
             tracing::info!(
                 "DAG execution for task '{}' finished: success={}, nodes={}/{}, runtime={}s",
-                task_id, result.success, result.node_results.len(), node_count, runtime_secs
+                task_id,
+                result.success,
+                result.node_results.len(),
+                node_count,
+                runtime_secs
             );
         });
     }

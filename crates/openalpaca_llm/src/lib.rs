@@ -15,19 +15,38 @@ pub mod secret_store;
 pub mod settings_service;
 pub mod types;
 
-pub use cli_backend::{CliBackendsConfig, CliBackendConfig, CliBackendStatus, ClaudeCodeCliProvider, CodexCliProvider, detect_cli_backends};
-pub use config::{LlmConfig, LlmRouterConfig, LlmRuntimeConfig, ProviderConfig, ProviderDefaults, KeyConfig, OrchestratorLlmConfig, EmbeddingsConfig, SecurityConfig, TimeoutsConfig, EndpointsConfig, EnvVarsConfig, ModelConfigEntry, build_provider, build_provider_with_runtime, build_router, build_router_with_secret_store, read_config, write_config, resolve_key_from_config, migrate_llm_secrets, reverse_migrate_llm_secrets, collect_secret_refs};
-pub use embedder::{Embedder, EmbedError, build_embedder, build_embedder_with_runtime};
+pub use cli_backend::{
+    ClaudeCodeCliProvider, CliBackendConfig, CliBackendStatus, CliBackendsConfig, CodexCliProvider,
+    detect_cli_backends,
+};
+pub use config::{
+    EmbeddingsConfig, EndpointsConfig, EnvVarsConfig, KeyConfig, LlmConfig, LlmRouterConfig,
+    LlmRuntimeConfig, ModelConfigEntry, OrchestratorLlmConfig, ProviderConfig, ProviderDefaults,
+    SecurityConfig, TimeoutsConfig, build_provider, build_provider_with_runtime, build_router,
+    build_router_with_secret_store, collect_secret_refs, migrate_llm_secrets, read_config,
+    resolve_key_from_config, reverse_migrate_llm_secrets, write_config,
+};
 pub use cost_tracker::{CallRecord, CostSnapshot, CostTracker, ModelUsageStats, UsageStats};
-pub use credential_discovery::{CredentialDiscoveryConfig, CredentialSource, DiscoveredCredential, DiscoveredCredentialInfo, OAuthToken, TokenManager};
+pub use credential_discovery::{
+    CredentialDiscoveryConfig, CredentialSource, DiscoveredCredential, DiscoveredCredentialInfo,
+    OAuthToken, TokenManager,
+};
+pub use embedder::{EmbedError, Embedder, build_embedder, build_embedder_with_runtime};
 pub use error::LlmError;
-pub use key_pool::{ApiKey, CallResult, KeyGuard, KeyHealthStatus, KeyPool, KeyPoolError, KeyPriority, KeySource, KeyStatus, ProviderType, SelectionStrategy, mask_secret};
+pub use key_pool::{
+    ApiKey, CallResult, KeyGuard, KeyHealthStatus, KeyPool, KeyPoolError, KeyPriority, KeySource,
+    KeyStatus, ProviderType, SelectionStrategy, mask_secret,
+};
 pub use model_registry::{ModelEntry, ModelInfo, ModelRegistry, PricingInfo};
 pub use provider_usage::{ExternalUsage, ProviderUsageSummary, ProviderUsageTracker};
-pub use rate_limiter::{RateLimitConfig, RateLimiterRegistry, CircuitState, backoff_with_jitter};
-pub use router::{LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RequestContext, RouterRequest};
+pub use rate_limiter::{CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter};
+pub use router::{
+    LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RequestContext, RouterRequest,
+};
 pub use secret_store::{CachingSecretStore, KeyringSecretStore, MemorySecretStore, SecretStore};
-pub use settings_service::{LlmSettingsService, OrchestratorConfigResponse, UpdateOrchestratorRequest};
+pub use settings_service::{
+    LlmSettingsService, OrchestratorConfigResponse, UpdateOrchestratorRequest,
+};
 pub use types::*;
 
 use async_trait::async_trait;
@@ -40,7 +59,11 @@ pub trait LlmProvider: Send + Sync {
 
     /// Chat using a specific API key. Default delegates to `chat()`.
     /// Providers override this to inject the key into their HTTP requests.
-    async fn chat_with_key(&self, _key: &str, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+    async fn chat_with_key(
+        &self,
+        _key: &str,
+        request: ChatRequest,
+    ) -> Result<ChatResponse, LlmError> {
         self.chat(request).await
     }
 

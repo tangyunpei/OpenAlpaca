@@ -6,21 +6,20 @@
 //! registry with its own model, persona, and constraints. It receives a
 //! `spawn_subagent` tool that delegates work to other agents.
 
-use crate::agent::subagent::SubAgent;
 #[cfg(test)]
 use crate::agent::subagent::AgentStatus;
+use crate::agent::subagent::SubAgent;
 use crate::agent::template::AgentTemplate;
 use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
-use arc_swap::ArcSwap;
 use crate::events::SystemEvent;
 use crate::middleware::prompt::format_tool_guidance;
 use crate::runner::{LoopConfig, LoopResult, run_agentic_loop_routed};
-use tokio_util::sync::CancellationToken;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy, ToolExecutor};
 use crate::tools::registry::BuiltInTool;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext, ToolRegistry};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter, ToolDefinition};
@@ -29,6 +28,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// Maximum nesting depth for subagent spawning.
@@ -60,6 +60,12 @@ pub struct SubagentTracker {
     pub notify: tokio::sync::Notify,
 }
 
+impl Default for SubagentTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SubagentTracker {
     pub fn new() -> Self {
         Self {
@@ -75,7 +81,10 @@ impl SubagentTracker {
 
     pub fn complete(&self, run_id: &str, content: String, success: bool) {
         let mut map = self.statuses.lock().unwrap_or_else(|p| p.into_inner());
-        map.insert(run_id.to_string(), SubagentStatus::Completed { content, success });
+        map.insert(
+            run_id.to_string(),
+            SubagentStatus::Completed { content, success },
+        );
         drop(map);
         self.notify.notify_waiters();
     }
@@ -101,15 +110,25 @@ impl SubagentTracker {
 
     pub fn all_done(&self) -> bool {
         let map = self.statuses.lock().unwrap_or_else(|p| p.into_inner());
-        map.values().all(|s| matches!(s, SubagentStatus::Completed { .. } | SubagentStatus::Failed { .. }))
+        map.values().all(|s| {
+            matches!(
+                s,
+                SubagentStatus::Completed { .. } | SubagentStatus::Failed { .. }
+            )
+        })
     }
 
     pub fn status_counts(&self) -> (usize, usize, usize, usize) {
         let map = self.statuses.lock().unwrap_or_else(|p| p.into_inner());
-        let queued = map.values().filter(|s| matches!(s, SubagentStatus::Queued)).count();
-        let running = map.values().filter(|s| matches!(s, SubagentStatus::Running)).count();
-        let completed = map.values().filter(|s| matches!(s, SubagentStatus::Completed { .. })).count();
-        let failed = map.values().filter(|s| matches!(s, SubagentStatus::Failed { .. })).count();
+        let (mut queued, mut running, mut completed, mut failed) = (0, 0, 0, 0);
+        for s in map.values() {
+            match s {
+                SubagentStatus::Queued => queued += 1,
+                SubagentStatus::Running => running += 1,
+                SubagentStatus::Completed { .. } => completed += 1,
+                SubagentStatus::Failed { .. } => failed += 1,
+            }
+        }
         (queued, running, completed, failed)
     }
 
@@ -130,8 +149,13 @@ impl SubagentTracker {
                 SubagentStatus::Completed { content, success } => {
                     let preview: String = content.chars().take(500).collect();
                     parts.push(format!(
-                        "- **{}**: {} — {}", id,
-                        if *success { "completed" } else { "completed (partial)" },
+                        "- **{}**: {} — {}",
+                        id,
+                        if *success {
+                            "completed"
+                        } else {
+                            "completed (partial)"
+                        },
                         preview
                     ));
                 }
@@ -255,14 +279,10 @@ pub struct SpawnSubagentTool {
     max_concurrent_subagents: usize,
     /// Semaphore limiting concurrent subagent spawns per lead agent.
     concurrency_semaphore: Arc<tokio::sync::Semaphore>,
-    /// Semaphore limiting concurrent subagent *execution* (LLM calls).
-    /// Sized to estimated LLM capacity minus 1 (reserved for lead agent).
-    execution_semaphore: Arc<tokio::sync::Semaphore>,
-    /// Number of available API keys, used to compute stagger delay inside spawned tasks.
-    available_api_keys: usize,
 }
 
 impl SpawnSubagentTool {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         router: Arc<LlmRouter>,
         tool_registry: Arc<ToolRegistry>,
@@ -277,8 +297,6 @@ impl SpawnSubagentTool {
         tracker: Arc<SubagentTracker>,
         depth: u32,
         max_concurrent_subagents: usize,
-        exec_slots: usize,
-        available_api_keys: usize,
     ) -> Self {
         Self {
             router,
@@ -296,8 +314,6 @@ impl SpawnSubagentTool {
             depth,
             max_concurrent_subagents,
             concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent_subagents)),
-            execution_semaphore: Arc::new(tokio::sync::Semaphore::new(exec_slots)),
-            available_api_keys,
         }
     }
 
@@ -435,15 +451,22 @@ impl BuiltInTool for SpawnSubagentTool {
         ];
 
         // 8. Build LoopConfig from daemon defaults + agent constraints
-        let loop_config = LoopConfig::from_agent(
-            &self.daemon_config.load().execution.agent_defaults, &agent,
-        ).with_model_pricing(self.router.model_registry(), agent.llm_config.model.as_deref());
+        let loop_config =
+            LoopConfig::from_agent(&self.daemon_config.load().execution.agent_defaults, &agent)
+                .with_model_pricing(
+                    self.router.model_registry(),
+                    agent.llm_config.model.as_deref(),
+                );
 
         let sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
 
         // 9. Spawn subagent as a background task (non-blocking).
         //    This allows the lead agent to spawn multiple subagents in parallel.
-        let run_id = format!("{}::{}", agent_id, &instance_id.split("::").last().unwrap_or(&instance_id));
+        let run_id = format!(
+            "{}::{}",
+            agent_id,
+            &instance_id.split("::").last().unwrap_or(&instance_id)
+        );
         self.tracker.register(&run_id);
 
         let child_token = self.cancel_token.as_ref().map(|t| t.child_token());
@@ -504,9 +527,9 @@ impl BuiltInTool for SpawnSubagentTool {
             // Stagger delay after acquiring execution slot, before LLM calls.
             // Spreads RPM load when few API keys are available.
             let stagger_ms: u64 = match available_api_keys {
-                0..=1 => 500,  // 1 key: aggressive stagger
-                2 => 200,      // 2 keys: moderate stagger
-                _ => 0,        // 3+ keys: no stagger needed
+                0..=1 => 500, // 1 key: aggressive stagger
+                2 => 200,     // 2 keys: moderate stagger
+                _ => 0,       // 3+ keys: no stagger needed
             };
             if stagger_ms > 0 {
                 tracing::debug!(
@@ -561,20 +584,31 @@ impl BuiltInTool for SpawnSubagentTool {
 
             // Record LLM usage + agent history
             crate::orchestrator::dispatcher::usage::record_llm_usage(
-                &router, &result, loop_config.model.as_deref(),
-                &agent_id_owned, &task_id, duration_ms as i64,
-                db.as_ref(), &bus,
+                &router,
+                &result,
+                loop_config.model.as_deref(),
+                &agent_id_owned,
+                &task_id,
+                duration_ms as i64,
+                db.as_ref(),
+                &bus,
             );
 
             if let Some(ref db) = db {
                 crate::orchestrator::dispatcher::usage::record_agent_history(
-                    db, &agent_id_owned, &task_id, "subagent", agent_success, duration_ms as i64 / 1000,
+                    db,
+                    &agent_id_owned,
+                    &task_id,
+                    "subagent",
+                    agent_success,
+                    duration_ms as i64 / 1000,
                 );
             }
 
             tracing::info!(
                 "Subagent '{}' (instance '{}') completed objective '{}': success={}, rounds={}, tokens={}/{}, duration={}ms",
-                agent_id_owned, instance_id,
+                agent_id_owned,
+                instance_id,
                 &objective_preview,
                 agent_success,
                 result.rounds_used,
@@ -634,24 +668,31 @@ impl BuiltInTool for CheckSubagentStatusTool {
             .ok_or_else(|| "Missing required parameter: subagent_run_id".to_string())?;
 
         match self.tracker.get(run_id) {
-            Some(SubagentStatus::Queued) => {
-                Ok(format!("Subagent '{}' is queued, waiting for an execution slot. Check again later or use `wait_for_subagents`.", run_id))
-            }
-            Some(SubagentStatus::Running) => {
-                Ok(format!("Subagent '{}' is still running. Check again later or use `wait_for_subagents`.", run_id))
-            }
-            Some(SubagentStatus::Completed { content, success }) => {
-                Ok(format!(
-                    "Subagent '{}' {}: {}",
-                    run_id,
-                    if success { "completed successfully" } else { "completed with issues" },
-                    content,
-                ))
-            }
+            Some(SubagentStatus::Queued) => Ok(format!(
+                "Subagent '{}' is queued, waiting for an execution slot. Check again later or use `wait_for_subagents`.",
+                run_id
+            )),
+            Some(SubagentStatus::Running) => Ok(format!(
+                "Subagent '{}' is still running. Check again later or use `wait_for_subagents`.",
+                run_id
+            )),
+            Some(SubagentStatus::Completed { content, success }) => Ok(format!(
+                "Subagent '{}' {}: {}",
+                run_id,
+                if success {
+                    "completed successfully"
+                } else {
+                    "completed with issues"
+                },
+                content,
+            )),
             Some(SubagentStatus::Failed { error }) => {
                 Err(format!("Subagent '{}' failed: {}", run_id, error))
             }
-            None => Err(format!("Unknown subagent_run_id: '{}'. Valid run IDs are shown when calling spawn_subagent.", run_id)),
+            None => Err(format!(
+                "Unknown subagent_run_id: '{}'. Valid run IDs are shown when calling spawn_subagent.",
+                run_id
+            )),
         }
     }
 }
@@ -702,7 +743,10 @@ impl BuiltInTool for WaitForSubagentsTool {
                     "Timed out after {}s waiting for subagents. \
                      Status: {} completed, {} failed, {} queued, {} running.\n\n{}",
                     max_wait.as_secs(),
-                    completed, failed, queued, running,
+                    completed,
+                    failed,
+                    queued,
+                    running,
                     self.tracker.summary()
                 ));
             }
@@ -753,7 +797,9 @@ pub fn wait_for_subagents_tool_definition() -> ToolDefinition {
 ///
 /// This is the preferred variant: the LLM sees template IDs (not instance IDs),
 /// and `spawn_instance()` creates a fresh instance for each invocation.
-pub fn spawn_subagent_tool_definition_from_templates(templates: &[AgentTemplate]) -> ToolDefinition {
+pub fn spawn_subagent_tool_definition_from_templates(
+    templates: &[AgentTemplate],
+) -> ToolDefinition {
     let agent_descriptions: Vec<String> = templates
         .iter()
         .map(|t| {
@@ -1035,7 +1081,8 @@ pub async fn run_lead_agent(
         available_api_keys = available_api_keys,
         task_id = task_id,
         "Lead agent computed execution gate: {} exec slots ({} capacity - 1 reserved)",
-        exec_slots, capacity_info.effective_capacity,
+        exec_slots,
+        capacity_info.effective_capacity,
     );
 
     let spawn_tool = Arc::new(SpawnSubagentTool::new(
@@ -1051,7 +1098,11 @@ pub async fn run_lead_agent(
         cancel_token.clone(),
         tracker.clone(),
         0, // depth: top-level lead agent
-        daemon_config.load().execution.lead_agent_defaults.max_concurrent_subagents,
+        daemon_config
+            .load()
+            .execution
+            .lead_agent_defaults
+            .max_concurrent_subagents,
         exec_slots,
         available_api_keys,
     ));
@@ -1069,10 +1120,8 @@ pub async fn run_lead_agent(
         agent_id: Some(lead_agent.id.clone()),
         db: db.clone(),
     };
-    let contextual_executor = Arc::new(ContextualToolExecutor::new(
-        tool_registry.clone(),
-        ctx_exec,
-    ));
+    let contextual_executor =
+        Arc::new(ContextualToolExecutor::new(tool_registry.clone(), ctx_exec));
 
     let lead_executor = Arc::new(LeadAgentToolExecutor::new(
         spawn_tool.clone(),
@@ -1086,7 +1135,8 @@ pub async fn run_lead_agent(
     let sandbox_policy = SandboxPolicy::from_constraints(&lead_agent.id, &lead_agent.constraints);
 
     // 6. Build system prompt from templates
-    let system_prompt = build_lead_agent_prompt_from_templates(&lead_agent.preset.persona, &worker_templates);
+    let system_prompt =
+        build_lead_agent_prompt_from_templates(&lead_agent.preset.persona, &worker_templates);
     let tool_guidance = format_tool_guidance(&tools);
     let full_system = format!("{}{}", system_prompt, tool_guidance);
 
@@ -1104,9 +1154,9 @@ pub async fn run_lead_agent(
         } else {
             None
         };
-        let scope_ctx = workspace_id.as_ref().map(|ws| {
-            crate::memory::scope_context::MemoryScopeContext::new(Some(ws.clone()))
-        });
+        let scope_ctx = workspace_id
+            .as_ref()
+            .map(|ws| crate::memory::scope_context::MemoryScopeContext::new(Some(ws.clone())));
         let memories = if let Some(ref ctx) = scope_ctx {
             let cascade_scopes = ctx.cascade_scopes();
             repo.search_hybrid_cascade(
@@ -1160,8 +1210,13 @@ pub async fn run_lead_agent(
 
     // 8. Build LoopConfig from lead agent defaults + agent constraint overrides
     let loop_config = LoopConfig::from_lead_agent(
-        &daemon_config.load().execution.lead_agent_defaults, lead_agent,
-    ).with_model_pricing(router.model_registry(), lead_agent.llm_config.model.as_deref());
+        &daemon_config.load().execution.lead_agent_defaults,
+        lead_agent,
+    )
+    .with_model_pricing(
+        router.model_registry(),
+        lead_agent.llm_config.model.as_deref(),
+    );
 
     // 9. Run the agentic loop
     tracing::info!(
@@ -1188,8 +1243,7 @@ pub async fn run_lead_agent(
 
     let success = matches!(
         &result.finish_reason,
-        crate::runner::LoopFinishReason::Complete
-            | crate::runner::LoopFinishReason::MaxRounds
+        crate::runner::LoopFinishReason::Complete | crate::runner::LoopFinishReason::MaxRounds
     );
 
     let subagents_spawned = spawn_tool.spawn_count();
@@ -1253,10 +1307,7 @@ mod tests {
 
         #[async_trait]
         impl BuiltInTool for NoopTool {
-            async fn execute(
-                &self,
-                _arguments: &serde_json::Value,
-            ) -> Result<String, String> {
+            async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
                 Ok("noop".to_string())
             }
         }
@@ -1307,14 +1358,21 @@ mod tests {
             tracker: tracker.clone(),
             depth: 0,
             max_concurrent_subagents: DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-            concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MAX_CONCURRENT_SUBAGENTS)),
-            execution_semaphore: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MAX_CONCURRENT_SUBAGENTS)),
+            concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+            )),
+            execution_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+            )),
             available_api_keys: 1,
         });
-        let check_status_tool = Arc::new(CheckSubagentStatusTool { tracker: tracker.clone() });
+        let check_status_tool = Arc::new(CheckSubagentStatusTool {
+            tracker: tracker.clone(),
+        });
         let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
 
-        let executor = LeadAgentToolExecutor::new(spawn_tool, check_status_tool, wait_tool, contextual);
+        let executor =
+            LeadAgentToolExecutor::new(spawn_tool, check_status_tool, wait_tool, contextual);
 
         let tools = executor.registered_tools();
         assert!(tools.contains(&"spawn_subagent".to_string()));
@@ -1421,13 +1479,19 @@ mod tests {
         assert!(matches!(tracker.get("run-1"), Some(SubagentStatus::Queued)));
 
         tracker.set_status("run-1", SubagentStatus::Running);
-        assert!(matches!(tracker.get("run-1"), Some(SubagentStatus::Running)));
+        assert!(matches!(
+            tracker.get("run-1"),
+            Some(SubagentStatus::Running)
+        ));
         assert!(!tracker.all_done());
 
-        tracker.set_status("run-1", SubagentStatus::Completed {
-            content: "done".to_string(),
-            success: true,
-        });
+        tracker.set_status(
+            "run-1",
+            SubagentStatus::Completed {
+                content: "done".to_string(),
+                success: true,
+            },
+        );
         assert!(tracker.all_done());
     }
 
@@ -1491,15 +1555,21 @@ mod tests {
         tracker.register("run-abc");
         tracker.complete("run-abc", "Done!".to_string(), true);
 
-        let tool = CheckSubagentStatusTool { tracker: tracker.clone() };
+        let tool = CheckSubagentStatusTool {
+            tracker: tracker.clone(),
+        };
 
         // Completed
-        let result = tool.execute(&serde_json::json!({"subagent_run_id": "run-abc"})).await;
+        let result = tool
+            .execute(&serde_json::json!({"subagent_run_id": "run-abc"}))
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("completed successfully"));
 
         // Unknown
-        let result = tool.execute(&serde_json::json!({"subagent_run_id": "no-such"})).await;
+        let result = tool
+            .execute(&serde_json::json!({"subagent_run_id": "no-such"}))
+            .await;
         assert!(result.is_err());
     }
 
@@ -1508,10 +1578,14 @@ mod tests {
         let tracker = Arc::new(SubagentTracker::new());
         tracker.register("run-queued");
 
-        let tool = CheckSubagentStatusTool { tracker: tracker.clone() };
+        let tool = CheckSubagentStatusTool {
+            tracker: tracker.clone(),
+        };
 
         // Queued
-        let result = tool.execute(&serde_json::json!({"subagent_run_id": "run-queued"})).await;
+        let result = tool
+            .execute(&serde_json::json!({"subagent_run_id": "run-queued"}))
+            .await;
         assert!(result.is_ok());
         let msg = result.unwrap();
         assert!(msg.contains("queued"));
@@ -1519,7 +1593,9 @@ mod tests {
 
         // Transition to Running
         tracker.set_status("run-queued", SubagentStatus::Running);
-        let result = tool.execute(&serde_json::json!({"subagent_run_id": "run-queued"})).await;
+        let result = tool
+            .execute(&serde_json::json!({"subagent_run_id": "run-queued"}))
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("still running"));
     }

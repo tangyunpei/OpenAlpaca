@@ -1,5 +1,7 @@
 use super::*;
-use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent};
+use crate::agent::subagent::{
+    AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent,
+};
 use crate::agent::template::{AgentTemplate, AgentTemplateFrontmatter};
 use crate::orchestrator::task_planner::TaskPlan;
 use std::collections::HashMap;
@@ -65,11 +67,26 @@ fn setup(agents: Vec<SubAgent>) -> TaskDispatcher {
     let lane_mgr = Arc::new(LaneManager::new());
     let bus = EventBus::default();
     let tool_registry = Arc::new(crate::tools::ToolRegistry::new());
-    let executor = Arc::new(crate::tools::RegistryToolExecutor::new(tool_registry.clone()));
-    let sandbox = Arc::new(crate::security::sandbox::SandboxManager::with_defaults(executor, bus.clone()));
+    let executor = Arc::new(crate::tools::RegistryToolExecutor::new(
+        tool_registry.clone(),
+    ));
+    let sandbox = Arc::new(crate::security::sandbox::SandboxManager::with_defaults(
+        executor,
+        bus.clone(),
+    ));
     let gate = Arc::new(crate::security::gate::SecurityGate::new(sandbox));
     let daemon_config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
-    TaskDispatcher::new(ctx, lane_mgr, bus, None, gate, tool_registry, None, None, daemon_config)
+    TaskDispatcher::new(
+        ctx,
+        lane_mgr,
+        bus,
+        None,
+        gate,
+        tool_registry,
+        None,
+        None,
+        daemon_config,
+    )
 }
 
 #[test]
@@ -215,11 +232,19 @@ fn test_dispatch_lead_agent_marks_agent_busy() {
     assert!(result.is_ok());
 
     // The lead agent should be marked Busy
-    let lead = dispatcher.shared_context.agent_registry.get("lead-01").unwrap();
+    let lead = dispatcher
+        .shared_context
+        .agent_registry
+        .get("lead-01")
+        .unwrap();
     assert_eq!(lead.status.as_str(), "busy");
 
     // The worker should still be Idle
-    let worker = dispatcher.shared_context.agent_registry.get("worker-01").unwrap();
+    let worker = dispatcher
+        .shared_context
+        .agent_registry
+        .get("worker-01")
+        .unwrap();
     assert!(worker.status.is_available());
 }
 
@@ -243,11 +268,19 @@ fn test_dispatch_lead_agent_prefers_lead_orchestration_skill() {
     assert!(result.is_ok());
 
     // lead-01 should be busy (it has lead_orchestration skill)
-    let lead = dispatcher.shared_context.agent_registry.get("lead-01").unwrap();
+    let lead = dispatcher
+        .shared_context
+        .agent_registry
+        .get("lead-01")
+        .unwrap();
     assert_eq!(lead.status.as_str(), "busy");
 
     // worker-01 should still be idle
-    let worker = dispatcher.shared_context.agent_registry.get("worker-01").unwrap();
+    let worker = dispatcher
+        .shared_context
+        .agent_registry
+        .get("worker-01")
+        .unwrap();
     assert!(worker.status.is_available());
 }
 
@@ -258,9 +291,7 @@ fn test_dispatch_lead_agent_fallback_to_any_idle_agent() {
     // with a UUID suffix. We verify that:
     // 1. dispatch succeeds
     // 2. a new instance exists for the worker-01 template
-    let dispatcher = setup(vec![
-        make_agent("worker-01", vec!["web_search"]),
-    ]);
+    let dispatcher = setup(vec![make_agent("worker-01", vec!["web_search"])]);
 
     let result = dispatcher.dispatch_lead_agent(
         "Complex task",
@@ -274,10 +305,21 @@ fn test_dispatch_lead_agent_fallback_to_any_idle_agent() {
     assert!(result.is_ok());
 
     // A new instance spawned from worker-01 template should exist and be busy
-    assert!(dispatcher.shared_context.agent_registry.count_instances_of("worker-01") >= 1);
+    assert!(
+        dispatcher
+            .shared_context
+            .agent_registry
+            .count_instances_of("worker-01")
+            >= 1
+    );
     let instances = dispatcher.shared_context.agent_registry.list_instances();
-    let busy_worker = instances.iter().find(|a| a.template_id == "worker-01" && !a.status.is_available());
-    assert!(busy_worker.is_some(), "Expected a busy instance of worker-01");
+    let busy_worker = instances
+        .iter()
+        .find(|a| a.template_id == "worker-01" && !a.status.is_available());
+    assert!(
+        busy_worker.is_some(),
+        "Expected a busy instance of worker-01"
+    );
 }
 
 #[test]
@@ -312,14 +354,8 @@ fn test_dispatch_planned_empty_assignments_promotes_to_lead_agent() {
         use_lead_agent: false,
     };
 
-    let result = dispatcher.dispatch_planned(
-        "Normal task",
-        plan,
-        "user1",
-        "user1:cli",
-        "cli",
-        None,
-    );
+    let result =
+        dispatcher.dispatch_planned("Normal task", plan, "user1", "user1:cli", "cli", None);
 
     // Should succeed — dispatched to lead agent as last-resort fallback
     assert!(result.is_ok());

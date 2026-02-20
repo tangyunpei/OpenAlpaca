@@ -1,7 +1,7 @@
-use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use crate::daemon_config::DaemonConfig;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+use arc_swap::ArcSwap;
+use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use std::sync::Arc;
 
@@ -53,7 +53,13 @@ impl BuiltInTool for MemorySearchTool {
         // Track access for importance decay + boost
         if !memories.is_empty() {
             let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-            let access_boost = self.daemon_config.load().orchestrator.memory.decay.access_boost;
+            let access_boost = self
+                .daemon_config
+                .load()
+                .orchestrator
+                .memory
+                .decay
+                .access_boost;
             if let Err(e) = repo.touch_accessed(&ids, access_boost) {
                 tracing::warn!("Failed to track memory access: {e}");
             }

@@ -8,6 +8,7 @@ use crate::agent::subagent::SubAgent;
 use openalpaca_llm::{ChatMessage, LlmRouter, RequestContext, RouterRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Maximum number of recent history messages to include in planning prompts.
@@ -105,10 +106,7 @@ impl TaskDag {
         }
 
         if self.nodes.len() > 8 {
-            return Err(format!(
-                "DAG has {} nodes (max 8)",
-                self.nodes.len()
-            ));
+            return Err(format!("DAG has {} nodes (max 8)", self.nodes.len()));
         }
 
         // Check all dependencies exist and all agents are available
@@ -151,7 +149,9 @@ impl TaskDag {
             .iter()
             .filter(|n| {
                 matches!(n.status, DagNodeStatus::Pending | DagNodeStatus::Ready)
-                    && n.depends_on.iter().all(|dep| completed.contains(dep.as_str()))
+                    && n.depends_on
+                        .iter()
+                        .all(|dep| completed.contains(dep.as_str()))
             })
             .collect()
     }
@@ -483,7 +483,7 @@ async fn plan_inner(
         let request = RouterRequest {
             model: None,
             messages: messages.clone(),
-            tools: vec![],
+            tools: Arc::new(vec![]),
             temperature: Some(0.0),
             max_tokens: Some(2048),
             context: RequestContext::default(),
@@ -765,7 +765,10 @@ mod tests {
         assert_eq!(plan.title.as_deref(), Some("Research Rust async patterns"));
         assert_eq!(plan.assignments.len(), 1);
         assert_eq!(plan.assignments[0].agent_id, "researcher-01");
-        assert_eq!(plan.assignments[0].matched_skills, vec!["web_search", "summarize"]);
+        assert_eq!(
+            plan.assignments[0].matched_skills,
+            vec!["web_search", "summarize"]
+        );
     }
 
     #[test]
@@ -897,9 +900,7 @@ mod tests {
 
     // ── DAG tests ─────────────────────────────────────────────────────
 
-    use crate::agent::subagent::{
-        AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus,
-    };
+    use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus};
 
     fn make_agent(id: &str) -> SubAgent {
         SubAgent {
@@ -1007,7 +1008,11 @@ mod tests {
                 make_dag_node("n3", "a1", &["n1", "n2"]),
             ],
         };
-        let ready: Vec<&str> = dag.ready_nodes().iter().map(|n| n.node_id.as_str()).collect();
+        let ready: Vec<&str> = dag
+            .ready_nodes()
+            .iter()
+            .map(|n| n.node_id.as_str())
+            .collect();
         assert!(ready.contains(&"n1"));
         assert!(ready.contains(&"n2"));
         assert!(!ready.contains(&"n3"));
@@ -1418,7 +1423,10 @@ mod tests {
         }"#;
         let plan = TaskPlanner::parse_response(json).unwrap();
         assert_eq!(plan.classification, "complex_task");
-        assert!(plan.use_lead_agent, "Missing use_lead_agent should default to true");
+        assert!(
+            plan.use_lead_agent,
+            "Missing use_lead_agent should default to true"
+        );
     }
 
     #[test]
@@ -1438,7 +1446,10 @@ mod tests {
         }"#;
         let plan = TaskPlanner::parse_response(json).unwrap();
         assert_eq!(plan.classification, "complex_task");
-        assert!(!plan.use_lead_agent, "Explicit false with DAG should stay false");
+        assert!(
+            !plan.use_lead_agent,
+            "Explicit false with DAG should stay false"
+        );
         assert!(plan.dag.is_some());
     }
 

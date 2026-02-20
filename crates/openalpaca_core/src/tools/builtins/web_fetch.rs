@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use std::sync::Arc;
 
@@ -33,45 +33,41 @@ impl BuiltInTool for WebFetchTool {
         }
 
         // Reject non-text content types (images, executables, etc.)
-        if let Some(ct) = response.headers().get(reqwest::header::CONTENT_TYPE) {
-            if let Ok(ct_str) = ct.to_str() {
-                let ct_lower = ct_str.to_lowercase();
-                let is_text = ct_lower.starts_with("text/")
-                    || ct_lower.starts_with("application/json")
-                    || ct_lower.starts_with("application/xml")
-                    || ct_lower.starts_with("application/xhtml")
-                    || ct_lower.starts_with("application/javascript")
-                    || ct_lower.starts_with("application/x-yaml")
-                    || ct_lower.starts_with("application/yaml");
-                if !is_text {
-                    return Err(format!(
-                        "Non-text content type '{}': web_fetch only supports text-based responses",
-                        ct_str
-                    ));
-                }
+        if let Some(ct) = response.headers().get(reqwest::header::CONTENT_TYPE)
+            && let Ok(ct_str) = ct.to_str()
+        {
+            let ct_lower = ct_str.to_lowercase();
+            let is_text = ct_lower.starts_with("text/")
+                || ct_lower.starts_with("application/json")
+                || ct_lower.starts_with("application/xml")
+                || ct_lower.starts_with("application/xhtml")
+                || ct_lower.starts_with("application/javascript")
+                || ct_lower.starts_with("application/x-yaml")
+                || ct_lower.starts_with("application/yaml");
+            if !is_text {
+                return Err(format!(
+                    "Non-text content type '{}': web_fetch only supports text-based responses",
+                    ct_str
+                ));
             }
         }
 
         // Limit download size: read up to 1MB then truncate output to 8KB.
         // Prevents downloading multi-GB files into memory.
         const MAX_DOWNLOAD_SIZE: usize = 1024 * 1024; // 1 MB
-        let body = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            async {
-                let mut bytes = Vec::new();
-                let mut stream = response.bytes_stream();
-                use futures_util::StreamExt;
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk.map_err(|e| format!("Failed to read response: {}", e))?;
-                    bytes.extend_from_slice(&chunk);
-                    if bytes.len() > MAX_DOWNLOAD_SIZE {
-                        break;
-                    }
+        let body = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let mut bytes = Vec::new();
+            let mut stream = response.bytes_stream();
+            use futures_util::StreamExt;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| format!("Failed to read response: {}", e))?;
+                bytes.extend_from_slice(&chunk);
+                if bytes.len() > MAX_DOWNLOAD_SIZE {
+                    break;
                 }
-                String::from_utf8(bytes)
-                    .map_err(|_| "Response body is not valid UTF-8".to_string())
-            },
-        )
+            }
+            String::from_utf8(bytes).map_err(|_| "Response body is not valid UTF-8".to_string())
+        })
         .await
         .map_err(|_| "Response body read timed out after 15s".to_string())?
         .map_err(|e: String| e)?;
@@ -92,31 +88,35 @@ impl BuiltInTool for WebFetchTool {
 /// - Private/reserved IP ranges (127.x, 10.x, 172.16-31.x, 192.168.x, [::1])
 /// - Localhost variations
 fn validate_fetch_url(url: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url)
-        .map_err(|e| format!("Invalid URL: {}", e))?;
+    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
 
     // Only allow http and https
     match parsed.scheme() {
         "http" | "https" => {}
-        scheme => return Err(format!(
-            "URL scheme '{}' is not allowed; only http and https are permitted", scheme
-        )),
+        scheme => {
+            return Err(format!(
+                "URL scheme '{}' is not allowed; only http and https are permitted",
+                scheme
+            ));
+        }
     }
 
-    let host = parsed.host_str()
+    let host = parsed
+        .host_str()
         .ok_or_else(|| "URL has no host".to_string())?;
 
     // Block cloud metadata endpoints
     let blocked_hosts = [
-        "169.254.169.254",           // AWS/GCP/Azure metadata
-        "metadata.google.internal",  // GCP metadata
-        "metadata.internal",         // Generic cloud metadata
+        "169.254.169.254",          // AWS/GCP/Azure metadata
+        "metadata.google.internal", // GCP metadata
+        "metadata.internal",        // Generic cloud metadata
     ];
     let host_lower = host.to_lowercase();
     for blocked in &blocked_hosts {
         if host_lower == *blocked {
             return Err(format!(
-                "Access to '{}' is blocked (cloud metadata endpoint)", host
+                "Access to '{}' is blocked (cloud metadata endpoint)",
+                host
             ));
         }
     }
@@ -137,17 +137,15 @@ fn validate_fetch_url(url: &str) -> Result<(), String> {
                     || ipv4.is_private()                    // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
                     || ipv4.is_link_local()                 // 169.254.0.0/16
                     || ipv4.is_unspecified()                // 0.0.0.0
-                    || (ipv4.octets()[0] == 100 && (ipv4.octets()[1] & 0xC0) == 64)  // 100.64.0.0/10 (CGN)
+                    || (ipv4.octets()[0] == 100 && (ipv4.octets()[1] & 0xC0) == 64) // 100.64.0.0/10 (CGN)
             }
             std::net::IpAddr::V6(ipv6) => {
                 ipv6.is_loopback()                          // ::1
-                    || ipv6.is_unspecified()                 // ::
+                    || ipv6.is_unspecified() // ::
             }
         };
         if is_private {
-            return Err(format!(
-                "Access to private/reserved IP '{}' is blocked", ip
-            ));
+            return Err(format!("Access to private/reserved IP '{}' is blocked", ip));
         }
     }
 

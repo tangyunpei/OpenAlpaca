@@ -104,7 +104,9 @@ impl CostTracker {
 
         // Update provider usage (resolve model → provider)
         {
-            let provider_name = self.model_registry.resolve_provider_name(&record.model)
+            let provider_name = self
+                .model_registry
+                .resolve_provider_name(&record.model)
                 .unwrap_or_else(|| "unknown".to_string());
 
             let mut usage = self.provider_usage.write().await;
@@ -226,7 +228,12 @@ mod tests {
         // claude-sonnet: $3/1M input, $15/1M output
         let cost = tracker.calculate_cost("claude-sonnet-4-5-20250929", 1_000_000, 100_000);
         let expected = 3.0 + 1.5; // 1M * $3/1M + 100K * $15/1M
-        assert!((cost - expected).abs() < 0.01, "cost={}, expected={}", cost, expected);
+        assert!(
+            (cost - expected).abs() < 0.01,
+            "cost={}, expected={}",
+            cost,
+            expected
+        );
     }
 
     #[test]

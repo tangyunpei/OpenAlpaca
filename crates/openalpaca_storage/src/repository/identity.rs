@@ -601,11 +601,13 @@ mod tests {
             created_at: String::new(),
         };
         conv_repo.insert(&msg).unwrap();
-        conv_repo.insert(&ConversationMessage {
-            content: "world".to_string(),
-            role: "assistant".to_string(),
-            ..msg.clone()
-        }).unwrap();
+        conv_repo
+            .insert(&ConversationMessage {
+                content: "world".to_string(),
+                role: "assistant".to_string(),
+                ..msg.clone()
+            })
+            .unwrap();
 
         // Verify messages exist under old lane
         let before = conv_repo.list_by_lane(old_lane, 50, 0).unwrap();
@@ -677,11 +679,13 @@ mod tests {
             .unwrap();
 
         // Now add more messages under the new provider lane (simulating unlink + new messages)
-        conv_repo.insert(&ConversationMessage {
-            lane_key: "tg456:telegram".to_string(),
-            content: "second".to_string(),
-            ..msg.clone()
-        }).unwrap();
+        conv_repo
+            .insert(&ConversationMessage {
+                lane_key: "tg456:telegram".to_string(),
+                content: "second".to_string(),
+                ..msg.clone()
+            })
+            .unwrap();
 
         // Re-link: should not cause UNIQUE violation
         identity_repo
