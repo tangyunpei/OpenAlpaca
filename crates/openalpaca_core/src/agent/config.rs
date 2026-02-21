@@ -216,6 +216,7 @@ impl AgentConfigFile {
                     max_tool_calls: c.max_tool_calls,
                     timeout_seconds: c.timeout_seconds,
                     max_cost_per_task: c.max_cost_per_task,
+                    max_rounds: None,
                     require_confirmation_for: c
                         .require_confirmation_for
                         .clone()
@@ -386,6 +387,7 @@ impl AgentConfigFile {
             max_tool_calls: self.constraints.as_ref().and_then(|c| c.max_tool_calls),
             timeout_seconds: self.constraints.as_ref().and_then(|c| c.timeout_seconds),
             max_cost_per_task: self.constraints.as_ref().and_then(|c| c.max_cost_per_task),
+            max_rounds: None,
             require_confirmation_for: self
                 .constraints
                 .as_ref()
@@ -441,6 +443,7 @@ impl AgentConfigFile {
                 max_tool_calls: c.max_tool_calls,
                 timeout_seconds: c.timeout_seconds,
                 max_cost_per_task: c.max_cost_per_task,
+                max_rounds: None,
                 require_confirmation_for: c.require_confirmation_for.clone().unwrap_or_default(),
                 allowed_capabilities: c.allowed_capabilities.clone().unwrap_or_default(),
                 denied_capabilities: denied,

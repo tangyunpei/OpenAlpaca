@@ -415,6 +415,7 @@ mod tests {
                 max_tool_calls: None,
                 timeout_seconds: None,
                 max_cost_per_task: None,
+                max_rounds: None,
                 require_confirmation_for: vec![],
             },
             body: String::new(),

@@ -165,16 +165,28 @@ impl SandboxManager {
         }
 
         // 5. Timeout-wrapped execution
-        let timeout = Duration::from_secs(policy.max_tool_runtime_secs);
+        //
+        // Coordination tools (wait_for_subagents, check_subagent_status) have their
+        // own internal timeouts and must not be subject to the per-tool sandbox
+        // timeout, which is typically much shorter than the time subagents need to
+        // complete their work.
+        let is_coordination_tool = tool_call.name == "wait_for_subagents"
+            || tool_call.name == "check_subagent_status";
+
         let executor = self.executor.clone();
         let tool_name = tool_call.name.clone();
         let arguments = tool_call.arguments.clone();
 
         let start = std::time::Instant::now();
-        let result = tokio::time::timeout(timeout, async move {
-            executor.execute(&tool_name, &arguments).await
-        })
-        .await;
+        let result = if is_coordination_tool {
+            Ok(executor.execute(&tool_name, &arguments).await)
+        } else {
+            let timeout = Duration::from_secs(policy.max_tool_runtime_secs);
+            tokio::time::timeout(timeout, async move {
+                executor.execute(&tool_name, &arguments).await
+            })
+            .await
+        };
 
         let duration_ms = start.elapsed().as_millis() as u64;
 

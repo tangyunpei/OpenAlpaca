@@ -127,6 +127,7 @@ fn template_from_agent(agent: &SubAgent) -> AgentTemplate {
             max_tool_calls: agent.constraints.max_tool_calls,
             timeout_seconds: agent.constraints.timeout_seconds,
             max_cost_per_task: agent.constraints.max_cost_per_task,
+            max_rounds: agent.constraints.max_rounds,
             require_confirmation_for: agent.constraints.require_confirmation_for.clone(),
         },
         body: String::new(),

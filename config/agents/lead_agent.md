@@ -14,12 +14,12 @@ skills:
   - "workspace_write"
 temperature: 0.3
 verbosity: "detailed"
-model: "claude-opus-4-6"
+model: "claude-sonnet-4-6"
 fallback_models:
-  - "claude-sonnet-4-6"
+  - "claude-opus-4-6"
 max_tool_calls: 50
 timeout_seconds: 300
-max_cost_per_task: 5.0
+max_cost_per_task: 3.0
 ---
 
 ## Persona

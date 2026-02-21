@@ -159,7 +159,7 @@ pub fn workspace_tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "content": {
                         "type": "string",
-                        "description": "The content to store (max 8KB)"
+                        "description": "The content to store (max 32KB)"
                     },
                     "entry_type": {
                         "type": "string",

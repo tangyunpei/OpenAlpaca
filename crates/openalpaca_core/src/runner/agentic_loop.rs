@@ -203,7 +203,7 @@ impl LoopConfig {
         };
 
         Self {
-            max_rounds,
+            max_rounds: agent.constraints.max_rounds.unwrap_or(max_rounds),
             max_tools_per_round,
             max_tool_runtime: Duration::from_secs(
                 agent
