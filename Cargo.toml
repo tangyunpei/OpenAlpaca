@@ -109,6 +109,7 @@ async-trait = "0.1.89"
 
 openalpaca_llm = { path = "crates/openalpaca_llm" }
 arc-swap = "1"
+signal-hook = "0.4.3"
 aes-gcm = "0.10"
 sha2 = "0.10"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
