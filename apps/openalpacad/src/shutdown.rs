@@ -54,7 +54,7 @@ pub fn warn_if_ctrl_c_unavailable_on_tty() {
     let termios = unsafe { termios.assume_init() };
 
     let isig_enabled = (termios.c_lflag & libc::ISIG) != 0;
-    let intr = termios.c_cc[libc::VINTR as usize] as u8;
+    let intr = termios.c_cc[libc::VINTR];
 
     if !isig_enabled || intr != 0x03 {
         tracing::warn!(
