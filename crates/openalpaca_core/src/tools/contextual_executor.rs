@@ -115,11 +115,12 @@ impl ContextualToolExecutor {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: content".to_string())?;
 
-        // Enforce the documented 8KB content size limit
-        const MAX_WORKSPACE_CONTENT_SIZE: usize = 8192;
+        // Enforce the documented 32KB content size limit
+        const MAX_WORKSPACE_CONTENT_SIZE: usize = 32768;
         if content.len() > MAX_WORKSPACE_CONTENT_SIZE {
             return Err(format!(
-                "Content size {} bytes exceeds the {} byte limit",
+                "Content size {} bytes exceeds the {} byte limit. \
+                 Condense or summarize your content to fit within the limit, then retry.",
                 content.len(),
                 MAX_WORKSPACE_CONTENT_SIZE
             ));
@@ -136,7 +137,7 @@ impl ContextualToolExecutor {
             _ => WorkspaceEntryType::Text,
         };
 
-        const MAX_RETRIES: usize = 3;
+        const MAX_RETRIES: usize = 5;
         for attempt in 0..MAX_RETRIES {
             let repo = openalpaca_storage::repository::TaskRepository::new(db);
             let task = repo
@@ -172,7 +173,7 @@ impl ContextualToolExecutor {
                     MAX_RETRIES
                 );
                 // Brief async backoff to reduce collision probability
-                tokio::time::sleep(std::time::Duration::from_millis(10 * (1 << attempt))).await;
+                tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
             }
         }
 

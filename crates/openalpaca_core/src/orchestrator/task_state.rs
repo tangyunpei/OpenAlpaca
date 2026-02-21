@@ -41,8 +41,8 @@ impl Default for TaskWorkspace {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
-            max_entries: 20,
-            max_entry_size: 8192,
+            max_entries: 50,
+            max_entry_size: 32768,
         }
     }
 }
@@ -572,6 +572,6 @@ mod tests {
         let state: TaskState = serde_json::from_str(old_json).unwrap();
         assert_eq!(state.objective, "test");
         assert!(state.workspace.entries.is_empty());
-        assert_eq!(state.workspace.max_entries, 20);
+        assert_eq!(state.workspace.max_entries, 50);
     }
 }

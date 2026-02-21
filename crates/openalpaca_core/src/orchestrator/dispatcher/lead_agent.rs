@@ -123,7 +123,17 @@ impl TaskDispatcher {
                 "lead_orchestrator".to_string(),
             )];
             let initial_state = TaskState::initial(description, &step_info);
-            let _ = repo.update_state(&task_id, &initial_state.to_json(), 0);
+            let state_json = initial_state.to_json();
+            match repo.update_state(&task_id, &state_json, 0) {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(task_id = %task_id, "State init version conflict, retrying");
+                    let _ = repo.update_state(&task_id, &state_json, 1);
+                }
+                Err(e) => {
+                    tracing::error!(task_id = %task_id, error = %e, "Failed to initialize task state");
+                }
+            }
         }
 
         // Spawn the lead agent execution

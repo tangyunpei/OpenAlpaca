@@ -46,6 +46,8 @@ pub struct AgentTemplateFrontmatter {
     pub timeout_seconds: Option<u64>,
     /// Maximum cost per task in USD.
     pub max_cost_per_task: Option<f64>,
+    /// Maximum agentic loop rounds (overrides daemon default).
+    pub max_rounds: Option<usize>,
     /// Tools requiring user confirmation before execution.
     pub require_confirmation_for: Vec<String>,
 }
@@ -198,6 +200,7 @@ fn parse_agent_frontmatter_lines(
     let mut max_tool_calls: Option<u32> = None;
     let mut timeout_seconds: Option<u64> = None;
     let mut max_cost_per_task: Option<f64> = None;
+    let mut max_rounds: Option<usize> = None;
     let mut require_confirmation_for: Vec<String> = Vec::new();
 
     let mut idx = 0usize;
@@ -297,6 +300,11 @@ fn parse_agent_frontmatter_lines(
             idx += 1;
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix("max_rounds:") {
+            max_rounds = strip_outer_quotes(rest).parse::<usize>().ok();
+            idx += 1;
+            continue;
+        }
         if trimmed.starts_with("require_confirmation_for:") {
             require_confirmation_for = parse_yaml_list(lines, &mut idx);
             continue;
@@ -325,6 +333,7 @@ fn parse_agent_frontmatter_lines(
         max_tool_calls,
         timeout_seconds,
         max_cost_per_task,
+        max_rounds,
         require_confirmation_for,
     })
 }
@@ -451,6 +460,9 @@ pub fn render_agent_markdown(template: &AgentTemplate) -> String {
     if let Some(v) = fm.max_cost_per_task {
         out.push_str(&format!("max_cost_per_task: {}\n", v));
     }
+    if let Some(v) = fm.max_rounds {
+        out.push_str(&format!("max_rounds: {}\n", v));
+    }
     if !fm.require_confirmation_for.is_empty() {
         out.push_str("require_confirmation_for:\n");
         for tool in &fm.require_confirmation_for {
@@ -526,6 +538,7 @@ impl AgentTemplate {
                     max_tool_calls: fm.max_tool_calls,
                     timeout_seconds: fm.timeout_seconds,
                     max_cost_per_task: fm.max_cost_per_task,
+                    max_rounds: fm.max_rounds,
                     require_confirmation_for: fm.require_confirmation_for.clone(),
                     allowed_capabilities,
                     denied_capabilities,

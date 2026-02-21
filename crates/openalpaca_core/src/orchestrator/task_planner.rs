@@ -494,6 +494,8 @@ async fn plan_inner(
             .map_err(|_| PlanError::Timeout(limits.timeout_secs))?
             .map_err(|e| PlanError::LlmError(e.to_string()))?;
 
+        let response_content = response.content.clone();
+
         match TaskPlanner::parse_response(&response.content) {
             Ok(plan) => {
                 if let Some(ref dag) = plan.dag
@@ -531,6 +533,14 @@ async fn plan_inner(
                     limits.max_retries + 1,
                 );
                 last_error = PlanError::MalformedResponse(msg);
+                // Fail fast: if response has no JSON structure at all (e.g. conversational
+                // text in user's language), retrying with the same prompt won't help
+                if !response_content.contains('{') {
+                    tracing::warn!(
+                        "Response contains no JSON structure, skipping remaining retries"
+                    );
+                    break;
+                }
             }
             Err(e) => return Err(e),
         }
@@ -628,6 +638,12 @@ Example 4 — Grey area defaults to lead agent:
 User: "Improve the performance of our database queries."
 {"classification": "complex_task", "title": "Optimize database query performance", "assignments": [], "reasoning": "Improving performance is exploratory: it requires profiling, identifying bottlenecks, and iterating on fixes. The steps are not known upfront. Using lead agent.", "dag": null, "use_lead_agent": true}
 </examples>
+
+<critical>
+IMPORTANT: Regardless of the language of the user's message, you MUST ALWAYS respond with
+ONLY a valid JSON object. Never reply conversationally. Never respond in the user's language.
+Your ENTIRE output must be a single JSON object starting with '{' and ending with '}'.
+</critical>
 
 <format>
 Respond with ONLY a single JSON object. No markdown fences, no explanation, no other text.

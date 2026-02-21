@@ -13,6 +13,10 @@ replan_after_every_n_nodes = 2
 replan_enabled = false
 total_timeout_secs = 1800
 
+[execution.planner]
+max_retries = 1
+planning_timeout_secs = 30
+
 [execution.lead_agent_defaults]
 max_cost = 5
 max_rounds = 30

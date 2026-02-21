@@ -106,6 +106,9 @@ pub struct AgentConstraints {
     pub max_tool_calls: Option<u32>,
     pub timeout_seconds: Option<u64>,
     pub max_cost_per_task: Option<f64>,
+    /// Maximum agentic loop rounds (overrides daemon default when set).
+    #[serde(default)]
+    pub max_rounds: Option<usize>,
     #[serde(default)]
     pub require_confirmation_for: Vec<String>,
     #[serde(default)]
