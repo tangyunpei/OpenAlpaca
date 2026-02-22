@@ -140,6 +140,7 @@
         <thead>
           <tr>
             <th class="text-left px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Time</th>
+            <th class="text-left px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Request</th>
             <th class="text-left px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Task</th>
             <th class="text-left px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Mode</th>
             <th class="text-left px-2.5 py-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground border-b border-border bg-white/2 whitespace-nowrap">Reason</th>
@@ -153,7 +154,8 @@
           {#each records as rec (rec.id)}
             <tr class="hover:bg-white/3">
               <td class="px-2.5 py-1.5 border-b border-white/3 text-foreground whitespace-nowrap font-mono text-xs">{formatTime(rec.timestamp)}</td>
-              <td class="px-2.5 py-1.5 border-b border-white/3 text-foreground whitespace-nowrap font-mono text-xs">{rec.task_id.slice(0, 8)}...</td>
+              <td class="px-2.5 py-1.5 border-b border-white/3 text-foreground whitespace-nowrap font-mono text-xs">{rec.request_id.slice(0, 8)}...</td>
+              <td class="px-2.5 py-1.5 border-b border-white/3 text-foreground whitespace-nowrap font-mono text-xs">{rec.task_id ? rec.task_id.slice(0, 8) + "..." : "\u2014"}</td>
               <td class="px-2.5 py-1.5 border-b border-white/3 whitespace-nowrap">
                 <span class="text-xs font-medium {modeColor(rec.mode)}">{modeLabel(rec.mode)}</span>
               </td>

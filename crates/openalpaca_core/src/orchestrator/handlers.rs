@@ -199,6 +199,7 @@ impl Orchestrator {
 
                             let dispatch_start = Instant::now();
                             let dispatch_result = self.task_dispatcher.dispatch_planned(
+                                request_id,
                                 &augmented,
                                 plan,
                                 &principal_id(&principal),
@@ -394,6 +395,7 @@ impl Orchestrator {
                             "Heuristic dispatch failed ({e}), trying lead agent fallback"
                         );
                         match self.task_dispatcher.dispatch_lead_agent_heuristic(
+                            request_id,
                             &augmented,
                             &principal_id(principal),
                             lane_key,

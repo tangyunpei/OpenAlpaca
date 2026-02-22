@@ -273,7 +273,8 @@ pub enum SystemEvent {
     },
     /// Dispatcher analysis decision (Phase 2: decoupled analysis from execution)
     DispatchDecision {
-        task_id: String,
+        request_id: String,
+        task_id: Option<String>,
         /// "lead_agent" | "dag_parallel" | "sequential_pipeline"
         mode: String,
         /// "planner_explicit" | "execution_mode_field" | "empty_assignments_fallback" | "heuristic_fallback"
