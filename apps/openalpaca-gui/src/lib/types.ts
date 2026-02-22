@@ -415,3 +415,44 @@ export interface LlmUsageDaily {
   total_output_tokens: number;
   total_cost_usd: number;
 }
+
+// ── Orchestrator Latency types ──────────────────────────────────
+
+export interface OrchestratorLatencyRecord {
+  id: number;
+  request_id: string;
+  mode: string;
+  planner_ms: number;
+  dispatch_ms: number;
+  ack_ms: number;
+  fallback_reason: string | null;
+  auto_promotion_reason: string | null;
+  timestamp: string;
+}
+
+export interface LatencyAggregate {
+  mode: string;
+  count: number;
+  p50_total_ms: number;
+  p95_total_ms: number;
+  p99_total_ms: number;
+  mean_planner_ms: number;
+  mean_dispatch_ms: number;
+  mean_ack_ms: number;
+  auto_promotion_count: number;
+  fallback_count: number;
+}
+
+// ── Dispatch Decision types ─────────────────────────────────────
+
+export interface DispatchDecisionRecord {
+  id: number;
+  task_id: string;
+  mode: string;
+  reason: string;
+  agent_count: number;
+  dag_node_count: number | null;
+  predictability_score: number | null;
+  planner_requested_mode: string | null;
+  timestamp: string;
+}

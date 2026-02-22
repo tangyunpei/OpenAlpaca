@@ -153,6 +153,7 @@ impl Orchestrator {
                 timeout_secs: planner_cfg.planning_timeout_secs,
                 max_retries: planner_cfg.max_retries,
                 max_tokens: planner_cfg.max_tokens,
+                plan_protocol_v2_enabled: planner_cfg.plan_protocol_v2_enabled,
             };
 
             let planner_start = Instant::now();

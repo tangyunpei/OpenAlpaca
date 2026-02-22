@@ -121,4 +121,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "orchestrator_latency",
         sql: include_str!("022_orchestrator_latency.sql"),
     },
+    Migration {
+        version: 23,
+        name: "dispatch_decision",
+        sql: include_str!("023_dispatch_decision.sql"),
+    },
 ];

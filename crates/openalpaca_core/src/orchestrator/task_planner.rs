@@ -278,6 +278,62 @@ impl TaskDag {
             .filter(|n| n.status == DagNodeStatus::Completed)
             .count()
     }
+
+    /// Compute critical path length (hops to furthest descendant) per node.
+    ///
+    /// Nodes with no dependents have length 0. Uses reverse topological order
+    /// so each node's length = max(length[child] + 1) for all children.
+    /// Nodes on the critical path have the highest values and should be
+    /// prioritized for scheduling to minimize overall DAG completion time.
+    pub fn critical_path_lengths(&self) -> HashMap<String, usize> {
+        // Build forward adjacency: node -> vec of nodes that depend on it
+        let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+        for node in &self.nodes {
+            dependents.entry(node.node_id.as_str()).or_default();
+            for dep in &node.depends_on {
+                dependents
+                    .entry(dep.as_str())
+                    .or_default()
+                    .push(node.node_id.as_str());
+            }
+        }
+
+        // Get topological order, then reverse it so leaf nodes come first
+        let (_, topo) = self.run_kahns();
+        let mut lengths: HashMap<String, usize> = HashMap::new();
+
+        // Process in reverse topological order (leaves first)
+        for node_id in topo.iter().rev() {
+            let max_child = dependents
+                .get(node_id.as_str())
+                .map(|children| {
+                    children
+                        .iter()
+                        .filter_map(|c| lengths.get(*c).map(|l| l + 1))
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            lengths.insert(node_id.clone(), max_child);
+        }
+
+        lengths
+    }
+
+    /// Get ready nodes sorted by critical path length (descending).
+    ///
+    /// Nodes with longer downstream paths are returned first, ensuring the
+    /// critical path is prioritized when concurrency slots are limited.
+    pub fn ready_nodes_prioritized(&self) -> Vec<&DagNode> {
+        let lengths = self.critical_path_lengths();
+        let mut ready = self.ready_nodes();
+        ready.sort_by(|a, b| {
+            let la = lengths.get(&a.node_id).copied().unwrap_or(0);
+            let lb = lengths.get(&b.node_id).copied().unwrap_or(0);
+            lb.cmp(&la)
+        });
+        ready
+    }
 }
 
 // ── Plan types ───────────────────────────────────────────────────────
@@ -300,6 +356,15 @@ pub struct TaskPlan {
     /// Set by parse_response() or plan_inner() when a safety net triggers.
     #[serde(skip)]
     pub auto_promotion_reason: Option<String>,
+    /// V2 protocol: explicit execution mode from planner.
+    /// When present, takes precedence over use_lead_agent/dag heuristic.
+    /// Values: "lead_agent" | "dag" | "pipeline"
+    #[serde(default)]
+    pub execution_mode: Option<String>,
+    /// V2 protocol: planner's confidence that the task has predictable structure (0.0-1.0).
+    /// Higher values indicate the planner believes all steps are known upfront.
+    #[serde(default)]
+    pub predictability_score: Option<f64>,
 }
 
 /// Serde default for `use_lead_agent`: returns `true` so that missing
@@ -626,6 +691,8 @@ pub struct PlannerLimits {
     pub timeout_secs: u64,
     pub max_retries: usize,
     pub max_tokens: u32,
+    /// When true, include execution_mode and predictability_score in the planner prompt.
+    pub plan_protocol_v2_enabled: bool,
 }
 
 pub struct TaskPlanner;
@@ -648,7 +715,7 @@ impl TaskPlanner {
         limits: PlannerLimits,
         dag_prefer_predictable: bool,
     ) -> Result<TaskPlan, PlanError> {
-        let system_prompt = Self::build_hierarchical_prompt(idle_agents);
+        let system_prompt = Self::build_hierarchical_prompt(idle_agents, limits.plan_protocol_v2_enabled);
         let mut messages = build_messages(
             &system_prompt,
             user_message,
@@ -674,7 +741,7 @@ impl TaskPlanner {
     }
 
     /// Build the hierarchical planning prompt with DAG support.
-    fn build_hierarchical_prompt(idle_agents: &[SubAgent]) -> String {
+    fn build_hierarchical_prompt(idle_agents: &[SubAgent], plan_protocol_v2: bool) -> String {
         let mut prompt = String::from(
             "You are a task planner for OpenAlpaca. Classify the user message and, \
              for complex tasks, decompose into a DAG of sub-tasks.\n\n",
@@ -752,6 +819,25 @@ DAG construction rules:
 "#,
         );
 
+        if plan_protocol_v2 {
+            prompt.push_str(
+                r#"
+
+<v2_protocol>
+Additional optional fields (v2 protocol):
+- "execution_mode": "lead_agent" | "dag" | "pipeline" — explicit execution path.
+  When set, this takes priority over use_lead_agent/dag inference.
+- "predictability_score": 0.0-1.0 — your confidence that all task steps are known upfront.
+  0.0 = fully exploratory, 1.0 = fully predictable.
+
+When you include "execution_mode", you SHOULD also set "predictability_score".
+Example:
+{"classification": "complex_task", "title": "Batch process items", "assignments": [], "reasoning": "...", "dag": {...}, "use_lead_agent": false, "execution_mode": "dag", "predictability_score": 0.9}
+</v2_protocol>
+"#,
+            );
+        }
+
         prompt
     }
 
@@ -785,6 +871,13 @@ DAG construction rules:
                         .and_then(|v| v.as_bool())
                         .unwrap_or(true),
                     auto_promotion_reason: None,
+                    execution_mode: obj
+                        .get("execution_mode")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    predictability_score: obj
+                        .get("predictability_score")
+                        .and_then(|v| v.as_f64()),
                 }
             } else {
                 return Err(PlanError::MalformedResponse(format!(
@@ -798,6 +891,47 @@ DAG construction rules:
                 &content.chars().take(200).collect::<String>()
             )));
         };
+
+        // V2 protocol: when execution_mode is present, use it to resolve the
+        // execution path authoritatively (overrides use_lead_agent/dag heuristics).
+        if let Some(ref mode) = plan.execution_mode {
+            match mode.as_str() {
+                "lead_agent" => {
+                    return Ok(TaskPlan {
+                        use_lead_agent: true,
+                        dag: None,
+                        ..plan
+                    });
+                }
+                "dag" => {
+                    if plan.dag.is_some() {
+                        return Ok(TaskPlan {
+                            use_lead_agent: false,
+                            ..plan
+                        });
+                    }
+                    // execution_mode says "dag" but no DAG provided — fall through to heuristics
+                    tracing::warn!(
+                        classification = %plan.classification,
+                        "execution_mode='dag' but no DAG provided, falling through to heuristics"
+                    );
+                }
+                "pipeline" => {
+                    return Ok(TaskPlan {
+                        use_lead_agent: false,
+                        dag: None,
+                        ..plan
+                    });
+                }
+                _ => {
+                    tracing::warn!(
+                        classification = %plan.classification,
+                        execution_mode = %mode,
+                        "Unknown execution_mode value, falling through to heuristics"
+                    );
+                }
+            }
+        }
 
         // Mutual exclusivity: if planner returned both use_lead_agent and a DAG,
         // strip the DAG (lead agent takes priority as the safer single-orchestrator path).
@@ -1380,7 +1514,7 @@ mod tests {
     #[test]
     fn test_build_hierarchical_prompt_with_agents() {
         let agents = vec![make_agent("a1")];
-        let prompt = TaskPlanner::build_hierarchical_prompt(&agents);
+        let prompt = TaskPlanner::build_hierarchical_prompt(&agents, false);
         assert!(prompt.contains("a1"));
         // XML structure tags
         assert!(prompt.contains("<agents>"));
@@ -1400,8 +1534,64 @@ mod tests {
 
     #[test]
     fn test_build_hierarchical_prompt_no_agents() {
-        let prompt = TaskPlanner::build_hierarchical_prompt(&[]);
+        let prompt = TaskPlanner::build_hierarchical_prompt(&[], false);
         assert!(prompt.contains("No agents are currently available"));
+    }
+
+    #[test]
+    fn test_prompt_includes_v2_fields_when_enabled() {
+        let prompt = TaskPlanner::build_hierarchical_prompt(&[], true);
+        assert!(prompt.contains("execution_mode"));
+        assert!(prompt.contains("predictability_score"));
+        assert!(prompt.contains("v2_protocol"));
+    }
+
+    #[test]
+    fn test_prompt_excludes_v2_fields_when_disabled() {
+        let prompt = TaskPlanner::build_hierarchical_prompt(&[], false);
+        assert!(!prompt.contains("v2_protocol"));
+    }
+
+    #[test]
+    fn test_taskplan_old_json_compat() {
+        let json = r#"{"classification": "simple_query", "title": null, "assignments": [], "reasoning": "test", "dag": null, "use_lead_agent": false}"#;
+        let plan: TaskPlan = serde_json::from_str(json).unwrap();
+        assert!(plan.execution_mode.is_none());
+        assert!(plan.predictability_score.is_none());
+    }
+
+    #[test]
+    fn test_taskplan_v2_execution_mode_dag() {
+        let json = r#"{"classification": "complex_task", "title": "Test", "assignments": [], "reasoning": "test", "dag": {"nodes": [{"node_id": "n1", "title": "A", "description": "D", "agent_id": "a1", "agent_name": "Agent", "depends_on": [], "workspace_keys": [], "output_key": null}, {"node_id": "n2", "title": "B", "description": "D", "agent_id": "a1", "agent_name": "Agent", "depends_on": ["n1"], "workspace_keys": [], "output_key": null}]}, "use_lead_agent": true, "execution_mode": "dag", "predictability_score": 0.9}"#;
+        let plan = TaskPlanner::parse_response(json).unwrap();
+        // execution_mode "dag" should override use_lead_agent=true
+        assert!(!plan.use_lead_agent);
+        assert!(plan.dag.is_some());
+        assert_eq!(plan.execution_mode.as_deref(), Some("dag"));
+        assert_eq!(plan.predictability_score, Some(0.9));
+    }
+
+    #[test]
+    fn test_taskplan_v2_execution_mode_lead() {
+        let json = r#"{"classification": "complex_task", "title": "Test", "assignments": [], "reasoning": "test", "dag": null, "use_lead_agent": false, "execution_mode": "lead_agent"}"#;
+        let plan = TaskPlanner::parse_response(json).unwrap();
+        assert!(plan.use_lead_agent);
+        assert!(plan.dag.is_none());
+    }
+
+    #[test]
+    fn test_taskplan_v2_execution_mode_pipeline() {
+        let json = r#"{"classification": "complex_task", "title": "Test", "assignments": [{"agent_id": "a1", "agent_name": "Agent", "role_description": "Role", "matched_skills": ["coding"]}], "reasoning": "test", "dag": null, "use_lead_agent": true, "execution_mode": "pipeline"}"#;
+        let plan = TaskPlanner::parse_response(json).unwrap();
+        assert!(!plan.use_lead_agent);
+        assert!(plan.dag.is_none());
+    }
+
+    #[test]
+    fn test_taskplan_v2_predictability_score() {
+        let json = r#"{"classification": "complex_task", "title": "Test", "assignments": [], "reasoning": "test", "dag": null, "use_lead_agent": true, "predictability_score": 0.85}"#;
+        let plan: TaskPlan = serde_json::from_str(json).unwrap();
+        assert_eq!(plan.predictability_score, Some(0.85));
     }
 
     // ── validate_structure tests ─────────────────────────────────
@@ -1651,5 +1841,121 @@ mod tests {
         let plan = TaskPlanner::parse_response(json).unwrap();
         assert!(plan.use_lead_agent);
         assert!(plan.dag.is_none());
+    }
+
+    // ── Critical path scheduling tests ──────────────────────────────
+
+    #[test]
+    fn test_critical_path_linear_chain() {
+        // A -> B -> C: lengths = {A:2, B:1, C:0}
+        let dag = TaskDag {
+            nodes: vec![
+                make_dag_node("A", "a1", &[]),
+                make_dag_node("B", "a1", &["A"]),
+                make_dag_node("C", "a1", &["B"]),
+            ],
+        };
+        let lengths = dag.critical_path_lengths();
+        assert_eq!(lengths["A"], 2);
+        assert_eq!(lengths["B"], 1);
+        assert_eq!(lengths["C"], 0);
+    }
+
+    #[test]
+    fn test_critical_path_diamond() {
+        // A -> {B, C} -> D: lengths = {A:2, B:1, C:1, D:0}
+        let dag = TaskDag {
+            nodes: vec![
+                make_dag_node("A", "a1", &[]),
+                make_dag_node("B", "a1", &["A"]),
+                make_dag_node("C", "a1", &["A"]),
+                make_dag_node("D", "a1", &["B", "C"]),
+            ],
+        };
+        let lengths = dag.critical_path_lengths();
+        assert_eq!(lengths["A"], 2);
+        assert_eq!(lengths["B"], 1);
+        assert_eq!(lengths["C"], 1);
+        assert_eq!(lengths["D"], 0);
+    }
+
+    #[test]
+    fn test_critical_path_wide_fan_out() {
+        // A -> {B, C, D} all independent leaves: A:1, B/C/D:0
+        let dag = TaskDag {
+            nodes: vec![
+                make_dag_node("A", "a1", &[]),
+                make_dag_node("B", "a1", &["A"]),
+                make_dag_node("C", "a1", &["A"]),
+                make_dag_node("D", "a1", &["A"]),
+            ],
+        };
+        let lengths = dag.critical_path_lengths();
+        assert_eq!(lengths["A"], 1);
+        assert_eq!(lengths["B"], 0);
+        assert_eq!(lengths["C"], 0);
+        assert_eq!(lengths["D"], 0);
+    }
+
+    #[test]
+    fn test_critical_path_asymmetric() {
+        // A -> B -> C (long path), A -> D (short path)
+        // A:2, B:1, C:0, D:0; B should be prioritized over D
+        let dag = TaskDag {
+            nodes: vec![
+                make_dag_node("A", "a1", &[]),
+                make_dag_node("B", "a1", &["A"]),
+                make_dag_node("C", "a1", &["B"]),
+                make_dag_node("D", "a1", &["A"]),
+            ],
+        };
+        let lengths = dag.critical_path_lengths();
+        assert_eq!(lengths["A"], 2);
+        assert_eq!(lengths["B"], 1);
+        assert_eq!(lengths["C"], 0);
+        assert_eq!(lengths["D"], 0);
+    }
+
+    #[test]
+    fn test_ready_nodes_prioritized_ordering() {
+        // After A completes: B (path length 1) and D (path length 0) both ready
+        // B should come first because it has longer downstream path
+        let mut dag = TaskDag {
+            nodes: vec![
+                make_dag_node("A", "a1", &[]),
+                make_dag_node("B", "a1", &["A"]),
+                make_dag_node("C", "a1", &["B"]),
+                make_dag_node("D", "a1", &["A"]),
+            ],
+        };
+        dag.complete_node("A", "done");
+
+        let prioritized = dag.ready_nodes_prioritized();
+        assert_eq!(prioritized.len(), 2);
+        assert_eq!(prioritized[0].node_id, "B"); // longer downstream path
+        assert_eq!(prioritized[1].node_id, "D"); // shorter downstream path
+    }
+
+    #[test]
+    fn test_critical_path_disabled_uses_original_order() {
+        // When not using prioritized, ready_nodes() returns in node order
+        let mut dag = TaskDag {
+            nodes: vec![
+                make_dag_node("A", "a1", &[]),
+                make_dag_node("B", "a1", &["A"]),
+                make_dag_node("C", "a1", &["B"]),
+                make_dag_node("D", "a1", &["A"]),
+            ],
+        };
+        dag.complete_node("A", "done");
+
+        let normal = dag.ready_nodes();
+        let prioritized = dag.ready_nodes_prioritized();
+
+        // Both return the same nodes, just potentially different order
+        assert_eq!(normal.len(), prioritized.len());
+        let normal_ids: HashSet<&str> = normal.iter().map(|n| n.node_id.as_str()).collect();
+        let prio_ids: HashSet<&str> = prioritized.iter().map(|n| n.node_id.as_str()).collect();
+        assert_eq!(normal_ids, prio_ids);
     }
 }

@@ -2,6 +2,7 @@
 
 mod core;
 mod dag;
+pub(crate) mod decision;
 mod lead_agent;
 mod pipeline;
 #[cfg(test)]
@@ -11,9 +12,11 @@ pub(crate) mod usage;
 use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
+use crate::events::SystemEvent;
 use crate::lane::LaneManager;
 use crate::security::gate::SecurityGate;
 use arc_swap::ArcSwap;
+use chrono::Utc;
 use openalpaca_llm::LlmRouter;
 use openalpaca_storage::Database;
 use std::sync::Arc;
@@ -304,6 +307,52 @@ impl TaskDispatcher {
         source: &str,
         workspace_id: Option<String>,
     ) -> Result<String, String> {
+        // ── Dispatch Analysis (Phase 2) ────────────────────────────────
+        let dcfg = self.daemon_config.load();
+        if dcfg.execution.planner.dispatch_analysis_enabled {
+            let dd = decision::analyze_plan(&plan);
+            tracing::info!(
+                mode = %dd.mode,
+                reason = %dd.reason,
+                agent_count = dd.agent_count,
+                dag_node_count = ?dd.dag_node_count,
+                predictability_score = ?dd.predictability_score,
+                "DispatchDecision analysis"
+            );
+            let dd_task_id = Uuid::new_v4().to_string();
+            self.bus.publish(SystemEvent::DispatchDecision {
+                task_id: dd_task_id.clone(),
+                mode: dd.mode.to_string(),
+                reason: dd.reason.to_string(),
+                agent_count: dd.agent_count,
+                dag_node_count: dd.dag_node_count,
+                predictability_score: dd.predictability_score,
+                timestamp: Utc::now(),
+            });
+
+            // Persist to DB (best-effort)
+            if let Some(ref db) = self.db {
+                use openalpaca_storage::repository::dispatch_decision::{
+                    DispatchDecisionRecord, DispatchDecisionRepository,
+                };
+                let repo = DispatchDecisionRepository::new(db);
+                if let Err(e) = repo.record(&DispatchDecisionRecord {
+                    id: None,
+                    task_id: dd_task_id,
+                    mode: dd.mode.to_string(),
+                    reason: dd.reason.to_string(),
+                    agent_count: dd.agent_count,
+                    dag_node_count: dd.dag_node_count,
+                    predictability_score: dd.predictability_score,
+                    planner_requested_mode: dd.planner_requested_mode.clone(),
+                    timestamp: None,
+                }) {
+                    tracing::warn!("Failed to persist dispatch decision: {}", e);
+                }
+            }
+        }
+        // ── End Dispatch Analysis ──────────────────────────────────────
+
         let plan_classification = plan.classification.clone();
         let plan_title_ref = plan.title.as_deref().unwrap_or("<none>").to_string();
 
