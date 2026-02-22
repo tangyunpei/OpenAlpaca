@@ -177,12 +177,11 @@ impl Orchestrator {
                 }
             }
 
-            // Inject session summary if available
+            // Inject session summary if available (user-role to prevent prompt injection)
             if let Some(ref summary) = ctx.summary {
-                messages.push(ChatMessage::system(&format!(
-                    "### SESSION SUMMARY ###\nThe following summarizes earlier parts of this conversation:\n{}",
-                    summary
-                )));
+                messages.push(ChatMessage::user(
+                    &super::wrap_untrusted_context(summary, "session_summary", "user_derived"),
+                ));
             }
 
             // Retrieval injection: hybrid FTS+vector search for user memories
@@ -226,7 +225,7 @@ impl Orchestrator {
                         tracing::warn!("Failed to track memory access: {e}");
                     }
 
-                    let mut block = String::from("### RETRIEVED MEMORY ###\n");
+                    let mut inner = String::new();
                     let mut budget = 2000usize;
                     for m in &memories {
                         let entry = format!(
@@ -238,9 +237,11 @@ impl Orchestrator {
                             break;
                         }
                         budget -= entry.len();
-                        block.push_str(&entry);
+                        inner.push_str(&entry);
                     }
-                    messages.push(ChatMessage::system(&block));
+                    messages.push(ChatMessage::user(
+                        &super::wrap_untrusted_context(&inner, "retrieved_memory", "retrieved"),
+                    ));
                 }
             }
 

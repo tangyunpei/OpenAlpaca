@@ -455,5 +455,6 @@ export interface DispatchDecisionRecord {
   dag_node_count: number | null;
   predictability_score: number | null;
   planner_requested_mode: string | null;
+  error_message: string | null;
   timestamp: string;
 }

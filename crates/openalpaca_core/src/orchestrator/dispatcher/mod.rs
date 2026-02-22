@@ -104,7 +104,7 @@ pub(super) async fn retrieve_memory_block(
         tracing::warn!("Failed to track memory access: {e}");
     }
 
-    let mut block = String::from("### RETRIEVED MEMORY ###\n");
+    let mut inner = String::new();
     let mut budget = 2000usize;
     for m in &memories {
         let entry = format!(
@@ -116,9 +116,9 @@ pub(super) async fn retrieve_memory_block(
             break;
         }
         budget -= entry.len();
-        block.push_str(&entry);
+        inner.push_str(&entry);
     }
-    Some(block)
+    Some(super::wrap_untrusted_context(&inner, "retrieved_memory", "retrieved"))
 }
 
 /// Spawn a background task to extract memories from a completed task output.
@@ -277,6 +277,7 @@ impl TaskDispatcher {
             agent_count: dd.agent_count,
             dag_node_count: dd.dag_node_count,
             predictability_score: dd.predictability_score,
+            error_message: dd.error_message.clone(),
             timestamp: Utc::now(),
         });
 
@@ -292,6 +293,7 @@ impl TaskDispatcher {
                 dag_node_count: dd.dag_node_count,
                 predictability_score: dd.predictability_score,
                 planner_requested_mode: dd.planner_requested_mode.clone(),
+                error_message: dd.error_message.clone(),
                 timestamp: None,
             }) {
                 Ok(id) => return Some(id),
@@ -326,18 +328,33 @@ impl TaskDispatcher {
         lane_key: &str,
         workspace_id: Option<String>,
     ) -> Result<String, String> {
-        let matches = self
+        let matches = match self
             .skill_matcher
             .match_skills(required_skills, &self.shared_context.agent_registry)
-            .map_err(|e| {
+        {
+            Ok(m) => m,
+            Err(e) => {
                 tracing::warn!(
                     required_skills = ?required_skills,
                     description_len = description.len(),
                     source = source,
                     "Heuristic skill matching failed: {e}"
                 );
-                e
-            })?;
+                // Record the failed attempt so it appears in analytics
+                let dd = decision::DispatchDecision {
+                    mode: decision::DispatchMode::SequentialPipeline,
+                    reason: decision::DecisionReason::HeuristicMatchFailed,
+                    agent_count: 0,
+                    dag_node_count: None,
+                    predictability_score: None,
+                    planner_requested_mode: None,
+                    error_message: Some(e.clone()),
+                    timestamp: Utc::now(),
+                };
+                self.record_decision(&request_id.to_string(), &dd);
+                return Err(e);
+            }
+        };
 
         // Record heuristic dispatch decision
         let dd = decision::DispatchDecision {
@@ -347,6 +364,7 @@ impl TaskDispatcher {
             dag_node_count: None,
             predictability_score: None,
             planner_requested_mode: None,
+            error_message: None,
             timestamp: Utc::now(),
         };
         let decision_row_id = self.record_decision(&request_id.to_string(), &dd);
@@ -386,6 +404,7 @@ impl TaskDispatcher {
             dag_node_count: None,
             predictability_score: None,
             planner_requested_mode: None,
+            error_message: None,
             timestamp: Utc::now(),
         };
         let decision_row_id = self.record_decision(&request_id.to_string(), &dd);

@@ -16,6 +16,7 @@ pub struct DispatchDecisionRecord {
     pub dag_node_count: Option<usize>,
     pub predictability_score: Option<f64>,
     pub planner_requested_mode: Option<String>,
+    pub error_message: Option<String>,
     pub timestamp: Option<String>,
 }
 
@@ -34,8 +35,8 @@ impl<'a> DispatchDecisionRepository<'a> {
         self.db.with_connection(|conn| {
             conn.execute(
                 "INSERT INTO dispatch_decisions \
-                 (request_id, task_id, mode, reason, agent_count, dag_node_count, predictability_score, planner_requested_mode) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (request_id, task_id, mode, reason, agent_count, dag_node_count, predictability_score, planner_requested_mode, error_message) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 rusqlite::params![
                     record.request_id,
                     record.task_id,
@@ -45,6 +46,7 @@ impl<'a> DispatchDecisionRepository<'a> {
                     record.dag_node_count.map(|v| v as i64),
                     record.predictability_score,
                     record.planner_requested_mode,
+                    record.error_message,
                 ],
             )
             .context("Failed to insert dispatch decision record")?;
@@ -75,7 +77,7 @@ impl<'a> DispatchDecisionRepository<'a> {
         self.db.with_connection(|conn| {
             let mut sql = String::from(
                 "SELECT id, request_id, task_id, mode, reason, agent_count, dag_node_count, \
-                 predictability_score, planner_requested_mode, timestamp \
+                 predictability_score, planner_requested_mode, error_message, timestamp \
                  FROM dispatch_decisions WHERE 1=1",
             );
             let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -113,7 +115,8 @@ impl<'a> DispatchDecisionRepository<'a> {
                             .map(|v| v as usize),
                         predictability_score: row.get(7)?,
                         planner_requested_mode: row.get(8)?,
-                        timestamp: row.get(9)?,
+                        error_message: row.get(9)?,
+                        timestamp: row.get(10)?,
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -147,6 +150,7 @@ mod tests {
                 dag_node_count: None,
                 predictability_score: Some(0.85),
                 planner_requested_mode: Some("lead_agent".to_string()),
+                error_message: None,
                 timestamp: None,
             })
             .unwrap();
@@ -184,6 +188,7 @@ mod tests {
                 dag_node_count: Some(4),
                 predictability_score: Some(0.9),
                 planner_requested_mode: Some("dag".to_string()),
+                error_message: None,
                 timestamp: None,
             })
             .unwrap();
@@ -216,6 +221,7 @@ mod tests {
             dag_node_count: None,
             predictability_score: None,
             planner_requested_mode: None,
+            error_message: None,
             timestamp: None,
         })
         .unwrap();
@@ -231,6 +237,7 @@ mod tests {
             dag_node_count: None,
             predictability_score: None,
             planner_requested_mode: None,
+            error_message: None,
             timestamp: None,
         })
         .unwrap();
@@ -262,6 +269,7 @@ mod tests {
                     dag_node_count: None,
                     predictability_score: None,
                     planner_requested_mode: None,
+                    error_message: None,
                     timestamp: None,
                 })
                 .unwrap();
@@ -279,9 +287,59 @@ mod tests {
     }
 
     #[test]
-    fn test_migration_024_creates_request_id_schema() {
+    fn test_dispatch_decision_error_message_roundtrip() {
         let db = setup_db();
-        assert_eq!(db.schema_version().unwrap(), 24);
+        let repo = DispatchDecisionRepository::new(&db);
+
+        repo.record(&DispatchDecisionRecord {
+            id: None,
+            request_id: "req-err".to_string(),
+            task_id: None,
+            mode: "sequential_pipeline".to_string(),
+            reason: "heuristic_match_failed".to_string(),
+            agent_count: 0,
+            dag_node_count: None,
+            predictability_score: None,
+            planner_requested_mode: None,
+            error_message: Some("No agents match the required skills".to_string()),
+            timestamp: None,
+        })
+        .unwrap();
+
+        let records = repo.query(None, None, None, 1).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].reason, "heuristic_match_failed");
+        assert_eq!(
+            records[0].error_message.as_deref(),
+            Some("No agents match the required skills")
+        );
+
+        // Also insert one without error_message and verify it's None
+        repo.record(&DispatchDecisionRecord {
+            id: None,
+            request_id: "req-ok".to_string(),
+            task_id: None,
+            mode: "lead_agent".to_string(),
+            reason: "planner_explicit".to_string(),
+            agent_count: 1,
+            dag_node_count: None,
+            predictability_score: None,
+            planner_requested_mode: None,
+            error_message: None,
+            timestamp: None,
+        })
+        .unwrap();
+
+        let all = repo.query(None, None, None, 10).unwrap();
+        assert_eq!(all.len(), 2);
+        let ok_record = all.iter().find(|r| r.request_id == "req-ok").unwrap();
+        assert!(ok_record.error_message.is_none());
+    }
+
+    #[test]
+    fn test_migration_025_creates_error_message_schema() {
+        let db = setup_db();
+        assert_eq!(db.schema_version().unwrap(), 25);
 
         // Verify request_id column works
         let repo = DispatchDecisionRepository::new(&db);
@@ -295,6 +353,7 @@ mod tests {
             dag_node_count: Some(4),
             predictability_score: Some(0.5),
             planner_requested_mode: None,
+            error_message: None,
             timestamp: None,
         })
         .unwrap();

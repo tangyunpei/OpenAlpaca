@@ -332,7 +332,7 @@ impl TaskDispatcher {
                     )
                     .await
                     {
-                        messages.push(ChatMessage::system(&block));
+                        messages.push(ChatMessage::user(&block));
                     }
                 }
 

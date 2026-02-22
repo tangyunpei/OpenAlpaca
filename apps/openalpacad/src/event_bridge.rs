@@ -353,10 +353,11 @@ pub fn spawn_event_bridge(
                     mode,
                     reason,
                     agent_count,
+                    error_message,
                     ..
                 } => {
                     tracing::debug!(
-                        "DispatchDecision: request={request_id}, task={task_id:?}, mode={mode}, reason={reason}, agents={agent_count}"
+                        "DispatchDecision: request={request_id}, task={task_id:?}, mode={mode}, reason={reason}, agents={agent_count}, error={error_message:?}"
                     );
                 }
                 openalpaca_core::events::SystemEvent::OrchestrationStage {

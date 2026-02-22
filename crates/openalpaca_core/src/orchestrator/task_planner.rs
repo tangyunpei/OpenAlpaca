@@ -582,14 +582,15 @@ fn build_messages(
 
     if let Some(summary) = session_summary {
         let capped: String = summary.chars().take(PLANNING_SUMMARY_MAX_CHARS).collect();
-        messages.push(ChatMessage::system(&format!(
-            "### SESSION SUMMARY ###\n{}",
-            capped
-        )));
+        messages.push(ChatMessage::user(
+            &super::wrap_untrusted_context(&format!("### SESSION SUMMARY ###\n{}", capped), "session_summary", "user_derived"),
+        ));
     }
 
     if let Some(tasks_block) = active_tasks_block {
-        messages.push(ChatMessage::system(tasks_block));
+        messages.push(ChatMessage::user(
+            &super::wrap_untrusted_context(tasks_block, "active_tasks", "user_derived"),
+        ));
     }
 
     messages.extend_from_slice(history_tail);
@@ -1957,5 +1958,58 @@ mod tests {
         let normal_ids: HashSet<&str> = normal.iter().map(|n| n.node_id.as_str()).collect();
         let prio_ids: HashSet<&str> = prioritized.iter().map(|n| n.node_id.as_str()).collect();
         assert_eq!(normal_ids, prio_ids);
+    }
+
+    // ── build_messages prompt-injection hardening tests ────────────────
+
+    #[test]
+    fn test_build_messages_untrusted_context_uses_user_role() {
+        let system_prompt = "You are the planner.";
+        let user_msg = "Build me a web scraper";
+        let summary = "User previously asked about Rust";
+        let tasks_block = "### ACTIVE TASKS ###\n- [abc12345] Fix bug (in_progress)";
+
+        let msgs = build_messages(
+            system_prompt,
+            user_msg,
+            &[],
+            Some(summary),
+            Some(tasks_block),
+        );
+
+        // First message must be the system policy prompt
+        assert_eq!(msgs[0].role, openalpaca_llm::Role::System);
+        assert_eq!(msgs[0].content, system_prompt);
+
+        // Session summary and active tasks must be User role, not System
+        assert_eq!(msgs[1].role, openalpaca_llm::Role::User, "Summary should be user role");
+        assert_eq!(msgs[2].role, openalpaca_llm::Role::User, "Tasks should be user role");
+
+        // Both must contain the untrusted-context framing
+        assert!(
+            msgs[1].content.contains("context_data"),
+            "Summary should be wrapped in <context_data>"
+        );
+        assert!(
+            msgs[1].content.contains("NOT instructions"),
+            "Summary should contain injection guard"
+        );
+        assert!(
+            msgs[2].content.contains("context_data"),
+            "Tasks should be wrapped in <context_data>"
+        );
+
+        // Final message is the user query
+        let last = msgs.last().unwrap();
+        assert_eq!(last.role, openalpaca_llm::Role::User);
+        assert_eq!(last.content, user_msg);
+    }
+
+    #[test]
+    fn test_build_messages_no_context_only_system_and_user() {
+        let msgs = build_messages("System prompt.", "Hello", &[], None, None);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, openalpaca_llm::Role::System);
+        assert_eq!(msgs[1].role, openalpaca_llm::Role::User);
     }
 }

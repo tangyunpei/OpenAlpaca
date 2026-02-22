@@ -66,6 +66,7 @@
       case "execution_mode_field": return "V2 Mode";
       case "empty_assignments_fallback": return "Fallback";
       case "heuristic_fallback": return "Heuristic";
+      case "heuristic_match_failed": return "Match Failed";
       default: return reason;
     }
   }
