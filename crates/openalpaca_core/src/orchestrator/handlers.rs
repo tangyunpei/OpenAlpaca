@@ -6,6 +6,10 @@ use crate::security::policy::{Principal, Scope};
 use crate::types::Capability;
 use chrono::Utc;
 use openalpaca_storage::repository::TaskRepository;
+use openalpaca_storage::repository::orchestrator_latency::{
+    OrchestratorLatencyRecord, OrchestratorLatencyRepository,
+};
+use std::time::Instant;
 use uuid::Uuid;
 
 use super::intent::Intent;
@@ -27,6 +31,8 @@ impl Orchestrator {
         scope: Scope,
         lane_key: String,
     ) -> Result<String, String> {
+        let ack_start = Instant::now();
+
         // 1. Permission check via SecurityGate (wraps TrustGate)
         let capability = Capability {
             name: "chat.respond".to_string(),
@@ -103,17 +109,35 @@ impl Orchestrator {
         };
 
         // 5. Compute result — planner path or heuristic fallback
+        //    Track timing for observability (Step 1: OrchestrationStage metrics)
+        let mut planner_ms: u64 = 0;
+        let mut dispatch_ms: u64 = 0;
+        let mode: String;
+        let mut fallback_reason: Option<String> = None;
+        let mut auto_promotion_reason: Option<String> = None;
+
         let result: Result<String, String> = if self.is_bootstrapping() {
-            // During bootstrap onboarding, all messages are conversational.
-            // Skip the LLM planner (which would fail to produce JSON from casual chat)
-            // and go directly to simple_query where bootstrap instructions are injected.
+            mode = "bootstrap".to_string();
+            self.handle_simple_query(
+                request_id, &source, &content, &lane_key, &ctx, owner_id, &scope_ctx,
+            )
+            .await
+        } else if self.llm_router.is_some()
+            && matches!(intent, Intent::SimpleQuery { .. })
+            && self.intent_parser.is_fast_path_eligible(&content)
+        {
+            // Fast path: skip LLM planner for obviously simple messages
+            mode = "fast_path".to_string();
+            self.bus.publish(SystemEvent::PlannerBypassed {
+                request_id,
+                reason: "fast_path".to_string(),
+                timestamp: Utc::now(),
+            });
             self.handle_simple_query(
                 request_id, &source, &content, &lane_key, &ctx, owner_id, &scope_ctx,
             )
             .await
         } else if let Some(ref router) = self.llm_router {
-            // Present all templates (not instances) to the planner — templates represent
-            // available capabilities regardless of how many instances are currently running.
             let templates = self.shared_context.agent_registry.list_templates();
             let idle_agents: Vec<crate::agent::SubAgent> = templates
                 .iter()
@@ -128,8 +152,11 @@ impl Orchestrator {
             let limits = PlannerLimits {
                 timeout_secs: planner_cfg.planning_timeout_secs,
                 max_retries: planner_cfg.max_retries,
+                max_tokens: planner_cfg.max_tokens,
             };
-            match TaskPlanner::plan_hierarchical(
+
+            let planner_start = Instant::now();
+            let plan_result = TaskPlanner::plan_hierarchical(
                 router,
                 &content,
                 &idle_agents,
@@ -137,63 +164,84 @@ impl Orchestrator {
                 ctx.summary.as_deref(),
                 active_tasks_block.as_deref(),
                 limits,
+                planner_cfg.dag_prefer_predictable_enabled,
             )
-            .await
-            {
-                Ok(plan) => match plan.classification.as_str() {
-                    "simple_query" => {
-                        self.bus.publish(SystemEvent::IntentClassified {
-                            request_id,
-                            intent_type: "simple_query".to_string(),
-                            timestamp: Utc::now(),
-                        });
-                        self.handle_simple_query(
-                            request_id, &source, &content, &lane_key, &ctx, owner_id, &scope_ctx,
-                        )
-                        .await
-                    }
-                    "complex_task" => {
-                        self.bus.publish(SystemEvent::IntentClassified {
-                            request_id,
-                            intent_type: "complex_task".to_string(),
-                            timestamp: Utc::now(),
-                        });
-                        let description = &content;
-                        let augmented = self.augment_with_context(description, &ctx);
-                        match self.task_dispatcher.dispatch_planned(
-                            &augmented,
-                            plan,
-                            &principal_id(&principal),
-                            &lane_key,
-                            &source,
-                            scope_ctx.workspace_id.clone(),
-                        ) {
-                            Ok(response) => Ok(response),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Dispatch planned failed: {e}, falling back to simple_query"
-                                );
-                                self.handle_simple_query(
-                                    request_id, &source, &content, &lane_key, &ctx, owner_id,
-                                    &scope_ctx,
-                                )
-                                .await
+            .await;
+            planner_ms = planner_start.elapsed().as_millis() as u64;
+
+            match plan_result {
+                Ok(plan) => {
+                    auto_promotion_reason = plan.auto_promotion_reason.clone();
+                    match plan.classification.as_str() {
+                        "simple_query" => {
+                            mode = "planner_simple_query".to_string();
+                            self.bus.publish(SystemEvent::IntentClassified {
+                                request_id,
+                                intent_type: "simple_query".to_string(),
+                                timestamp: Utc::now(),
+                            });
+                            self.handle_simple_query(
+                                request_id, &source, &content, &lane_key, &ctx, owner_id,
+                                &scope_ctx,
+                            )
+                            .await
+                        }
+                        "complex_task" => {
+                            mode = "planner_complex_task".to_string();
+                            self.bus.publish(SystemEvent::IntentClassified {
+                                request_id,
+                                intent_type: "complex_task".to_string(),
+                                timestamp: Utc::now(),
+                            });
+                            let description = &content;
+                            let augmented = self.augment_with_context(description, &ctx);
+
+                            let dispatch_start = Instant::now();
+                            let dispatch_result = self.task_dispatcher.dispatch_planned(
+                                &augmented,
+                                plan,
+                                &principal_id(&principal),
+                                &lane_key,
+                                &source,
+                                scope_ctx.workspace_id.clone(),
+                            );
+                            dispatch_ms = dispatch_start.elapsed().as_millis() as u64;
+
+                            match dispatch_result {
+                                Ok(response) => Ok(response),
+                                Err(e) => {
+                                    fallback_reason =
+                                        Some(format!("dispatch_planned_failed: {e}"));
+                                    tracing::warn!(
+                                        "Dispatch planned failed: {e}, falling back to simple_query"
+                                    );
+                                    self.handle_simple_query(
+                                        request_id, &source, &content, &lane_key, &ctx, owner_id,
+                                        &scope_ctx,
+                                    )
+                                    .await
+                                }
                             }
                         }
+                        other => {
+                            mode = "planner_unknown".to_string();
+                            fallback_reason =
+                                Some(format!("unknown_classification: {other}"));
+                            tracing::warn!(
+                                "LLM planner returned unknown classification '{}', falling back to heuristic",
+                                other
+                            );
+                            self.dispatch_with_heuristic(
+                                request_id, &source, &content, &principal, &lane_key, &ctx,
+                                owner_id, &scope_ctx,
+                            )
+                            .await
+                        }
                     }
-                    _other => {
-                        tracing::warn!(
-                            "LLM planner returned unknown classification '{}', falling back to heuristic",
-                            _other
-                        );
-                        self.dispatch_with_heuristic(
-                            request_id, &source, &content, &principal, &lane_key, &ctx, owner_id,
-                            &scope_ctx,
-                        )
-                        .await
-                    }
-                },
+                }
                 Err(e) => {
+                    mode = "planner_failed".to_string();
+                    fallback_reason = Some(format!("planning_error: {e}"));
                     tracing::warn!("LLM planning failed: {}, falling back to heuristic", e);
                     self.dispatch_with_heuristic(
                         request_id, &source, &content, &principal, &lane_key, &ctx, owner_id,
@@ -203,12 +251,44 @@ impl Orchestrator {
                 }
             }
         } else {
-            // No LLM router — keyword heuristic
+            mode = "no_llm".to_string();
             self.dispatch_with_heuristic(
                 request_id, &source, &content, &principal, &lane_key, &ctx, owner_id, &scope_ctx,
             )
             .await
         };
+
+        let ack_ms = ack_start.elapsed().as_millis() as u64;
+
+        // Emit OrchestrationStage event
+        self.bus.publish(SystemEvent::OrchestrationStage {
+            request_id,
+            mode: mode.clone(),
+            planner_ms,
+            dispatch_ms,
+            ack_ms,
+            fallback_reason: fallback_reason.clone(),
+            auto_promotion_reason: auto_promotion_reason.clone(),
+            timestamp: Utc::now(),
+        });
+
+        // Persist latency record (best-effort)
+        if let Some(ref db) = self.db {
+            let repo = OrchestratorLatencyRepository::new(db);
+            if let Err(e) = repo.record(&OrchestratorLatencyRecord {
+                id: None,
+                request_id: request_id.to_string(),
+                mode,
+                planner_ms,
+                dispatch_ms,
+                ack_ms,
+                fallback_reason,
+                auto_promotion_reason,
+                timestamp: None,
+            }) {
+                tracing::debug!("Failed to persist orchestrator latency: {e}");
+            }
+        }
 
         // 6 + 7. Summary update and user trait extraction run concurrently
         // (both are fire-and-forget LLM calls that don't affect the response).
@@ -309,19 +389,33 @@ impl Orchestrator {
                 ) {
                     Ok(response) => Ok(response),
                     Err(e) => {
-                        tracing::warn!(
-                            "Heuristic dispatch failed: {e}, falling back to simple_query"
+                        tracing::info!(
+                            "Heuristic dispatch failed ({e}), trying lead agent fallback"
                         );
-                        self.handle_simple_query(
-                            request_id,
-                            source,
-                            &description,
+                        match self.task_dispatcher.dispatch_lead_agent_heuristic(
+                            &augmented,
+                            &principal_id(principal),
                             lane_key,
-                            ctx,
-                            owner_id,
-                            scope_ctx,
-                        )
-                        .await
+                            source,
+                            scope_ctx.workspace_id.clone(),
+                        ) {
+                            Ok(response) => Ok(response),
+                            Err(e2) => {
+                                tracing::warn!(
+                                    "Lead agent fallback also failed: {e2}, falling back to simple_query"
+                                );
+                                self.handle_simple_query(
+                                    request_id,
+                                    source,
+                                    &description,
+                                    lane_key,
+                                    ctx,
+                                    owner_id,
+                                    scope_ctx,
+                                )
+                                .await
+                            }
+                        }
                     }
                 }
             }

@@ -339,6 +339,25 @@ pub fn spawn_event_bridge(
                 }
                 openalpaca_core::events::SystemEvent::Error { code, message, .. } => {
                     tracing::error!("System error: code={code}, message={message}");
+                }
+                openalpaca_core::events::SystemEvent::PlannerBypassed {
+                    request_id,
+                    reason,
+                    ..
+                } => {
+                    tracing::debug!("Planner bypassed: request={request_id}, reason={reason}");
+                }
+                openalpaca_core::events::SystemEvent::OrchestrationStage {
+                    request_id,
+                    mode,
+                    planner_ms,
+                    dispatch_ms,
+                    ack_ms,
+                    ..
+                } => {
+                    tracing::debug!(
+                        "Orchestration: request={request_id}, mode={mode}, planner={planner_ms}ms, dispatch={dispatch_ms}ms, ack={ack_ms}ms"
+                    );
                 } // NO catch-all: compiler will flag any missing SystemEvent variant
             }
         }

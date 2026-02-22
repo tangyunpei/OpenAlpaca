@@ -278,6 +278,20 @@ impl TaskDispatcher {
         )
     }
 
+    /// Dispatch a task directly to the lead agent (heuristic fallback).
+    /// Used when heuristic skill matching fails for ComplexTask intents.
+    pub fn dispatch_lead_agent_heuristic(
+        &self,
+        description: &str,
+        created_by: &str,
+        lane_key: &str,
+        source: &str,
+        workspace_id: Option<String>,
+    ) -> Result<String, String> {
+        let title = generate_title(description);
+        self.dispatch_lead_agent(description, title, created_by, lane_key, source, workspace_id)
+    }
+
     /// Dispatch a complex task using an LLM-generated plan.
     /// Validates that assigned agents exist and are idle, then delegates to dispatch_core.
     /// If `plan.use_lead_agent` is true, routes to the Lead Agent orchestration path.

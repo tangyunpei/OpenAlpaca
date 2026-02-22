@@ -406,13 +406,16 @@ mod tests {
         let json = r#"{"decision": "modify_dag", "dag": {"nodes": [
             {"node_id": "new_1", "title": "New task", "description": "Do new thing",
              "agent_id": "agent-1", "agent_name": "Agent One",
-             "depends_on": [], "workspace_keys": [], "output_key": "new_output"}
+             "depends_on": [], "workspace_keys": [], "output_key": "new_output"},
+            {"node_id": "new_2", "title": "Follow-up", "description": "Do follow-up",
+             "agent_id": "agent-1", "agent_name": "Agent One",
+             "depends_on": ["new_1"], "workspace_keys": ["new_output"], "output_key": "final_output"}
         ]}}"#;
         let agents = make_agents();
         let result = Replanner::parse_decision(json, &agents).unwrap();
         match result {
             ReplanDecision::ModifyDag { dag } => {
-                assert_eq!(dag.nodes.len(), 1);
+                assert_eq!(dag.nodes.len(), 2);
                 assert_eq!(dag.nodes[0].node_id, "new_1");
             }
             _ => panic!("Expected ModifyDag"),
@@ -424,7 +427,10 @@ mod tests {
         let json = r#"{"decision": "modify_dag", "dag": {"nodes": [
             {"node_id": "new_1", "title": "New task", "description": "Do new thing",
              "agent_id": "nonexistent-agent", "agent_name": "Ghost",
-             "depends_on": [], "workspace_keys": [], "output_key": "new_output"}
+             "depends_on": [], "workspace_keys": [], "output_key": "new_output"},
+            {"node_id": "new_2", "title": "Follow-up", "description": "Do follow-up",
+             "agent_id": "agent-1", "agent_name": "Agent One",
+             "depends_on": ["new_1"], "workspace_keys": ["new_output"], "output_key": "final_output"}
         ]}}"#;
         let agents = make_agents();
         let result = Replanner::parse_decision(json, &agents);

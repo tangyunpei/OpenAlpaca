@@ -22,6 +22,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/events/history",
             get(crate::routes::events_history_handler),
         )
+        .route(
+            "/v1/orchestrator/latency",
+            get(crate::routes::orchestrator_latency_handler),
+        )
         .route("/v1/connectors", get(crate::routes::list_connectors_handler))
         .route(
             "/v1/connectors/{id}/action",
