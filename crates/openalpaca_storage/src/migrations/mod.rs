@@ -131,4 +131,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "dispatch_decision_request_id",
         sql: include_str!("024_dispatch_decision_request_id.sql"),
     },
+    Migration {
+        version: 25,
+        name: "dispatch_decision_error_message",
+        sql: include_str!("025_dispatch_decision_error_message.sql"),
+    },
 ];

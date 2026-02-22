@@ -37,6 +37,8 @@ pub enum DecisionReason {
     EmptyAssignmentsFallback,
     /// Heuristic skill matching chose this path.
     HeuristicFallback,
+    /// Heuristic skill matching was attempted but failed (no matching agents found).
+    HeuristicMatchFailed,
 }
 
 impl std::fmt::Display for DecisionReason {
@@ -46,6 +48,7 @@ impl std::fmt::Display for DecisionReason {
             Self::ExecutionModeField => write!(f, "execution_mode_field"),
             Self::EmptyAssignmentsFallback => write!(f, "empty_assignments_fallback"),
             Self::HeuristicFallback => write!(f, "heuristic_fallback"),
+            Self::HeuristicMatchFailed => write!(f, "heuristic_match_failed"),
         }
     }
 }
@@ -59,6 +62,7 @@ pub struct DispatchDecision {
     pub dag_node_count: Option<usize>,
     pub predictability_score: Option<f64>,
     pub planner_requested_mode: Option<String>,
+    pub error_message: Option<String>,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -88,6 +92,7 @@ pub fn analyze_plan(plan: &TaskPlan) -> DispatchDecision {
                 dag_node_count: plan.dag.as_ref().map(|d| d.nodes.len()),
                 predictability_score: plan.predictability_score,
                 planner_requested_mode: plan.execution_mode.clone(),
+                error_message: None,
                 timestamp: now,
             };
         }
@@ -102,6 +107,7 @@ pub fn analyze_plan(plan: &TaskPlan) -> DispatchDecision {
             dag_node_count: None,
             predictability_score: plan.predictability_score,
             planner_requested_mode: plan.execution_mode.clone(),
+            error_message: None,
             timestamp: now,
         };
     }
@@ -115,6 +121,7 @@ pub fn analyze_plan(plan: &TaskPlan) -> DispatchDecision {
             dag_node_count: Some(dag.nodes.len()),
             predictability_score: plan.predictability_score,
             planner_requested_mode: plan.execution_mode.clone(),
+            error_message: None,
             timestamp: now,
         };
     }
@@ -128,6 +135,7 @@ pub fn analyze_plan(plan: &TaskPlan) -> DispatchDecision {
             dag_node_count: None,
             predictability_score: plan.predictability_score,
             planner_requested_mode: plan.execution_mode.clone(),
+            error_message: None,
             timestamp: now,
         };
     }
@@ -140,6 +148,7 @@ pub fn analyze_plan(plan: &TaskPlan) -> DispatchDecision {
         dag_node_count: None,
         predictability_score: plan.predictability_score,
         planner_requested_mode: plan.execution_mode.clone(),
+        error_message: None,
         timestamp: now,
     }
 }
@@ -321,6 +330,7 @@ mod tests {
             dag_node_count: Some(3),
             predictability_score: Some(0.85),
             planner_requested_mode: Some("dag".to_string()),
+            error_message: None,
             timestamp: Utc::now(),
         };
         let json = serde_json::to_string(&decision).unwrap();
@@ -328,5 +338,25 @@ mod tests {
         assert_eq!(parsed.mode, DispatchMode::DagParallel);
         assert_eq!(parsed.agent_count, 3);
         assert_eq!(parsed.predictability_score, Some(0.85));
+    }
+
+    #[test]
+    fn test_heuristic_match_failed_reason_serialization() {
+        let decision = DispatchDecision {
+            mode: DispatchMode::SequentialPipeline,
+            reason: DecisionReason::HeuristicMatchFailed,
+            agent_count: 0,
+            dag_node_count: None,
+            predictability_score: None,
+            planner_requested_mode: None,
+            error_message: Some("No agents match the required skills".to_string()),
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&decision).unwrap();
+        assert!(json.contains("heuristic_match_failed"));
+        assert!(json.contains("No agents match the required skills"));
+        let parsed: DispatchDecision = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.reason, DecisionReason::HeuristicMatchFailed);
+        assert!(parsed.error_message.is_some());
     }
 }
