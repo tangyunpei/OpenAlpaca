@@ -179,19 +179,24 @@ impl IntentParser {
     }
 
     fn parse_task_control(lower: &str) -> Option<Intent> {
-        for action in &["cancel", "pause", "resume"] {
-            let prefix = format!("/{} ", action);
-            if lower.starts_with(&prefix) {
-                let task_id = lower[prefix.len()..].trim().to_string();
-                if !task_id.is_empty() {
-                    return Some(Intent::TaskControl {
-                        task_id,
-                        action: action.to_string(),
-                    });
-                }
-            }
+        let (action, rest) = if let Some(r) = lower.strip_prefix("/cancel ") {
+            ("cancel", r)
+        } else if let Some(r) = lower.strip_prefix("/pause ") {
+            ("pause", r)
+        } else if let Some(r) = lower.strip_prefix("/resume ") {
+            ("resume", r)
+        } else {
+            return None;
+        };
+        let task_id = rest.trim().to_string();
+        if !task_id.is_empty() {
+            Some(Intent::TaskControl {
+                task_id,
+                action: action.to_string(),
+            })
+        } else {
+            None
         }
-        None
     }
 
     fn parse_task_query(lower: &str) -> Option<Intent> {
@@ -237,11 +242,11 @@ impl IntentParser {
     /// Detect "remember X" style commands.
     fn parse_remember_command(lower: &str, original: &str) -> Option<String> {
         // "remember that ...", "remember my ...", "remember I ..."
-        if let Some(rest) = lower.strip_prefix("remember ") {
-            if !rest.trim().is_empty() {
-                // Safe: "remember " is 9 ASCII bytes, original is already trimmed
-                return Some(original["remember ".len()..].trim().to_string());
-            }
+        if let Some(rest) = lower.strip_prefix("remember ")
+            && !rest.trim().is_empty()
+        {
+            // Safe: "remember " is 9 ASCII bytes, original is already trimmed
+            return Some(original["remember ".len()..].trim().to_string());
         }
         // "please remember ..."
         if let Some(idx) = lower.find("please remember ") {
@@ -260,11 +265,11 @@ impl IntentParser {
 
     /// Detect "forget X" style commands.
     fn parse_forget_command(lower: &str, original: &str) -> Option<String> {
-        if let Some(rest) = lower.strip_prefix("forget ") {
-            if !rest.trim().is_empty() {
-                // Safe: "forget " is 7 ASCII bytes, original is already trimmed
-                return Some(original["forget ".len()..].trim().to_string());
-            }
+        if let Some(rest) = lower.strip_prefix("forget ")
+            && !rest.trim().is_empty()
+        {
+            // Safe: "forget " is 7 ASCII bytes, original is already trimmed
+            return Some(original["forget ".len()..].trim().to_string());
         }
         if let Some(idx) = lower.find("please forget ") {
             let start = idx + "please forget ".len();
@@ -290,8 +295,7 @@ impl IntentParser {
         let lower = trimmed.to_lowercase();
 
         // 1. Slash-command skill invocation: "/review some code"
-        if trimmed.starts_with('/') {
-            let without_slash = &trimmed[1..];
+        if let Some(without_slash) = trimmed.strip_prefix('/') {
             let parts: Vec<&str> = without_slash.splitn(2, ' ').collect();
             let command = parts[0];
             let query = parts.get(1).map(|s| s.trim()).unwrap_or("");
@@ -414,6 +418,59 @@ impl IntentParser {
 
     fn mentions_filename(content: &str) -> bool {
         rel_path_regex().is_match(content) || file_named_regex().is_match(content)
+    }
+
+    /// Check if a message is eligible for the fast path (skip LLM planner).
+    ///
+    /// Returns true when the message is short, has no complexity or delegation
+    /// signals, and doesn't contain task management verbs — meaning it's very
+    /// likely a simple conversational query that doesn't need planning.
+    pub fn is_fast_path_eligible(&self, content: &str) -> bool {
+        const TASK_VERBS: &[&str] = &[
+            "create a task",
+            "build a plan",
+            "step by step",
+            "first ",
+            " then ",
+            "and then",
+            "followed by",
+            "multiple steps",
+        ];
+        const DELEGATION_SIGNALS: &[&str] = &[
+            "assign to",
+            "delegate",
+            "use agent",
+            "spawn agent",
+        ];
+
+        // 1. Short content only
+        if content.len() > 200 {
+            return false;
+        }
+
+        let lower = content.to_lowercase();
+
+        // 2. No complexity signals
+        if Self::has_complexity_signal(&lower) {
+            return false;
+        }
+
+        // 3. At most one skill keyword
+        if Self::extract_skills(&lower).len() > 1 {
+            return false;
+        }
+
+        // 4. No task management verbs
+        if TASK_VERBS.iter().any(|v| lower.contains(v)) {
+            return false;
+        }
+
+        // 5. No delegation language
+        if DELEGATION_SIGNALS.iter().any(|s| lower.contains(s)) {
+            return false;
+        }
+
+        true
     }
 }
 
@@ -663,7 +720,11 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn create_test_skill_dir(parent: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
+    fn create_test_skill_dir(
+        parent: &std::path::Path,
+        name: &str,
+        content: &str,
+    ) -> std::path::PathBuf {
         let dir = parent.join(name);
         std::fs::create_dir_all(&dir).unwrap();
         let md_path = dir.join("SKILL.md");
@@ -674,7 +735,10 @@ mod tests {
 
     fn make_test_catalog() -> (TempDir, SkillCatalog) {
         let tmp = TempDir::new().unwrap();
-        create_test_skill_dir(tmp.path(), "code-review", r#"---
+        create_test_skill_dir(
+            tmp.path(),
+            "code-review",
+            r#"---
 name: "Code Review"
 description: "Review code for bugs"
 command: "review"
@@ -689,8 +753,12 @@ auto_load: false
 ## Instructions
 
 Review the code.
-"#);
-        create_test_skill_dir(tmp.path(), "explain-code", r#"---
+"#,
+        );
+        create_test_skill_dir(
+            tmp.path(),
+            "explain-code",
+            r#"---
 name: "Explain Code"
 description: "Explain what code does"
 command: "explain-code"
@@ -703,8 +771,12 @@ auto_load: false
 ## Instructions
 
 Explain step by step.
-"#);
-        create_test_skill_dir(tmp.path(), "commit-message", r#"---
+"#,
+        );
+        create_test_skill_dir(
+            tmp.path(),
+            "commit-message",
+            r#"---
 name: "Commit Message"
 description: "Generate commit messages"
 command: "commit"
@@ -717,7 +789,8 @@ auto_load: false
 ## Instructions
 
 Generate a conventional commit.
-"#);
+"#,
+        );
 
         let catalog = SkillCatalog::new();
         catalog.scan_directory(tmp.path());
@@ -833,5 +906,48 @@ Generate a conventional commit.
             query: "test query".to_string(),
         };
         assert_eq!(intent.intent_type(), "skill_invocation");
+    }
+
+    // --- fast path eligibility tests ---
+
+    #[test]
+    fn test_fast_path_greeting() {
+        assert!(parser().is_fast_path_eligible("hello"));
+    }
+
+    #[test]
+    fn test_fast_path_short_question() {
+        assert!(parser().is_fast_path_eligible("what time is it?"));
+    }
+
+    #[test]
+    fn test_fast_path_complexity_signal_ineligible() {
+        assert!(!parser().is_fast_path_eligible("can you help me with this?"));
+    }
+
+    #[test]
+    fn test_fast_path_long_content_ineligible() {
+        let long = "a".repeat(201);
+        assert!(!parser().is_fast_path_eligible(&long));
+    }
+
+    #[test]
+    fn test_fast_path_task_verb_ineligible() {
+        assert!(!parser().is_fast_path_eligible("create a task to fix the bug"));
+    }
+
+    #[test]
+    fn test_fast_path_delegation_ineligible() {
+        assert!(!parser().is_fast_path_eligible("delegate this to the researcher"));
+    }
+
+    #[test]
+    fn test_fast_path_step_by_step_ineligible() {
+        assert!(!parser().is_fast_path_eligible("do this step by step"));
+    }
+
+    #[test]
+    fn test_fast_path_multi_skill_ineligible() {
+        assert!(!parser().is_fast_path_eligible("research and summarize this"));
     }
 }

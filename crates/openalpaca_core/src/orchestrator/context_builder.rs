@@ -24,14 +24,15 @@ impl Orchestrator {
         let repo = ConversationRepository::new(db);
 
         // Step 1: Load summary from conversations table
-        let (summary_text, summary_version, last_summarized_id) = match repo.get_summary(lane_key) {
-            Ok(tuple) => tuple,
-            Err(_) => (String::new(), 0, 0),
-        };
+        let (summary_text, summary_version, last_summarized_id) =
+            repo.get_summary(lane_key).unwrap_or_default();
 
         // Step 2: Load recent messages (40, not 120)
         let dcfg = self.daemon_config.load();
-        let raw_messages = match repo.list_recent_by_lane(lane_key, dcfg.orchestrator.memory.prompt_recent_messages as i64) {
+        let raw_messages = match repo.list_recent_by_lane(
+            lane_key,
+            dcfg.orchestrator.memory.prompt_recent_messages as i64,
+        ) {
             Ok(msgs) => msgs,
             Err(_) => return empty,
         };

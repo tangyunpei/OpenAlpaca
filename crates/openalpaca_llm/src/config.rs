@@ -1,9 +1,9 @@
+use crate::LlmProvider;
+use crate::cost_tracker::CostTracker;
 use crate::error::LlmError;
 use crate::key_pool::{ApiKey, KeyPool, KeyPriority, KeySource, ProviderType, SelectionStrategy};
 use crate::model_registry::ModelRegistry;
-use crate::cost_tracker::CostTracker;
 use crate::router::{LlmRouter, ProviderEntry};
-use crate::LlmProvider;
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -31,7 +31,10 @@ impl LlmConfig {
         self.resolve_api_key_with_env_config(None)
     }
 
-    pub fn resolve_api_key_with_env_config(&self, env_config: Option<&EnvVarsConfig>) -> Option<String> {
+    pub fn resolve_api_key_with_env_config(
+        &self,
+        env_config: Option<&EnvVarsConfig>,
+    ) -> Option<String> {
         if let Some(ref key) = self.api_key {
             return Some(key.clone());
         }
@@ -64,37 +67,50 @@ pub fn build_provider_with_runtime(
             let api_key = config
                 .resolve_api_key_with_env_config(Some(&rt.env_vars))
                 .ok_or(LlmError::Config("Anthropic API key not configured. Set api_key in config or ANTHROPIC_API_KEY env var.".into()))?;
-            let model = config.model.clone()
+            let model = config
+                .model
+                .clone()
                 .or_else(|| _provider_defaults.map(|d| d.default_model.clone()));
-            let max_tokens = config.max_tokens
+            let max_tokens = config
+                .max_tokens
                 .or_else(|| _provider_defaults.map(|d| d.default_max_tokens));
-            let provider = crate::providers::anthropic::AnthropicProvider::new(
-                api_key, model, max_tokens,
-            );
+            let provider =
+                crate::providers::anthropic::AnthropicProvider::new(api_key, model, max_tokens);
             Ok(Box::new(provider))
         }
         #[cfg(feature = "openai")]
         "openai" => {
             let api_key = config
                 .resolve_api_key_with_env_config(Some(&rt.env_vars))
-                .ok_or(LlmError::Config("OpenAI API key not configured. Set api_key in config or OPENAI_API_KEY env var.".into()))?;
-            let model = config.model.clone()
+                .ok_or(LlmError::Config(
+                "OpenAI API key not configured. Set api_key in config or OPENAI_API_KEY env var."
+                    .into(),
+            ))?;
+            let model = config
+                .model
+                .clone()
                 .or_else(|| _provider_defaults.map(|d| d.default_model.clone()));
-            let base_url = config.base_url.clone()
+            let base_url = config
+                .base_url
+                .clone()
                 .or_else(|| _provider_defaults.and_then(|d| d.base_url.clone()));
-            let max_tokens = config.max_tokens
+            let max_tokens = config
+                .max_tokens
                 .or_else(|| _provider_defaults.map(|d| d.default_max_tokens));
-            let provider = crate::providers::openai::OpenAiProvider::new(
-                api_key, model, base_url, max_tokens,
-            );
+            let provider =
+                crate::providers::openai::OpenAiProvider::new(api_key, model, base_url, max_tokens);
             Ok(Box::new(provider))
         }
         #[cfg(feature = "ollama")]
         "ollama" => {
-            let model = config.model.clone()
+            let model = config
+                .model
+                .clone()
                 .or_else(|| _provider_defaults.map(|d| d.default_model.clone()))
                 .unwrap_or_else(|| "llama3".to_string());
-            let base_url = config.base_url.clone()
+            let base_url = config
+                .base_url
+                .clone()
                 .or_else(|| _provider_defaults.and_then(|d| d.base_url.clone()));
             let provider = crate::providers::ollama::OllamaProvider::new(model, base_url);
             Ok(Box::new(provider))
@@ -113,6 +129,7 @@ pub struct LlmRouterConfig {
     pub models: Option<HashMap<String, ModelConfigEntry>>,
     pub fallback_chains: Option<HashMap<String, Vec<String>>>,
     pub limits: Option<LimitsConfig>,
+    pub rate_limits: Option<crate::rate_limiter::RateLimitConfig>,
     pub credential_discovery: Option<crate::credential_discovery::CredentialDiscoveryConfig>,
     pub cli_backends: Option<crate::cli_backend::CliBackendsConfig>,
     pub embeddings: Option<EmbeddingsConfig>,
@@ -194,9 +211,15 @@ pub struct LimitsConfig {
 
 // ── Externalized Config Structs ───────────────────────────────────────
 
-fn default_usage_cache_ttl() -> u64 { 300 }
-fn default_usage_fetch_timeout() -> u64 { 10 }
-fn default_cli_timeout() -> u64 { 120 }
+fn default_usage_cache_ttl() -> u64 {
+    300
+}
+fn default_usage_fetch_timeout() -> u64 {
+    10
+}
+fn default_cli_timeout() -> u64 {
+    120
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeoutsConfig {
@@ -218,9 +241,15 @@ impl Default for TimeoutsConfig {
     }
 }
 
-fn default_anthropic_usage_url() -> String { "https://api.anthropic.com/api/oauth/usage".to_string() }
-fn default_openai_usage_url() -> String { "https://api.openai.com/dashboard/billing/usage".to_string() }
-fn default_openai_embeddings_url() -> String { "https://api.openai.com/v1/embeddings".to_string() }
+fn default_anthropic_usage_url() -> String {
+    "https://api.anthropic.com/api/oauth/usage".to_string()
+}
+fn default_openai_usage_url() -> String {
+    "https://api.openai.com/dashboard/billing/usage".to_string()
+}
+fn default_openai_embeddings_url() -> String {
+    "https://api.openai.com/v1/embeddings".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndpointsConfig {
@@ -242,8 +271,12 @@ impl Default for EndpointsConfig {
     }
 }
 
-fn default_anthropic_env() -> String { "ANTHROPIC_API_KEY".to_string() }
-fn default_openai_env() -> String { "OPENAI_API_KEY".to_string() }
+fn default_anthropic_env() -> String {
+    "ANTHROPIC_API_KEY".to_string()
+}
+fn default_openai_env() -> String {
+    "OPENAI_API_KEY".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvVarsConfig {
@@ -283,21 +316,30 @@ pub struct LlmRuntimeConfig {
 impl Default for LlmRuntimeConfig {
     fn default() -> Self {
         let mut provider_defaults = HashMap::new();
-        provider_defaults.insert("anthropic".to_string(), ProviderDefaults {
-            default_model: "claude-sonnet-4-5-20250929".to_string(),
-            default_max_tokens: 4096,
-            base_url: None,
-        });
-        provider_defaults.insert("openai".to_string(), ProviderDefaults {
-            default_model: "gpt-4o".to_string(),
-            default_max_tokens: 4096,
-            base_url: Some("https://api.openai.com/v1".to_string()),
-        });
-        provider_defaults.insert("ollama".to_string(), ProviderDefaults {
-            default_model: "llama3".to_string(),
-            default_max_tokens: 4096,
-            base_url: Some("http://localhost:11434/v1".to_string()),
-        });
+        provider_defaults.insert(
+            "anthropic".to_string(),
+            ProviderDefaults {
+                default_model: "claude-sonnet-4-5-20250929".to_string(),
+                default_max_tokens: 4096,
+                base_url: None,
+            },
+        );
+        provider_defaults.insert(
+            "openai".to_string(),
+            ProviderDefaults {
+                default_model: "gpt-4o".to_string(),
+                default_max_tokens: 4096,
+                base_url: Some("https://api.openai.com/v1".to_string()),
+            },
+        );
+        provider_defaults.insert(
+            "ollama".to_string(),
+            ProviderDefaults {
+                default_model: "llama3".to_string(),
+                default_max_tokens: 4096,
+                base_url: Some("http://localhost:11434/v1".to_string()),
+            },
+        );
         Self {
             timeouts: TimeoutsConfig::default(),
             endpoints: EndpointsConfig::default(),
@@ -319,13 +361,18 @@ impl From<&LlmRouterConfig> for LlmRuntimeConfig {
             for (name, pc) in providers {
                 let existing = provider_defaults.get(name);
                 let defaults = ProviderDefaults {
-                    default_model: pc.default_model.clone()
+                    default_model: pc
+                        .default_model
+                        .clone()
                         .or_else(|| existing.map(|e| e.default_model.clone()))
                         .unwrap_or_else(|| "unknown".to_string()),
-                    default_max_tokens: pc.default_max_tokens
+                    default_max_tokens: pc
+                        .default_max_tokens
                         .or_else(|| existing.map(|e| e.default_max_tokens))
                         .unwrap_or(4096),
-                    base_url: pc.base_url.clone()
+                    base_url: pc
+                        .base_url
+                        .clone()
                         .or_else(|| existing.and_then(|e| e.base_url.clone())),
                 };
                 provider_defaults.insert(name.clone(), defaults);
@@ -398,7 +445,9 @@ fn build_router_from_legacy(content: &str) -> Result<LlmRouter, LlmError> {
         .ok_or_else(|| LlmError::UnknownProvider(config.provider.clone()))?;
 
     let default_model = config.model.unwrap_or_else(|| {
-        runtime.provider_defaults.get(config.provider.as_str())
+        runtime
+            .provider_defaults
+            .get(config.provider.as_str())
             .map(|d| d.default_model.clone())
             .unwrap_or_else(|| "claude-sonnet-4-5-20250929".to_string())
     });
@@ -422,6 +471,16 @@ fn build_router_from_hierarchical(
     let runtime_config = LlmRuntimeConfig::from(&config);
     let mut providers_map: HashMap<ProviderType, ProviderEntry> = HashMap::new();
 
+    // Shared HTTP client for all providers (connection pool reuse).
+    // Only built when at least one provider feature is enabled (requires reqwest).
+    #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+    let shared_client = reqwest::Client::builder()
+        .pool_max_idle_per_host(10)
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
     // Build provider entries
     if let Some(ref providers) = config.providers {
         for (provider_name, provider_config) in providers {
@@ -443,7 +502,8 @@ fn build_router_from_hierarchical(
                         if resolved.is_none() {
                             tracing::warn!(
                                 "Skipping key '{}': environment variable '{}' not set",
-                                key_config.id, env_var
+                                key_config.id,
+                                env_var
                             );
                         }
                         resolved
@@ -455,7 +515,8 @@ fn build_router_from_hierarchical(
                                 Ok(None) => {
                                     tracing::warn!(
                                         "Skipping key '{}': secret_ref '{}' not found in keychain",
-                                        key_config.id, sref
+                                        key_config.id,
+                                        sref
                                     );
                                     None
                                 }
@@ -501,10 +562,7 @@ fn build_router_from_hierarchical(
                             Some(encrypted.clone())
                         }
                     } else {
-                        tracing::warn!(
-                            "Skipping key '{}': no secret configured",
-                            key_config.id
-                        );
+                        tracing::warn!("Skipping key '{}': no secret configured", key_config.id);
                         None
                     };
 
@@ -513,11 +571,8 @@ fn build_router_from_hierarchical(
                         None => continue, // Skip this key, try next
                     };
 
-                    let mut api_key = ApiKey::new(
-                        key_config.id.clone(),
-                        provider_type,
-                        secret.clone(),
-                    );
+                    let mut api_key =
+                        ApiKey::new(key_config.id.clone(), provider_type, secret.clone());
                     api_key.tier = key_config.tier.clone();
                     api_key.monthly_budget = key_config.monthly_budget;
                     api_key.rate_limit = key_config.rate_limit;
@@ -547,7 +602,9 @@ fn build_router_from_hierarchical(
             }
 
             // Parse strategy from either field
-            let strategy_str = provider_config.key_selection_strategy.as_deref()
+            let strategy_str = provider_config
+                .key_selection_strategy
+                .as_deref()
                 .or(provider_config.strategy.as_deref());
             let strategy = match strategy_str {
                 Some("lru") | Some("least_recently_used") => SelectionStrategy::LeastRecentlyUsed,
@@ -573,12 +630,18 @@ fn build_router_from_hierarchical(
                         );
                         continue;
                     };
-                    let model = provider_config.default_model.clone()
+                    let model = provider_config
+                        .default_model
+                        .clone()
                         .or_else(|| prov_defaults.map(|d| d.default_model.clone()));
-                    let max_tokens = provider_config.default_max_tokens
+                    let max_tokens = provider_config
+                        .default_max_tokens
                         .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(crate::providers::anthropic::AnthropicProvider::new(
-                        key, model, max_tokens,
+                    Box::new(crate::providers::anthropic::AnthropicProvider::with_client(
+                        shared_client.clone(),
+                        key,
+                        model,
+                        max_tokens,
                     ))
                 }
                 #[cfg(feature = "openai")]
@@ -590,25 +653,40 @@ fn build_router_from_hierarchical(
                         );
                         continue;
                     };
-                    let model = provider_config.default_model.clone()
+                    let model = provider_config
+                        .default_model
+                        .clone()
                         .or_else(|| prov_defaults.map(|d| d.default_model.clone()));
-                    let base_url = provider_config.base_url.clone()
+                    let base_url = provider_config
+                        .base_url
+                        .clone()
                         .or_else(|| prov_defaults.and_then(|d| d.base_url.clone()));
-                    let max_tokens = provider_config.default_max_tokens
+                    let max_tokens = provider_config
+                        .default_max_tokens
                         .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(crate::providers::openai::OpenAiProvider::new(
-                        key, model, base_url, max_tokens,
+                    Box::new(crate::providers::openai::OpenAiProvider::with_client(
+                        shared_client.clone(),
+                        key,
+                        model,
+                        base_url,
+                        max_tokens,
                     ))
                 }
                 #[cfg(feature = "ollama")]
                 ProviderType::Ollama => {
-                    let model = provider_config.default_model.clone()
+                    let model = provider_config
+                        .default_model
+                        .clone()
                         .or_else(|| prov_defaults.map(|d| d.default_model.clone()))
                         .unwrap_or_else(|| "llama3".to_string());
-                    let base_url = provider_config.base_url.clone()
+                    let base_url = provider_config
+                        .base_url
+                        .clone()
                         .or_else(|| prov_defaults.and_then(|d| d.base_url.clone()));
-                    Box::new(crate::providers::ollama::OllamaProvider::new(
-                        model, base_url,
+                    Box::new(crate::providers::ollama::OllamaProvider::with_client(
+                        shared_client.clone(),
+                        model,
+                        base_url,
                     ))
                 }
                 #[allow(unreachable_patterns)]
@@ -640,7 +718,9 @@ fn build_router_from_hierarchical(
         .as_ref()
         .map(|o| o.model.clone())
         .unwrap_or_else(|| {
-            runtime_config.provider_defaults.get("anthropic")
+            runtime_config
+                .provider_defaults
+                .get("anthropic")
                 .map(|d| d.default_model.clone())
                 .unwrap_or_else(|| "claude-sonnet-4-5-20250929".to_string())
         });
@@ -656,6 +736,7 @@ fn build_router_from_hierarchical(
     }
 
     let cost_tracker = Arc::new(CostTracker::new(ModelRegistry::with_defaults()));
+    let rate_limit_config = config.rate_limits.unwrap_or_default();
 
     let router = LlmRouter::new_with_runtime(
         providers_map,
@@ -664,6 +745,7 @@ fn build_router_from_hierarchical(
         cost_tracker,
         default_model,
         runtime_config,
+        rate_limit_config,
     );
 
     // Register CLI backends if detected
@@ -672,7 +754,10 @@ fn build_router_from_hierarchical(
 
     if let Some(ref cc_config) = cli_config.claude_code {
         if let Some(provider) = crate::cli_backend::ClaudeCodeCliProvider::from_config(cc_config) {
-            tracing::info!("Registered Claude Code CLI backend at {:?}", provider.binary_path());
+            tracing::info!(
+                "Registered Claude Code CLI backend at {:?}",
+                provider.binary_path()
+            );
             router.register_cli_backend(ProviderType::Anthropic, Arc::new(provider));
         }
     } else if let Some(path) = crate::cli_backend::ClaudeCodeCliProvider::detect() {
@@ -686,7 +771,10 @@ fn build_router_from_hierarchical(
 
     if let Some(ref codex_config) = cli_config.codex {
         if let Some(provider) = crate::cli_backend::CodexCliProvider::from_config(codex_config) {
-            tracing::info!("Registered Codex CLI backend at {:?}", provider.binary_path());
+            tracing::info!(
+                "Registered Codex CLI backend at {:?}",
+                provider.binary_path()
+            );
             router.register_cli_backend(ProviderType::OpenAI, Arc::new(provider));
         }
     } else if let Some(path) = crate::cli_backend::CodexCliProvider::detect() {
@@ -728,12 +816,11 @@ pub fn resolve_key_from_config(
     if let Some(ref env_var) = key_config.secret_env {
         return resolve_key_secret(env_var);
     }
-    if let Some(ref sref) = key_config.secret_ref {
-        if let Some(store) = secret_store {
-            if let Ok(Some(s)) = store.get(sref) {
-                return Some(s);
-            }
-        }
+    if let Some(ref sref) = key_config.secret_ref
+        && let Some(store) = secret_store
+        && let Ok(Some(s)) = store.get(sref)
+    {
+        return Some(s);
     }
     if let Some(ref encrypted) = key_config.secret_encrypted {
         if crate::key_encryption::KeyEncryptor::is_encrypted(encrypted) {
@@ -806,23 +893,17 @@ pub fn migrate_llm_secrets(
                         Err(e) => {
                             tracing::warn!(
                                 "Migration: cannot decrypt key '{}' for {}: {e}",
-                                key.id, provider_name
+                                key.id,
+                                provider_name
                             );
                             continue;
                         }
                     };
 
-                    let sref = format!(
-                        "llm/{}/{}",
-                        provider_name,
-                        uuid::Uuid::new_v4()
-                    );
+                    let sref = format!("llm/{}/{}", provider_name, uuid::Uuid::new_v4());
 
                     if let Err(e) = secret_store.set(&sref, &plaintext) {
-                        tracing::warn!(
-                            "Migration: cannot store key '{}' in keychain: {e}",
-                            key.id
-                        );
+                        tracing::warn!("Migration: cannot store key '{}' in keychain: {e}", key.id);
                         continue;
                     }
 
@@ -860,10 +941,10 @@ pub fn reverse_migrate_llm_secrets(
     if !config_path.exists() {
         return Ok(0);
     }
-    if let Ok(metadata) = std::fs::metadata(config_path) {
-        if metadata.permissions().readonly() {
-            return Ok(0);
-        }
+    if let Ok(metadata) = std::fs::metadata(config_path)
+        && metadata.permissions().readonly()
+    {
+        return Ok(0);
     }
 
     let mut config = read_config(config_path)
@@ -897,14 +978,17 @@ pub fn reverse_migrate_llm_secrets(
                         Ok(None) => {
                             tracing::warn!(
                                 "Reverse migration: secret_ref '{}' for key '{}' ({}) not found in keychain, skipping",
-                                sref, key.id, provider_name
+                                sref,
+                                key.id,
+                                provider_name
                             );
                             continue;
                         }
                         Err(e) => {
                             tracing::warn!(
                                 "Reverse migration: cannot read '{}' from keychain for key '{}': {e}",
-                                sref, key.id
+                                sref,
+                                key.id
                             );
                             continue;
                         }
@@ -931,7 +1015,9 @@ pub fn reverse_migrate_llm_secrets(
             .map_err(|e| format!("Failed to acquire config lock for reverse migration: {e}"))?;
         write_config(config_path, &config)
             .map_err(|e| format!("Failed to write reverse-migrated config: {e}"))?;
-        tracing::info!("Reverse-migrated {migrated} secret(s) from OS keychain to local encrypted storage");
+        tracing::info!(
+            "Reverse-migrated {migrated} secret(s) from OS keychain to local encrypted storage"
+        );
     }
 
     Ok(migrated)
@@ -944,13 +1030,13 @@ pub fn reverse_migrate_llm_secrets(
 pub fn collect_secret_refs(config: &LlmRouterConfig) -> Vec<String> {
     let mut refs = Vec::new();
     if let Some(ref providers) = config.providers {
-        for (_name, provider) in providers {
+        for provider in providers.values() {
             if let Some(ref keys) = provider.keys {
                 for key in keys {
-                    if let Some(ref sref) = key.secret_ref {
-                        if !refs.contains(sref) {
-                            refs.push(sref.clone());
-                        }
+                    if let Some(ref sref) = key.secret_ref
+                        && !refs.contains(sref)
+                    {
+                        refs.push(sref.clone());
                     }
                 }
             }
@@ -1051,7 +1137,9 @@ secret_env = "ANTHROPIC_API_KEY"
         // Verify it parses as LlmRouterConfig
         let config: LlmRouterConfig = toml::from_str(toml_str).unwrap();
         let key = &config.providers.as_ref().unwrap()["anthropic"]
-            .keys.as_ref().unwrap()[0];
+            .keys
+            .as_ref()
+            .unwrap()[0];
         assert_eq!(key.secret_env.as_deref(), Some("ANTHROPIC_API_KEY"));
     }
 
@@ -1082,19 +1170,27 @@ context = 100000
 "claude-sonnet-4-5-20250929" = ["gpt-4o"]
 "#;
         let config: LlmRouterConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.orchestrator.as_ref().unwrap().model, "claude-sonnet-4-5-20250929");
+        assert_eq!(
+            config.orchestrator.as_ref().unwrap().model,
+            "claude-sonnet-4-5-20250929"
+        );
         assert!(config.providers.as_ref().unwrap().contains_key("anthropic"));
         assert!(config.models.as_ref().unwrap().contains_key("custom-model"));
 
         let key = &config.providers.as_ref().unwrap()["anthropic"]
-            .keys.as_ref().unwrap()[0];
+            .keys
+            .as_ref()
+            .unwrap()[0];
         assert_eq!(key.id, "key1");
         assert_eq!(key.tier.as_deref(), Some("tier1"));
     }
 
     #[test]
     fn test_parse_provider_type_fn() {
-        assert_eq!(parse_provider_type("anthropic"), Some(ProviderType::Anthropic));
+        assert_eq!(
+            parse_provider_type("anthropic"),
+            Some(ProviderType::Anthropic)
+        );
         assert_eq!(parse_provider_type("openai"), Some(ProviderType::OpenAI));
         assert_eq!(parse_provider_type("ollama"), Some(ProviderType::Ollama));
         assert_eq!(parse_provider_type("unknown"), None);

@@ -26,8 +26,8 @@ pub fn app_dir() -> anyhow::Result<PathBuf> {
 /// Must be called before any other `app_dir()` consumers (e.g. singleton lock,
 /// database open) so the rename happens while no files are held open.
 pub fn migrate_legacy_app_dir() {
-    let old = ProjectDirs::from("com", "openalpaca", "OpenAlpaca")
-        .map(|p| p.data_dir().to_path_buf());
+    let old =
+        ProjectDirs::from("com", "openalpaca", "OpenAlpaca").map(|p| p.data_dir().to_path_buf());
     let new = app_dir().ok();
 
     if let (Some(old), Some(new)) = (old, new) {
@@ -39,11 +39,7 @@ pub fn migrate_legacy_app_dir() {
                 let _ = std::fs::create_dir_all(parent);
             }
             match std::fs::rename(&old, &new) {
-                Ok(()) => tracing::info!(
-                    "Migrated app dir: {} → {}",
-                    old.display(),
-                    new.display()
-                ),
+                Ok(()) => tracing::info!("Migrated app dir: {} → {}", old.display(), new.display()),
                 Err(e) => tracing::warn!(
                     "Failed to migrate app dir: {e}. Old: {}, New: {}",
                     old.display(),

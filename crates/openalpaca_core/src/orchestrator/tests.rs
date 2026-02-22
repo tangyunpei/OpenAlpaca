@@ -2,10 +2,12 @@ use super::*;
 use crate::agent::subagent::{
     AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent,
 };
+use crate::agent::template::{AgentTemplate, AgentTemplateFrontmatter};
 use crate::events::SystemEvent;
 use crate::security::policy::{Principal, Scope};
 use crate::security::sandbox::SandboxManager;
 use crate::tools::{RegistryToolExecutor, ToolRegistry};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 fn make_tool_registry() -> Arc<ToolRegistry> {
@@ -43,8 +45,9 @@ fn make_orchestrator() -> Orchestrator {
 
 fn make_orchestrator_with_agents(agents: Vec<SubAgent>) -> Orchestrator {
     let ctx = Arc::new(SharedContext::new());
-    for a in agents {
-        ctx.agent_registry.register(a);
+    for a in &agents {
+        ctx.agent_registry.register_template(template_from_agent(a));
+        ctx.agent_registry.register(a.clone());
     }
     let lanes = Arc::new(LaneManager::new());
     let bus = EventBus::default();
@@ -85,6 +88,7 @@ fn test_update_system_persona_updates_active_snapshot() {
 fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
     SubAgent {
         id: id.to_string(),
+        template_id: id.to_string(),
         name: format!("Agent {}", id),
         description: Some(format!("{} agent", id)),
         icon: None,
@@ -101,6 +105,33 @@ fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
         preset: AgentPreset::default(),
         constraints: AgentConstraints::default(),
         llm_config: AgentLlmConfig::default(),
+    }
+}
+
+/// Create a minimal AgentTemplate from a SubAgent (for test setup).
+fn template_from_agent(agent: &SubAgent) -> AgentTemplate {
+    let is_lead = agent.skills.iter().any(|s| s.name == "lead_orchestration");
+    AgentTemplate {
+        frontmatter: AgentTemplateFrontmatter {
+            id: agent.template_id.clone(),
+            name: agent.name.clone(),
+            description: agent.description.clone().unwrap_or_default(),
+            icon: agent.icon.clone(),
+            singleton: is_lead,
+            skills: agent.skills.iter().map(|s| s.name.clone()).collect(),
+            denied_skills: vec![],
+            temperature: agent.preset.temperature,
+            verbosity: agent.preset.verbosity.clone(),
+            model: agent.llm_config.model.clone(),
+            fallback_models: agent.llm_config.fallback_models.clone(),
+            max_tool_calls: agent.constraints.max_tool_calls,
+            timeout_seconds: agent.constraints.timeout_seconds,
+            max_cost_per_task: agent.constraints.max_cost_per_task,
+            max_rounds: agent.constraints.max_rounds,
+            require_confirmation_for: agent.constraints.require_confirmation_for.clone(),
+        },
+        body: String::new(),
+        sections: HashMap::new(),
     }
 }
 
@@ -256,8 +287,8 @@ async fn test_full_lifecycle_events() {
 async fn test_simple_query_with_mock_llm() {
     use async_trait::async_trait;
     use openalpaca_llm::{
-        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, LlmRouter,
-        ProviderType, Usage,
+        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, LlmRouter, ProviderType,
+        Usage,
     };
 
     struct MockLlm;
@@ -370,9 +401,7 @@ async fn test_security_gate_replaces_trust_gate() {
 /// Helper: create a mock LLM that returns a fixed response string.
 fn make_planning_mock_llm(response: &str) -> Arc<LlmRouter> {
     use async_trait::async_trait;
-    use openalpaca_llm::{
-        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, Usage,
-    };
+    use openalpaca_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, Usage};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct PlanningMockLlm {
@@ -421,8 +450,9 @@ fn make_orchestrator_with_llm_and_agents(
     agents: Vec<SubAgent>,
 ) -> Orchestrator {
     let ctx = Arc::new(SharedContext::new());
-    for a in agents {
-        ctx.agent_registry.register(a);
+    for a in &agents {
+        ctx.agent_registry.register_template(template_from_agent(a));
+        ctx.agent_registry.register(a.clone());
     }
     let lanes = Arc::new(LaneManager::new());
     let bus = EventBus::default();
@@ -448,16 +478,14 @@ fn make_orchestrator_with_llm_and_agents(
 async fn test_llm_planning_complex_task() {
     let plan_json = r#"{"classification": "complex_task", "title": "Research Rust patterns", "assignments": [{"agent_id": "a1", "agent_name": "Agent a1", "role_description": "Research agent", "matched_skills": ["web_search"]}], "reasoning": "User wants research"}"#;
     let router = make_planning_mock_llm(plan_json);
-    let orch = make_orchestrator_with_llm_and_agents(
-        router,
-        vec![make_agent("a1", vec!["web_search"])],
-    );
+    let orch =
+        make_orchestrator_with_llm_and_agents(router, vec![make_agent("a1", vec!["web_search"])]);
 
     let result = orch
         .handle_message(
             Uuid::new_v4(),
             "cli".to_string(),
-            "research Rust async patterns".to_string(),
+            "please research Rust async patterns".to_string(),
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
@@ -502,10 +530,8 @@ async fn test_llm_planning_simple_query() {
 async fn test_llm_planning_fallback_on_malformed() {
     // LLM returns garbage — should fall back to keyword heuristic
     let router = make_planning_mock_llm("this is not valid json at all");
-    let orch = make_orchestrator_with_llm_and_agents(
-        router,
-        vec![make_agent("a1", vec!["web_search"])],
-    );
+    let orch =
+        make_orchestrator_with_llm_and_agents(router, vec![make_agent("a1", vec!["web_search"])]);
 
     let result = orch
         .handle_message(
@@ -637,8 +663,8 @@ fn make_orchestrator_with_tools_and_llm(
 #[tokio::test]
 async fn test_tool_intent_detected_and_executes() {
     use openalpaca_llm::{
-        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider,
-        ToolCall as LlmToolCall, Usage,
+        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, ToolCall as LlmToolCall,
+        Usage,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -718,8 +744,8 @@ async fn test_tool_intent_detected_and_executes() {
 #[tokio::test]
 async fn test_tool_max_rounds_enforcement() {
     use openalpaca_llm::{
-        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider,
-        ToolCall as LlmToolCall, Usage,
+        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, ToolCall as LlmToolCall,
+        Usage,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 

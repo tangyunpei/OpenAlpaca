@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use std::sync::Arc;
 

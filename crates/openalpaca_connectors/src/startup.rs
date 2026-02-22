@@ -36,8 +36,9 @@ impl ConnectorHandle {
         match self {
             #[cfg(feature = "telegram")]
             ConnectorHandle::Telegram(token) => {
-                // Ignore errors during shutdown
-                let _ = token.shutdown();
+                if let Ok(fut) = token.shutdown() {
+                    fut.await;
+                }
             }
             ConnectorHandle::None => {}
         }

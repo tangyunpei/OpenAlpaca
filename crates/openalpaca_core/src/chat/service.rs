@@ -94,7 +94,9 @@ impl ChatService {
                         connection_id: principal_owned.clone(),
                     },
                     content: user_content.clone(),
-                    principal: Principal::User { global_id: principal_owned.clone() },
+                    principal: Principal::User {
+                        global_id: principal_owned.clone(),
+                    },
                     scope: Scope::Global,
                 })
                 .await;
@@ -128,7 +130,11 @@ impl ChatService {
             }
 
             // Emit ChatStreamEnded event
-            let status = if response.is_error { "error" } else { "completed" };
+            let status = if response.is_error {
+                "error"
+            } else {
+                "completed"
+            };
             let _ = bus.publish(SystemEvent::ChatStreamEnded {
                 stream_id: sid.clone(),
                 lane_key: lk,

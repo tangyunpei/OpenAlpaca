@@ -42,9 +42,7 @@ pub struct PreferenceListResponse {
 // ── Handlers ──────────────────────────────────────────────────────
 
 /// GET /v1/preferences
-pub async fn list_preferences_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn list_preferences_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let repo = PreferenceRepository::new(&state.db);
 
     match repo.list_for_user(&state.local_user_id) {
@@ -60,10 +58,13 @@ pub async fn list_preferences_handler(
             let count = items.len();
             (
                 StatusCode::OK,
-                Json(serde_json::to_value(PreferenceListResponse {
-                    preferences: items,
-                    count,
-                }).unwrap()),
+                Json(
+                    serde_json::to_value(PreferenceListResponse {
+                        preferences: items,
+                        count,
+                    })
+                    .unwrap(),
+                ),
             )
         }
         Err(e) => (
@@ -83,11 +84,14 @@ pub async fn get_preference_handler(
     match repo.get(&state.local_user_id, &key) {
         Ok(Some(pref)) => (
             StatusCode::OK,
-            Json(serde_json::to_value(PreferenceResponse {
-                key: pref.key,
-                value: pref.value,
-                version: pref.version,
-            }).unwrap()),
+            Json(
+                serde_json::to_value(PreferenceResponse {
+                    key: pref.key,
+                    value: pref.value,
+                    version: pref.version,
+                })
+                .unwrap(),
+            ),
         ),
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -114,16 +118,16 @@ pub async fn set_preference_handler(
             match repo.get(&state.local_user_id, &key) {
                 Ok(Some(pref)) => (
                     StatusCode::OK,
-                    Json(serde_json::to_value(PreferenceResponse {
-                        key: pref.key,
-                        value: pref.value,
-                        version: pref.version,
-                    }).unwrap()),
+                    Json(
+                        serde_json::to_value(PreferenceResponse {
+                            key: pref.key,
+                            value: pref.value,
+                            version: pref.version,
+                        })
+                        .unwrap(),
+                    ),
                 ),
-                _ => (
-                    StatusCode::OK,
-                    Json(serde_json::json!({ "status": "ok" })),
-                ),
+                _ => (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))),
             }
         }
         Err(e) => {

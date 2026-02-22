@@ -1,18 +1,24 @@
 //! LLM Router: routes requests to the correct provider with key rotation,
 //! fallback chains, and cost tracking.
 
+use crate::LlmProvider;
 use crate::config::LlmRuntimeConfig;
 use crate::cost_tracker::{CallRecord, CostTracker};
 use crate::error::LlmError;
-use crate::key_pool::{ApiKey, CallResult, KeyPool, KeyPoolError, KeyStatus, ProviderType, SelectionStrategy};
+use crate::key_pool::{
+    ApiKey, CallResult, KeyPool, KeyPoolError, KeyStatus, ProviderType, SelectionStrategy,
+};
 use crate::model_registry::{ModelEntry, ModelInfo, ModelRegistry};
+use crate::rate_limiter::{
+    CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter,
+};
 use crate::types::*;
-use crate::LlmProvider;
-use tracing;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
+use tracing;
 
 /// Context for a router request (agent/task identification).
 #[derive(Debug, Clone, Default)]
@@ -25,7 +31,7 @@ pub struct RequestContext {
 pub struct RouterRequest {
     pub model: Option<String>,
     pub messages: Vec<ChatMessage>,
-    pub tools: Vec<ToolDefinition>,
+    pub tools: Arc<Vec<ToolDefinition>>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     pub context: RequestContext,
@@ -59,6 +65,25 @@ pub enum LlmRouterError {
     Llm(#[from] LlmError),
 }
 
+/// Structured LLM capacity information for adaptive concurrency decisions.
+///
+/// Returned by [`LlmRouter::estimated_llm_capacity`] so callers can base
+/// stagger delay on the raw key count and reserve slots for the lead agent.
+#[derive(Debug, Clone)]
+pub struct LlmCapacityInfo {
+    /// Number of API-compatible keys currently available (not in cooldown).
+    pub available_api_keys: usize,
+    /// Max concurrent calls allowed per key (from rate limiter config).
+    pub per_key_concurrency: usize,
+    /// `available_api_keys * per_key_concurrency`.
+    pub key_capacity: usize,
+    /// Whether a CLI fallback backend is registered for this provider.
+    pub has_cli_fallback: bool,
+    /// Effective parallel capacity: `min(key_capacity, global_available)`.
+    /// When `key_capacity == 0` and `has_cli_fallback`, this is 1 (fallback only).
+    pub effective_capacity: usize,
+}
+
 /// A provider entry with its key pool (swappable for hot-reload).
 pub struct ProviderEntry {
     pub provider: Arc<dyn LlmProvider>,
@@ -76,6 +101,11 @@ pub struct LlmRouter {
     cli_backends: DashMap<ProviderType, Arc<dyn LlmProvider>>,
     /// Hot-swappable runtime config (timeouts, endpoints, env vars, provider defaults).
     runtime_config: ArcSwap<LlmRuntimeConfig>,
+    /// Limits concurrent in-flight LLM API calls to prevent rate-limit stampedes
+    /// when parallel subagents all call the API simultaneously.
+    concurrency_limiter: Arc<Semaphore>,
+    /// Per-key rate limiters (RPM/TPM token buckets + concurrency) and circuit breaker.
+    rate_limiter_registry: Arc<RateLimiterRegistry>,
 }
 
 impl LlmRouter {
@@ -86,6 +116,7 @@ impl LlmRouter {
         cost_tracker: Arc<CostTracker>,
         default_model: String,
     ) -> Self {
+        let rate_config = RateLimitConfig::default();
         let dm = DashMap::new();
         for (k, v) in providers {
             dm.insert(k, v);
@@ -98,10 +129,12 @@ impl LlmRouter {
             default_model: ArcSwap::from_pointee(default_model),
             cli_backends: DashMap::new(),
             runtime_config: ArcSwap::from_pointee(LlmRuntimeConfig::default()),
+            concurrency_limiter: Arc::new(Semaphore::new(rate_config.global_concurrency)),
+            rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_config)),
         }
     }
 
-    /// Create a router with an explicit runtime config.
+    /// Create a router with an explicit runtime config and rate limit config.
     pub fn new_with_runtime(
         providers: HashMap<ProviderType, ProviderEntry>,
         model_registry: ModelRegistry,
@@ -109,6 +142,7 @@ impl LlmRouter {
         cost_tracker: Arc<CostTracker>,
         default_model: String,
         runtime_config: LlmRuntimeConfig,
+        rate_limit_config: RateLimitConfig,
     ) -> Self {
         let dm = DashMap::new();
         for (k, v) in providers {
@@ -122,6 +156,8 @@ impl LlmRouter {
             default_model: ArcSwap::from_pointee(default_model),
             cli_backends: DashMap::new(),
             runtime_config: ArcSwap::from_pointee(runtime_config),
+            concurrency_limiter: Arc::new(Semaphore::new(rate_limit_config.global_concurrency)),
+            rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_limit_config)),
         }
     }
 
@@ -132,7 +168,11 @@ impl LlmRouter {
         default_model: String,
     ) -> Self {
         let key_pool = KeyPool::new(
-            vec![ApiKey::new("default".to_string(), provider_type, String::new())],
+            vec![ApiKey::new(
+                "default".to_string(),
+                provider_type,
+                String::new(),
+            )],
             SelectionStrategy::RoundRobin,
         );
 
@@ -147,6 +187,7 @@ impl LlmRouter {
 
         let model_registry = ModelRegistry::with_defaults();
         let cost_tracker = Arc::new(CostTracker::new(ModelRegistry::with_defaults()));
+        let rate_config = RateLimitConfig::default();
 
         Self {
             providers,
@@ -156,6 +197,8 @@ impl LlmRouter {
             default_model: ArcSwap::from_pointee(default_model),
             cli_backends: DashMap::new(),
             runtime_config: ArcSwap::from_pointee(LlmRuntimeConfig::default()),
+            concurrency_limiter: Arc::new(Semaphore::new(rate_config.global_concurrency)),
+            rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_config)),
         }
     }
 
@@ -226,11 +269,7 @@ impl LlmRouter {
     }
 
     /// Register a CLI backend for fallback.
-    pub fn register_cli_backend(
-        &self,
-        provider_type: ProviderType,
-        backend: Arc<dyn LlmProvider>,
-    ) {
+    pub fn register_cli_backend(&self, provider_type: ProviderType, backend: Arc<dyn LlmProvider>) {
         self.cli_backends.insert(provider_type, backend);
     }
 
@@ -242,6 +281,67 @@ impl LlmRouter {
     /// Check if a CLI backend is registered for a provider type.
     pub fn has_cli_backend(&self, provider_type: ProviderType) -> bool {
         self.cli_backends.contains_key(&provider_type)
+    }
+
+    /// Estimate the parallel LLM capacity given the current state of API keys
+    /// and rate limiters.
+    ///
+    /// Returns a [`LlmCapacityInfo`] struct so callers can base stagger delay
+    /// on the raw key count and reserve slots for the lead agent.
+    ///
+    /// CLI fallback is **not** counted as parallel bandwidth — it is only used
+    /// when all API keys are exhausted (see `try_fallback()`). When
+    /// `key_capacity == 0` and a CLI backend exists, `effective_capacity` is 1
+    /// so at least one subagent can proceed via fallback.
+    ///
+    /// Used by `SpawnSubagentTool` to dynamically reduce parallelism when
+    /// the number of available API keys cannot support `max_concurrent_subagents`.
+    pub async fn estimated_llm_capacity(&self, model: Option<&str>) -> LlmCapacityInfo {
+        let zero = LlmCapacityInfo {
+            available_api_keys: 0,
+            per_key_concurrency: 0,
+            key_capacity: 0,
+            has_cli_fallback: false,
+            effective_capacity: 0,
+        };
+
+        let default = self.default_model();
+        let model_id = model.unwrap_or(&default);
+
+        let provider_type = match self.model_registry.resolve_provider(model_id) {
+            Some(pt) => pt,
+            None => return zero,
+        };
+
+        let available_keys = match self.providers.get(&provider_type) {
+            Some(entry) => {
+                let pool = entry.value().key_pool.load();
+                pool.available_api_key_count().await
+            }
+            None => return zero,
+        };
+
+        let per_key = self.rate_limiter_registry.config().per_key_concurrency;
+        let key_capacity = available_keys * per_key;
+        let has_cli_fallback = self.cli_backends.contains_key(&provider_type);
+
+        let effective_capacity = if key_capacity > 0 {
+            let global_available = self.concurrency_limiter.available_permits();
+            key_capacity.min(global_available)
+        } else if has_cli_fallback {
+            // All keys exhausted but CLI fallback can handle 1 request
+            1
+        } else {
+            0
+        };
+
+        LlmCapacityInfo {
+            available_api_keys: available_keys,
+            per_key_concurrency: per_key,
+            key_capacity,
+            has_cli_fallback,
+            effective_capacity,
+        }
     }
 
     /// List models confirmed by provider API refresh (for GUI dropdowns).
@@ -269,12 +369,14 @@ impl LlmRouter {
                 Ok(guard) => guard.secret.clone(),
                 Err(_) => {
                     // No API-compatible key — fall back to hardcoded defaults
-                    let count = self.model_registry
+                    let count = self
+                        .model_registry
                         .mark_defaults_discovered_for_provider(provider_type);
                     if count > 0 {
                         tracing::info!(
                             "No API key for {:?}, marked {} default models as discovered",
-                            provider_type, count
+                            provider_type,
+                            count
                         );
                     }
                     continue;
@@ -285,11 +387,13 @@ impl LlmRouter {
                 Ok(model_ids) => {
                     let count = model_ids.len();
                     if count == 0 {
-                        let dc = self.model_registry
+                        let dc = self
+                            .model_registry
                             .mark_defaults_discovered_for_provider(provider_type);
                         tracing::info!(
                             "Provider {:?} returned 0 models, marked {} defaults",
-                            provider_type, dc
+                            provider_type,
+                            dc
                         );
                         continue;
                     }
@@ -323,7 +427,10 @@ impl LlmRouter {
         provider_type: ProviderType,
         key: &str,
     ) -> Result<Vec<String>, LlmError> {
-        let entry = self.providers.get(&provider_type).ok_or(LlmError::NotConfigured)?;
+        let entry = self
+            .providers
+            .get(&provider_type)
+            .ok_or(LlmError::NotConfigured)?;
         entry.value().provider.list_models_with_key(key).await
     }
 
@@ -342,11 +449,45 @@ impl LlmRouter {
         let default = self.default_model();
         let model = request.model.as_deref().unwrap_or(&default);
 
+        // Acquire concurrency permit — limits parallel in-flight API calls
+        // to prevent rate-limit stampedes from parallel subagents.
+        let _permit = self
+            .concurrency_limiter
+            .acquire()
+            .await
+            .map_err(|_| LlmRouterError::MaxRetriesExceeded)?;
+
         match self.try_model(model, &request).await {
             Ok(response) => Ok(response),
-            Err(LlmRouterError::AllKeysRateLimited)
-            | Err(LlmRouterError::MaxRetriesExceeded)
-            | Err(LlmRouterError::NoApiCompatibleKeys) => {
+            Err(LlmRouterError::NoApiCompatibleKeys) => {
+                tracing::warn!(
+                    model = model,
+                    "No API-compatible keys configured (only managed/OAuth tokens). \
+                     Add an API key (sk-ant-api*) to avoid CLI fallback. Trying fallback chain."
+                );
+                self.try_fallback(model, &request).await
+            }
+            Err(LlmRouterError::AllKeysRateLimited) => {
+                tracing::warn!(
+                    model = model,
+                    "All API keys are rate-limited. Trying fallback chain."
+                );
+                self.try_fallback(model, &request).await
+            }
+            Err(LlmRouterError::MaxRetriesExceeded) => {
+                tracing::warn!(
+                    model = model,
+                    "Max retries exceeded across all keys. Trying fallback chain."
+                );
+                self.try_fallback(model, &request).await
+            }
+            // Transient errors (529 Overloaded, 500+) should also try fallback models
+            Err(LlmRouterError::Llm(ref llm_err)) if llm_err.is_transient() => {
+                tracing::warn!(
+                    model = model,
+                    error = %llm_err,
+                    "Transient API error. Trying fallback chain."
+                );
                 self.try_fallback(model, &request).await
             }
             Err(e) => Err(e),
@@ -378,80 +519,150 @@ impl LlmRouter {
         model: &str,
         request: &RouterRequest,
     ) -> Result<ChatResponse, LlmRouterError> {
+        // 1. Check global circuit breaker
+        if let Err(CircuitState::Open) = self.rate_limiter_registry.check_circuit().await {
+            tracing::warn!(
+                model = model,
+                "Circuit breaker is Open — failing fast without calling API"
+            );
+            return Err(LlmRouterError::MaxRetriesExceeded);
+        }
+
         let pool = entry.key_pool.load();
-        let max_retries = pool.len().max(1);
+        let rate_config = self.rate_limiter_registry.config();
+        let max_retries = pool.len().max(rate_config.max_transient_retries);
+        let estimated_tokens = estimate_request_tokens(request);
+        let backoff_base = std::time::Duration::from_millis(rate_config.backoff_base_ms);
+        let backoff_cap = std::time::Duration::from_millis(rate_config.backoff_cap_ms);
 
-        for _attempt in 0..max_retries {
-            let key_guard = pool
-                .acquire()
-                .await
-                .map_err(|e| match e {
-                    KeyPoolError::NoApiCompatibleKeys => LlmRouterError::NoApiCompatibleKeys,
-                    _ => LlmRouterError::AllKeysRateLimited,
-                })?;
+        // Allow up to 2 rate-limit wait cycles before giving up.
+        let mut rate_limit_waits = 0;
+        const MAX_RATE_LIMIT_WAITS: u32 = 2;
+        const MAX_RATE_LIMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-            let chat_request = ChatRequest {
-                messages: request.messages.clone(),
-                tools: request.tools.clone(),
-                model: Some(model.to_string()),
-                temperature: request.temperature,
-                max_tokens: request.max_tokens,
-            };
+        loop {
+            for attempt in 0..max_retries {
+                let key_guard = match pool.acquire().await {
+                    Ok(guard) => guard,
+                    Err(KeyPoolError::NoApiCompatibleKeys) => {
+                        return Err(LlmRouterError::NoApiCompatibleKeys);
+                    }
+                    Err(_) => {
+                        // AllKeysRateLimited — break to the wait-for-cooldown logic below
+                        break;
+                    }
+                };
 
-            match entry
-                .provider
-                .chat_with_key(&key_guard.secret, chat_request)
-                .await
-            {
-                Ok(response) => {
-                    pool.report_result(&key_guard.id, CallResult::Success)
+                // 2. Per-key rate limiting: concurrency + RPM + TPM token buckets
+                let key_limiter = self
+                    .rate_limiter_registry
+                    .get_or_create(&key_guard.id, key_guard.rate_limit);
+                let _key_permit = key_limiter.acquire(estimated_tokens).await;
+
+                let chat_request = ChatRequest {
+                    messages: request.messages.clone(),
+                    tools: (*request.tools).clone(),
+                    model: Some(model.to_string()),
+                    temperature: request.temperature,
+                    max_tokens: request.max_tokens,
+                };
+
+                match entry
+                    .provider
+                    .chat_with_key(&key_guard.secret, chat_request)
+                    .await
+                {
+                    Ok(response) => {
+                        pool.report_result(&key_guard.id, CallResult::Success).await;
+                        self.rate_limiter_registry.report_success().await;
+
+                        // Record cost
+                        let cost = self.cost_tracker.calculate_cost(
+                            model,
+                            response.usage.input_tokens,
+                            response.usage.output_tokens,
+                        );
+                        let record = CallRecord {
+                            agent_id: request
+                                .context
+                                .agent_id
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            task_id: request.context.task_id.clone(),
+                            model: model.to_string(),
+                            input_tokens: response.usage.input_tokens,
+                            output_tokens: response.usage.output_tokens,
+                            cost_usd: cost,
+                        };
+                        self.cost_tracker.record(&record).await;
+
+                        return Ok(response);
+                    }
+                    Err(LlmError::RateLimited { retry_after_ms }) => {
+                        pool.report_result(
+                            &key_guard.id,
+                            CallResult::RateLimited { retry_after_ms },
+                        )
                         .await;
+                        self.rate_limiter_registry.report_failure().await;
+                        // Try next key — token bucket naturally throttles re-requests
+                        continue;
+                    }
+                    Err(e) if e.is_auth_error() => {
+                        tracing::warn!(
+                            "Authentication error for key '{}', trying next key",
+                            key_guard.id
+                        );
+                        pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
+                            .await;
+                        continue;
+                    }
+                    Err(e) if e.is_transient() => {
+                        // Exponential backoff with full jitter
+                        let backoff =
+                            backoff_with_jitter(backoff_base, attempt as u32, backoff_cap);
+                        tracing::warn!(
+                            model = model,
+                            error = %e,
+                            attempt = attempt,
+                            backoff_ms = backoff.as_millis() as u64,
+                            "Transient LLM error, retrying with exponential backoff"
+                        );
+                        pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
+                            .await;
+                        self.rate_limiter_registry.report_failure().await;
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    Err(e) => {
+                        pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
+                            .await;
+                        self.rate_limiter_registry.report_failure().await;
+                        return Err(LlmRouterError::Llm(e));
+                    }
+                }
+            }
 
-                    // Record cost
-                    let cost = self.cost_tracker.calculate_cost(
-                        model,
-                        response.usage.input_tokens,
-                        response.usage.output_tokens,
-                    );
-                    let record = CallRecord {
-                        agent_id: request
-                            .context
-                            .agent_id
-                            .clone()
-                            .unwrap_or_else(|| "unknown".to_string()),
-                        task_id: request.context.task_id.clone(),
-                        model: model.to_string(),
-                        input_tokens: response.usage.input_tokens,
-                        output_tokens: response.usage.output_tokens,
-                        cost_usd: cost,
-                    };
-                    self.cost_tracker.record(&record).await;
+            // All keys exhausted or rate-limited — wait for cooldown if we haven't exceeded wait limit
+            if rate_limit_waits >= MAX_RATE_LIMIT_WAITS {
+                break;
+            }
 
-                    return Ok(response);
-                }
-                Err(LlmError::RateLimited { retry_after_ms }) => {
-                    pool.report_result(
-                        &key_guard.id,
-                        CallResult::RateLimited { retry_after_ms },
-                    )
-                    .await;
-                    // Try next key
-                    continue;
-                }
-                Err(e) if e.is_auth_error() => {
-                    tracing::warn!(
-                        "Authentication error for key '{}', trying next key",
-                        key_guard.id
-                    );
-                    pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
-                        .await;
-                    continue;
-                }
-                Err(e) => {
-                    pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
-                        .await;
-                    return Err(LlmRouterError::Llm(e));
-                }
+            if let Some(cooldown) = pool.shortest_cooldown().await {
+                let wait = cooldown.min(MAX_RATE_LIMIT_WAIT);
+                tracing::info!(
+                    model = model,
+                    wait_secs = wait.as_secs(),
+                    attempt = rate_limit_waits + 1,
+                    max_attempts = MAX_RATE_LIMIT_WAITS,
+                    "All keys rate-limited, waiting for cooldown before retry"
+                );
+                tokio::time::sleep(wait).await;
+                rate_limit_waits += 1;
+                continue;
+            } else {
+                // No cooldowns active — keys are genuinely exhausted
+                break;
             }
         }
 
@@ -475,44 +686,102 @@ impl LlmRouter {
 
         // 2. Try CLI backend fallback
         let provider_type = self.model_registry.resolve_provider(original_model);
-        if let Some(pt) = provider_type {
-            if let Some(cli_backend) = self.cli_backends.get(&pt) {
-                tracing::info!("Falling back to CLI backend for {:?}", pt);
-                let flattened = flatten_messages(&request.messages);
-                let cli_request = ChatRequest {
-                    messages: vec![ChatMessage::user(&flattened)],
-                    tools: vec![],
-                    model: Some(original_model.to_string()),
-                    temperature: request.temperature,
-                    max_tokens: request.max_tokens,
-                };
-                match cli_backend.chat(cli_request).await {
-                    Ok(response) => {
-                        // Record with zero cost (CLI fallback)
-                        let record = CallRecord {
-                            agent_id: request
-                                .context
-                                .agent_id
-                                .clone()
-                                .unwrap_or_else(|| "unknown".to_string()),
-                            task_id: request.context.task_id.clone(),
-                            model: format!("{}_cli", original_model),
-                            input_tokens: 0,
-                            output_tokens: 0,
-                            cost_usd: 0.0,
-                        };
-                        self.cost_tracker.record(&record).await;
-                        return Ok(response);
-                    }
-                    Err(e) => {
-                        tracing::warn!("CLI backend fallback failed for {:?}: {}", pt, e);
-                    }
+        if let Some(pt) = provider_type
+            && let Some(cli_backend) = self.cli_backends.get(&pt)
+        {
+            tracing::info!("Falling back to CLI backend for {:?}", pt);
+            let truncated = truncate_messages_for_cli(&request.messages);
+            let flattened = flatten_messages(&truncated);
+            let cli_request = ChatRequest {
+                messages: vec![ChatMessage::user(&flattened)],
+                tools: vec![],
+                model: Some(original_model.to_string()),
+                temperature: request.temperature,
+                max_tokens: request.max_tokens,
+            };
+            match cli_backend.chat(cli_request).await {
+                Ok(response) => {
+                    // Record with zero cost (CLI fallback)
+                    let record = CallRecord {
+                        agent_id: request
+                            .context
+                            .agent_id
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        task_id: request.context.task_id.clone(),
+                        model: format!("{}_cli", original_model),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cost_usd: 0.0,
+                    };
+                    self.cost_tracker.record(&record).await;
+                    return Ok(response);
+                }
+                Err(e) => {
+                    tracing::warn!("CLI backend fallback failed for {:?}: {}", pt, e);
                 }
             }
         }
 
         Err(LlmRouterError::AllFallbacksFailed)
     }
+}
+
+/// Rough estimate of tokens in a request.
+///
+/// Uses 1 token ≈ 4 bytes heuristic. Intentionally overestimates slightly,
+/// which is the safe direction for rate limiting (better to be conservative
+/// than to exceed TPM limits).
+fn estimate_request_tokens(request: &RouterRequest) -> u32 {
+    let msg_bytes: usize = request.messages.iter().map(|m| m.content.len()).sum();
+    let tool_bytes: usize = request
+        .tools
+        .iter()
+        .map(|t| t.description.len() + t.parameters.to_string().len())
+        .sum();
+    ((msg_bytes + tool_bytes) / 4).max(100) as u32
+}
+
+/// Maximum prompt size (in bytes) for CLI backend fallback.
+/// CLI backends shell out to `claude -p "..."` which is slow on large prompts.
+const CLI_MAX_PROMPT_BYTES: usize = 16 * 1024;
+
+/// Truncate a message history for CLI fallback to avoid timeouts.
+///
+/// Keeps the first message (system prompt) and the last 2 messages (most recent context),
+/// dropping middle messages when the total flattened size exceeds `CLI_MAX_PROMPT_BYTES`.
+pub fn truncate_messages_for_cli(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    if messages.is_empty() {
+        return vec![];
+    }
+
+    let total_size: usize = messages.iter().map(|m| m.content.len() + 20).sum();
+    if total_size <= CLI_MAX_PROMPT_BYTES {
+        return messages.to_vec();
+    }
+
+    let mut result = Vec::new();
+
+    // Always keep the first message (system prompt)
+    result.push(messages[0].clone());
+
+    // Keep the last 2 messages (most recent context)
+    let kept_tail = 2.min(messages.len().saturating_sub(1));
+    let dropped = messages.len().saturating_sub(1 + kept_tail);
+
+    if dropped > 0 {
+        result.push(ChatMessage::user(&format!(
+            "[... {} earlier messages omitted for CLI fallback (total history was {}KB) ...]",
+            dropped,
+            total_size / 1024,
+        )));
+    }
+
+    for msg in messages.iter().rev().take(kept_tail).rev() {
+        result.push(msg.clone());
+    }
+
+    result
 }
 
 /// Flatten messages into a single prompt string for CLI backends.
@@ -579,10 +848,17 @@ mod tests {
             if idx < self.responses.len() {
                 self.responses[idx].clone()
             } else {
-                self.responses.last().cloned().unwrap_or(Err(LlmError::NotConfigured))
+                self.responses
+                    .last()
+                    .cloned()
+                    .unwrap_or(Err(LlmError::NotConfigured))
             }
         }
-        async fn chat_with_key(&self, _key: &str, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        async fn chat_with_key(
+            &self,
+            _key: &str,
+            request: ChatRequest,
+        ) -> Result<ChatResponse, LlmError> {
             self.chat(request).await
         }
     }
@@ -591,7 +867,7 @@ mod tests {
         RouterRequest {
             model: model.map(|m| m.to_string()),
             messages: vec![ChatMessage::user("test")],
-            tools: vec![],
+            tools: Arc::new(vec![]),
             temperature: None,
             max_tokens: None,
             context: RequestContext::default(),
@@ -629,15 +905,25 @@ mod tests {
         let provider = Arc::new(MockProvider::new(
             "anthropic",
             vec![
-                Err(LlmError::RateLimited { retry_after_ms: 1000 }),
+                Err(LlmError::RateLimited {
+                    retry_after_ms: 1000,
+                }),
                 Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929")),
             ],
         ));
 
         let key_pool = KeyPool::new(
             vec![
-                ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string()),
-                ApiKey::new("k2".to_string(), ProviderType::Anthropic, "sk-2".to_string()),
+                ApiKey::new(
+                    "k1".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-1".to_string(),
+                ),
+                ApiKey::new(
+                    "k2".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-2".to_string(),
+                ),
             ],
             SelectionStrategy::RoundRobin,
         );
@@ -668,7 +954,9 @@ mod tests {
         // Anthropic provider always rate-limits
         let anthropic = Arc::new(MockProvider::new(
             "anthropic",
-            vec![Err(LlmError::RateLimited { retry_after_ms: 1000 })],
+            vec![Err(LlmError::RateLimited {
+                retry_after_ms: 1000,
+            })],
         ));
         let openai = Arc::new(MockProvider::new(
             "openai",
@@ -681,7 +969,11 @@ mod tests {
             ProviderEntry {
                 provider: anthropic,
                 key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
-                    vec![ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string())],
+                    vec![ApiKey::new(
+                        "k1".to_string(),
+                        ProviderType::Anthropic,
+                        "sk-1".to_string(),
+                    )],
                     SelectionStrategy::RoundRobin,
                 ))),
             },
@@ -691,7 +983,11 @@ mod tests {
             ProviderEntry {
                 provider: openai,
                 key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
-                    vec![ApiKey::new("k1".to_string(), ProviderType::OpenAI, "sk-1".to_string())],
+                    vec![ApiKey::new(
+                        "k1".to_string(),
+                        ProviderType::OpenAI,
+                        "sk-1".to_string(),
+                    )],
                     SelectionStrategy::RoundRobin,
                 ))),
             },
@@ -757,11 +1053,17 @@ mod tests {
     async fn test_all_failed_no_fallback() {
         let provider = Arc::new(MockProvider::new(
             "anthropic",
-            vec![Err(LlmError::RateLimited { retry_after_ms: 1000 })],
+            vec![Err(LlmError::RateLimited {
+                retry_after_ms: 1000,
+            })],
         ));
 
         let key_pool = KeyPool::new(
-            vec![ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string())],
+            vec![ApiKey::new(
+                "k1".to_string(),
+                ProviderType::Anthropic,
+                "sk-1".to_string(),
+            )],
             SelectionStrategy::RoundRobin,
         );
 
@@ -797,7 +1099,11 @@ mod tests {
         ));
 
         let key_pool = KeyPool::new(
-            vec![ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string())],
+            vec![ApiKey::new(
+                "k1".to_string(),
+                ProviderType::Anthropic,
+                "sk-1".to_string(),
+            )],
             SelectionStrategy::RoundRobin,
         );
 
@@ -825,8 +1131,16 @@ mod tests {
         // Hot-reload with new key pool
         let new_pool = KeyPool::new(
             vec![
-                ApiKey::new("k_new_1".to_string(), ProviderType::Anthropic, "sk-new-1".to_string()),
-                ApiKey::new("k_new_2".to_string(), ProviderType::Anthropic, "sk-new-2".to_string()),
+                ApiKey::new(
+                    "k_new_1".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-new-1".to_string(),
+                ),
+                ApiKey::new(
+                    "k_new_2".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-new-2".to_string(),
+                ),
             ],
             SelectionStrategy::RoundRobin,
         );
@@ -848,7 +1162,11 @@ mod tests {
             vec![Ok(MockProvider::ok_response("gpt-5.2"))],
         ));
         let pool = KeyPool::new(
-            vec![ApiKey::new("k1".to_string(), ProviderType::OpenAI, "sk-1".to_string())],
+            vec![ApiKey::new(
+                "k1".to_string(),
+                ProviderType::OpenAI,
+                "sk-1".to_string(),
+            )],
             SelectionStrategy::RoundRobin,
         );
 
@@ -860,9 +1178,16 @@ mod tests {
             "gpt-5.2".to_string(),
         );
 
-        assert!(!router.reload_keys(ProviderType::OpenAI, KeyPool::new(vec![], SelectionStrategy::RoundRobin)));
+        assert!(!router.reload_keys(
+            ProviderType::OpenAI,
+            KeyPool::new(vec![], SelectionStrategy::RoundRobin)
+        ));
         assert!(router.register_provider(ProviderType::OpenAI, provider, pool));
-        assert!(router.configured_providers().contains(&ProviderType::OpenAI));
+        assert!(
+            router
+                .configured_providers()
+                .contains(&ProviderType::OpenAI)
+        );
     }
 
     #[tokio::test]
@@ -870,7 +1195,9 @@ mod tests {
         // API provider always rate-limits
         let api_provider = Arc::new(MockProvider::new(
             "anthropic",
-            vec![Err(LlmError::RateLimited { retry_after_ms: 1000 })],
+            vec![Err(LlmError::RateLimited {
+                retry_after_ms: 1000,
+            })],
         ));
         let cli_provider = Arc::new(MockProvider::new(
             "claude_cli",
@@ -883,7 +1210,11 @@ mod tests {
             ProviderEntry {
                 provider: api_provider,
                 key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
-                    vec![ApiKey::new("k1".to_string(), ProviderType::Anthropic, "sk-1".to_string())],
+                    vec![ApiKey::new(
+                        "k1".to_string(),
+                        ProviderType::Anthropic,
+                        "sk-1".to_string(),
+                    )],
                     SelectionStrategy::RoundRobin,
                 ))),
             },
@@ -934,14 +1265,24 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for KeyAwareMockProvider {
-        fn name(&self) -> &str { "key_aware_mock" }
-        fn supports_tools(&self) -> bool { false }
+        fn name(&self) -> &str {
+            "key_aware_mock"
+        }
+        fn supports_tools(&self) -> bool {
+            false
+        }
         async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
             Err(LlmError::NotConfigured)
         }
-        async fn chat_with_key(&self, key: &str, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
+        async fn chat_with_key(
+            &self,
+            key: &str,
+            _req: ChatRequest,
+        ) -> Result<ChatResponse, LlmError> {
             if key.starts_with("sk-ant-oat") {
-                Err(LlmError::AuthenticationFailed("managed token cannot auth against HTTP API".into()))
+                Err(LlmError::AuthenticationFailed(
+                    "managed token cannot auth against HTTP API".into(),
+                ))
             } else {
                 Ok(MockProvider::ok_response("claude-haiku"))
             }
@@ -958,10 +1299,7 @@ mod tests {
         );
         managed_key.source = crate::key_pool::KeySource::ClaudeCode;
 
-        let key_pool = KeyPool::new(
-            vec![managed_key],
-            SelectionStrategy::RoundRobin,
-        );
+        let key_pool = KeyPool::new(vec![managed_key], SelectionStrategy::RoundRobin);
 
         let key_aware = Arc::new(KeyAwareMockProvider);
         let cli_provider = Arc::new(MockProvider::new(
@@ -1011,10 +1349,7 @@ mod tests {
         );
         api_key.source = crate::key_pool::KeySource::ApiConsole;
 
-        let key_pool = KeyPool::new(
-            vec![managed_key, api_key],
-            SelectionStrategy::RoundRobin,
-        );
+        let key_pool = KeyPool::new(vec![managed_key, api_key], SelectionStrategy::RoundRobin);
 
         let key_aware = Arc::new(KeyAwareMockProvider);
 
@@ -1045,13 +1380,322 @@ mod tests {
     #[test]
     fn test_flatten_messages() {
         let messages = vec![
-            ChatMessage { role: Role::System, content: "You are helpful.".to_string(), tool_calls: None, tool_call_id: None },
+            ChatMessage {
+                role: Role::System,
+                content: "You are helpful.".to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+            },
             ChatMessage::user("Hello"),
-            ChatMessage { role: Role::Assistant, content: "Hi!".to_string(), tool_calls: None, tool_call_id: None },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "Hi!".to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+            },
         ];
         let flattened = flatten_messages(&messages);
         assert!(flattened.contains("[System] You are helpful."));
         assert!(flattened.contains("Hello"));
         assert!(flattened.contains("[Assistant] Hi!"));
+    }
+
+    #[test]
+    fn test_truncate_messages_for_cli_small_input() {
+        let messages = vec![
+            ChatMessage {
+                role: Role::System,
+                content: "System prompt".to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage::user("Hello"),
+            ChatMessage {
+                role: Role::Assistant,
+                content: "Hi!".to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+        let result = truncate_messages_for_cli(&messages);
+        // Small input — no truncation needed
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].content, "System prompt");
+        assert_eq!(result[1].content, "Hello");
+        assert_eq!(result[2].content, "Hi!");
+    }
+
+    #[test]
+    fn test_truncate_messages_for_cli_large_input() {
+        let big_content = "x".repeat(8 * 1024); // 8KB per message
+        let messages = vec![
+            ChatMessage {
+                role: Role::System,
+                content: "System prompt".to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage::user(&big_content), // middle — should be dropped
+            ChatMessage {
+                role: Role::Assistant,
+                content: big_content.clone(),
+                tool_calls: None,
+                tool_call_id: None,
+            }, // middle — should be dropped
+            ChatMessage::user(&big_content), // middle — should be dropped
+            ChatMessage {
+                role: Role::Tool,
+                content: "tool result".to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+            }, // second-to-last — kept
+            ChatMessage::user("What next?"), // last — kept
+        ];
+        // Total > 16KB, so truncation should fire
+        let result = truncate_messages_for_cli(&messages);
+        // Should keep: system (1) + omission notice (1) + last 2 (2) = 4
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].content, "System prompt");
+        assert!(result[1].content.contains("earlier messages omitted"));
+        assert_eq!(result[2].content, "tool result");
+        assert_eq!(result[3].content, "What next?");
+    }
+
+    #[test]
+    fn test_truncate_messages_for_cli_empty() {
+        let result = truncate_messages_for_cli(&[]);
+        assert!(result.is_empty());
+    }
+
+    // ── estimated_llm_capacity tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_estimated_llm_capacity_single_key() {
+        // Single provider, single key, default rate config (per_key_concurrency=2, global=4)
+        let provider = Arc::new(MockProvider::new(
+            "anthropic",
+            vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+        ));
+        let router = make_router_with_mock(
+            provider,
+            ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929",
+        );
+
+        // 1 available key * 5 per-key concurrency = 5, capped by global (10) = 5
+        let info = router.estimated_llm_capacity(None).await;
+        assert_eq!(info.available_api_keys, 1);
+        assert_eq!(info.per_key_concurrency, 5);
+        assert_eq!(info.key_capacity, 5);
+        assert!(!info.has_cli_fallback);
+        assert_eq!(info.effective_capacity, 5);
+    }
+
+    #[tokio::test]
+    async fn test_estimated_llm_capacity_multiple_keys() {
+        let provider = Arc::new(MockProvider::new(
+            "anthropic",
+            vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+        ));
+
+        let key_pool = KeyPool::new(
+            vec![
+                ApiKey::new(
+                    "k1".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-1".to_string(),
+                ),
+                ApiKey::new(
+                    "k2".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-2".to_string(),
+                ),
+                ApiKey::new(
+                    "k3".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-3".to_string(),
+                ),
+            ],
+            SelectionStrategy::RoundRobin,
+        );
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            ProviderType::Anthropic,
+            ProviderEntry {
+                provider,
+                key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+            },
+        );
+
+        let router = LlmRouter::new(
+            providers,
+            ModelRegistry::with_defaults(),
+            HashMap::new(),
+            Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+
+        // 3 keys * 5 per-key = 15, capped by global concurrency (10) = 10
+        let info = router.estimated_llm_capacity(None).await;
+        assert_eq!(info.available_api_keys, 3);
+        assert_eq!(info.key_capacity, 15);
+        assert!(!info.has_cli_fallback);
+        assert_eq!(info.effective_capacity, 10);
+    }
+
+    #[tokio::test]
+    async fn test_estimated_llm_capacity_rate_limited_keys() {
+        let provider = Arc::new(MockProvider::new(
+            "anthropic",
+            vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+        ));
+
+        let key_pool = KeyPool::new(
+            vec![
+                ApiKey::new(
+                    "k1".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-1".to_string(),
+                ),
+                ApiKey::new(
+                    "k2".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-2".to_string(),
+                ),
+            ],
+            SelectionStrategy::RoundRobin,
+        );
+
+        // Rate-limit one key
+        key_pool
+            .report_result(
+                "k1",
+                CallResult::RateLimited {
+                    retry_after_ms: 60_000,
+                },
+            )
+            .await;
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            ProviderType::Anthropic,
+            ProviderEntry {
+                provider,
+                key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+            },
+        );
+
+        let router = LlmRouter::new(
+            providers,
+            ModelRegistry::with_defaults(),
+            HashMap::new(),
+            Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+
+        // 1 available key * 5 per-key = 5, capped by global (10) = 5
+        let info = router.estimated_llm_capacity(None).await;
+        assert_eq!(info.available_api_keys, 1);
+        assert_eq!(info.key_capacity, 5);
+        assert_eq!(info.effective_capacity, 5);
+    }
+
+    #[tokio::test]
+    async fn test_estimated_llm_capacity_unknown_model() {
+        let provider = Arc::new(MockProvider::new("anthropic", vec![]));
+        let router = make_router_with_mock(
+            provider,
+            ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929",
+        );
+
+        let info = router
+            .estimated_llm_capacity(Some("nonexistent-model"))
+            .await;
+        assert_eq!(info.effective_capacity, 0);
+        assert_eq!(info.available_api_keys, 0);
+    }
+
+    #[tokio::test]
+    async fn test_estimated_llm_capacity_with_cli_fallback() {
+        // Single key + CLI backend: CLI is fallback-only, NOT added to parallel capacity
+        let provider = Arc::new(MockProvider::new(
+            "anthropic",
+            vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+        ));
+        let cli_provider = Arc::new(MockProvider::new(
+            "claude_cli",
+            vec![Ok(MockProvider::ok_response("claude_cli"))],
+        ));
+
+        let router = make_router_with_mock(
+            provider,
+            ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929",
+        );
+        router.register_cli_backend(ProviderType::Anthropic, cli_provider);
+
+        // 1 key * 5 per-key = 5, CLI NOT counted as parallel bandwidth
+        let info = router.estimated_llm_capacity(None).await;
+        assert_eq!(info.available_api_keys, 1);
+        assert_eq!(info.key_capacity, 5);
+        assert!(info.has_cli_fallback);
+        assert_eq!(info.effective_capacity, 5);
+    }
+
+    #[tokio::test]
+    async fn test_estimated_llm_capacity_all_keys_limited_with_cli() {
+        // All keys rate-limited but CLI available — CLI provides fallback capacity of 1
+        let provider = Arc::new(MockProvider::new(
+            "anthropic",
+            vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
+        ));
+        let cli_provider = Arc::new(MockProvider::new(
+            "claude_cli",
+            vec![Ok(MockProvider::ok_response("claude_cli"))],
+        ));
+
+        let key_pool = KeyPool::new(
+            vec![ApiKey::new(
+                "k1".to_string(),
+                ProviderType::Anthropic,
+                "sk-1".to_string(),
+            )],
+            SelectionStrategy::RoundRobin,
+        );
+        key_pool
+            .report_result(
+                "k1",
+                CallResult::RateLimited {
+                    retry_after_ms: 60_000,
+                },
+            )
+            .await;
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            ProviderType::Anthropic,
+            ProviderEntry {
+                provider,
+                key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+            },
+        );
+
+        let router = LlmRouter::new(
+            providers,
+            ModelRegistry::with_defaults(),
+            HashMap::new(),
+            Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+        router.register_cli_backend(ProviderType::Anthropic, cli_provider);
+
+        // 0 available keys, CLI fallback = effective capacity 1
+        let info = router.estimated_llm_capacity(None).await;
+        assert_eq!(info.available_api_keys, 0);
+        assert_eq!(info.key_capacity, 0);
+        assert!(info.has_cli_fallback);
+        assert_eq!(info.effective_capacity, 1);
     }
 }

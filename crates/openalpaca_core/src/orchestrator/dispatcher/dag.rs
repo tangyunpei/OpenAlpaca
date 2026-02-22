@@ -1,15 +1,19 @@
-use super::{TaskDispatcher, format_task_result, spawn_task_memory_extraction};
-use crate::agent::subagent::AgentStatus;
+use super::super::task_planner::TaskDag;
+use super::{
+    TaskDispatcher, finalize_task, format_task_result, persist_conversation,
+    spawn_task_memory_extraction,
+};
+use crate::agent::registry::DestroyOutcome;
 use crate::context::{DagSummary, TaskEntryStatus};
 use crate::events::SystemEvent;
 use crate::runner::dag_executor::{DagExecutorConfig, DagFinishReason, execute_dag};
 use chrono::Utc;
-use openalpaca_storage::{ConversationMessage, ConversationRepository};
-use super::super::task_planner::TaskDag;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 impl TaskDispatcher {
     /// Spawn DAG-parallel execution: independent nodes run concurrently.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_dag_execution(
         &self,
         task_id: String,
@@ -21,15 +25,8 @@ impl TaskDispatcher {
         source: String,
         workspace_id: Option<String>,
     ) {
-        let router = match &self.llm_router {
-            Some(r) => r.clone(),
-            None => {
-                tracing::warn!(
-                    "No LLM router configured — cannot execute DAG for task '{}'",
-                    task_id
-                );
-                return;
-            }
+        let Some(router) = self.require_router(&task_id) else {
+            return;
         };
 
         let bus = self.bus.clone();
@@ -39,12 +36,17 @@ impl TaskDispatcher {
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
 
+        // Create cancellation token for this task
+        let cancel_token = CancellationToken::new();
+        ctx.register_cancellation_token(&task_id, cancel_token.clone());
+
         tokio::spawn(async move {
             let start_time = std::time::Instant::now();
             let node_count = dag.nodes.len();
 
             // Update task status → Running
-            ctx.task_registry.update_status(&task_id, TaskEntryStatus::Running);
+            ctx.task_registry
+                .update_status(&task_id, TaskEntryStatus::Running);
             bus.publish(SystemEvent::TaskUpdated {
                 task_id: task_id.clone(),
                 status: "running".to_string(),
@@ -80,7 +82,7 @@ impl TaskDispatcher {
                 total_timeout: Duration::from_secs(dag_cfg.total_timeout_secs),
                 max_retries_per_node: dag_cfg.max_retries_per_node,
                 replan_config: crate::orchestrator::replanner::ReplanConfig {
-                    enabled: false,
+                    enabled: dag_cfg.replan_enabled,
                     replan_after_every_n_nodes: dag_cfg.replan_after_every_n_nodes,
                     max_replans: dag_cfg.max_replans,
                 },
@@ -98,18 +100,36 @@ impl TaskDispatcher {
                 db.clone(),
                 &created_by,
                 &daemon_config,
+                Some(cancel_token),
             )
             .await;
+
+            // Cleanup cancellation token
+            ctx.remove_cancellation_token(&task_id);
 
             let now = Utc::now();
             let runtime_secs = start_time.elapsed().as_secs() as i64;
 
-            // Release all agents back to Idle
+            // Destroy all agent instances (resets singletons to Idle, removes non-singletons)
             for node in &dag.nodes {
-                ctx.agent_registry.update_status(&node.agent_id, AgentStatus::Idle);
+                let outcome = ctx.agent_registry.destroy_instance(&node.agent_id);
+                let status = match outcome {
+                    DestroyOutcome::ResetToIdle => "idle",
+                    _ => "destroyed",
+                };
+                // Retrieve template_id from instance before it was destroyed
+                // (node.agent_id is the instance_id assigned during spawn)
+                let template_id = node
+                    .agent_id
+                    .split("::")
+                    .next()
+                    .unwrap_or(&node.agent_id)
+                    .to_string();
                 bus.publish(SystemEvent::AgentStatusChanged {
                     agent_id: node.agent_id.clone(),
-                    status: "idle".to_string(),
+                    instance_id: node.agent_id.clone(),
+                    template_id,
+                    status: status.to_string(),
                     current_task_id: None,
                     timestamp: now,
                 });
@@ -122,7 +142,7 @@ impl TaskDispatcher {
                     .iter()
                     .filter(|nr| nr.success && !nr.final_content.is_empty())
                     .map(|nr| nr.final_content.clone())
-                    .last()
+                    .next_back()
                     .unwrap_or_else(|| {
                         format!(
                             "DAG completed: {}/{} nodes succeeded ({} tokens used)",
@@ -147,50 +167,28 @@ impl TaskDispatcher {
             let db_summary = final_content.chars().take(2000).collect::<String>();
 
             // Update task status
-            if result.success {
-                ctx.task_registry.update_status(&task_id, TaskEntryStatus::Completed);
-                if let Some(ref db) = db {
-                    let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                    let _ = repo.update_status(&task_id, openalpaca_storage::TaskStatus::Completed);
-                    let _ = repo.set_result(&task_id, &db_summary);
-                }
-                bus.publish(SystemEvent::TaskCompleted {
-                    task_id: task_id.clone(),
-                    result_summary: Some(db_summary.clone()),
-                    timestamp: now,
-                });
-            } else {
-                ctx.task_registry.update_status(&task_id, TaskEntryStatus::Failed);
-                if let Some(ref db) = db {
-                    let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                    let _ = repo.update_status(&task_id, openalpaca_storage::TaskStatus::Failed);
-                    let _ = repo.set_result(&task_id, &db_summary);
-                }
-                bus.publish(SystemEvent::TaskFailed {
-                    task_id: task_id.clone(),
-                    error: db_summary.clone(),
-                    timestamp: now,
-                });
-            }
+            finalize_task(
+                &ctx,
+                &bus,
+                db.as_ref(),
+                &task_id,
+                &db_summary,
+                result.success,
+            );
 
             // Persist final result to conversation
             if let Some(ref db) = db {
                 let content = format_task_result(&task_title, &final_content, result.success);
-                let conv_repo = ConversationRepository::new(db);
-                let _ = conv_repo.get_or_create_conversation(&lane_key, &source);
-                let _ = conv_repo.insert(&ConversationMessage {
-                    id: 0,
-                    lane_key: lane_key.clone(),
-                    role: "assistant".to_string(),
+                persist_conversation(
+                    db,
+                    &lane_key,
+                    &source,
                     content,
-                    source: Some(source.clone()),
-                    model: None,
-                    tokens_in: Some(result.total_input_tokens as i64),
-                    tokens_out: Some(result.total_output_tokens as i64),
-                    duration_ms: Some(runtime_secs * 1000),
-                    created_at: String::new(),
-                });
-                let _ = conv_repo.increment_message_count(&lane_key);
+                    None,
+                    result.total_input_tokens as i64,
+                    result.total_output_tokens as i64,
+                    runtime_secs,
+                );
             }
 
             // Memory extraction from DAG output (non-blocking)
@@ -212,7 +210,11 @@ impl TaskDispatcher {
 
             tracing::info!(
                 "DAG execution for task '{}' finished: success={}, nodes={}/{}, runtime={}s",
-                task_id, result.success, result.node_results.len(), node_count, runtime_secs
+                task_id,
+                result.success,
+                result.node_results.len(),
+                node_count,
+                runtime_secs
             );
         });
     }

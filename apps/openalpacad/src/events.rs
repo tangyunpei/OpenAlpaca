@@ -123,13 +123,17 @@ impl EventBroadcaster {
                     name,
                     status,
                     current_task_id,
+                    agent_instance_id,
+                    template_id,
                     ..
                 } => {
                     let detail = serde_json::json!({
                         "agent_id": agent_id,
                         "name": name,
                         "status": status,
-                        "current_task_id": current_task_id
+                        "current_task_id": current_task_id,
+                        "agent_instance_id": agent_instance_id,
+                        "template_id": template_id
                     });
                     repo.log("agent_status_change", None, Some(&detail), None)
                 }
@@ -209,6 +213,9 @@ impl EventBroadcaster {
                     });
                     repo.log("orchestrator_config_changed", None, Some(&detail), None)
                 }
+                ServerEvent::DaemonConfigChanged { .. } => {
+                    repo.log("daemon_config_changed", None, None, None)
+                }
                 ServerEvent::SecurityViolation {
                     agent_id,
                     tool_name,
@@ -235,7 +242,12 @@ impl EventBroadcaster {
                         "consecutive_failures": consecutive_failures,
                         "reset_after_secs": reset_after_secs
                     });
-                    repo.log("circuit_breaker_tripped", Some(agent_id), Some(&detail), None)
+                    repo.log(
+                        "circuit_breaker_tripped",
+                        Some(agent_id),
+                        Some(&detail),
+                        None,
+                    )
                 }
                 ServerEvent::ToolExecuted {
                     agent_id,
@@ -270,9 +282,7 @@ impl EventBroadcaster {
                     repo.log("llm_call_completed", Some(agent_id), Some(&detail), None)
                 }
                 ServerEvent::SkillCatalogUpdated {
-                    skill_name,
-                    action,
-                    ..
+                    skill_name, action, ..
                 } => {
                     let detail = serde_json::json!({
                         "skill_name": skill_name,
@@ -370,12 +380,16 @@ impl EventBroadcaster {
         name: &str,
         status: &str,
         current_task_id: Option<String>,
+        agent_instance_id: &str,
+        template_id: &str,
     ) {
         let event = ServerEvent::AgentStatus {
             agent_id: agent_id.to_string(),
             name: name.to_string(),
             status: status.to_string(),
             current_task_id,
+            agent_instance_id: agent_instance_id.to_string(),
+            template_id: template_id.to_string(),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };
@@ -450,6 +464,17 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
+    /// Broadcast a daemon config changed event and persist it
+    pub fn daemon_config_changed(&self) {
+        let event = ServerEvent::DaemonConfigChanged {
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
     /// Broadcast a chat stream ended event and persist it
     pub fn chat_stream_ended(&self, stream_id: &str, lane_key: &str, status: &str) {
         let event = ServerEvent::ChatStreamEnded {
@@ -465,6 +490,7 @@ impl EventBroadcaster {
     }
 
     /// Broadcast a DAG node status event and persist it
+    #[allow(clippy::too_many_arguments)]
     pub fn dag_node_status(
         &self,
         task_id: &str,
@@ -527,13 +553,7 @@ impl EventBroadcaster {
     }
 
     /// Broadcast a tool executed event and persist it
-    pub fn tool_executed(
-        &self,
-        agent_id: &str,
-        tool_name: &str,
-        success: bool,
-        duration_ms: u64,
-    ) {
+    pub fn tool_executed(&self, agent_id: &str, tool_name: &str, success: bool, duration_ms: u64) {
         let event = ServerEvent::ToolExecuted {
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),

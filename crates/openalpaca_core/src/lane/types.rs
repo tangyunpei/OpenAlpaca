@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A key that uniquely identifies a conversation lane.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -190,7 +190,10 @@ mod tests {
 
     #[test]
     fn test_lane_key_display() {
-        assert_eq!(LaneKey::new("user1", "telegram").to_string(), "user1:telegram");
+        assert_eq!(
+            LaneKey::new("user1", "telegram").to_string(),
+            "user1:telegram"
+        );
         assert_eq!(LaneKey::new("abc", "gui").to_string(), "abc:gui");
     }
 
@@ -218,10 +221,7 @@ mod tests {
     #[test]
     fn test_task_lane_with_source() {
         let lane = TaskLane::new("task-1").with_source(LaneKey::new("u1", "cli"));
-        assert_eq!(
-            lane.source_lane,
-            Some(LaneKey::new("u1", "cli"))
-        );
+        assert_eq!(lane.source_lane, Some(LaneKey::new("u1", "cli")));
     }
 
     #[test]

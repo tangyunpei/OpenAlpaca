@@ -62,14 +62,22 @@ mod tests {
     fn complete(input: &str) -> Vec<String> {
         let helper = ReplHelper;
         let (_, pairs) = helper
-            .complete(input, input.len(), &Context::new(&rustyline::history::DefaultHistory::new()))
+            .complete(
+                input,
+                input.len(),
+                &Context::new(&rustyline::history::DefaultHistory::new()),
+            )
             .unwrap();
         pairs.into_iter().map(|p| p.replacement).collect()
     }
 
     fn hint(input: &str) -> Option<String> {
         let helper = ReplHelper;
-        helper.hint(input, input.len(), &Context::new(&rustyline::history::DefaultHistory::new()))
+        helper.hint(
+            input,
+            input.len(),
+            &Context::new(&rustyline::history::DefaultHistory::new()),
+        )
     }
 
     #[test]

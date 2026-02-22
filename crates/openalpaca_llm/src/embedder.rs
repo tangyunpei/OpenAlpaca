@@ -39,13 +39,19 @@ impl OpenAiEmbedder {
         Self::new_with_url(api_key, model, dimensions, None)
     }
 
-    pub fn new_with_url(api_key: String, model: String, dimensions: u32, url: Option<String>) -> Result<Self, EmbedError> {
+    pub fn new_with_url(
+        api_key: String,
+        model: String,
+        dimensions: u32,
+        url: Option<String>,
+    ) -> Result<Self, EmbedError> {
         Ok(Self {
             client: reqwest::Client::new(),
             api_key,
             model,
             dimensions,
-            embeddings_url: url.unwrap_or_else(|| "https://api.openai.com/v1/embeddings".to_string()),
+            embeddings_url: url
+                .unwrap_or_else(|| "https://api.openai.com/v1/embeddings".to_string()),
         })
     }
 }
@@ -137,9 +143,13 @@ impl LocalEmbedder {
         let mut opts = fastembed::InitOptions::default();
         opts.model_name = model_enum;
         opts.show_download_progress = true;
-        let model = fastembed::TextEmbedding::try_new(opts)
-            .map_err(|e| EmbedError::Config(format!("Failed to load local embedding model: {e}")))?;
-        Ok(Self { model, dims: dimensions })
+        let model = fastembed::TextEmbedding::try_new(opts).map_err(|e| {
+            EmbedError::Config(format!("Failed to load local embedding model: {e}"))
+        })?;
+        Ok(Self {
+            model,
+            dims: dimensions,
+        })
     }
 }
 
@@ -234,14 +244,12 @@ fn resolve_openai_key(
     provider_config: Option<&crate::config::ProviderConfig>,
 ) -> Option<String> {
     // Try keys from provider config
-    if let Some(pc) = provider_config {
-        if let Some(ref keys) = pc.keys {
-            for key_config in keys {
-                if let Some(secret) =
-                    crate::config::resolve_key_from_config(key_config, secret_store)
-                {
-                    return Some(secret);
-                }
+    if let Some(pc) = provider_config
+        && let Some(ref keys) = pc.keys
+    {
+        for key_config in keys {
+            if let Some(secret) = crate::config::resolve_key_from_config(key_config, secret_store) {
+                return Some(secret);
             }
         }
     }

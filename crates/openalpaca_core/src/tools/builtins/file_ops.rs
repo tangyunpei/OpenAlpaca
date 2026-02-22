@@ -1,11 +1,11 @@
-use async_trait::async_trait;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use std::sync::Arc;
 
 use super::helpers::{
-    validate_workspace_path, resolve_workspace_path, resolve_workspace_path_for_write,
-    is_soul_path, is_user_path, is_identity_path, MAX_FILE_READ_SIZE,
+    MAX_FILE_READ_SIZE, is_identity_path, is_soul_path, is_user_path, resolve_workspace_path,
+    resolve_workspace_path_for_write, validate_workspace_path,
 };
 
 // --- file_read ---

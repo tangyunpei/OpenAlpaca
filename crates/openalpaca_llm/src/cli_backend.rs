@@ -3,9 +3,9 @@
 //! Implements `LlmProvider` by spawning local CLI processes (`claude`, `codex`).
 //! These are used as a last-resort fallback when API calls fail.
 
+use crate::LlmProvider;
 use crate::error::LlmError;
 use crate::types::*;
-use crate::LlmProvider;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -43,7 +43,10 @@ pub struct ClaudeCodeCliProvider {
 
 impl ClaudeCodeCliProvider {
     pub fn new(binary_path: PathBuf, timeout: Duration) -> Self {
-        Self { binary_path, timeout }
+        Self {
+            binary_path,
+            timeout,
+        }
     }
 
     /// Detect `claude` binary on PATH.
@@ -57,7 +60,9 @@ impl ClaudeCodeCliProvider {
             return None;
         }
 
-        let path = config.path.as_ref()
+        let path = config
+            .path
+            .as_ref()
             .map(PathBuf::from)
             .or_else(Self::detect)?;
 
@@ -97,14 +102,18 @@ impl LlmProvider for ClaudeCodeCliProvider {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(LlmError::CliBackend(format!(
                         "claude CLI failed (exit {}): {}",
-                        output.status, stderr.trim()
+                        output.status,
+                        stderr.trim()
                     )));
                 }
 
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 parse_claude_output(&stdout)
             }
-            Ok(Err(e)) => Err(LlmError::CliBackend(format!("Failed to spawn claude CLI: {}", e))),
+            Ok(Err(e)) => Err(LlmError::CliBackend(format!(
+                "Failed to spawn claude CLI: {}",
+                e
+            ))),
             Err(_) => Err(LlmError::CliBackend(format!(
                 "claude CLI timed out after {}s",
                 self.timeout.as_secs()
@@ -112,7 +121,11 @@ impl LlmProvider for ClaudeCodeCliProvider {
         }
     }
 
-    async fn chat_with_key(&self, _key: &str, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+    async fn chat_with_key(
+        &self,
+        _key: &str,
+        request: ChatRequest,
+    ) -> Result<ChatResponse, LlmError> {
         // CLI uses its own auth, ignore key
         self.chat(request).await
     }
@@ -130,7 +143,10 @@ pub struct CodexCliProvider {
 
 impl CodexCliProvider {
     pub fn new(binary_path: PathBuf, timeout: Duration) -> Self {
-        Self { binary_path, timeout }
+        Self {
+            binary_path,
+            timeout,
+        }
     }
 
     /// Detect `codex` binary on PATH.
@@ -144,7 +160,9 @@ impl CodexCliProvider {
             return None;
         }
 
-        let path = config.path.as_ref()
+        let path = config
+            .path
+            .as_ref()
             .map(PathBuf::from)
             .or_else(Self::detect)?;
 
@@ -184,14 +202,18 @@ impl LlmProvider for CodexCliProvider {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(LlmError::CliBackend(format!(
                         "codex CLI failed (exit {}): {}",
-                        output.status, stderr.trim()
+                        output.status,
+                        stderr.trim()
                     )));
                 }
 
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 parse_codex_output(&stdout)
             }
-            Ok(Err(e)) => Err(LlmError::CliBackend(format!("Failed to spawn codex CLI: {}", e))),
+            Ok(Err(e)) => Err(LlmError::CliBackend(format!(
+                "Failed to spawn codex CLI: {}",
+                e
+            ))),
             Err(_) => Err(LlmError::CliBackend(format!(
                 "codex CLI timed out after {}s",
                 self.timeout.as_secs()
@@ -199,7 +221,11 @@ impl LlmProvider for CodexCliProvider {
         }
     }
 
-    async fn chat_with_key(&self, _key: &str, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+    async fn chat_with_key(
+        &self,
+        _key: &str,
+        request: ChatRequest,
+    ) -> Result<ChatResponse, LlmError> {
         self.chat(request).await
     }
 
@@ -237,7 +263,9 @@ fn parse_claude_output(stdout: &str) -> Result<ChatResponse, LlmError> {
         Ok(parsed) => {
             if parsed.is_error == Some(true) {
                 return Err(LlmError::CliBackend(
-                    parsed.result.unwrap_or_else(|| "Unknown CLI error".to_string()),
+                    parsed
+                        .result
+                        .unwrap_or_else(|| "Unknown CLI error".to_string()),
                 ));
             }
 
@@ -373,7 +401,10 @@ mod tests {
     fn test_parse_raw_stdout_fallback() {
         let stdout = "Just plain text output\nwith multiple lines";
         let response = parse_claude_output(stdout).unwrap();
-        assert_eq!(response.content, "Just plain text output\nwith multiple lines");
+        assert_eq!(
+            response.content,
+            "Just plain text output\nwith multiple lines"
+        );
     }
 
     #[test]
@@ -394,16 +425,12 @@ mod tests {
     #[test]
     fn test_supports_tools_false() {
         // Verify at the type level that CLI providers don't support tools
-        let provider = ClaudeCodeCliProvider::new(
-            PathBuf::from("/usr/bin/claude"),
-            Duration::from_secs(120),
-        );
+        let provider =
+            ClaudeCodeCliProvider::new(PathBuf::from("/usr/bin/claude"), Duration::from_secs(120));
         assert!(!provider.supports_tools());
 
-        let provider = CodexCliProvider::new(
-            PathBuf::from("/usr/bin/codex"),
-            Duration::from_secs(120),
-        );
+        let provider =
+            CodexCliProvider::new(PathBuf::from("/usr/bin/codex"), Duration::from_secs(120));
         assert!(!provider.supports_tools());
     }
 

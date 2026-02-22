@@ -29,17 +29,23 @@ pub fn resolve_agent_tools(
     let skill_names: Vec<String> = agent.skills.iter().map(|s| s.name.clone()).collect();
     let mut tools = tool_registry.definitions_for_skills(&skill_names);
 
-    // Add workspace tools so agents can read/write the shared workspace
-    tools.extend(builtins::workspace_tool_definitions());
+    // Add workspace tools only when the agent explicitly lists them as skills —
+    // otherwise they'll be offered to the LLM but blocked by capability enforcement,
+    // wasting rounds on tools the agent isn't allowed to use.
+    if skill_names
+        .iter()
+        .any(|s| s == "workspace_read" || s == "workspace_write")
+    {
+        tools.extend(builtins::workspace_tool_definitions());
+    }
 
     // Add memory_search only when the agent explicitly lists it as a skill,
     // respecting least-privilege (previously it was force-added for all agents).
     if skill_names.iter().any(|s| s == "memory_search")
         && !tools.iter().any(|t| t.name == "memory_search")
+        && let Some(mem_tool) = tool_registry.get("memory_search")
     {
-        if let Some(mem_tool) = tool_registry.get("memory_search") {
-            tools.push(mem_tool.definition.clone());
-        }
+        tools.push(mem_tool.definition.clone());
     }
 
     tools

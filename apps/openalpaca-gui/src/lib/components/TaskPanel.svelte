@@ -9,6 +9,19 @@
   let displayedTasks = $state<Task[]>([]);
   let selectedTaskId = $state<string | null>(null);
 
+  // Counts for filter badges
+  let activeCount = $state(0);
+  let completedCount = $state(0);
+
+  $effect(() => {
+    const unsub = activeTasks.subscribe((v) => (activeCount = v.length));
+    return unsub;
+  });
+  $effect(() => {
+    const unsub = completedTasks.subscribe((v) => (completedCount = v.length));
+    return unsub;
+  });
+
   // Single $effect manages subscription lifecycle — cleans up on filter change or destroy
   $effect(() => {
     const store = filter === "active" ? activeTasks : completedTasks;
@@ -42,11 +55,11 @@
     <button
       class="px-4 py-1.5 border-none bg-transparent text-muted-foreground cursor-pointer text-[0.8rem] font-medium rounded-[5px] transition-all duration-200 hover:text-foreground {filter === 'active' ? 'bg-white/10 text-white' : ''}"
       onclick={() => setFilter("active")}
-    >Active</button>
+    >Active{#if activeCount > 0}<span class="ml-1 text-[0.65rem] opacity-70">({activeCount})</span>{/if}</button>
     <button
       class="px-4 py-1.5 border-none bg-transparent text-muted-foreground cursor-pointer text-[0.8rem] font-medium rounded-[5px] transition-all duration-200 hover:text-foreground {filter === 'completed' ? 'bg-white/10 text-white' : ''}"
       onclick={() => setFilter("completed")}
-    >Completed</button>
+    >Completed{#if completedCount > 0}<span class="ml-1 text-[0.65rem] opacity-70">({completedCount})</span>{/if}</button>
   </div>
 </div>
 
@@ -58,8 +71,18 @@
     {#each displayedTasks as task (task.id)}
       <TaskCard {task} onclick={() => (selectedTaskId = task.id)} />
     {:else}
-      <div class="text-muted-foreground text-center py-15 px-10">
-        {filter === "active" ? "No active tasks." : "No completed tasks."}
+      <div class="flex flex-col items-center justify-center py-14 px-10 text-center">
+        <div class="w-12 h-12 mb-3 rounded-xl bg-white/[0.03] border border-white/5 flex items-center justify-center">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="text-muted-foreground/50">
+            {#if filter === "active"}
+              <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48 2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48 2.83-2.83"/>
+            {:else}
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
+            {/if}
+          </svg>
+        </div>
+        <p class="text-muted-foreground text-sm m-0">{filter === "active" ? "No active tasks" : "No completed tasks"}</p>
+        <p class="text-muted-foreground/50 text-xs m-0 mt-1">{filter === "active" ? "Tasks will appear here when created" : "Completed tasks will be listed here"}</p>
       </div>
     {/each}
   </div>

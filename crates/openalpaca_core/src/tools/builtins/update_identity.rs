@@ -1,7 +1,7 @@
-use async_trait::async_trait;
-use base64::Engine as _;
 use crate::middleware::identity::{parse_identity_markdown, render_identity_markdown};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+use async_trait::async_trait;
+use base64::Engine as _;
 use openalpaca_llm::ToolDefinition;
 use std::sync::Arc;
 
@@ -14,13 +14,7 @@ struct IdentityUpdateTool {
 /// Known top-level fields in the update_identity tool arguments.
 const KNOWN_IDENTITY_FIELDS: &[&str] = &["mode", "content_b64", "sections"];
 /// Known section-patch fields inside the `sections` object.
-const KNOWN_IDENTITY_SECTION_FIELDS: &[&str] = &[
-    "name",
-    "creature",
-    "vibe",
-    "emoji",
-    "avatar",
-];
+const KNOWN_IDENTITY_SECTION_FIELDS: &[&str] = &["name", "creature", "vibe", "emoji", "avatar"];
 
 #[async_trait]
 impl BuiltInTool for IdentityUpdateTool {

@@ -94,11 +94,14 @@ impl SkillMatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent};
+    use crate::agent::subagent::{
+        AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent,
+    };
 
     fn make_agent(id: &str, name: &str, skills: Vec<&str>) -> SubAgent {
         SubAgent {
             id: id.to_string(),
+            template_id: id.to_string(),
             name: name.to_string(),
             description: Some(format!("{} agent", name)),
             icon: None,

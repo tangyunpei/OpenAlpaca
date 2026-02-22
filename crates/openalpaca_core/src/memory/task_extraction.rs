@@ -6,9 +6,9 @@
 
 use arc_swap::ArcSwap;
 use openalpaca_llm::{ChatMessage, Embedder, LlmRouter, RequestContext, RouterRequest};
+use openalpaca_storage::Database;
 use openalpaca_storage::models::memory::{MemoryKind, MemoryScope, MemorySource};
 use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
-use openalpaca_storage::Database;
 use std::sync::Arc;
 
 use crate::daemon_config::DaemonConfig;
@@ -125,7 +125,7 @@ pub async fn extract_task_memories(
             ),
             ChatMessage::user(&user_prompt),
         ],
-        tools: vec![],
+        tools: Arc::new(vec![]),
         temperature: Some(0.0),
         max_tokens: Some(512),
         context: RequestContext {
@@ -289,6 +289,7 @@ pub async fn extract_task_memories(
 /// (vector or FTS fallback) → supersede or insert → store embedding.
 ///
 /// Used by task extraction, auto-extraction, and the /remember handler.
+#[allow(clippy::too_many_arguments)]
 pub async fn persist_memory_item(
     repo: &MemoryRepository<'_>,
     embedder: &Option<Arc<dyn Embedder>>,
@@ -342,12 +343,12 @@ pub async fn persist_memory_item(
             metadata,
         ) {
             Ok(new_id) if new_id > 0 => {
-                if let Some(ref emb) = new_embedding {
-                    if let Err(e) = repo.insert_embedding(new_id, emb) {
-                        tracing::warn!(
-                            "Failed to insert embedding for superseded memory #{new_id}: {e}"
-                        );
-                    }
+                if let Some(ref emb) = new_embedding
+                    && let Err(e) = repo.insert_embedding(new_id, emb)
+                {
+                    tracing::warn!(
+                        "Failed to insert embedding for superseded memory #{new_id}: {e}"
+                    );
                 }
                 tracing::debug!(
                     "Memory persist: superseded #{} -> #{}: {}",
@@ -373,10 +374,10 @@ pub async fn persist_memory_item(
             owner_id, kind, scope, scope_id, source, content, metadata, importance, confidence,
         ) {
             Ok(new_id) if new_id > 0 => {
-                if let Some(ref emb) = new_embedding {
-                    if let Err(e) = repo.insert_embedding(new_id, emb) {
-                        tracing::warn!("Failed to insert embedding for memory #{new_id}: {e}");
-                    }
+                if let Some(ref emb) = new_embedding
+                    && let Err(e) = repo.insert_embedding(new_id, emb)
+                {
+                    tracing::warn!("Failed to insert embedding for memory #{new_id}: {e}");
                 }
                 tracing::debug!(
                     "Memory persist: stored new: {}",
@@ -402,19 +403,19 @@ pub fn parse_json_response(content: &str) -> Option<serde_json::Value> {
     // Try ```json fence
     if let Some(start) = trimmed.find("```json") {
         let after = &trimmed[start + 7..];
-        if let Some(end) = after.find("```") {
-            if let Ok(v) = serde_json::from_str(after[..end].trim()) {
-                return Some(v);
-            }
+        if let Some(end) = after.find("```")
+            && let Ok(v) = serde_json::from_str(after[..end].trim())
+        {
+            return Some(v);
         }
     }
     // Try plain ``` fence
     if let Some(start) = trimmed.find("```") {
         let after = &trimmed[start + 3..];
-        if let Some(end) = after.find("```") {
-            if let Ok(v) = serde_json::from_str(after[..end].trim()) {
-                return Some(v);
-            }
+        if let Some(end) = after.find("```")
+            && let Ok(v) = serde_json::from_str(after[..end].trim())
+        {
+            return Some(v);
         }
     }
     None

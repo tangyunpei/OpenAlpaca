@@ -74,9 +74,41 @@ export interface Skill {
   proficiency: number;
 }
 
+// ── Agent Template types (REST response from /v1/agent-templates) ───
+
+export interface AgentTemplate {
+  id: string;
+  name: string;
+  description: string;
+  icon: string | null;
+  singleton: boolean;
+  skills: string[];
+  denied_skills: string[];
+  temperature: number;
+  verbosity: string;
+  model: string | null;
+  fallback_models: string[];
+  max_tool_calls: number | null;
+  timeout_seconds: number | null;
+  max_cost_per_task: number | null;
+  require_confirmation_for: string[];
+  persona: string;
+  body: string;
+}
+
+// ── Agent Instance types (REST response from /v1/agent-instances) ───
+
+export interface AgentInstance {
+  id: string;
+  template_id: string;
+  name: string;
+  status: string;
+  current_task: string | null;
+}
+
 // ── Agent types ─────────────────────────────────────────────────────
 
-export type AgentStatusValue = "idle" | "busy" | "waiting" | "offline" | "error";
+export type AgentStatusValue = "idle" | "busy" | "waiting" | "offline" | "error" | "spawned" | "destroyed";
 
 export interface Agent {
   id: string;
@@ -85,6 +117,7 @@ export interface Agent {
   icon: string | null;
   status: string;
   current_task_id: string | null;
+  template_id?: string;
   skills_json: string;
   preset_json: string;
   constraints_json: string | null;

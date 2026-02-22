@@ -1,4 +1,4 @@
-use super::{principal_id, role_label, ConversationContext, Orchestrator};
+use super::{ConversationContext, Orchestrator, principal_id, role_label};
 use crate::events::SystemEvent;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::security::gate::SecurityGate;
@@ -6,6 +6,10 @@ use crate::security::policy::{Principal, Scope};
 use crate::types::Capability;
 use chrono::Utc;
 use openalpaca_storage::repository::TaskRepository;
+use openalpaca_storage::repository::orchestrator_latency::{
+    OrchestratorLatencyRecord, OrchestratorLatencyRepository,
+};
+use std::time::Instant;
 use uuid::Uuid;
 
 use super::intent::Intent;
@@ -27,6 +31,8 @@ impl Orchestrator {
         scope: Scope,
         lane_key: String,
     ) -> Result<String, String> {
+        let ack_start = Instant::now();
+
         // 1. Permission check via SecurityGate (wraps TrustGate)
         let capability = Capability {
             name: "chat.respond".to_string(),
@@ -51,7 +57,9 @@ impl Orchestrator {
         let scope_ctx = MemoryScopeContext::new(workspace_id);
 
         // 3. Try slash commands, task queries, and skill invocations first
-        let intent = self.intent_parser.parse_with_skills(&content, &self.skill_catalog);
+        let intent = self
+            .intent_parser
+            .parse_with_skills(&content, &self.skill_catalog);
         match &intent {
             Intent::TaskQuery { .. } | Intent::TaskControl { .. } => {
                 self.bus.publish(SystemEvent::IntentClassified {
@@ -101,14 +109,54 @@ impl Orchestrator {
         };
 
         // 5. Compute result — planner path or heuristic fallback
-        let result: Result<String, String> = if let Some(ref router) = self.llm_router {
-            let idle_agents = self.shared_context.agent_registry.list_idle();
+        //    Track timing for observability (Step 1: OrchestrationStage metrics)
+        let mut planner_ms: u64 = 0;
+        let mut dispatch_ms: u64 = 0;
+        let mode: String;
+        let mut fallback_reason: Option<String> = None;
+        let mut auto_promotion_reason: Option<String> = None;
+
+        let result: Result<String, String> = if self.is_bootstrapping() {
+            mode = "bootstrap".to_string();
+            self.handle_simple_query(
+                request_id, &source, &content, &lane_key, &ctx, owner_id, &scope_ctx,
+            )
+            .await
+        } else if self.llm_router.is_some()
+            && matches!(intent, Intent::SimpleQuery { .. })
+            && self.intent_parser.is_fast_path_eligible(&content)
+        {
+            // Fast path: skip LLM planner for obviously simple messages
+            mode = "fast_path".to_string();
+            self.bus.publish(SystemEvent::PlannerBypassed {
+                request_id,
+                reason: "fast_path".to_string(),
+                timestamp: Utc::now(),
+            });
+            self.handle_simple_query(
+                request_id, &source, &content, &lane_key, &ctx, owner_id, &scope_ctx,
+            )
+            .await
+        } else if let Some(ref router) = self.llm_router {
+            let templates = self.shared_context.agent_registry.list_templates();
+            let idle_agents: Vec<crate::agent::SubAgent> = templates
+                .iter()
+                .map(|t| {
+                    let mut agent = t.to_subagent(&t.frontmatter.id, "");
+                    agent.status = crate::agent::AgentStatus::Idle;
+                    agent.current_task = None;
+                    agent
+                })
+                .collect();
             let planner_cfg = &self.daemon_config.load().execution.planner;
             let limits = PlannerLimits {
                 timeout_secs: planner_cfg.planning_timeout_secs,
                 max_retries: planner_cfg.max_retries,
+                max_tokens: planner_cfg.max_tokens,
             };
-            match TaskPlanner::plan_hierarchical(
+
+            let planner_start = Instant::now();
+            let plan_result = TaskPlanner::plan_hierarchical(
                 router,
                 &content,
                 &idle_agents,
@@ -116,83 +164,143 @@ impl Orchestrator {
                 ctx.summary.as_deref(),
                 active_tasks_block.as_deref(),
                 limits,
+                planner_cfg.dag_prefer_predictable_enabled,
             )
-            .await
-            {
-                Ok(plan) => match plan.classification.as_str() {
-                    "simple_query" => {
-                        self.bus.publish(SystemEvent::IntentClassified {
-                            request_id,
-                            intent_type: "simple_query".to_string(),
-                            timestamp: Utc::now(),
-                        });
-                        self.handle_simple_query(
-                            request_id, &source, &content, &lane_key, &ctx, owner_id, &scope_ctx,
-                        )
-                        .await
-                    }
-                    "complex_task" => {
-                        self.bus.publish(SystemEvent::IntentClassified {
-                            request_id,
-                            intent_type: "complex_task".to_string(),
-                            timestamp: Utc::now(),
-                        });
-                        let description = &content;
-                        let augmented = self.augment_with_context(description, &ctx);
-                        match self.task_dispatcher.dispatch_planned(
-                            &augmented,
-                            plan,
-                            &principal_id(&principal),
-                            &lane_key,
-                            &source,
-                            scope_ctx.workspace_id.clone(),
-                        ) {
-                            Ok(response) => Ok(response),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Dispatch planned failed: {e}, falling back to simple_query"
-                                );
-                                self.handle_simple_query(
-                                    request_id, &source, &content, &lane_key, &ctx, owner_id, &scope_ctx,
-                                )
-                                .await
+            .await;
+            planner_ms = planner_start.elapsed().as_millis() as u64;
+
+            match plan_result {
+                Ok(plan) => {
+                    auto_promotion_reason = plan.auto_promotion_reason.clone();
+                    match plan.classification.as_str() {
+                        "simple_query" => {
+                            mode = "planner_simple_query".to_string();
+                            self.bus.publish(SystemEvent::IntentClassified {
+                                request_id,
+                                intent_type: "simple_query".to_string(),
+                                timestamp: Utc::now(),
+                            });
+                            self.handle_simple_query(
+                                request_id, &source, &content, &lane_key, &ctx, owner_id,
+                                &scope_ctx,
+                            )
+                            .await
+                        }
+                        "complex_task" => {
+                            mode = "planner_complex_task".to_string();
+                            self.bus.publish(SystemEvent::IntentClassified {
+                                request_id,
+                                intent_type: "complex_task".to_string(),
+                                timestamp: Utc::now(),
+                            });
+                            let description = &content;
+                            let augmented = self.augment_with_context(description, &ctx);
+
+                            let dispatch_start = Instant::now();
+                            let dispatch_result = self.task_dispatcher.dispatch_planned(
+                                &augmented,
+                                plan,
+                                &principal_id(&principal),
+                                &lane_key,
+                                &source,
+                                scope_ctx.workspace_id.clone(),
+                            );
+                            dispatch_ms = dispatch_start.elapsed().as_millis() as u64;
+
+                            match dispatch_result {
+                                Ok(response) => Ok(response),
+                                Err(e) => {
+                                    fallback_reason =
+                                        Some(format!("dispatch_planned_failed: {e}"));
+                                    tracing::warn!(
+                                        "Dispatch planned failed: {e}, falling back to simple_query"
+                                    );
+                                    self.handle_simple_query(
+                                        request_id, &source, &content, &lane_key, &ctx, owner_id,
+                                        &scope_ctx,
+                                    )
+                                    .await
+                                }
                             }
                         }
+                        other => {
+                            mode = "planner_unknown".to_string();
+                            fallback_reason =
+                                Some(format!("unknown_classification: {other}"));
+                            tracing::warn!(
+                                "LLM planner returned unknown classification '{}', falling back to heuristic",
+                                other
+                            );
+                            self.dispatch_with_heuristic(
+                                request_id, &source, &content, &principal, &lane_key, &ctx,
+                                owner_id, &scope_ctx,
+                            )
+                            .await
+                        }
                     }
-                    _other => {
-                        tracing::warn!(
-                            "LLM planner returned unknown classification '{}', falling back to heuristic",
-                            _other
-                        );
-                        self.dispatch_with_heuristic(
-                            request_id, &source, &content, &principal, &lane_key, &ctx, owner_id, &scope_ctx,
-                        )
-                        .await
-                    }
-                },
+                }
                 Err(e) => {
+                    mode = "planner_failed".to_string();
+                    fallback_reason = Some(format!("planning_error: {e}"));
                     tracing::warn!("LLM planning failed: {}, falling back to heuristic", e);
                     self.dispatch_with_heuristic(
-                        request_id, &source, &content, &principal, &lane_key, &ctx, owner_id, &scope_ctx,
+                        request_id, &source, &content, &principal, &lane_key, &ctx, owner_id,
+                        &scope_ctx,
                     )
                     .await
                 }
             }
         } else {
-            // No LLM router — keyword heuristic
+            mode = "no_llm".to_string();
             self.dispatch_with_heuristic(
                 request_id, &source, &content, &principal, &lane_key, &ctx, owner_id, &scope_ctx,
             )
             .await
         };
 
-        // 6. Summary update ONCE, AFTER result, for ALL normal turns (D7)
-        self.maybe_update_summary(&lane_key, &ctx).await;
+        let ack_ms = ack_start.elapsed().as_millis() as u64;
 
-        // 7. Automatic user trait extraction (post-response, fire-and-forget cost)
-        if let Ok(ref response_text) = result {
-            self.maybe_extract_user_traits(&lane_key, &content, response_text, owner_id)
-                .await;
+        // Emit OrchestrationStage event
+        self.bus.publish(SystemEvent::OrchestrationStage {
+            request_id,
+            mode: mode.clone(),
+            planner_ms,
+            dispatch_ms,
+            ack_ms,
+            fallback_reason: fallback_reason.clone(),
+            auto_promotion_reason: auto_promotion_reason.clone(),
+            timestamp: Utc::now(),
+        });
+
+        // Persist latency record (best-effort)
+        if let Some(ref db) = self.db {
+            let repo = OrchestratorLatencyRepository::new(db);
+            if let Err(e) = repo.record(&OrchestratorLatencyRecord {
+                id: None,
+                request_id: request_id.to_string(),
+                mode,
+                planner_ms,
+                dispatch_ms,
+                ack_ms,
+                fallback_reason,
+                auto_promotion_reason,
+                timestamp: None,
+            }) {
+                tracing::debug!("Failed to persist orchestrator latency: {e}");
+            }
+        }
+
+        // 6 + 7. Summary update and user trait extraction run concurrently
+        // (both are fire-and-forget LLM calls that don't affect the response).
+        {
+            let summary_fut = self.maybe_update_summary(&lane_key, &ctx);
+            let extract_fut = async {
+                if let Ok(ref response_text) = result {
+                    self.maybe_extract_user_traits(&lane_key, &content, response_text, owner_id)
+                        .await;
+                }
+            };
+            tokio::join!(summary_fut, extract_fut);
         }
 
         // 8. Check if bootstrap onboarding is complete
@@ -202,7 +310,11 @@ impl Orchestrator {
     }
 
     /// Augment a task description with conversation context (summary + recent exchanges).
-    pub(super) fn augment_with_context(&self, description: &str, ctx: &ConversationContext) -> String {
+    pub(super) fn augment_with_context(
+        &self,
+        description: &str,
+        ctx: &ConversationContext,
+    ) -> String {
         if let Some(ref summary) = ctx.summary {
             let recent_excerpt: String = ctx
                 .recent_messages
@@ -229,6 +341,7 @@ impl Orchestrator {
     }
 
     /// Fallback dispatch using keyword-based intent classification and greedy skill matching.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn dispatch_with_heuristic(
         &self,
         request_id: Uuid,
@@ -240,7 +353,9 @@ impl Orchestrator {
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
     ) -> Result<String, String> {
-        let intent = self.intent_parser.parse_with_skills(content, &self.skill_catalog);
+        let intent = self
+            .intent_parser
+            .parse_with_skills(content, &self.skill_catalog);
 
         self.bus.publish(SystemEvent::IntentClassified {
             request_id,
@@ -250,8 +365,10 @@ impl Orchestrator {
 
         match intent {
             Intent::SimpleQuery { query } => {
-                self.handle_simple_query(request_id, source, &query, lane_key, ctx, owner_id, scope_ctx)
-                    .await
+                self.handle_simple_query(
+                    request_id, source, &query, lane_key, ctx, owner_id, scope_ctx,
+                )
+                .await
             }
             Intent::TaskQuery { task_id } => {
                 self.handle_task_query(task_id, &principal_id(principal))
@@ -272,32 +389,54 @@ impl Orchestrator {
                 ) {
                     Ok(response) => Ok(response),
                     Err(e) => {
-                        tracing::warn!(
-                            "Heuristic dispatch failed: {e}, falling back to simple_query"
+                        tracing::info!(
+                            "Heuristic dispatch failed ({e}), trying lead agent fallback"
                         );
-                        self.handle_simple_query(
-                            request_id,
-                            source,
-                            &description,
+                        match self.task_dispatcher.dispatch_lead_agent_heuristic(
+                            &augmented,
+                            &principal_id(principal),
                             lane_key,
-                            ctx,
-                            owner_id,
-                            scope_ctx,
-                        )
-                        .await
+                            source,
+                            scope_ctx.workspace_id.clone(),
+                        ) {
+                            Ok(response) => Ok(response),
+                            Err(e2) => {
+                                tracing::warn!(
+                                    "Lead agent fallback also failed: {e2}, falling back to simple_query"
+                                );
+                                self.handle_simple_query(
+                                    request_id,
+                                    source,
+                                    &description,
+                                    lane_key,
+                                    ctx,
+                                    owner_id,
+                                    scope_ctx,
+                                )
+                                .await
+                            }
+                        }
                     }
                 }
             }
             Intent::TaskControl { task_id, action } => self.handle_task_control(&task_id, &action),
             Intent::RememberCommand { content } => {
-                self.handle_remember_command(&content, owner_id, scope_ctx).await
+                self.handle_remember_command(&content, owner_id, scope_ctx)
+                    .await
             }
             Intent::ForgetCommand { content } => {
                 self.handle_forget_command(&content, owner_id).await
             }
             Intent::SkillInvocation { skill_name, query } => {
                 self.handle_skill_invocation(
-                    request_id, source, &skill_name, &query, lane_key, ctx, owner_id, scope_ctx,
+                    request_id,
+                    source,
+                    &skill_name,
+                    &query,
+                    lane_key,
+                    ctx,
+                    owner_id,
+                    scope_ctx,
                 )
                 .await
             }

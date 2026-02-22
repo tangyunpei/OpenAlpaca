@@ -23,7 +23,7 @@ export type ServerEvent =
   | { type: "wake"; wake: unknown; ts: string; instance_id: string; _id: number }
   | { type: "connector_status"; id: string; status: string; ts: string; instance_id: string; _id: number }
   | { type: "task_status"; task_id: string; title: string; status: string; progress_current: number | null; progress_total: number | null; result_summary: string | null; ts: string; instance_id: string; _id: number }
-  | { type: "agent_status"; agent_id: string; name: string; status: string; current_task_id: string | null; ts: string; instance_id: string; _id: number }
+  | { type: "agent_status"; agent_id: string; name: string; status: string; current_task_id: string | null; agent_instance_id: string; template_id: string; ts: string; instance_id: string; _id: number }
   | { type: "key_status_changed"; provider: string; key_id: string; status: string; ts: string; instance_id: string; _id: number }
   | { type: "chat_stream_started"; stream_id: string; lane_key: string; ts: string; instance_id: string; _id: number }
   | { type: "chat_stream_ended"; stream_id: string; lane_key: string; status: string; ts: string; instance_id: string; _id: number }

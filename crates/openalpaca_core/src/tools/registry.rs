@@ -39,6 +39,12 @@ pub struct ToolRegistry {
     tools: HashMap<String, RegisteredTool>,
 }
 
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
@@ -166,7 +172,11 @@ async fn execute_http(
         // Truncate to 8KB
         Ok(body.chars().take(8192).collect())
     } else {
-        Err(format!("HTTP {} — {}", status, body.chars().take(1024).collect::<String>()))
+        Err(format!(
+            "HTTP {} — {}",
+            status,
+            body.chars().take(1024).collect::<String>()
+        ))
     }
 }
 
@@ -275,7 +285,11 @@ mod tests {
 
         let skills = vec!["nonexistent_skill".to_string()];
         let defs = registry.definitions_for_skills(&skills);
-        assert_eq!(defs.len(), 0, "Non-matching skills should return empty list, not all tools");
+        assert_eq!(
+            defs.len(),
+            0,
+            "Non-matching skills should return empty list, not all tools"
+        );
     }
 
     #[test]
@@ -283,7 +297,11 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(make_tool("web_search", "results"));
         let defs = registry.definitions_for_skills(&[]);
-        assert_eq!(defs.len(), 0, "Empty skills should return empty list (least-privilege)");
+        assert_eq!(
+            defs.len(),
+            0,
+            "Empty skills should return empty list (least-privilege)"
+        );
     }
 
     #[tokio::test]
@@ -291,9 +309,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(make_tool("test_tool", "hello"));
 
-        let result = registry
-            .execute("test_tool", &serde_json::json!({}))
-            .await;
+        let result = registry.execute("test_tool", &serde_json::json!({})).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "hello");
     }

@@ -15,14 +15,20 @@ impl Default for SystemPersona {
         Self {
             name: "OpenAlpaca".to_string(),
             core_values: vec![
-                "Be helpful and harmless".to_string(),
-                "Prefer JSON output when structure is needed".to_string(),
+                "Act as the user's trusted local AI agent, respecting their privacy and autonomy"
+                    .to_string(),
+                "Provide structured output (JSON) when the task requires machine-readable results"
+                    .to_string(),
             ],
             safety_rules: vec![
-                "Do not execute system commands without permission".to_string(),
-                "Do not reveal sensitive user data".to_string(),
+                "Confirm with the user before executing system commands or destructive actions"
+                    .to_string(),
+                "Protect the user's sensitive data and keep it within the local environment"
+                    .to_string(),
             ],
-            base_instructions: "You are an intelligent agent running on the user's local machine."
+            base_instructions: "You are OpenAlpaca, a locally-hosted AI agent that helps the user \
+                manage tasks, retrieve information, and coordinate work through specialized \
+                sub-agents and tools. You run entirely on the user's own machine."
                 .to_string(),
         }
     }
@@ -46,7 +52,7 @@ impl PromptAssembler {
         let mut prompt = String::new();
 
         // 1. System Block (Immutable)
-        prompt.push_str("### SYSTEM INSTRUCTIONS ###\n");
+        prompt.push_str("<system_instructions>\n");
         prompt.push_str(&format!("Identity: {}\n", system.name));
         prompt.push_str("Core Values:\n");
         for value in &system.core_values {
@@ -57,12 +63,13 @@ impl PromptAssembler {
             prompt.push_str(&format!("- {}\n", rule));
         }
         prompt.push_str(&format!(
-            "Base Instructions: {}\n\n",
+            "Base Instructions: {}\n",
             system.base_instructions
         ));
+        prompt.push_str("</system_instructions>\n\n");
 
         // 2. Agent Block (Mutable)
-        prompt.push_str("### AGENT ROLE ###\n");
+        prompt.push_str("<agent_role>\n");
         prompt.push_str(&format!("Role: {}\n", agent.role));
         prompt.push_str(&format!("Tone: {}\n", agent.tone));
         if !agent.domain_knowledge.is_empty() {
@@ -71,6 +78,7 @@ impl PromptAssembler {
                 prompt.push_str(&format!("- {}\n", domain));
             }
         }
+        prompt.push_str("</agent_role>\n");
 
         prompt
     }
@@ -80,14 +88,18 @@ pub fn format_tool_guidance(tools: &[openalpaca_llm::ToolDefinition]) -> String 
     if tools.is_empty() {
         return String::new();
     }
-    let tool_list: String = tools.iter()
+    let tool_list: String = tools
+        .iter()
         .map(|t| format!("- {}: {}", t.name, t.description))
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "\n\nYou have access to the following tools:\n{}\n\n\
-         Use these tools when they help complete the task. \
-         Do NOT say you cannot access files or the internet \u{2014} use the provided tools instead.",
+        "\n\n<available_tools>\n{}\n\
+         \n\
+         Use these tools to access files, fetch URLs, manage tasks, and complete the user's request.\n\
+         Always use the provided tools rather than claiming you cannot perform an action.\n\
+         If a tool call fails, report the error clearly and suggest an alternative approach.\n\
+         </available_tools>",
         tool_list
     )
 }
@@ -107,12 +119,14 @@ mod tests {
 
         let prompt = PromptAssembler::assemble(&system, &agent);
 
-        assert!(prompt.contains("### SYSTEM INSTRUCTIONS ###"));
+        assert!(prompt.contains("<system_instructions>"));
+        assert!(prompt.contains("</system_instructions>"));
         assert!(prompt.contains("Identity: OpenAlpaca"));
-        assert!(prompt.contains("### AGENT ROLE ###"));
+        assert!(prompt.contains("<agent_role>"));
+        assert!(prompt.contains("</agent_role>"));
         assert!(prompt.contains("Role: Coder"));
-        // User input should NOT be in the system prompt (Bug B fix)
-        assert!(!prompt.contains("### USER INPUT ###"));
+        // User input should NOT be in the system prompt
+        assert!(!prompt.contains("<user_input>"));
     }
 
     #[test]

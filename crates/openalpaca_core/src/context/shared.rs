@@ -2,6 +2,7 @@ use crate::agent::registry::AgentRegistry;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 /// Status of a task entry in the in-memory registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +168,8 @@ impl Default for TaskRegistry {
 pub struct SharedContext {
     pub task_registry: TaskRegistry,
     pub agent_registry: Arc<AgentRegistry>,
+    /// Cancellation tokens for running tasks, keyed by task_id.
+    cancellation_tokens: Mutex<HashMap<String, CancellationToken>>,
 }
 
 impl SharedContext {
@@ -174,7 +177,40 @@ impl SharedContext {
         Self {
             task_registry: TaskRegistry::new(),
             agent_registry: Arc::new(AgentRegistry::new()),
+            cancellation_tokens: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Register a cancellation token for a task.
+    pub fn register_cancellation_token(&self, task_id: &str, token: CancellationToken) {
+        let mut tokens = self
+            .cancellation_tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        tokens.insert(task_id.to_string(), token);
+    }
+
+    /// Trigger cancellation for a task. Returns `true` if the token was found.
+    pub fn cancel_task(&self, task_id: &str) -> bool {
+        let tokens = self
+            .cancellation_tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(token) = tokens.get(task_id) {
+            token.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove a cancellation token after the task has finished (cleanup).
+    pub fn remove_cancellation_token(&self, task_id: &str) {
+        let mut tokens = self
+            .cancellation_tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        tokens.remove(task_id);
     }
 }
 
@@ -250,11 +286,14 @@ mod tests {
 
     #[test]
     fn test_agent_registry_in_shared_context() {
-        use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, SubAgent};
+        use crate::agent::subagent::{
+            AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, SubAgent,
+        };
 
         let ctx = SharedContext::new();
         let agent = SubAgent {
             id: "a1".to_string(),
+            template_id: "a1".to_string(),
             name: "Test Agent".to_string(),
             description: None,
             icon: None,

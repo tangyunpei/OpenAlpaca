@@ -24,8 +24,15 @@ pub fn resolve_cascade(
     scope_ctx: &MemoryScopeContext,
 ) -> Vec<MemoryV2> {
     let cascade_scopes = scope_ctx.cascade_scopes();
-    repo.search_hybrid_cascade(owner_id, query, embedding, limit, kind_filter, &cascade_scopes)
-        .unwrap_or_default()
+    repo.search_hybrid_cascade(
+        owner_id,
+        query,
+        embedding,
+        limit,
+        kind_filter,
+        &cascade_scopes,
+    )
+    .unwrap_or_default()
 }
 
 #[cfg(test)]

@@ -94,11 +94,7 @@ fn print_help() {
     println!("  {} — Toggle thinking indicator", "/verbose".bold());
     println!("  {} — Show this help", "/help".bold());
     println!();
-    println!(
-        "  {} / {} — Exit chat",
-        "exit".bold(),
-        "quit".bold()
-    );
+    println!("  {} / {} — Exit chat", "exit".bold(), "quit".bold());
 }
 
 async fn cmd_status(client: &DaemonClient) -> anyhow::Result<()> {
@@ -129,15 +125,12 @@ async fn cmd_model(client: &DaemonClient) -> anyhow::Result<()> {
     if let Some(model) = config["model"].as_str() {
         println!("{} {}", "Model:".bold(), model);
     }
-    if let Some(fallbacks) = config["fallback_models"].as_array() {
-        if !fallbacks.is_empty() {
-            let names: Vec<&str> = fallbacks
-                .iter()
-                .filter_map(|v| v.as_str())
-                .collect();
-            if !names.is_empty() {
-                println!("{} {}", "Fallbacks:".dimmed(), names.join(", "));
-            }
+    if let Some(fallbacks) = config["fallback_models"].as_array()
+        && !fallbacks.is_empty()
+    {
+        let names: Vec<&str> = fallbacks.iter().filter_map(|v| v.as_str()).collect();
+        if !names.is_empty() {
+            println!("{} {}", "Fallbacks:".dimmed(), names.join(", "));
         }
     }
     Ok(())
@@ -249,10 +242,7 @@ async fn cmd_keys(client: &DaemonClient) -> anyhow::Result<()> {
 fn cmd_usage(context: &ReplContext) {
     let u = &context.session_usage;
     println!("{}", "Session usage:".bold());
-    println!(
-        "  Requests: {}",
-        u.request_count
-    );
+    println!("  Requests: {}", u.request_count);
     println!(
         "  Tokens in:  {}",
         chat_stream::format_token_count(u.total_tokens_in)
@@ -261,10 +251,7 @@ fn cmd_usage(context: &ReplContext) {
         "  Tokens out: {}",
         chat_stream::format_token_count(u.total_tokens_out)
     );
-    println!(
-        "  Total time: {}ms",
-        u.total_duration_ms
-    );
+    println!("  Total time: {}ms", u.total_duration_ms);
 }
 
 fn cmd_clear() {

@@ -173,6 +173,7 @@ fn append_line(buf: &mut String, line: &str) {
     buf.push_str(line.trim());
 }
 
+#[allow(clippy::type_complexity)]
 fn parse_sections(
     lines: &[String],
 ) -> Result<(Vec<String>, Vec<String>, String, Vec<String>), SoulParseError> {

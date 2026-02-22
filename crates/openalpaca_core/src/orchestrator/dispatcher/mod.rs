@@ -6,13 +6,14 @@ mod lead_agent;
 mod pipeline;
 #[cfg(test)]
 mod tests;
+pub(crate) mod usage;
 
 use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
-use arc_swap::ArcSwap;
 use crate::lane::LaneManager;
 use crate::security::gate::SecurityGate;
+use arc_swap::ArcSwap;
 use openalpaca_llm::LlmRouter;
 use openalpaca_storage::Database;
 use std::sync::Arc;
@@ -20,11 +21,11 @@ use uuid::Uuid;
 
 use crate::tools::ToolRegistry;
 
+use super::skill_matcher::{SkillMatch, SkillMatcher};
+use super::task_planner::TaskPlan;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::memory::task_extraction::{TaskExtractionParams, extract_task_memories};
 use openalpaca_storage::repository::MemoryRepository;
-use super::skill_matcher::{SkillMatch, SkillMatcher};
-use super::task_planner::TaskPlan;
 
 /// Retrieve relevant user memories as a formatted block for agent prompts.
 /// Mirrors the retrieval pattern used in `handle_simple_query()`.
@@ -116,6 +117,7 @@ pub(super) async fn retrieve_memory_block(
 
 /// Spawn a background task to extract memories from a completed task output.
 /// Fire-and-forget: does not block the caller. Only runs for successful tasks.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_task_memory_extraction(
     db: &Database,
     router: &Arc<LlmRouter>,
@@ -150,8 +152,18 @@ pub(super) fn spawn_task_memory_extraction(
     let embedder = embedder.clone();
     let daemon_config = daemon_config.clone();
 
-    tokio::spawn(async move {
+    let task_id_for_log = params.task_id.clone();
+    let handle = tokio::spawn(async move {
         extract_task_memories(params, db, router, embedder, daemon_config).await;
+    });
+    // Separate lightweight task to catch panics from the extraction task
+    tokio::spawn(async move {
+        if let Err(e) = handle.await {
+            tracing::warn!(
+                "Fire-and-forget memory extraction failed for task '{}': {e}",
+                task_id_for_log,
+            );
+        }
     });
 }
 
@@ -170,6 +182,7 @@ pub struct TaskDispatcher {
 }
 
 impl TaskDispatcher {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         shared_context: Arc<SharedContext>,
         lane_manager: Arc<LaneManager>,
@@ -195,8 +208,42 @@ impl TaskDispatcher {
         }
     }
 
+    /// Get the LLM router or fail the task with a helpful error.
+    fn require_router(&self, task_id: &str) -> Option<Arc<LlmRouter>> {
+        match &self.llm_router {
+            Some(r) => Some(r.clone()),
+            None => {
+                tracing::error!(
+                    "No LLM router configured — cannot execute task '{}'",
+                    task_id
+                );
+                self.shared_context
+                    .task_registry
+                    .update_status(task_id, crate::context::TaskEntryStatus::Failed);
+                if let Some(ref db) = self.db {
+                    let repo = openalpaca_storage::repository::TaskRepository::new(db);
+                    if let Err(e) =
+                        repo.update_status(task_id, openalpaca_storage::TaskStatus::Failed)
+                    {
+                        tracing::warn!(
+                            "require_router: failed to update DB status for task '{}': {e}",
+                            task_id
+                        );
+                    }
+                }
+                self.bus.publish(crate::events::SystemEvent::TaskFailed {
+                    task_id: task_id.to_string(),
+                    error: "No LLM router configured".to_string(),
+                    timestamp: chrono::Utc::now(),
+                });
+                None
+            }
+        }
+    }
+
     /// Dispatch a complex task using heuristic skill matching:
     /// Matches required skills to idle agents, then delegates to dispatch_core.
+    #[allow(clippy::too_many_arguments)]
     pub fn dispatch(
         &self,
         _request_id: Uuid,
@@ -209,9 +256,40 @@ impl TaskDispatcher {
     ) -> Result<String, String> {
         let matches = self
             .skill_matcher
-            .match_skills(required_skills, &self.shared_context.agent_registry)?;
+            .match_skills(required_skills, &self.shared_context.agent_registry)
+            .map_err(|e| {
+                tracing::warn!(
+                    required_skills = ?required_skills,
+                    description_len = description.len(),
+                    source = source,
+                    "Heuristic skill matching failed: {e}"
+                );
+                e
+            })?;
         let title = generate_title(description);
-        self.dispatch_core(description, title, matches, created_by, lane_key, source, None, workspace_id)
+        self.dispatch_core(
+            description,
+            title,
+            matches,
+            created_by,
+            lane_key,
+            source,
+            workspace_id,
+        )
+    }
+
+    /// Dispatch a task directly to the lead agent (heuristic fallback).
+    /// Used when heuristic skill matching fails for ComplexTask intents.
+    pub fn dispatch_lead_agent_heuristic(
+        &self,
+        description: &str,
+        created_by: &str,
+        lane_key: &str,
+        source: &str,
+        workspace_id: Option<String>,
+    ) -> Result<String, String> {
+        let title = generate_title(description);
+        self.dispatch_lead_agent(description, title, created_by, lane_key, source, workspace_id)
     }
 
     /// Dispatch a complex task using an LLM-generated plan.
@@ -226,23 +304,88 @@ impl TaskDispatcher {
         source: &str,
         workspace_id: Option<String>,
     ) -> Result<String, String> {
-        // Lead Agent path: dynamic orchestration for complex/exploratory tasks
+        let plan_classification = plan.classification.clone();
+        let plan_title_ref = plan.title.as_deref().unwrap_or("<none>").to_string();
+
+        // 1. Lead Agent path: dynamic orchestration for complex/exploratory tasks
         if plan.use_lead_agent {
+            tracing::info!(
+                classification = %plan_classification,
+                plan_title = %plan_title_ref,
+                description_len = description.len(),
+                "dispatch_planned: use_lead_agent=true, routing to lead agent"
+            );
             let title = plan
                 .title
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| generate_title(description));
             return self.dispatch_lead_agent(
-                description, title, created_by, lane_key, source, workspace_id,
+                description,
+                title,
+                created_by,
+                lane_key,
+                source,
+                workspace_id,
             );
         }
 
-        if plan.assignments.is_empty() {
-            return Err("No agents assigned by planner".to_string());
+        // 2. DAG path: planner emits assignments=[] with agent info in dag.nodes[].agent_id.
+        //    Must check DAG presence BEFORE the empty-assignments fallback, otherwise
+        //    DAG plans are silently rerouted to lead agent.
+        if let Some(dag) = plan.dag {
+            tracing::info!(
+                classification = %plan_classification,
+                plan_title = %plan_title_ref,
+                dag_nodes = dag.nodes.len(),
+                has_assignments = !plan.assignments.is_empty(),
+                description_len = description.len(),
+                "dispatch_planned: DAG present, routing to DAG-parallel execution"
+            );
+            let title = plan
+                .title
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| generate_title(description));
+            return self.dispatch_dag_planned(
+                description,
+                title,
+                dag,
+                created_by,
+                lane_key,
+                source,
+                workspace_id,
+            );
         }
 
-        // Build matches from plan assignments — availability is checked
-        // atomically via try_claim() inside dispatch_core().
+        // 3. No DAG and no assignments — fallback to lead agent
+        if plan.assignments.is_empty() {
+            tracing::info!(
+                classification = %plan_classification,
+                plan_title = %plan_title_ref,
+                description_len = description.len(),
+                "dispatch_planned: no agent assignments and no DAG, falling back to lead agent"
+            );
+            let title = plan
+                .title
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| generate_title(description));
+            return self.dispatch_lead_agent(
+                description,
+                title,
+                created_by,
+                lane_key,
+                source,
+                workspace_id,
+            );
+        }
+
+        // 4. Sequential pipeline: assignments provided, no DAG
+        tracing::info!(
+            classification = %plan_classification,
+            plan_title = %plan_title_ref,
+            assignment_count = plan.assignments.len(),
+            description_len = description.len(),
+            "dispatch_planned: routing to sequential pipeline"
+        );
         let matches: Vec<SkillMatch> = plan
             .assignments
             .iter()
@@ -254,13 +397,20 @@ impl TaskDispatcher {
             })
             .collect();
 
-        let dag = plan.dag;
         let title = plan
             .title
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| generate_title(description));
 
-        self.dispatch_core(description, title, matches, created_by, lane_key, source, dag, workspace_id)
+        self.dispatch_core(
+            description,
+            title,
+            matches,
+            created_by,
+            lane_key,
+            source,
+            workspace_id,
+        )
     }
 }
 
@@ -301,4 +451,92 @@ pub(super) fn format_task_result(title: &str, summary: &str, is_success: bool) -
     } else {
         format!("**Task failed: {}**\n\n{}", title, summary)
     }
+}
+
+/// Update task status in registry + DB + emit event for a completed or failed task.
+pub(super) fn finalize_task(
+    ctx: &crate::context::SharedContext,
+    bus: &crate::bus::EventBus,
+    db: Option<&openalpaca_storage::Database>,
+    task_id: &str,
+    summary: &str,
+    success: bool,
+) {
+    let now = chrono::Utc::now();
+    if success {
+        ctx.task_registry
+            .update_status(task_id, crate::context::TaskEntryStatus::Completed);
+        if let Some(db) = db {
+            let repo = openalpaca_storage::repository::TaskRepository::new(db);
+            if let Err(e) = repo.update_status(task_id, openalpaca_storage::TaskStatus::Completed) {
+                tracing::warn!(
+                    "finalize_task: failed to update status for task '{}': {e}",
+                    task_id
+                );
+            }
+            if let Err(e) = repo.set_result(task_id, summary) {
+                tracing::warn!(
+                    "finalize_task: failed to set result for task '{}': {e}",
+                    task_id
+                );
+            }
+        }
+        bus.publish(crate::events::SystemEvent::TaskCompleted {
+            task_id: task_id.to_string(),
+            result_summary: Some(summary.to_string()),
+            timestamp: now,
+        });
+    } else {
+        ctx.task_registry
+            .update_status(task_id, crate::context::TaskEntryStatus::Failed);
+        if let Some(db) = db {
+            let repo = openalpaca_storage::repository::TaskRepository::new(db);
+            if let Err(e) = repo.update_status(task_id, openalpaca_storage::TaskStatus::Failed) {
+                tracing::warn!(
+                    "finalize_task: failed to update status for task '{}': {e}",
+                    task_id
+                );
+            }
+            if let Err(e) = repo.set_result(task_id, summary) {
+                tracing::warn!(
+                    "finalize_task: failed to set result for task '{}': {e}",
+                    task_id
+                );
+            }
+        }
+        bus.publish(crate::events::SystemEvent::TaskFailed {
+            task_id: task_id.to_string(),
+            error: summary.to_string(),
+            timestamp: now,
+        });
+    }
+}
+
+/// Persist a task result as a conversation message.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn persist_conversation(
+    db: &openalpaca_storage::Database,
+    lane_key: &str,
+    source: &str,
+    content: String,
+    model: Option<String>,
+    tokens_in: i64,
+    tokens_out: i64,
+    runtime_secs: i64,
+) {
+    let conv_repo = openalpaca_storage::ConversationRepository::new(db);
+    let _ = conv_repo.get_or_create_conversation(lane_key, source);
+    let _ = conv_repo.insert(&openalpaca_storage::ConversationMessage {
+        id: 0,
+        lane_key: lane_key.to_string(),
+        role: "assistant".to_string(),
+        content,
+        source: Some(source.to_string()),
+        model,
+        tokens_in: Some(tokens_in),
+        tokens_out: Some(tokens_out),
+        duration_ms: Some(runtime_secs * 1000),
+        created_at: String::new(),
+    });
+    let _ = conv_repo.increment_message_count(lane_key);
 }

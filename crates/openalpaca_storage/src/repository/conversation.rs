@@ -37,7 +37,12 @@ impl<'a> ConversationRepository<'a> {
     }
 
     /// List messages for a lane, ordered by creation time ascending.
-    pub fn list_by_lane(&self, lane_key: &str, limit: i64, offset: i64) -> Result<Vec<ConversationMessage>> {
+    pub fn list_by_lane(
+        &self,
+        lane_key: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<ConversationMessage>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, created_at
@@ -59,7 +64,11 @@ impl<'a> ConversationRepository<'a> {
     }
 
     /// List the most recent N messages for a lane, in chronological order.
-    pub fn list_recent_by_lane(&self, lane_key: &str, limit: i64) -> Result<Vec<ConversationMessage>> {
+    pub fn list_recent_by_lane(
+        &self,
+        lane_key: &str,
+        limit: i64,
+    ) -> Result<Vec<ConversationMessage>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, created_at
@@ -474,13 +483,17 @@ mod tests {
         let db = test_db();
         let repo = ConversationRepository::new(&db);
 
-        let conv = repo.get_or_create_conversation("user1:telegram", "telegram").unwrap();
+        let conv = repo
+            .get_or_create_conversation("user1:telegram", "telegram")
+            .unwrap();
         assert_eq!(conv.lane_key, "user1:telegram");
         assert_eq!(conv.source, "telegram");
         assert_eq!(conv.message_count, 0);
 
         // Second call should return the same conversation
-        let conv2 = repo.get_or_create_conversation("user1:telegram", "telegram").unwrap();
+        let conv2 = repo
+            .get_or_create_conversation("user1:telegram", "telegram")
+            .unwrap();
         assert_eq!(conv.id, conv2.id);
     }
 
@@ -490,8 +503,10 @@ mod tests {
         let repo = ConversationRepository::new(&db);
 
         repo.get_or_create_conversation("user1:gui", "gui").unwrap();
-        repo.get_or_create_conversation("user2:telegram", "telegram").unwrap();
-        repo.get_or_create_conversation("user3:telegram", "telegram").unwrap();
+        repo.get_or_create_conversation("user2:telegram", "telegram")
+            .unwrap();
+        repo.get_or_create_conversation("user3:telegram", "telegram")
+            .unwrap();
 
         // List all
         let all = repo.list_conversations(None, 50, 0).unwrap();
@@ -579,7 +594,9 @@ mod tests {
         repo.get_or_create_conversation("user1:gui", "gui").unwrap();
 
         // Update with correct version (0)
-        let ok = repo.update_summary_optimistic("user1:gui", 0, "Test summary", 42).unwrap();
+        let ok = repo
+            .update_summary_optimistic("user1:gui", 0, "Test summary", 42)
+            .unwrap();
         assert!(ok);
 
         let (summary, version, last_id) = repo.get_summary("user1:gui").unwrap();
@@ -596,10 +613,15 @@ mod tests {
         repo.get_or_create_conversation("user1:gui", "gui").unwrap();
 
         // First update succeeds
-        assert!(repo.update_summary_optimistic("user1:gui", 0, "Summary v1", 10).unwrap());
+        assert!(
+            repo.update_summary_optimistic("user1:gui", 0, "Summary v1", 10)
+                .unwrap()
+        );
 
         // Second update with stale version (0) fails
-        let ok = repo.update_summary_optimistic("user1:gui", 0, "Summary v2", 20).unwrap();
+        let ok = repo
+            .update_summary_optimistic("user1:gui", 0, "Summary v2", 20)
+            .unwrap();
         assert!(!ok);
 
         // Original update preserved
@@ -615,7 +637,8 @@ mod tests {
         let repo = ConversationRepository::new(&db);
 
         repo.get_or_create_conversation("user1:gui", "gui").unwrap();
-        repo.update_summary_optimistic("user1:gui", 0, "Some summary", 50).unwrap();
+        repo.update_summary_optimistic("user1:gui", 0, "Some summary", 50)
+            .unwrap();
         repo.increment_message_count("user1:gui").unwrap();
 
         repo.clear_summary("user1:gui").unwrap();
@@ -637,23 +660,27 @@ mod tests {
 
         let mut ids = Vec::new();
         for i in 0..10 {
-            let id = repo.insert(&ConversationMessage {
-                id: 0,
-                lane_key: "user:gui".to_string(),
-                role: "user".to_string(),
-                content: format!("Message {i}"),
-                source: None,
-                model: None,
-                tokens_in: None,
-                tokens_out: None,
-                duration_ms: None,
-                created_at: String::new(),
-            }).unwrap();
+            let id = repo
+                .insert(&ConversationMessage {
+                    id: 0,
+                    lane_key: "user:gui".to_string(),
+                    role: "user".to_string(),
+                    content: format!("Message {i}"),
+                    source: None,
+                    model: None,
+                    tokens_in: None,
+                    tokens_out: None,
+                    duration_ms: None,
+                    created_at: String::new(),
+                })
+                .unwrap();
             ids.push(id);
         }
 
         // Query range: after id[2] and before id[7] → should get ids 3,4,5,6
-        let msgs = repo.list_by_lane_id_range("user:gui", ids[2], ids[7], 100).unwrap();
+        let msgs = repo
+            .list_by_lane_id_range("user:gui", ids[2], ids[7], 100)
+            .unwrap();
         assert_eq!(msgs.len(), 4);
         assert_eq!(msgs[0].content, "Message 3");
         assert_eq!(msgs[1].content, "Message 4");
@@ -661,13 +688,17 @@ mod tests {
         assert_eq!(msgs[3].content, "Message 6");
 
         // With limit
-        let msgs = repo.list_by_lane_id_range("user:gui", ids[2], ids[7], 2).unwrap();
+        let msgs = repo
+            .list_by_lane_id_range("user:gui", ids[2], ids[7], 2)
+            .unwrap();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].content, "Message 3");
         assert_eq!(msgs[1].content, "Message 4");
 
         // Empty range
-        let msgs = repo.list_by_lane_id_range("user:gui", ids[5], ids[5], 100).unwrap();
+        let msgs = repo
+            .list_by_lane_id_range("user:gui", ids[5], ids[5], 100)
+            .unwrap();
         assert_eq!(msgs.len(), 0);
     }
 }

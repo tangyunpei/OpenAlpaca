@@ -179,6 +179,11 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["execution", "lead_agent_defaults"],
         field: "max_tool_runtime_secs",
     },
+    TomlMapping {
+        schema_key: "daemon.execution.lead_max_concurrent_subagents",
+        section: &["execution", "lead_agent_defaults"],
+        field: "max_concurrent_subagents",
+    },
     // DAG (cont.)
     TomlMapping {
         schema_key: "daemon.dag.node_timeout_secs",
@@ -318,15 +323,11 @@ fn load_toml_value() -> Result<toml::Value> {
     }
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
-    toml::from_str(&content)
-        .with_context(|| format!("Failed to parse {}", path.display()))
+    toml::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))
 }
 
 /// Navigate into a TOML value tree by section path, returning the leaf table.
-fn navigate_to_section<'a>(
-    root: &'a toml::Value,
-    section: &[&str],
-) -> Option<&'a toml::Value> {
+fn navigate_to_section<'a>(root: &'a toml::Value, section: &[&str]) -> Option<&'a toml::Value> {
     let mut current = root;
     for key in section {
         current = current.get(key)?;
@@ -335,10 +336,7 @@ fn navigate_to_section<'a>(
 }
 
 /// Navigate into a mutable TOML value tree, creating tables as needed.
-fn navigate_to_section_mut<'a>(
-    root: &'a mut toml::Value,
-    section: &[&str],
-) -> &'a mut toml::Value {
+fn navigate_to_section_mut<'a>(root: &'a mut toml::Value, section: &[&str]) -> &'a mut toml::Value {
     let mut current = root;
     for key in section {
         // Ensure each level is a table
@@ -356,9 +354,8 @@ fn navigate_to_section_mut<'a>(
 
 /// Get a single daemon config value by schema key.
 pub fn get_daemon_value(key: &str) -> Result<Option<String>> {
-    let mapping = find_mapping(key).ok_or_else(|| {
-        anyhow::anyhow!("Unknown daemon config key '{}'", key)
-    })?;
+    let mapping =
+        find_mapping(key).ok_or_else(|| anyhow::anyhow!("Unknown daemon config key '{}'", key))?;
 
     let root = load_toml_value()?;
     let section = match navigate_to_section(&root, mapping.section) {
@@ -374,9 +371,8 @@ pub fn get_daemon_value(key: &str) -> Result<Option<String>> {
 
 /// Set a single daemon config value by schema key.
 pub fn set_daemon_value(key: &str, value: &str) -> Result<()> {
-    let mapping = find_mapping(key).ok_or_else(|| {
-        anyhow::anyhow!("Unknown daemon config key '{}'", key)
-    })?;
+    let mapping =
+        find_mapping(key).ok_or_else(|| anyhow::anyhow!("Unknown daemon config key '{}'", key))?;
 
     let path = daemon_config_path()?;
 
@@ -392,9 +388,9 @@ pub fn set_daemon_value(key: &str, value: &str) -> Result<()> {
 
     // Navigate to the correct section and set the value
     let section = navigate_to_section_mut(&mut root, mapping.section);
-    let table = section.as_table_mut().ok_or_else(|| {
-        anyhow::anyhow!("TOML section is not a table")
-    })?;
+    let table = section
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("TOML section is not a table"))?;
 
     // Infer TOML type: try integer first, then float, then string
     let toml_val = string_to_toml_value(value);
@@ -404,10 +400,8 @@ pub fn set_daemon_value(key: &str, value: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context("Failed to create config directory")?;
     }
-    let output = toml::to_string_pretty(&root)
-        .context("Failed to serialize daemon config")?;
-    std::fs::write(&path, output)
-        .with_context(|| format!("Failed to write {}", path.display()))?;
+    let output = toml::to_string_pretty(&root).context("Failed to serialize daemon config")?;
+    std::fs::write(&path, output).with_context(|| format!("Failed to write {}", path.display()))?;
 
     Ok(())
 }
@@ -416,9 +410,8 @@ pub fn set_daemon_value(key: &str, value: &str) -> Result<()> {
 ///
 /// Removes the field from daemon.toml. The runtime will fall back to the default.
 pub fn delete_daemon_value(key: &str) -> Result<()> {
-    let mapping = find_mapping(key).ok_or_else(|| {
-        anyhow::anyhow!("Unknown daemon config key '{}'", key)
-    })?;
+    let mapping =
+        find_mapping(key).ok_or_else(|| anyhow::anyhow!("Unknown daemon config key '{}'", key))?;
 
     let path = daemon_config_path()?;
     if !path.exists() {
@@ -427,21 +420,33 @@ pub fn delete_daemon_value(key: &str) -> Result<()> {
 
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
-    let mut root: toml::Value = toml::from_str(&content)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    let mut root: toml::Value =
+        toml::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))?;
 
     // Navigate to the section and remove the field
-    if let Some(section) = navigate_to_section_mut_opt(&mut root, mapping.section) {
-        if let Some(table) = section.as_table_mut() {
-            table.remove(mapping.field);
-        }
+    if let Some(section) = navigate_to_section_mut_opt(&mut root, mapping.section)
+        && let Some(table) = section.as_table_mut()
+    {
+        table.remove(mapping.field);
     }
 
-    let output = toml::to_string_pretty(&root)
-        .context("Failed to serialize daemon config")?;
-    std::fs::write(&path, output)
-        .with_context(|| format!("Failed to write {}", path.display()))?;
+    let output = toml::to_string_pretty(&root).context("Failed to serialize daemon config")?;
+    std::fs::write(&path, output).with_context(|| format!("Failed to write {}", path.display()))?;
 
+    Ok(())
+}
+
+/// Clear all daemon config values, resetting to runtime defaults.
+///
+/// Writes a minimal empty TOML file. The daemon runtime fills in defaults
+/// via `DaemonConfig::default()` when the file has no overrides.
+pub fn clear_daemon_config() -> Result<()> {
+    let path = daemon_config_path()?;
+    if !path.exists() {
+        return Ok(());
+    }
+    std::fs::write(&path, "# Reset to defaults\n")
+        .with_context(|| format!("Failed to write {}", path.display()))?;
     Ok(())
 }
 
@@ -458,20 +463,20 @@ pub fn list_daemon_entries() -> Result<Vec<(String, String, String)>> {
             continue;
         }
 
-        if let Some(section) = navigate_to_section(&root, mapping.section) {
-            if let Some(val) = section.get(mapping.field) {
-                let kind = match val {
-                    toml::Value::Integer(_) => "int",
-                    toml::Value::Float(_) => "float",
-                    toml::Value::Boolean(_) => "bool",
-                    _ => "string",
-                };
-                entries.push((
-                    mapping.schema_key.to_string(),
-                    toml_value_to_string(val),
-                    kind.to_string(),
-                ));
-            }
+        if let Some(section) = navigate_to_section(&root, mapping.section)
+            && let Some(val) = section.get(mapping.field)
+        {
+            let kind = match val {
+                toml::Value::Integer(_) => "int",
+                toml::Value::Float(_) => "float",
+                toml::Value::Boolean(_) => "bool",
+                _ => "string",
+            };
+            entries.push((
+                mapping.schema_key.to_string(),
+                toml_value_to_string(val),
+                kind.to_string(),
+            ));
         }
     }
 

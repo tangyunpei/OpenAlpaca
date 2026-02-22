@@ -1,6 +1,6 @@
+use crate::LlmProvider;
 use crate::error::LlmError;
 use crate::types::*;
-use crate::LlmProvider;
 use async_trait::async_trait;
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-5-20250929";
@@ -17,22 +17,26 @@ pub struct AnthropicProvider {
 
 impl AnthropicProvider {
     pub fn new(api_key: String, model: Option<String>, max_tokens: Option<u32>) -> Self {
+        Self::with_client(reqwest::Client::new(), api_key, model, max_tokens)
+    }
+
+    /// Create with a shared `reqwest::Client` (for connection pool reuse).
+    pub fn with_client(
+        client: reqwest::Client,
+        api_key: String,
+        model: Option<String>,
+        max_tokens: Option<u32>,
+    ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client,
             api_key,
             model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         }
     }
 
-    fn build_request_body(
-        &self,
-        request: &ChatRequest,
-    ) -> serde_json::Value {
-        let model = request
-            .model
-            .as_deref()
-            .unwrap_or(&self.model);
+    fn build_request_body(&self, request: &ChatRequest) -> serde_json::Value {
+        let model = request.model.as_deref().unwrap_or(&self.model);
         let max_tokens = request.max_tokens.unwrap_or(self.max_tokens);
 
         // Extract system message (Anthropic uses top-level system field)
@@ -128,14 +132,15 @@ impl AnthropicProvider {
     }
 
     fn parse_response(&self, body: serde_json::Value) -> Result<ChatResponse, LlmError> {
-        let model = body["model"]
-            .as_str()
-            .unwrap_or(&self.model)
-            .to_string();
+        let model = body["model"].as_str().unwrap_or(&self.model).to_string();
 
         let base_input = body["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
-        let cache_creation = body["usage"]["cache_creation_input_tokens"].as_u64().unwrap_or(0) as u32;
-        let cache_read = body["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0) as u32;
+        let cache_creation = body["usage"]["cache_creation_input_tokens"]
+            .as_u64()
+            .unwrap_or(0) as u32;
+        let cache_read = body["usage"]["cache_read_input_tokens"]
+            .as_u64()
+            .unwrap_or(0) as u32;
 
         let usage = Usage {
             input_tokens: base_input + cache_creation + cache_read,
@@ -168,14 +173,8 @@ impl AnthropicProvider {
                     }
                     Some("tool_use") => {
                         tool_calls.push(ToolCall {
-                            id: block["id"]
-                                .as_str()
-                                .unwrap_or_default()
-                                .to_string(),
-                            name: block["name"]
-                                .as_str()
-                                .unwrap_or_default()
-                                .to_string(),
+                            id: block["id"].as_str().unwrap_or_default().to_string(),
+                            name: block["name"].as_str().unwrap_or_default().to_string(),
                             arguments: block["input"].clone(),
                         });
                     }
@@ -239,7 +238,11 @@ impl LlmProvider for AnthropicProvider {
         Ok(models)
     }
 
-    async fn chat_with_key(&self, key: &str, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+    async fn chat_with_key(
+        &self,
+        key: &str,
+        request: ChatRequest,
+    ) -> Result<ChatResponse, LlmError> {
         let body = self.build_request_body(&request);
 
         let response = self
@@ -255,13 +258,14 @@ impl LlmProvider for AnthropicProvider {
 
         let status = response.status().as_u16();
 
-        if status == 429 {
+        if status == 429 || status == 529 {
+            let default_retry = if status == 529 { 30 } else { 1 };
             let retry_after = response
                 .headers()
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1000);
+                .unwrap_or(default_retry);
             return Err(LlmError::RateLimited {
                 retry_after_ms: retry_after * 1000,
             });
@@ -290,11 +294,7 @@ mod tests {
 
     #[test]
     fn test_request_serialization() {
-        let provider = AnthropicProvider::new(
-            "test-key".to_string(),
-            None,
-            None,
-        );
+        let provider = AnthropicProvider::new("test-key".to_string(), None, None);
         let request = ChatRequest {
             messages: vec![
                 ChatMessage::system("You are helpful."),
@@ -375,7 +375,10 @@ mod tests {
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].id, "toolu_01");
         assert_eq!(response.tool_calls[0].name, "web_search");
-        assert_eq!(response.tool_calls[0].arguments["query"], "Rust programming");
+        assert_eq!(
+            response.tool_calls[0].arguments["query"],
+            "Rust programming"
+        );
         assert_eq!(response.finish_reason, FinishReason::ToolUse);
     }
 

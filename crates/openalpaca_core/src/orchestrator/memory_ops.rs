@@ -51,23 +51,18 @@ impl Orchestrator {
             };
 
             match result {
-                PersistResult::Superseded { old_content, .. } => {
-                    Ok(format!(
-                        "Got it, I've updated my memory{} (was: \"{}\"): {}",
-                        scope_label,
-                        old_content.chars().take(50).collect::<String>(),
-                        text
-                    ))
-                }
-                PersistResult::Inserted(_) => {
-                    Ok(format!("Got it, I'll remember that{}: {}", scope_label, text))
-                }
-                PersistResult::Duplicate => {
-                    Ok("I already have that noted.".to_string())
-                }
-                PersistResult::Error(e) => {
-                    Err(format!("Failed to store memory: {}", e))
-                }
+                PersistResult::Superseded { old_content, .. } => Ok(format!(
+                    "Got it, I've updated my memory{} (was: \"{}\"): {}",
+                    scope_label,
+                    old_content.chars().take(50).collect::<String>(),
+                    text
+                )),
+                PersistResult::Inserted(_) => Ok(format!(
+                    "Got it, I'll remember that{}: {}",
+                    scope_label, text
+                )),
+                PersistResult::Duplicate => Ok("I already have that noted.".to_string()),
+                PersistResult::Error(e) => Err(format!("Failed to store memory: {}", e)),
             }
         } else {
             Err("Memory system is not available.".to_string())
@@ -156,8 +151,7 @@ mod tests {
     #[test]
     fn test_parse_remember_scope_workspace_flag() {
         let ctx = MemoryScopeContext::new(Some("/home/user/project".to_string()));
-        let (text, scope, id) =
-            parse_remember_scope("--workspace this project uses SQLite", &ctx);
+        let (text, scope, id) = parse_remember_scope("--workspace this project uses SQLite", &ctx);
         assert_eq!(text, "this project uses SQLite");
         assert_eq!(scope, MemoryScope::Workspace);
         assert_eq!(id, "/home/user/project");
@@ -166,8 +160,7 @@ mod tests {
     #[test]
     fn test_parse_remember_scope_workspace_flag_at_end() {
         let ctx = MemoryScopeContext::new(Some("/ws".to_string()));
-        let (text, scope, id) =
-            parse_remember_scope("this project uses SQLite --workspace", &ctx);
+        let (text, scope, id) = parse_remember_scope("this project uses SQLite --workspace", &ctx);
         assert_eq!(text, "this project uses SQLite");
         assert_eq!(scope, MemoryScope::Workspace);
         assert_eq!(id, "/ws");
@@ -176,8 +169,7 @@ mod tests {
     #[test]
     fn test_parse_remember_scope_workspace_no_detection() {
         let ctx = MemoryScopeContext::global_only();
-        let (text, scope, id) =
-            parse_remember_scope("--workspace this project uses SQLite", &ctx);
+        let (text, scope, id) = parse_remember_scope("--workspace this project uses SQLite", &ctx);
         assert_eq!(text, "this project uses SQLite");
         // Falls back to Global when no workspace detected
         assert_eq!(scope, MemoryScope::Global);

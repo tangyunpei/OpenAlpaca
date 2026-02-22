@@ -3,8 +3,8 @@ use clap::{Args, Subcommand};
 use console::style;
 use dialoguer::{Confirm, Input, Password, Select, theme::ColorfulTheme};
 use openalpaca_llm::{ClaudeCodeCliProvider, CodexCliProvider};
-use openalpaca_storage::{ConfigRepository, Database, config_schema, paths};
 use openalpaca_storage::config_schema::ConfigBackend;
+use openalpaca_storage::{ConfigRepository, Database, config_schema, paths};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -68,7 +68,11 @@ pub async fn run(args: ConfigArgs) -> Result<()> {
     match args.action {
         Some(ConfigAction::Set { key, value }) => cmd_set(&repo, &key, &value)?,
         Some(ConfigAction::Get { key }) => cmd_get(&repo, &key)?,
-        Some(ConfigAction::List { all, format, verbose }) => cmd_list(&repo, all, format, verbose)?,
+        Some(ConfigAction::List {
+            all,
+            format,
+            verbose,
+        }) => cmd_list(&repo, all, format, verbose)?,
         Some(ConfigAction::Reset { key, factory }) => cmd_reset(&repo, &db, key, factory)?,
         None => run_interactive(&repo, &db)?,
     }
@@ -115,8 +119,11 @@ fn cmd_set(repo: &ConfigRepository, key: &str, value: &str) -> Result<()> {
 
 fn cmd_get(repo: &ConfigRepository, key: &str) -> Result<()> {
     let def = config_schema::lookup(key);
-    let backend = def.as_ref().map(|d| d.backend).unwrap_or(ConfigBackend::SystemConfig);
-    let sensitive = def.as_ref().map_or(false, |d| d.sensitive);
+    let backend = def
+        .as_ref()
+        .map(|d| d.backend)
+        .unwrap_or(ConfigBackend::SystemConfig);
+    let sensitive = def.as_ref().is_some_and(|d| d.sensitive);
 
     let value = match backend {
         ConfigBackend::LlmToml => ai_config::get_ai_value(key)?,
@@ -224,7 +231,7 @@ fn cmd_list(repo: &ConfigRepository, all: bool, format: OutputFormat, verbose: b
             continue;
         }
         let def = config_schema::lookup(k);
-        let sensitive = def.as_ref().map_or(false, |d| d.sensitive);
+        let sensitive = def.as_ref().is_some_and(|d| d.sensitive);
         let display = if sensitive {
             config_schema::mask_value(v)
         } else {
@@ -272,12 +279,7 @@ fn print_grouped_table(
     let category_order = ["Agents", "API-Keys", "Daemon", "Connectors", "System"];
 
     // Compute column widths from actual data
-    let key_width = resolved
-        .keys()
-        .map(|k| k.len())
-        .max()
-        .unwrap_or(30)
-        .max(20);
+    let key_width = resolved.keys().map(|k| k.len()).max().unwrap_or(30).max(20);
     let val_width = resolved
         .values()
         .map(|(v, _, _)| v.len())
@@ -306,11 +308,24 @@ fn print_grouped_table(
         first_category = false;
         let header = format!("━━━ {} ", cat);
         let pad = 60usize.saturating_sub(header.len());
-        println!("{}", style(format!("{}{}", header, "━".repeat(pad))).bold().cyan());
+        println!(
+            "{}",
+            style(format!("{}{}", header, "━".repeat(pad)))
+                .bold()
+                .cyan()
+        );
 
         if subcats.is_empty() {
             // Flat category (Connectors, System)
-            print_category_keys(&cat_keys, resolved, key_width, val_width, verbose, &mut total_keys, &mut set_keys);
+            print_category_keys(
+                &cat_keys,
+                resolved,
+                key_width,
+                val_width,
+                verbose,
+                &mut total_keys,
+                &mut set_keys,
+            );
         } else {
             // Subcategory-based rendering
             for sub in &subcats {
@@ -320,7 +335,15 @@ fn print_grouped_table(
                     continue;
                 }
                 println!("  {}", style(sub).bold());
-                print_category_keys(&sub_keys, resolved, key_width, val_width, verbose, &mut total_keys, &mut set_keys);
+                print_category_keys(
+                    &sub_keys,
+                    resolved,
+                    key_width,
+                    val_width,
+                    verbose,
+                    &mut total_keys,
+                    &mut set_keys,
+                );
             }
         }
     }
@@ -328,7 +351,11 @@ fn print_grouped_table(
     // Dynamic connector keys not in the static registry
     let mut dynamic_keys: Vec<&String> = resolved
         .keys()
-        .filter(|k| config_schema::CONFIG_KEYS.iter().all(|d| d.key != k.as_str()))
+        .filter(|k| {
+            config_schema::CONFIG_KEYS
+                .iter()
+                .all(|d| d.key != k.as_str())
+        })
         .collect();
     dynamic_keys.sort();
 
@@ -338,7 +365,12 @@ fn print_grouped_table(
         }
         let header = "━━━ Dynamic ";
         let pad = 60usize.saturating_sub(header.len());
-        println!("{}", style(format!("{}{}", header, "━".repeat(pad))).bold().cyan());
+        println!(
+            "{}",
+            style(format!("{}{}", header, "━".repeat(pad)))
+                .bold()
+                .cyan()
+        );
 
         for k in &dynamic_keys {
             let (display_val, source, is_set) = &resolved[k.as_str()];
@@ -349,7 +381,16 @@ fn print_grouped_table(
             let desc = config_schema::lookup(k)
                 .map(|d| d.description.to_string())
                 .unwrap_or_default();
-            print_key_row(k, display_val, *is_set, source, &desc, key_width, val_width, verbose);
+            print_key_row(
+                k,
+                display_val,
+                *is_set,
+                source,
+                &desc,
+                key_width,
+                val_width,
+                verbose,
+            );
         }
     }
 
@@ -381,11 +422,21 @@ fn print_category_keys(
             if *is_set {
                 *set += 1;
             }
-            print_key_row(def.key, display_val, *is_set, source, def.description, key_width, val_width, verbose);
+            print_key_row(
+                def.key,
+                display_val,
+                *is_set,
+                source,
+                def.description,
+                key_width,
+                val_width,
+                verbose,
+            );
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_key_row(
     key: &str,
     value: &str,
@@ -445,6 +496,8 @@ fn cmd_reset(
 
         if confirm {
             db.factory_reset()?;
+            ai_config::clear_ai_config()?;
+            daemon_config_cli::clear_daemon_config()?;
             println!("All configuration and data wiped (Factory Reset).");
         } else {
             println!("Cancelled.");
@@ -454,7 +507,10 @@ fn cmd_reset(
 
     if let Some(k) = key {
         let def = config_schema::lookup(&k);
-        let backend = def.as_ref().map(|d| d.backend).unwrap_or(ConfigBackend::SystemConfig);
+        let backend = def
+            .as_ref()
+            .map(|d| d.backend)
+            .unwrap_or(ConfigBackend::SystemConfig);
         match backend {
             ConfigBackend::LlmToml => ai_config::delete_ai_value(&k)?,
             ConfigBackend::DaemonToml => daemon_config_cli::delete_daemon_value(&k)?,
@@ -470,6 +526,7 @@ fn cmd_reset(
         if confirm {
             repo.clear_all()?;
             ai_config::clear_ai_config()?;
+            daemon_config_cli::clear_daemon_config()?;
             println!("Config reset (agents and data preserved).");
         } else {
             println!("Cancelled.");
@@ -481,10 +538,7 @@ fn cmd_reset(
 // ── Interactive TUI ──────────────────────────────────────────────────────
 
 fn run_interactive(repo: &ConfigRepository, db: &Database) -> Result<()> {
-    println!(
-        "{}",
-        style("OpenAlpaca Configuration Mode").bold().cyan()
-    );
+    println!("{}", style("OpenAlpaca Configuration Mode").bold().cyan());
 
     let mut config_map: HashMap<String, String> = HashMap::new();
     for (k, v, _) in repo.list()? {
@@ -554,10 +608,12 @@ fn run_interactive(repo: &ConfigRepository, db: &Database) -> Result<()> {
 
                     if input == "yes" || input == "y" {
                         db.factory_reset()?;
+                        let _ = ai_config::clear_ai_config();
+                        let _ = daemon_config_cli::clear_daemon_config();
                         config_map.clear();
                         println!(
                             "{}",
-                            style("Database wiped (Factory Reset). Exiting.").green()
+                            style("All configuration wiped (Factory Reset). Exiting.").green()
                         );
                         break;
                     } else {
@@ -574,7 +630,10 @@ fn run_interactive(repo: &ConfigRepository, db: &Database) -> Result<()> {
 
 fn format_category_label(category: &str, config_map: &HashMap<String, String>) -> String {
     let keys = config_schema::keys_in_category(category);
-    let set_count = keys.iter().filter(|d| config_map.contains_key(d.key)).count();
+    let set_count = keys
+        .iter()
+        .filter(|d| config_map.contains_key(d.key))
+        .count();
     let total = keys.len();
     format!(
         "{}  {}",
@@ -609,7 +668,10 @@ fn format_key_menu_item(
         (val, true)
     } else if let Some(d) = def.default {
         if def.sensitive {
-            (format!("(default: {})", config_schema::mask_value(d)), false)
+            (
+                format!("(default: {})", config_schema::mask_value(d)),
+                false,
+            )
         } else {
             (format!("(default: {})", d), false)
         }
@@ -744,10 +806,7 @@ fn interactive_provider(
 
 /// Flat key-list editor — the original `interactive_provider` body.
 /// Used for Anthropic, OpenAI, Ollama (and as fallback from guided wizards' "Configure Settings").
-fn interactive_provider_flat(
-    config: &mut HashMap<String, String>,
-    provider: &str,
-) -> Result<()> {
+fn interactive_provider_flat(config: &mut HashMap<String, String>, provider: &str) -> Result<()> {
     let keys = config_schema::keys_in_subcategory("API-Keys", provider);
     loop {
         let mut items: Vec<String> = keys
@@ -779,10 +838,12 @@ fn interactive_provider_flat(
 /// Sync AI entries from disk back into the in-memory config_map.
 fn sync_ai_config_map(config: &mut HashMap<String, String>) {
     // Remove stale AI keys first
-    config.retain(|k, _| !k.starts_with("ai.") || {
-        config_schema::lookup(k)
-            .map(|d| d.backend != ConfigBackend::LlmToml)
-            .unwrap_or(true)
+    config.retain(|k, _| {
+        !k.starts_with("ai.") || {
+            config_schema::lookup(k)
+                .map(|d| d.backend != ConfigBackend::LlmToml)
+                .unwrap_or(true)
+        }
     });
     // Re-read from disk
     for (k, v, _) in ai_config::list_ai_entries().unwrap_or_default() {
@@ -976,11 +1037,7 @@ fn interactive_edit_key(
             )?;
             *did_write_llm_toml = true;
             sync_ai_config_map(config);
-            println!(
-                "{} Key '{}' updated.",
-                style("[ok]").green().bold(),
-                key_id
-            );
+            println!("{} Key '{}' updated.", style("[ok]").green().bold(), key_id);
         }
         1 => {
             // Delete Key
@@ -992,11 +1049,7 @@ fn interactive_edit_key(
                 ai_config::remove_provider_key(provider, key_id)?;
                 *did_write_llm_toml = true;
                 sync_ai_config_map(config);
-                println!(
-                    "{} Key '{}' deleted.",
-                    style("[ok]").green().bold(),
-                    key_id
-                );
+                println!("{} Key '{}' deleted.", style("[ok]").green().bold(), key_id);
             } else {
                 println!("{}", style("Cancelled.").dim());
             }
@@ -1039,7 +1092,13 @@ fn interactive_add_key(
     if let Err(e) = config_schema::validate_key_for_provider(provider, secret.trim()) {
         println!("{}", style(format!("Warning: {}", e)).yellow());
         if provider == "anthropic" && secret.trim().starts_with("sk-ant-oat") {
-            println!("{}", style("Tip: Use the Claude Code > Quick Setup wizard to add setup-tokens correctly.").dim());
+            println!(
+                "{}",
+                style(
+                    "Tip: Use the Claude Code > Quick Setup wizard to add setup-tokens correctly."
+                )
+                .dim()
+            );
         }
         let proceed = Confirm::with_theme(&ColorfulTheme::default())
             .with_prompt("Add this key anyway?")
@@ -1056,7 +1115,7 @@ fn interactive_add_key(
     let source_sel = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Key source")
         .default(0)
-        .items(&source_choices)
+        .items(source_choices)
         .interact()?;
 
     // Priority
@@ -1064,7 +1123,7 @@ fn interactive_add_key(
     let priority_sel = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Priority")
         .default(0)
-        .items(&priority_choices)
+        .items(priority_choices)
         .interact()?;
 
     ai_config::upsert_provider_key(
@@ -1080,7 +1139,12 @@ fn interactive_add_key(
 
     // Auto-enable if this is the first key
     let enabled_key = format!("ai.{}.enabled", provider);
-    if !config.contains_key(&enabled_key) || config.get(&enabled_key).map(|v| v == "false").unwrap_or(false) {
+    if !config.contains_key(&enabled_key)
+        || config
+            .get(&enabled_key)
+            .map(|v| v == "false")
+            .unwrap_or(false)
+    {
         config.insert(enabled_key, "true".to_string());
     }
 
@@ -1101,7 +1165,10 @@ fn guided_claude_code_setup(config: &mut HashMap<String, String>) -> Result<()> 
         println!();
         println!("{}", style("Claude Code Setup").bold().cyan());
         println!("{}", style("──────────────────────────────────").dim());
-        println!("{}", format_provider_status("claude", "claude_code", config));
+        println!(
+            "{}",
+            format_provider_status("claude", "claude_code", config)
+        );
         println!();
 
         let items = vec![
@@ -1139,10 +1206,7 @@ fn guided_claude_code_quick_setup(config: &mut HashMap<String, String>) -> Resul
         style("Run `claude setup-token` in your terminal, then paste the generated token below.")
             .yellow()
     );
-    println!(
-        "{}",
-        style("(Leave empty to cancel)").dim()
-    );
+    println!("{}", style("(Leave empty to cancel)").dim());
     println!();
 
     loop {
@@ -1161,9 +1225,15 @@ fn guided_claude_code_quick_setup(config: &mut HashMap<String, String>) -> Resul
                 let trimmed = token.trim().to_string();
 
                 // Store as anthropic API key with claude_code source
-                let old_key = config.get("ai.anthropic.api_key").cloned().unwrap_or_default();
+                let old_key = config
+                    .get("ai.anthropic.api_key")
+                    .cloned()
+                    .unwrap_or_default();
                 config.insert("ai.anthropic.api_key".to_string(), trimmed);
-                config.insert("__source:ai.anthropic.api_key".to_string(), "claude_code".to_string());
+                config.insert(
+                    "__source:ai.anthropic.api_key".to_string(),
+                    "claude_code".to_string(),
+                );
 
                 // Auto-enable anthropic if key was previously empty
                 if old_key.is_empty() {
@@ -1193,8 +1263,10 @@ fn guided_claude_code_quick_setup(config: &mut HashMap<String, String>) -> Resul
                 println!();
                 println!(
                     "{}",
-                    style("Changes are in memory. Use 'Save & Exit' from the main menu to persist.")
-                        .dim()
+                    style(
+                        "Changes are in memory. Use 'Save & Exit' from the main menu to persist."
+                    )
+                    .dim()
                 );
                 return Ok(());
             }
@@ -1262,67 +1334,64 @@ fn guided_codex_quick_setup(config: &mut HashMap<String, String>) -> Result<()> 
     println!();
 
     // Check OPENAI_API_KEY env var
-    if let Ok(env_key) = std::env::var("OPENAI_API_KEY") {
-        if !env_key.trim().is_empty() {
-            match config_schema::validate_openai_api_key(&env_key) {
-                Ok(()) => {
+    if let Ok(env_key) = std::env::var("OPENAI_API_KEY")
+        && !env_key.trim().is_empty()
+    {
+        match config_schema::validate_openai_api_key(&env_key) {
+            Ok(()) => {
+                println!(
+                    "{} Detected OPENAI_API_KEY environment variable ({})",
+                    style("[ok]").green().bold(),
+                    config_schema::mask_value(&env_key)
+                );
+
+                let use_env = Confirm::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Use this key?")
+                    .default(true)
+                    .interact()?;
+
+                if use_env {
+                    let trimmed = env_key.trim().to_string();
+                    let old_key = config.get("ai.openai.api_key").cloned().unwrap_or_default();
+                    config.insert("ai.openai.api_key".to_string(), trimmed);
+
+                    if old_key.is_empty() {
+                        config.insert("ai.openai.enabled".to_string(), "true".to_string());
+                    }
+                    config.insert("ai.codex.discovery".to_string(), "true".to_string());
+
+                    println!();
+                    println!("{}", style("Setup complete!").bold().green());
                     println!(
-                        "{} Detected OPENAI_API_KEY environment variable ({})",
+                        "  {} OpenAI API key stored ({})",
                         style("[ok]").green().bold(),
-                        config_schema::mask_value(&env_key)
+                        config_schema::mask_value(config.get("ai.openai.api_key").unwrap())
                     );
-
-                    let use_env = Confirm::with_theme(&ColorfulTheme::default())
-                        .with_prompt("Use this key?")
-                        .default(true)
-                        .interact()?;
-
-                    if use_env {
-                        let trimmed = env_key.trim().to_string();
-                        let old_key = config.get("ai.openai.api_key").cloned().unwrap_or_default();
-                        config.insert("ai.openai.api_key".to_string(), trimmed);
-
-                        if old_key.is_empty() {
-                            config.insert("ai.openai.enabled".to_string(), "true".to_string());
-                        }
-                        config.insert("ai.codex.discovery".to_string(), "true".to_string());
-
-                        println!();
-                        println!("{}", style("Setup complete!").bold().green());
+                    if old_key.is_empty() {
                         println!(
-                            "  {} OpenAI API key stored ({})",
-                            style("[ok]").green().bold(),
-                            config_schema::mask_value(config.get("ai.openai.api_key").unwrap())
-                        );
-                        if old_key.is_empty() {
-                            println!(
-                                "  {} OpenAI provider auto-enabled",
-                                style("[ok]").green().bold()
-                            );
-                        }
-                        println!(
-                            "  {} Codex discovery enabled",
+                            "  {} OpenAI provider auto-enabled",
                             style("[ok]").green().bold()
                         );
-                        println!();
-                        println!(
+                    }
+                    println!("  {} Codex discovery enabled", style("[ok]").green().bold());
+                    println!();
+                    println!(
                             "{}",
                             style("Changes are in memory. Use 'Save & Exit' from the main menu to persist.")
                                 .dim()
                         );
-                        return Ok(());
-                    }
-                    // User declined env var — fall through to manual paste
-                    println!();
+                    return Ok(());
                 }
-                Err(e) => {
-                    println!(
-                        "{} OPENAI_API_KEY env var is set but invalid: {}",
-                        style("[!!]").red().bold(),
-                        e
-                    );
-                    println!();
-                }
+                // User declined env var — fall through to manual paste
+                println!();
+            }
+            Err(e) => {
+                println!(
+                    "{} OPENAI_API_KEY env var is set but invalid: {}",
+                    style("[!!]").red().bold(),
+                    e
+                );
+                println!();
             }
         }
     }
@@ -1331,10 +1400,7 @@ fn guided_codex_quick_setup(config: &mut HashMap<String, String>) -> Result<()> 
         "{}",
         style("Get your API key at: https://platform.openai.com/api-keys").yellow()
     );
-    println!(
-        "{}",
-        style("(Leave empty to cancel)").dim()
-    );
+    println!("{}", style("(Leave empty to cancel)").dim());
     println!();
 
     loop {
@@ -1373,15 +1439,14 @@ fn guided_codex_quick_setup(config: &mut HashMap<String, String>) -> Result<()> 
                         style("[ok]").green().bold()
                     );
                 }
-                println!(
-                    "  {} Codex discovery enabled",
-                    style("[ok]").green().bold()
-                );
+                println!("  {} Codex discovery enabled", style("[ok]").green().bold());
                 println!();
                 println!(
                     "{}",
-                    style("Changes are in memory. Use 'Save & Exit' from the main menu to persist.")
-                        .dim()
+                    style(
+                        "Changes are in memory. Use 'Save & Exit' from the main menu to persist."
+                    )
+                    .dim()
                 );
                 return Ok(());
             }
@@ -1458,8 +1523,12 @@ struct TuiAgentConfigResponse {
 }
 
 /// Run an async future on the current tokio runtime from synchronous code.
+///
+/// Uses `block_in_place` to safely move off the async worker thread before
+/// blocking, which avoids the "Cannot start a runtime from within a runtime"
+/// panic when called inside `#[tokio::main]`.
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    tokio::runtime::Handle::current().block_on(f)
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
 }
 
 /// Fetch agents from the daemon. Returns empty vec on connection failure.
@@ -1502,7 +1571,10 @@ fn format_agent_menu_item(agent: &TuiAgentItem) -> String {
 }
 
 /// Interactive agent management sub-menu.
-fn interactive_manage_agents(_repo: &ConfigRepository, _config: &HashMap<String, String>) -> Result<bool> {
+fn interactive_manage_agents(
+    _repo: &ConfigRepository,
+    _config: &HashMap<String, String>,
+) -> Result<bool> {
     loop {
         // Fetch fresh agent list every iteration
         let agents = fetch_agents();
@@ -1558,10 +1630,10 @@ fn interactive_agent_detail(agent: &TuiAgentItem) -> Result<()> {
         println!();
         println!("{} {}", style("Agent:").dim(), style(&agent.name).bold());
         println!("{} {}", style("ID:").dim(), &agent.id);
-        if let Some(ref desc) = agent.description {
-            if !desc.is_empty() {
-                println!("{} {}", style("Description:").dim(), desc);
-            }
+        if let Some(ref desc) = agent.description
+            && !desc.is_empty()
+        {
+            println!("{} {}", style("Description:").dim(), desc);
         }
 
         let status_styled = match agent.status.to_lowercase().as_str() {
@@ -1624,11 +1696,8 @@ fn interactive_agent_detail(agent: &TuiAgentItem) -> Result<()> {
 /// Show full agent config as pretty-printed JSON.
 fn view_agent_config_json(agent_id: &str) -> Result<()> {
     let client = DaemonClient::connect().context("Daemon is not running")?;
-    let config: TuiAgentConfigResponse = block_on(async {
-        client
-            .get(&format!("/v1/agents/{}/config", agent_id))
-            .await
-    })?;
+    let config: TuiAgentConfigResponse =
+        block_on(async { client.get(&format!("/v1/agents/{}/config", agent_id)).await })?;
 
     println!();
     println!(
@@ -1654,11 +1723,8 @@ fn view_agent_config_json(agent_id: &str) -> Result<()> {
 /// Interactive editor for an agent's config (key-by-key editing).
 fn interactive_edit_agent_config(agent_id: &str, agent_name: &str) -> Result<()> {
     let client = DaemonClient::connect().context("Daemon is not running")?;
-    let resp: TuiAgentConfigResponse = block_on(async {
-        client
-            .get(&format!("/v1/agents/{}/config", agent_id))
-            .await
-    })?;
+    let resp: TuiAgentConfigResponse =
+        block_on(async { client.get(&format!("/v1/agents/{}/config", agent_id)).await })?;
 
     let mut config = resp.config;
     let version = resp.config_version;
@@ -1806,10 +1872,10 @@ fn set_nested_value(root: &mut serde_json::Value, path: &str, value: serde_json:
             return;
         }
         // Navigate deeper, creating objects as needed
-        if !current.get(*part).map_or(false, |v| v.is_object()) {
-            if let Some(obj) = current.as_object_mut() {
-                obj.insert(part.to_string(), serde_json::json!({}));
-            }
+        if !current.get(*part).is_some_and(|v| v.is_object())
+            && let Some(obj) = current.as_object_mut()
+        {
+            obj.insert(part.to_string(), serde_json::json!({}));
         }
         current = current.get_mut(*part).unwrap();
     }
@@ -1835,17 +1901,17 @@ fn parse_json_value(s: &str) -> serde_json::Value {
         return serde_json::Value::Bool(false);
     }
     // Try JSON array (e.g., ["a","b"])
-    if s.starts_with('[') {
-        if let Ok(arr) = serde_json::from_str::<serde_json::Value>(s) {
-            return arr;
-        }
+    if s.starts_with('[')
+        && let Ok(arr) = serde_json::from_str::<serde_json::Value>(s)
+    {
+        return arr;
     }
     // Comma-separated → array
     if s.contains(',') && !s.contains('"') {
         let items: Vec<serde_json::Value> = s
             .split(',')
             .map(|item| serde_json::Value::String(item.trim().to_string()))
-            .filter(|v| v.as_str().map_or(true, |s| !s.is_empty()))
+            .filter(|v| v.as_str().is_none_or(|s| !s.is_empty()))
             .collect();
         if items.len() > 1 {
             return serde_json::Value::Array(items);
@@ -1870,14 +1936,22 @@ fn agent_action_tui(agent_id: &str, action: &str) -> Result<()> {
         "paused" => style(status).yellow(),
         _ => style(status).dim(),
     };
-    println!("{} Agent {} → {}", style("✓").green(), agent_id, status_styled);
+    println!(
+        "{} Agent {} → {}",
+        style("✓").green(),
+        agent_id,
+        status_styled
+    );
     Ok(())
 }
 
 /// Remove (archive) an agent with confirmation.
 fn remove_agent_tui(agent_id: &str, agent_name: &str) -> Result<bool> {
     let confirm = Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("Remove agent '{}'? This will archive it.", agent_name))
+        .with_prompt(format!(
+            "Remove agent '{}'? This will archive it.",
+            agent_name
+        ))
         .default(false)
         .interact()?;
 
@@ -1887,11 +1961,8 @@ fn remove_agent_tui(agent_id: &str, agent_name: &str) -> Result<bool> {
     }
 
     let client = DaemonClient::connect().context("Daemon is not running")?;
-    let result: serde_json::Value = block_on(async {
-        client
-            .delete_req(&format!("/v1/agents/{}", agent_id))
-            .await
-    })?;
+    let result: serde_json::Value =
+        block_on(async { client.delete_req(&format!("/v1/agents/{}", agent_id)).await })?;
 
     let status = result["status"].as_str().unwrap_or("archived");
     println!(
@@ -1945,11 +2016,9 @@ fn interactive_create_agent() -> Result<()> {
                     .interact_text()?
             }
         }
-        _ => {
-            Input::<String>::with_theme(&theme)
-                .with_prompt("Model (e.g., claude-sonnet-4-5-20250929)")
-                .interact_text()?
-        }
+        _ => Input::<String>::with_theme(&theme)
+            .with_prompt("Model (e.g., claude-sonnet-4-5-20250929)")
+            .interact_text()?,
     };
 
     // 4. Persona
@@ -2031,9 +2100,8 @@ fn interactive_create_agent() -> Result<()> {
 
     let client = DaemonClient::connect().context("Daemon is not running")?;
     let body = serde_json::json!({ "config": agent_config });
-    let result: Result<serde_json::Value> = block_on(async {
-        client.post("/v1/agents", &body).await
-    });
+    let result: Result<serde_json::Value> =
+        block_on(async { client.post("/v1/agents", &body).await });
 
     match result {
         Ok(resp) => {
@@ -2045,11 +2113,7 @@ fn interactive_create_agent() -> Result<()> {
             );
         }
         Err(e) => {
-            println!(
-                "{} Failed to create agent: {}",
-                style("✗").red(),
-                e
-            );
+            println!("{} Failed to create agent: {}", style("✗").red(), e);
         }
     }
 
@@ -2214,15 +2278,12 @@ fn check_credential_file(provider: &str) -> bool {
 
 /// Read a boolean from config with schema-default fallback.
 fn effective_bool(config: &HashMap<String, String>, key: &str) -> bool {
-    config
-        .get(key)
-        .map(|v| v == "true")
-        .unwrap_or_else(|| {
-            config_schema::lookup(key)
-                .and_then(|d| d.default)
-                .map(|d| d == "true")
-                .unwrap_or(false)
-        })
+    config.get(key).map(|v| v == "true").unwrap_or_else(|| {
+        config_schema::lookup(key)
+            .and_then(|d| d.default)
+            .map(|d| d == "true")
+            .unwrap_or(false)
+    })
 }
 
 /// Build a multi-line status block for a CLI-based provider.
@@ -2304,15 +2365,9 @@ fn format_provider_status(
     // CLI fallback toggle
     let cli_enabled_key = format!("ai.{}.cli_enabled", provider_key);
     if effective_bool(config, &cli_enabled_key) {
-        lines.push(format!(
-            "  {} CLI fallback: enabled",
-            style("[on]").green()
-        ));
+        lines.push(format!("  {} CLI fallback: enabled", style("[on]").green()));
     } else {
-        lines.push(format!(
-            "  {} CLI fallback: disabled",
-            style("[--]").dim()
-        ));
+        lines.push(format!("  {} CLI fallback: disabled", style("[--]").dim()));
     }
 
     // API key status (sibling provider)
@@ -2334,11 +2389,7 @@ fn format_provider_status(
                 api_label
             ));
         } else {
-            lines.push(format!(
-                "  {} {} not set",
-                style("[--]").dim(),
-                api_label
-            ));
+            lines.push(format!("  {} {} not set", style("[--]").dim(), api_label));
         }
     }
 
@@ -2404,7 +2455,7 @@ fn configure_key(
             let sel = Select::with_theme(&ColorfulTheme::default())
                 .with_prompt(&prompt)
                 .default(idx)
-                .items(&choices)
+                .items(choices)
                 .interact()?;
             choices[sel].to_string()
         }
@@ -2466,7 +2517,10 @@ fn save_and_exit(repo: &ConfigRepository, config_map: &HashMap<String, String>) 
             continue;
         }
         let def = config_schema::lookup(k);
-        let backend = def.as_ref().map(|d| d.backend).unwrap_or(ConfigBackend::SystemConfig);
+        let backend = def
+            .as_ref()
+            .map(|d| d.backend)
+            .unwrap_or(ConfigBackend::SystemConfig);
         match backend {
             ConfigBackend::LlmToml => ai_entries.push((k.as_str(), v.as_str())),
             ConfigBackend::DaemonToml => {

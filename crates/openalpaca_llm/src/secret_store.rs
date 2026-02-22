@@ -119,10 +119,7 @@ impl CachingSecretStore {
         // If keys is empty we still need to verify keychain works,
         // so do a single probe read on a non-existent key.
         if keys.is_empty() {
-            return match self.inner.get("__openalpaca_probe__") {
-                Ok(_) => true,
-                Err(_) => false,
-            };
+            return self.inner.get("__openalpaca_probe__").is_ok();
         }
         true
     }
@@ -349,10 +346,7 @@ mod tests {
         assert_eq!(caching.get("key1").unwrap(), None);
         // set() should update the cache from None → Some
         caching.set("key1", "now-exists").unwrap();
-        assert_eq!(
-            caching.get("key1").unwrap(),
-            Some("now-exists".to_string())
-        );
+        assert_eq!(caching.get("key1").unwrap(), Some("now-exists".to_string()));
     }
 
     #[test]

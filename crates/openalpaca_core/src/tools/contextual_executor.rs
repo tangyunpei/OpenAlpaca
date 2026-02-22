@@ -13,7 +13,12 @@ use std::sync::Arc;
 /// All persona-update tools require owner authorization to prevent
 /// subagents in DAG/pipeline contexts from modifying system personality
 /// files without proper ownership verification.
-const OWNER_SCOPED_TOOLS: &[&str] = &["memory_search", "update_user", "update_soul", "update_identity"];
+const OWNER_SCOPED_TOOLS: &[&str] = &[
+    "memory_search",
+    "update_user",
+    "update_soul",
+    "update_identity",
+];
 
 /// Tools that operate on the task workspace (handled directly, not forwarded to registry).
 const WORKSPACE_SCOPED_TOOLS: &[&str] = &["workspace_read", "workspace_write"];
@@ -64,10 +69,7 @@ impl ContextualToolExecutor {
             None => return Ok("[]".to_string()),
         };
 
-        let key = arguments
-            .get("key")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let key = arguments.get("key").and_then(|v| v.as_str()).unwrap_or("");
 
         let entries = state.workspace.read(key);
         let result: Vec<serde_json::Value> = entries
@@ -113,11 +115,12 @@ impl ContextualToolExecutor {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: content".to_string())?;
 
-        // Enforce the documented 8KB content size limit
-        const MAX_WORKSPACE_CONTENT_SIZE: usize = 8192;
+        // Enforce the documented 32KB content size limit
+        const MAX_WORKSPACE_CONTENT_SIZE: usize = 32768;
         if content.len() > MAX_WORKSPACE_CONTENT_SIZE {
             return Err(format!(
-                "Content size {} bytes exceeds the {} byte limit",
+                "Content size {} bytes exceeds the {} byte limit. \
+                 Condense or summarize your content to fit within the limit, then retry.",
                 content.len(),
                 MAX_WORKSPACE_CONTENT_SIZE
             ));
@@ -134,7 +137,7 @@ impl ContextualToolExecutor {
             _ => WorkspaceEntryType::Text,
         };
 
-        const MAX_RETRIES: usize = 3;
+        const MAX_RETRIES: usize = 5;
         for attempt in 0..MAX_RETRIES {
             let repo = openalpaca_storage::repository::TaskRepository::new(db);
             let task = repo
@@ -148,7 +151,9 @@ impl ContextualToolExecutor {
                 None => return Err("Task has no state".to_string()),
             };
 
-            state.workspace.write(key, content, agent_id, entry_type.clone(), &[])?;
+            state
+                .workspace
+                .write(key, content, agent_id, entry_type.clone(), &[])?;
 
             let new_json = state.to_json();
             let updated = repo
@@ -163,10 +168,12 @@ impl ContextualToolExecutor {
             if attempt < MAX_RETRIES - 1 {
                 tracing::debug!(
                     "Workspace write version conflict for key '{}' (attempt {}/{}), retrying",
-                    key, attempt + 1, MAX_RETRIES
+                    key,
+                    attempt + 1,
+                    MAX_RETRIES
                 );
                 // Brief async backoff to reduce collision probability
-                tokio::time::sleep(std::time::Duration::from_millis(10 * (1 << attempt))).await;
+                tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
             }
         }
 
@@ -186,11 +193,7 @@ impl ToolExecutor for ContextualToolExecutor {
     ) -> Result<String, String> {
         // Handle workspace tools directly (no registry delegation)
         if WORKSPACE_SCOPED_TOOLS.contains(&tool_name) {
-            let agent_id = self
-                .context
-                .agent_id
-                .as_deref()
-                .unwrap_or("unknown");
+            let agent_id = self.context.agent_id.as_deref().unwrap_or("unknown");
 
             return match tool_name {
                 "workspace_read" => self.handle_workspace_read(arguments),
@@ -226,8 +229,8 @@ impl ToolExecutor for ContextualToolExecutor {
         // Add workspace tools so they pass capability checks
         if self.context.task_id.is_some() {
             for name in WORKSPACE_SCOPED_TOOLS {
-                if !tools.contains(&name.to_string()) {
-                    tools.push(name.to_string());
+                if !tools.iter().any(|t| t == name) {
+                    tools.push((*name).to_string());
                 }
             }
         }

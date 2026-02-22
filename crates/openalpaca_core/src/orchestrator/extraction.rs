@@ -6,6 +6,7 @@ use chrono::Utc;
 use openalpaca_llm::{ChatMessage, RequestContext, RouterRequest};
 use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 impl Orchestrator {
     /// Automatically extract user traits from a conversation turn.
@@ -32,7 +33,9 @@ impl Orchestrator {
         let dcfg = self.daemon_config.load();
 
         // Content filter: skip short messages and slash commands
-        if user_message.len() < dcfg.orchestrator.costs.extract_min_content_len || user_message.starts_with('/') {
+        if user_message.len() < dcfg.orchestrator.costs.extract_min_content_len
+            || user_message.starts_with('/')
+        {
             return;
         }
 
@@ -58,9 +61,7 @@ impl Orchestrator {
             .map(|s| s.total_cost_usd)
             .unwrap_or(0.0);
         if extract_cost > dcfg.orchestrator.costs.extract_max_daily_cost_usd {
-            tracing::debug!(
-                "User extraction skipped: cost ${extract_cost:.2} exceeds cap"
-            );
+            tracing::debug!("User extraction skipped: cost ${extract_cost:.2} exceeds cap");
             return;
         }
 
@@ -69,9 +70,9 @@ impl Orchestrator {
         let asst_trunc: String = assistant_response.chars().take(400).collect();
 
         let user_prompt = format!(
-            "## Conversation Turn\nUser: {}\nAssistant: {}\n\n\
-             Analyze this conversation turn and extract any user traits.\n\
-             Output ONLY a JSON object with this schema:\n\
+            "<conversation_turn>\nUser: {}\nAssistant: {}\n</conversation_turn>\n\n\
+             Analyze this conversation turn and extract any user traits.\n\n\
+             <output_schema>\n\
              {{\n\
                \"extractions\": [\n\
                  {{\n\
@@ -83,17 +84,19 @@ impl Orchestrator {
                    \"action\": \"set\" or \"update\"\n\
                  }}\n\
                ]\n\
-             }}\n\n\
-             Rules:\n\
+             }}\n\
+             </output_schema>\n\n\
+             <extraction_rules>\n\
              - \"target\": \"profile\" for stable identity traits (name, timezone, expertise, style). Requires confidence >= 0.8.\n\
              - \"target\": \"memory\" for situational preferences. Confidence >= 0.5.\n\
              - For identity fields, use \"identity.<Key>\" (e.g. \"identity.Name\").\n\
              - \"action\": \"set\" (default) fills only empty profile fields. \"action\": \"update\" replaces existing values.\n\
              - Use \"update\" ONLY when the user explicitly states a change to something previously known \
              (e.g. \"I moved to Tokyo\", \"call me Alex now\", \"I switched to vim\"). Requires confidence >= 0.9.\n\
-             - Only extract what is clearly stated or strongly implied. Do not hallucinate.\n\
+             - Only extract information that is clearly stated or strongly implied in the conversation.\n\
+             - Be conservative. Prefer fewer high-confidence extractions over many low-confidence ones.\n\
              - If nothing can be extracted, return {{\"extractions\": []}}.\n\
-             - Be conservative. Prefer fewer high-confidence extractions over many low-confidence ones.",
+             </extraction_rules>",
             user_trunc, asst_trunc
         );
 
@@ -101,12 +104,12 @@ impl Orchestrator {
             model: None,
             messages: vec![
                 ChatMessage::system(
-                    "You are a user trait extractor. Output ONLY valid JSON matching the schema. \
-                     No markdown fences, no commentary.",
+                    "<role>You are a user trait extractor for OpenAlpaca.</role>\n\
+                     <output_format>Output ONLY valid JSON matching the schema. No markdown fences, no commentary.</output_format>",
                 ),
                 ChatMessage::user(&user_prompt),
             ],
-            tools: vec![],
+            tools: Arc::new(vec![]),
             temperature: Some(0.0),
             max_tokens: Some(256),
             context: RequestContext {
@@ -220,10 +223,22 @@ impl Orchestrator {
         let memory_threshold = mem_cfg.memory_confidence_threshold;
 
         for extraction in extractions {
-            let target = extraction.get("target").and_then(|v| v.as_str()).unwrap_or("");
-            let field = extraction.get("field").and_then(|v| v.as_str()).unwrap_or("");
-            let value = extraction.get("value").and_then(|v| v.as_str()).unwrap_or("");
-            let confidence = extraction.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let target = extraction
+                .get("target")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let field = extraction
+                .get("field")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let value = extraction
+                .get("value")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let confidence = extraction
+                .get("confidence")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
 
             if value.is_empty() || field.is_empty() {
                 continue;
@@ -234,12 +249,17 @@ impl Orchestrator {
                     if confidence < profile_threshold {
                         continue;
                     }
-                    let action = extraction.get("action").and_then(|v| v.as_str()).unwrap_or("set");
+                    let action = extraction
+                        .get("action")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("set");
                     // "update" requires higher confidence than "set"
                     if action == "update" && confidence < profile_update_threshold {
                         tracing::debug!(
                             "Extraction: skipping update action for '{}' (confidence {:.2} < {:.1})",
-                            field, confidence, profile_update_threshold
+                            field,
+                            confidence,
+                            profile_update_threshold
                         );
                         continue;
                     }
@@ -249,10 +269,13 @@ impl Orchestrator {
                             .entry("identity".to_string())
                             .or_insert_with(|| serde_json::json!({}));
                         if let Some(obj) = identity_obj.as_object_mut() {
-                            obj.insert(key.to_string(), serde_json::json!({
-                                "value": value,
-                                "action": action,
-                            }));
+                            obj.insert(
+                                key.to_string(),
+                                serde_json::json!({
+                                    "value": value,
+                                    "action": action,
+                                }),
+                            );
                         }
                     } else {
                         // Direct section field (e.g. "expertise", "preferences")
@@ -357,10 +380,13 @@ impl Orchestrator {
                 "identity" => {
                     if let Some(obj) = value.as_object() {
                         for (key, val) in obj {
-                            let v = val.get("value").and_then(|v| v.as_str())
+                            let v = val
+                                .get("value")
+                                .and_then(|v| v.as_str())
                                 .or_else(|| val.as_str()) // backward compat: bare string
                                 .unwrap_or("");
-                            let action = val.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                            let action =
+                                val.get("action").and_then(|a| a.as_str()).unwrap_or("set");
                             if v.is_empty() {
                                 continue;
                             }
@@ -373,45 +399,75 @@ impl Orchestrator {
                     }
                 }
                 "communication_style" => {
-                    let v = value.get("value").and_then(|v| v.as_str())
-                        .or_else(|| value.as_str()).unwrap_or("");
-                    let action = value.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                    let v = value
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| value.as_str())
+                        .unwrap_or("");
+                    let action = value
+                        .get("action")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("set");
                     if !v.is_empty() && (doc.communication_style.is_empty() || action == "update") {
                         doc.communication_style = v.to_string();
                         modified_sections.push("communication_style".to_string());
                     }
                 }
                 "expertise" => {
-                    let v = value.get("value").and_then(|v| v.as_str())
-                        .or_else(|| value.as_str()).unwrap_or("");
-                    let action = value.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                    let v = value
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| value.as_str())
+                        .unwrap_or("");
+                    let action = value
+                        .get("action")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("set");
                     if !v.is_empty() && (doc.expertise.is_empty() || action == "update") {
                         doc.expertise = v.to_string();
                         modified_sections.push("expertise".to_string());
                     }
                 }
                 "projects" => {
-                    let v = value.get("value").and_then(|v| v.as_str())
-                        .or_else(|| value.as_str()).unwrap_or("");
-                    let action = value.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                    let v = value
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| value.as_str())
+                        .unwrap_or("");
+                    let action = value
+                        .get("action")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("set");
                     if !v.is_empty() && (doc.projects.is_empty() || action == "update") {
                         doc.projects = v.to_string();
                         modified_sections.push("projects".to_string());
                     }
                 }
                 "preferences" => {
-                    let v = value.get("value").and_then(|v| v.as_str())
-                        .or_else(|| value.as_str()).unwrap_or("");
-                    let action = value.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                    let v = value
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| value.as_str())
+                        .unwrap_or("");
+                    let action = value
+                        .get("action")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("set");
                     if !v.is_empty() && (doc.preferences.is_empty() || action == "update") {
                         doc.preferences = v.to_string();
                         modified_sections.push("preferences".to_string());
                     }
                 }
                 "notes" => {
-                    let v = value.get("value").and_then(|v| v.as_str())
-                        .or_else(|| value.as_str()).unwrap_or("");
-                    let action = value.get("action").and_then(|a| a.as_str()).unwrap_or("set");
+                    let v = value
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| value.as_str())
+                        .unwrap_or("");
+                    let action = value
+                        .get("action")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("set");
                     if !v.is_empty() && (doc.notes.is_empty() || action == "update") {
                         doc.notes = v.to_string();
                         modified_sections.push("notes".to_string());

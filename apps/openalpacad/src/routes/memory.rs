@@ -139,9 +139,7 @@ pub async fn delete_memory_handler(
 
 /// POST /v1/memory/reindex
 /// Trigger embedding reindex for the local user's memories.
-pub async fn reindex_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn reindex_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let embedder = match &state.embedder {
         Some(e) => e.clone(),
         None => {
@@ -175,10 +173,10 @@ pub async fn reindex_handler(
         Ok(embeddings) => {
             let mut indexed = 0usize;
             for ((id, _), embedding) in missing.iter().zip(embeddings.iter()) {
-                if embedding.len() == embedder.dimensions() as usize {
-                    if repo.insert_embedding(*id, embedding).is_ok() {
-                        indexed += 1;
-                    }
+                if embedding.len() == embedder.dimensions() as usize
+                    && repo.insert_embedding(*id, embedding).is_ok()
+                {
+                    indexed += 1;
                 }
             }
             (
@@ -195,9 +193,7 @@ pub async fn reindex_handler(
 
 /// GET /v1/memory/status
 /// Return embedding statistics for the local user.
-pub async fn index_status_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn index_status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let repo = MemoryRepository::new(&state.db);
     match repo.embedding_stats(&state.local_user_id) {
         Ok((total, embedded)) => (

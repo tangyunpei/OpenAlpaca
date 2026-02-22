@@ -1,19 +1,23 @@
-use super::{TaskDispatcher, format_task_result, spawn_task_memory_extraction};
-use crate::agent::subagent::{AgentStatus, SubAgent};
+use super::super::task_state::TaskState;
+use super::usage;
+use super::{
+    TaskDispatcher, finalize_task, format_task_result, persist_conversation,
+    spawn_task_memory_extraction,
+};
+use crate::agent::registry::DestroyOutcome;
+use crate::agent::subagent::SubAgent;
 use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
 use crate::runner::lead_agent::run_lead_agent;
-use crate::runner::LoopFinishReason;
 use chrono::Utc;
-use openalpaca_storage::{ConversationMessage, ConversationRepository};
-use super::super::task_state::TaskState;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 impl TaskDispatcher {
     /// Dispatch a task using the Lead Agent orchestration pattern.
-    /// Finds a lead agent (by `lead_orchestration` skill or first available agent),
-    /// registers the task, and spawns the lead agent execution loop.
-    pub(super) fn dispatch_lead_agent(
+    /// Spawns a lead agent instance from the "lead_agent" template (singleton),
+    /// registers the task, and runs the lead agent execution loop.
+    pub(crate) fn dispatch_lead_agent(
         &self,
         description: &str,
         title: String,
@@ -22,43 +26,41 @@ impl TaskDispatcher {
         source: &str,
         workspace_id: Option<String>,
     ) -> Result<String, String> {
-        // Generate task_id first — needed by try_claim
         let task_id = Uuid::new_v4().to_string();
         let now = Utc::now();
 
-        // Atomically claim a lead agent: prefer "lead_orchestration" skill,
-        // fall back to any idle agent.
+        // Spawn a lead agent instance from the singleton template.
+        // Prefer templates with "lead_orchestration" skill, fall back to any template.
         let lead_agent = {
-            let candidates = self
+            let templates = self
                 .shared_context
                 .agent_registry
-                .find_by_skill("lead_orchestration");
-            let mut claimed = None;
-            for c in candidates {
-                if c.status.is_available()
-                    && let Ok(agent) = self
-                        .shared_context
-                        .agent_registry
-                        .try_claim(&c.id, task_id.clone())
+                .find_templates_by_skill("lead_orchestration");
+            let mut spawned = None;
+            for t in &templates {
+                if let Ok(agent) = self
+                    .shared_context
+                    .agent_registry
+                    .spawn_instance(&t.frontmatter.id, task_id.clone())
                 {
-                    claimed = Some(agent);
+                    spawned = Some(agent);
                     break;
                 }
             }
-            if claimed.is_none() {
-                // Fallback: try any idle agent
-                for c in self.shared_context.agent_registry.list_idle() {
+            if spawned.is_none() {
+                // Fallback: try spawning from any available template
+                for t in self.shared_context.agent_registry.list_templates() {
                     if let Ok(agent) = self
                         .shared_context
                         .agent_registry
-                        .try_claim(&c.id, task_id.clone())
+                        .spawn_instance(&t.frontmatter.id, task_id.clone())
                     {
-                        claimed = Some(agent);
+                        spawned = Some(agent);
                         break;
                     }
                 }
             }
-            claimed.ok_or_else(|| {
+            spawned.ok_or_else(|| {
                 "No agents available to act as Lead Agent. All agents are busy.".to_string()
             })?
         };
@@ -72,10 +74,12 @@ impl TaskDispatcher {
         let task_lane = self.lane_manager.create_task_lane(&task_id);
         task_lane.assign_agent(lead_agent.id.clone());
 
-        // Emit status change (try_claim already set agent to Busy)
+        // Emit status change — lead agent instance just spawned
         self.bus.publish(SystemEvent::AgentStatusChanged {
             agent_id: lead_agent.id.clone(),
-            status: "busy".to_string(),
+            instance_id: lead_agent.id.clone(),
+            template_id: lead_agent.template_id.clone(),
+            status: "spawned".to_string(),
             current_task_id: Some(task_id.clone()),
             timestamp: now,
         });
@@ -119,7 +123,17 @@ impl TaskDispatcher {
                 "lead_orchestrator".to_string(),
             )];
             let initial_state = TaskState::initial(description, &step_info);
-            let _ = repo.update_state(&task_id, &initial_state.to_json(), 0);
+            let state_json = initial_state.to_json();
+            match repo.update_state(&task_id, &state_json, 0) {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(task_id = %task_id, "State init version conflict, retrying");
+                    let _ = repo.update_state(&task_id, &state_json, 1);
+                }
+                Err(e) => {
+                    tracing::error!(task_id = %task_id, error = %e, "Failed to initialize task state");
+                }
+            }
         }
 
         // Spawn the lead agent execution
@@ -144,6 +158,7 @@ impl TaskDispatcher {
 
     /// Spawn the lead agent execution in a background tokio task.
     /// The lead agent runs a full agentic loop with `spawn_subagent` tool access.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_lead_agent_execution(
         &self,
         task_id: String,
@@ -155,15 +170,8 @@ impl TaskDispatcher {
         created_by: String,
         workspace_id: Option<String>,
     ) {
-        let router = match &self.llm_router {
-            Some(r) => r.clone(),
-            None => {
-                tracing::warn!(
-                    "No LLM router configured — cannot execute lead agent for task '{}'",
-                    task_id
-                );
-                return;
-            }
+        let Some(router) = self.require_router(&task_id) else {
+            return;
         };
 
         let bus = self.bus.clone();
@@ -173,8 +181,18 @@ impl TaskDispatcher {
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
 
+        // Create cancellation token for this task
+        let cancel_token = CancellationToken::new();
+        ctx.register_cancellation_token(&task_id, cancel_token.clone());
+
         tokio::spawn(async move {
             let start_time = std::time::Instant::now();
+
+            tracing::info!(
+                task_id = %task_id,
+                lead_agent = %lead_agent.id,
+                "Lead agent background execution starting"
+            );
 
             // Update task status → Running
             ctx.task_registry
@@ -191,6 +209,8 @@ impl TaskDispatcher {
                 let _ = repo.update_status(&task_id, openalpaca_storage::TaskStatus::Running);
             }
 
+            tracing::info!(task_id = %task_id, "Task status: queued → running");
+
             // Run the lead agent
             let result = run_lead_agent(
                 &lead_agent,
@@ -205,18 +225,37 @@ impl TaskDispatcher {
                 &created_by,
                 &daemon_config,
                 workspace_id.clone(),
+                Some(cancel_token),
             )
             .await;
+
+            // Cleanup cancellation token
+            ctx.remove_cancellation_token(&task_id);
 
             let now = Utc::now();
             let runtime_secs = start_time.elapsed().as_secs() as i64;
 
-            // Release lead agent back to Idle
-            ctx.agent_registry
-                .update_status(&lead_agent.id, AgentStatus::Idle);
+            tracing::info!(
+                task_id = %task_id,
+                success = result.success,
+                rounds = result.loop_result.rounds_used,
+                subagents = result.subagents_spawned,
+                runtime_secs = runtime_secs,
+                finish_reason = ?result.loop_result.finish_reason,
+                "Lead agent execution returned"
+            );
+
+            // Destroy lead agent instance (resets singleton to Idle)
+            let outcome = ctx.agent_registry.destroy_instance(&lead_agent.id);
+            let destroy_status = match outcome {
+                DestroyOutcome::ResetToIdle => "idle",
+                _ => "destroyed",
+            };
             bus.publish(SystemEvent::AgentStatusChanged {
                 agent_id: lead_agent.id.clone(),
-                status: "idle".to_string(),
+                instance_id: lead_agent.id.clone(),
+                template_id: lead_agent.template_id.clone(),
+                status: destroy_status.to_string(),
                 current_task_id: None,
                 timestamp: now,
             });
@@ -244,124 +283,69 @@ impl TaskDispatcher {
             let db_summary = final_content.chars().take(2000).collect::<String>();
 
             // Persist LLM usage for the lead agent's own loop
-            let default_model = router.default_model();
-            let actual_model = result
-                .loop_result
-                .model_used
-                .as_deref()
-                .or(lead_agent.llm_config.model.as_deref())
-                .unwrap_or(&default_model);
-            let resolved_provider = router
-                .model_registry()
-                .resolve_provider(actual_model)
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            let call_cost = router.cost_tracker.calculate_cost(
-                actual_model,
-                result.loop_result.total_input_tokens,
-                result.loop_result.total_output_tokens,
+            usage::record_llm_usage(
+                &router,
+                &result.loop_result,
+                lead_agent.llm_config.model.as_deref(),
+                &lead_agent.id,
+                &task_id,
+                start_time.elapsed().as_millis() as i64,
+                db.as_ref(),
+                &bus,
             );
 
+            // Record agent task history
             if let Some(ref db) = db {
-                let usage_repo =
-                    openalpaca_storage::repository::LlmUsageRepository::new(db);
-                if let Err(e) = usage_repo.record_and_log(
+                usage::record_agent_history(
+                    db,
                     &lead_agent.id,
-                    Some(&task_id),
-                    &resolved_provider,
-                    actual_model,
-                    result.loop_result.total_input_tokens as i32,
-                    result.loop_result.total_output_tokens as i32,
-                    call_cost,
-                    start_time.elapsed().as_millis() as i64,
-                    if result.success { "success" } else { "error" },
-                    match &result.loop_result.finish_reason {
-                        LoopFinishReason::Error(msg) => Some(msg.as_str()),
-                        _ => None,
-                    },
-                ) {
-                    tracing::warn!("Failed to persist LLM usage for lead agent: {e}");
-                }
-
-                // Record agent task history
-                let subagent_repo = openalpaca_storage::SubAgentRepository::new(db);
-                let history_entry = openalpaca_storage::AgentTaskHistory {
-                    id: Uuid::new_v4().to_string(),
-                    agent_id: lead_agent.id.clone(),
-                    task_id: task_id.clone(),
-                    role: "lead_agent".to_string(),
-                    status: if result.success { "completed" } else { "failed" }
-                        .to_string(),
-                    runtime_seconds: Some(runtime_secs),
-                    completed_at: now,
-                };
-                if let Err(e) = subagent_repo.add_history(&history_entry) {
-                    tracing::warn!("Failed to record lead agent task history: {e}");
-                }
-                if result.success {
-                    let _ = subagent_repo
-                        .increment_completed(&lead_agent.id, runtime_secs);
-                } else {
-                    let _ = subagent_repo.increment_failed(&lead_agent.id);
-                }
+                    &task_id,
+                    "lead_agent",
+                    result.success,
+                    runtime_secs,
+                );
             }
 
             // Update task status
             if result.success {
-                ctx.task_registry
-                    .update_status(&task_id, TaskEntryStatus::Completed);
-                if let Some(ref db) = db {
-                    let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                    let _ = repo.update_status(
-                        &task_id,
-                        openalpaca_storage::TaskStatus::Completed,
-                    );
-                    let _ = repo.set_result(&task_id, &db_summary);
-                }
-                bus.publish(SystemEvent::TaskCompleted {
-                    task_id: task_id.clone(),
-                    result_summary: Some(db_summary.clone()),
-                    timestamp: now,
-                });
+                tracing::info!(task_id = %task_id, "Task status: running → completed");
             } else {
-                ctx.task_registry
-                    .update_status(&task_id, TaskEntryStatus::Failed);
-                if let Some(ref db) = db {
-                    let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                    let _ = repo
-                        .update_status(&task_id, openalpaca_storage::TaskStatus::Failed);
-                    let _ = repo.set_result(&task_id, &db_summary);
-                }
-                bus.publish(SystemEvent::TaskFailed {
-                    task_id: task_id.clone(),
-                    error: db_summary.clone(),
-                    timestamp: now,
-                });
+                tracing::warn!(
+                    task_id = %task_id,
+                    finish_reason = ?result.loop_result.finish_reason,
+                    "Task status: running → failed"
+                );
             }
+            finalize_task(
+                &ctx,
+                &bus,
+                db.as_ref(),
+                &task_id,
+                &db_summary,
+                result.success,
+            );
 
             // Persist final result to conversation
             if let Some(ref db) = db {
-                let content =
-                    format_task_result(&task_title, &final_content, result.success);
-                let conv_repo = ConversationRepository::new(db);
-                let _ = conv_repo.get_or_create_conversation(&lane_key, &source);
-                let _ = conv_repo.insert(&ConversationMessage {
-                    id: 0,
-                    lane_key: lane_key.clone(),
-                    role: "assistant".to_string(),
+                let content = format_task_result(&task_title, &final_content, result.success);
+                // Resolve model name for conversation record
+                let default_model = router.default_model();
+                let actual_model = result
+                    .loop_result
+                    .model_used
+                    .as_deref()
+                    .or(lead_agent.llm_config.model.as_deref())
+                    .unwrap_or(&default_model);
+                persist_conversation(
+                    db,
+                    &lane_key,
+                    &source,
                     content,
-                    source: Some(source.clone()),
-                    model: Some(actual_model.to_string()),
-                    tokens_in: Some(
-                        result.loop_result.total_input_tokens as i64,
-                    ),
-                    tokens_out: Some(
-                        result.loop_result.total_output_tokens as i64,
-                    ),
-                    duration_ms: Some(runtime_secs * 1000),
-                    created_at: String::new(),
-                });
-                let _ = conv_repo.increment_message_count(&lane_key);
+                    Some(actual_model.to_string()),
+                    result.loop_result.total_input_tokens as i64,
+                    result.loop_result.total_output_tokens as i64,
+                    runtime_secs,
+                );
             }
 
             // Memory extraction from lead agent output (non-blocking)

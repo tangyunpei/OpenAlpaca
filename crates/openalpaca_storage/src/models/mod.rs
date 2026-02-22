@@ -2,8 +2,8 @@
 //!
 //! Organizes core, identity, and task models into a single module.
 
-mod core;
 pub mod conversation;
+mod core;
 pub mod identity;
 pub mod memory;
 pub mod subagent;
