@@ -264,4 +264,24 @@ pub enum SystemEvent {
         nodes_removed: usize,
         timestamp: DateTime<Utc>,
     },
+    /// The LLM planner was bypassed (fast path, bootstrap, no router)
+    PlannerBypassed {
+        request_id: Uuid,
+        /// "fast_path" | "bootstrap" | "no_llm_router"
+        reason: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// Request-level orchestration stage metrics
+    OrchestrationStage {
+        request_id: Uuid,
+        /// "fast_path" | "planner_simple_query" | "planner_complex_task" |
+        /// "heuristic_simple_query" | "heuristic_complex_task" | "bootstrap" | "no_llm"
+        mode: String,
+        planner_ms: u64,
+        dispatch_ms: u64,
+        ack_ms: u64,
+        fallback_reason: Option<String>,
+        auto_promotion_reason: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
 }

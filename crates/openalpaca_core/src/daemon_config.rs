@@ -205,11 +205,11 @@ pub struct LeadAgentDefaults {
 impl Default for LeadAgentDefaults {
     fn default() -> Self {
         Self {
-            max_rounds: 30,
+            max_rounds: 18,
             max_tools_per_round: 3,
             max_tool_runtime_secs: 300,
             max_cost: 5.0,
-            max_concurrent_subagents: 5,
+            max_concurrent_subagents: 6,
         }
     }
 }
@@ -239,6 +239,11 @@ pub struct PlannerConfig {
     pub planning_timeout_secs: u64,
     /// Maximum retry attempts on malformed LLM responses before giving up.
     pub max_retries: usize,
+    /// Maximum tokens for the planner LLM response.
+    pub max_tokens: u32,
+    /// When true, inject a system hint nudging the planner toward DAG
+    /// when the user message contains predictable parallel structure.
+    pub dag_prefer_predictable_enabled: bool,
 }
 
 impl Default for PlannerConfig {
@@ -246,6 +251,8 @@ impl Default for PlannerConfig {
         Self {
             planning_timeout_secs: 60,
             max_retries: 2,
+            max_tokens: 1024,
+            dag_prefer_predictable_enabled: false,
         }
     }
 }
@@ -652,6 +659,12 @@ impl DaemonConfig {
             5,
             "planner.max_retries",
         );
+        clamp_val(
+            &mut self.execution.planner.max_tokens,
+            256,
+            4096,
+            "planner.max_tokens",
+        );
         // ── Execution > DAG ──
         clamp_val(
             &mut self.execution.dag.max_concurrent_agents,
@@ -798,9 +811,10 @@ mod tests {
         assert_eq!(config.orchestrator.memory.summary_max_chars, 4000);
         assert_eq!(config.orchestrator.costs.summary_max_daily_cost_usd, 0.50);
         assert_eq!(config.execution.agent_defaults.max_rounds, 15);
-        assert_eq!(config.execution.lead_agent_defaults.max_rounds, 30);
+        assert_eq!(config.execution.lead_agent_defaults.max_rounds, 18);
         assert_eq!(config.execution.planner.planning_timeout_secs, 60);
         assert_eq!(config.execution.planner.max_retries, 2);
+        assert_eq!(config.execution.planner.max_tokens, 1024);
         assert_eq!(config.execution.dag.max_concurrent_agents, 3);
         assert_eq!(config.security.max_input_length, 32768);
         assert_eq!(config.server.heartbeat_interval_secs, 5);

@@ -14,12 +14,15 @@ replan_enabled = false
 total_timeout_secs = 1800
 
 [execution.planner]
-max_retries = 1
-planning_timeout_secs = 30
+dag_prefer_predictable_enabled = false
+max_retries = 0
+max_tokens = 1024
+planning_timeout_secs = 15
 
 [execution.lead_agent_defaults]
+max_concurrent_subagents = 6
 max_cost = 5
-max_rounds = 30
+max_rounds = 18
 max_tool_runtime_secs = 300
 max_tools_per_round = 3
 

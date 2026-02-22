@@ -6,9 +6,10 @@
 
 use crate::agent::subagent::SubAgent;
 use openalpaca_llm::{ChatMessage, LlmRouter, RequestContext, RouterRequest};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 /// Maximum number of recent history messages to include in planning prompts.
@@ -103,6 +104,13 @@ impl TaskDag {
 
         if self.nodes.is_empty() {
             return Err("DAG has no nodes".to_string());
+        }
+
+        if self.nodes.len() < 2 {
+            return Err(format!(
+                "DAG requires at least 2 nodes (got {}); use lead agent for single-step tasks",
+                self.nodes.len()
+            ));
         }
 
         if self.nodes.len() > 8 {
@@ -238,6 +246,10 @@ impl TaskDag {
             return Err("DAG has no nodes".to_string());
         }
 
+        if self.nodes.len() < 2 {
+            return Err("DAG requires at least 2 nodes".to_string());
+        }
+
         let node_ids: HashSet<&str> = self.nodes.iter().map(|n| n.node_id.as_str()).collect();
         for node in &self.nodes {
             for dep in &node.depends_on {
@@ -284,6 +296,10 @@ pub struct TaskPlan {
     /// Defaults to `true` (lead agent is the safer fallback for uncertain tasks).
     #[serde(default = "default_use_lead_agent")]
     pub use_lead_agent: bool,
+    /// Tracks why auto-promotion to lead agent occurred (observability).
+    /// Set by parse_response() or plan_inner() when a safety net triggers.
+    #[serde(skip)]
+    pub auto_promotion_reason: Option<String>,
 }
 
 /// Serde default for `use_lead_agent`: returns `true` so that missing
@@ -434,6 +450,56 @@ fn format_agent_list(out: &mut String, agents: &[SubAgent]) {
 /// Build the message list for a planning LLM call.
 ///
 /// Constructs: `[system_prompt, optional summary, optional active_tasks, history_tail…, user_message]`
+static NUMBERED_LIST_RE: OnceLock<Regex> = OnceLock::new();
+static BULLET_LIST_RE: OnceLock<Regex> = OnceLock::new();
+static BATCH_KEYWORD_RE: OnceLock<Regex> = OnceLock::new();
+static EXPLICIT_QUANTITY_RE: OnceLock<Regex> = OnceLock::new();
+
+fn numbered_list_regex() -> &'static Regex {
+    NUMBERED_LIST_RE.get_or_init(|| Regex::new(r"\b\d+\.\s").unwrap())
+}
+
+fn bullet_list_regex() -> &'static Regex {
+    BULLET_LIST_RE.get_or_init(|| Regex::new(r"(?m)^[\s]*[-*]\s").unwrap())
+}
+
+fn batch_keyword_regex() -> &'static Regex {
+    BATCH_KEYWORD_RE.get_or_init(|| {
+        Regex::new(r"(?i)\b(each|all of|every|for each|respectively)\b").unwrap()
+    })
+}
+
+fn explicit_quantity_regex() -> &'static Regex {
+    EXPLICIT_QUANTITY_RE.get_or_init(|| Regex::new(r"(?i)\b(into|to|in)\s+\d+\s").unwrap())
+}
+
+/// Detect if a user message contains predictable parallel structure
+/// (numbered lists, bullet lists, batch keywords, or explicit quantities).
+fn has_predictable_structure(content: &str) -> bool {
+    // Numbered list: "1. ...", "2. ..." etc. — at least 2 occurrences
+    if numbered_list_regex().find_iter(content).count() >= 2 {
+        return true;
+    }
+
+    // Bullet list: lines starting with "- " or "* " — at least 2 occurrences
+    if bullet_list_regex().find_iter(content).count() >= 2 {
+        return true;
+    }
+
+    // Comma + "and" + batch keyword: "translate into French, Spanish, and German for each"
+    if content.contains(',') && content.contains(" and ") && batch_keyword_regex().is_match(content)
+    {
+        return true;
+    }
+
+    // Explicit quantity: "into 3 languages", "to 5 files"
+    if explicit_quantity_regex().is_match(content) {
+        return true;
+    }
+
+    false
+}
+
 fn build_messages(
     system_prompt: &str,
     user_message: &str,
@@ -485,7 +551,7 @@ async fn plan_inner(
             messages: messages.clone(),
             tools: Arc::new(vec![]),
             temperature: Some(0.0),
-            max_tokens: Some(2048),
+            max_tokens: Some(limits.max_tokens),
             context: RequestContext::default(),
         };
 
@@ -521,6 +587,7 @@ async fn plan_inner(
                     return Ok(TaskPlan {
                         dag: None,
                         use_lead_agent: plan.use_lead_agent || promoted,
+                        auto_promotion_reason: Some("dag_validation_failed".into()),
                         ..plan
                     });
                 }
@@ -558,6 +625,7 @@ async fn plan_inner(
 pub struct PlannerLimits {
     pub timeout_secs: u64,
     pub max_retries: usize,
+    pub max_tokens: u32,
 }
 
 pub struct TaskPlanner;
@@ -569,6 +637,7 @@ impl TaskPlanner {
     /// Retries up to `limits.max_retries` times on malformed responses. DAG validation
     /// failures do NOT trigger retries — the plan is returned with `dag: None`
     /// (existing fallback behaviour). Timeout and LLM errors are returned immediately.
+    #[allow(clippy::too_many_arguments)]
     pub async fn plan_hierarchical(
         router: &LlmRouter,
         user_message: &str,
@@ -577,15 +646,30 @@ impl TaskPlanner {
         session_summary: Option<&str>,
         active_tasks_block: Option<&str>,
         limits: PlannerLimits,
+        dag_prefer_predictable: bool,
     ) -> Result<TaskPlan, PlanError> {
         let system_prompt = Self::build_hierarchical_prompt(idle_agents);
-        let messages = build_messages(
+        let mut messages = build_messages(
             &system_prompt,
             user_message,
             history,
             session_summary,
             active_tasks_block,
         );
+
+        // If enabled, inject a system hint before the final user message
+        // when the message contains predictable parallel structure.
+        if dag_prefer_predictable && has_predictable_structure(user_message) {
+            let hint = ChatMessage::system(
+                "[SYSTEM HINT: This message contains enumerated or parallel sub-tasks. \
+                 Prefer a DAG with parallel nodes if all steps are known upfront. \
+                 Set use_lead_agent to false when using DAG.]",
+            );
+            // Insert before the last message (the user message)
+            let last_idx = messages.len().saturating_sub(1);
+            messages.insert(last_idx, hint);
+        }
+
         plan_inner(router, messages, limits, idle_agents).await
     }
 
@@ -634,9 +718,6 @@ User: "Translate this document into French, Spanish, and German."
   {"node_id": "node_3", "title": "Translate to German", "description": "Translate the document into German.", "agent_id": "translator-01", "agent_name": "Translator", "depends_on": [], "workspace_keys": [], "output_key": "german_translation"}
 ]}, "use_lead_agent": false}
 
-Example 4 — Grey area defaults to lead agent:
-User: "Improve the performance of our database queries."
-{"classification": "complex_task", "title": "Optimize database query performance", "assignments": [], "reasoning": "Improving performance is exploratory: it requires profiling, identifying bottlenecks, and iterating on fixes. The steps are not known upfront. Using lead agent.", "dag": null, "use_lead_agent": true}
 </examples>
 
 <critical>
@@ -654,8 +735,8 @@ JSON schema:
 When "classification" is "complex_task", you MUST provide exactly one execution path:
 1. "use_lead_agent": true (with "dag": null) — for exploratory or dynamic tasks
 2. "dag" with 2-8 nodes (with "use_lead_agent": false) — for fully predictable tasks
-3. "assignments" with an agent list — for simple sequential pipelines
-Returning "complex_task" with empty assignments, no DAG, and use_lead_agent=false is INVALID.
+Do NOT set both "use_lead_agent": true and "dag" simultaneously.
+Returning "complex_task" with no DAG and use_lead_agent=false is INVALID.
 </format>
 
 <rules>
@@ -703,6 +784,7 @@ DAG construction rules:
                         .get("use_lead_agent")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(true),
+                    auto_promotion_reason: None,
                 }
             } else {
                 return Err(PlanError::MalformedResponse(format!(
@@ -716,6 +798,20 @@ DAG construction rules:
                 &content.chars().take(200).collect::<String>()
             )));
         };
+
+        // Mutual exclusivity: if planner returned both use_lead_agent and a DAG,
+        // strip the DAG (lead agent takes priority as the safer single-orchestrator path).
+        if plan.use_lead_agent && plan.dag.is_some() {
+            tracing::warn!(
+                classification = %plan.classification,
+                "Stripping DAG: use_lead_agent=true and dag both present"
+            );
+            return Ok(TaskPlan {
+                dag: None,
+                auto_promotion_reason: Some("mutual_exclusivity_stripped".into()),
+                ..plan
+            });
+        }
 
         // Safety net: if the LLM returned complex_task but provided no execution
         // path (no assignments, no DAG, no lead_agent), auto-promote to lead_agent
@@ -735,6 +831,7 @@ DAG construction rules:
             );
             return Ok(TaskPlan {
                 use_lead_agent: true,
+                auto_promotion_reason: Some("empty_complex_task".into()),
                 ..plan
             });
         }
@@ -972,6 +1069,25 @@ mod tests {
     }
 
     #[test]
+    fn test_dag_validate_single_node() {
+        let dag = TaskDag {
+            nodes: vec![make_dag_node("n1", "a1", &[])],
+        };
+        let agents = vec![make_agent("a1")];
+        let err = dag.validate(&agents).unwrap_err();
+        assert!(err.contains("at least 2 nodes"));
+    }
+
+    #[test]
+    fn test_dag_validate_structure_single_node() {
+        let dag = TaskDag {
+            nodes: vec![make_dag_node("n1", "a1", &[])],
+        };
+        let err = dag.validate_structure().unwrap_err();
+        assert!(err.contains("at least 2 nodes"));
+    }
+
+    #[test]
     fn test_dag_validate_too_many_nodes() {
         let nodes: Vec<DagNode> = (0..9)
             .map(|i| make_dag_node(&format!("n{}", i), "a1", &[]))
@@ -985,7 +1101,10 @@ mod tests {
     #[test]
     fn test_dag_validate_unknown_dependency() {
         let dag = TaskDag {
-            nodes: vec![make_dag_node("n1", "a1", &["nonexistent"])],
+            nodes: vec![
+                make_dag_node("n1", "a1", &["nonexistent"]),
+                make_dag_node("n2", "a1", &[]),
+            ],
         };
         let agents = vec![make_agent("a1")];
         let err = dag.validate(&agents).unwrap_err();
@@ -995,7 +1114,10 @@ mod tests {
     #[test]
     fn test_dag_validate_unknown_agent() {
         let dag = TaskDag {
-            nodes: vec![make_dag_node("n1", "ghost_agent", &[])],
+            nodes: vec![
+                make_dag_node("n1", "ghost_agent", &[]),
+                make_dag_node("n2", "a1", &[]),
+            ],
         };
         let agents = vec![make_agent("a1")];
         let err = dag.validate(&agents).unwrap_err();
@@ -1210,6 +1332,7 @@ mod tests {
             "title": "Research and write",
             "assignments": [],
             "reasoning": "Multi-step task",
+            "use_lead_agent": false,
             "dag": {
                 "nodes": [
                     {"node_id": "n1", "title": "Research", "description": "Do research", "agent_id": "a1", "agent_name": "Agent a1", "depends_on": [], "workspace_keys": [], "output_key": "research"},
@@ -1271,7 +1394,8 @@ mod tests {
         // Concrete few-shot examples present
         assert!(prompt.contains("Translate"));
         assert!(prompt.contains("Research"));
-        assert!(prompt.contains("Grey area"));
+        // "Grey area" example was removed in prompt cleanup (Step 4)
+        assert!(prompt.contains("Do NOT set both"));
     }
 
     #[test]
@@ -1310,7 +1434,10 @@ mod tests {
     #[test]
     fn test_validate_structure_detects_unknown_dep() {
         let dag = TaskDag {
-            nodes: vec![make_dag_node("n1", "a1", &["nonexistent"])],
+            nodes: vec![
+                make_dag_node("n1", "a1", &["nonexistent"]),
+                make_dag_node("n2", "a1", &[]),
+            ],
         };
         let err = dag.validate_structure().unwrap_err();
         assert!(err.contains("unknown node"));
@@ -1372,7 +1499,8 @@ mod tests {
 
     #[test]
     fn test_task_plan_use_lead_agent_with_dag() {
-        // use_lead_agent and dag can coexist (lead agent would be preferred)
+        // When both use_lead_agent and dag are present, DAG should be stripped
+        // (mutual exclusivity: lead agent takes priority).
         let json = r#"{
             "classification": "complex_task",
             "title": "Complex task",
@@ -1387,7 +1515,11 @@ mod tests {
         }"#;
         let plan = TaskPlanner::parse_response(json).unwrap();
         assert!(plan.use_lead_agent);
-        assert!(plan.dag.is_some());
+        assert!(plan.dag.is_none(), "DAG should be stripped when use_lead_agent is true");
+        assert_eq!(
+            plan.auto_promotion_reason.as_deref(),
+            Some("mutual_exclusivity_stripped")
+        );
     }
 
     #[test]
@@ -1405,6 +1537,44 @@ mod tests {
         }"#;
         let plan = TaskPlanner::parse_response(json).unwrap();
         assert!(plan.use_lead_agent);
+    }
+
+    // ── has_predictable_structure tests ────────────────────────
+
+    #[test]
+    fn test_predictable_structure_numbered_list() {
+        assert!(has_predictable_structure(
+            "1. Translate to French\n2. Translate to Spanish\n3. Translate to German"
+        ));
+    }
+
+    #[test]
+    fn test_predictable_structure_bullet_list() {
+        assert!(has_predictable_structure(
+            "- Write the intro\n- Write the body\n- Write the conclusion"
+        ));
+    }
+
+    #[test]
+    fn test_predictable_structure_batch_translate() {
+        assert!(has_predictable_structure(
+            "Translate this into French, Spanish, and German for each chapter"
+        ));
+    }
+
+    #[test]
+    fn test_predictable_structure_explicit_quantity() {
+        assert!(has_predictable_structure("Split this into 3 sections"));
+    }
+
+    #[test]
+    fn test_predictable_structure_simple_message() {
+        assert!(!has_predictable_structure("debug my test"));
+    }
+
+    #[test]
+    fn test_predictable_structure_greeting() {
+        assert!(!has_predictable_structure("hello, how are you?"));
     }
 
     // ── PlanError display tests ─────────────────────────────────

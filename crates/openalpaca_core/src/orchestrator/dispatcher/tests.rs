@@ -191,6 +191,7 @@ fn test_dispatch_planned_with_use_lead_agent_routes_correctly() {
         reasoning: None,
         dag: None,
         use_lead_agent: true,
+        auto_promotion_reason: None,
     };
 
     let result = dispatcher.dispatch_planned(
@@ -353,6 +354,7 @@ fn test_dispatch_planned_empty_assignments_promotes_to_lead_agent() {
         reasoning: None,
         dag: None,
         use_lead_agent: false,
+        auto_promotion_reason: None,
     };
 
     let result =

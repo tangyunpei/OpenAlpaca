@@ -419,6 +419,59 @@ impl IntentParser {
     fn mentions_filename(content: &str) -> bool {
         rel_path_regex().is_match(content) || file_named_regex().is_match(content)
     }
+
+    /// Check if a message is eligible for the fast path (skip LLM planner).
+    ///
+    /// Returns true when the message is short, has no complexity or delegation
+    /// signals, and doesn't contain task management verbs — meaning it's very
+    /// likely a simple conversational query that doesn't need planning.
+    pub fn is_fast_path_eligible(&self, content: &str) -> bool {
+        const TASK_VERBS: &[&str] = &[
+            "create a task",
+            "build a plan",
+            "step by step",
+            "first ",
+            " then ",
+            "and then",
+            "followed by",
+            "multiple steps",
+        ];
+        const DELEGATION_SIGNALS: &[&str] = &[
+            "assign to",
+            "delegate",
+            "use agent",
+            "spawn agent",
+        ];
+
+        // 1. Short content only
+        if content.len() > 200 {
+            return false;
+        }
+
+        let lower = content.to_lowercase();
+
+        // 2. No complexity signals
+        if Self::has_complexity_signal(&lower) {
+            return false;
+        }
+
+        // 3. At most one skill keyword
+        if Self::extract_skills(&lower).len() > 1 {
+            return false;
+        }
+
+        // 4. No task management verbs
+        if TASK_VERBS.iter().any(|v| lower.contains(v)) {
+            return false;
+        }
+
+        // 5. No delegation language
+        if DELEGATION_SIGNALS.iter().any(|s| lower.contains(s)) {
+            return false;
+        }
+
+        true
+    }
 }
 
 #[cfg(test)]
@@ -853,5 +906,48 @@ Generate a conventional commit.
             query: "test query".to_string(),
         };
         assert_eq!(intent.intent_type(), "skill_invocation");
+    }
+
+    // --- fast path eligibility tests ---
+
+    #[test]
+    fn test_fast_path_greeting() {
+        assert!(parser().is_fast_path_eligible("hello"));
+    }
+
+    #[test]
+    fn test_fast_path_short_question() {
+        assert!(parser().is_fast_path_eligible("what time is it?"));
+    }
+
+    #[test]
+    fn test_fast_path_complexity_signal_ineligible() {
+        assert!(!parser().is_fast_path_eligible("can you help me with this?"));
+    }
+
+    #[test]
+    fn test_fast_path_long_content_ineligible() {
+        let long = "a".repeat(201);
+        assert!(!parser().is_fast_path_eligible(&long));
+    }
+
+    #[test]
+    fn test_fast_path_task_verb_ineligible() {
+        assert!(!parser().is_fast_path_eligible("create a task to fix the bug"));
+    }
+
+    #[test]
+    fn test_fast_path_delegation_ineligible() {
+        assert!(!parser().is_fast_path_eligible("delegate this to the researcher"));
+    }
+
+    #[test]
+    fn test_fast_path_step_by_step_ineligible() {
+        assert!(!parser().is_fast_path_eligible("do this step by step"));
+    }
+
+    #[test]
+    fn test_fast_path_multi_skill_ineligible() {
+        assert!(!parser().is_fast_path_eligible("research and summarize this"));
     }
 }

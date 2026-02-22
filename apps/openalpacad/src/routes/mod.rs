@@ -8,6 +8,7 @@ pub mod connectors;
 pub mod events;
 pub mod events_history;
 pub mod memory;
+pub mod orchestrator_latency;
 pub mod preferences;
 pub mod settings;
 pub mod tasks;
@@ -44,6 +45,7 @@ pub use command::command_handler;
 pub use connectors::{connector_action_handler, connector_config_handler, list_connectors_handler};
 pub use events::events_handler;
 pub use events_history::events_history_handler;
+pub use orchestrator_latency::orchestrator_latency_handler;
 pub use memory::{
     delete_memory_handler, get_memory_handler, index_status_handler, kb_ingest_handler,
     list_memories_handler, reindex_handler,

@@ -17,7 +17,7 @@ impl TaskDispatcher {
     /// Dispatch a task using the Lead Agent orchestration pattern.
     /// Spawns a lead agent instance from the "lead_agent" template (singleton),
     /// registers the task, and runs the lead agent execution loop.
-    pub(super) fn dispatch_lead_agent(
+    pub(crate) fn dispatch_lead_agent(
         &self,
         description: &str,
         title: String,

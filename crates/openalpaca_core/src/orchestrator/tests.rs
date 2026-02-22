@@ -485,7 +485,7 @@ async fn test_llm_planning_complex_task() {
         .handle_message(
             Uuid::new_v4(),
             "cli".to_string(),
-            "research Rust async patterns".to_string(),
+            "please research Rust async patterns".to_string(),
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
