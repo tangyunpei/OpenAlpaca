@@ -426,6 +426,6 @@ mod tests {
     #[test]
     fn test_schema_version() {
         let db = setup_db();
-        assert_eq!(db.schema_version().unwrap(), 22);
+        assert_eq!(db.schema_version().unwrap(), 23);
     }
 }

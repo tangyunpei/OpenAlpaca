@@ -200,6 +200,10 @@ pub struct LeadAgentDefaults {
     pub max_cost: f64,
     /// Maximum number of concurrent subagents a single lead agent can have running.
     pub max_concurrent_subagents: usize,
+    /// When true, lead agents get the `spawn_subagents_batch` tool for
+    /// spawning multiple subagents in a single tool call. Phase 2 feature flag.
+    #[serde(default)]
+    pub batch_spawn_enabled: bool,
 }
 
 impl Default for LeadAgentDefaults {
@@ -210,6 +214,7 @@ impl Default for LeadAgentDefaults {
             max_tool_runtime_secs: 300,
             max_cost: 5.0,
             max_concurrent_subagents: 6,
+            batch_spawn_enabled: false,
         }
     }
 }
@@ -244,6 +249,14 @@ pub struct PlannerConfig {
     /// When true, inject a system hint nudging the planner toward DAG
     /// when the user message contains predictable parallel structure.
     pub dag_prefer_predictable_enabled: bool,
+    /// When true, the dispatcher produces a DispatchDecision before execution,
+    /// emitting an event for observability. Phase 2 feature flag.
+    #[serde(default)]
+    pub dispatch_analysis_enabled: bool,
+    /// When true, TaskPlan responses include execution_mode and predictability_score
+    /// fields, and the planner prompt is extended with v2 schema. Phase 2 feature flag.
+    #[serde(default)]
+    pub plan_protocol_v2_enabled: bool,
 }
 
 impl Default for PlannerConfig {
@@ -253,6 +266,8 @@ impl Default for PlannerConfig {
             max_retries: 2,
             max_tokens: 1024,
             dag_prefer_predictable_enabled: false,
+            dispatch_analysis_enabled: false,
+            plan_protocol_v2_enabled: false,
         }
     }
 }
@@ -268,18 +283,23 @@ pub struct DagConfig {
     pub replan_after_every_n_nodes: usize,
     pub max_replans: usize,
     pub replan_enabled: bool,
+    /// When true, ready nodes are prioritized by critical path length
+    /// (longest remaining dependency chain first). Phase 2 feature flag.
+    #[serde(default)]
+    pub critical_path_scheduling_enabled: bool,
 }
 
 impl Default for DagConfig {
     fn default() -> Self {
         Self {
-            max_concurrent_agents: 3,
+            max_concurrent_agents: 4,
             node_timeout_secs: 300,
             total_timeout_secs: 1800,
             max_retries_per_node: 1,
             replan_after_every_n_nodes: 2,
             max_replans: 3,
             replan_enabled: false,
+            critical_path_scheduling_enabled: false,
         }
     }
 }
@@ -815,7 +835,7 @@ mod tests {
         assert_eq!(config.execution.planner.planning_timeout_secs, 60);
         assert_eq!(config.execution.planner.max_retries, 2);
         assert_eq!(config.execution.planner.max_tokens, 1024);
-        assert_eq!(config.execution.dag.max_concurrent_agents, 3);
+        assert_eq!(config.execution.dag.max_concurrent_agents, 4);
         assert_eq!(config.security.max_input_length, 32768);
         assert_eq!(config.server.heartbeat_interval_secs, 5);
     }
@@ -893,5 +913,54 @@ max_concurrent_agents = 8
             config.server.event_bus_capacity,
             original.server.event_bus_capacity
         );
+    }
+
+    #[test]
+    fn test_phase2_flags_default_to_false() {
+        let config = DaemonConfig::default();
+        assert!(!config.execution.planner.dispatch_analysis_enabled);
+        assert!(!config.execution.planner.plan_protocol_v2_enabled);
+        assert!(!config.execution.lead_agent_defaults.batch_spawn_enabled);
+        assert!(!config.execution.dag.critical_path_scheduling_enabled);
+    }
+
+    #[test]
+    fn test_phase2_flags_from_toml() {
+        let toml_str = r#"
+[execution.planner]
+dispatch_analysis_enabled = true
+plan_protocol_v2_enabled = true
+
+[execution.lead_agent_defaults]
+batch_spawn_enabled = true
+
+[execution.dag]
+critical_path_scheduling_enabled = true
+"#;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.execution.planner.dispatch_analysis_enabled);
+        assert!(config.execution.planner.plan_protocol_v2_enabled);
+        assert!(config.execution.lead_agent_defaults.batch_spawn_enabled);
+        assert!(config.execution.dag.critical_path_scheduling_enabled);
+    }
+
+    #[test]
+    fn test_dag_max_concurrent_default_4() {
+        let config = DaemonConfig::default();
+        assert_eq!(config.execution.dag.max_concurrent_agents, 4);
+    }
+
+    #[test]
+    fn test_phase2_flags_backward_compat() {
+        // Parsing a TOML without Phase 2 fields should succeed with all flags false
+        let toml_str = r#"
+[execution.planner]
+max_tokens = 1024
+"#;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.execution.planner.dispatch_analysis_enabled);
+        assert!(!config.execution.planner.plan_protocol_v2_enabled);
+        assert!(!config.execution.lead_agent_defaults.batch_spawn_enabled);
+        assert!(!config.execution.dag.critical_path_scheduling_enabled);
     }
 }
