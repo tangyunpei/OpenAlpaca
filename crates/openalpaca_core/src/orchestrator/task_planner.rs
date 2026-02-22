@@ -6,8 +6,10 @@
 
 use crate::agent::subagent::SubAgent;
 use openalpaca_llm::{ChatMessage, LlmRouter, RequestContext, RouterRequest};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 /// Maximum number of recent history messages to include in planning prompts.
@@ -104,11 +106,15 @@ impl TaskDag {
             return Err("DAG has no nodes".to_string());
         }
 
-        if self.nodes.len() > 8 {
+        if self.nodes.len() < 2 {
             return Err(format!(
-                "DAG has {} nodes (max 8)",
+                "DAG requires at least 2 nodes (got {}); use lead agent for single-step tasks",
                 self.nodes.len()
             ));
+        }
+
+        if self.nodes.len() > 8 {
+            return Err(format!("DAG has {} nodes (max 8)", self.nodes.len()));
         }
 
         // Check all dependencies exist and all agents are available
@@ -151,7 +157,9 @@ impl TaskDag {
             .iter()
             .filter(|n| {
                 matches!(n.status, DagNodeStatus::Pending | DagNodeStatus::Ready)
-                    && n.depends_on.iter().all(|dep| completed.contains(dep.as_str()))
+                    && n.depends_on
+                        .iter()
+                        .all(|dep| completed.contains(dep.as_str()))
             })
             .collect()
     }
@@ -238,6 +246,10 @@ impl TaskDag {
             return Err("DAG has no nodes".to_string());
         }
 
+        if self.nodes.len() < 2 {
+            return Err("DAG requires at least 2 nodes".to_string());
+        }
+
         let node_ids: HashSet<&str> = self.nodes.iter().map(|n| n.node_id.as_str()).collect();
         for node in &self.nodes {
             for dep in &node.depends_on {
@@ -281,8 +293,19 @@ pub struct TaskPlan {
     pub dag: Option<TaskDag>,
     /// When true, the task should be executed by a Lead Agent (full agentic loop
     /// with dynamic subagent spawning) instead of a static DAG or sequential pipeline.
-    #[serde(default)]
+    /// Defaults to `true` (lead agent is the safer fallback for uncertain tasks).
+    #[serde(default = "default_use_lead_agent")]
     pub use_lead_agent: bool,
+    /// Tracks why auto-promotion to lead agent occurred (observability).
+    /// Set by parse_response() or plan_inner() when a safety net triggers.
+    #[serde(skip)]
+    pub auto_promotion_reason: Option<String>,
+}
+
+/// Serde default for `use_lead_agent`: returns `true` so that missing
+/// or omitted `use_lead_agent` fields default to lead agent mode (the safer option).
+fn default_use_lead_agent() -> bool {
+    true
 }
 
 /// An agent assignment decided by the LLM planner.
@@ -395,9 +418,9 @@ fn find_outermost_braces(s: &str) -> Option<&str> {
 
 // ── Planning helpers ─────────────────────────────────────────────────
 
-/// Render the "## Available Agents" prompt section into `out`.
+/// Render the `<agents>` prompt section into `out`.
 fn format_agent_list(out: &mut String, agents: &[SubAgent]) {
-    out.push_str("## Available Agents\n");
+    out.push_str("<agents>\n");
     if agents.is_empty() {
         out.push_str("No agents are currently available.\n");
     } else {
@@ -409,7 +432,7 @@ fn format_agent_list(out: &mut String, agents: &[SubAgent]) {
                 .map(|s| format!("{} ({:.1})", s.name, s.proficiency))
                 .collect();
             out.push_str(&format!(
-                "- ID: \"{}\", Name: \"{}\", Description: \"{}\", Skills: {}\n",
+                "<agent id=\"{}\" name=\"{}\">\n{}\nSkills: {}\n</agent>\n",
                 agent.id,
                 agent.name,
                 desc,
@@ -421,11 +444,62 @@ fn format_agent_list(out: &mut String, agents: &[SubAgent]) {
             ));
         }
     }
+    out.push_str("</agents>\n");
 }
 
 /// Build the message list for a planning LLM call.
 ///
 /// Constructs: `[system_prompt, optional summary, optional active_tasks, history_tail…, user_message]`
+static NUMBERED_LIST_RE: OnceLock<Regex> = OnceLock::new();
+static BULLET_LIST_RE: OnceLock<Regex> = OnceLock::new();
+static BATCH_KEYWORD_RE: OnceLock<Regex> = OnceLock::new();
+static EXPLICIT_QUANTITY_RE: OnceLock<Regex> = OnceLock::new();
+
+fn numbered_list_regex() -> &'static Regex {
+    NUMBERED_LIST_RE.get_or_init(|| Regex::new(r"\b\d+\.\s").unwrap())
+}
+
+fn bullet_list_regex() -> &'static Regex {
+    BULLET_LIST_RE.get_or_init(|| Regex::new(r"(?m)^[\s]*[-*]\s").unwrap())
+}
+
+fn batch_keyword_regex() -> &'static Regex {
+    BATCH_KEYWORD_RE.get_or_init(|| {
+        Regex::new(r"(?i)\b(each|all of|every|for each|respectively)\b").unwrap()
+    })
+}
+
+fn explicit_quantity_regex() -> &'static Regex {
+    EXPLICIT_QUANTITY_RE.get_or_init(|| Regex::new(r"(?i)\b(into|to|in)\s+\d+\s").unwrap())
+}
+
+/// Detect if a user message contains predictable parallel structure
+/// (numbered lists, bullet lists, batch keywords, or explicit quantities).
+fn has_predictable_structure(content: &str) -> bool {
+    // Numbered list: "1. ...", "2. ..." etc. — at least 2 occurrences
+    if numbered_list_regex().find_iter(content).count() >= 2 {
+        return true;
+    }
+
+    // Bullet list: lines starting with "- " or "* " — at least 2 occurrences
+    if bullet_list_regex().find_iter(content).count() >= 2 {
+        return true;
+    }
+
+    // Comma + "and" + batch keyword: "translate into French, Spanish, and German for each"
+    if content.contains(',') && content.contains(" and ") && batch_keyword_regex().is_match(content)
+    {
+        return true;
+    }
+
+    // Explicit quantity: "into 3 languages", "to 5 files"
+    if explicit_quantity_regex().is_match(content) {
+        return true;
+    }
+
+    false
+}
+
 fn build_messages(
     system_prompt: &str,
     user_message: &str,
@@ -458,27 +532,16 @@ fn build_messages(
     messages
 }
 
-/// Internal planning mode — captures the differences between flat and hierarchical.
-enum PlanMode<'a> {
-    Flat,
-    Hierarchical { idle_agents: &'a [SubAgent] },
-}
-
-/// Shared retry loop for both flat and hierarchical planning.
+/// Shared retry loop for hierarchical planning.
 ///
 /// Builds a `RouterRequest` per attempt, calls the router with a timeout,
-/// parses the response, and optionally validates the DAG (hierarchical only).
+/// parses the response, and validates the DAG against available agents.
 async fn plan_inner(
     router: &LlmRouter,
     messages: Vec<ChatMessage>,
     limits: PlannerLimits,
-    mode: PlanMode<'_>,
+    idle_agents: &[SubAgent],
 ) -> Result<TaskPlan, PlanError> {
-    let (max_tokens, log_prefix) = match &mode {
-        PlanMode::Flat => (512u32, "Plan"),
-        PlanMode::Hierarchical { .. } => (2048u32, "Hierarchical plan"),
-    };
-
     let mut last_error = PlanError::MalformedResponse("no attempts made".to_string());
     let deadline = Duration::from_secs(limits.timeout_secs);
 
@@ -486,9 +549,9 @@ async fn plan_inner(
         let request = RouterRequest {
             model: None,
             messages: messages.clone(),
-            tools: vec![],
+            tools: Arc::new(vec![]),
             temperature: Some(0.0),
-            max_tokens: Some(max_tokens),
+            max_tokens: Some(limits.max_tokens),
             context: RequestContext::default(),
         };
 
@@ -497,17 +560,34 @@ async fn plan_inner(
             .map_err(|_| PlanError::Timeout(limits.timeout_secs))?
             .map_err(|e| PlanError::LlmError(e.to_string()))?;
 
+        let response_content = response.content.clone();
+
         match TaskPlanner::parse_response(&response.content) {
             Ok(plan) => {
-                if let PlanMode::Hierarchical { idle_agents } = &mode
-                    && let Some(ref dag) = plan.dag
+                if let Some(ref dag) = plan.dag
                     && let Err(e) = dag.validate(idle_agents)
                 {
-                    tracing::warn!(
-                        "DAG validation failed: {e}, falling back to flat assignments"
-                    );
+                    let promoted = plan.assignments.is_empty() && !plan.use_lead_agent;
+                    if promoted {
+                        tracing::warn!(
+                            classification = %plan.classification,
+                            reasoning = ?plan.reasoning,
+                            dag_error = %e,
+                            "Auto-promoting to lead agent: DAG validation failed and plan \
+                             has no flat assignments. Original use_lead_agent=false."
+                        );
+                    } else {
+                        tracing::warn!(
+                            classification = %plan.classification,
+                            reasoning = ?plan.reasoning,
+                            dag_error = %e,
+                            "DAG validation failed, falling back to flat assignments"
+                        );
+                    }
                     return Ok(TaskPlan {
                         dag: None,
+                        use_lead_agent: plan.use_lead_agent || promoted,
+                        auto_promotion_reason: Some("dag_validation_failed".into()),
                         ..plan
                     });
                 }
@@ -515,11 +595,19 @@ async fn plan_inner(
             }
             Err(PlanError::MalformedResponse(msg)) => {
                 tracing::warn!(
-                    "{log_prefix} attempt {}/{} returned malformed response: {msg}",
+                    "Hierarchical plan attempt {}/{} returned malformed response: {msg}",
                     attempt + 1,
                     limits.max_retries + 1,
                 );
                 last_error = PlanError::MalformedResponse(msg);
+                // Fail fast: if response has no JSON structure at all (e.g. conversational
+                // text in user's language), retrying with the same prompt won't help
+                if !response_content.contains('{') {
+                    tracing::warn!(
+                        "Response contains no JSON structure, skipping remaining retries"
+                    );
+                    break;
+                }
             }
             Err(e) => return Err(e),
         }
@@ -537,42 +625,19 @@ async fn plan_inner(
 pub struct PlannerLimits {
     pub timeout_secs: u64,
     pub max_retries: usize,
+    pub max_tokens: u32,
 }
 
 pub struct TaskPlanner;
 
 impl TaskPlanner {
-    /// Call the LLM to classify a user message and optionally assign agents.
-    ///
-    /// Retries up to `limits.max_retries` times on malformed responses before
-    /// propagating the error. LLM transport and timeout errors are returned
-    /// immediately without retrying.
-    pub async fn plan(
-        router: &LlmRouter,
-        user_message: &str,
-        idle_agents: &[SubAgent],
-        history: &[ChatMessage],
-        session_summary: Option<&str>,
-        active_tasks_block: Option<&str>,
-        limits: PlannerLimits,
-    ) -> Result<TaskPlan, PlanError> {
-        let system_prompt = Self::build_system_prompt(idle_agents);
-        let messages = build_messages(
-            &system_prompt,
-            user_message,
-            history,
-            session_summary,
-            active_tasks_block,
-        );
-        plan_inner(router, messages, limits, PlanMode::Flat).await
-    }
-
     /// Hierarchical planning: decompose a complex task into a DAG of sub-tasks.
     /// Falls back to flat assignment if DAG planning fails or returns simple_query.
     ///
     /// Retries up to `limits.max_retries` times on malformed responses. DAG validation
     /// failures do NOT trigger retries — the plan is returned with `dag: None`
     /// (existing fallback behaviour). Timeout and LLM errors are returned immediately.
+    #[allow(clippy::too_many_arguments)]
     pub async fn plan_hierarchical(
         router: &LlmRouter,
         user_message: &str,
@@ -581,16 +646,31 @@ impl TaskPlanner {
         session_summary: Option<&str>,
         active_tasks_block: Option<&str>,
         limits: PlannerLimits,
+        dag_prefer_predictable: bool,
     ) -> Result<TaskPlan, PlanError> {
         let system_prompt = Self::build_hierarchical_prompt(idle_agents);
-        let messages = build_messages(
+        let mut messages = build_messages(
             &system_prompt,
             user_message,
             history,
             session_summary,
             active_tasks_block,
         );
-        plan_inner(router, messages, limits, PlanMode::Hierarchical { idle_agents }).await
+
+        // If enabled, inject a system hint before the final user message
+        // when the message contains predictable parallel structure.
+        if dag_prefer_predictable && has_predictable_structure(user_message) {
+            let hint = ChatMessage::system(
+                "[SYSTEM HINT: This message contains enumerated or parallel sub-tasks. \
+                 Prefer a DAG with parallel nodes if all steps are known upfront. \
+                 Set use_lead_agent to false when using DAG.]",
+            );
+            // Insert before the last message (the user message)
+            let last_idx = messages.len().saturating_sub(1);
+            messages.insert(last_idx, hint);
+        }
+
+        plan_inner(router, messages, limits, idle_agents).await
     }
 
     /// Build the hierarchical planning prompt with DAG support.
@@ -604,89 +684,71 @@ impl TaskPlanner {
 
         prompt.push_str(
             r#"
-## Response Format
-Respond with ONLY a single JSON object. No markdown, no explanation, no other text.
+<instructions>
+Classify the user's message into one of two categories:
+- "simple_query": greetings, short questions, casual conversation, or anything answerable directly without agent work.
+- "complex_task": multi-step tasks that require one or more agents to execute.
 
-For simple queries:
-{"classification": "simple_query", "title": null, "assignments": [], "reasoning": "...", "dag": null, "use_lead_agent": false}
+Think step-by-step before producing your JSON response:
+1. Is this a simple greeting, question, or chat message? If yes, classify as "simple_query".
+2. If it is a task, are all steps known upfront and predictable, or is it exploratory/dynamic?
+3. Which available agents have the right skills for the task?
+4. Write your reasoning into the "reasoning" field, then produce the JSON.
 
-For complex tasks with predictable structure (steps are known upfront), provide a DAG of sub-tasks:
-{"classification": "complex_task", "title": "...", "assignments": [], "reasoning": "...", "dag": {"nodes": [
-  {"node_id": "node_1", "title": "Research topic", "description": "Search for...", "agent_id": "...", "agent_name": "...", "depends_on": [], "workspace_keys": [], "output_key": "research_results"},
-  {"node_id": "node_2", "title": "Write summary", "description": "Using the research...", "agent_id": "...", "agent_name": "...", "depends_on": ["node_1"], "workspace_keys": ["research_results"], "output_key": "summary"}
+For complex tasks, choose exactly one execution strategy:
+- Set "use_lead_agent": true when the task is open-ended, exploratory, or adaptive (PREFERRED default). Use this when the number of sub-tasks is unknown, results from one step change what comes next, or the task requires iterative refinement (e.g. debugging, research, creative exploration).
+- Provide a "dag" with nodes when ALL steps are known upfront and predictable (e.g. translating into N languages, a fixed pipeline of read-then-summarize-then-send, or batch-processing independent items).
+- If unsure, default to "use_lead_agent": true. A lead agent can always execute a simple plan, but a DAG cannot adapt if the plan is wrong.
+</instructions>
+
+<examples>
+Example 1 — Simple query:
+User: "Hello, how are you?"
+{"classification": "simple_query", "title": null, "assignments": [], "reasoning": "This is a greeting, not a task.", "dag": null, "use_lead_agent": false}
+
+Example 2 — Complex task with lead agent (exploratory):
+User: "Research the best caching strategy for our REST API and recommend one."
+{"classification": "complex_task", "title": "Research API caching strategies", "assignments": [], "reasoning": "This is an open-ended research task. The user wants evaluation of options, which requires iterative exploration. Using lead agent.", "dag": null, "use_lead_agent": true}
+
+Example 3 — Complex task with DAG (predictable steps):
+User: "Translate this document into French, Spanish, and German."
+{"classification": "complex_task", "title": "Translate document into 3 languages", "assignments": [], "reasoning": "All three translations are known upfront and independent. Using a DAG with parallel nodes.", "dag": {"nodes": [
+  {"node_id": "node_1", "title": "Translate to French", "description": "Translate the document into French.", "agent_id": "translator-01", "agent_name": "Translator", "depends_on": [], "workspace_keys": [], "output_key": "french_translation"},
+  {"node_id": "node_2", "title": "Translate to Spanish", "description": "Translate the document into Spanish.", "agent_id": "translator-01", "agent_name": "Translator", "depends_on": [], "workspace_keys": [], "output_key": "spanish_translation"},
+  {"node_id": "node_3", "title": "Translate to German", "description": "Translate the document into German.", "agent_id": "translator-01", "agent_name": "Translator", "depends_on": [], "workspace_keys": [], "output_key": "german_translation"}
 ]}, "use_lead_agent": false}
 
-For complex tasks that are dynamic, exploratory, or require adaptive decomposition, use the lead agent:
-{"classification": "complex_task", "title": "...", "assignments": [], "reasoning": "...", "dag": null, "use_lead_agent": true}
+</examples>
 
-## When to use `use_lead_agent: true`
-Use the lead agent when the task is open-ended or adaptive:
-- **Research & analysis**: "Find the best approach for X" — requires evaluating options
-- **Debugging**: "Fix the failing tests" — requires iterating until resolved
-- **Creative exploration**: "Design a logo concept" — requires back-and-forth refinement
-- The number of sub-tasks cannot be determined before starting
-- Results from one step change what steps come next
+<critical>
+IMPORTANT: Regardless of the language of the user's message, you MUST ALWAYS respond with
+ONLY a valid JSON object. Never reply conversationally. Never respond in the user's language.
+Your ENTIRE output must be a single JSON object starting with '{' and ending with '}'.
+</critical>
 
-## When to use a DAG (`dag` with nodes, `use_lead_agent: false`)
-Use a DAG when all steps are known upfront:
-- **Translation**: "Translate this into 5 languages" — each language is a known, independent node
-- **Pipeline**: "Read file X, then summarize it, then email the summary" — fixed sequence
-- **Batch processing**: "Run these 3 analyses on the dataset" — parallel independent tasks
-- All sub-tasks and their dependencies can be enumerated now
-- No step's output changes what steps exist
+<format>
+Respond with ONLY a single JSON object. No markdown fences, no explanation, no other text.
 
-## Grey area — default to lead agent
-If unsure whether the task is predictable or exploratory, prefer `use_lead_agent: true`.
-A lead agent can always execute a simple plan, but a DAG cannot adapt if the plan is wrong.
+JSON schema:
+{"classification": "simple_query" | "complex_task", "title": string | null, "assignments": [], "reasoning": "...", "dag": null | {"nodes": [...]}, "use_lead_agent": boolean}
 
-## DAG Rules
-- Each node is a sub-task assigned to one agent
-- `depends_on`: list of node_ids that must complete before this node starts
-- Nodes with no dependencies can run in parallel
-- `workspace_keys`: workspace entries this node should read (from other nodes' output_key)
-- `output_key`: the workspace key where this node writes its result
-- 2-8 nodes max
-- Use exact agent_id values from the list above
-- Decompose into distinct stages requiring different skills
-- Express parallelism: if two tasks are independent, give them no shared dependencies
-- Simple queries (greetings, short phrases) should still be "simple_query"
-"#,
-        );
+When "classification" is "complex_task", you MUST provide exactly one execution path:
+1. "use_lead_agent": true (with "dag": null) — for exploratory or dynamic tasks
+2. "dag" with 2-8 nodes (with "use_lead_agent": false) — for fully predictable tasks
+Do NOT set both "use_lead_agent": true and "dag" simultaneously.
+Returning "complex_task" with no DAG and use_lead_agent=false is INVALID.
+</format>
 
-        prompt
-    }
-
-    /// Build the system prompt listing available agents.
-    fn build_system_prompt(idle_agents: &[SubAgent]) -> String {
-        let mut prompt = String::from(
-            "You are a task router for OpenAlpaca. Classify the user message and, if it requires work, assign agents.\n\n",
-        );
-
-        format_agent_list(&mut prompt, idle_agents);
-
-        prompt.push_str(
-            r#"
-## Response Format
-Respond with ONLY a single JSON object. No markdown, no explanation, no other text.
-The JSON object MUST contain exactly these four keys: "classification", "title", "assignments", "reasoning".
-Do NOT include keys like "available_agents" or repeat the agent list.
-
-Simple query example:
-{"classification": "simple_query", "title": null, "assignments": [], "reasoning": "This is a casual greeting"}
-
-Complex task example:
-{"classification": "complex_task", "title": "Research Rust async patterns", "assignments": [{"agent_id": "...", "agent_name": "...", "role_description": "...", "matched_skills": ["..."]}], "reasoning": "User needs research done"}
-
-## Rules
-- "classification" MUST be either "simple_query" or "complex_task"
-- Use exact agent_id values from the list above
-- Title: imperative, max 50 chars (e.g. "Research Rust async patterns")
-- Only classify as complex_task if agent work is needed
-- **Agents run as a sequential pipeline**: agent 1 runs first, then agent 2 receives agent 1's output as context, and so on. Order matters — list them in execution order.
-- Use multiple agents when the task has distinct stages requiring different skills (e.g. agent with file_read reads a file → agent with text_generate writes a polished summary using the file content).
-- Use a single agent when one agent can handle the entire task alone (e.g. a file_read agent can also summarize what it reads via its LLM).
-- Casual messages, greetings, short phrases, numbers, or anything that doesn't require agent tools should be "simple_query".
-- If an active task already covers the user's request, classify as "simple_query" and explain the existing task in your reasoning.
+<rules>
+DAG construction rules:
+- Each node is a sub-task assigned to one agent (use exact agent_id values from the agents list)
+- "depends_on": list of node_ids that must complete before this node starts
+- Nodes with no shared dependencies run in parallel — express parallelism for independent tasks
+- "workspace_keys": workspace entries this node reads (from other nodes' output_key)
+- "output_key": workspace key where this node writes its result
+- 2-8 nodes maximum
+- Decompose into distinct stages that require different skills
+</rules>
 "#,
         );
 
@@ -721,7 +783,8 @@ Complex task example:
                     use_lead_agent: obj
                         .get("use_lead_agent")
                         .and_then(|v| v.as_bool())
-                        .unwrap_or(false),
+                        .unwrap_or(true),
+                    auto_promotion_reason: None,
                 }
             } else {
                 return Err(PlanError::MalformedResponse(format!(
@@ -736,17 +799,41 @@ Complex task example:
             )));
         };
 
-        // Warn about potentially mis-routed complex tasks
+        // Mutual exclusivity: if planner returned both use_lead_agent and a DAG,
+        // strip the DAG (lead agent takes priority as the safer single-orchestrator path).
+        if plan.use_lead_agent && plan.dag.is_some() {
+            tracing::warn!(
+                classification = %plan.classification,
+                "Stripping DAG: use_lead_agent=true and dag both present"
+            );
+            return Ok(TaskPlan {
+                dag: None,
+                auto_promotion_reason: Some("mutual_exclusivity_stripped".into()),
+                ..plan
+            });
+        }
+
+        // Safety net: if the LLM returned complex_task but provided no execution
+        // path (no assignments, no DAG, no lead_agent), auto-promote to lead_agent
+        // instead of letting dispatch_planned() fail with "No agents assigned".
         if plan.classification == "complex_task"
             && plan.assignments.is_empty()
             && plan.dag.is_none()
             && !plan.use_lead_agent
         {
             tracing::warn!(
-                "LLM planner returned complex_task with no assignments, no DAG, \
-                 and use_lead_agent=false — task may be mis-routed. Reasoning: {:?}",
-                plan.reasoning
+                classification = %plan.classification,
+                reasoning = ?plan.reasoning,
+                title = ?plan.title,
+                "Auto-promoting to lead agent: planner returned complex_task with no \
+                 assignments, no DAG, and use_lead_agent=false. This may indicate a \
+                 planning error — check the planner prompt and model output."
             );
+            return Ok(TaskPlan {
+                use_lead_agent: true,
+                auto_promotion_reason: Some("empty_complex_task".into()),
+                ..plan
+            });
         }
 
         Ok(plan)
@@ -791,7 +878,10 @@ mod tests {
         assert_eq!(plan.title.as_deref(), Some("Research Rust async patterns"));
         assert_eq!(plan.assignments.len(), 1);
         assert_eq!(plan.assignments[0].agent_id, "researcher-01");
-        assert_eq!(plan.assignments[0].matched_skills, vec!["web_search", "summarize"]);
+        assert_eq!(
+            plan.assignments[0].matched_skills,
+            vec!["web_search", "summarize"]
+        );
     }
 
     #[test]
@@ -818,51 +908,6 @@ mod tests {
             }
             _ => panic!("Expected MalformedResponse"),
         }
-    }
-
-    #[test]
-    fn test_build_system_prompt_with_agents() {
-        use crate::agent::subagent::{
-            AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill,
-        };
-
-        let agents = vec![SubAgent {
-            id: "researcher-01".to_string(),
-            name: "Researcher".to_string(),
-            description: Some("Research agent".to_string()),
-            icon: None,
-            status: AgentStatus::Idle,
-            current_task: None,
-            skills: vec![
-                Skill {
-                    name: "web_search".to_string(),
-                    category: "research".to_string(),
-                    proficiency: 0.9,
-                },
-                Skill {
-                    name: "summarize".to_string(),
-                    category: "research".to_string(),
-                    proficiency: 0.8,
-                },
-            ],
-            preset: AgentPreset::default(),
-            constraints: AgentConstraints::default(),
-            llm_config: AgentLlmConfig::default(),
-        }];
-
-        let prompt = TaskPlanner::build_system_prompt(&agents);
-        assert!(prompt.contains("researcher-01"));
-        assert!(prompt.contains("Researcher"));
-        assert!(prompt.contains("Research agent"));
-        assert!(prompt.contains("web_search (0.9)"));
-        assert!(prompt.contains("summarize (0.8)"));
-        assert!(prompt.contains("If an active task already covers"));
-    }
-
-    #[test]
-    fn test_build_system_prompt_no_agents() {
-        let prompt = TaskPlanner::build_system_prompt(&[]);
-        assert!(prompt.contains("No agents are currently available"));
     }
 
     #[test]
@@ -938,9 +983,9 @@ mod tests {
     }
 
     #[test]
-    fn test_complex_task_empty_parses_ok() {
-        // Verifies parse succeeds even with empty assignments/dag/lead_agent
-        // (the tracing::warn is emitted but not assertable without subscriber)
+    fn test_complex_task_empty_auto_promotes_to_lead_agent() {
+        // When complex_task has no assignments, no DAG, and no lead_agent,
+        // parse_response auto-promotes to use_lead_agent=true as a safety net.
         let json = r#"{
             "classification": "complex_task",
             "title": "Do something",
@@ -949,7 +994,7 @@ mod tests {
         }"#;
         let plan = TaskPlanner::parse_response(json).unwrap();
         assert_eq!(plan.classification, "complex_task");
-        assert!(!plan.use_lead_agent);
+        assert!(plan.use_lead_agent);
         assert!(plan.dag.is_none());
         assert!(plan.assignments.is_empty());
     }
@@ -968,13 +1013,12 @@ mod tests {
 
     // ── DAG tests ─────────────────────────────────────────────────────
 
-    use crate::agent::subagent::{
-        AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus,
-    };
+    use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus};
 
     fn make_agent(id: &str) -> SubAgent {
         SubAgent {
             id: id.to_string(),
+            template_id: id.to_string(),
             name: format!("Agent {}", id),
             description: None,
             icon: None,
@@ -1025,6 +1069,25 @@ mod tests {
     }
 
     #[test]
+    fn test_dag_validate_single_node() {
+        let dag = TaskDag {
+            nodes: vec![make_dag_node("n1", "a1", &[])],
+        };
+        let agents = vec![make_agent("a1")];
+        let err = dag.validate(&agents).unwrap_err();
+        assert!(err.contains("at least 2 nodes"));
+    }
+
+    #[test]
+    fn test_dag_validate_structure_single_node() {
+        let dag = TaskDag {
+            nodes: vec![make_dag_node("n1", "a1", &[])],
+        };
+        let err = dag.validate_structure().unwrap_err();
+        assert!(err.contains("at least 2 nodes"));
+    }
+
+    #[test]
     fn test_dag_validate_too_many_nodes() {
         let nodes: Vec<DagNode> = (0..9)
             .map(|i| make_dag_node(&format!("n{}", i), "a1", &[]))
@@ -1038,7 +1101,10 @@ mod tests {
     #[test]
     fn test_dag_validate_unknown_dependency() {
         let dag = TaskDag {
-            nodes: vec![make_dag_node("n1", "a1", &["nonexistent"])],
+            nodes: vec![
+                make_dag_node("n1", "a1", &["nonexistent"]),
+                make_dag_node("n2", "a1", &[]),
+            ],
         };
         let agents = vec![make_agent("a1")];
         let err = dag.validate(&agents).unwrap_err();
@@ -1048,7 +1114,10 @@ mod tests {
     #[test]
     fn test_dag_validate_unknown_agent() {
         let dag = TaskDag {
-            nodes: vec![make_dag_node("n1", "ghost_agent", &[])],
+            nodes: vec![
+                make_dag_node("n1", "ghost_agent", &[]),
+                make_dag_node("n2", "a1", &[]),
+            ],
         };
         let agents = vec![make_agent("a1")];
         let err = dag.validate(&agents).unwrap_err();
@@ -1077,7 +1146,11 @@ mod tests {
                 make_dag_node("n3", "a1", &["n1", "n2"]),
             ],
         };
-        let ready: Vec<&str> = dag.ready_nodes().iter().map(|n| n.node_id.as_str()).collect();
+        let ready: Vec<&str> = dag
+            .ready_nodes()
+            .iter()
+            .map(|n| n.node_id.as_str())
+            .collect();
         assert!(ready.contains(&"n1"));
         assert!(ready.contains(&"n2"));
         assert!(!ready.contains(&"n3"));
@@ -1259,6 +1332,7 @@ mod tests {
             "title": "Research and write",
             "assignments": [],
             "reasoning": "Multi-step task",
+            "use_lead_agent": false,
             "dag": {
                 "nodes": [
                     {"node_id": "n1", "title": "Research", "description": "Do research", "agent_id": "a1", "agent_name": "Agent a1", "depends_on": [], "workspace_keys": [], "output_key": "research"},
@@ -1308,13 +1382,20 @@ mod tests {
         let agents = vec![make_agent("a1")];
         let prompt = TaskPlanner::build_hierarchical_prompt(&agents);
         assert!(prompt.contains("a1"));
-        assert!(prompt.contains("DAG Rules"));
+        // XML structure tags
+        assert!(prompt.contains("<agents>"));
+        assert!(prompt.contains("<instructions>"));
+        assert!(prompt.contains("<examples>"));
+        assert!(prompt.contains("<format>"));
+        assert!(prompt.contains("<rules>"));
+        // DAG fields still referenced
         assert!(prompt.contains("depends_on"));
         assert!(prompt.contains("workspace_keys"));
-        // Verify concrete examples are present
-        assert!(prompt.contains("Translation"));
-        assert!(prompt.contains("Debugging"));
-        assert!(prompt.contains("Grey area"));
+        // Concrete few-shot examples present
+        assert!(prompt.contains("Translate"));
+        assert!(prompt.contains("Research"));
+        // "Grey area" example was removed in prompt cleanup (Step 4)
+        assert!(prompt.contains("Do NOT set both"));
     }
 
     #[test]
@@ -1353,7 +1434,10 @@ mod tests {
     #[test]
     fn test_validate_structure_detects_unknown_dep() {
         let dag = TaskDag {
-            nodes: vec![make_dag_node("n1", "a1", &["nonexistent"])],
+            nodes: vec![
+                make_dag_node("n1", "a1", &["nonexistent"]),
+                make_dag_node("n2", "a1", &[]),
+            ],
         };
         let err = dag.validate_structure().unwrap_err();
         assert!(err.contains("unknown node"));
@@ -1369,8 +1453,9 @@ mod tests {
     // ── use_lead_agent tests ─────────────────────────────────────
 
     #[test]
-    fn test_task_plan_use_lead_agent_defaults_to_false() {
-        // When use_lead_agent is missing from JSON, it should default to false
+    fn test_task_plan_use_lead_agent_defaults_to_false_but_promotes_when_orphaned() {
+        // When use_lead_agent is missing from JSON, serde defaults to false,
+        // but auto-promote kicks in because assignments+dag are also empty.
         let json = r#"{
             "classification": "complex_task",
             "title": "Some task",
@@ -1378,7 +1463,7 @@ mod tests {
             "reasoning": "test"
         }"#;
         let plan = TaskPlanner::parse_response(json).unwrap();
-        assert!(!plan.use_lead_agent);
+        assert!(plan.use_lead_agent);
     }
 
     #[test]
@@ -1398,7 +1483,9 @@ mod tests {
     }
 
     #[test]
-    fn test_task_plan_use_lead_agent_false_explicit() {
+    fn test_task_plan_use_lead_agent_false_explicit_promotes_when_orphaned() {
+        // Even with explicit use_lead_agent=false, if assignments and DAG are
+        // both empty, auto-promote overrides to true as a safety net.
         let json = r#"{
             "classification": "complex_task",
             "title": "Predictable task",
@@ -1407,12 +1494,13 @@ mod tests {
             "use_lead_agent": false
         }"#;
         let plan = TaskPlanner::parse_response(json).unwrap();
-        assert!(!plan.use_lead_agent);
+        assert!(plan.use_lead_agent);
     }
 
     #[test]
     fn test_task_plan_use_lead_agent_with_dag() {
-        // use_lead_agent and dag can coexist (lead agent would be preferred)
+        // When both use_lead_agent and dag are present, DAG should be stripped
+        // (mutual exclusivity: lead agent takes priority).
         let json = r#"{
             "classification": "complex_task",
             "title": "Complex task",
@@ -1427,7 +1515,11 @@ mod tests {
         }"#;
         let plan = TaskPlanner::parse_response(json).unwrap();
         assert!(plan.use_lead_agent);
-        assert!(plan.dag.is_some());
+        assert!(plan.dag.is_none(), "DAG should be stripped when use_lead_agent is true");
+        assert_eq!(
+            plan.auto_promotion_reason.as_deref(),
+            Some("mutual_exclusivity_stripped")
+        );
     }
 
     #[test]
@@ -1445,6 +1537,44 @@ mod tests {
         }"#;
         let plan = TaskPlanner::parse_response(json).unwrap();
         assert!(plan.use_lead_agent);
+    }
+
+    // ── has_predictable_structure tests ────────────────────────
+
+    #[test]
+    fn test_predictable_structure_numbered_list() {
+        assert!(has_predictable_structure(
+            "1. Translate to French\n2. Translate to Spanish\n3. Translate to German"
+        ));
+    }
+
+    #[test]
+    fn test_predictable_structure_bullet_list() {
+        assert!(has_predictable_structure(
+            "- Write the intro\n- Write the body\n- Write the conclusion"
+        ));
+    }
+
+    #[test]
+    fn test_predictable_structure_batch_translate() {
+        assert!(has_predictable_structure(
+            "Translate this into French, Spanish, and German for each chapter"
+        ));
+    }
+
+    #[test]
+    fn test_predictable_structure_explicit_quantity() {
+        assert!(has_predictable_structure("Split this into 3 sections"));
+    }
+
+    #[test]
+    fn test_predictable_structure_simple_message() {
+        assert!(!has_predictable_structure("debug my test"));
+    }
+
+    #[test]
+    fn test_predictable_structure_greeting() {
+        assert!(!has_predictable_structure("hello, how are you?"));
     }
 
     // ── PlanError display tests ─────────────────────────────────
@@ -1465,5 +1595,61 @@ mod tests {
     fn test_plan_error_malformed_display() {
         let err = PlanError::MalformedResponse("bad json".to_string());
         assert_eq!(err.to_string(), "Malformed response: bad json");
+    }
+
+    #[test]
+    fn test_missing_use_lead_agent_defaults_true() {
+        // When the LLM omits use_lead_agent entirely, it should default to true
+        // (lead agent is the safer fallback for complex tasks).
+        let json = r#"{
+            "classification": "complex_task",
+            "title": "Research something",
+            "assignments": [{"agent_id": "a1", "agent_name": "Agent A", "role_description": "do stuff", "matched_skills": ["search"]}],
+            "reasoning": "needs research"
+        }"#;
+        let plan = TaskPlanner::parse_response(json).unwrap();
+        assert_eq!(plan.classification, "complex_task");
+        assert!(
+            plan.use_lead_agent,
+            "Missing use_lead_agent should default to true"
+        );
+    }
+
+    #[test]
+    fn test_explicit_false_with_dag_stays_false() {
+        // When the LLM explicitly sets use_lead_agent: false AND provides a DAG,
+        // we respect the explicit choice.
+        let json = r#"{
+            "classification": "complex_task",
+            "title": "Translate documents",
+            "assignments": [],
+            "reasoning": "Known steps, using DAG",
+            "dag": {"nodes": [
+                {"node_id": "n1", "title": "Translate EN", "description": "...", "agent_id": "translator-01", "agent_name": "Translator", "depends_on": [], "workspace_keys": [], "output_key": "en"},
+                {"node_id": "n2", "title": "Translate FR", "description": "...", "agent_id": "translator-01", "agent_name": "Translator", "depends_on": [], "workspace_keys": [], "output_key": "fr"}
+            ]},
+            "use_lead_agent": false
+        }"#;
+        let plan = TaskPlanner::parse_response(json).unwrap();
+        assert_eq!(plan.classification, "complex_task");
+        assert!(
+            !plan.use_lead_agent,
+            "Explicit false with DAG should stay false"
+        );
+        assert!(plan.dag.is_some());
+    }
+
+    #[test]
+    fn test_explicit_true_use_lead_agent() {
+        let json = r#"{
+            "classification": "complex_task",
+            "title": "Debug failing tests",
+            "assignments": [],
+            "reasoning": "Exploratory task",
+            "use_lead_agent": true
+        }"#;
+        let plan = TaskPlanner::parse_response(json).unwrap();
+        assert!(plan.use_lead_agent);
+        assert!(plan.dag.is_none());
     }
 }

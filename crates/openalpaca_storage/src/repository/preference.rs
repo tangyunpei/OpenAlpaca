@@ -1,5 +1,5 @@
 use crate::Database;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::OptionalExtension;
 
 /// Repository for user preferences (preference table).
@@ -176,10 +176,12 @@ mod tests {
         // Version is 1, but we pass expected_version=99 -> should fail
         let result = repo.set("user1", "color", "red", Some(99));
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Optimistic lock conflict"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Optimistic lock conflict")
+        );
     }
 
     #[test]

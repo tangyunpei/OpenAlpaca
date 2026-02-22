@@ -19,8 +19,8 @@ use futures_util::stream::Stream;
 use openalpaca_core::events::SystemEvent;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, convert::Infallible, sync::Arc};
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
 use crate::AppState;
 
@@ -137,14 +137,12 @@ pub async fn send_chat_handler(
             })
             .into_response()
         }
-        Err(e) => {
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "GATEWAY_ERROR",
-                &e.to_string(),
-            )
-            .into_response()
-        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "GATEWAY_ERROR",
+            &e.to_string(),
+        )
+        .into_response(),
     }
 }
 
@@ -256,7 +254,12 @@ pub async fn get_chat_history_handler(
     let lane_key = query.lane_key.as_deref().unwrap_or(&state.default_lane_key);
 
     match chat_service.get_history(lane_key, limit, offset) {
-        Ok((messages, total)) => Json(ChatHistoryResponse { messages, total, lane_key: lane_key.to_string() }).into_response(),
+        Ok((messages, total)) => Json(ChatHistoryResponse {
+            messages,
+            total,
+            lane_key: lane_key.to_string(),
+        })
+        .into_response(),
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "HISTORY_NOT_FOUND",
@@ -336,12 +339,8 @@ pub async fn get_conversation_messages_handler(
     let conv = match repo.get_conversation(&id) {
         Ok(Some(c)) => c,
         Ok(None) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "NOT_FOUND",
-                "Conversation not found",
-            )
-            .into_response();
+            return error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "Conversation not found")
+                .into_response();
         }
         Err(e) => {
             return error_response(

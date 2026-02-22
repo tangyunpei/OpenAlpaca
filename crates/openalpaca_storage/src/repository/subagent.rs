@@ -1,7 +1,7 @@
 //! Repository for SubAgent configuration, metrics, and task history
 
-use crate::models::subagent::{AgentMetrics, AgentTaskHistory, SubAgentConfig};
 use crate::Database;
+use crate::models::subagent::{AgentMetrics, AgentTaskHistory, SubAgentConfig};
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{OptionalExtension, Row};
@@ -23,9 +23,10 @@ impl<'a> SubAgentRepository<'a> {
         self.db.with_connection(|conn| {
             let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
             conn.execute(
-                "INSERT INTO agent (id, name, persona, description, icon, status, current_task_id, skills_json, preset_json, constraints_json, llm_config_json, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                "INSERT INTO agent (id, template_id, name, persona, description, icon, status, current_task_id, skills_json, preset_json, constraints_json, llm_config_json, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(id) DO UPDATE SET
+                   template_id = excluded.template_id,
                    name = excluded.name,
                    persona = excluded.persona,
                    description = excluded.description,
@@ -37,6 +38,7 @@ impl<'a> SubAgentRepository<'a> {
                    updated_at = excluded.updated_at",
                 rusqlite::params![
                     config.id,
+                    config.template_id,
                     config.name,
                     config.persona,
                     config.description,
@@ -60,7 +62,7 @@ impl<'a> SubAgentRepository<'a> {
     pub fn get(&self, id: &str) -> Result<Option<SubAgentConfig>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, persona, description, icon, status, current_task_id, skills_json, preset_json, constraints_json, llm_config_json, created_at, updated_at
+                "SELECT id, template_id, name, persona, description, icon, status, current_task_id, skills_json, preset_json, constraints_json, llm_config_json, created_at, updated_at
                  FROM agent WHERE id = ?",
             )?;
             let config = stmt
@@ -75,7 +77,7 @@ impl<'a> SubAgentRepository<'a> {
     pub fn list(&self, limit: usize) -> Result<Vec<SubAgentConfig>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, persona, description, icon, status, current_task_id, skills_json, preset_json, constraints_json, llm_config_json, created_at, updated_at
+                "SELECT id, template_id, name, persona, description, icon, status, current_task_id, skills_json, preset_json, constraints_json, llm_config_json, created_at, updated_at
                  FROM agent ORDER BY created_at DESC LIMIT ?",
             )?;
             let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
@@ -93,7 +95,7 @@ impl<'a> SubAgentRepository<'a> {
     pub fn list_by_status(&self, status: &str, limit: usize) -> Result<Vec<SubAgentConfig>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, persona, description, icon, status, current_task_id, skills_json, preset_json, constraints_json, llm_config_json, created_at, updated_at
+                "SELECT id, template_id, name, persona, description, icon, status, current_task_id, skills_json, preset_json, constraints_json, llm_config_json, created_at, updated_at
                  FROM agent WHERE status = ? ORDER BY created_at DESC LIMIT ?",
             )?;
             let rows = stmt.query_map(rusqlite::params![status, limit as i64], |row| {
@@ -255,21 +257,30 @@ impl<'a> SubAgentRepository<'a> {
     // ── Row Mappers ─────────────────────────────────────────────
 
     fn row_to_config(row: &Row) -> rusqlite::Result<SubAgentConfig> {
-        let created_str: String = row.get(11)?;
-        let updated_str: Option<String> = row.get(12)?;
+        let created_str: String = row.get(12)?;
+        let updated_str: Option<String> = row.get(13)?;
 
         Ok(SubAgentConfig {
             id: row.get(0)?,
-            name: row.get(1)?,
-            persona: row.get(2)?,
-            description: row.get(3)?,
-            icon: row.get(4)?,
-            status: row.get::<_, Option<String>>(5)?.unwrap_or_else(|| "idle".to_string()),
-            current_task_id: row.get(6)?,
-            skills_json: row.get::<_, Option<String>>(7)?.unwrap_or_else(|| "[]".to_string()),
-            preset_json: row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "{}".to_string()),
-            constraints_json: row.get(9)?,
-            llm_config_json: row.get(10)?,
+            template_id: row
+                .get::<_, Option<String>>(1)?
+                .unwrap_or_else(|| row.get::<_, String>(0).unwrap_or_default()),
+            name: row.get(2)?,
+            persona: row.get(3)?,
+            description: row.get(4)?,
+            icon: row.get(5)?,
+            status: row
+                .get::<_, Option<String>>(6)?
+                .unwrap_or_else(|| "idle".to_string()),
+            current_task_id: row.get(7)?,
+            skills_json: row
+                .get::<_, Option<String>>(8)?
+                .unwrap_or_else(|| "[]".to_string()),
+            preset_json: row
+                .get::<_, Option<String>>(9)?
+                .unwrap_or_else(|| "{}".to_string()),
+            constraints_json: row.get(10)?,
+            llm_config_json: row.get(11)?,
             created_at: parse_datetime(&created_str),
             updated_at: updated_str.as_deref().map(parse_datetime),
         })
@@ -326,6 +337,7 @@ mod tests {
     fn make_config(id: &str, name: &str) -> SubAgentConfig {
         SubAgentConfig {
             id: id.to_string(),
+            template_id: id.to_string(),
             name: name.to_string(),
             description: Some("A test agent".to_string()),
             icon: None,
@@ -373,6 +385,7 @@ mod tests {
 
         let fetched = repo.get("sa1").unwrap().unwrap();
         assert_eq!(fetched.id, "sa1");
+        assert_eq!(fetched.template_id, "sa1");
         assert_eq!(fetched.name, "Research Agent");
         assert_eq!(fetched.status, "idle");
         assert_eq!(fetched.description.as_deref(), Some("A test agent"));
@@ -479,7 +492,8 @@ mod tests {
         let repo = SubAgentRepository::new(&db);
 
         repo.upsert(&make_config("sa1", "Agent")).unwrap();
-        repo.upsert_metrics(&AgentMetrics::new_empty("sa1")).unwrap();
+        repo.upsert_metrics(&AgentMetrics::new_empty("sa1"))
+            .unwrap();
 
         repo.increment_completed("sa1", 120).unwrap();
 
@@ -496,7 +510,8 @@ mod tests {
         let repo = SubAgentRepository::new(&db);
 
         repo.upsert(&make_config("sa1", "Agent")).unwrap();
-        repo.upsert_metrics(&AgentMetrics::new_empty("sa1")).unwrap();
+        repo.upsert_metrics(&AgentMetrics::new_empty("sa1"))
+            .unwrap();
 
         // Complete one, fail one
         repo.increment_completed("sa1", 60).unwrap();

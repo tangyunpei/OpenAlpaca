@@ -6,12 +6,12 @@ use axum::{
     response::IntoResponse,
 };
 use chrono::Utc;
-use serde::Deserialize;
 use openalpaca_core::events::SystemEvent;
 use openalpaca_llm::settings_service::{
     AddKeyRequest, OrchestratorConfigResponse, ReorderKeysRequest, SetKeyPriorityRequest,
     UpdateOrchestratorRequest, ValidateKeyRequest,
 };
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 fn settings_error(status: StatusCode, code: &str, message: &str) -> impl IntoResponse {
@@ -31,16 +31,20 @@ fn settings_error(status: StatusCode, code: &str, message: &str) -> impl IntoRes
 pub async fn get_llm_settings(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let service = match &state.llm_settings_service {
         Some(s) => s,
-        None => return settings_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "LLM_NOT_CONFIGURED",
-            "LLM router is not configured",
-        ).into_response(),
+        None => {
+            return settings_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LLM_NOT_CONFIGURED",
+                "LLM router is not configured",
+            )
+            .into_response();
+        }
     };
 
     match service.get_config().await {
         Ok(config) => (StatusCode::OK, Json(serde_json::to_value(config).unwrap())).into_response(),
-        Err(e) => settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e).into_response(),
+        Err(e) => settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e)
+            .into_response(),
     }
 }
 
@@ -51,11 +55,14 @@ pub async fn upsert_key(
 ) -> impl IntoResponse {
     let service = match &state.llm_settings_service {
         Some(s) => s,
-        None => return settings_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "LLM_NOT_CONFIGURED",
-            "LLM router is not configured",
-        ).into_response(),
+        None => {
+            return settings_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LLM_NOT_CONFIGURED",
+                "LLM router is not configured",
+            )
+            .into_response();
+        }
     };
 
     // Validate key format
@@ -64,7 +71,8 @@ pub async fn upsert_key(
             StatusCode::BAD_REQUEST,
             "INVALID_KEY_FORMAT",
             "Key secret cannot be empty",
-        ).into_response();
+        )
+        .into_response();
     }
 
     let event_provider = body.provider.clone();
@@ -81,11 +89,11 @@ pub async fn upsert_key(
             (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
         }
         Err(e) if e.contains("Encryption") => {
-            settings_error(StatusCode::INTERNAL_SERVER_ERROR, "ENCRYPTION_FAILED", &e).into_response()
+            settings_error(StatusCode::INTERNAL_SERVER_ERROR, "ENCRYPTION_FAILED", &e)
+                .into_response()
         }
-        Err(e) => {
-            settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e).into_response()
-        }
+        Err(e) => settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e)
+            .into_response(),
     }
 }
 
@@ -96,11 +104,14 @@ pub async fn delete_key(
 ) -> impl IntoResponse {
     let service = match &state.llm_settings_service {
         Some(s) => s,
-        None => return settings_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "LLM_NOT_CONFIGURED",
-            "LLM router is not configured",
-        ).into_response(),
+        None => {
+            return settings_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LLM_NOT_CONFIGURED",
+                "LLM router is not configured",
+            )
+            .into_response();
+        }
     };
 
     match service.remove_key(&provider, &key_id).await {
@@ -116,9 +127,8 @@ pub async fn delete_key(
         Err(e) if e.contains("not found") => {
             settings_error(StatusCode::NOT_FOUND, "KEY_NOT_FOUND", &e).into_response()
         }
-        Err(e) => {
-            settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e).into_response()
-        }
+        Err(e) => settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e)
+            .into_response(),
     }
 }
 
@@ -129,11 +139,14 @@ pub async fn reorder_keys(
 ) -> impl IntoResponse {
     let service = match &state.llm_settings_service {
         Some(s) => s,
-        None => return settings_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "LLM_NOT_CONFIGURED",
-            "LLM router is not configured",
-        ).into_response(),
+        None => {
+            return settings_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LLM_NOT_CONFIGURED",
+                "LLM router is not configured",
+            )
+            .into_response();
+        }
     };
 
     let event_provider = body.provider.clone();
@@ -147,9 +160,8 @@ pub async fn reorder_keys(
             });
             (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
         }
-        Err(e) => {
-            settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e).into_response()
-        }
+        Err(e) => settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e)
+            .into_response(),
     }
 }
 
@@ -160,11 +172,14 @@ pub async fn set_key_priority(
 ) -> impl IntoResponse {
     let service = match &state.llm_settings_service {
         Some(s) => s,
-        None => return settings_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "LLM_NOT_CONFIGURED",
-            "LLM router is not configured",
-        ).into_response(),
+        None => {
+            return settings_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LLM_NOT_CONFIGURED",
+                "LLM router is not configured",
+            )
+            .into_response();
+        }
     };
 
     if body.priority != "primary" && body.priority != "fallback" {
@@ -172,7 +187,8 @@ pub async fn set_key_priority(
             StatusCode::BAD_REQUEST,
             "INVALID_PRIORITY",
             "Priority must be 'primary' or 'fallback'",
-        ).into_response();
+        )
+        .into_response();
     }
 
     let provider = body.provider.clone();
@@ -191,9 +207,8 @@ pub async fn set_key_priority(
         Err(e) if e.contains("not found") => {
             settings_error(StatusCode::NOT_FOUND, "KEY_NOT_FOUND", &e).into_response()
         }
-        Err(e) => {
-            settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e).into_response()
-        }
+        Err(e) => settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e)
+            .into_response(),
     }
 }
 
@@ -204,11 +219,14 @@ pub async fn validate_key(
 ) -> impl IntoResponse {
     let service = match &state.llm_settings_service {
         Some(s) => s,
-        None => return settings_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "LLM_NOT_CONFIGURED",
-            "LLM router is not configured",
-        ).into_response(),
+        None => {
+            return settings_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LLM_NOT_CONFIGURED",
+                "LLM router is not configured",
+            )
+            .into_response();
+        }
     };
 
     if body.secret.is_empty() {
@@ -216,12 +234,14 @@ pub async fn validate_key(
             StatusCode::BAD_REQUEST,
             "INVALID_KEY_FORMAT",
             "Key secret cannot be empty",
-        ).into_response();
+        )
+        .into_response();
     }
 
     match service.validate_key(body).await {
         Ok(result) => (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response(),
-        Err(e) => settings_error(StatusCode::GATEWAY_TIMEOUT, "KEY_VALIDATION_TIMEOUT", &e).into_response(),
+        Err(e) => settings_error(StatusCode::GATEWAY_TIMEOUT, "KEY_VALIDATION_TIMEOUT", &e)
+            .into_response(),
     }
 }
 
@@ -229,11 +249,14 @@ pub async fn validate_key(
 pub async fn get_key_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let service = match &state.llm_settings_service {
         Some(s) => s,
-        None => return settings_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "LLM_NOT_CONFIGURED",
-            "LLM router is not configured",
-        ).into_response(),
+        None => {
+            return settings_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LLM_NOT_CONFIGURED",
+                "LLM router is not configured",
+            )
+            .into_response();
+        }
     };
 
     let health = service.key_health().await;
@@ -244,11 +267,14 @@ pub async fn get_key_status(State(state): State<Arc<AppState>>) -> impl IntoResp
 pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let service = match &state.llm_settings_service {
         Some(s) => s,
-        None => return settings_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "LLM_NOT_CONFIGURED",
-            "LLM router is not configured",
-        ).into_response(),
+        None => {
+            return settings_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LLM_NOT_CONFIGURED",
+                "LLM router is not configured",
+            )
+            .into_response();
+        }
     };
 
     let models = service.available_models();
@@ -259,11 +285,14 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoRespons
 pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let service = match &state.llm_settings_service {
         Some(s) => s,
-        None => return settings_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "LLM_NOT_CONFIGURED",
-            "LLM router is not configured",
-        ).into_response(),
+        None => {
+            return settings_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LLM_NOT_CONFIGURED",
+                "LLM router is not configured",
+            )
+            .into_response();
+        }
     };
 
     service.refresh_models().await;
@@ -288,7 +317,12 @@ pub async fn get_orchestrator_config(State(state): State<Arc<AppState>>) -> impl
     match service.get_orchestrator_config() {
         Ok((model, fallback_models)) => {
             let active_agents = state.gateway.shared_context.agent_registry.count();
-            let active_tasks = state.gateway.shared_context.task_registry.list_active().len();
+            let active_tasks = state
+                .gateway
+                .shared_context
+                .task_registry
+                .list_active()
+                .len();
             let daily_cost_usd = 0.0; // Cost tracker requires async access via LlmRouter
 
             let resp = OrchestratorConfigResponse {
@@ -300,10 +334,8 @@ pub async fn get_orchestrator_config(State(state): State<Arc<AppState>>) -> impl
             };
             (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response()
         }
-        Err(e) => {
-            settings_error(StatusCode::INTERNAL_SERVER_ERROR, "CONFIG_READ_FAILED", &e)
-                .into_response()
-        }
+        Err(e) => settings_error(StatusCode::INTERNAL_SERVER_ERROR, "CONFIG_READ_FAILED", &e)
+            .into_response(),
     }
 }
 
@@ -327,20 +359,17 @@ pub async fn update_orchestrator_config(
     let model_name = body.model.clone();
     match service.update_orchestrator_config(body) {
         Ok(()) => {
-            let _ = state.gateway.bus.publish(SystemEvent::OrchestratorConfigChanged {
-                model: model_name,
-                timestamp: Utc::now(),
-            });
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({ "status": "ok" })),
-            )
-                .into_response()
+            let _ = state
+                .gateway
+                .bus
+                .publish(SystemEvent::OrchestratorConfigChanged {
+                    model: model_name,
+                    timestamp: Utc::now(),
+                });
+            (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
         }
-        Err(e) => {
-            settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e)
-                .into_response()
-        }
+        Err(e) => settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e)
+            .into_response(),
     }
 }
 
@@ -416,16 +445,11 @@ pub async fn get_llm_usage_daily(
 // ── Credential Discovery endpoints ──────────────────────────────────
 
 /// GET /v1/settings/llm/credentials — list discovered credentials
-pub async fn get_discovered_credentials(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn get_discovered_credentials(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let tm = match &state.token_manager {
         Some(tm) => tm,
         None => {
-            return (
-                StatusCode::OK,
-                Json(serde_json::json!([])),
-            ).into_response();
+            return (StatusCode::OK, Json(serde_json::json!([]))).into_response();
         }
     };
 
@@ -434,9 +458,7 @@ pub async fn get_discovered_credentials(
 }
 
 /// POST /v1/settings/llm/credentials/rescan — rescan credentials
-pub async fn rescan_credentials(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn rescan_credentials(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let tm = match &state.token_manager {
         Some(tm) => tm,
         None => {
@@ -444,7 +466,8 @@ pub async fn rescan_credentials(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "CREDENTIAL_DISCOVERY_NOT_CONFIGURED",
                 "Credential discovery is not enabled",
-            ).into_response();
+            )
+            .into_response();
         }
     };
 
@@ -455,7 +478,8 @@ pub async fn rescan_credentials(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "LLM_NOT_CONFIGURED",
                 "LLM router is not configured",
-            ).into_response();
+            )
+            .into_response();
         }
     };
 
@@ -465,9 +489,7 @@ pub async fn rescan_credentials(
 }
 
 /// GET /v1/settings/llm/cli-backends — list CLI backend status
-pub async fn get_cli_backends(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn get_cli_backends(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Read CLI backends config from llm.toml
     let llm_config_path = std::env::current_dir()
         .unwrap_or_default()
@@ -484,13 +506,15 @@ pub async fn get_cli_backends(
 
     let statuses = openalpaca_llm::detect_cli_backends(&cli_config);
     let _ = &state; // acknowledge state usage
-    (StatusCode::OK, Json(serde_json::to_value(statuses).unwrap())).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(statuses).unwrap()),
+    )
+        .into_response()
 }
 
 /// GET /v1/settings/llm/providers/usage — provider-level usage summaries
-pub async fn get_provider_usage(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn get_provider_usage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let service = match &state.llm_settings_service {
         Some(s) => s,
         None => {
@@ -498,7 +522,8 @@ pub async fn get_provider_usage(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "LLM_NOT_CONFIGURED",
                 "LLM router is not configured",
-            ).into_response();
+            )
+            .into_response();
         }
     };
 
@@ -532,7 +557,11 @@ pub async fn get_provider_usage(
         }
     }
 
-    (StatusCode::OK, Json(serde_json::to_value(summaries).unwrap())).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(summaries).unwrap()),
+    )
+        .into_response()
 }
 
 // ── LLM Pricing endpoints ──────────────────────────────────────────
@@ -541,11 +570,14 @@ pub async fn get_provider_usage(
 pub async fn get_llm_pricing(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let service = match &state.llm_settings_service {
         Some(s) => s,
-        None => return settings_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "LLM_NOT_CONFIGURED",
-            "LLM router is not configured",
-        ).into_response(),
+        None => {
+            return settings_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LLM_NOT_CONFIGURED",
+                "LLM router is not configured",
+            )
+            .into_response();
+        }
     };
 
     let models = service.all_models_with_pricing();
@@ -566,18 +598,120 @@ pub async fn estimate_cost(
 ) -> impl IntoResponse {
     let service = match &state.llm_settings_service {
         Some(s) => s,
-        None => return settings_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "LLM_NOT_CONFIGURED",
-            "LLM router is not configured",
-        ).into_response(),
+        None => {
+            return settings_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LLM_NOT_CONFIGURED",
+                "LLM router is not configured",
+            )
+            .into_response();
+        }
     };
 
     let cost = service.estimate_cost(&query.model, query.input_tokens, query.output_tokens);
-    (StatusCode::OK, Json(serde_json::json!({
-        "model": query.model,
-        "input_tokens": query.input_tokens,
-        "output_tokens": query.output_tokens,
-        "estimated_cost_usd": cost,
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "model": query.model,
+            "input_tokens": query.input_tokens,
+            "output_tokens": query.output_tokens,
+            "estimated_cost_usd": cost,
+        })),
+    )
+        .into_response()
+}
+
+// ── Daemon config (providers) endpoints ─────────────────────────────
+
+#[derive(Serialize)]
+struct DaemonProvidersResponse {
+    web_search: WebSearchConfigResponse,
+}
+
+#[derive(Serialize)]
+struct WebSearchConfigResponse {
+    api_key_configured: bool,
+    api_key_hint: String,
+    timeout_secs: u64,
+}
+
+/// GET /v1/daemon/config/providers — read daemon provider configuration
+pub async fn get_daemon_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cfg = state.daemon_config.load();
+    let ws = &cfg.providers.web_search;
+
+    let hint = if ws.api_key.len() > 4 {
+        format!("****{}", &ws.api_key[ws.api_key.len() - 4..])
+    } else if !ws.api_key.is_empty() {
+        "****".to_string()
+    } else {
+        String::new()
+    };
+
+    let resp = DaemonProvidersResponse {
+        web_search: WebSearchConfigResponse {
+            api_key_configured: !ws.api_key.is_empty(),
+            api_key_hint: hint,
+            timeout_secs: ws.timeout_secs,
+        },
+    };
+
+    (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct UpdateWebSearchRequest {
+    pub api_key: Option<String>,
+    pub timeout_secs: Option<u64>,
+}
+
+/// PUT /v1/daemon/config/providers/web-search — update web search provider config
+pub async fn update_web_search_config(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<UpdateWebSearchRequest>,
+) -> impl IntoResponse {
+    use openalpaca_core::daemon_config::load_daemon_config;
+
+    // Load current config from disk (not in-memory) to preserve all fields
+    let mut cfg = load_daemon_config(&state.daemon_config_path);
+
+    // Apply patches
+    if let Some(ref key) = body.api_key {
+        cfg.providers.web_search.api_key = key.clone();
+    }
+    if let Some(timeout) = body.timeout_secs {
+        cfg.providers.web_search.timeout_secs = timeout;
+    }
+
+    // Validate ranges
+    cfg.validate();
+
+    // Serialize and write back
+    let toml_str = match toml::to_string_pretty(&cfg) {
+        Ok(s) => s,
+        Err(e) => {
+            return settings_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SERIALIZE_FAILED",
+                &format!("Failed to serialize config: {}", e),
+            )
+            .into_response();
+        }
+    };
+
+    if let Err(e) = tokio::fs::write(&state.daemon_config_path, &toml_str).await {
+        return settings_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DISK_WRITE_FAILED",
+            &format!("Failed to write daemon.toml: {}", e),
+        )
+        .into_response();
+    }
+
+    // The file watcher will hot-reload the config. Also publish event for GUI.
+    let _ = state.gateway.bus.publish(SystemEvent::DaemonConfigChanged {
+        timestamp: Utc::now(),
+    });
+
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
 }

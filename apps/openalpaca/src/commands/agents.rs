@@ -285,11 +285,7 @@ async fn agent_config(agent_id: &str, format: OutputFormat) -> Result<()> {
             );
         }
         OutputFormat::Table => {
-            println!(
-                "{} {}",
-                "Config version:".dimmed(),
-                config.config_version
-            );
+            println!("{} {}", "Config version:".dimmed(), config.config_version);
             println!();
             println!(
                 "{}",
@@ -359,11 +355,8 @@ async fn agent_set(agent_id: &str, key_path: &str, value: &str) -> Result<()> {
             }
         } else {
             // Navigate deeper
-            if !current.get(*part).is_some() {
-                bail!(
-                    "Path '{}' does not exist in config",
-                    parts[..=i].join(".")
-                );
+            if current.get(*part).is_none() {
+                bail!("Path '{}' does not exist in config", parts[..=i].join("."));
             }
             current = current.get_mut(*part).unwrap();
         }
@@ -421,10 +414,7 @@ async fn create_from_chat(description: &str) -> Result<()> {
     let client = DaemonClient::connect()?;
     let body = serde_json::json!({ "description": description });
 
-    match client
-        .post_raw("/v1/agents/from-chat", &body)
-        .await
-    {
+    match client.post_raw("/v1/agents/from-chat", &body).await {
         Ok(_) => {
             println!("{} Agent created from chat description", "✓".green());
         }
@@ -460,7 +450,7 @@ async fn create_interactive() -> Result<()> {
     // 3. Model — try to fetch from daemon, fall back to free text
     let model = match get_model_list().await {
         Ok(models) if !models.is_empty() => {
-            let display: Vec<String> = models.iter().map(|m| m.clone()).collect();
+            let display: Vec<String> = models.to_vec();
             let idx = Select::with_theme(&theme)
                 .with_prompt("Model")
                 .items(&display)
@@ -540,7 +530,10 @@ async fn get_model_list() -> Result<Vec<String>> {
 
 async fn remove_agent(agent_id: &str) -> Result<()> {
     let confirm = Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("Remove agent '{}'? This will archive it.", agent_id))
+        .with_prompt(format!(
+            "Remove agent '{}'? This will archive it.",
+            agent_id
+        ))
         .default(false)
         .interact()?;
 

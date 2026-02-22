@@ -204,12 +204,11 @@ impl ReplSession {
                     self.context.session_usage.add(usage);
                 }
                 // If delegation, poll for task completion
-                if let StreamResult::Delegation { task_title, .. } = &result {
-                    if let Err(e) =
+                if let StreamResult::Delegation { task_title, .. } = &result
+                    && let Err(e) =
                         chat_stream::poll_task_completion(&self.client, task_title).await
-                    {
-                        eprintln!("{} {}", "Poll error:".red(), e);
-                    }
+                {
+                    eprintln!("{} {}", "Poll error:".red(), e);
                 }
             }
             Err(e) => {
@@ -234,17 +233,13 @@ impl ReplSession {
             "|".dimmed(),
             "Type 'exit' to leave, /help for commands".dimmed()
         );
-        match self
+        if let Ok(config) = self
             .client
             .get::<serde_json::Value>("/v1/orchestrator/config")
             .await
+            && let Some(model) = config["model"].as_str()
         {
-            Ok(config) => {
-                if let Some(model) = config["model"].as_str() {
-                    println!("{} {}", "Model:".dimmed(), model);
-                }
-            }
-            Err(_) => {}
+            println!("{} {}", "Model:".dimmed(), model);
         }
         println!();
     }

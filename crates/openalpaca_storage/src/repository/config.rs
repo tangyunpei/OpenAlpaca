@@ -114,14 +114,16 @@ impl<'a> ConfigRepository<'a> {
                 anyhow::bail!(
                     "Key '{}' is managed by config/llm.toml. \
                      Use `openalpaca config set {} <value>` (CLI) or edit the file directly.",
-                    key, key
+                    key,
+                    key
                 );
             }
             ConfigBackend::DaemonToml => {
                 anyhow::bail!(
                     "Key '{}' is managed by config/daemon.toml. \
                      Use `openalpaca config set {} <value>` (CLI) or edit the file directly.",
-                    key, key
+                    key,
+                    key
                 );
             }
             ConfigBackend::SystemConfig => {} // proceed

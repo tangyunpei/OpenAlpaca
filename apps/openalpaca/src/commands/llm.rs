@@ -218,7 +218,11 @@ impl TableRow for KeyEntry {
     }
 
     fn table_row(&self) -> String {
-        let priority_marker = if self.is_primary { "Primary" } else { "Fallback" };
+        let priority_marker = if self.is_primary {
+            "Primary"
+        } else {
+            "Fallback"
+        };
         let masked = self.masked_secret.as_deref().unwrap_or("***");
         let source = self.source.as_deref().unwrap_or("-");
         let status = self.status.as_deref().unwrap_or("unknown");
@@ -403,14 +407,11 @@ async fn llm_status(format: OutputFormat) -> Result<()> {
                 orch_config["model"].as_str().unwrap_or("-")
             );
 
-            if let Some(fallbacks) = orch_config["fallback_models"].as_array() {
-                if !fallbacks.is_empty() {
-                    let names: Vec<&str> = fallbacks
-                        .iter()
-                        .filter_map(|m| m.as_str())
-                        .collect();
-                    println!("  {} {}", "Fallbacks:".dimmed(), names.join(", "));
-                }
+            if let Some(fallbacks) = orch_config["fallback_models"].as_array()
+                && !fallbacks.is_empty()
+            {
+                let names: Vec<&str> = fallbacks.iter().filter_map(|m| m.as_str()).collect();
+                println!("  {} {}", "Fallbacks:".dimmed(), names.join(", "));
             }
 
             println!(
@@ -437,22 +438,14 @@ async fn llm_status(format: OutputFormat) -> Result<()> {
                     let provider = k["provider"].as_str().unwrap_or("-");
                     let key_id = k["key_id"].as_str().unwrap_or("-");
                     let ok = k["is_valid"].as_bool().unwrap_or(false);
-                    let indicator = if ok {
-                        "✓".green()
-                    } else {
-                        "✗".red()
-                    };
+                    let indicator = if ok { "✓".green() } else { "✗".red() };
                     println!("  {} {} / {}", indicator, provider, key_id);
                 }
             } else if let Some(obj) = key_health.as_object() {
                 // Could be a single summary object
                 for (provider, data) in obj {
                     let ok = data["is_valid"].as_bool().unwrap_or(false);
-                    let indicator = if ok {
-                        "✓".green()
-                    } else {
-                        "✗".red()
-                    };
+                    let indicator = if ok { "✓".green() } else { "✗".red() };
                     println!("  {} {}", indicator, provider);
                 }
             }
@@ -473,9 +466,7 @@ async fn run_keys(args: KeysArgs) -> Result<()> {
         } => keys_add(provider, secret, priority, source, notes).await,
         KeysCommands::Remove { provider, key_id } => keys_remove(&provider, &key_id).await,
         KeysCommands::Validate { provider, secret } => keys_validate(&provider, &secret).await,
-        KeysCommands::SetPrimary { provider, key_id } => {
-            keys_set_primary(&provider, &key_id).await
-        }
+        KeysCommands::SetPrimary { provider, key_id } => keys_set_primary(&provider, &key_id).await,
         KeysCommands::Reorder { key_ids } => keys_reorder(key_ids).await,
     }
 }
@@ -488,18 +479,14 @@ async fn keys_list(format: OutputFormat) -> Result<()> {
     let mut keys = Vec::new();
     if let Some(providers) = config["providers"].as_object() {
         for (provider_name, provider_data) in providers {
-            let primary_key_id = provider_data["primary_key_id"]
-                .as_str()
-                .unwrap_or("");
+            let primary_key_id = provider_data["primary_key_id"].as_str().unwrap_or("");
             if let Some(provider_keys) = provider_data["keys"].as_array() {
                 for key in provider_keys {
                     let key_id = key["key_id"].as_str().unwrap_or("").to_string();
                     keys.push(KeyEntry {
                         provider: provider_name.clone(),
                         key_id: key_id.clone(),
-                        masked_secret: key["masked_secret"]
-                            .as_str()
-                            .map(|s| s.to_string()),
+                        masked_secret: key["masked_secret"].as_str().map(|s| s.to_string()),
                         is_primary: key_id == primary_key_id,
                         source: key["source"].as_str().map(|s| s.to_string()),
                         status: key["status"].as_str().map(|s| s.to_string()),
@@ -564,7 +551,9 @@ async fn keys_add(
                 println!("{}", "valid".green());
             } else {
                 println!("{}", "invalid".red());
-                let msg = result["message"].as_str().unwrap_or("Key validation failed");
+                let msg = result["message"]
+                    .as_str()
+                    .unwrap_or("Key validation failed");
                 println!("  {}", msg);
             }
         }
@@ -590,7 +579,13 @@ async fn keys_add(
     let source = match source {
         Some(s) => s,
         None => {
-            let sources = vec!["API Console", "Claude Code", "Codex", "Environment", "Other"];
+            let sources = vec![
+                "API Console",
+                "Claude Code",
+                "Codex",
+                "Environment",
+                "Other",
+            ];
             let idx = Select::with_theme(&theme)
                 .with_prompt("Source")
                 .items(&sources)
@@ -671,11 +666,11 @@ async fn keys_validate(provider: &str, secret: &str) -> Result<()> {
     if let Some(rate_limit) = result["rate_limit"].as_str() {
         println!("  {} {}", "Rate limit:".dimmed(), rate_limit);
     }
-    if let Some(models) = result["available_models"].as_array() {
-        if !models.is_empty() {
-            let names: Vec<&str> = models.iter().filter_map(|m| m.as_str()).collect();
-            println!("  {} {}", "Models:".dimmed(), names.join(", "));
-        }
+    if let Some(models) = result["available_models"].as_array()
+        && !models.is_empty()
+    {
+        let names: Vec<&str> = models.iter().filter_map(|m| m.as_str()).collect();
+        println!("  {} {}", "Models:".dimmed(), names.join(", "));
     }
 
     Ok(())
@@ -688,12 +683,7 @@ async fn keys_set_primary(provider: &str, key_id: &str) -> Result<()> {
         "primary_key_id": key_id,
     });
     let _: serde_json::Value = client.put("/v1/settings/llm/keys/reorder", &body).await?;
-    println!(
-        "{} Set {} as primary for {}",
-        "✓".green(),
-        key_id,
-        provider
-    );
+    println!("{} Set {} as primary for {}", "✓".green(), key_id, provider);
     Ok(())
 }
 
@@ -920,8 +910,7 @@ async fn llm_backends(format: OutputFormat) -> Result<()> {
 
 async fn llm_provider_usage(format: OutputFormat) -> Result<()> {
     let client = DaemonClient::connect()?;
-    let usage: Vec<ProviderUsageEntry> =
-        client.get("/v1/settings/llm/providers/usage").await?;
+    let usage: Vec<ProviderUsageEntry> = client.get("/v1/settings/llm/providers/usage").await?;
 
     if usage.is_empty() {
         println!("{}", "No provider usage data available.".dimmed());
@@ -941,7 +930,10 @@ async fn llm_strategy(provider: &str, strategy: &str) -> Result<()> {
     // Build update with strategy field
     let mut update = serde_json::Map::new();
     if let Some(model) = config["model"].as_str() {
-        update.insert("model".to_string(), serde_json::Value::String(model.to_string()));
+        update.insert(
+            "model".to_string(),
+            serde_json::Value::String(model.to_string()),
+        );
     }
     if let Some(fallbacks) = config.get("fallback_models") {
         update.insert("fallback_models".to_string(), fallbacks.clone());
@@ -955,7 +947,10 @@ async fn llm_strategy(provider: &str, strategy: &str) -> Result<()> {
     );
 
     let _: serde_json::Value = client
-        .put("/v1/orchestrator/config", &serde_json::Value::Object(update))
+        .put(
+            "/v1/orchestrator/config",
+            &serde_json::Value::Object(update),
+        )
         .await?;
     println!(
         "{} Strategy set to '{}' for provider '{}'",

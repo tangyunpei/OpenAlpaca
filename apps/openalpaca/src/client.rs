@@ -68,11 +68,7 @@ impl DaemonClient {
     }
 
     /// POST with JSON body and JSON response.
-    pub async fn post<B: Serialize, T: DeserializeOwned>(
-        &self,
-        path: &str,
-        body: &B,
-    ) -> Result<T> {
+    pub async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self.http.post(&url).json(body).send().await?;
         let resp = check_response(resp).await?;
@@ -87,11 +83,7 @@ impl DaemonClient {
     }
 
     /// PUT with JSON body and JSON response.
-    pub async fn put<B: Serialize, T: DeserializeOwned>(
-        &self,
-        path: &str,
-        body: &B,
-    ) -> Result<T> {
+    pub async fn put<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self.http.put(&url).json(body).send().await?;
         let resp = check_response(resp).await?;

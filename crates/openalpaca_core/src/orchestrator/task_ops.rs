@@ -89,7 +89,11 @@ impl Orchestrator {
         }
     }
 
-    pub(super) fn handle_task_control(&self, task_id: &str, action: &str) -> Result<String, String> {
+    pub(super) fn handle_task_control(
+        &self,
+        task_id: &str,
+        action: &str,
+    ) -> Result<String, String> {
         // Fetch current state
         let entry = self
             .shared_context
@@ -133,6 +137,21 @@ impl Orchestrator {
         self.shared_context
             .task_registry
             .update_status(task_id, new_status);
+
+        // Trigger the CancellationToken so background execution tasks actually stop.
+        // Without this, the tokio tasks (DAG, pipeline, lead agent) continue running
+        // because they only check token.is_cancelled() in their event loops.
+        if new_status == TaskEntryStatus::Cancelled {
+            let cancelled = self.shared_context.cancel_task(task_id);
+            if cancelled {
+                tracing::info!("Triggered cancellation token for task '{}'", task_id);
+            } else {
+                tracing::warn!(
+                    "No cancellation token found for task '{}' — task may have already finished",
+                    task_id
+                );
+            }
+        }
 
         // Update task lane if present
         if let Some(lane) = self.lane_manager.get_task_lane(task_id) {

@@ -86,16 +86,6 @@ apps/openalpaca-gui/src-tauri/gen/
 *.db-wal
 *.db-journal
 
-
-# ============================================
-# Agent
-# ============================================
-.claude/
-.claude/*   config/.master_key
-config/llm.toml
-
-
-
 # ============================================
 # Markdown Documentation (Except Manuals)
 # ============================================
@@ -103,12 +93,22 @@ config/llm.toml
 !docs/CLI_Manual.md
 !docs/GUI_Manual.md
 !docs/plans/Unified_Memory_System.md
+!config/agents/*.md
+!config/orchestrator/templates/
+!config/orchestrator/templates/*.md
+# ============================================
+# Agent
+# ============================================
+.claude/
+.claude/*   
+config/.master_key
+config/llm.toml
+
+
+
 
 
 # ============================================
 # Embedding Model
 # ============================================
-.fastembed_cache/*
-
-!config/orchestrator/templates/
-!config/orchestrator/templates/*.md
+.fastembed_cache

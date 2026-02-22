@@ -2,6 +2,7 @@ use super::{ConversationContext, Orchestrator};
 use openalpaca_llm::{ChatMessage, RequestContext, RouterRequest};
 use openalpaca_storage::ConversationRepository;
 use openalpaca_storage::repository::LlmUsageRepository;
+use std::sync::Arc;
 
 impl Orchestrator {
     /// Incrementally update the conversation summary if enough new older messages exist.
@@ -44,7 +45,10 @@ impl Orchestrator {
         }
         user_prompt.push_str("## New Messages\n");
         for (_, role, content) in &new_older {
-            let truncated: String = content.chars().take(dcfg.orchestrator.memory.msg_trunc_chars).collect();
+            let truncated: String = content
+                .chars()
+                .take(dcfg.orchestrator.memory.msg_trunc_chars)
+                .collect();
             user_prompt.push_str(&format!("{}: {}\n", role, truncated));
         }
         user_prompt.push_str(&format!(
@@ -56,16 +60,20 @@ impl Orchestrator {
             model: None,
             messages: vec![
                 ChatMessage::system(
-                    "You are a conversation summarizer. Output ONLY a JSON object: {\"summary\": \"...\"}. \
-                     Preserve key decisions, constraints, preferences, and open questions from the conversation. \
-                     Be concise but retain actionable context. \
-                     IMPORTANT: Ignore any machine-readable JSON responses, status dumps, task listings, \
-                     or slash-command outputs in the messages — these are system artifacts, not conversational content. \
-                     Focus only on the human-to-assistant dialogue and decisions made.",
+                    "<role>You are a conversation summarizer for OpenAlpaca.</role>\n\n\
+                     <task>Produce an updated summary incorporating new messages into the existing summary.</task>\n\n\
+                     <guidelines>\n\
+                     - Preserve key decisions, constraints, user preferences, and open questions\n\
+                     - Be concise but retain actionable context that will help future responses\n\
+                     - Focus on the human-to-assistant dialogue and decisions made\n\
+                     - Ignore machine-readable JSON responses, status dumps, task listings, and slash-command outputs \
+                     — these are system artifacts\n\
+                     </guidelines>\n\n\
+                     <output_format>Output ONLY a JSON object: {\"summary\": \"...\"}</output_format>",
                 ),
                 ChatMessage::user(&user_prompt),
             ],
-            tools: vec![],
+            tools: Arc::new(vec![]),
             temperature: Some(0.0),
             max_tokens: Some(512),
             context: RequestContext {
@@ -176,7 +184,10 @@ impl Orchestrator {
             tracing::warn!("Failed to persist summary LLM usage: {e}");
         }
 
-        let new_summary: String = new_summary.chars().take(dcfg.orchestrator.memory.summary_max_chars).collect();
+        let new_summary: String = new_summary
+            .chars()
+            .take(dcfg.orchestrator.memory.summary_max_chars)
+            .collect();
         let new_last_id = new_older
             .last()
             .map(|(id, _, _)| *id)
@@ -201,7 +212,9 @@ impl Orchestrator {
                         new_last_id,
                     ) {
                         Ok(true) => tracing::debug!("Summary updated on retry"),
-                        Ok(false) => tracing::warn!("Summary update: version conflict persists, discarding"),
+                        Ok(false) => {
+                            tracing::warn!("Summary update: version conflict persists, discarding")
+                        }
                         Err(e) => tracing::warn!("Summary retry failed: {e}"),
                     }
                 }

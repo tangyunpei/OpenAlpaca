@@ -6,6 +6,7 @@ import { writable, derived, type Readable } from "svelte/store";
 import { events, type ServerEvent } from "../daemon";
 import { getLlmSettings, getAvailableModels, refreshAvailableModels, getDiscoveredCredentials, getCliBackends } from "../api/settings";
 import { getOrchestratorConfig, updateOrchestratorConfig } from "../api/orchestrator";
+import { getDaemonProviders, updateWebSearchConfig, type DaemonProvidersResponse } from "../api/daemon";
 import type { LlmSettingsResponse, ProviderInfo, OrchestratorConfigResponse, ModelEntry, DiscoveredCredentialInfo, CliBackendStatus } from "../types";
 
 /** Current LLM settings */
@@ -143,5 +144,41 @@ export function subscribeToOrchestratorEvents(): () => void {
     if (latest.type !== "orchestrator_config_changed") return;
 
     loadOrchestratorConfig();
+  });
+}
+
+// ── Daemon provider config ────────────────────────────────────────
+
+/** Daemon provider configuration (web search, etc.) */
+export const daemonProviders = writable<DaemonProvidersResponse | null>(null);
+
+/** Fetch daemon providers config */
+export async function loadDaemonProviders(): Promise<void> {
+  try {
+    const config = await getDaemonProviders();
+    daemonProviders.set(config);
+  } catch (e) {
+    console.error("[settings-store] Failed to load daemon providers:", e);
+  }
+}
+
+/** Save web search config and refresh store */
+export async function saveDaemonWebSearch(
+  apiKey?: string,
+  timeoutSecs?: number,
+): Promise<void> {
+  await updateWebSearchConfig({ api_key: apiKey, timeout_secs: timeoutSecs });
+  await loadDaemonProviders();
+}
+
+/** Subscribe to daemon_config_changed events.
+ *  Returns an unsubscribe function. */
+export function subscribeToDaemonConfigEvents(): () => void {
+  return events.subscribe(($events) => {
+    if ($events.length === 0) return;
+    const latest = $events[0] as ServerEvent;
+    if (latest.type !== "daemon_config_changed") return;
+
+    loadDaemonProviders();
   });
 }

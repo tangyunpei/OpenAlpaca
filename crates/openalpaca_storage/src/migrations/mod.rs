@@ -106,4 +106,19 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "memory_fixes",
         sql: include_str!("019_memory_fixes.sql"),
     },
+    Migration {
+        version: 20,
+        name: "agent_template_id",
+        sql: include_str!("020_agent_template_id.sql"),
+    },
+    Migration {
+        version: 21,
+        name: "agent_template_id_not_null",
+        sql: include_str!("021_agent_template_id_not_null.sql"),
+    },
+    Migration {
+        version: 22,
+        name: "orchestrator_latency",
+        sql: include_str!("022_orchestrator_latency.sql"),
+    },
 ];

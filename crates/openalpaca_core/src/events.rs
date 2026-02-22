@@ -74,15 +74,23 @@ pub enum SystemEvent {
         error: String,
         timestamp: DateTime<Utc>,
     },
-    /// An agent was registered or config updated
-    AgentRegistered {
-        agent_id: String,
-        name: String,
-        timestamp: DateTime<Utc>,
-    },
-    /// An agent's status changed
+    /// An agent instance's lifecycle status changed.
+    ///
+    /// Status values form a full lifecycle:
+    ///   "spawned"   — instance created from template
+    ///   "busy"      — instance claimed/re-claimed for a task step
+    ///   "idle"      — singleton released back to the reuse pool
+    ///   "waiting"   — instance paused awaiting user action
+    ///   "error"     — instance entered error state
+    ///   "destroyed" — non-singleton instance removed from registry
     AgentStatusChanged {
+        /// Kept for backward compat (same as instance_id).
         agent_id: String,
+        /// The runtime instance identifier (e.g. "code_agent::a1b2c3d4").
+        instance_id: String,
+        /// The template this instance was spawned from (e.g. "code_agent").
+        template_id: String,
+        /// Lifecycle status string.
         status: String,
         current_task_id: Option<String>,
         timestamp: DateTime<Utc>,
@@ -211,6 +219,8 @@ pub enum SystemEvent {
         model: String,
         timestamp: DateTime<Utc>,
     },
+    /// The daemon configuration was changed (e.g. providers.web_search)
+    DaemonConfigChanged { timestamp: DateTime<Utc> },
     /// An LLM API key status changed (add/remove/reorder/priority)
     KeyStatusChanged {
         provider: String,
@@ -252,6 +262,26 @@ pub enum SystemEvent {
         nodes_added: usize,
         /// How many nodes were removed (replaced) from the old DAG
         nodes_removed: usize,
+        timestamp: DateTime<Utc>,
+    },
+    /// The LLM planner was bypassed (fast path, bootstrap, no router)
+    PlannerBypassed {
+        request_id: Uuid,
+        /// "fast_path" | "bootstrap" | "no_llm_router"
+        reason: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// Request-level orchestration stage metrics
+    OrchestrationStage {
+        request_id: Uuid,
+        /// "fast_path" | "planner_simple_query" | "planner_complex_task" |
+        /// "heuristic_simple_query" | "heuristic_complex_task" | "bootstrap" | "no_llm"
+        mode: String,
+        planner_ms: u64,
+        dispatch_ms: u64,
+        ack_ms: u64,
+        fallback_reason: Option<String>,
+        auto_promotion_reason: Option<String>,
         timestamp: DateTime<Utc>,
     },
 }

@@ -60,6 +60,8 @@ pub struct SandboxManager {
     executor: Arc<dyn ToolExecutor>,
     bus: EventBus,
     circuit_breaker: ToolCircuitBreaker,
+    /// Optional database for persisting security violation audit logs.
+    db: Option<openalpaca_storage::Database>,
 }
 
 impl SandboxManager {
@@ -74,6 +76,23 @@ impl SandboxManager {
             executor,
             bus,
             circuit_breaker,
+            db: None,
+        }
+    }
+
+    /// Create a new SandboxManager with a database for audit logging.
+    pub fn with_db(
+        executor: Arc<dyn ToolExecutor>,
+        bus: EventBus,
+        circuit_breaker_config: &CircuitBreakerConfig,
+        db: openalpaca_storage::Database,
+    ) -> Self {
+        let circuit_breaker = ToolCircuitBreaker::new(circuit_breaker_config, bus.clone());
+        Self {
+            executor,
+            bus,
+            circuit_breaker,
+            db: Some(db),
         }
     }
 
@@ -146,24 +165,38 @@ impl SandboxManager {
         }
 
         // 5. Timeout-wrapped execution
-        let timeout = Duration::from_secs(policy.max_tool_runtime_secs);
+        //
+        // Coordination tools (wait_for_subagents, check_subagent_status) have their
+        // own internal timeouts and must not be subject to the per-tool sandbox
+        // timeout, which is typically much shorter than the time subagents need to
+        // complete their work.
+        let is_coordination_tool = tool_call.name == "wait_for_subagents"
+            || tool_call.name == "check_subagent_status";
+
         let executor = self.executor.clone();
         let tool_name = tool_call.name.clone();
         let arguments = tool_call.arguments.clone();
 
         let start = std::time::Instant::now();
-        let result = tokio::time::timeout(timeout, async move {
-            executor.execute(&tool_name, &arguments).await
-        })
-        .await;
+        let result = if is_coordination_tool {
+            Ok(executor.execute(&tool_name, &arguments).await)
+        } else {
+            let timeout = Duration::from_secs(policy.max_tool_runtime_secs);
+            tokio::time::timeout(timeout, async move {
+                executor.execute(&tool_name, &arguments).await
+            })
+            .await
+        };
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
         // 5. Process result and record for circuit breaker
-        let final_result = match result {
+
+        match result {
             Ok(Ok(output)) => {
                 self.emit_tool_executed(agent_id, &tool_call.name, true, duration_ms);
-                self.circuit_breaker.record_success(agent_id, &tool_call.name);
+                self.circuit_breaker
+                    .record_success(agent_id, &tool_call.name);
                 Ok(output)
             }
             Ok(Err(err)) => {
@@ -185,9 +218,7 @@ impl SandboxManager {
                     .record_failure(agent_id, &tool_call.name);
                 Err(reason)
             }
-        };
-
-        final_result
+        }
     }
 
     fn emit_security_violation(&self, agent_id: &str, tool_name: &str, reason: &str) {
@@ -197,6 +228,24 @@ impl SandboxManager {
             reason: reason.to_string(),
             timestamp: Utc::now(),
         });
+
+        // Best-effort persistence to event_log for audit trail
+        if let Some(ref db) = self.db {
+            let detail = serde_json::json!({
+                "tool_name": tool_name,
+                "reason": reason,
+            });
+            let result = serde_json::json!({ "outcome": "denied" });
+            let repo = openalpaca_storage::repository::EventLogRepository::new(db);
+            if let Err(e) = repo.log(
+                "security_violation",
+                Some(agent_id),
+                Some(&detail),
+                Some(&result),
+            ) {
+                tracing::warn!("Failed to persist security violation to event_log: {e}");
+            }
+        }
     }
 
     fn emit_tool_executed(&self, agent_id: &str, tool_name: &str, success: bool, duration_ms: u64) {
@@ -368,6 +417,10 @@ mod tests {
 
         let result = sandbox.execute_tool("agent1", &tc, &policy).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not in the allowed tools list"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("not in the allowed tools list")
+        );
     }
 }

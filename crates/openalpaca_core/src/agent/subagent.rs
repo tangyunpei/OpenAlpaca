@@ -3,9 +3,17 @@
 use serde::{Deserialize, Serialize};
 
 /// In-memory SubAgent representation.
+///
+/// In the template+instance model, each `SubAgent` is a runtime **instance**
+/// spawned from an `AgentTemplate`. The `template_id` links back to the
+/// originating template, while `id` is a unique instance identifier
+/// (e.g. `"code_agent::a1b2c3d4"` for non-singletons, or `"lead_agent"` for singletons).
 #[derive(Debug, Clone)]
 pub struct SubAgent {
     pub id: String,
+    /// Template this instance was spawned from (e.g. "code_agent").
+    /// For backward compatibility, defaults to the same value as `id`.
+    pub template_id: String,
     pub name: String,
     pub description: Option<String>,
     pub icon: Option<String>,
@@ -98,6 +106,9 @@ pub struct AgentConstraints {
     pub max_tool_calls: Option<u32>,
     pub timeout_seconds: Option<u64>,
     pub max_cost_per_task: Option<f64>,
+    /// Maximum agentic loop rounds (overrides daemon default when set).
+    #[serde(default)]
+    pub max_rounds: Option<usize>,
     #[serde(default)]
     pub require_confirmation_for: Vec<String>,
     #[serde(default)]
@@ -110,17 +121,36 @@ pub struct AgentConstraints {
     pub denied_models: Vec<String>,
 }
 
+impl AgentConstraints {
+    /// Pre-lowercase all constraint list entries so that capability/model
+    /// checks can compare against an already-normalized set.
+    pub fn normalize(&mut self) {
+        for s in &mut self.allowed_capabilities {
+            *s = s.to_lowercase();
+        }
+        for s in &mut self.denied_capabilities {
+            *s = s.to_lowercase();
+        }
+        for s in &mut self.allowed_models {
+            *s = s.to_lowercase();
+        }
+        for s in &mut self.denied_models {
+            *s = s.to_lowercase();
+        }
+    }
+}
+
 impl SubAgent {
     /// Hydrate from a storage SubAgentConfig.
     pub fn from_config(config: &openalpaca_storage::SubAgentConfig) -> Self {
         let skills: Vec<Skill> = serde_json::from_str(&config.skills_json).unwrap_or_default();
-        let preset: AgentPreset =
-            serde_json::from_str(&config.preset_json).unwrap_or_default();
-        let constraints: AgentConstraints = config
+        let preset: AgentPreset = serde_json::from_str(&config.preset_json).unwrap_or_default();
+        let mut constraints: AgentConstraints = config
             .constraints_json
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
+        constraints.normalize();
         let llm_config: AgentLlmConfig = config
             .llm_config_json
             .as_deref()
@@ -142,6 +172,7 @@ impl SubAgent {
 
         Self {
             id: config.id.clone(),
+            template_id: config.id.clone(), // backward compat: template_id = id
             name: config.name.clone(),
             description: config.description.clone(),
             icon: config.icon.clone(),
@@ -188,10 +219,12 @@ mod tests {
     #[test]
     fn test_agent_status_is_available() {
         assert!(AgentStatus::Idle.is_available());
-        assert!(!AgentStatus::Busy {
-            task_id: "t1".into()
-        }
-        .is_available());
+        assert!(
+            !AgentStatus::Busy {
+                task_id: "t1".into()
+            }
+            .is_available()
+        );
     }
 
     #[test]

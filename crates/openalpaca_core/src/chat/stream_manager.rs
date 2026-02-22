@@ -15,7 +15,9 @@ use uuid::Uuid;
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ChatStreamEvent {
     Thinking,
-    Delta { content: String },
+    Delta {
+        content: String,
+    },
     Done {
         content: String,
         model: String,
@@ -23,7 +25,9 @@ pub enum ChatStreamEvent {
         tokens_out: u64,
         duration_ms: u64,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// A cloneable handle for sending streaming events into a chat stream.
@@ -191,7 +195,9 @@ impl ChatStreamManager {
 
     /// Get a receiver for an existing stream (for SSE endpoint).
     pub fn get_receiver(&self, stream_id: &str) -> Option<broadcast::Receiver<ChatStreamEvent>> {
-        self.streams.get(stream_id).map(|entry| entry.tx.subscribe())
+        self.streams
+            .get(stream_id)
+            .map(|entry| entry.tx.subscribe())
     }
 
     /// Send an event to a stream. Also refreshes `last_active` to prevent stale cleanup.

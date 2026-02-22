@@ -180,9 +180,7 @@ fn parse_identity_field(line: &str) -> Option<(String, String)> {
     Some((key, value))
 }
 
-fn parse_body_fields(
-    lines: &[String],
-) -> (String, String, String, String, String) {
+fn parse_body_fields(lines: &[String]) -> (String, String, String, String, String) {
     let mut name = String::new();
     let mut creature = String::new();
     let mut vibe = String::new();

@@ -1,10 +1,10 @@
 //! Multi-key management with round-robin selection, cooldown, and rate-limit tracking.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
 
 /// Provider type for categorizing API keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -18,7 +18,11 @@ pub enum ProviderType {
 impl ProviderType {
     /// Return all known provider variants.
     pub fn all() -> &'static [ProviderType] {
-        &[ProviderType::Anthropic, ProviderType::OpenAI, ProviderType::Ollama]
+        &[
+            ProviderType::Anthropic,
+            ProviderType::OpenAI,
+            ProviderType::Ollama,
+        ]
     }
 }
 
@@ -58,7 +62,10 @@ impl KeySource {
     /// Whether this key can authenticate against a provider's standard HTTP API.
     /// Managed keys (ClaudeCode, Codex, ClaudeMaxPro) are session/OAuth tokens.
     pub fn is_api_compatible(&self) -> bool {
-        matches!(self, KeySource::ApiConsole | KeySource::Environment | KeySource::Other)
+        matches!(
+            self,
+            KeySource::ApiConsole | KeySource::Environment | KeySource::Other
+        )
     }
 }
 
@@ -134,20 +141,20 @@ impl ApiKey {
             return false;
         }
         // Secret-format guard: sk-ant-oat* tokens are never API-compatible
-        if self.provider == ProviderType::Anthropic
-            && self.secret.starts_with("sk-ant-oat")
-        {
+        if self.provider == ProviderType::Anthropic && self.secret.starts_with("sk-ant-oat") {
             return false;
         }
         true
     }
 }
 
-/// Guard returned by `acquire()` — holds the key id and secret for use.
+/// Guard returned by `acquire()` — holds the key id, secret, and rate limit for use.
 #[derive(Debug, Clone)]
 pub struct KeyGuard {
     pub id: String,
     pub secret: String,
+    /// Per-key RPM limit from config (if configured).
+    pub rate_limit: Option<u32>,
 }
 
 /// Errors from key pool operations.
@@ -253,6 +260,7 @@ impl KeyPool {
                 return Ok(KeyGuard {
                     id: key.id.clone(),
                     secret: key.secret.clone(),
+                    rate_limit: key.rate_limit,
                 });
             }
         }
@@ -291,6 +299,7 @@ impl KeyPool {
                 return Ok(KeyGuard {
                     id: key.id.clone(),
                     secret: key.secret.clone(),
+                    rate_limit: key.rate_limit,
                 });
             }
         }
@@ -321,7 +330,8 @@ impl KeyPool {
 
         // Try primary keys with round-robin
         if !primary_indices.is_empty() {
-            let start = self.round_robin_index.fetch_add(1, Ordering::Relaxed) % primary_indices.len();
+            let start =
+                self.round_robin_index.fetch_add(1, Ordering::Relaxed) % primary_indices.len();
             for i in 0..primary_indices.len() {
                 let idx = primary_indices[(start + i) % primary_indices.len()];
                 let key = self.keys[idx].read().await;
@@ -329,6 +339,7 @@ impl KeyPool {
                     return Ok(KeyGuard {
                         id: key.id.clone(),
                         secret: key.secret.clone(),
+                        rate_limit: key.rate_limit,
                     });
                 }
             }
@@ -341,6 +352,7 @@ impl KeyPool {
                 return Ok(KeyGuard {
                     id: key.id.clone(),
                     secret: key.secret.clone(),
+                    rate_limit: key.rate_limit,
                 });
             }
         }
@@ -367,7 +379,8 @@ impl KeyPool {
 
         // Try primary keys with round-robin
         if !primary_indices.is_empty() {
-            let start = self.round_robin_index.fetch_add(1, Ordering::Relaxed) % primary_indices.len();
+            let start =
+                self.round_robin_index.fetch_add(1, Ordering::Relaxed) % primary_indices.len();
             for i in 0..primary_indices.len() {
                 let idx = primary_indices[(start + i) % primary_indices.len()];
                 let key = self.keys[idx].read().await;
@@ -375,6 +388,7 @@ impl KeyPool {
                     return Ok(KeyGuard {
                         id: key.id.clone(),
                         secret: key.secret.clone(),
+                        rate_limit: key.rate_limit,
                     });
                 }
             }
@@ -387,6 +401,7 @@ impl KeyPool {
                 return Ok(KeyGuard {
                     id: key.id.clone(),
                     secret: key.secret.clone(),
+                    rate_limit: key.rate_limit,
                 });
             }
         }
@@ -436,6 +451,46 @@ impl KeyPool {
         self.keys.is_empty()
     }
 
+    /// Count API-compatible keys that are currently available (not in cooldown).
+    /// Used by the router to estimate how many parallel LLM calls can proceed
+    /// without contention, so spawn concurrency can be adapted dynamically.
+    pub async fn available_api_key_count(&self) -> usize {
+        let mut count = 0;
+        for key_lock in &self.keys {
+            let key = key_lock.read().await;
+            if key.is_api_compatible_key() && key.is_available() {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Returns the shortest remaining cooldown duration among API-compatible
+    /// rate-limited keys, or `None` if no keys are cooling down.
+    /// Useful for waiting until the next key becomes available.
+    pub async fn shortest_cooldown(&self) -> Option<Duration> {
+        let now = Instant::now();
+        let mut shortest: Option<Duration> = None;
+
+        for key_lock in &self.keys {
+            let key = key_lock.read().await;
+            if !key.is_api_compatible_key() {
+                continue;
+            }
+            if let Some(until) = key.rate_state.cooldown_until
+                && until > now
+            {
+                let remaining = until - now;
+                shortest = Some(match shortest {
+                    Some(prev) => prev.min(remaining),
+                    None => remaining,
+                });
+            }
+        }
+
+        shortest
+    }
+
     /// Get the status of all keys.
     pub async fn key_statuses(&self) -> Vec<KeyStatus> {
         let mut statuses = Vec::with_capacity(self.keys.len());
@@ -476,7 +531,11 @@ mod tests {
     use super::*;
 
     fn make_key(id: &str) -> ApiKey {
-        ApiKey::new(id.to_string(), ProviderType::Anthropic, format!("sk-{}", id))
+        ApiKey::new(
+            id.to_string(),
+            ProviderType::Anthropic,
+            format!("sk-{}", id),
+        )
     }
 
     fn make_key_with_priority(id: &str, priority: KeyPriority) -> ApiKey {
@@ -512,7 +571,13 @@ mod tests {
         );
 
         // Rate-limit k1
-        pool.report_result("k1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+        pool.report_result(
+            "k1",
+            CallResult::RateLimited {
+                retry_after_ms: 60_000,
+            },
+        )
+        .await;
 
         // Next acquire should skip k1 and return k2
         let guard = pool.acquire().await.unwrap();
@@ -526,8 +591,20 @@ mod tests {
             SelectionStrategy::RoundRobin,
         );
 
-        pool.report_result("k1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
-        pool.report_result("k2", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+        pool.report_result(
+            "k1",
+            CallResult::RateLimited {
+                retry_after_ms: 60_000,
+            },
+        )
+        .await;
+        pool.report_result(
+            "k2",
+            CallResult::RateLimited {
+                retry_after_ms: 60_000,
+            },
+        )
+        .await;
 
         let result = pool.acquire().await;
         assert!(matches!(result, Err(KeyPoolError::AllKeysRateLimited)));
@@ -540,8 +617,20 @@ mod tests {
             SelectionStrategy::RoundRobin,
         );
 
-        pool.report_result("k1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
-        pool.report_result("k2", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+        pool.report_result(
+            "k1",
+            CallResult::RateLimited {
+                retry_after_ms: 60_000,
+            },
+        )
+        .await;
+        pool.report_result(
+            "k2",
+            CallResult::RateLimited {
+                retry_after_ms: 60_000,
+            },
+        )
+        .await;
 
         pool.reset_all().await;
 
@@ -551,12 +640,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_success_clears_cooldown() {
-        let pool = KeyPool::new(
-            vec![make_key("k1")],
-            SelectionStrategy::RoundRobin,
-        );
+        let pool = KeyPool::new(vec![make_key("k1")], SelectionStrategy::RoundRobin);
 
-        pool.report_result("k1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+        pool.report_result(
+            "k1",
+            CallResult::RateLimited {
+                retry_after_ms: 60_000,
+            },
+        )
+        .await;
         assert!(pool.acquire().await.is_err());
 
         pool.report_result("k1", CallResult::Success).await;
@@ -606,7 +698,13 @@ mod tests {
         );
 
         // Rate-limit all primary keys
-        pool.report_result("primary1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+        pool.report_result(
+            "primary1",
+            CallResult::RateLimited {
+                retry_after_ms: 60_000,
+            },
+        )
+        .await;
 
         // Should fall back to fallback key
         let guard = pool.acquire().await.unwrap();
@@ -623,8 +721,20 @@ mod tests {
             SelectionStrategy::PrimaryFallback,
         );
 
-        pool.report_result("primary1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
-        pool.report_result("fallback1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+        pool.report_result(
+            "primary1",
+            CallResult::RateLimited {
+                retry_after_ms: 60_000,
+            },
+        )
+        .await;
+        pool.report_result(
+            "fallback1",
+            CallResult::RateLimited {
+                retry_after_ms: 60_000,
+            },
+        )
+        .await;
 
         let result = pool.acquire().await;
         assert!(matches!(result, Err(KeyPoolError::AllKeysRateLimited)));
@@ -633,7 +743,10 @@ mod tests {
     #[test]
     fn test_mask_secret() {
         // Long key
-        assert_eq!(mask_secret("sk-ant-api03-abcdefghij1234567890"), "sk-ant-a...7890");
+        assert_eq!(
+            mask_secret("sk-ant-api03-abcdefghij1234567890"),
+            "sk-ant-a...7890"
+        );
         // Short key (<=12 chars)
         assert_eq!(mask_secret("sk-short"), "********");
         // Exactly 12 chars
@@ -649,7 +762,13 @@ mod tests {
             SelectionStrategy::RoundRobin,
         );
 
-        pool.report_result("k1", CallResult::RateLimited { retry_after_ms: 60_000 }).await;
+        pool.report_result(
+            "k1",
+            CallResult::RateLimited {
+                retry_after_ms: 60_000,
+            },
+        )
+        .await;
 
         let statuses = pool.key_statuses().await;
         assert_eq!(statuses.len(), 2);
@@ -769,16 +888,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_acquire_api_compatible_delegates() {
-        let pool = KeyPool::new(
-            vec![make_api_key("api1")],
-            SelectionStrategy::RoundRobin,
-        );
+        let pool = KeyPool::new(vec![make_api_key("api1")], SelectionStrategy::RoundRobin);
         let guard1 = pool.acquire().await.unwrap();
         // Reset index for comparison
-        let pool2 = KeyPool::new(
-            vec![make_api_key("api1")],
-            SelectionStrategy::RoundRobin,
-        );
+        let pool2 = KeyPool::new(vec![make_api_key("api1")], SelectionStrategy::RoundRobin);
         let guard2 = pool2.acquire_api_compatible().await.unwrap();
         assert_eq!(guard1.id, guard2.id);
     }
@@ -790,9 +903,86 @@ mod tests {
             SelectionStrategy::RoundRobin,
         );
         // acquire() should fail
-        assert!(matches!(pool.acquire().await, Err(KeyPoolError::NoApiCompatibleKeys)));
+        assert!(matches!(
+            pool.acquire().await,
+            Err(KeyPoolError::NoApiCompatibleKeys)
+        ));
         // acquire_any() should succeed
         let guard = pool.acquire_any().await.unwrap();
         assert_eq!(guard.id, "managed1");
+    }
+
+    // ── available_api_key_count tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_available_api_key_count_all_healthy() {
+        let pool = KeyPool::new(
+            vec![make_api_key("a1"), make_api_key("a2"), make_api_key("a3")],
+            SelectionStrategy::RoundRobin,
+        );
+        assert_eq!(pool.available_api_key_count().await, 3);
+    }
+
+    #[tokio::test]
+    async fn test_available_api_key_count_excludes_managed() {
+        let pool = KeyPool::new(
+            vec![make_managed_key("m1"), make_api_key("a1")],
+            SelectionStrategy::RoundRobin,
+        );
+        assert_eq!(pool.available_api_key_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_available_api_key_count_excludes_cooldown() {
+        let pool = KeyPool::new(
+            vec![make_api_key("a1"), make_api_key("a2")],
+            SelectionStrategy::RoundRobin,
+        );
+        pool.report_result(
+            "a1",
+            CallResult::RateLimited {
+                retry_after_ms: 60_000,
+            },
+        )
+        .await;
+        assert_eq!(pool.available_api_key_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_available_api_key_count_empty_pool() {
+        let pool = KeyPool::new(vec![], SelectionStrategy::RoundRobin);
+        assert_eq!(pool.available_api_key_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_available_api_key_count_all_managed() {
+        let pool = KeyPool::new(
+            vec![make_managed_key("m1"), make_managed_key("m2")],
+            SelectionStrategy::RoundRobin,
+        );
+        assert_eq!(pool.available_api_key_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_available_api_key_count_all_rate_limited() {
+        let pool = KeyPool::new(
+            vec![make_api_key("a1"), make_api_key("a2")],
+            SelectionStrategy::RoundRobin,
+        );
+        pool.report_result(
+            "a1",
+            CallResult::RateLimited {
+                retry_after_ms: 60_000,
+            },
+        )
+        .await;
+        pool.report_result(
+            "a2",
+            CallResult::RateLimited {
+                retry_after_ms: 60_000,
+            },
+        )
+        .await;
+        assert_eq!(pool.available_api_key_count().await, 0);
     }
 }

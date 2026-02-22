@@ -243,6 +243,7 @@ impl<'a> LlmUsageRepository<'a> {
 
     /// Record a completed LLM call: inserts into call log and upserts daily aggregate.
     /// Use status "success" for successful calls, "error" or "cost_exceeded" for failures.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_and_log(
         &self,
         agent_id: &str,
@@ -425,6 +426,6 @@ mod tests {
     #[test]
     fn test_schema_version() {
         let db = setup_db();
-        assert_eq!(db.schema_version().unwrap(), 19);
+        assert_eq!(db.schema_version().unwrap(), 22);
     }
 }

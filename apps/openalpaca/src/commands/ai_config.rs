@@ -6,13 +6,14 @@
 use anyhow::{Context, Result};
 use openalpaca_llm::cli_backend::{CliBackendConfig, CliBackendsConfig};
 use openalpaca_llm::config::{
-    read_config, write_config, KeyConfig, LlmRouterConfig, OrchestratorLlmConfig, ProviderConfig,
+    EmbeddingsConfig, KeyConfig, LlmRouterConfig, OrchestratorLlmConfig, ProviderConfig,
+    read_config, write_config,
 };
 use openalpaca_llm::credential_discovery::CredentialDiscoveryConfig;
 use openalpaca_llm::key_encryption::KeyEncryptor;
 use openalpaca_llm::secret_store::{KeyringSecretStore, MemorySecretStore, SecretStore};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Ensure master key exists at canonical app_dir before any crypto operations.
 fn ensure_master_key() {
@@ -167,91 +168,114 @@ pub fn delete_ai_value(key: &str) -> Result<()> {
             }
         }
         "ai.claude_code.cli_enabled" => {
-            if let Some(ref mut cb) = config.cli_backends {
-                if let Some(ref mut cc) = cb.claude_code {
-                    cc.enabled = None;
-                }
+            if let Some(ref mut cb) = config.cli_backends
+                && let Some(ref mut cc) = cb.claude_code
+            {
+                cc.enabled = None;
             }
         }
         "ai.claude_code.cli_path" => {
-            if let Some(ref mut cb) = config.cli_backends {
-                if let Some(ref mut cc) = cb.claude_code {
-                    cc.path = None;
-                }
+            if let Some(ref mut cb) = config.cli_backends
+                && let Some(ref mut cc) = cb.claude_code
+            {
+                cc.path = None;
             }
         }
         "ai.codex.cli_enabled" => {
-            if let Some(ref mut cb) = config.cli_backends {
-                if let Some(ref mut cx) = cb.codex {
-                    cx.enabled = None;
-                }
+            if let Some(ref mut cb) = config.cli_backends
+                && let Some(ref mut cx) = cb.codex
+            {
+                cx.enabled = None;
             }
         }
         "ai.codex.cli_path" => {
-            if let Some(ref mut cb) = config.cli_backends {
-                if let Some(ref mut cx) = cb.codex {
-                    cx.path = None;
-                }
+            if let Some(ref mut cb) = config.cli_backends
+                && let Some(ref mut cx) = cb.codex
+            {
+                cx.path = None;
+            }
+        }
+        "ai.embeddings.enabled" => {
+            if let Some(ref mut emb) = config.embeddings {
+                emb.enabled = false;
+            }
+        }
+        "ai.embeddings.provider" => {
+            if let Some(ref mut emb) = config.embeddings {
+                emb.provider = String::new();
+            }
+        }
+        "ai.embeddings.model" => {
+            if let Some(ref mut emb) = config.embeddings {
+                emb.model = None;
+            }
+        }
+        "ai.embeddings.dimensions" => {
+            if let Some(ref mut emb) = config.embeddings {
+                emb.dimensions = None;
             }
         }
         k if k.ends_with(".enabled") => {
             let provider = extract_provider(k)?;
-            if let Some(ref mut providers) = config.providers {
-                if let Some(entry) = providers.get_mut(&provider) {
-                    entry.enabled = None;
-                }
+            if let Some(ref mut providers) = config.providers
+                && let Some(entry) = providers.get_mut(&provider)
+            {
+                entry.enabled = None;
             }
         }
         k if k.ends_with(".api_key") => {
             let provider = extract_provider(k)?;
-            if let Some(ref mut providers) = config.providers {
-                if let Some(entry) = providers.get_mut(&provider) {
-                    if let Some(ref mut keys) = entry.keys {
-                        let cli_id = format!("{}_cli", provider);
-                        // Delete keychain secrets for removed keys
-                        for k in keys.iter() {
-                            if k.id == cli_id || keys.len() == 1 {
-                                if let Some(ref sref) = k.secret_ref {
-                                    let _ = store.delete(sref);
-                                }
-                            }
-                        }
-                        // 1. Try to remove {provider}_cli key
-                        let before = keys.len();
-                        keys.retain(|k| k.id != cli_id);
-                        if keys.len() < before {
-                            // Removed cli key — done
-                        } else if keys.len() == 1 {
-                            // 2. Migration fallback: exactly one key (legacy) → remove it
-                            if let Some(ref sref) = keys[0].secret_ref {
-                                let _ = store.delete(sref);
-                            }
-                            keys.remove(0);
-                        } else if !keys.is_empty() {
-                            // 3. Multiple keys, no cli key → remove first primary, else first
-                            let pos = keys.iter().position(|k| k.priority.as_deref() == Some("primary"))
-                                .unwrap_or(0);
-                            if let Some(ref sref) = keys[pos].secret_ref {
-                                let _ = store.delete(sref);
-                            }
-                            keys.remove(pos);
-                        }
-                        if !keys.is_empty() {
-                            eprintln!(
-                                "Note: {} key(s) remain for '{}'. Use `config` → API-Keys → {} to manage individual keys.",
-                                keys.len(), provider, provider
-                            );
-                        }
+            if let Some(ref mut providers) = config.providers
+                && let Some(entry) = providers.get_mut(&provider)
+                && let Some(ref mut keys) = entry.keys
+            {
+                let cli_id = format!("{}_cli", provider);
+                // Delete keychain secrets for removed keys
+                for k in keys.iter() {
+                    if (k.id == cli_id || keys.len() == 1)
+                        && let Some(ref sref) = k.secret_ref
+                    {
+                        let _ = store.delete(sref);
                     }
+                }
+                // 1. Try to remove {provider}_cli key
+                let before = keys.len();
+                keys.retain(|k| k.id != cli_id);
+                if keys.len() < before {
+                    // Removed cli key — done
+                } else if keys.len() == 1 {
+                    // 2. Migration fallback: exactly one key (legacy) → remove it
+                    if let Some(ref sref) = keys[0].secret_ref {
+                        let _ = store.delete(sref);
+                    }
+                    keys.remove(0);
+                } else if !keys.is_empty() {
+                    // 3. Multiple keys, no cli key → remove first primary, else first
+                    let pos = keys
+                        .iter()
+                        .position(|k| k.priority.as_deref() == Some("primary"))
+                        .unwrap_or(0);
+                    if let Some(ref sref) = keys[pos].secret_ref {
+                        let _ = store.delete(sref);
+                    }
+                    keys.remove(pos);
+                }
+                if !keys.is_empty() {
+                    eprintln!(
+                        "Note: {} key(s) remain for '{}'. Use `config` → API-Keys → {} to manage individual keys.",
+                        keys.len(),
+                        provider,
+                        provider
+                    );
                 }
             }
         }
         k if k.ends_with(".base_url") => {
             let provider = extract_provider(k)?;
-            if let Some(ref mut providers) = config.providers {
-                if let Some(entry) = providers.get_mut(&provider) {
-                    entry.base_url = None;
-                }
+            if let Some(ref mut providers) = config.providers
+                && let Some(entry) = providers.get_mut(&provider)
+            {
+                entry.base_url = None;
             }
         }
         _ => return Err(anyhow::anyhow!("Unknown AI config key: {}", key)),
@@ -276,6 +300,10 @@ pub fn list_ai_entries() -> Result<Vec<(String, String, String)>> {
     let keys = [
         "ai.default_model",
         "ai.fallback_models",
+        "ai.embeddings.enabled",
+        "ai.embeddings.provider",
+        "ai.embeddings.model",
+        "ai.embeddings.dimensions",
         "ai.anthropic.enabled",
         "ai.anthropic.api_key",
         "ai.openai.enabled",
@@ -293,8 +321,13 @@ pub fn list_ai_entries() -> Result<Vec<(String, String, String)>> {
     let mut entries = Vec::new();
     for key in &keys {
         if let Some(val) = read_from_config(key, &config, &encryptor, &store) {
-            let kind = if key.ends_with(".enabled") || key.ends_with(".discovery") || key.ends_with(".cli_enabled") {
+            let kind = if key.ends_with(".enabled")
+                || key.ends_with(".discovery")
+                || key.ends_with(".cli_enabled")
+            {
                 "bool"
+            } else if key.ends_with(".dimensions") {
+                "int"
             } else {
                 "string"
             };
@@ -304,8 +337,10 @@ pub fn list_ai_entries() -> Result<Vec<(String, String, String)>> {
     Ok(entries)
 }
 
-/// Clear only the managed AI fields (orchestrator, provider enabled/keys[0]/base_url).
-/// Preserves: models, limits, fallback_chains, credential_discovery, cli_backends.
+/// Clear all AI/LLM configuration in `llm.toml`, resetting to defaults.
+///
+/// Deletes keychain secrets for provider keys, then sets every section to `None`.
+/// The runtime will fall back to built-in defaults on next load.
 pub fn clear_ai_config() -> Result<()> {
     let path = llm_config_path()?;
     if !path.exists() {
@@ -313,12 +348,10 @@ pub fn clear_ai_config() -> Result<()> {
     }
     let mut config = read_config(&path).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    config.orchestrator = None;
-
+    // Delete keychain secrets before clearing providers
     if let Some(ref mut providers) = config.providers {
         let store = secret_store();
         for (_name, prov) in providers.iter_mut() {
-            // Delete keychain secrets before clearing
             if let Some(ref keys) = prov.keys {
                 for k in keys {
                     if let Some(ref sref) = k.secret_ref {
@@ -326,14 +359,22 @@ pub fn clear_ai_config() -> Result<()> {
                     }
                 }
             }
-            prov.enabled = None;
-            prov.base_url = None;
-            prov.keys = None;
         }
     }
 
+    // Clear all sections
+    config.orchestrator = None;
+    config.providers = None;
     config.credential_discovery = None;
     config.cli_backends = None;
+    config.embeddings = None;
+    config.models = None;
+    config.fallback_chains = None;
+    config.limits = None;
+    config.security = None;
+    config.timeouts = None;
+    config.endpoints = None;
+    config.env_vars = None;
 
     write_config(&path, &config).map_err(|e| anyhow::anyhow!("{}", e))?;
     Ok(())
@@ -384,8 +425,7 @@ pub fn upsert_provider_key(
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         (Some(sref), None)
     } else {
-        let encryptor = KeyEncryptor::load_or_generate()
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let encryptor = KeyEncryptor::load_or_generate().map_err(|e| anyhow::anyhow!("{}", e))?;
         let encrypted = encryptor
             .encrypt(secret)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -500,23 +540,26 @@ pub fn remove_provider_key(provider: &str, key_id: &str) -> Result<()> {
     let mut config = read_config(&path).map_err(|e| anyhow::anyhow!("{}", e))?;
     let store = secret_store();
 
-    if let Some(ref mut providers) = config.providers {
-        if let Some(entry) = providers.get_mut(provider) {
-            if let Some(ref mut keys) = entry.keys {
-                // Delete keychain secret before removing
-                for k in keys.iter() {
-                    if k.id == key_id {
-                        if let Some(ref sref) = k.secret_ref {
-                            let _ = store.delete(sref);
-                        }
-                    }
-                }
-                let before = keys.len();
-                keys.retain(|k| k.id != key_id);
-                if keys.len() == before {
-                    return Err(anyhow::anyhow!("Key '{}' not found in provider '{}'", key_id, provider));
-                }
+    if let Some(ref mut providers) = config.providers
+        && let Some(entry) = providers.get_mut(provider)
+        && let Some(ref mut keys) = entry.keys
+    {
+        // Delete keychain secret before removing
+        for k in keys.iter() {
+            if k.id == key_id
+                && let Some(ref sref) = k.secret_ref
+            {
+                let _ = store.delete(sref);
             }
+        }
+        let before = keys.len();
+        keys.retain(|k| k.id != key_id);
+        if keys.len() == before {
+            return Err(anyhow::anyhow!(
+                "Key '{}' not found in provider '{}'",
+                key_id,
+                provider
+            ));
         }
     }
 
@@ -526,7 +569,7 @@ pub fn remove_provider_key(provider: &str, key_id: &str) -> Result<()> {
 
 // ── Internal helpers ────────────────────────────────────────────────────
 
-fn load_or_default(path: &PathBuf) -> Result<LlmRouterConfig> {
+fn load_or_default(path: &Path) -> Result<LlmRouterConfig> {
     if path.exists() {
         read_config(path).map_err(|e| anyhow::anyhow!("{}", e))
     } else {
@@ -593,7 +636,7 @@ fn apply_to_config(
                 .cli_backends
                 .get_or_insert_with(CliBackendsConfig::default)
                 .claude_code
-                .get_or_insert_with(|| CliBackendConfig {
+                .get_or_insert(CliBackendConfig {
                     path: None,
                     enabled: None,
                     timeout_secs: None,
@@ -605,7 +648,7 @@ fn apply_to_config(
                 .cli_backends
                 .get_or_insert_with(CliBackendsConfig::default)
                 .claude_code
-                .get_or_insert_with(|| CliBackendConfig {
+                .get_or_insert(CliBackendConfig {
                     path: None,
                     enabled: None,
                     timeout_secs: None,
@@ -617,7 +660,7 @@ fn apply_to_config(
                 .cli_backends
                 .get_or_insert_with(CliBackendsConfig::default)
                 .codex
-                .get_or_insert_with(|| CliBackendConfig {
+                .get_or_insert(CliBackendConfig {
                     path: None,
                     enabled: None,
                     timeout_secs: None,
@@ -629,19 +672,69 @@ fn apply_to_config(
                 .cli_backends
                 .get_or_insert_with(CliBackendsConfig::default)
                 .codex
-                .get_or_insert_with(|| CliBackendConfig {
+                .get_or_insert(CliBackendConfig {
                     path: None,
                     enabled: None,
                     timeout_secs: None,
                 })
                 .path = Some(value.to_string());
         }
+        "ai.embeddings.enabled" => {
+            config
+                .embeddings
+                .get_or_insert_with(|| EmbeddingsConfig {
+                    enabled: false,
+                    provider: String::new(),
+                    model: None,
+                    dimensions: None,
+                    batch_size: None,
+                })
+                .enabled = value == "true";
+        }
+        "ai.embeddings.provider" => {
+            config
+                .embeddings
+                .get_or_insert_with(|| EmbeddingsConfig {
+                    enabled: false,
+                    provider: String::new(),
+                    model: None,
+                    dimensions: None,
+                    batch_size: None,
+                })
+                .provider = value.to_string();
+        }
+        "ai.embeddings.model" => {
+            config
+                .embeddings
+                .get_or_insert_with(|| EmbeddingsConfig {
+                    enabled: false,
+                    provider: String::new(),
+                    model: None,
+                    dimensions: None,
+                    batch_size: None,
+                })
+                .model = Some(value.to_string());
+        }
+        "ai.embeddings.dimensions" => {
+            let dim: u32 = value
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid dimensions value: {}", value))?;
+            config
+                .embeddings
+                .get_or_insert_with(|| EmbeddingsConfig {
+                    enabled: false,
+                    provider: String::new(),
+                    model: None,
+                    dimensions: None,
+                    batch_size: None,
+                })
+                .dimensions = Some(dim);
+        }
         k if k.starts_with("ai.") && k.ends_with(".enabled") => {
             let provider = extract_provider(k)?;
             let providers = config.providers.get_or_insert_with(HashMap::new);
-            let entry = providers
-                .entry(provider)
-                .or_insert_with(ProviderConfig::default);
+            let entry = providers.entry(provider).or_default();
             entry.enabled = Some(value == "true");
         }
         k if k.starts_with("ai.") && k.ends_with(".api_key") => {
@@ -660,8 +753,8 @@ fn apply_to_config(
                 (Some(sref), None)
             } else {
                 // Store as local encrypted value
-                let encryptor = KeyEncryptor::load_or_generate()
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                let encryptor =
+                    KeyEncryptor::load_or_generate().map_err(|e| anyhow::anyhow!("{}", e))?;
                 let encrypted = encryptor
                     .encrypt(value)
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -669,9 +762,7 @@ fn apply_to_config(
             };
 
             let providers = config.providers.get_or_insert_with(HashMap::new);
-            let entry = providers
-                .entry(provider)
-                .or_insert_with(ProviderConfig::default);
+            let entry = providers.entry(provider).or_default();
             let keys = entry.keys.get_or_insert_with(Vec::new);
             if let Some(existing) = keys.iter_mut().find(|k| k.id == cli_id) {
                 // Delete old keychain secret if present
@@ -728,9 +819,7 @@ fn apply_to_config(
         k if k.starts_with("ai.") && k.ends_with(".base_url") => {
             let provider = extract_provider(k)?;
             let providers = config.providers.get_or_insert_with(HashMap::new);
-            let entry = providers
-                .entry(provider)
-                .or_insert_with(ProviderConfig::default);
+            let entry = providers.entry(provider).or_default();
             entry.base_url = Some(value.to_string());
         }
         _ => return Err(anyhow::anyhow!("Unknown AI config key: {}", key)),
@@ -792,6 +881,18 @@ fn read_from_config(
             .as_ref()
             .and_then(|cb| cb.codex.as_ref())
             .and_then(|cx| cx.path.clone()),
+        "ai.embeddings.enabled" => config.embeddings.as_ref().map(|e| e.enabled.to_string()),
+        "ai.embeddings.provider" => config
+            .embeddings
+            .as_ref()
+            .filter(|e| !e.provider.is_empty())
+            .map(|e| e.provider.clone()),
+        "ai.embeddings.model" => config.embeddings.as_ref().and_then(|e| e.model.clone()),
+        "ai.embeddings.dimensions" => config
+            .embeddings
+            .as_ref()
+            .and_then(|e| e.dimensions)
+            .map(|d| d.to_string()),
         k if k.ends_with(".enabled") => {
             let provider = extract_provider(k).ok()?;
             config
@@ -803,19 +904,19 @@ fn read_from_config(
         }
         k if k.ends_with(".api_key") => {
             let provider = extract_provider(k).ok()?;
-            let keys = config
-                .providers
-                .as_ref()?
-                .get(&provider)?
-                .keys
-                .as_ref()?;
+            let keys = config.providers.as_ref()?.get(&provider)?.keys.as_ref()?;
             let cli_id = format!("{}_cli", provider);
             // 1. Find key with id == "{provider}_cli"
-            let key = keys.iter().find(|k| k.id == cli_id)
+            let key = keys
+                .iter()
+                .find(|k| k.id == cli_id)
                 // 2. Fallback: if exactly one key, use it
                 .or_else(|| if keys.len() == 1 { keys.first() } else { None })
                 // 3. Fallback: first key with priority == "primary"
-                .or_else(|| keys.iter().find(|k| k.priority.as_deref() == Some("primary")))
+                .or_else(|| {
+                    keys.iter()
+                        .find(|k| k.priority.as_deref() == Some("primary"))
+                })
                 // 4. Fallback: first key
                 .or_else(|| keys.first())?;
             // Resolve: secret_ref > secret_encrypted > secret_env

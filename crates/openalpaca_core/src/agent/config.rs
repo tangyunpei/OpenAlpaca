@@ -1,9 +1,13 @@
 //! TOML-based agent configuration file structure
 
-use super::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent};
+use super::subagent::{
+    AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent,
+};
+use super::template::{AgentTemplate, AgentTemplateFrontmatter, extract_persona};
 use chrono::Utc;
 use openalpaca_storage::SubAgentConfig;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// TOML config file structure for agent definitions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,7 +84,11 @@ impl AgentConfigFile {
 
         let skills = AgentSkillsConfig {
             assigned,
-            denied: if denied.is_empty() { None } else { Some(denied) },
+            denied: if denied.is_empty() {
+                None
+            } else {
+                Some(denied)
+            },
         };
 
         let preset = AgentPresetConfig {
@@ -184,7 +192,11 @@ impl AgentConfigFile {
         let preset = AgentPreset {
             persona: self.preset.persona.clone(),
             temperature: self.preset.temperature.unwrap_or(0.5),
-            verbosity: self.preset.verbosity.clone().unwrap_or_else(|| "normal".to_string()),
+            verbosity: self
+                .preset
+                .verbosity
+                .clone()
+                .unwrap_or_else(|| "normal".to_string()),
         };
 
         // Merge skills.denied into denied_capabilities
@@ -200,10 +212,11 @@ impl AgentConfigFile {
                         denied.push(d.clone());
                     }
                 }
-                AgentConstraints {
+                let mut constraints = AgentConstraints {
                     max_tool_calls: c.max_tool_calls,
                     timeout_seconds: c.timeout_seconds,
                     max_cost_per_task: c.max_cost_per_task,
+                    max_rounds: None,
                     require_confirmation_for: c
                         .require_confirmation_for
                         .clone()
@@ -212,11 +225,17 @@ impl AgentConfigFile {
                     denied_capabilities: denied,
                     allowed_models: c.allowed_models.clone().unwrap_or_default(),
                     denied_models: c.denied_models.clone().unwrap_or_default(),
-                }
+                };
+                constraints.normalize();
+                constraints
             })
-            .unwrap_or_else(|| AgentConstraints {
-                denied_capabilities: skills_denied,
-                ..Default::default()
+            .unwrap_or_else(|| {
+                let mut constraints = AgentConstraints {
+                    denied_capabilities: skills_denied,
+                    ..Default::default()
+                };
+                constraints.normalize();
+                constraints
             });
 
         let llm_config = self
@@ -229,8 +248,10 @@ impl AgentConfigFile {
             })
             .unwrap_or_default();
 
+        let id = self.agent.id;
         SubAgent {
-            id: self.agent.id,
+            template_id: id.clone(), // backward compat: template_id = id
+            id,
             name: self.agent.name,
             description: Some(self.agent.description),
             icon: self.agent.icon,
@@ -240,6 +261,149 @@ impl AgentConfigFile {
             preset,
             constraints,
             llm_config,
+        }
+    }
+
+    /// Create an `AgentConfigFile` from an `AgentTemplate`.
+    ///
+    /// This enables backward-compatible REST API responses: the template
+    /// is converted to the TOML-style structure callers already expect.
+    pub fn from_template(template: &AgentTemplate) -> Self {
+        let fm = &template.frontmatter;
+        let persona = extract_persona(template);
+
+        let meta = AgentMeta {
+            id: fm.id.clone(),
+            name: fm.name.clone(),
+            description: fm.description.clone(),
+            icon: fm.icon.clone(),
+        };
+
+        let skills = AgentSkillsConfig {
+            assigned: fm.skills.clone(),
+            denied: if fm.denied_skills.is_empty() {
+                None
+            } else {
+                Some(fm.denied_skills.clone())
+            },
+        };
+
+        let preset = AgentPresetConfig {
+            persona,
+            temperature: Some(fm.temperature),
+            verbosity: Some(fm.verbosity.clone()),
+        };
+
+        let constraints = {
+            let has_values = fm.max_tool_calls.is_some()
+                || fm.timeout_seconds.is_some()
+                || fm.max_cost_per_task.is_some()
+                || !fm.require_confirmation_for.is_empty()
+                || !fm.skills.is_empty()
+                || !fm.denied_skills.is_empty();
+
+            if has_values {
+                Some(AgentConstraintsConfig {
+                    max_tool_calls: fm.max_tool_calls,
+                    timeout_seconds: fm.timeout_seconds,
+                    max_cost_per_task: fm.max_cost_per_task,
+                    require_confirmation_for: if fm.require_confirmation_for.is_empty() {
+                        None
+                    } else {
+                        Some(fm.require_confirmation_for.clone())
+                    },
+                    allowed_capabilities: if fm.skills.is_empty() {
+                        None
+                    } else {
+                        Some(fm.skills.clone())
+                    },
+                    denied_capabilities: if fm.denied_skills.is_empty() {
+                        None
+                    } else {
+                        Some(fm.denied_skills.clone())
+                    },
+                    allowed_models: None,
+                    denied_models: None,
+                })
+            } else {
+                None
+            }
+        };
+
+        let llm = {
+            let has_values = fm.model.is_some() || !fm.fallback_models.is_empty();
+            if has_values {
+                Some(AgentLlmConfigFile {
+                    model: fm.model.clone(),
+                    fallback_models: if fm.fallback_models.is_empty() {
+                        None
+                    } else {
+                        Some(fm.fallback_models.clone())
+                    },
+                    overrides: None,
+                })
+            } else {
+                None
+            }
+        };
+
+        Self {
+            agent: meta,
+            skills,
+            preset,
+            constraints,
+            llm,
+        }
+    }
+
+    /// Convert this TOML config to an `AgentTemplate`.
+    ///
+    /// This is the reverse of `from_template()` and is used for
+    /// TOML→Markdown migration or when the REST API creates a template
+    /// from a TOML-format POST body.
+    pub fn into_template(self) -> AgentTemplate {
+        let skills_denied = self.skills.denied.clone().unwrap_or_default();
+
+        let frontmatter = AgentTemplateFrontmatter {
+            id: self.agent.id.clone(),
+            name: self.agent.name.clone(),
+            description: self.agent.description.clone(),
+            icon: self.agent.icon.clone(),
+            singleton: false, // default — only lead_agent overrides
+            skills: self.skills.assigned.clone(),
+            denied_skills: skills_denied,
+            temperature: self.preset.temperature.unwrap_or(0.5),
+            verbosity: self
+                .preset
+                .verbosity
+                .clone()
+                .unwrap_or_else(|| "normal".to_string()),
+            model: self.llm.as_ref().and_then(|l| l.model.clone()),
+            fallback_models: self
+                .llm
+                .as_ref()
+                .and_then(|l| l.fallback_models.clone())
+                .unwrap_or_default(),
+            max_tool_calls: self.constraints.as_ref().and_then(|c| c.max_tool_calls),
+            timeout_seconds: self.constraints.as_ref().and_then(|c| c.timeout_seconds),
+            max_cost_per_task: self.constraints.as_ref().and_then(|c| c.max_cost_per_task),
+            max_rounds: None,
+            require_confirmation_for: self
+                .constraints
+                .as_ref()
+                .and_then(|c| c.require_confirmation_for.clone())
+                .unwrap_or_default(),
+        };
+
+        // Build body from persona
+        let body = format!("## Persona\n\n{}", self.preset.persona);
+        let mut sections = HashMap::new();
+        sections.insert("Persona".to_string(), self.preset.persona.clone());
+
+        AgentTemplate {
+            frontmatter,
+            body,
+            sections,
         }
     }
 
@@ -259,7 +423,11 @@ impl AgentConfigFile {
         let preset = AgentPreset {
             persona: self.preset.persona.clone(),
             temperature: self.preset.temperature.unwrap_or(0.5),
-            verbosity: self.preset.verbosity.clone().unwrap_or_else(|| "normal".to_string()),
+            verbosity: self
+                .preset
+                .verbosity
+                .clone()
+                .unwrap_or_else(|| "normal".to_string()),
         };
 
         let skills_denied2 = self.skills.denied.clone().unwrap_or_default();
@@ -271,24 +439,25 @@ impl AgentConfigFile {
                     denied.push(d.clone());
                 }
             }
-            AgentConstraints {
+            let mut constraints = AgentConstraints {
                 max_tool_calls: c.max_tool_calls,
                 timeout_seconds: c.timeout_seconds,
                 max_cost_per_task: c.max_cost_per_task,
+                max_rounds: None,
                 require_confirmation_for: c.require_confirmation_for.clone().unwrap_or_default(),
                 allowed_capabilities: c.allowed_capabilities.clone().unwrap_or_default(),
                 denied_capabilities: denied,
                 allowed_models: c.allowed_models.clone().unwrap_or_default(),
                 denied_models: c.denied_models.clone().unwrap_or_default(),
-            }
+            };
+            constraints.normalize();
+            constraints
         });
 
-        let llm_config = self.llm.as_ref().map(|l| {
-            AgentLlmConfig {
-                model: l.model.clone(),
-                fallback_models: l.fallback_models.clone().unwrap_or_default(),
-                overrides: l.overrides.clone().unwrap_or_default(),
-            }
+        let llm_config = self.llm.as_ref().map(|l| AgentLlmConfig {
+            model: l.model.clone(),
+            fallback_models: l.fallback_models.clone().unwrap_or_default(),
+            overrides: l.overrides.clone().unwrap_or_default(),
         });
         let llm_config_json = llm_config
             .as_ref()
@@ -296,8 +465,10 @@ impl AgentConfigFile {
 
         let now = Utc::now();
 
+        let agent_id = self.agent.id.clone();
         SubAgentConfig {
-            id: self.agent.id,
+            id: agent_id.clone(),
+            template_id: agent_id,
             name: self.agent.name.clone(),
             description: Some(self.agent.description),
             icon: self.agent.icon,
@@ -351,7 +522,10 @@ require_confirmation_for = ["file_delete"]
         assert_eq!(config.agent.id, "test_agent");
         assert_eq!(config.skills.assigned.len(), 2);
         assert_eq!(config.preset.temperature, Some(0.3));
-        assert_eq!(config.constraints.as_ref().unwrap().max_tool_calls, Some(20));
+        assert_eq!(
+            config.constraints.as_ref().unwrap().max_tool_calls,
+            Some(20)
+        );
     }
 
     #[test]
@@ -380,7 +554,12 @@ require_confirmation_for = ["file_delete"]
         let config: AgentConfigFile = toml::from_str(sample_toml()).unwrap();
         let agent = config.into_subagent();
         // skills.denied = ["shell_execute"] should be merged
-        assert!(agent.constraints.denied_capabilities.contains(&"shell_execute".to_string()));
+        assert!(
+            agent
+                .constraints
+                .denied_capabilities
+                .contains(&"shell_execute".to_string())
+        );
     }
 
     #[test]
@@ -405,10 +584,23 @@ denied_capabilities = ["file_write"]
 "#;
         let config: AgentConfigFile = toml::from_str(toml_str).unwrap();
         let agent = config.into_subagent();
-        assert_eq!(agent.constraints.allowed_capabilities, vec!["web_search", "summarize"]);
+        assert_eq!(
+            agent.constraints.allowed_capabilities,
+            vec!["web_search", "summarize"]
+        );
         // "file_write" from denied_capabilities + "shell_execute" from skills.denied
-        assert!(agent.constraints.denied_capabilities.contains(&"file_write".to_string()));
-        assert!(agent.constraints.denied_capabilities.contains(&"shell_execute".to_string()));
+        assert!(
+            agent
+                .constraints
+                .denied_capabilities
+                .contains(&"file_write".to_string())
+        );
+        assert!(
+            agent
+                .constraints
+                .denied_capabilities
+                .contains(&"shell_execute".to_string())
+        );
     }
 
     #[test]
@@ -429,6 +621,135 @@ persona = "test"
         let config: AgentConfigFile = toml::from_str(toml_str).unwrap();
         let agent = config.into_subagent();
         // skills.denied should still be captured even without [constraints]
-        assert!(agent.constraints.denied_capabilities.contains(&"shell_execute".to_string()));
+        assert!(
+            agent
+                .constraints
+                .denied_capabilities
+                .contains(&"shell_execute".to_string())
+        );
+    }
+
+    // ── Template bridge tests ──────────────────────────────────────
+
+    fn sample_template() -> AgentTemplate {
+        use crate::agent::template::parse_agent_markdown;
+        parse_agent_markdown(
+            r#"---
+id: "bridge_agent"
+name: "Bridge Agent"
+description: "Agent for bridge testing"
+icon: "bridge"
+skills:
+  - "web_search"
+  - "summarize"
+denied_skills:
+  - "shell_execute"
+temperature: 0.3
+verbosity: "detailed"
+model: "claude-sonnet-4-5-20250929"
+fallback_models:
+  - "claude-haiku-4-5-20251001"
+max_tool_calls: 20
+timeout_seconds: 300
+max_cost_per_task: 0.50
+require_confirmation_for:
+  - "file_delete"
+---
+
+## Persona
+
+You are a bridge testing assistant.
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_from_template() {
+        let template = sample_template();
+        let config = AgentConfigFile::from_template(&template);
+
+        assert_eq!(config.agent.id, "bridge_agent");
+        assert_eq!(config.agent.name, "Bridge Agent");
+        assert_eq!(config.agent.icon, Some("bridge".to_string()));
+        assert_eq!(config.skills.assigned, vec!["web_search", "summarize"]);
+        assert_eq!(
+            config.skills.denied,
+            Some(vec!["shell_execute".to_string()])
+        );
+        assert_eq!(config.preset.temperature, Some(0.3));
+        assert_eq!(config.preset.verbosity, Some("detailed".to_string()));
+        assert!(config.preset.persona.contains("bridge testing assistant"));
+        assert_eq!(
+            config.constraints.as_ref().unwrap().max_tool_calls,
+            Some(20)
+        );
+        assert_eq!(
+            config.llm.as_ref().unwrap().model,
+            Some("claude-sonnet-4-5-20250929".to_string())
+        );
+        assert_eq!(
+            config.llm.as_ref().unwrap().fallback_models,
+            Some(vec!["claude-haiku-4-5-20251001".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_from_template_roundtrip_to_subagent() {
+        let template = sample_template();
+        let config = AgentConfigFile::from_template(&template);
+        let agent = config.into_subagent();
+
+        assert_eq!(agent.id, "bridge_agent");
+        assert_eq!(agent.template_id, "bridge_agent");
+        assert_eq!(agent.skills.len(), 2);
+        assert_eq!(agent.preset.temperature, 0.3);
+        assert!(
+            agent
+                .constraints
+                .denied_capabilities
+                .contains(&"shell_execute".to_string())
+        );
+        assert!(agent.status.is_available());
+    }
+
+    #[test]
+    fn test_into_template() {
+        let config: AgentConfigFile = toml::from_str(sample_toml()).unwrap();
+        let template = config.into_template();
+
+        assert_eq!(template.frontmatter.id, "test_agent");
+        assert_eq!(template.frontmatter.name, "Test Agent");
+        assert_eq!(template.frontmatter.skills, vec!["web_search", "summarize"]);
+        assert_eq!(template.frontmatter.denied_skills, vec!["shell_execute"]);
+        assert_eq!(template.frontmatter.temperature, 0.3);
+        assert_eq!(template.frontmatter.max_tool_calls, Some(20));
+        assert!(
+            template
+                .sections
+                .get("Persona")
+                .unwrap()
+                .contains("test assistant")
+        );
+        assert!(!template.frontmatter.singleton);
+    }
+
+    #[test]
+    fn test_into_template_roundtrip() {
+        // TOML → AgentConfigFile → AgentTemplate → AgentConfigFile → SubAgent
+        let config: AgentConfigFile = toml::from_str(sample_toml()).unwrap();
+        let template = config.into_template();
+        let config2 = AgentConfigFile::from_template(&template);
+        let agent = config2.into_subagent();
+
+        assert_eq!(agent.id, "test_agent");
+        assert_eq!(agent.skills.len(), 2);
+        assert_eq!(agent.preset.temperature, 0.3);
+        assert!(
+            agent
+                .constraints
+                .denied_capabilities
+                .contains(&"shell_execute".to_string())
+        );
     }
 }

@@ -402,14 +402,20 @@ mod tests {
     #[test]
     fn test_transient_error_classification() {
         // Transient errors (should trip)
-        assert!(is_transient_tool_error("HTTP request failed: connection refused"));
-        assert!(is_transient_tool_error("Tool 'api_call' timed out after 60s"));
+        assert!(is_transient_tool_error(
+            "HTTP request failed: connection refused"
+        ));
+        assert!(is_transient_tool_error(
+            "Tool 'api_call' timed out after 60s"
+        ));
         assert!(is_transient_tool_error("HTTP 503 — Service Unavailable"));
         assert!(is_transient_tool_error("HTTP 500 — Internal Server Error"));
         assert!(is_transient_tool_error("Connection refused"));
         assert!(is_transient_tool_error("connection reset by peer"));
         assert!(is_transient_tool_error("network error"));
-        assert!(is_transient_tool_error("Command failed (exit 1): something broke"));
+        assert!(is_transient_tool_error(
+            "Command failed (exit 1): something broke"
+        ));
         assert!(is_transient_tool_error("Command timed out after 30s"));
 
         // Permanent errors (should NOT trip)
@@ -417,8 +423,12 @@ mod tests {
         assert!(!is_transient_tool_error("HTTP 403 — Forbidden"));
         assert!(!is_transient_tool_error("Unknown tool: nonexistent"));
         assert!(!is_transient_tool_error("Access denied by policy"));
-        assert!(!is_transient_tool_error("Command failed (exit 127): not found"));
-        assert!(!is_transient_tool_error("Invalid argument: missing required field"));
+        assert!(!is_transient_tool_error(
+            "Command failed (exit 127): not found"
+        ));
+        assert!(!is_transient_tool_error(
+            "Invalid argument: missing required field"
+        ));
     }
 
     #[test]

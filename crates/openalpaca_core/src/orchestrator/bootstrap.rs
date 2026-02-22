@@ -32,20 +32,14 @@ impl Orchestrator {
         let identity_populated = self
             .identity_document
             .read()
-            .map(|g| {
-                g.as_ref()
-                    .map_or(false, |d| identity_document_has_content(d))
-            })
+            .map(|g| g.as_ref().is_some_and(identity_document_has_content))
             .unwrap_or(false);
 
         // Check user
         let user_populated = self
             .user_document
             .read()
-            .map(|g| {
-                g.as_ref()
-                    .map_or(false, |d| user_document_has_content(d))
-            })
+            .map(|g| g.as_ref().is_some_and(user_document_has_content))
             .unwrap_or(false);
 
         if !identity_populated || !user_populated {
@@ -63,12 +57,12 @@ impl Orchestrator {
         tracing::info!("Bootstrap onboarding complete! Identity and user profile populated.");
 
         // Delete BOOTSTRAP.md from disk
-        if let Ok(guard) = self.bootstrap_path.read() {
-            if let Some(ref path) = *guard {
-                match std::fs::remove_file(path) {
-                    Ok(()) => tracing::info!("Deleted BOOTSTRAP.md: {}", path.display()),
-                    Err(e) => tracing::warn!("Failed to delete BOOTSTRAP.md: {e}"),
-                }
+        if let Ok(guard) = self.bootstrap_path.read()
+            && let Some(ref path) = *guard
+        {
+            match std::fs::remove_file(path) {
+                Ok(()) => tracing::info!("Deleted BOOTSTRAP.md: {}", path.display()),
+                Err(e) => tracing::warn!("Failed to delete BOOTSTRAP.md: {e}"),
             }
         }
 

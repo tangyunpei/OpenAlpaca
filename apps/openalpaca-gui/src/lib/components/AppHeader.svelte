@@ -11,7 +11,7 @@
   let { statusState, info, onToggleSettings }: Props = $props();
 </script>
 
-<header class="flex justify-between items-center mb-6 pb-4 border-b-2 border-primary flex-wrap gap-2.5">
+<header class="flex justify-between items-center mb-6 pb-4 border-b-2 border-primary flex-wrap gap-2.5 shrink-0">
   <div class="flex flex-col gap-1 min-w-0">
     <h1 class="m-0 text-2xl font-extrabold text-foreground tracking-tight max-[480px]:text-xl">
       OpenAlpaca

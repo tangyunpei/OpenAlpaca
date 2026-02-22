@@ -1,7 +1,7 @@
-use async_trait::async_trait;
-use base64::Engine as _;
 use crate::middleware::user::{parse_user_markdown, render_user_markdown};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+use async_trait::async_trait;
+use base64::Engine as _;
 use openalpaca_llm::ToolDefinition;
 use std::sync::Arc;
 
@@ -170,8 +170,7 @@ impl UserUpdateTool {
         }
 
         // Validate frontmatter (lenient: sections are optional)
-        parse_user_markdown(&content)
-            .map_err(|e| format!("USER validation failed: {}", e))?;
+        parse_user_markdown(&content).map_err(|e| format!("USER validation failed: {}", e))?;
 
         Ok(content)
     }

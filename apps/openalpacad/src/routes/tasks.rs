@@ -69,13 +69,13 @@ pub async fn create_task_handler(
             Json(serde_json::json!({ "error": "Title must be 1-500 characters" })),
         );
     }
-    if let Some(ref desc) = request.description {
-        if desc.len() > 10_000 {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "Description must be at most 10000 characters" })),
-            );
-        }
+    if let Some(ref desc) = request.description
+        && desc.len() > 10_000
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Description must be at most 10000 characters" })),
+        );
     }
 
     let task_id = Uuid::new_v4().to_string();
@@ -154,7 +154,9 @@ pub async fn list_tasks_handler(
                 Err(_) => {
                     return (
                         StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({ "error": format!("Invalid status: {}", status_str) })),
+                        Json(
+                            serde_json::json!({ "error": format!("Invalid status: {}", status_str) }),
+                        ),
                     );
                 }
             }
@@ -166,26 +168,40 @@ pub async fn list_tasks_handler(
     match tasks {
         Ok(tasks) => {
             let repo = TaskRepository::new(&state.db);
-            let enriched: Vec<serde_json::Value> = tasks.iter().map(|t| {
-                let assignments = repo.get_assignments(&t.id).unwrap_or_default();
-                let agents: Vec<serde_json::Value> = assignments.iter().map(|a| {
-                    serde_json::json!({
-                        "agent_id": a.agent_id,
-                        "role": a.role,
-                        "status": a.status.as_str()
-                    })
-                }).collect();
-                match serde_json::to_value(t) {
-                    Ok(mut v) => {
-                        if let Some(obj) = v.as_object_mut() {
-                            obj.insert("assigned_agents".to_string(), serde_json::json!(agents));
+            let enriched: Vec<serde_json::Value> = tasks
+                .iter()
+                .map(|t| {
+                    let assignments = repo.get_assignments(&t.id).unwrap_or_default();
+                    let agents: Vec<serde_json::Value> = assignments
+                        .iter()
+                        .map(|a| {
+                            serde_json::json!({
+                                "agent_id": a.agent_id,
+                                "role": a.role,
+                                "status": a.status.as_str()
+                            })
+                        })
+                        .collect();
+                    match serde_json::to_value(t) {
+                        Ok(mut v) => {
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.insert(
+                                    "assigned_agents".to_string(),
+                                    serde_json::json!(agents),
+                                );
+                            }
+                            v
                         }
-                        v
+                        Err(_) => {
+                            serde_json::json!({ "id": t.id, "error": "serialization_failed" })
+                        }
                     }
-                    Err(_) => serde_json::json!({ "id": t.id, "error": "serialization_failed" })
-                }
-            }).collect();
-            (StatusCode::OK, Json(serde_json::to_value(enriched).unwrap_or_else(|_| serde_json::json!([]))))
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(enriched).unwrap_or_else(|_| serde_json::json!([]))),
+            )
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -296,16 +312,14 @@ pub async fn get_task_dag_handler(
                 .nodes
                 .iter()
                 .filter(|n| {
-                    n.status
-                        == openalpaca_core::orchestrator::task_planner::DagNodeStatus::Running
+                    n.status == openalpaca_core::orchestrator::task_planner::DagNodeStatus::Running
                 })
                 .count();
             let failed = dag
                 .nodes
                 .iter()
                 .filter(|n| {
-                    n.status
-                        == openalpaca_core::orchestrator::task_planner::DagNodeStatus::Failed
+                    n.status == openalpaca_core::orchestrator::task_planner::DagNodeStatus::Failed
                 })
                 .count();
 
@@ -367,6 +381,15 @@ pub async fn task_action_handler(
                     })),
                 );
             }
+
+            // Trigger actual cancellation of the running task
+            let cancelled = state.gateway.shared_context.cancel_task(&id);
+            if cancelled {
+                tracing::info!(task_id = %id, "Task cancellation triggered via API");
+            } else {
+                tracing::warn!(task_id = %id, "No cancellation token found — task may have already completed");
+            }
+
             TaskStatus::Cancelled
         }
         "pause" => {

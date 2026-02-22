@@ -2,10 +2,11 @@
 //! and decides whether to continue, modify the remaining DAG, or abort.
 
 use crate::agent::subagent::SubAgent;
-use crate::orchestrator::task_planner::{extract_json_block, DagNode, DagNodeStatus, TaskDag};
+use crate::orchestrator::task_planner::{DagNode, DagNodeStatus, TaskDag, extract_json_block};
 use crate::orchestrator::task_state::TaskWorkspace;
 use openalpaca_llm::{ChatMessage, LlmRouter, RequestContext, RouterRequest};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 // ── Configuration ────────────────────────────────────────────────────
 
@@ -39,13 +40,9 @@ pub enum ReplanDecision {
     /// Plan is on track, no changes needed.
     Continue,
     /// Replace remaining DAG with a new version.
-    ModifyDag {
-        dag: TaskDag,
-    },
+    ModifyDag { dag: TaskDag },
     /// Give up — task is unachievable or no longer makes sense.
-    Abort {
-        reason: String,
-    },
+    Abort { reason: String },
 }
 
 // ── Replanner ────────────────────────────────────────────────────────
@@ -87,7 +84,7 @@ impl Replanner {
         let request = RouterRequest {
             model: None,
             messages,
-            tools: vec![],
+            tools: Arc::new(vec![]),
             temperature: Some(0.0),
             max_tokens: Some(2048),
             context: RequestContext::default(),
@@ -116,28 +113,22 @@ impl Replanner {
 
         // Original objective
         prompt.push_str(&format!(
-            "## Original Objective\n{}\n\n",
+            "<original_objective>\n{}\n</original_objective>\n\n",
             original_objective
         ));
 
         // Current DAG state
-        prompt.push_str("## Current DAG State\n");
+        prompt.push_str("<dag_state>\n");
         for node in &dag.nodes {
             let status = match &node.status {
                 DagNodeStatus::Completed => {
-                    let summary = node
-                        .result_summary
-                        .as_deref()
-                        .unwrap_or("(no summary)");
+                    let summary = node.result_summary.as_deref().unwrap_or("(no summary)");
                     // Cap summary to 200 chars for prompt
                     let capped: String = summary.chars().take(200).collect();
                     format!("COMPLETED — {}", capped)
                 }
                 DagNodeStatus::Failed => {
-                    let err = node
-                        .result_summary
-                        .as_deref()
-                        .unwrap_or("(no error)");
+                    let err = node.result_summary.as_deref().unwrap_or("(no error)");
                     let capped: String = err.chars().take(200).collect();
                     format!("FAILED — {}", capped)
                 }
@@ -151,18 +142,18 @@ impl Replanner {
                 node.node_id, node.title, node.agent_name, status
             ));
         }
-        prompt.push('\n');
+        prompt.push_str("</dag_state>\n\n");
 
         // Workspace contents (summaries only)
         let workspace_summary = workspace.format_for_prompt(&[]);
         if !workspace_summary.is_empty() {
-            prompt.push_str("## Workspace Contents (summaries of completed work)\n");
+            prompt.push_str("<workspace>\n");
             prompt.push_str(&workspace_summary);
-            prompt.push('\n');
+            prompt.push_str("</workspace>\n\n");
         }
 
         // Available agents
-        prompt.push_str("## Available Agents\n");
+        prompt.push_str("<available_agents>\n");
         if idle_agents.is_empty() {
             prompt.push_str("No agents are currently available.\n");
         } else {
@@ -174,17 +165,17 @@ impl Replanner {
                 ));
             }
         }
-        prompt.push('\n');
+        prompt.push_str("</available_agents>\n\n");
 
         // Context
         prompt.push_str(&format!(
-            "## Context\nReplans so far: {} (be conservative — avoid unnecessary changes)\n\n",
+            "<context>\nReplans so far: {} (be conservative — avoid unnecessary changes)\n</context>\n\n",
             replans_so_far
         ));
 
-        // Response format
+        // Response format and rules
         prompt.push_str(
-            r#"## Response Format
+            r#"<response_format>
 Respond with ONLY a single JSON object. No markdown, no explanation, no other text.
 
 If the plan is on track:
@@ -198,14 +189,16 @@ If the plan needs modification (replace remaining PENDING/READY nodes with new n
 
 If the task should be abandoned:
 {"decision": "abort", "reason": "Explanation of why the task cannot be completed"}
+</response_format>
 
-## Rules
+<rules>
 - Prefer "continue" unless completed results clearly show the remaining plan is wrong
 - A "modify_dag" replaces only PENDING/READY/SKIPPED nodes; COMPLETED/RUNNING nodes are kept
 - New nodes in modify_dag can reference output_keys from already-completed nodes
 - Use exact agent_id values from the Available Agents list
 - 2-8 nodes max in modified DAG
 - Only abort if the task is fundamentally impossible given completed results
+</rules>
 "#,
         );
 
@@ -230,30 +223,30 @@ If the task should be abandoned:
         }
 
         // Fallback: extract from loose Value
-        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(json_str) {
-            if let Some(decision_str) = obj.get("decision").and_then(|v| v.as_str()) {
-                return match decision_str {
-                    "continue" => Ok(ReplanDecision::Continue),
-                    "abort" => {
-                        let reason = obj
-                            .get("reason")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("No reason provided")
-                            .to_string();
-                        Ok(ReplanDecision::Abort { reason })
-                    }
-                    "modify_dag" => {
-                        let dag: TaskDag = obj
-                            .get("dag")
-                            .and_then(|v| serde_json::from_value(v.clone()).ok())
-                            .ok_or("modify_dag decision missing valid 'dag' field")?;
-                        dag.validate(available_agents)
-                            .map_err(|e| format!("Replanned DAG validation failed: {e}"))?;
-                        Ok(ReplanDecision::ModifyDag { dag })
-                    }
-                    other => Err(format!("Unknown decision: '{other}'")),
-                };
-            }
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(json_str)
+            && let Some(decision_str) = obj.get("decision").and_then(|v| v.as_str())
+        {
+            return match decision_str {
+                "continue" => Ok(ReplanDecision::Continue),
+                "abort" => {
+                    let reason = obj
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("No reason provided")
+                        .to_string();
+                    Ok(ReplanDecision::Abort { reason })
+                }
+                "modify_dag" => {
+                    let dag: TaskDag = obj
+                        .get("dag")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .ok_or("modify_dag decision missing valid 'dag' field")?;
+                    dag.validate(available_agents)
+                        .map_err(|e| format!("Replanned DAG validation failed: {e}"))?;
+                    Ok(ReplanDecision::ModifyDag { dag })
+                }
+                other => Err(format!("Unknown decision: '{other}'")),
+            };
         }
 
         // If all parsing fails, default to continue (conservative)
@@ -263,7 +256,6 @@ If the task should be abandoned:
         );
         Ok(ReplanDecision::Continue)
     }
-
 }
 
 // ── Merge logic ──────────────────────────────────────────────────────
@@ -311,21 +303,22 @@ pub fn merge_replanned_dag(
     };
 
     // Full validation: dependency existence, cycle detection, AND agent existence
-    merged.validate(available_agents).map_err(|e| {
-        format!("Merged DAG validation failed: {}", e)
-    })?;
+    merged
+        .validate(available_agents)
+        .map_err(|e| format!("Merged DAG validation failed: {}", e))?;
 
     // Warn about agents that exist but aren't currently available
     for node in &merged.nodes {
-        if matches!(node.status, DagNodeStatus::Pending) {
-            if let Some(agent) = available_agents.iter().find(|a| a.id == node.agent_id) {
-                if !agent.status.is_available() {
-                    tracing::warn!(
-                        "Merged DAG node '{}' references agent '{}' which is currently {:?}",
-                        node.node_id, agent.id, agent.status
-                    );
-                }
-            }
+        if matches!(node.status, DagNodeStatus::Pending)
+            && let Some(agent) = available_agents.iter().find(|a| a.id == node.agent_id)
+            && !agent.status.is_available()
+        {
+            tracing::warn!(
+                "Merged DAG node '{}' references agent '{}' which is currently {:?}",
+                node.node_id,
+                agent.id,
+                agent.status
+            );
         }
     }
 
@@ -340,6 +333,7 @@ mod tests {
         use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus};
         SubAgent {
             id: id.to_string(),
+            template_id: id.to_string(),
             name: name.to_string(),
             description: Some(format!("Test agent {}", name)),
             icon: None,
@@ -412,13 +406,16 @@ mod tests {
         let json = r#"{"decision": "modify_dag", "dag": {"nodes": [
             {"node_id": "new_1", "title": "New task", "description": "Do new thing",
              "agent_id": "agent-1", "agent_name": "Agent One",
-             "depends_on": [], "workspace_keys": [], "output_key": "new_output"}
+             "depends_on": [], "workspace_keys": [], "output_key": "new_output"},
+            {"node_id": "new_2", "title": "Follow-up", "description": "Do follow-up",
+             "agent_id": "agent-1", "agent_name": "Agent One",
+             "depends_on": ["new_1"], "workspace_keys": ["new_output"], "output_key": "final_output"}
         ]}}"#;
         let agents = make_agents();
         let result = Replanner::parse_decision(json, &agents).unwrap();
         match result {
             ReplanDecision::ModifyDag { dag } => {
-                assert_eq!(dag.nodes.len(), 1);
+                assert_eq!(dag.nodes.len(), 2);
                 assert_eq!(dag.nodes[0].node_id, "new_1");
             }
             _ => panic!("Expected ModifyDag"),
@@ -430,7 +427,10 @@ mod tests {
         let json = r#"{"decision": "modify_dag", "dag": {"nodes": [
             {"node_id": "new_1", "title": "New task", "description": "Do new thing",
              "agent_id": "nonexistent-agent", "agent_name": "Ghost",
-             "depends_on": [], "workspace_keys": [], "output_key": "new_output"}
+             "depends_on": [], "workspace_keys": [], "output_key": "new_output"},
+            {"node_id": "new_2", "title": "Follow-up", "description": "Do follow-up",
+             "agent_id": "agent-1", "agent_name": "Agent One",
+             "depends_on": ["new_1"], "workspace_keys": ["new_output"], "output_key": "final_output"}
         ]}}"#;
         let agents = make_agents();
         let result = Replanner::parse_decision(json, &agents);
@@ -466,9 +466,7 @@ mod tests {
             ],
         };
         let new_dag = TaskDag {
-            nodes: vec![
-                make_node("n4", "agent-2", &["n1"], DagNodeStatus::Pending),
-            ],
+            nodes: vec![make_node("n4", "agent-2", &["n1"], DagNodeStatus::Pending)],
         };
 
         let merged = merge_replanned_dag(&existing, &new_dag, &make_agents()).unwrap();
@@ -487,9 +485,7 @@ mod tests {
             ],
         };
         let new_dag = TaskDag {
-            nodes: vec![
-                make_node("n5", "agent-2", &["n2"], DagNodeStatus::Pending),
-            ],
+            nodes: vec![make_node("n5", "agent-2", &["n2"], DagNodeStatus::Pending)],
         };
 
         let merged = merge_replanned_dag(&existing, &new_dag, &make_agents()).unwrap();
@@ -502,9 +498,7 @@ mod tests {
     #[test]
     fn test_merge_deduplicates_node_ids() {
         let existing = TaskDag {
-            nodes: vec![
-                make_node("n1", "agent-1", &[], DagNodeStatus::Completed),
-            ],
+            nodes: vec![make_node("n1", "agent-1", &[], DagNodeStatus::Completed)],
         };
         // New DAG reuses n1 id (should be skipped since it's already completed)
         let new_dag = TaskDag {
@@ -530,9 +524,7 @@ mod tests {
             ],
         };
         let new_dag = TaskDag {
-            nodes: vec![
-                make_node("n4", "agent-2", &["n1"], DagNodeStatus::Pending),
-            ],
+            nodes: vec![make_node("n4", "agent-2", &["n1"], DagNodeStatus::Pending)],
         };
 
         let merged = merge_replanned_dag(&existing, &new_dag, &make_agents()).unwrap();
@@ -551,9 +543,7 @@ mod tests {
         };
         // New DAG references n2, which was dropped (it was Pending in existing)
         let new_dag = TaskDag {
-            nodes: vec![
-                make_node("n4", "agent-2", &["n2"], DagNodeStatus::Pending),
-            ],
+            nodes: vec![make_node("n4", "agent-2", &["n2"], DagNodeStatus::Pending)],
         };
 
         let result = merge_replanned_dag(&existing, &new_dag, &make_agents());
@@ -565,9 +555,7 @@ mod tests {
     fn test_merge_rejects_cycle() {
         // Existing: n1 completed
         let existing = TaskDag {
-            nodes: vec![
-                make_node("n1", "agent-1", &[], DagNodeStatus::Completed),
-            ],
+            nodes: vec![make_node("n1", "agent-1", &[], DagNodeStatus::Completed)],
         };
         // New DAG introduces a cycle: n2 depends on n3, n3 depends on n2
         let new_dag = TaskDag {
@@ -585,15 +573,16 @@ mod tests {
     #[test]
     fn test_merge_rejects_unknown_agent() {
         let existing = TaskDag {
-            nodes: vec![
-                make_node("n1", "agent-1", &[], DagNodeStatus::Completed),
-            ],
+            nodes: vec![make_node("n1", "agent-1", &[], DagNodeStatus::Completed)],
         };
         // New DAG references an agent that doesn't exist in make_agents()
         let new_dag = TaskDag {
-            nodes: vec![
-                make_node("n2", "ghost-agent", &["n1"], DagNodeStatus::Pending),
-            ],
+            nodes: vec![make_node(
+                "n2",
+                "ghost-agent",
+                &["n1"],
+                DagNodeStatus::Pending,
+            )],
         };
 
         let result = merge_replanned_dag(&existing, &new_dag, &make_agents());
