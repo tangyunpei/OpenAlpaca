@@ -68,6 +68,31 @@ pub struct DispatchDecision {
 pub fn analyze_plan(plan: &TaskPlan) -> DispatchDecision {
     let now = Utc::now();
 
+    // 0. V2 protocol: execution_mode field takes priority when present
+    if let Some(ref em) = plan.execution_mode {
+        let mode = match em.as_str() {
+            "lead_agent" => Some(DispatchMode::LeadAgent),
+            "dag" if plan.dag.is_some() => Some(DispatchMode::DagParallel),
+            "pipeline" if !plan.assignments.is_empty() => Some(DispatchMode::SequentialPipeline),
+            _ => None,
+        };
+        if let Some(mode) = mode {
+            return DispatchDecision {
+                mode,
+                reason: DecisionReason::ExecutionModeField,
+                agent_count: plan
+                    .dag
+                    .as_ref()
+                    .map(|d| d.nodes.len())
+                    .unwrap_or(plan.assignments.len()),
+                dag_node_count: plan.dag.as_ref().map(|d| d.nodes.len()),
+                predictability_score: plan.predictability_score,
+                planner_requested_mode: plan.execution_mode.clone(),
+                timestamp: now,
+            };
+        }
+    }
+
     // 1. Lead Agent path: use_lead_agent=true
     if plan.use_lead_agent {
         return DispatchDecision {
@@ -202,6 +227,86 @@ mod tests {
     fn test_analyze_dispatch_empty_fallback() {
         let plan = make_simple_plan();
 
+        let decision = analyze_plan(&plan);
+        assert_eq!(decision.mode, DispatchMode::LeadAgent);
+        assert_eq!(decision.reason, DecisionReason::EmptyAssignmentsFallback);
+    }
+
+    #[test]
+    fn test_analyze_v2_execution_mode_field_lead() {
+        let mut plan = make_simple_plan();
+        plan.execution_mode = Some("lead_agent".to_string());
+
+        let decision = analyze_plan(&plan);
+        assert_eq!(decision.mode, DispatchMode::LeadAgent);
+        assert_eq!(decision.reason, DecisionReason::ExecutionModeField);
+        assert_eq!(
+            decision.planner_requested_mode.as_deref(),
+            Some("lead_agent")
+        );
+    }
+
+    #[test]
+    fn test_analyze_v2_execution_mode_field_dag() {
+        let mut plan = make_simple_plan();
+        plan.execution_mode = Some("dag".to_string());
+        plan.dag = Some(TaskDag {
+            nodes: vec![
+                make_dag_node("n1", &[]),
+                make_dag_node("n2", &["n1"]),
+                make_dag_node("n3", &["n1"]),
+            ],
+        });
+
+        let decision = analyze_plan(&plan);
+        assert_eq!(decision.mode, DispatchMode::DagParallel);
+        assert_eq!(decision.reason, DecisionReason::ExecutionModeField);
+        assert_eq!(decision.agent_count, 3);
+        assert_eq!(decision.dag_node_count, Some(3));
+    }
+
+    #[test]
+    fn test_analyze_v2_execution_mode_field_pipeline() {
+        let mut plan = make_simple_plan();
+        plan.execution_mode = Some("pipeline".to_string());
+        plan.assignments = vec![PlannedAssignment {
+            agent_id: "agent_1".to_string(),
+            agent_name: "Agent One".to_string(),
+            role_description: "Step 1".to_string(),
+            matched_skills: vec!["coding".to_string()],
+        }];
+
+        let decision = analyze_plan(&plan);
+        assert_eq!(decision.mode, DispatchMode::SequentialPipeline);
+        assert_eq!(decision.reason, DecisionReason::ExecutionModeField);
+        assert_eq!(decision.agent_count, 1);
+    }
+
+    #[test]
+    fn test_analyze_v2_unknown_mode_falls_through() {
+        let mut plan = make_simple_plan();
+        plan.execution_mode = Some("unknown_mode".to_string());
+        // No use_lead_agent, no dag, no assignments → EmptyAssignmentsFallback
+        let decision = analyze_plan(&plan);
+        assert_eq!(decision.mode, DispatchMode::LeadAgent);
+        assert_eq!(decision.reason, DecisionReason::EmptyAssignmentsFallback);
+    }
+
+    #[test]
+    fn test_analyze_v2_dag_mode_without_dag_falls_through() {
+        let mut plan = make_simple_plan();
+        plan.execution_mode = Some("dag".to_string());
+        // execution_mode="dag" but no actual dag → falls through
+        let decision = analyze_plan(&plan);
+        assert_eq!(decision.mode, DispatchMode::LeadAgent);
+        assert_eq!(decision.reason, DecisionReason::EmptyAssignmentsFallback);
+    }
+
+    #[test]
+    fn test_analyze_v2_pipeline_mode_without_assignments_falls_through() {
+        let mut plan = make_simple_plan();
+        plan.execution_mode = Some("pipeline".to_string());
+        // execution_mode="pipeline" but no assignments → falls through to EmptyAssignmentsFallback
         let decision = analyze_plan(&plan);
         assert_eq!(decision.mode, DispatchMode::LeadAgent);
         assert_eq!(decision.reason, DecisionReason::EmptyAssignmentsFallback);

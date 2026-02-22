@@ -447,7 +447,8 @@ export interface LatencyAggregate {
 
 export interface DispatchDecisionRecord {
   id: number;
-  task_id: string;
+  request_id: string;
+  task_id: string | null;
   mode: string;
   reason: string;
   agent_count: number;

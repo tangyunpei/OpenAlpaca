@@ -348,6 +348,7 @@ pub fn spawn_event_bridge(
                     tracing::debug!("Planner bypassed: request={request_id}, reason={reason}");
                 }
                 openalpaca_core::events::SystemEvent::DispatchDecision {
+                    request_id,
                     task_id,
                     mode,
                     reason,
@@ -355,7 +356,7 @@ pub fn spawn_event_bridge(
                     ..
                 } => {
                     tracing::debug!(
-                        "DispatchDecision: task={task_id}, mode={mode}, reason={reason}, agents={agent_count}"
+                        "DispatchDecision: request={request_id}, task={task_id:?}, mode={mode}, reason={reason}, agents={agent_count}"
                     );
                 }
                 openalpaca_core::events::SystemEvent::OrchestrationStage {

@@ -36,7 +36,8 @@ export type ServerEvent =
   | { type: "llm_call_completed"; agent_id: string; model: string; input_tokens: number; output_tokens: number; cost_usd: number; ts: string; instance_id: string; _id: number }
   | { type: "skill_catalog_updated"; skill_name: string; action: string; ts: string; instance_id: string; _id: number }
   | { type: "task_replanned"; task_id: string; replan_number: number; decision: string; nodes_added: number; nodes_removed: number; ts: string; instance_id: string; _id: number }
-  | { type: "soul_updated"; actor: string; mode: string; content_sha256: string; backup_path: string | null; ts: string; instance_id: string; _id: number };
+  | { type: "soul_updated"; actor: string; mode: string; content_sha256: string; backup_path: string | null; ts: string; instance_id: string; _id: number }
+  | { type: "daemon_config_changed"; ts: string; instance_id: string; _id: number };
 
 /** Connection state */
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "error";
