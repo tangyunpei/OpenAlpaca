@@ -186,6 +186,7 @@ impl TaskDispatcher {
                     task_id: Some(task_id.clone()),
                     agent_id: Some(agent_id.clone()),
                     db: db.clone(),
+                    workspace_id: workspace_id.clone(),
                 };
                 let contextual_executor =
                     Arc::new(ContextualToolExecutor::new(tool_registry.clone(), ctx_exec));

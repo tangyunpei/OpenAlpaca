@@ -231,7 +231,7 @@ mod tests {
 
         let db = Database::open(&db_path).unwrap();
         assert!(db_path.exists());
-        assert_eq!(db.schema_version().unwrap(), 25);
+        assert_eq!(db.schema_version().unwrap(), 26);
     }
 
     #[test]
@@ -243,7 +243,7 @@ mod tests {
         let _db1 = Database::open(&db_path).unwrap();
         let db2 = Database::open(&db_path).unwrap();
 
-        assert_eq!(db2.schema_version().unwrap(), 25);
+        assert_eq!(db2.schema_version().unwrap(), 26);
     }
 
     #[test]

@@ -64,7 +64,7 @@ impl ChatService {
     /// 3. `Done { content, model, tokens_in, tokens_out, duration_ms }` — full text + metadata
     ///
     /// On error: `Thinking` → `Error { message }`.
-    pub fn send_message(&self, content: String, principal: &str) -> Result<ChatSendResponse> {
+    pub fn send_message(&self, content: String, principal: &str, workspace_path: Option<String>) -> Result<ChatSendResponse> {
         let lane_key = format!("{principal}:gui");
 
         let (stream_id, _rx, sink) = self.stream_manager.create_stream(&lane_key);
@@ -98,6 +98,7 @@ impl ChatService {
                         global_id: principal_owned.clone(),
                     },
                     scope: Scope::Global,
+                    workspace_path,
                 })
                 .await;
 

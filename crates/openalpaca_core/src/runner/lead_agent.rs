@@ -266,6 +266,7 @@ pub struct SpawnSubagentTool {
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     /// Tracks how many subagents have been spawned (for observability).
     spawn_count: AtomicUsize,
+    workspace_id: Option<String>,
     /// Cancellation token from the parent lead agent task.
     /// Child tokens are created for each subagent so they auto-cancel
     /// when the parent task is cancelled.
@@ -297,6 +298,7 @@ impl SpawnSubagentTool {
         tracker: Arc<SubagentTracker>,
         depth: u32,
         max_concurrent_subagents: usize,
+        workspace_id: Option<String>,
     ) -> Self {
         Self {
             router,
@@ -314,6 +316,7 @@ impl SpawnSubagentTool {
             depth,
             max_concurrent_subagents,
             concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent_subagents)),
+            workspace_id,
         }
     }
 
@@ -416,6 +419,7 @@ impl BuiltInTool for SpawnSubagentTool {
             task_id: Some(self.task_id.clone()),
             agent_id: Some(agent_id.to_string()),
             db: self.db.clone(),
+            workspace_id: self.workspace_id.clone(),
         };
         let contextual_executor = Arc::new(ContextualToolExecutor::new(
             self.tool_registry.clone(),
@@ -1196,6 +1200,7 @@ pub async fn run_lead_agent(
             .execution
             .lead_agent_defaults
             .max_concurrent_subagents,
+        workspace_id.clone(),
     ));
 
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
@@ -1210,6 +1215,7 @@ pub async fn run_lead_agent(
         task_id: Some(task_id.to_string()),
         agent_id: Some(lead_agent.id.clone()),
         db: db.clone(),
+        workspace_id: workspace_id.clone(),
     };
     let contextual_executor =
         Arc::new(ContextualToolExecutor::new(tool_registry.clone(), ctx_exec));
@@ -1300,7 +1306,9 @@ pub async fn run_lead_agent(
                 budget -= entry.len();
                 block.push_str(&entry);
             }
-            messages.push(ChatMessage::system(&block));
+            messages.push(ChatMessage::user(
+                &crate::orchestrator::wrap_untrusted_context(&block, "retrieved_memory", "retrieved"),
+            ));
         }
     }
 
@@ -1431,6 +1439,7 @@ mod tests {
             task_id: Some("task-1".to_string()),
             agent_id: None,
             db: None,
+            workspace_id: None,
         };
         let contextual = Arc::new(ContextualToolExecutor::new(registry.clone(), ctx_exec));
 
@@ -1456,6 +1465,7 @@ mod tests {
             lead_template_id: "test-lead".to_string(),
             daemon_config: Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
             spawn_count: AtomicUsize::new(0),
+            workspace_id: None,
             cancel_token: None,
             tracker: tracker.clone(),
             depth: 0,
@@ -1781,6 +1791,7 @@ mod tests {
             tracker.clone(),
             0,
             DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+            None, // workspace_id
         ));
         let check_tool = Arc::new(CheckSubagentStatusTool {
             tracker: tracker.clone(),
@@ -1791,6 +1802,7 @@ mod tests {
             task_id: Some("task-1".to_string()),
             agent_id: None,
             db: None,
+            workspace_id: None,
         };
         let contextual = Arc::new(ContextualToolExecutor::new(registry, ctx_exec));
 
@@ -1848,6 +1860,7 @@ mod tests {
             tracker.clone(),
             0,
             DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+            None, // workspace_id
         ));
         let batch_tool = Some(Arc::new(SpawnSubagentsBatchTool::new(spawn_tool.clone())));
         let check_tool = Arc::new(CheckSubagentStatusTool {
@@ -1859,6 +1872,7 @@ mod tests {
             task_id: Some("task-1".to_string()),
             agent_id: None,
             db: None,
+            workspace_id: None,
         };
         let contextual = Arc::new(ContextualToolExecutor::new(registry, ctx_exec));
 
@@ -1900,6 +1914,7 @@ mod tests {
             tracker,
             0,
             DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+            None, // workspace_id
         ));
         let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
 
@@ -1935,6 +1950,7 @@ mod tests {
             tracker,
             0,
             DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+            None, // workspace_id
         ));
         let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
 

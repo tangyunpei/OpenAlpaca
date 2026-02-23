@@ -47,6 +47,7 @@ pub trait MessageHandler: Send + Sync {
         principal: Principal,
         scope: Scope,
         lane_key: String,
+        workspace_path: Option<String>,
     ) -> Result<HandleResult, String>;
 }
 
@@ -56,6 +57,9 @@ pub struct GatewayRequest {
     pub content: String,
     pub principal: Principal,
     pub scope: Scope,
+    /// Optional workspace path provided by the client (GUI project dir, CLI cwd).
+    /// Used for memory scoping instead of the daemon's CWD.
+    pub workspace_path: Option<String>,
 }
 
 /// Response from the gateway after handling a message.
@@ -146,6 +150,7 @@ impl Gateway {
                 req.principal,
                 req.scope,
                 lane_key_str.clone(),
+                req.workspace_path,
             )
             .await
         {
@@ -196,6 +201,7 @@ impl Gateway {
             content: content.to_string(),
             principal: Principal::System,
             scope: Scope::Global,
+            workspace_path: None,
         })
         .await
     }
@@ -234,6 +240,7 @@ mod tests {
             _principal: Principal,
             _scope: Scope,
             _lane_key: String,
+            _workspace_path: Option<String>,
         ) -> Result<HandleResult, String> {
             Ok(HandleResult::text(format!("Echo: {content}")))
         }
@@ -252,6 +259,7 @@ mod tests {
             _principal: Principal,
             _scope: Scope,
             _lane_key: String,
+            _workspace_path: Option<String>,
         ) -> Result<HandleResult, String> {
             Err("Access denied".to_string())
         }
@@ -294,6 +302,7 @@ mod tests {
                 content: "hello".to_string(),
                 principal: Principal::System,
                 scope: Scope::Global,
+                workspace_path: None,
             })
             .await;
         assert_eq!(resp.lane_key.user_id, "user1");
@@ -315,6 +324,7 @@ mod tests {
             content: "hi".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
+            workspace_path: None,
         })
         .await;
         assert_eq!(gw.lane_manager.conversation_count(), 1);
@@ -328,6 +338,7 @@ mod tests {
             content: "again".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
+            workspace_path: None,
         })
         .await;
         assert_eq!(gw.lane_manager.conversation_count(), 1);
@@ -344,6 +355,7 @@ mod tests {
                 content: "test".to_string(),
                 principal: Principal::System,
                 scope: Scope::Global,
+                workspace_path: None,
             })
             .await;
         assert!(resp.is_error);
@@ -362,6 +374,7 @@ mod tests {
             content: "hello bus".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
+            workspace_path: None,
         })
         .await;
 
@@ -389,6 +402,7 @@ mod tests {
             content: "msg1".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
+            workspace_path: None,
         })
         .await;
         gw.handle_event(GatewayRequest {
@@ -399,6 +413,7 @@ mod tests {
             content: "msg2".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
+            workspace_path: None,
         })
         .await;
 
@@ -423,6 +438,7 @@ mod tests {
                     global_id: "global1".to_string(),
                 },
                 scope: Scope::Global,
+                workspace_path: None,
             })
             .await;
         assert_eq!(resp.lane_key.user_id, "global1");
@@ -442,6 +458,7 @@ mod tests {
                     id: "tg_user_456".to_string(),
                 },
                 scope: Scope::Global,
+                workspace_path: None,
             })
             .await;
         assert_eq!(resp2.lane_key.user_id, "tg_user_456");
@@ -457,6 +474,7 @@ mod tests {
                 content: "yo".to_string(),
                 principal: Principal::System,
                 scope: Scope::Global,
+                workspace_path: None,
             })
             .await;
         assert_eq!(resp3.lane_key.user_id, "tg_user_789");
@@ -498,6 +516,7 @@ mod tests {
             content: "hello from telegram".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
+            workspace_path: None,
         })
         .await;
 
@@ -548,6 +567,7 @@ mod tests {
                 content: "hello".to_string(),
                 principal: Principal::System,
                 scope: Scope::Global,
+                workspace_path: None,
             })
             .await;
         let r2 = gw
@@ -558,6 +578,7 @@ mod tests {
                 content: "/status".to_string(),
                 principal: Principal::System,
                 scope: Scope::Global,
+                workspace_path: None,
             })
             .await;
         let r3 = gw
@@ -569,6 +590,7 @@ mod tests {
                 content: "follow-up".to_string(),
                 principal: Principal::System,
                 scope: Scope::Global,
+                workspace_path: None,
             })
             .await;
 

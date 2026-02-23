@@ -88,6 +88,7 @@ impl TaskDispatcher {
                 },
             };
             let mut dag = dag;
+            let workspace_id_for_memory = workspace_id.clone();
             let result = execute_dag(
                 &mut dag,
                 &config,
@@ -101,6 +102,7 @@ impl TaskDispatcher {
                 &created_by,
                 &daemon_config,
                 Some(cancel_token),
+                workspace_id,
             )
             .await;
 
@@ -204,7 +206,7 @@ impl TaskDispatcher {
                     &final_content,
                     "dag",
                     result.success,
-                    workspace_id.clone(),
+                    workspace_id_for_memory,
                 );
             }
 

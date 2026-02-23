@@ -427,7 +427,6 @@ async fn async_main(
         background::spawn_embedding_indexer(
             emb.clone(),
             db.clone(),
-            local_user_id.clone(),
             daemon_config.clone(),
             cancel_token.clone(),
         );

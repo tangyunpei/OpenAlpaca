@@ -366,6 +366,7 @@ impl Orchestrator {
                 task_id: None,
                 agent_id: None,
                 db: self.db.clone(),
+                workspace_id: scope_ctx.workspace_id.clone(),
             };
             let contextual_executor = Arc::new(ContextualToolExecutor::new(
                 self.tool_registry.clone(),
