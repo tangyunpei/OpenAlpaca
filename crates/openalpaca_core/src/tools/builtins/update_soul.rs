@@ -30,6 +30,9 @@ impl BuiltInTool for SoulUpdateTool {
         // Reject unknown top-level fields
         if let Some(obj) = arguments.as_object() {
             for key in obj.keys() {
+                if key == "owner_id" {
+                    continue; // Injected by ContextualToolExecutor
+                }
                 if !KNOWN_SOUL_FIELDS.contains(&key.as_str()) {
                     return Err(format!(
                         "Unknown field '{}'. Allowed fields: {}",

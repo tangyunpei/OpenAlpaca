@@ -146,6 +146,7 @@ async fn test_simple_query_echo() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
         )
         .await;
     assert!(result.is_ok());
@@ -165,6 +166,7 @@ async fn test_task_query_empty() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
         )
         .await;
     assert!(result.is_ok());
@@ -186,6 +188,7 @@ async fn test_complex_task_dispatch() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
         )
         .await;
     assert!(result.is_ok());
@@ -210,6 +213,7 @@ async fn test_task_control_cancel() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
         )
         .await;
     assert!(result.is_ok());
@@ -231,6 +235,7 @@ async fn test_permission_denied_external() {
             },
             Scope::Global,
             "unknown:telegram".to_string(),
+            None,
         )
         .await;
     assert!(result.is_err());
@@ -251,6 +256,7 @@ async fn test_full_lifecycle_events() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
         )
         .await;
 
@@ -349,6 +355,7 @@ async fn test_simple_query_with_mock_llm() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
         )
         .await;
     assert!(result.is_ok());
@@ -368,6 +375,7 @@ async fn test_input_sanitization_blocks_null_bytes() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
         )
         .await;
     assert!(result.is_err());
@@ -389,6 +397,7 @@ async fn test_security_gate_replaces_trust_gate() {
             },
             Scope::Global,
             "unknown:telegram".to_string(),
+            None,
         )
         .await;
     assert!(result.is_err());
@@ -489,6 +498,7 @@ async fn test_llm_planning_complex_task() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
         )
         .await;
 
@@ -518,6 +528,7 @@ async fn test_llm_planning_simple_query() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
         )
         .await;
 
@@ -541,6 +552,7 @@ async fn test_llm_planning_fallback_on_malformed() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
         )
         .await;
 
@@ -590,6 +602,7 @@ async fn test_slash_commands_bypass_llm() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
         )
         .await;
 
@@ -733,6 +746,7 @@ async fn test_tool_intent_detected_and_executes() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
         )
         .await;
 
@@ -810,6 +824,7 @@ async fn test_tool_max_rounds_enforcement() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
         )
         .await;
 
@@ -837,6 +852,7 @@ async fn test_tool_intent_but_not_in_registry() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
         )
         .await;
 
@@ -860,6 +876,7 @@ async fn test_dispatch_error_falls_back_to_simple_query() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
         )
         .await;
 

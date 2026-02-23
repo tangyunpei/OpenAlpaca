@@ -115,6 +115,7 @@ pub async fn execute_dag(
     created_by: &str,
     daemon_config: &Arc<ArcSwap<DaemonConfig>>,
     cancel_token: Option<CancellationToken>,
+    workspace_id: Option<String>,
 ) -> DagExecutionResult {
     let start = Instant::now();
 
@@ -314,6 +315,7 @@ pub async fn execute_dag(
             let daemon_config_clone = daemon_config.clone();
             let token_clone = cancel_token.clone();
 
+            let workspace_id_clone = workspace_id.clone();
             join_set.spawn(async move {
                 execute_single_node(
                     node_snapshot,
@@ -328,6 +330,7 @@ pub async fn execute_dag(
                     node_timeout,
                     daemon_config_clone,
                     token_clone,
+                    workspace_id_clone,
                 )
                 .await
             });
@@ -678,6 +681,7 @@ async fn execute_single_node(
     node_timeout: Duration,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     cancel_token: Option<CancellationToken>,
+    workspace_id: Option<String>,
 ) -> NodeResult {
     let agent_id = agent.id.clone();
 
@@ -687,6 +691,7 @@ async fn execute_single_node(
         task_id: Some(task_id.clone()),
         agent_id: Some(agent_id.clone()),
         db: db.clone(),
+        workspace_id,
     };
     let contextual_executor =
         Arc::new(ContextualToolExecutor::new(tool_registry.clone(), ctx_exec));

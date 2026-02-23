@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn test_migration_025_creates_error_message_schema() {
         let db = setup_db();
-        assert_eq!(db.schema_version().unwrap(), 25);
+        assert_eq!(db.schema_version().unwrap(), 26);
 
         // Verify request_id column works
         let repo = DispatchDecisionRepository::new(&db);

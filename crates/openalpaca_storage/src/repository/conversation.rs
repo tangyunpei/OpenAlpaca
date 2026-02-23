@@ -176,6 +176,40 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
+    /// List conversations for a specific owner (lane_key starts with "{owner_id}:").
+    pub fn list_conversations_for_owner(
+        &self,
+        owner_id: &str,
+        source_filter: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Conversation>> {
+        self.db.with_connection(|conn| {
+            let lane_pattern = format!("{}:%", owner_id);
+            let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match source_filter {
+                Some(source) => (
+                    "SELECT id, lane_key, source, title, message_count, last_message_at, created_at, updated_at, summary, summary_version, last_summarized_message_id, summary_updated_at
+                     FROM conversations WHERE lane_key LIKE ?1 AND source = ?2 ORDER BY updated_at DESC LIMIT ?3 OFFSET ?4".to_string(),
+                    vec![Box::new(lane_pattern), Box::new(source.to_string()), Box::new(limit), Box::new(offset)],
+                ),
+                None => (
+                    "SELECT id, lane_key, source, title, message_count, last_message_at, created_at, updated_at, summary, summary_version, last_summarized_message_id, summary_updated_at
+                     FROM conversations WHERE lane_key LIKE ?1 ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3".to_string(),
+                    vec![Box::new(lane_pattern), Box::new(limit), Box::new(offset)],
+                ),
+            };
+
+            let mut stmt = conn.prepare(&sql)?;
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+            let mut rows = stmt.query(params_refs.as_slice())?;
+            let mut conversations = Vec::new();
+            while let Some(row) = rows.next()? {
+                conversations.push(Self::row_to_conversation(row)?);
+            }
+            Ok(conversations)
+        })
+    }
+
     /// List conversations with optional source filter.
     pub fn list_conversations(
         &self,
@@ -700,5 +734,39 @@ mod tests {
             .list_by_lane_id_range("user:gui", ids[5], ids[5], 100)
             .unwrap();
         assert_eq!(msgs.len(), 0);
+    }
+
+    #[test]
+    fn test_list_conversations_for_owner() {
+        let db = test_db();
+        let repo = ConversationRepository::new(&db);
+
+        repo.get_or_create_conversation("alice:gui", "gui").unwrap();
+        repo.get_or_create_conversation("alice:telegram", "telegram").unwrap();
+        repo.get_or_create_conversation("bob:gui", "gui").unwrap();
+        repo.get_or_create_conversation("bob:telegram", "telegram").unwrap();
+
+        // Alice should only see her own conversations
+        let alice_all = repo.list_conversations_for_owner("alice", None, 50, 0).unwrap();
+        assert_eq!(alice_all.len(), 2);
+        for c in &alice_all {
+            assert!(c.lane_key.starts_with("alice:"), "unexpected lane_key: {}", c.lane_key);
+        }
+
+        // Bob should only see his own conversations
+        let bob_all = repo.list_conversations_for_owner("bob", None, 50, 0).unwrap();
+        assert_eq!(bob_all.len(), 2);
+        for c in &bob_all {
+            assert!(c.lane_key.starts_with("bob:"), "unexpected lane_key: {}", c.lane_key);
+        }
+
+        // Alice filtered by source
+        let alice_gui = repo.list_conversations_for_owner("alice", Some("gui"), 50, 0).unwrap();
+        assert_eq!(alice_gui.len(), 1);
+        assert_eq!(alice_gui[0].lane_key, "alice:gui");
+
+        // Nonexistent owner
+        let nobody = repo.list_conversations_for_owner("nobody", None, 50, 0).unwrap();
+        assert_eq!(nobody.len(), 0);
     }
 }

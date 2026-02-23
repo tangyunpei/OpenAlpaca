@@ -315,12 +315,19 @@ pub async fn persist_memory_item(
         None
     };
 
-    // Step 2: Check for similar existing memories
+    // Step 2: Check for similar existing memories (scoped to prevent cross-scope supersession)
     let similar = if let Some(ref emb) = new_embedding {
-        repo.find_similar_for_supersession(owner_id, emb, supersession_threshold, 1)
-            .unwrap_or_default()
+        repo.find_similar_for_supersession(
+            owner_id,
+            emb,
+            supersession_threshold,
+            1,
+            Some(scope),
+            Some(scope_id),
+        )
+        .unwrap_or_default()
     } else {
-        repo.find_similar_fts_fallback(owner_id, content, 3)
+        repo.find_similar_fts_fallback(owner_id, content, 3, Some(scope), Some(scope_id))
             .unwrap_or_default()
             .into_iter()
             .filter(|(_, jaccard)| *jaccard >= fts_jaccard_threshold)

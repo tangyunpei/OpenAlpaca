@@ -9,15 +9,16 @@ use crate::tools::ToolRegistry;
 use async_trait::async_trait;
 use std::sync::Arc;
 
-/// Tools whose arguments need owner_id injection.
-/// All persona-update tools require owner authorization to prevent
-/// subagents in DAG/pipeline contexts from modifying system personality
-/// files without proper ownership verification.
-const OWNER_SCOPED_TOOLS: &[&str] = &[
-    "memory_search",
+/// Tools that need owner_id injection only.
+const OWNER_ONLY_TOOLS: &[&str] = &[
     "update_user",
     "update_soul",
     "update_identity",
+];
+
+/// Tools that need both owner_id and workspace_id injection.
+const OWNER_AND_WORKSPACE_TOOLS: &[&str] = &[
+    "memory_search",
 ];
 
 /// Tools that operate on the task workspace (handled directly, not forwarded to registry).
@@ -29,6 +30,7 @@ pub struct ToolExecutionContext {
     pub task_id: Option<String>,
     pub agent_id: Option<String>,
     pub db: Option<openalpaca_storage::Database>,
+    pub workspace_id: Option<String>,
 }
 
 /// A ToolExecutor that injects contextual data (owner_id) into
@@ -202,8 +204,32 @@ impl ToolExecutor for ContextualToolExecutor {
             };
         }
 
-        // Handle owner-scoped tools (inject owner_id)
-        if OWNER_SCOPED_TOOLS.contains(&tool_name) {
+        // Handle tools that need both owner_id and workspace_id
+        if OWNER_AND_WORKSPACE_TOOLS.contains(&tool_name) {
+            let owner_id = self.context.owner_id.as_ref().ok_or_else(|| {
+                format!(
+                    "Tool '{}' requires owner_id but none provided in execution context",
+                    tool_name
+                )
+            })?;
+            let mut args = arguments.clone();
+            if let Some(obj) = args.as_object_mut() {
+                obj.insert(
+                    "owner_id".to_string(),
+                    serde_json::Value::String(owner_id.clone()),
+                );
+                if let Some(ref ws_id) = self.context.workspace_id {
+                    obj.insert(
+                        "workspace_id".to_string(),
+                        serde_json::Value::String(ws_id.clone()),
+                    );
+                }
+            }
+            return self.registry.execute(tool_name, &args).await;
+        }
+
+        // Handle tools that need owner_id only (no workspace_id)
+        if OWNER_ONLY_TOOLS.contains(&tool_name) {
             let owner_id = self.context.owner_id.as_ref().ok_or_else(|| {
                 format!(
                     "Tool '{}' requires owner_id but none provided in execution context",
@@ -279,6 +305,7 @@ mod tests {
                 task_id: None,
                 agent_id: None,
                 db: None,
+                workspace_id: None,
             },
         );
 
@@ -302,6 +329,7 @@ mod tests {
                 task_id: None,
                 agent_id: None,
                 db: None,
+                workspace_id: None,
             },
         );
 
@@ -325,6 +353,7 @@ mod tests {
                 task_id: None,
                 agent_id: None,
                 db: None,
+                workspace_id: None,
             },
         );
 
@@ -352,6 +381,7 @@ mod tests {
                 task_id: Some("task-1".to_string()),
                 agent_id: Some("test-agent".to_string()),
                 db: None,
+                workspace_id: None,
             },
         );
 
@@ -370,6 +400,7 @@ mod tests {
                 task_id: None,
                 agent_id: None,
                 db: None,
+                workspace_id: None,
             },
         );
 
@@ -388,6 +419,7 @@ mod tests {
                 task_id: None,
                 agent_id: None,
                 db: None,
+                workspace_id: None,
             },
         );
 
@@ -396,5 +428,55 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("requires a task context"));
+    }
+
+    #[tokio::test]
+    async fn test_update_user_not_injected_workspace_id() {
+        let registry = make_registry_with_tools(&["update_user"]);
+        let executor = ContextualToolExecutor::new(
+            registry,
+            ToolExecutionContext {
+                owner_id: Some("user-42".to_string()),
+                task_id: None,
+                agent_id: None,
+                db: None,
+                workspace_id: Some("ws-abc".to_string()),
+            },
+        );
+
+        let result = executor
+            .execute("update_user", &serde_json::json!({"mode": "replace"}))
+            .await
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        // owner_id should be injected
+        assert_eq!(parsed["owner_id"], "user-42");
+        // workspace_id should NOT be injected for update_user
+        assert!(parsed.get("workspace_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_memory_search_gets_both_owner_and_workspace() {
+        let registry = make_registry_with_tools(&["memory_search"]);
+        let executor = ContextualToolExecutor::new(
+            registry,
+            ToolExecutionContext {
+                owner_id: Some("user-42".to_string()),
+                task_id: None,
+                agent_id: None,
+                db: None,
+                workspace_id: Some("ws-abc".to_string()),
+            },
+        );
+
+        let result = executor
+            .execute("memory_search", &serde_json::json!({"query": "hello"}))
+            .await
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["owner_id"], "user-42");
+        assert_eq!(parsed["workspace_id"], "ws-abc");
     }
 }

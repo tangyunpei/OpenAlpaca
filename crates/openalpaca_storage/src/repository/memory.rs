@@ -396,7 +396,7 @@ impl<'a> MemoryRepository<'a> {
         // Iterate in reverse: most specific scope first (Workspace before Global)
         for &(scope, scope_id) in scopes.iter().rev() {
             let (scope_filter, scope_id_filter) = match scope {
-                MemoryScope::Global => (None, None), // Global: no scope filter
+                MemoryScope::Global => (Some(scope), None), // Global: filter to scope=Global only
                 _ => (Some(scope), scope_id),
             };
 
@@ -536,6 +536,41 @@ impl<'a> MemoryRepository<'a> {
         })
     }
 
+    /// Get a memory by its primary key, scoped to a specific owner.
+    /// Returns `None` if the memory doesn't exist or belongs to a different owner.
+    pub fn get_for_owner(&self, id: i64, owner_id: &str) -> Result<Option<MemoryV2>> {
+        self.db.with_connection(|conn| {
+            let sql = format!(
+                "SELECT {ALL_COLUMNS_PLAIN} FROM memory WHERE id = ?1 AND owner_id = ?2"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mut rows = stmt.query(rusqlite::params![id, owner_id])?;
+            match rows.next()? {
+                Some(row) => Ok(Some(row_to_memory_v2(row)?)),
+                None => Ok(None),
+            }
+        })
+    }
+
+    /// Delete a single memory by its primary key, scoped to a specific owner.
+    /// Returns `false` if the memory doesn't exist or belongs to a different owner.
+    pub fn delete_for_owner(&self, id: i64, owner_id: &str) -> Result<bool> {
+        self.db.with_connection_mut(|conn| {
+            let tx = conn.transaction()?;
+            // Delete vector embedding first to avoid orphan
+            tx.execute(
+                "DELETE FROM memory_vec WHERE memory_id IN (SELECT id FROM memory WHERE id = ?1 AND owner_id = ?2)",
+                rusqlite::params![id, owner_id],
+            )?;
+            let count = tx.execute(
+                "DELETE FROM memory WHERE id = ?1 AND owner_id = ?2",
+                rusqlite::params![id, owner_id],
+            )?;
+            tx.commit()?;
+            Ok(count > 0)
+        })
+    }
+
     // ── Lifecycle methods (migration 018) ───────────────────────────────
 
     /// Batch-update `last_accessed_at` and apply a small importance boost for a set of memory IDs.
@@ -565,18 +600,23 @@ impl<'a> MemoryRepository<'a> {
 
     /// Find semantically similar memories for supersession using vector search.
     /// Only matches Fact and Preference kinds (excludes KbChunk).
+    /// Optionally scoped by `scope_filter` and `scope_id_filter` to prevent
+    /// cross-scope supersession.
     /// Returns `Vec<(MemoryV2, f64)>` sorted by L2 distance ascending.
+    #[allow(clippy::too_many_arguments)]
     pub fn find_similar_for_supersession(
         &self,
         owner_id: &str,
         embedding: &[f32],
         distance_threshold: f64,
         limit: usize,
+        scope_filter: Option<MemoryScope>,
+        scope_id_filter: Option<&str>,
     ) -> Result<Vec<(MemoryV2, f64)>> {
         self.db.with_connection(|conn| {
             let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
             let k = (limit * VEC_OVER_FETCH_FACTOR) as i64;
-            let sql = format!(
+            let mut sql = format!(
                 "SELECT {ALL_COLUMNS}, v.distance FROM memory m
                  JOIN (
                      SELECT memory_id, distance FROM memory_vec
@@ -584,18 +624,36 @@ impl<'a> MemoryRepository<'a> {
                  ) v ON m.id = v.memory_id
                  WHERE m.owner_id = ?3
                    AND m.kind IN ('fact', 'preference')
-                   AND v.distance < ?4
-                 ORDER BY v.distance ASC
-                 LIMIT ?5"
+                   AND v.distance < ?4"
             );
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+                Box::new(blob),
+                Box::new(k),
+                Box::new(owner_id.to_string()),
+                Box::new(distance_threshold),
+            ];
+            let mut param_idx = 5;
+
+            if let Some(scope) = scope_filter {
+                sql.push_str(&format!(" AND m.scope = ?{param_idx}"));
+                params.push(Box::new(scope.as_str().to_string()));
+                param_idx += 1;
+            }
+            if let Some(sid) = scope_id_filter {
+                sql.push_str(&format!(" AND m.scope_id = ?{param_idx}"));
+                params.push(Box::new(sid.to_string()));
+                param_idx += 1;
+            }
+
+            sql.push_str(&format!(
+                " ORDER BY v.distance ASC LIMIT ?{param_idx}"
+            ));
+            params.push(Box::new(limit as i64));
+
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
             let mut stmt = conn.prepare(&sql)?;
-            let mut rows = stmt.query(rusqlite::params![
-                blob,
-                k,
-                owner_id,
-                distance_threshold,
-                limit as i64
-            ])?;
+            let mut rows = stmt.query(param_refs.as_slice())?;
             let mut results = Vec::new();
             while let Some(row) = rows.next()? {
                 let memory = row_to_memory_v2(row)?;
@@ -612,11 +670,16 @@ impl<'a> MemoryRepository<'a> {
     /// common short words. Requires at least 2 meaningful terms; returns empty if content
     /// is too short or generic. Results include a Jaccard word-overlap score for callers
     /// to apply a threshold before superseding.
+    ///
+    /// Optionally scoped by `scope_filter` and `scope_id_filter` to prevent
+    /// cross-scope supersession.
     pub fn find_similar_fts_fallback(
         &self,
         owner_id: &str,
         content: &str,
         limit: usize,
+        scope_filter: Option<MemoryScope>,
+        scope_id_filter: Option<&str>,
     ) -> Result<Vec<(MemoryV2, f64)>> {
         // Extract significant terms (>3 chars to skip "I", "the", "is", "like", etc.)
         let truncated: String = content.chars().take(200).collect();
@@ -634,7 +697,7 @@ impl<'a> MemoryRepository<'a> {
         // AND-join: all terms must be present in the matched memory
         let query_terms = terms.join(" AND ");
 
-        let all = self.search_fts(owner_id, &query_terms, limit * 2, None, None, None)?;
+        let all = self.search_fts(owner_id, &query_terms, limit * 2, None, scope_filter, scope_id_filter)?;
 
         // Compute Jaccard word-overlap score for each result
         let new_words: std::collections::HashSet<String> = content
@@ -1606,5 +1669,149 @@ mod tests {
             "Importance should be capped at 1.0, got {}",
             mem.importance
         );
+    }
+
+    #[test]
+    fn test_cascade_scope_isolation() {
+        let db = test_db();
+        let repo = MemoryRepository::new(&db);
+
+        // Create a Global memory
+        repo.add(
+            "owner-1",
+            MemoryKind::Fact,
+            MemoryScope::Global,
+            "",
+            MemorySource::Conversation,
+            "Global knowledge about testing frameworks",
+            None,
+            0.8,
+            0.9,
+        )
+        .unwrap();
+
+        // Create a Workspace-A memory
+        repo.add(
+            "owner-1",
+            MemoryKind::Fact,
+            MemoryScope::Workspace,
+            "workspace-A",
+            MemorySource::Conversation,
+            "Workspace A knowledge about testing patterns",
+            None,
+            0.8,
+            0.9,
+        )
+        .unwrap();
+
+        // Create a Workspace-B memory
+        repo.add(
+            "owner-1",
+            MemoryKind::Fact,
+            MemoryScope::Workspace,
+            "workspace-B",
+            MemorySource::Conversation,
+            "Workspace B knowledge about testing strategies",
+            None,
+            0.8,
+            0.9,
+        )
+        .unwrap();
+
+        // Cascade search with workspace-A context:
+        // scopes = [(Global, None), (Workspace, Some("workspace-A"))]
+        let scopes: Vec<(MemoryScope, Option<&str>)> = vec![
+            (MemoryScope::Global, None),
+            (MemoryScope::Workspace, Some("workspace-A")),
+        ];
+
+        let results = repo
+            .search_hybrid_cascade("owner-1", "testing", None, 10, None, &scopes)
+            .unwrap();
+
+        let contents: Vec<&str> = results.iter().map(|m| m.content.as_str()).collect();
+
+        // Workspace-A memories should be returned
+        assert!(
+            contents.iter().any(|c| c.contains("Workspace A")),
+            "Workspace A memory should be in results, got: {contents:?}"
+        );
+
+        // Global memories should be returned
+        assert!(
+            contents.iter().any(|c| c.contains("Global")),
+            "Global memory should be in results, got: {contents:?}"
+        );
+
+        // Workspace-B memories should NOT be returned
+        assert!(
+            !contents.iter().any(|c| c.contains("Workspace B")),
+            "Workspace B memory should NOT be in results, got: {contents:?}"
+        );
+    }
+
+    #[test]
+    fn test_get_delete_owner_scoped() {
+        let db = test_db();
+        let repo = MemoryRepository::new(&db);
+
+        let id_a = repo
+            .add(
+                "owner-A",
+                MemoryKind::Fact,
+                MemoryScope::Global,
+                "",
+                MemorySource::Conversation,
+                "Owner A secret memory",
+                None,
+                0.8,
+                0.9,
+            )
+            .unwrap();
+        assert!(id_a > 0);
+
+        let id_b = repo
+            .add(
+                "owner-B",
+                MemoryKind::Fact,
+                MemoryScope::Global,
+                "",
+                MemorySource::Conversation,
+                "Owner B secret memory",
+                None,
+                0.8,
+                0.9,
+            )
+            .unwrap();
+        assert!(id_b > 0);
+
+        // Owner A can get their own memory
+        let mem = repo.get_for_owner(id_a, "owner-A").unwrap();
+        assert!(mem.is_some());
+        assert_eq!(mem.unwrap().content, "Owner A secret memory");
+
+        // Owner B cannot get owner A's memory
+        let mem = repo.get_for_owner(id_a, "owner-B").unwrap();
+        assert!(mem.is_none(), "Owner B should not be able to read owner A's memory");
+
+        // Owner B cannot delete owner A's memory
+        let deleted = repo.delete_for_owner(id_a, "owner-B").unwrap();
+        assert!(!deleted, "Owner B should not be able to delete owner A's memory");
+
+        // Verify owner A's memory still exists
+        let mem = repo.get_for_owner(id_a, "owner-A").unwrap();
+        assert!(mem.is_some(), "Owner A's memory should still exist after failed delete by B");
+
+        // Owner A can delete their own memory
+        let deleted = repo.delete_for_owner(id_a, "owner-A").unwrap();
+        assert!(deleted, "Owner A should be able to delete their own memory");
+
+        // Verify it's gone
+        let mem = repo.get_for_owner(id_a, "owner-A").unwrap();
+        assert!(mem.is_none(), "Memory should be gone after owner deletes it");
+
+        // Owner B's memory is unaffected
+        let mem = repo.get_for_owner(id_b, "owner-B").unwrap();
+        assert!(mem.is_some(), "Owner B's memory should be unaffected");
     }
 }

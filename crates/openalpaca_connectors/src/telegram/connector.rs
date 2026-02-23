@@ -178,6 +178,7 @@ impl TelegramConnector {
                 scope: Scope::Conversation {
                     id: chat_id.0.to_string(),
                 },
+                workspace_path: None, // Telegram has no workspace context; uses Global scope only
             })
             .await;
 

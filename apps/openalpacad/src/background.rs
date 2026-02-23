@@ -13,7 +13,6 @@ use crate::events::EventBroadcaster;
 pub fn spawn_embedding_indexer(
     embedder: Arc<dyn openalpaca_llm::Embedder>,
     db: Database,
-    user_id: String,
     daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
     cancel: CancellationToken,
 ) {
@@ -30,33 +29,44 @@ pub fn spawn_embedding_indexer(
                 }
             }
             let repo = openalpaca_storage::MemoryRepository::new(&db);
-            let missing = match repo.list_missing_embeddings(&user_id, batch_size) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            if missing.is_empty() {
-                continue;
-            }
 
-            let texts: Vec<&str> = missing.iter().map(|(_, c)| c.as_str()).collect();
-            match embedder.embed(&texts).await {
-                Ok(embeddings) => {
-                    let mut count = 0usize;
-                    for ((id, _), embedding) in missing.iter().zip(embeddings.iter()) {
-                        if embedding.len() == embedder.dimensions() as usize {
-                            if let Err(e) = repo.insert_embedding(*id, embedding) {
-                                tracing::warn!(
-                                    "Failed to insert embedding for memory #{id}: {e}"
-                                );
+            let owner_ids = match repo.list_owner_ids() {
+                Ok(ids) => ids,
+                Err(e) => {
+                    tracing::warn!("Embedding indexer: failed to list owners: {e}");
+                    continue;
+                }
+            };
+
+            let mut total_count = 0usize;
+            for owner_id in &owner_ids {
+                let missing = match repo.list_missing_embeddings(owner_id, batch_size) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if missing.is_empty() {
+                    continue;
+                }
+
+                let texts: Vec<&str> = missing.iter().map(|(_, c)| c.as_str()).collect();
+                match embedder.embed(&texts).await {
+                    Ok(embeddings) => {
+                        for ((id, _), embedding) in missing.iter().zip(embeddings.iter()) {
+                            if embedding.len() == embedder.dimensions() as usize {
+                                if let Err(e) = repo.insert_embedding(*id, embedding) {
+                                    tracing::warn!(
+                                        "Failed to insert embedding for memory #{id}: {e}"
+                                    );
+                                }
+                                total_count += 1;
                             }
-                            count += 1;
                         }
                     }
-                    if count > 0 {
-                        tracing::info!("Indexed {count} embeddings");
-                    }
+                    Err(e) => tracing::warn!("Embedding batch failed for owner {owner_id}: {e}"),
                 }
-                Err(e) => tracing::warn!("Embedding batch failed: {e}"),
+            }
+            if total_count > 0 {
+                tracing::info!("Indexed {total_count} embeddings across {} owners", owner_ids.len());
             }
         }
     });

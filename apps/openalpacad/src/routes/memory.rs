@@ -99,7 +99,7 @@ pub async fn get_memory_handler(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     let repo = MemoryRepository::new(&state.db);
-    match repo.get(id) {
+    match repo.get_for_owner(id, &state.local_user_id) {
         Ok(Some(mem)) => (StatusCode::OK, Json(serde_json::to_value(mem).unwrap())),
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -119,7 +119,7 @@ pub async fn delete_memory_handler(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     let repo = MemoryRepository::new(&state.db);
-    match repo.delete(id) {
+    match repo.delete_for_owner(id, &state.local_user_id) {
         Ok(true) => (
             StatusCode::OK,
             Json(serde_json::json!({ "status": "deleted", "id": id })),

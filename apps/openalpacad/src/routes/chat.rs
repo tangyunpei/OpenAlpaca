@@ -8,7 +8,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         IntoResponse,
         sse::{Event, KeepAlive, Sse},
@@ -90,6 +90,12 @@ struct ErrorDetail {
     message: String,
 }
 
+/// Check if the given lane_key belongs to the specified user.
+/// Lane key format is "{user_id}:{source_name}".
+fn is_lane_owned_by(lane_key: &str, user_id: &str) -> bool {
+    lane_key.starts_with(&format!("{}:", user_id))
+}
+
 fn error_response(status: StatusCode, code: &str, message: &str) -> impl IntoResponse {
     (
         status,
@@ -106,6 +112,7 @@ fn error_response(status: StatusCode, code: &str, message: &str) -> impl IntoRes
 
 pub async fn send_chat_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<ChatSendRequest>,
 ) -> impl IntoResponse {
     let chat_service = match &state.chat_service {
@@ -122,7 +129,12 @@ pub async fn send_chat_handler(
 
     let principal = &state.local_user_id;
 
-    match chat_service.send_message(body.content, principal) {
+    let workspace_path = headers
+        .get("x-workspace-path")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    match chat_service.send_message(body.content, principal, workspace_path) {
         Ok(resp) => {
             // Publish to EventBus; bridge forwards to WebSocket clients
             let _ = state.gateway.bus.publish(SystemEvent::ChatStreamStarted {
@@ -253,6 +265,12 @@ pub async fn get_chat_history_handler(
     let offset = query.offset.unwrap_or(0);
     let lane_key = query.lane_key.as_deref().unwrap_or(&state.default_lane_key);
 
+    // Verify the caller owns this lane (lane_key format: "{user_id}:{source_name}")
+    if !is_lane_owned_by(lane_key, &state.local_user_id) {
+        return error_response(StatusCode::FORBIDDEN, "FORBIDDEN", "Access denied to this lane")
+            .into_response();
+    }
+
     match chat_service.get_history(lane_key, limit, offset) {
         Ok((messages, total)) => Json(ChatHistoryResponse {
             messages,
@@ -289,6 +307,12 @@ pub async fn delete_chat_history_handler(
 
     let lane_key = query.lane_key.as_deref().unwrap_or(&state.default_lane_key);
 
+    // Verify the caller owns this lane (lane_key format: "{user_id}:{source_name}")
+    if !is_lane_owned_by(lane_key, &state.local_user_id) {
+        return error_response(StatusCode::FORBIDDEN, "FORBIDDEN", "Access denied to this lane")
+            .into_response();
+    }
+
     match chat_service.clear_history(lane_key) {
         Ok(deleted) => {
             // Also clear the conversation summary
@@ -315,7 +339,7 @@ pub async fn list_conversations_handler(
     let limit = query.limit.unwrap_or(50);
     let offset = query.offset.unwrap_or(0);
 
-    match repo.list_conversations(query.source.as_deref(), limit, offset) {
+    match repo.list_conversations_for_owner(&state.local_user_id, query.source.as_deref(), limit, offset) {
         Ok(conversations) => Json(ConversationsResponse { conversations }).into_response(),
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -352,6 +376,12 @@ pub async fn get_conversation_messages_handler(
         }
     };
 
+    // Verify the caller owns this conversation
+    if !is_lane_owned_by(&conv.lane_key, &state.local_user_id) {
+        return error_response(StatusCode::FORBIDDEN, "FORBIDDEN", "Access denied")
+            .into_response();
+    }
+
     let limit = query.limit.unwrap_or(50);
     let offset = query.offset.unwrap_or(0);
 
@@ -366,5 +396,29 @@ pub async fn get_conversation_messages_handler(
             &e.to_string(),
         )
         .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_lane_owned_by_exact_match() {
+        assert!(is_lane_owned_by("user1:gui", "user1"));
+        assert!(is_lane_owned_by("user1:telegram", "user1"));
+    }
+
+    #[test]
+    fn test_is_lane_owned_by_rejects_prefix_overlap() {
+        // user1 must NOT match user10's lanes
+        assert!(!is_lane_owned_by("user10:gui", "user1"));
+    }
+
+    #[test]
+    fn test_is_lane_owned_by_empty_and_edge_cases() {
+        assert!(!is_lane_owned_by("", "user1"));
+        assert!(!is_lane_owned_by("user1", "user1")); // no colon separator
+        assert!(is_lane_owned_by("user1:", "user1")); // empty source, still valid format
     }
 }
