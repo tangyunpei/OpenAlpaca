@@ -7,7 +7,8 @@ pub mod providers;
 pub mod routing;
 pub mod types;
 
-// Re-export submodules at crate root for backward compatibility
+// TODO: Remove backward-compat re-exports once all consumers use canonical paths
+// (apps/ imports were updated in the reorganize branch; external consumers may remain)
 pub use keys::credential_discovery;
 pub use keys::key_encryption;
 pub use keys::key_pool;
