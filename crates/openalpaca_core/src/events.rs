@@ -271,6 +271,20 @@ pub enum SystemEvent {
         reason: String,
         timestamp: DateTime<Utc>,
     },
+    /// Dispatcher analysis decision (Phase 2: decoupled analysis from execution)
+    DispatchDecision {
+        request_id: String,
+        task_id: Option<String>,
+        /// "lead_agent" | "dag_parallel" | "sequential_pipeline"
+        mode: String,
+        /// "planner_explicit" | "execution_mode_field" | "empty_assignments_fallback" | "heuristic_fallback" | "heuristic_match_failed"
+        reason: String,
+        agent_count: usize,
+        dag_node_count: Option<usize>,
+        predictability_score: Option<f64>,
+        error_message: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
     /// Request-level orchestration stage metrics
     OrchestrationStage {
         request_id: Uuid,

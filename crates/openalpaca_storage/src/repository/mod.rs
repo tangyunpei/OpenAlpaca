@@ -5,6 +5,7 @@
 pub mod agent;
 pub mod config;
 pub mod conversation;
+pub mod dispatch_decision;
 pub mod event_log;
 pub mod identity;
 pub mod llm_usage;
@@ -17,6 +18,7 @@ pub mod task;
 pub use agent::AgentRepository;
 pub use config::ConfigRepository;
 pub use conversation::ConversationRepository;
+pub use dispatch_decision::DispatchDecisionRepository;
 pub use event_log::EventLogRepository;
 pub use identity::IdentityRepository;
 pub use llm_usage::LlmUsageRepository;
