@@ -3,6 +3,7 @@
 //! Keyword-based heuristics (LLM integration planned for Phase 5.1).
 
 use crate::orchestrator::skill_catalog::SkillCatalog;
+use crate::orchestrator::skill_router::SkillRouter;
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -328,6 +329,73 @@ impl IntentParser {
                     skill_name,
                     query: trimmed.to_string(),
                 };
+            }
+        }
+
+        // 3. Fall through to existing parse() logic
+        self.parse(content)
+    }
+
+    /// Parse a user message into an Intent, using the weighted SkillRouter
+    /// for scoring-based skill selection instead of regex trigger matching.
+    ///
+    /// Priority:
+    /// 1. Slash-command skill invocation: `/review some code`
+    /// 2. Weighted router scoring (auto-select if score >= threshold and mode == "auto")
+    /// 3. Fall through to standard `parse()` logic
+    pub fn parse_with_skills_and_router(
+        &self,
+        content: &str,
+        catalog: &SkillCatalog,
+        router: &SkillRouter,
+    ) -> Intent {
+        let trimmed = content.trim();
+
+        // 1. Slash-command skill invocation (same as parse_with_skills)
+        if let Some(without_slash) = trimmed.strip_prefix('/') {
+            let parts: Vec<&str> = without_slash.splitn(2, ' ').collect();
+            let command = parts[0];
+            let query = parts.get(1).map(|s| s.trim()).unwrap_or("");
+
+            if let Some(entry) = catalog.get_by_command(command) {
+                return Intent::SkillInvocation {
+                    skill_name: entry.frontmatter.name.clone(),
+                    query: if query.is_empty() {
+                        trimmed.to_string()
+                    } else {
+                        query.to_string()
+                    },
+                };
+            }
+            // Fall through if no skill matches the slash command
+        }
+
+        // 2. Weighted router scoring (replaces trigger pattern matching)
+        if !trimmed.starts_with('/') {
+            let route_result = router.route(trimmed, catalog);
+
+            if let Some(ref skill_id) = route_result.selected {
+                let skill_name = catalog
+                    .get(skill_id)
+                    .map(|e| e.frontmatter.name.clone())
+                    .unwrap_or_else(|| skill_id.clone());
+
+                router.record_usage(skill_id);
+
+                return Intent::SkillInvocation {
+                    skill_name,
+                    query: trimmed.to_string(),
+                };
+            }
+
+            // Log suggestions for observability but don't auto-select
+            if !route_result.suggestions.is_empty() {
+                tracing::debug!(
+                    "SkillRouter: {} suggestion(s) for query (top: {} score={:.2})",
+                    route_result.suggestions.len(),
+                    route_result.suggestions[0].skill_name,
+                    route_result.suggestions[0].score,
+                );
             }
         }
 
@@ -793,7 +861,7 @@ Generate a conventional commit.
         );
 
         let catalog = SkillCatalog::new();
-        catalog.scan_directory(tmp.path());
+        catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
         (tmp, catalog)
     }
 
@@ -949,5 +1017,106 @@ Generate a conventional commit.
     #[test]
     fn test_fast_path_multi_skill_ineligible() {
         assert!(!parser().is_fast_path_eligible("research and summarize this"));
+    }
+
+    // --- parse_with_skills_and_router tests ---
+
+    fn make_router_test_catalog() -> (TempDir, SkillCatalog) {
+        let tmp = TempDir::new().unwrap();
+        create_test_skill_dir(
+            tmp.path(),
+            "code-review",
+            r#"---
+name: "Code Review"
+description: "Review code for bugs"
+invoke:
+  mode: auto
+  slash: "/review"
+routing:
+  intent:
+    - "review code"
+  keywords:
+    - "bugs"
+    - "style"
+---
+
+## Instructions
+
+Review the code.
+"#,
+        );
+        create_test_skill_dir(
+            tmp.path(),
+            "explain-code",
+            r#"---
+name: "Explain Code"
+description: "Explain what code does"
+invoke:
+  mode: auto
+  slash: "/explain-code"
+routing:
+  intent:
+    - "explain code"
+---
+
+## Instructions
+
+Explain step by step.
+"#,
+        );
+
+        let catalog = SkillCatalog::new();
+        catalog.scan_directory(
+            tmp.path(),
+            crate::middleware::skill::SkillScope::Project,
+        );
+        (tmp, catalog)
+    }
+
+    #[test]
+    fn test_router_selects_correct_skill() {
+        let (_tmp, catalog) = make_router_test_catalog();
+        let router = SkillRouter::new(0.65, 0.45);
+
+        let intent =
+            parser().parse_with_skills_and_router("review code for bugs", &catalog, &router);
+        match intent {
+            Intent::SkillInvocation { skill_name, query } => {
+                assert_eq!(skill_name, "Code Review");
+                assert_eq!(query, "review code for bugs");
+            }
+            other => panic!("Expected SkillInvocation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_router_slash_command_takes_priority() {
+        let (_tmp, catalog) = make_router_test_catalog();
+        let router = SkillRouter::new(0.65, 0.45);
+
+        // Slash command should work even if router would select something else
+        let intent =
+            parser().parse_with_skills_and_router("/explain-code main.rs", &catalog, &router);
+        match intent {
+            Intent::SkillInvocation { skill_name, query } => {
+                assert_eq!(skill_name, "Explain Code");
+                assert_eq!(query, "main.rs");
+            }
+            other => panic!("Expected SkillInvocation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_router_no_match_falls_through() {
+        let (_tmp, catalog) = make_router_test_catalog();
+        let router = SkillRouter::new(0.65, 0.45);
+
+        let intent =
+            parser().parse_with_skills_and_router("hello world", &catalog, &router);
+        assert!(
+            matches!(intent, Intent::SimpleQuery { .. }),
+            "Should fall through to SimpleQuery, got {:?}",
+            intent
+        );
     }
 }

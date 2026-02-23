@@ -371,6 +371,66 @@ pub fn spawn_event_bridge(
                     tracing::debug!(
                         "Orchestration: request={request_id}, mode={mode}, planner={planner_ms}ms, dispatch={dispatch_ms}ms, ack={ack_ms}ms"
                     );
+                }
+
+                // ── Skill lifecycle events (log-only) ─────────────────────
+                openalpaca_core::events::SystemEvent::SkillDiscovered {
+                    skill_id,
+                    skill_name,
+                    scope,
+                    ..
+                } => {
+                    tracing::debug!(
+                        "Skill discovered: id={skill_id}, name={skill_name}, scope={scope}"
+                    );
+                }
+                openalpaca_core::events::SystemEvent::SkillSelected {
+                    skill_id,
+                    score,
+                    ..
+                } => {
+                    tracing::debug!(
+                        "Skill auto-selected: id={skill_id}, score={score:.3}"
+                    );
+                }
+                openalpaca_core::events::SystemEvent::SkillInvocationStarted {
+                    request_id,
+                    skill_id,
+                    ..
+                } => {
+                    tracing::debug!(
+                        "Skill invocation started: request={request_id}, skill={skill_id}"
+                    );
+                }
+                openalpaca_core::events::SystemEvent::SkillContextInjected {
+                    request_id,
+                    skill_id,
+                    context_bytes,
+                    ..
+                } => {
+                    tracing::debug!(
+                        "Skill context injected: request={request_id}, skill={skill_id}, bytes={context_bytes}"
+                    );
+                }
+                openalpaca_core::events::SystemEvent::SkillCompleted {
+                    request_id,
+                    skill_id,
+                    duration_ms,
+                    ..
+                } => {
+                    tracing::info!(
+                        "Skill completed: request={request_id}, skill={skill_id}, duration={duration_ms}ms"
+                    );
+                }
+                openalpaca_core::events::SystemEvent::SkillFailed {
+                    request_id,
+                    skill_id,
+                    error,
+                    ..
+                } => {
+                    tracing::warn!(
+                        "Skill failed: request={request_id}, skill={skill_id}, error={error}"
+                    );
                 } // NO catch-all: compiler will flag any missing SystemEvent variant
             }
         }

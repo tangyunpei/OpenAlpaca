@@ -133,7 +133,7 @@ pub async fn initialize_services(
         let catalog = openalpaca_core::orchestrator::skill_catalog::SkillCatalog::new();
         let skills_dir = config_base_dir.join("skills");
         if skills_dir.exists() {
-            let count = catalog.scan_directory(&skills_dir);
+            let count = catalog.scan_directory(&skills_dir, openalpaca_core::middleware::skill::SkillScope::Project);
             info!(
                 "Skill catalog: loaded {} skill(s) from {}",
                 count,
