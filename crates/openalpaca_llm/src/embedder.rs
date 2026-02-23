@@ -188,7 +188,7 @@ impl Embedder for LocalEmbedder {
 
 pub fn build_embedder(
     config: &EmbeddingsConfig,
-    secret_store: Option<&dyn crate::secret_store::SecretStore>,
+    secret_store: Option<&dyn crate::keys::secret_store::SecretStore>,
     provider_config: Option<&crate::config::ProviderConfig>,
 ) -> Result<Arc<dyn Embedder>, EmbedError> {
     build_embedder_with_runtime(config, secret_store, provider_config, None)
@@ -196,7 +196,7 @@ pub fn build_embedder(
 
 pub fn build_embedder_with_runtime(
     config: &EmbeddingsConfig,
-    _secret_store: Option<&dyn crate::secret_store::SecretStore>,
+    _secret_store: Option<&dyn crate::keys::secret_store::SecretStore>,
     _provider_config: Option<&crate::config::ProviderConfig>,
     _runtime_config: Option<&crate::config::LlmRuntimeConfig>,
 ) -> Result<Arc<dyn Embedder>, EmbedError> {
@@ -240,7 +240,7 @@ pub fn build_embedder_with_runtime(
 /// Resolve OpenAI API key from provider config (same key pool as chat).
 #[cfg(feature = "openai")]
 fn resolve_openai_key(
-    secret_store: Option<&dyn crate::secret_store::SecretStore>,
+    secret_store: Option<&dyn crate::keys::secret_store::SecretStore>,
     provider_config: Option<&crate::config::ProviderConfig>,
 ) -> Option<String> {
     // Try keys from provider config
