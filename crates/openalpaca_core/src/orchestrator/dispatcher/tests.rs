@@ -59,6 +59,10 @@ fn template_from_agent(agent: &SubAgent) -> AgentTemplate {
 }
 
 fn setup(agents: Vec<SubAgent>) -> TaskDispatcher {
+    setup_with_config(agents, DaemonConfig::default())
+}
+
+fn setup_with_config(agents: Vec<SubAgent>, config: DaemonConfig) -> TaskDispatcher {
     let ctx = Arc::new(SharedContext::new());
     for a in &agents {
         // Register both template (for spawn_instance) and instance (for backward compat)
@@ -76,7 +80,7 @@ fn setup(agents: Vec<SubAgent>) -> TaskDispatcher {
         bus.clone(),
     ));
     let gate = Arc::new(crate::security::gate::SecurityGate::new(sandbox));
-    let daemon_config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+    let daemon_config = Arc::new(ArcSwap::from_pointee(config));
     TaskDispatcher::new(
         ctx,
         lane_mgr,
@@ -192,9 +196,12 @@ fn test_dispatch_planned_with_use_lead_agent_routes_correctly() {
         dag: None,
         use_lead_agent: true,
         auto_promotion_reason: None,
+        execution_mode: None,
+        predictability_score: None,
     };
 
     let result = dispatcher.dispatch_planned(
+        Uuid::new_v4(),
         "Research and synthesize a complex topic",
         plan,
         "user1",
@@ -355,12 +362,84 @@ fn test_dispatch_planned_empty_assignments_promotes_to_lead_agent() {
         dag: None,
         use_lead_agent: false,
         auto_promotion_reason: None,
+        execution_mode: None,
+        predictability_score: None,
     };
 
     let result =
-        dispatcher.dispatch_planned("Normal task", plan, "user1", "user1:cli", "cli", None);
+        dispatcher.dispatch_planned(Uuid::new_v4(), "Normal task", plan, "user1", "user1:cli", "cli", None);
 
     // Should succeed — dispatched to lead agent as last-resort fallback
     assert!(result.is_ok());
     assert!(result.unwrap().contains("Lead Agent"));
+}
+
+#[test]
+fn test_dispatch_planned_pipeline_empty_assignments_decision_and_execution_agree() {
+    // Regression: execution_mode="pipeline" with empty assignments must record
+    // LeadAgent (not SequentialPipeline) AND actually execute the lead-agent path.
+    // This catches the drift where analyze_plan() would say "pipeline" but
+    // dispatch_planned() would actually run lead-agent.
+    use crate::events::SystemEvent;
+
+    let mut config = DaemonConfig::default();
+    config.execution.planner.dispatch_analysis_enabled = true;
+
+    let dispatcher = setup_with_config(vec![make_agent("a1", vec!["web_search"])], config);
+
+    // Subscribe to the event bus BEFORE dispatching
+    let mut rx = dispatcher.bus.subscribe();
+
+    let plan = TaskPlan {
+        classification: "complex_task".to_string(),
+        title: Some("Pipeline drift test".to_string()),
+        assignments: vec![], // empty → should NOT be treated as pipeline
+        reasoning: None,
+        dag: None,
+        use_lead_agent: false,
+        auto_promotion_reason: None,
+        execution_mode: Some("pipeline".to_string()), // planner says pipeline
+        predictability_score: Some(0.75),
+    };
+
+    let result = dispatcher.dispatch_planned(
+        Uuid::new_v4(),
+        "Test pipeline drift",
+        plan,
+        "user1",
+        "user1:cli",
+        "cli",
+        None,
+    );
+
+    // 1. Execution must route to lead-agent (not fail trying to run empty pipeline)
+    assert!(result.is_ok(), "Expected dispatch to succeed");
+    assert!(
+        result.unwrap().contains("Lead Agent"),
+        "Expected lead-agent execution, not pipeline"
+    );
+
+    // 2. The DispatchDecision event must record lead_agent, not sequential_pipeline
+    let mut found_decision = false;
+    while let Ok(event) = rx.try_recv() {
+        if let SystemEvent::DispatchDecision {
+            mode, reason, ..
+        } = event
+        {
+            assert_eq!(
+                mode, "lead_agent",
+                "Decision should record lead_agent, not pipeline"
+            );
+            assert_eq!(
+                reason, "empty_assignments_fallback",
+                "Reason should be empty_assignments_fallback"
+            );
+            found_decision = true;
+            break;
+        }
+    }
+    assert!(
+        found_decision,
+        "Expected DispatchDecision event to be published"
+    );
 }

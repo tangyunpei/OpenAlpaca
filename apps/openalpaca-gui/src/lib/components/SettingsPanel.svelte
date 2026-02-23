@@ -3,6 +3,8 @@
   import ProviderConfig from "./ProviderConfig.svelte";
   import WebSearchConfig from "./WebSearchConfig.svelte";
   import UsagePanel from "./UsagePanel.svelte";
+  import LatencyPanel from "./LatencyPanel.svelte";
+  import DecisionPanel from "./DecisionPanel.svelte";
   import {
     llmSettings,
     settingsLoading,
@@ -27,7 +29,7 @@
   let models = $state<ModelEntry[]>([]);
   let refreshing = $state(false);
 
-  let settingsTab = $state<"config" | "usage">("config");
+  let settingsTab = $state<"config" | "usage" | "latency" | "decisions">("config");
 
   const unsubSettings = llmSettings.subscribe((v) => (settings = v));
   const unsubLoading = settingsLoading.subscribe((v) => (loading = v));
@@ -80,10 +82,22 @@
     class="px-5 py-1.5 border border-input rounded-md text-[0.85rem] cursor-pointer transition-all {settingsTab === 'usage' ? 'bg-primary text-foreground border-accent' : 'bg-transparent text-muted-foreground hover:bg-white/5'}"
     onclick={() => (settingsTab = "usage")}
   >Usage</button>
+  <button
+    class="px-5 py-1.5 border border-input rounded-md text-[0.85rem] cursor-pointer transition-all {settingsTab === 'latency' ? 'bg-primary text-foreground border-accent' : 'bg-transparent text-muted-foreground hover:bg-white/5'}"
+    onclick={() => (settingsTab = "latency")}
+  >Latency</button>
+  <button
+    class="px-5 py-1.5 border border-input rounded-md text-[0.85rem] cursor-pointer transition-all {settingsTab === 'decisions' ? 'bg-primary text-foreground border-accent' : 'bg-transparent text-muted-foreground hover:bg-white/5'}"
+    onclick={() => (settingsTab = "decisions")}
+  >Decisions</button>
 </div>
 
 {#if settingsTab === "usage"}
   <UsagePanel />
+{:else if settingsTab === "latency"}
+  <LatencyPanel />
+{:else if settingsTab === "decisions"}
+  <DecisionPanel />
 {:else}
   <div class="flex gap-2.5 mb-5">
     <button

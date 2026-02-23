@@ -26,6 +26,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/orchestrator/latency",
             get(crate::routes::orchestrator_latency_handler),
         )
+        .route(
+            "/v1/orchestrator/latency/aggregate",
+            get(crate::routes::orchestrator_latency_aggregate_handler),
+        )
+        .route(
+            "/v1/orchestrator/decisions",
+            get(crate::routes::dispatch_decisions_handler),
+        )
         .route("/v1/connectors", get(crate::routes::list_connectors_handler))
         .route(
             "/v1/connectors/{id}/action",

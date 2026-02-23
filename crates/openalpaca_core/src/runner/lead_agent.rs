@@ -612,6 +612,137 @@ impl BuiltInTool for SpawnSubagentTool {
     }
 }
 
+// ── SpawnSubagentsBatchTool ──────────────────────────────────────────
+
+/// Batch variant of `spawn_subagent`: spawns 1-8 subagents in a single tool call.
+/// Delegates each spawn to the existing `SpawnSubagentTool` for consistent behavior.
+pub struct SpawnSubagentsBatchTool {
+    inner: Arc<SpawnSubagentTool>,
+}
+
+impl SpawnSubagentsBatchTool {
+    pub fn new(inner: Arc<SpawnSubagentTool>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl BuiltInTool for SpawnSubagentsBatchTool {
+    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        let subagents = arguments
+            .get("subagents")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                "Missing required parameter: subagents (must be a JSON array)".to_string()
+            })?;
+
+        if subagents.is_empty() {
+            return Err("subagents array must contain at least 1 item".to_string());
+        }
+        if subagents.len() > 8 {
+            return Err(format!(
+                "subagents array has {} items (max 8). Split into multiple batch calls.",
+                subagents.len()
+            ));
+        }
+
+        let mut results = Vec::with_capacity(subagents.len());
+        let mut success_count = 0usize;
+
+        for (i, entry) in subagents.iter().enumerate() {
+            let agent_id = entry
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("subagents[{}]: missing agent_id", i))?;
+            let objective = entry
+                .get("objective")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("subagents[{}]: missing objective", i))?;
+
+            let single_args = serde_json::json!({
+                "agent_id": agent_id,
+                "objective": objective,
+            });
+
+            match self.inner.execute(&single_args).await {
+                Ok(msg) => {
+                    success_count += 1;
+                    results.push(format!("[{}] OK: {}", i + 1, msg));
+                }
+                Err(e) => {
+                    results.push(format!("[{}] FAILED ({}): {}", i + 1, agent_id, e));
+                }
+            }
+        }
+
+        let summary = format!(
+            "Batch spawn: {}/{} subagents spawned successfully.\n{}",
+            success_count,
+            subagents.len(),
+            results.join("\n")
+        );
+        Ok(summary)
+    }
+}
+
+/// Tool definition for `spawn_subagents_batch`.
+pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> ToolDefinition {
+    let agent_descriptions: Vec<String> = templates
+        .iter()
+        .map(|t| {
+            let fm = &t.frontmatter;
+            let skills = fm.skills.join(", ");
+            format!(
+                "- ID: \"{}\", Name: \"{}\", Skills: [{}]",
+                fm.id, fm.name, skills
+            )
+        })
+        .collect();
+
+    let agents_list = if agent_descriptions.is_empty() {
+        "No agents available.".to_string()
+    } else {
+        agent_descriptions.join("\n")
+    };
+
+    ToolDefinition {
+        name: "spawn_subagents_batch".to_string(),
+        description: format!(
+            "Spawn multiple subagents in a single call (1-8). More efficient than calling \
+             spawn_subagent repeatedly. Each entry specifies an agent_id and objective. \
+             All subagents start executing immediately in parallel. Use wait_for_subagents \
+             to collect results.\n\nAvailable agents:\n{}",
+            agents_list
+        ),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "subagents": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "agent_id": {
+                                "type": "string",
+                                "description": "The ID of the agent template to spawn"
+                            },
+                            "objective": {
+                                "type": "string",
+                                "description": "A clear, specific objective for this subagent"
+                            }
+                        },
+                        "required": ["agent_id", "objective"]
+                    },
+                    "minItems": 1,
+                    "maxItems": 8,
+                    "description": "Array of subagent specs to spawn"
+                }
+            },
+            "required": ["subagents"]
+        }),
+    }
+}
+
 // ── CheckSubagentStatusTool ──────────────────────────────────────────
 
 /// Tool that allows the lead agent to check the status of a spawned subagent.
@@ -812,6 +943,7 @@ pub fn spawn_subagent_tool_definition_from_templates(
 /// and all other tools to the ContextualToolExecutor.
 pub struct LeadAgentToolExecutor {
     spawn_tool: Arc<SpawnSubagentTool>,
+    batch_spawn_tool: Option<Arc<SpawnSubagentsBatchTool>>,
     check_status_tool: Arc<CheckSubagentStatusTool>,
     wait_tool: Arc<WaitForSubagentsTool>,
     contextual_executor: Arc<ContextualToolExecutor>,
@@ -820,12 +952,14 @@ pub struct LeadAgentToolExecutor {
 impl LeadAgentToolExecutor {
     pub fn new(
         spawn_tool: Arc<SpawnSubagentTool>,
+        batch_spawn_tool: Option<Arc<SpawnSubagentsBatchTool>>,
         check_status_tool: Arc<CheckSubagentStatusTool>,
         wait_tool: Arc<WaitForSubagentsTool>,
         contextual_executor: Arc<ContextualToolExecutor>,
     ) -> Self {
         Self {
             spawn_tool,
+            batch_spawn_tool,
             check_status_tool,
             wait_tool,
             contextual_executor,
@@ -842,6 +976,10 @@ impl ToolExecutor for LeadAgentToolExecutor {
     ) -> Result<String, String> {
         match tool_name {
             "spawn_subagent" => self.spawn_tool.execute(arguments).await,
+            "spawn_subagents_batch" => match &self.batch_spawn_tool {
+                Some(tool) => tool.execute(arguments).await,
+                None => Err("spawn_subagents_batch tool is not enabled".to_string()),
+            },
             "check_subagent_status" => self.check_status_tool.execute(arguments).await,
             "wait_for_subagents" => self.wait_tool.execute(arguments).await,
             _ => self.contextual_executor.execute(tool_name, arguments).await,
@@ -851,6 +989,9 @@ impl ToolExecutor for LeadAgentToolExecutor {
     fn registered_tools(&self) -> Vec<String> {
         let mut tools = self.contextual_executor.registered_tools();
         tools.push("spawn_subagent".to_string());
+        if self.batch_spawn_tool.is_some() {
+            tools.push("spawn_subagents_batch".to_string());
+        }
         tools.push("check_subagent_status".to_string());
         tools.push("wait_for_subagents".to_string());
         tools
@@ -1017,7 +1158,15 @@ pub async fn run_lead_agent(
     let spawn_tool_def = spawn_subagent_tool_definition_from_templates(&worker_templates);
 
     // 3. Build tools: spawn_subagent + check/wait + workspace + memory_search
+    let batch_spawn_enabled = daemon_config
+        .load()
+        .execution
+        .lead_agent_defaults
+        .batch_spawn_enabled;
     let mut tools = vec![spawn_tool_def];
+    if batch_spawn_enabled {
+        tools.push(spawn_subagents_batch_tool_definition(&worker_templates));
+    }
     tools.push(check_subagent_status_tool_definition());
     tools.push(wait_for_subagents_tool_definition());
     tools.extend(crate::tools::builtins::workspace_tool_definitions());
@@ -1065,8 +1214,15 @@ pub async fn run_lead_agent(
     let contextual_executor =
         Arc::new(ContextualToolExecutor::new(tool_registry.clone(), ctx_exec));
 
+    let batch_spawn_tool = if batch_spawn_enabled {
+        Some(Arc::new(SpawnSubagentsBatchTool::new(spawn_tool.clone())))
+    } else {
+        None
+    };
+
     let lead_executor = Arc::new(LeadAgentToolExecutor::new(
         spawn_tool.clone(),
+        batch_spawn_tool,
         check_status_tool,
         wait_tool,
         contextual_executor,
@@ -1314,10 +1470,11 @@ mod tests {
         let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
 
         let executor =
-            LeadAgentToolExecutor::new(spawn_tool, check_status_tool, wait_tool, contextual);
+            LeadAgentToolExecutor::new(spawn_tool, None, check_status_tool, wait_tool, contextual);
 
         let tools = executor.registered_tools();
         assert!(tools.contains(&"spawn_subagent".to_string()));
+        assert!(!tools.contains(&"spawn_subagents_batch".to_string()));
         assert!(tools.contains(&"check_subagent_status".to_string()));
         assert!(tools.contains(&"wait_for_subagents".to_string()));
         assert!(tools.contains(&"web_search".to_string()));
@@ -1540,5 +1697,260 @@ mod tests {
             .await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("still running"));
+    }
+
+    // ── Batch spawn tool tests ────────────────────────────────────────
+
+    #[test]
+    fn test_batch_spawn_tool_definition_includes_agents() {
+        use crate::agent::template::AgentTemplateFrontmatter;
+
+        let templates = vec![AgentTemplate {
+            frontmatter: AgentTemplateFrontmatter {
+                id: "researcher".to_string(),
+                name: "Researcher".to_string(),
+                description: "Research agent".to_string(),
+                icon: None,
+                singleton: false,
+                skills: vec!["web_search".to_string()],
+                denied_skills: vec![],
+                temperature: 0.5,
+                verbosity: "normal".to_string(),
+                model: None,
+                fallback_models: vec![],
+                max_tool_calls: None,
+                timeout_seconds: None,
+                max_cost_per_task: None,
+                max_rounds: None,
+                require_confirmation_for: vec![],
+            },
+            body: String::new(),
+            sections: HashMap::new(),
+        }];
+
+        let def = spawn_subagents_batch_tool_definition(&templates);
+        assert_eq!(def.name, "spawn_subagents_batch");
+        assert!(def.description.contains("researcher"));
+        assert!(def.description.contains("Researcher"));
+    }
+
+    #[test]
+    fn test_batch_spawn_tool_hidden_when_disabled() {
+        // When batch_spawn_enabled is false, registered_tools should NOT list it
+        use crate::tools::registry::{RegisteredTool, ToolBackend};
+
+        struct NoopTool;
+        #[async_trait]
+        impl BuiltInTool for NoopTool {
+            async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+                Ok("noop".to_string())
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register(RegisteredTool {
+            definition: ToolDefinition {
+                name: "web_search".to_string(),
+                description: "test".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(NoopTool)),
+        });
+        let registry = Arc::new(registry);
+
+        let tracker = Arc::new(SubagentTracker::new());
+        let spawn_tool = Arc::new(SpawnSubagentTool::new(
+            Arc::new(openalpaca_llm::LlmRouter::new(
+                std::collections::HashMap::new(),
+                openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+                std::collections::HashMap::new(),
+                Arc::new(openalpaca_llm::CostTracker::new(
+                    openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+                )),
+                "test-model".to_string(),
+            )),
+            registry.clone(),
+            Arc::new(SharedContext::new()),
+            EventBus::default(),
+            None,
+            "task-1".to_string(),
+            "user-1".to_string(),
+            "test-lead".to_string(),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            None,
+            tracker.clone(),
+            0,
+            DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        ));
+        let check_tool = Arc::new(CheckSubagentStatusTool {
+            tracker: tracker.clone(),
+        });
+        let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
+        let ctx_exec = ToolExecutionContext {
+            owner_id: None,
+            task_id: Some("task-1".to_string()),
+            agent_id: None,
+            db: None,
+        };
+        let contextual = Arc::new(ContextualToolExecutor::new(registry, ctx_exec));
+
+        // batch_spawn_tool = None -> not in registered_tools
+        let executor =
+            LeadAgentToolExecutor::new(spawn_tool, None, check_tool, wait_tool, contextual);
+        let tools = executor.registered_tools();
+        assert!(!tools.contains(&"spawn_subagents_batch".to_string()));
+        assert!(tools.contains(&"spawn_subagent".to_string()));
+    }
+
+    #[test]
+    fn test_batch_spawn_tool_present_when_enabled() {
+        use crate::tools::registry::{RegisteredTool, ToolBackend};
+
+        struct NoopTool;
+        #[async_trait]
+        impl BuiltInTool for NoopTool {
+            async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+                Ok("noop".to_string())
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register(RegisteredTool {
+            definition: ToolDefinition {
+                name: "web_search".to_string(),
+                description: "test".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(NoopTool)),
+        });
+        let registry = Arc::new(registry);
+
+        let tracker = Arc::new(SubagentTracker::new());
+        let spawn_tool = Arc::new(SpawnSubagentTool::new(
+            Arc::new(openalpaca_llm::LlmRouter::new(
+                std::collections::HashMap::new(),
+                openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+                std::collections::HashMap::new(),
+                Arc::new(openalpaca_llm::CostTracker::new(
+                    openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+                )),
+                "test-model".to_string(),
+            )),
+            registry.clone(),
+            Arc::new(SharedContext::new()),
+            EventBus::default(),
+            None,
+            "task-1".to_string(),
+            "user-1".to_string(),
+            "test-lead".to_string(),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            None,
+            tracker.clone(),
+            0,
+            DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        ));
+        let batch_tool = Some(Arc::new(SpawnSubagentsBatchTool::new(spawn_tool.clone())));
+        let check_tool = Arc::new(CheckSubagentStatusTool {
+            tracker: tracker.clone(),
+        });
+        let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
+        let ctx_exec = ToolExecutionContext {
+            owner_id: None,
+            task_id: Some("task-1".to_string()),
+            agent_id: None,
+            db: None,
+        };
+        let contextual = Arc::new(ContextualToolExecutor::new(registry, ctx_exec));
+
+        // batch_spawn_tool = Some -> IS in registered_tools
+        let executor = LeadAgentToolExecutor::new(
+            spawn_tool,
+            batch_tool,
+            check_tool,
+            wait_tool,
+            contextual,
+        );
+        let tools = executor.registered_tools();
+        assert!(tools.contains(&"spawn_subagents_batch".to_string()));
+        assert!(tools.contains(&"spawn_subagent".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_batch_spawn_empty_array_error() {
+        let tracker = Arc::new(SubagentTracker::new());
+        let spawn_tool = Arc::new(SpawnSubagentTool::new(
+            Arc::new(openalpaca_llm::LlmRouter::new(
+                std::collections::HashMap::new(),
+                openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+                std::collections::HashMap::new(),
+                Arc::new(openalpaca_llm::CostTracker::new(
+                    openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+                )),
+                "test-model".to_string(),
+            )),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(SharedContext::new()),
+            EventBus::default(),
+            None,
+            "task-1".to_string(),
+            "user-1".to_string(),
+            "test-lead".to_string(),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            None,
+            tracker,
+            0,
+            DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        ));
+        let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
+
+        let result = batch_tool
+            .execute(&serde_json::json!({"subagents": []}))
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("at least 1"));
+    }
+
+    #[tokio::test]
+    async fn test_batch_spawn_exceeds_max_error() {
+        let tracker = Arc::new(SubagentTracker::new());
+        let spawn_tool = Arc::new(SpawnSubagentTool::new(
+            Arc::new(openalpaca_llm::LlmRouter::new(
+                std::collections::HashMap::new(),
+                openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+                std::collections::HashMap::new(),
+                Arc::new(openalpaca_llm::CostTracker::new(
+                    openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+                )),
+                "test-model".to_string(),
+            )),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(SharedContext::new()),
+            EventBus::default(),
+            None,
+            "task-1".to_string(),
+            "user-1".to_string(),
+            "test-lead".to_string(),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            None,
+            tracker,
+            0,
+            DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        ));
+        let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
+
+        // 9 items should fail (max 8)
+        let items: Vec<serde_json::Value> = (0..9)
+            .map(|i| {
+                serde_json::json!({
+                    "agent_id": format!("agent-{}", i),
+                    "objective": format!("task-{}", i)
+                })
+            })
+            .collect();
+        let result = batch_tool
+            .execute(&serde_json::json!({"subagents": items}))
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("max 8"));
     }
 }

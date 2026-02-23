@@ -47,7 +47,7 @@ pub struct DagExecutorConfig {
 impl Default for DagExecutorConfig {
     fn default() -> Self {
         Self {
-            max_concurrent_agents: 3,
+            max_concurrent_agents: 4,
             node_timeout: Duration::from_secs(300),
             total_timeout: Duration::from_secs(1800),
             max_retries_per_node: 1,
@@ -193,8 +193,15 @@ pub async fn execute_dag(
 
         // Collect ready node IDs and data BEFORE mutating the DAG.
         // This avoids holding an immutable borrow while we need mutable access.
-        let ready_info: Vec<(String, String, DagNode)> = dag
-            .ready_nodes()
+        // When critical path scheduling is enabled, prioritize nodes on the
+        // longest downstream path for better overall DAG completion time.
+        let dcfg = daemon_config.load();
+        let ready_refs = if dcfg.execution.dag.critical_path_scheduling_enabled {
+            dag.ready_nodes_prioritized()
+        } else {
+            dag.ready_nodes()
+        };
+        let ready_info: Vec<(String, String, DagNode)> = ready_refs
             .iter()
             .map(|n| (n.node_id.clone(), n.agent_id.clone(), (*n).clone()))
             .collect();
@@ -1093,7 +1100,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = DagExecutorConfig::default();
-        assert_eq!(config.max_concurrent_agents, 3);
+        assert_eq!(config.max_concurrent_agents, 4);
         assert_eq!(config.node_timeout, Duration::from_secs(300));
         assert_eq!(config.total_timeout, Duration::from_secs(1800));
         assert_eq!(config.max_retries_per_node, 1);

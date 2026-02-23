@@ -153,6 +153,7 @@ impl Orchestrator {
                 timeout_secs: planner_cfg.planning_timeout_secs,
                 max_retries: planner_cfg.max_retries,
                 max_tokens: planner_cfg.max_tokens,
+                plan_protocol_v2_enabled: planner_cfg.plan_protocol_v2_enabled,
             };
 
             let planner_start = Instant::now();
@@ -198,6 +199,7 @@ impl Orchestrator {
 
                             let dispatch_start = Instant::now();
                             let dispatch_result = self.task_dispatcher.dispatch_planned(
+                                request_id,
                                 &augmented,
                                 plan,
                                 &principal_id(&principal),
@@ -393,6 +395,7 @@ impl Orchestrator {
                             "Heuristic dispatch failed ({e}), trying lead agent fallback"
                         );
                         match self.task_dispatcher.dispatch_lead_agent_heuristic(
+                            request_id,
                             &augmented,
                             &principal_id(principal),
                             lane_key,

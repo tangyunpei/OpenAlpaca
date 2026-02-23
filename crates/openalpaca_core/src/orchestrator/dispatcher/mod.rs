@@ -2,6 +2,7 @@
 
 mod core;
 mod dag;
+pub(crate) mod decision;
 mod lead_agent;
 mod pipeline;
 #[cfg(test)]
@@ -11,9 +12,11 @@ pub(crate) mod usage;
 use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
+use crate::events::SystemEvent;
 use crate::lane::LaneManager;
 use crate::security::gate::SecurityGate;
 use arc_swap::ArcSwap;
+use chrono::Utc;
 use openalpaca_llm::LlmRouter;
 use openalpaca_storage::Database;
 use std::sync::Arc;
@@ -26,6 +29,9 @@ use super::task_planner::TaskPlan;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::memory::task_extraction::{TaskExtractionParams, extract_task_memories};
 use openalpaca_storage::repository::MemoryRepository;
+use openalpaca_storage::repository::dispatch_decision::{
+    DispatchDecisionRecord, DispatchDecisionRepository,
+};
 
 /// Retrieve relevant user memories as a formatted block for agent prompts.
 /// Mirrors the retrieval pattern used in `handle_simple_query()`.
@@ -98,7 +104,7 @@ pub(super) async fn retrieve_memory_block(
         tracing::warn!("Failed to track memory access: {e}");
     }
 
-    let mut block = String::from("### RETRIEVED MEMORY ###\n");
+    let mut inner = String::new();
     let mut budget = 2000usize;
     for m in &memories {
         let entry = format!(
@@ -110,9 +116,9 @@ pub(super) async fn retrieve_memory_block(
             break;
         }
         budget -= entry.len();
-        block.push_str(&entry);
+        inner.push_str(&entry);
     }
-    Some(block)
+    Some(super::wrap_untrusted_context(&inner, "retrieved_memory", "retrieved"))
 }
 
 /// Spawn a background task to extract memories from a completed task output.
@@ -241,12 +247,80 @@ impl TaskDispatcher {
         }
     }
 
+    // ── Shared decision recording helpers ──────────────────────────────
+
+    /// Record a dispatch decision (event + DB). Returns row ID for task_id backfill.
+    fn record_decision(
+        &self,
+        request_id: &str,
+        dd: &decision::DispatchDecision,
+    ) -> Option<i64> {
+        let dcfg = self.daemon_config.load();
+        if !dcfg.execution.planner.dispatch_analysis_enabled {
+            return None;
+        }
+
+        tracing::info!(
+            mode = %dd.mode,
+            reason = %dd.reason,
+            agent_count = dd.agent_count,
+            dag_node_count = ?dd.dag_node_count,
+            predictability_score = ?dd.predictability_score,
+            "DispatchDecision analysis"
+        );
+
+        self.bus.publish(SystemEvent::DispatchDecision {
+            request_id: request_id.to_string(),
+            task_id: None,
+            mode: dd.mode.to_string(),
+            reason: dd.reason.to_string(),
+            agent_count: dd.agent_count,
+            dag_node_count: dd.dag_node_count,
+            predictability_score: dd.predictability_score,
+            error_message: dd.error_message.clone(),
+            timestamp: Utc::now(),
+        });
+
+        if let Some(ref db) = self.db {
+            let repo = DispatchDecisionRepository::new(db);
+            match repo.record(&DispatchDecisionRecord {
+                id: None,
+                request_id: request_id.to_string(),
+                task_id: None,
+                mode: dd.mode.to_string(),
+                reason: dd.reason.to_string(),
+                agent_count: dd.agent_count,
+                dag_node_count: dd.dag_node_count,
+                predictability_score: dd.predictability_score,
+                planner_requested_mode: dd.planner_requested_mode.clone(),
+                error_message: dd.error_message.clone(),
+                timestamp: None,
+            }) {
+                Ok(id) => return Some(id),
+                Err(e) => tracing::warn!("Failed to persist dispatch decision: {e}"),
+            }
+        }
+        None
+    }
+
+    /// Backfill task_id after task creation.
+    fn backfill_decision_task_id(&self, decision_id: Option<i64>, task_id: &str) {
+        if let (Some(id), Some(db)) = (decision_id, &self.db) {
+            let repo = DispatchDecisionRepository::new(db);
+            if let Err(e) = repo.update_task_id(id, task_id) {
+                tracing::warn!("Failed to backfill decision task_id: {e}");
+            }
+        }
+    }
+
+    // ── Dispatch methods ────────────────────────────────────────────────
+
     /// Dispatch a complex task using heuristic skill matching:
     /// Matches required skills to idle agents, then delegates to dispatch_core.
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch(
         &self,
-        _request_id: Uuid,
+        request_id: Uuid,
         source: &str,
         description: &str,
         required_skills: &[String],
@@ -254,20 +328,49 @@ impl TaskDispatcher {
         lane_key: &str,
         workspace_id: Option<String>,
     ) -> Result<String, String> {
-        let matches = self
+        let matches = match self
             .skill_matcher
             .match_skills(required_skills, &self.shared_context.agent_registry)
-            .map_err(|e| {
+        {
+            Ok(m) => m,
+            Err(e) => {
                 tracing::warn!(
                     required_skills = ?required_skills,
                     description_len = description.len(),
                     source = source,
                     "Heuristic skill matching failed: {e}"
                 );
-                e
-            })?;
+                // Record the failed attempt so it appears in analytics
+                let dd = decision::DispatchDecision {
+                    mode: decision::DispatchMode::SequentialPipeline,
+                    reason: decision::DecisionReason::HeuristicMatchFailed,
+                    agent_count: 0,
+                    dag_node_count: None,
+                    predictability_score: None,
+                    planner_requested_mode: None,
+                    error_message: Some(e.clone()),
+                    timestamp: Utc::now(),
+                };
+                self.record_decision(&request_id.to_string(), &dd);
+                return Err(e);
+            }
+        };
+
+        // Record heuristic dispatch decision
+        let dd = decision::DispatchDecision {
+            mode: decision::DispatchMode::SequentialPipeline,
+            reason: decision::DecisionReason::HeuristicFallback,
+            agent_count: matches.len(),
+            dag_node_count: None,
+            predictability_score: None,
+            planner_requested_mode: None,
+            error_message: None,
+            timestamp: Utc::now(),
+        };
+        let decision_row_id = self.record_decision(&request_id.to_string(), &dd);
+
         let title = generate_title(description);
-        self.dispatch_core(
+        let result = self.dispatch_core(
             description,
             title,
             matches,
@@ -275,28 +378,53 @@ impl TaskDispatcher {
             lane_key,
             source,
             workspace_id,
-        )
+        );
+        if let Ok(ref task_id) = result {
+            self.backfill_decision_task_id(decision_row_id, task_id);
+        }
+        result
     }
 
     /// Dispatch a task directly to the lead agent (heuristic fallback).
     /// Used when heuristic skill matching fails for ComplexTask intents.
     pub fn dispatch_lead_agent_heuristic(
         &self,
+        request_id: Uuid,
         description: &str,
         created_by: &str,
         lane_key: &str,
         source: &str,
         workspace_id: Option<String>,
     ) -> Result<String, String> {
+        // Record heuristic lead-agent dispatch decision
+        let dd = decision::DispatchDecision {
+            mode: decision::DispatchMode::LeadAgent,
+            reason: decision::DecisionReason::HeuristicFallback,
+            agent_count: 0,
+            dag_node_count: None,
+            predictability_score: None,
+            planner_requested_mode: None,
+            error_message: None,
+            timestamp: Utc::now(),
+        };
+        let decision_row_id = self.record_decision(&request_id.to_string(), &dd);
+
         let title = generate_title(description);
-        self.dispatch_lead_agent(description, title, created_by, lane_key, source, workspace_id)
+        let result =
+            self.dispatch_lead_agent(description, title, created_by, lane_key, source, workspace_id);
+        if let Ok(ref task_id) = result {
+            self.backfill_decision_task_id(decision_row_id, task_id);
+        }
+        result
     }
 
     /// Dispatch a complex task using an LLM-generated plan.
     /// Validates that assigned agents exist and are idle, then delegates to dispatch_core.
     /// If `plan.use_lead_agent` is true, routes to the Lead Agent orchestration path.
+    #[allow(clippy::too_many_arguments)]
     pub fn dispatch_planned(
         &self,
+        request_id: Uuid,
         description: &str,
         plan: TaskPlan,
         created_by: &str,
@@ -304,6 +432,11 @@ impl TaskDispatcher {
         source: &str,
         workspace_id: Option<String>,
     ) -> Result<String, String> {
+        // ── Dispatch Analysis (Phase 2) ────────────────────────────────
+        let dd = decision::analyze_plan(&plan);
+        let decision_row_id = self.record_decision(&request_id.to_string(), &dd);
+        // ── End Dispatch Analysis ──────────────────────────────────────
+
         let plan_classification = plan.classification.clone();
         let plan_title_ref = plan.title.as_deref().unwrap_or("<none>").to_string();
 
@@ -319,7 +452,7 @@ impl TaskDispatcher {
                 .title
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| generate_title(description));
-            return self.dispatch_lead_agent(
+            let result = self.dispatch_lead_agent(
                 description,
                 title,
                 created_by,
@@ -327,6 +460,10 @@ impl TaskDispatcher {
                 source,
                 workspace_id,
             );
+            if let Ok(ref task_id) = result {
+                self.backfill_decision_task_id(decision_row_id, task_id);
+            }
+            return result;
         }
 
         // 2. DAG path: planner emits assignments=[] with agent info in dag.nodes[].agent_id.
@@ -345,7 +482,7 @@ impl TaskDispatcher {
                 .title
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| generate_title(description));
-            return self.dispatch_dag_planned(
+            let result = self.dispatch_dag_planned(
                 description,
                 title,
                 dag,
@@ -354,6 +491,10 @@ impl TaskDispatcher {
                 source,
                 workspace_id,
             );
+            if let Ok(ref task_id) = result {
+                self.backfill_decision_task_id(decision_row_id, task_id);
+            }
+            return result;
         }
 
         // 3. No DAG and no assignments — fallback to lead agent
@@ -368,7 +509,7 @@ impl TaskDispatcher {
                 .title
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| generate_title(description));
-            return self.dispatch_lead_agent(
+            let result = self.dispatch_lead_agent(
                 description,
                 title,
                 created_by,
@@ -376,6 +517,10 @@ impl TaskDispatcher {
                 source,
                 workspace_id,
             );
+            if let Ok(ref task_id) = result {
+                self.backfill_decision_task_id(decision_row_id, task_id);
+            }
+            return result;
         }
 
         // 4. Sequential pipeline: assignments provided, no DAG
@@ -402,7 +547,7 @@ impl TaskDispatcher {
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| generate_title(description));
 
-        self.dispatch_core(
+        let result = self.dispatch_core(
             description,
             title,
             matches,
@@ -410,7 +555,11 @@ impl TaskDispatcher {
             lane_key,
             source,
             workspace_id,
-        )
+        );
+        if let Ok(ref task_id) = result {
+            self.backfill_decision_task_id(decision_row_id, task_id);
+        }
+        result
     }
 }
 
