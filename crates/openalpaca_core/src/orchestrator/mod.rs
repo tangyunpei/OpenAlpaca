@@ -6,9 +6,7 @@
 pub mod dispatcher;
 pub mod intent;
 pub mod replanner;
-pub mod skill_catalog;
-pub mod skill_matcher;
-pub mod skill_router;
+pub mod skill;
 pub mod task_planner;
 pub mod task_state;
 
@@ -18,12 +16,13 @@ mod extraction;
 mod handlers;
 mod memory_ops;
 mod query_handler;
-mod skill_context;
-mod skill_handler;
-mod skill_output;
-pub mod skill_smoke;
 mod summary;
 mod task_ops;
+
+pub use skill::catalog as skill_catalog;
+pub use skill::matcher as skill_matcher;
+pub use skill::router as skill_router;
+pub use skill::smoke as skill_smoke;
 
 #[cfg(test)]
 mod tests;
