@@ -225,6 +225,16 @@ impl Default for LeadAgentDefaults {
 pub struct SkillDefaults {
     pub max_rounds: usize,
     pub max_tools_per_round: usize,
+    /// Default permission level for skills without explicit permissions.
+    pub default_permission_level: String,
+    /// Global tool deny list (applied to all skills in addition to per-skill deny).
+    pub global_tool_deny: Vec<String>,
+    /// Default tool rate limit (calls per minute) if not specified in skill.
+    pub default_tool_rate_limit: u32,
+    /// Auto-select score threshold for the skill router.
+    pub router_auto_select_threshold: f64,
+    /// Suggest score threshold for the skill router.
+    pub router_suggest_threshold: f64,
 }
 
 impl Default for SkillDefaults {
@@ -232,6 +242,11 @@ impl Default for SkillDefaults {
         Self {
             max_rounds: 6,
             max_tools_per_round: 3,
+            default_permission_level: "readonly".to_string(),
+            global_tool_deny: Vec::new(),
+            default_tool_rate_limit: 60,
+            router_auto_select_threshold: 0.65,
+            router_suggest_threshold: 0.45,
         }
     }
 }
@@ -666,6 +681,24 @@ impl DaemonConfig {
             50,
             "skill_defaults.max_tools_per_round",
         );
+        clamp_val(
+            &mut self.execution.skill_defaults.default_tool_rate_limit,
+            1,
+            1000,
+            "skill_defaults.default_tool_rate_limit",
+        );
+        clamp_val(
+            &mut self.execution.skill_defaults.router_auto_select_threshold,
+            0.0,
+            1.0,
+            "skill_defaults.router_auto_select_threshold",
+        );
+        clamp_val(
+            &mut self.execution.skill_defaults.router_suggest_threshold,
+            0.0,
+            1.0,
+            "skill_defaults.router_suggest_threshold",
+        );
         // ── Execution > Planner ──
         clamp_val(
             &mut self.execution.planner.planning_timeout_secs,
@@ -962,5 +995,71 @@ max_tokens = 1024
         assert!(!config.execution.planner.plan_protocol_v2_enabled);
         assert!(!config.execution.lead_agent_defaults.batch_spawn_enabled);
         assert!(!config.execution.dag.critical_path_scheduling_enabled);
+    }
+
+    #[test]
+    fn test_skill_defaults_new_fields_default() {
+        let config = DaemonConfig::default();
+        let sd = &config.execution.skill_defaults;
+        assert_eq!(sd.max_rounds, 6);
+        assert_eq!(sd.max_tools_per_round, 3);
+        assert_eq!(sd.default_permission_level, "readonly");
+        assert!(sd.global_tool_deny.is_empty());
+        assert_eq!(sd.default_tool_rate_limit, 60);
+        assert!((sd.router_auto_select_threshold - 0.65).abs() < f64::EPSILON);
+        assert!((sd.router_suggest_threshold - 0.45).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_skill_defaults_from_toml() {
+        let toml_str = r#"
+[execution.skill_defaults]
+max_rounds = 10
+default_permission_level = "readwrite"
+global_tool_deny = ["shell_command", "file_delete"]
+default_tool_rate_limit = 30
+router_auto_select_threshold = 0.8
+router_suggest_threshold = 0.5
+"#;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        let sd = &config.execution.skill_defaults;
+        assert_eq!(sd.max_rounds, 10);
+        assert_eq!(sd.default_permission_level, "readwrite");
+        assert_eq!(sd.global_tool_deny, vec!["shell_command", "file_delete"]);
+        assert_eq!(sd.default_tool_rate_limit, 30);
+        assert!((sd.router_auto_select_threshold - 0.8).abs() < f64::EPSILON);
+        assert!((sd.router_suggest_threshold - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_skill_defaults_backward_compat() {
+        // Old TOML with only max_rounds/max_tools_per_round should still parse
+        let toml_str = r#"
+[execution.skill_defaults]
+max_rounds = 8
+max_tools_per_round = 5
+"#;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        let sd = &config.execution.skill_defaults;
+        assert_eq!(sd.max_rounds, 8);
+        assert_eq!(sd.max_tools_per_round, 5);
+        // New fields have defaults
+        assert_eq!(sd.default_permission_level, "readonly");
+        assert!(sd.global_tool_deny.is_empty());
+        assert_eq!(sd.default_tool_rate_limit, 60);
+    }
+
+    #[test]
+    fn test_skill_defaults_validate_clamps() {
+        let mut config = DaemonConfig::default();
+        config.execution.skill_defaults.router_auto_select_threshold = 1.5; // max is 1.0
+        config.execution.skill_defaults.router_suggest_threshold = -0.1; // min is 0.0
+        config.execution.skill_defaults.default_tool_rate_limit = 0; // min is 1
+
+        config.validate();
+
+        assert!((config.execution.skill_defaults.router_auto_select_threshold - 1.0).abs() < f64::EPSILON);
+        assert!((config.execution.skill_defaults.router_suggest_threshold - 0.0).abs() < f64::EPSILON);
+        assert_eq!(config.execution.skill_defaults.default_tool_rate_limit, 1);
     }
 }

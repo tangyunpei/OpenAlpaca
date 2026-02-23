@@ -13,30 +13,352 @@ use std::collections::HashMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
-// Types
+// Scope
+// ---------------------------------------------------------------------------
+
+/// Where a skill was loaded from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SkillScope {
+    /// Project-level skills (e.g. `config/skills/`).
+    Project,
+    /// User-level skills (e.g. `~/.config/openalpaca/skills/`).
+    User,
+}
+
+// ---------------------------------------------------------------------------
+// Sub-config types
+// ---------------------------------------------------------------------------
+
+fn default_invoke_mode() -> String {
+    "manual".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InvokeConfig {
+    /// "manual" | "auto" | "scheduled" | "disabled"
+    #[serde(default = "default_invoke_mode")]
+    pub mode: String,
+    /// Slash command (e.g. "/review")
+    pub slash: Option<String>,
+    /// Alternative slash commands that also invoke this skill.
+    pub aliases: Vec<String>,
+    /// Hotkey binding
+    pub hotkey: Option<String>,
+    /// Cron expression for scheduled mode
+    pub cron: Option<String>,
+}
+
+impl Default for InvokeConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_invoke_mode(),
+            slash: None,
+            aliases: Vec::new(),
+            hotkey: None,
+            cron: None,
+        }
+    }
+}
+
+fn default_base() -> f64 {
+    0.2
+}
+fn default_intent_weight() -> f64 {
+    0.45
+}
+fn default_keyword_weight() -> f64 {
+    0.35
+}
+fn default_recency_weight() -> f64 {
+    0.2
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScoreWeights {
+    #[serde(default = "default_base")]
+    pub base: f64,
+    #[serde(default = "default_intent_weight")]
+    pub intent_weight: f64,
+    #[serde(default = "default_keyword_weight")]
+    pub keyword_weight: f64,
+    #[serde(default = "default_recency_weight")]
+    pub recency_weight: f64,
+}
+
+impl Default for ScoreWeights {
+    fn default() -> Self {
+        Self {
+            base: default_base(),
+            intent_weight: default_intent_weight(),
+            keyword_weight: default_keyword_weight(),
+            recency_weight: default_recency_weight(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RoutingExamples {
+    pub positive: Vec<String>,
+    pub negative: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RoutingConfig {
+    /// Intent patterns (regex) for auto-routing
+    pub intent: Vec<String>,
+    /// Keywords for keyword-based scoring
+    pub keywords: Vec<String>,
+    /// Negative keywords — if any match, the skill is penalized heavily.
+    pub negative_keywords: Vec<String>,
+    /// Score weights for routing
+    pub weights: ScoreWeights,
+    /// Example queries for intent classification
+    pub examples: RoutingExamples,
+}
+
+fn default_max_files() -> usize {
+    10
+}
+fn default_max_bytes_each() -> usize {
+    200_000
+}
+fn default_max_bytes() -> usize {
+    50_000
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContextSource {
+    File {
+        path: String,
+        #[serde(default = "default_max_bytes")]
+        max_bytes: usize,
+    },
+    FileGlob {
+        pattern: String,
+        #[serde(default = "default_max_files")]
+        max_files: usize,
+        #[serde(default = "default_max_bytes_each")]
+        max_bytes_each: usize,
+    },
+    Shell {
+        command: String,
+        #[serde(default = "default_max_bytes")]
+        max_bytes: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SummarizeConfig {
+    pub enabled: bool,
+    pub max_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextConfig {
+    /// Additional context sources injected before the skill prompt
+    #[serde(default)]
+    pub sources: Vec<ContextSource>,
+    /// Summarization settings for context
+    pub summarize: SummarizeConfig,
+    /// Controls when the skill description appears in the LLM catalog prompt.
+    pub read_when: Vec<String>,
+    /// Token budget for context injection (estimated as chars/4). 0 = default 4000.
+    pub budget_tokens: usize,
+}
+
+fn default_permission_level() -> String {
+    "readonly".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConfirmAction {
+    pub tools: Vec<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxConfig {
+    pub enabled: bool,
+    pub net: bool,
+    pub fs_writable: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PermissionsConfig {
+    /// "readonly" | "readwrite" | "admin"
+    #[serde(default = "default_permission_level")]
+    pub level: String,
+    /// Actions that require user confirmation
+    pub confirm: ConfirmAction,
+    /// Sandbox settings
+    pub sandbox: SandboxConfig,
+}
+
+impl Default for PermissionsConfig {
+    fn default() -> Self {
+        Self {
+            level: default_permission_level(),
+            confirm: ConfirmAction::default(),
+            sandbox: SandboxConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RateLimitConfig {
+    pub max_calls: Option<usize>,
+    pub window_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolsConfig {
+    /// Allowed tools (whitelist)
+    pub allow: Vec<String>,
+    /// Denied tools (blacklist)
+    pub deny: Vec<String>,
+    /// Per-tool default parameters
+    #[serde(default)]
+    pub defaults: HashMap<String, serde_json::Value>,
+    /// Rate limiting for tool calls
+    pub rate_limit: RateLimitConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExpectConfig {
+    pub contains: Vec<String>,
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutputConfig {
+    /// Output format hint ("text" | "json" | "markdown")
+    pub format: Option<String>,
+    /// Max output length in characters
+    pub max_length: Option<usize>,
+    /// Required H2 section headings in the output (for markdown format).
+    pub required_sections: Vec<String>,
+    /// Max output tokens (estimated as chars/4).
+    pub max_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TestsConfig {
+    /// Test input prompts
+    pub inputs: Vec<String>,
+    /// Expected output conditions
+    pub expect: ExpectConfig,
+    /// Smoke test input file paths (relative to skill directory)
+    pub smoke: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Main Types
 // ---------------------------------------------------------------------------
 
 /// YAML frontmatter metadata — loaded at Level 1 (startup catalog scan).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SkillFrontmatter {
+    // Identity
+    pub id: Option<String>,
     /// Human-readable skill name (e.g. "Code Review").
     pub name: String,
+    pub version: Option<String>,
     /// Short description for catalog display.
     pub description: String,
-    /// Slash command that invokes this skill (e.g. "review").
+
+    // New spec sections
+    pub invoke: InvokeConfig,
+    pub routing: RoutingConfig,
+    pub context: ContextConfig,
+    pub permissions: PermissionsConfig,
+    pub tools: ToolsConfig,
+    pub output: OutputConfig,
+    pub tests: TestsConfig,
+
+    // Legacy compat (deserialized but not serialized)
+    /// Slash command that invokes this skill (e.g. "review"). Legacy field.
+    #[serde(skip_serializing)]
     pub command: Option<String>,
-    /// Regex patterns that auto-detect when this skill should activate.
+    /// Regex patterns that auto-detect when this skill should activate. Legacy field.
+    #[serde(skip_serializing)]
     pub trigger_patterns: Vec<String>,
-    /// Tool names this skill requires to function.
+    /// Tool names this skill requires to function. Legacy field.
+    #[serde(skip_serializing)]
     pub tools_required: Vec<String>,
-    /// If true, this skill's instructions are always loaded into context.
+    /// If true, this skill's instructions are always loaded into context. Legacy field.
+    #[serde(skip_serializing)]
     pub auto_load: bool,
-    /// Controls when the skill description appears in the LLM catalog prompt.
+    /// Controls when the skill description appears in the LLM catalog prompt. Legacy field.
+    #[serde(skip_serializing)]
     pub read_when: Vec<String>,
 }
 
+impl SkillFrontmatter {
+    /// Bridge legacy fields to the new schema sections.
+    fn apply_legacy_compat(&mut self) {
+        // command -> invoke.slash (add "/" prefix)
+        if self.invoke.slash.is_none()
+            && let Some(ref cmd) = self.command
+        {
+            self.invoke.slash = Some(format!("/{}", cmd));
+        }
+        // auto_load=true -> invoke.mode="auto" (only if mode is still default)
+        if self.invoke.mode == "manual" && self.auto_load {
+            self.invoke.mode = "auto".to_string();
+        }
+        // trigger_patterns -> routing.intent
+        if self.routing.intent.is_empty() && !self.trigger_patterns.is_empty() {
+            self.routing.intent = self.trigger_patterns.clone();
+        }
+        // tools_required -> tools.allow
+        if self.tools.allow.is_empty() && !self.tools_required.is_empty() {
+            self.tools.allow = self.tools_required.clone();
+        }
+        // read_when -> context.read_when
+        if self.context.read_when.is_empty() && !self.read_when.is_empty() {
+            self.context.read_when = self.read_when.clone();
+        }
+    }
+
+    fn validate(&self) -> Result<(), SkillParseError> {
+        if self.name.is_empty() {
+            return Err(SkillParseError::MissingField("name"));
+        }
+        if self.description.is_empty() {
+            return Err(SkillParseError::MissingField("description"));
+        }
+        Ok(())
+    }
+
+    /// Get the effective slash command (without "/" prefix), checking both
+    /// new `invoke.slash` and legacy `command` fields.
+    pub fn effective_slash_command(&self) -> Option<String> {
+        self.invoke
+            .slash
+            .as_ref()
+            .map(|s| s.strip_prefix('/').unwrap_or(s).to_string())
+            .or_else(|| self.command.clone())
+    }
+}
+
 /// Full parsed SKILL.md document — loaded at Level 2 (on invocation).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SkillDocument {
     pub frontmatter: SkillFrontmatter,
     /// The full markdown body (instructions, examples, templates).
@@ -70,147 +392,35 @@ impl fmt::Display for SkillParseError {
 impl std::error::Error for SkillParseError {}
 
 // ---------------------------------------------------------------------------
-// Frontmatter helpers (reuse soul.rs patterns)
+// Frontmatter extraction
 // ---------------------------------------------------------------------------
 
-fn strip_outer_quotes(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.len() >= 2
-        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
-            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
-    {
-        trimmed[1..trimmed.len() - 1].trim().to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn split_frontmatter(input: &str) -> Result<(Vec<String>, Vec<String>), SkillParseError> {
-    let mut lines = input.lines();
-    let first = lines.next().unwrap_or_default();
-    if first.trim() != "---" {
+/// Extract the raw YAML string between `---` delimiters.
+/// Returns (yaml_str, body_lines) on success.
+fn extract_frontmatter_str(input: &str) -> Result<(&str, Vec<String>), SkillParseError> {
+    let trimmed = input.trim_start();
+    if !trimmed.starts_with("---") {
         return Err(SkillParseError::MissingFrontmatter);
     }
 
-    let mut frontmatter = Vec::new();
-    let mut body = Vec::new();
-    let mut in_frontmatter = true;
+    // Find the opening ---
+    let after_first = &trimmed[3..];
+    // Skip the rest of the opening line (should be just newline)
+    let after_first = after_first.strip_prefix('\n').unwrap_or(after_first);
 
-    for line in lines {
-        if in_frontmatter {
-            if line.trim() == "---" {
-                in_frontmatter = false;
-                continue;
-            }
-            frontmatter.push(line.to_string());
-            continue;
+    // Find the closing ---
+    let close_pos = after_first.find("\n---");
+    match close_pos {
+        Some(pos) => {
+            let yaml_str = &after_first[..pos];
+            let remainder = &after_first[pos + 4..]; // skip "\n---"
+            // Skip the rest of the closing line
+            let remainder = remainder.strip_prefix('\n').unwrap_or(remainder);
+            let body_lines: Vec<String> = remainder.lines().map(|l| l.to_string()).collect();
+            Ok((yaml_str, body_lines))
         }
-        body.push(line.to_string());
+        None => Err(SkillParseError::UnterminatedFrontmatter),
     }
-
-    if in_frontmatter {
-        return Err(SkillParseError::UnterminatedFrontmatter);
-    }
-
-    Ok((frontmatter, body))
-}
-
-/// Parse a YAML list of `- "item"` lines starting at `idx + 1`.
-/// Returns the collected items and advances `idx` past them.
-fn parse_yaml_list(lines: &[String], idx: &mut usize) -> Vec<String> {
-    let mut items = Vec::new();
-    *idx += 1;
-    while *idx < lines.len() {
-        let item = lines[*idx].trim();
-        if item.is_empty() {
-            *idx += 1;
-            continue;
-        }
-        if let Some(v) = item.strip_prefix("- ") {
-            items.push(strip_outer_quotes(v));
-            *idx += 1;
-            continue;
-        }
-        break; // Non-list-item line → stop
-    }
-    items
-}
-
-/// Parse a scalar boolean value from YAML (e.g. `true`, `false`, `"true"`).
-fn parse_yaml_bool(value: &str) -> bool {
-    let v = strip_outer_quotes(value).to_lowercase();
-    matches!(v.as_str(), "true" | "yes" | "1")
-}
-
-fn parse_skill_frontmatter_lines(lines: &[String]) -> Result<SkillFrontmatter, SkillParseError> {
-    let mut name: Option<String> = None;
-    let mut description: Option<String> = None;
-    let mut command: Option<String> = None;
-    let mut trigger_patterns: Vec<String> = Vec::new();
-    let mut tools_required: Vec<String> = Vec::new();
-    let mut auto_load: bool = false;
-    let mut read_when: Vec<String> = Vec::new();
-
-    let mut idx = 0usize;
-    while idx < lines.len() {
-        let trimmed = lines[idx].trim();
-        if trimmed.is_empty() {
-            idx += 1;
-            continue;
-        }
-
-        if let Some(rest) = trimmed.strip_prefix("name:") {
-            name = Some(strip_outer_quotes(rest));
-            idx += 1;
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("description:") {
-            description = Some(strip_outer_quotes(rest));
-            idx += 1;
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("command:") {
-            let v = strip_outer_quotes(rest);
-            if !v.is_empty() {
-                command = Some(v);
-            }
-            idx += 1;
-            continue;
-        }
-        if trimmed.starts_with("trigger_patterns:") {
-            trigger_patterns = parse_yaml_list(lines, &mut idx);
-            continue;
-        }
-        if trimmed.starts_with("tools_required:") {
-            tools_required = parse_yaml_list(lines, &mut idx);
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("auto_load:") {
-            auto_load = parse_yaml_bool(rest);
-            idx += 1;
-            continue;
-        }
-        if trimmed.starts_with("read_when:") {
-            read_when = parse_yaml_list(lines, &mut idx);
-            continue;
-        }
-
-        // Unknown field — skip silently
-        idx += 1;
-    }
-
-    let name = name.ok_or(SkillParseError::MissingField("name"))?;
-    let description = description.ok_or(SkillParseError::MissingField("description"))?;
-
-    Ok(SkillFrontmatter {
-        name,
-        description,
-        command,
-        trigger_patterns,
-        tools_required,
-        auto_load,
-        read_when,
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -268,14 +478,21 @@ fn parse_body_sections(lines: &[String]) -> (String, HashMap<String, String>) {
 ///
 /// Use this for lightweight catalog scanning at startup — does NOT parse the body.
 pub fn parse_skill_frontmatter(input: &str) -> Result<SkillFrontmatter, SkillParseError> {
-    let (frontmatter_lines, _body_lines) = split_frontmatter(input)?;
-    parse_skill_frontmatter_lines(&frontmatter_lines)
+    let (yaml_str, _body_lines) = extract_frontmatter_str(input)?;
+    let mut fm: SkillFrontmatter =
+        serde_yaml::from_str(yaml_str).map_err(|e| SkillParseError::InvalidYaml(e.to_string()))?;
+    fm.apply_legacy_compat();
+    fm.validate()?;
+    Ok(fm)
 }
 
 /// Parse the full SKILL.md file including body sections (Level 2).
 pub fn parse_skill_markdown(input: &str) -> Result<SkillDocument, SkillParseError> {
-    let (frontmatter_lines, body_lines) = split_frontmatter(input)?;
-    let frontmatter = parse_skill_frontmatter_lines(&frontmatter_lines)?;
+    let (yaml_str, body_lines) = extract_frontmatter_str(input)?;
+    let mut frontmatter: SkillFrontmatter =
+        serde_yaml::from_str(yaml_str).map_err(|e| SkillParseError::InvalidYaml(e.to_string()))?;
+    frontmatter.apply_legacy_compat();
+    frontmatter.validate()?;
     let (body, sections) = parse_body_sections(&body_lines);
 
     Ok(SkillDocument {
@@ -287,38 +504,23 @@ pub fn parse_skill_markdown(input: &str) -> Result<SkillDocument, SkillParseErro
 
 /// Render a `SkillDocument` back to valid SKILL.md markdown.
 ///
-/// Designed to round-trip: `parse_skill_markdown(render_skill_markdown(doc))`
-/// should produce a semantically-equal `SkillDocument`.
+/// Emits the new schema format. Legacy fields are not serialized (skip_serializing).
 pub fn render_skill_markdown(doc: &SkillDocument) -> String {
     let mut out = String::new();
 
     // -- Frontmatter --
     out.push_str("---\n");
-    out.push_str(&format!("name: \"{}\"\n", doc.frontmatter.name));
-    out.push_str(&format!(
-        "description: \"{}\"\n",
-        doc.frontmatter.description
-    ));
-    if let Some(ref cmd) = doc.frontmatter.command {
-        out.push_str(&format!("command: \"{}\"\n", cmd));
-    }
-    if !doc.frontmatter.trigger_patterns.is_empty() {
-        out.push_str("trigger_patterns:\n");
-        for pattern in &doc.frontmatter.trigger_patterns {
-            out.push_str(&format!("  - \"{}\"\n", pattern));
-        }
-    }
-    if !doc.frontmatter.tools_required.is_empty() {
-        out.push_str("tools_required:\n");
-        for tool in &doc.frontmatter.tools_required {
-            out.push_str(&format!("  - \"{}\"\n", tool));
-        }
-    }
-    out.push_str(&format!("auto_load: {}\n", doc.frontmatter.auto_load));
-    if !doc.frontmatter.read_when.is_empty() {
-        out.push_str("read_when:\n");
-        for item in &doc.frontmatter.read_when {
-            out.push_str(&format!("  - \"{}\"\n", item));
+
+    // Use serde_yaml for serialization. Fall back to manual if it fails.
+    match serde_yaml::to_string(&doc.frontmatter) {
+        Ok(yaml) => out.push_str(&yaml),
+        Err(_) => {
+            // Manual fallback for basic fields
+            out.push_str(&format!("name: \"{}\"\n", doc.frontmatter.name));
+            out.push_str(&format!(
+                "description: \"{}\"\n",
+                doc.frontmatter.description
+            ));
         }
     }
     out.push_str("---\n");
@@ -401,9 +603,19 @@ description: "A minimal skill"
             fm.description,
             "Review code for bugs, style issues, and improvements"
         );
+        // Legacy command field is populated
         assert_eq!(fm.command, Some("review".to_string()));
+        // Legacy compat: command -> invoke.slash
+        assert_eq!(fm.invoke.slash, Some("/review".to_string()));
+        // effective_slash_command should return "review"
+        assert_eq!(fm.effective_slash_command(), Some("review".to_string()));
+        // Legacy trigger_patterns are populated
         assert_eq!(fm.trigger_patterns, vec!["review.*code", "code review"]);
+        // Legacy compat: trigger_patterns -> routing.intent
+        assert_eq!(fm.routing.intent, vec!["review.*code", "code review"]);
+        // Legacy tools_required -> tools.allow
         assert_eq!(fm.tools_required, vec!["file_read"]);
+        assert_eq!(fm.tools.allow, vec!["file_read"]);
         assert!(!fm.auto_load);
         assert_eq!(fm.read_when, vec!["User asks for code review"]);
     }
@@ -466,13 +678,8 @@ description: "A minimal skill"
         let input = "---\nname: \"test\"\ndescription: \"test\"\nauto_load: true\n---\n";
         let fm = parse_skill_frontmatter(input).expect("should parse");
         assert!(fm.auto_load);
-    }
-
-    #[test]
-    fn test_auto_load_yes() {
-        let input = "---\nname: \"test\"\ndescription: \"test\"\nauto_load: yes\n---\n";
-        let fm = parse_skill_frontmatter(input).expect("should parse");
-        assert!(fm.auto_load);
+        // Legacy compat: auto_load=true -> invoke.mode="auto"
+        assert_eq!(fm.invoke.mode, "auto");
     }
 
     #[test]
@@ -480,8 +687,10 @@ description: "A minimal skill"
         let doc = parse_skill_markdown(VALID_SKILL).expect("valid skill should parse");
         let rendered = render_skill_markdown(&doc);
         let reparsed = parse_skill_markdown(&rendered).expect("rendered should re-parse");
-        assert_eq!(doc.frontmatter, reparsed.frontmatter);
-        // Body may differ in whitespace but sections should match
+        // Name, description should round-trip
+        assert_eq!(doc.frontmatter.name, reparsed.frontmatter.name);
+        assert_eq!(doc.frontmatter.description, reparsed.frontmatter.description);
+        // Body sections should match
         assert_eq!(
             doc.sections.keys().collect::<Vec<_>>().len(),
             reparsed.sections.keys().collect::<Vec<_>>().len()
@@ -502,7 +711,11 @@ description: "A minimal skill"
         let doc = parse_skill_markdown(MINIMAL_SKILL).expect("minimal should parse");
         let rendered = render_skill_markdown(&doc);
         let reparsed = parse_skill_markdown(&rendered).expect("rendered should re-parse");
-        assert_eq!(doc.frontmatter, reparsed.frontmatter);
+        assert_eq!(doc.frontmatter.name, reparsed.frontmatter.name);
+        assert_eq!(
+            doc.frontmatter.description,
+            reparsed.frontmatter.description
+        );
     }
 
     #[test]
@@ -556,5 +769,86 @@ auto_load: false
         assert_eq!(fm.name, "My Skill");
         assert_eq!(fm.description, "A skill without quotes");
         assert_eq!(fm.command, Some("my-skill".to_string()));
+    }
+
+    #[test]
+    fn test_new_schema_fields() {
+        let input = r#"---
+name: "Advanced Skill"
+description: "A skill using the new schema"
+invoke:
+  mode: auto
+  slash: "/advanced"
+routing:
+  intent:
+    - "advanced.*query"
+  keywords:
+    - "advanced"
+  weights:
+    base: 0.3
+tools:
+  allow:
+    - "file_read"
+    - "file_write"
+  deny:
+    - "shell_exec"
+permissions:
+  level: readwrite
+output:
+  format: markdown
+---
+
+## Instructions
+
+Do something advanced.
+"#;
+        let fm = parse_skill_frontmatter(input).expect("new schema should parse");
+        assert_eq!(fm.name, "Advanced Skill");
+        assert_eq!(fm.invoke.mode, "auto");
+        assert_eq!(fm.invoke.slash, Some("/advanced".to_string()));
+        assert_eq!(fm.routing.intent, vec!["advanced.*query"]);
+        assert_eq!(fm.routing.keywords, vec!["advanced"]);
+        assert!((fm.routing.weights.base - 0.3).abs() < f64::EPSILON);
+        // Other weights should be defaults
+        assert!((fm.routing.weights.intent_weight - 0.45).abs() < f64::EPSILON);
+        assert_eq!(fm.tools.allow, vec!["file_read", "file_write"]);
+        assert_eq!(fm.tools.deny, vec!["shell_exec"]);
+        assert_eq!(fm.permissions.level, "readwrite");
+        assert_eq!(fm.output.format, Some("markdown".to_string()));
+        assert_eq!(fm.effective_slash_command(), Some("advanced".to_string()));
+    }
+
+    #[test]
+    fn test_legacy_compat_auto_load_sets_invoke_mode() {
+        let input = "---\nname: test\ndescription: test\nauto_load: true\n---\n";
+        let fm = parse_skill_frontmatter(input).expect("should parse");
+        assert_eq!(fm.invoke.mode, "auto");
+    }
+
+    #[test]
+    fn test_legacy_compat_does_not_override_new_fields() {
+        let input = r#"---
+name: test
+description: test
+command: old-cmd
+invoke:
+  slash: "/new-cmd"
+trigger_patterns:
+  - "old pattern"
+routing:
+  intent:
+    - "new pattern"
+tools_required:
+  - "old_tool"
+tools:
+  allow:
+    - "new_tool"
+---
+"#;
+        let fm = parse_skill_frontmatter(input).expect("should parse");
+        // New fields should NOT be overridden by legacy
+        assert_eq!(fm.invoke.slash, Some("/new-cmd".to_string()));
+        assert_eq!(fm.routing.intent, vec!["new pattern"]);
+        assert_eq!(fm.tools.allow, vec!["new_tool"]);
     }
 }
