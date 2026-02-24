@@ -65,13 +65,6 @@ impl TrustGate {
                 ));
             }
 
-            // iMessage Special Policy: Even low risks might need confirmation if not whitelisted
-            // (Strictly enforce "No Write" for now for unknown external)
-            if provider == "imessage" && action.starts_with("fs.") {
-                return Err(
-                    "Permission Denied: iMessage user restricted from FS access.".to_string(),
-                );
-            }
         }
 
         // 4. Linked Users can generally do anything, BUT specific scopes might be guarded
