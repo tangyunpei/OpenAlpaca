@@ -586,3 +586,85 @@ async fn test_batch_spawn_exceeds_max_error() {
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("max 8"));
 }
+
+#[test]
+fn test_lead_agent_executor_delegates_shell_like_tools() {
+    // Verify that LeadAgentToolExecutor.shell_like_tools() delegates to the
+    // contextual executor instead of returning an empty Vec (the default).
+    use crate::tools::registry::{RegisteredTool, ToolBackend};
+
+    struct NoopTool;
+    #[async_trait]
+    impl BuiltInTool for NoopTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Ok("noop".to_string())
+        }
+    }
+
+    let mut registry = ToolRegistry::new();
+    // Register a command-backend tool so command_backend_tool_names() is non-empty
+    registry.register(RegisteredTool {
+        definition: ToolDefinition {
+            name: "my_cmd_tool".to_string(),
+            description: "test command tool".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        },
+        backend: ToolBackend::Command {
+            command: "echo".to_string(),
+            args_template: Some("hello".to_string()),
+            timeout_secs: 10,
+        },
+    });
+    let registry = Arc::new(registry);
+
+    let ctx_exec = ToolExecutionContext {
+        owner_id: None,
+        task_id: Some("task-1".to_string()),
+        agent_id: None,
+        db: None,
+        workspace_id: None,
+    };
+    let contextual = Arc::new(ContextualToolExecutor::new(registry.clone(), ctx_exec));
+
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn_tool = Arc::new(SpawnSubagentTool::new(
+        Arc::new(openalpaca_llm::LlmRouter::new(
+            std::collections::HashMap::new(),
+            openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+            std::collections::HashMap::new(),
+            Arc::new(openalpaca_llm::CostTracker::new(
+                openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+            )),
+            "test-model".to_string(),
+        )),
+        registry,
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        "task-1".to_string(),
+        "user-1".to_string(),
+        "test-lead".to_string(),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        None,
+        tracker.clone(),
+        0,
+        DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        None,
+    ));
+    let check_tool = Arc::new(CheckSubagentStatusTool {
+        tracker: tracker.clone(),
+    });
+    let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
+
+    let executor =
+        LeadAgentToolExecutor::new(spawn_tool, None, check_tool, wait_tool, contextual);
+
+    // shell_like_tools() should include "my_cmd_tool" from the registry
+    let shell_tools = executor.shell_like_tools();
+    assert!(
+        shell_tools.contains(&"my_cmd_tool".to_string()),
+        "LeadAgentToolExecutor.shell_like_tools() should delegate to contextual executor \
+         and include command-backend tools. Got: {:?}",
+        shell_tools
+    );
+}

@@ -1000,6 +1000,13 @@ impl ToolExecutor for LeadAgentToolExecutor {
         tools.push("wait_for_subagents".to_string());
         tools
     }
+
+    /// Delegate shell-like tool detection to the underlying contextual executor
+    /// so that command-backend tools routed through the lead agent path still
+    /// receive shell-injection sanitization from the SandboxManager.
+    fn shell_like_tools(&self) -> Vec<String> {
+        self.contextual_executor.shell_like_tools()
+    }
 }
 
 /// Build the system prompt for the Lead Agent from agent templates.

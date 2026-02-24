@@ -3,7 +3,6 @@ id: "writing_agent"
 name: "Writing Agent"
 description: "Focused on content writing, document generation, and text refinement"
 skills:
-  - "text_generate"
   - "file_write"
   - "workspace_read"
   - "workspace_write"

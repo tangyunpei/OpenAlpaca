@@ -2,7 +2,11 @@ mod file_ops;
 mod helpers;
 mod memory_search;
 mod shell_execute;
+// Stub tools — not registered (always returned "not implemented").
+// Kept for potential future implementation.
+#[allow(dead_code)]
 mod summarize;
+#[allow(dead_code)]
 mod text_generate;
 mod update_identity;
 mod update_soul;
@@ -20,8 +24,6 @@ use std::sync::Arc;
 use self::file_ops::{file_read_tool, file_write_tool};
 use self::memory_search::memory_search_tool;
 use self::shell_execute::shell_execute_tool;
-use self::summarize::summarize_tool;
-use self::text_generate::text_generate_tool;
 use self::update_identity::update_identity_tool;
 use self::update_soul::update_soul_tool;
 use self::update_user::update_user_tool;
@@ -72,22 +74,29 @@ pub struct IdentityToolContext {
 /// Return all built-in tool definitions and implementations.
 /// When `db` is provided, memory-backed tools (memory_search) are included.
 /// When `embedder` is provided, memory_search uses hybrid (FTS + vector) search.
+///
+/// `workspace_root` is the explicit workspace directory for file tools.
+/// If `None`, falls back to `std::env::current_dir()` (for backward
+/// compatibility in tests and CLI).
 pub fn builtin_tools(
     db: Option<openalpaca_storage::Database>,
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
+    workspace_root: Option<PathBuf>,
 ) -> Vec<RegisteredTool> {
     let dc = daemon_config
         .clone()
         .unwrap_or_else(|| Arc::new(ArcSwap::from_pointee(DaemonConfig::default())));
 
+    let ws_root = workspace_root.unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    });
+
     let mut tools = vec![
         web_search_tool(dc),
         web_fetch_tool(),
-        summarize_tool(),
-        text_generate_tool(),
-        file_read_tool(),
-        file_write_tool(),
+        file_read_tool(ws_root.clone()),
+        file_write_tool(ws_root),
         shell_execute_tool(),
     ];
     if let (Some(db), Some(dc)) = (db, daemon_config) {
@@ -103,13 +112,15 @@ pub fn builtin_tools_with_soul_context(
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     soul_ctx: SoulToolContext,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
+    workspace_root: Option<PathBuf>,
 ) -> Vec<RegisteredTool> {
-    let mut tools = builtin_tools(db, embedder, daemon_config);
+    let mut tools = builtin_tools(db, embedder, daemon_config, workspace_root);
     tools.push(update_soul_tool(soul_ctx));
     tools
 }
 
 /// Return all built-in tools, including `update_soul`, `update_user`, and `update_identity`.
+#[allow(clippy::too_many_arguments)]
 pub fn builtin_tools_with_persona_context(
     db: Option<openalpaca_storage::Database>,
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
@@ -117,8 +128,9 @@ pub fn builtin_tools_with_persona_context(
     user_ctx: UserToolContext,
     identity_ctx: IdentityToolContext,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
+    workspace_root: Option<PathBuf>,
 ) -> Vec<RegisteredTool> {
-    let mut tools = builtin_tools(db, embedder, daemon_config);
+    let mut tools = builtin_tools(db, embedder, daemon_config, workspace_root);
     tools.push(update_soul_tool(soul_ctx));
     tools.push(update_user_tool(user_ctx));
     tools.push(update_identity_tool(identity_ctx));

@@ -252,15 +252,19 @@ impl ToolExecutor for ContextualToolExecutor {
 
     fn registered_tools(&self) -> Vec<String> {
         let mut tools = self.registry.registered_tool_names();
-        // Add workspace tools so they pass capability checks
-        if self.context.task_id.is_some() {
-            for name in WORKSPACE_SCOPED_TOOLS {
-                if !tools.iter().any(|t| t == name) {
-                    tools.push((*name).to_string());
-                }
+        // Always advertise workspace tools so agents see them in capability
+        // checks. The execute() handlers already return clear errors when
+        // task_id is absent ("workspace_read requires a task context", etc.).
+        for name in WORKSPACE_SCOPED_TOOLS {
+            if !tools.iter().any(|t| t == name) {
+                tools.push((*name).to_string());
             }
         }
         tools
+    }
+
+    fn shell_like_tools(&self) -> Vec<String> {
+        self.registry.command_backend_tool_names()
     }
 }
 

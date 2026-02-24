@@ -14,18 +14,30 @@ impl BuiltInTool for ShellExecuteTool {
             .ok_or_else(|| "Missing required parameter: command".to_string())?;
 
         // Note: InputSanitizer already blocks ;, &&, ||, backticks, $( in arguments.
-        // This timeout provides defense-in-depth.
-        let timeout = std::time::Duration::from_secs(30);
+        // The primary timeout is enforced by the SandboxManager (default 60s from
+        // daemon_config.execution.agent_defaults.max_tool_runtime_secs). This 300s
+        // timeout is a defense-in-depth safety net in case the sandbox layer is
+        // bypassed (e.g. RegistryToolExecutor used directly).
+        let timeout = std::time::Duration::from_secs(300);
 
         let output = tokio::time::timeout(timeout, {
             crate::tools::platform::shell_command(command).output()
         })
         .await
-        .map_err(|_| "Command timed out after 30s".to_string())?
+        .map_err(|_| "Command timed out after 300s".to_string())?
         .map_err(|e| format!("Failed to execute command: {}", e))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Cap output size to prevent memory pressure from commands producing
+        // unbounded stdout/stderr (e.g. `find /` or `yes`).
+        const MAX_OUTPUT_BYTES: usize = 512 * 1024; // 512 KB
+        let stdout_raw = &output.stdout;
+        let stderr_raw = &output.stderr;
+        let stdout = String::from_utf8_lossy(
+            &stdout_raw[..stdout_raw.len().min(MAX_OUTPUT_BYTES)],
+        );
+        let stderr = String::from_utf8_lossy(
+            &stderr_raw[..stderr_raw.len().min(MAX_OUTPUT_BYTES)],
+        );
 
         if output.status.success() {
             let mut result = String::new();

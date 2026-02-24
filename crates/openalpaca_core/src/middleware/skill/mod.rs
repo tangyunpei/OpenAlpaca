@@ -114,7 +114,8 @@ pub struct RoutingConfig {
     pub keywords: Vec<String>,
     /// Negative keywords — if any match, the skill is penalized heavily.
     pub negative_keywords: Vec<String>,
-    /// Score weights for routing
+    /// Score weights for routing (also accepts `score` as alias for backward compat).
+    #[serde(alias = "score")]
     pub weights: ScoreWeights,
     /// Example queries for intent classification
     pub examples: RoutingExamples,
@@ -152,6 +153,9 @@ pub enum ContextSource {
     },
 }
 
+// TODO(P2-3): SummarizeConfig is parsed but not yet enforced at runtime.
+// When enabled, context injection should summarize large context blocks
+// before injecting them into the prompt.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SummarizeConfig {
@@ -214,6 +218,9 @@ impl Default for PermissionsConfig {
     }
 }
 
+// TODO(P2-3): RateLimitConfig is parsed but not yet enforced at runtime.
+// When implemented, tool calls within a skill invocation should be rate-limited
+// according to these settings.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RateLimitConfig {
@@ -229,6 +236,7 @@ pub struct ToolsConfig {
     /// Denied tools (blacklist)
     pub deny: Vec<String>,
     /// Per-tool default parameters
+    /// TODO(P2-3): defaults are parsed but not yet injected into tool calls at runtime.
     #[serde(default)]
     pub defaults: HashMap<String, serde_json::Value>,
     /// Rate limiting for tool calls
@@ -248,6 +256,7 @@ pub struct OutputConfig {
     /// Output format hint ("text" | "json" | "markdown")
     pub format: Option<String>,
     /// Max output length in characters
+    /// TODO(P2-3): max_length is parsed but not yet enforced at runtime.
     pub max_length: Option<usize>,
     /// Required H2 section headings in the output (for markdown format).
     pub required_sections: Vec<String>,

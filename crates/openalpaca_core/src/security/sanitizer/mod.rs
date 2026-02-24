@@ -65,10 +65,15 @@ impl InputSanitizer {
     ///   LLM agent constructs the full command intentionally. Non-shell tools
     ///   are NOT subject to these checks so that tools like `file_write` and
     ///   `workspace_write` can accept multi-line content.
+    ///
+    /// `extra_shell_tools` lists additional tool names (e.g., command-backend
+    /// tools loaded from TOML config) that should receive shell injection checks
+    /// alongside the hardcoded `SHELL_TOOLS` list.
     pub fn sanitize_tool_args(
         tool_name: &str,
         arguments: &serde_json::Value,
         allowed_tools: &[String],
+        extra_shell_tools: &[String],
     ) -> Result<(), SecurityViolation> {
         // Check tool is in allowed list
         if !allowed_tools.is_empty() && !allowed_tools.iter().any(|t| t == tool_name) {
@@ -77,7 +82,8 @@ impl InputSanitizer {
             });
         }
 
-        let is_shell_tool = Self::SHELL_TOOLS.contains(&tool_name);
+        let is_shell_tool = Self::SHELL_TOOLS.contains(&tool_name)
+            || extra_shell_tools.iter().any(|t| t == tool_name);
 
         // Recursively check string values in arguments
         Self::check_value_safety(arguments, is_shell_tool)?;

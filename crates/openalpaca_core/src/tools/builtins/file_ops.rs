@@ -1,6 +1,7 @@
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::helpers::{
@@ -10,7 +11,9 @@ use super::helpers::{
 
 // --- file_read ---
 
-struct FileReadTool;
+struct FileReadTool {
+    workspace_root: PathBuf,
+}
 
 #[async_trait]
 impl BuiltInTool for FileReadTool {
@@ -21,7 +24,7 @@ impl BuiltInTool for FileReadTool {
             .ok_or_else(|| "Missing required parameter: path".to_string())?;
 
         // Security: resolve path, reject traversal and symlink escapes
-        let full_path = resolve_workspace_path(path)?;
+        let full_path = resolve_workspace_path(path, &self.workspace_root)?;
 
         // Guard against OOM: reject files larger than 10 MB
         let metadata = tokio::fs::metadata(&full_path)
@@ -42,7 +45,7 @@ impl BuiltInTool for FileReadTool {
     }
 }
 
-pub(super) fn file_read_tool() -> RegisteredTool {
+pub(super) fn file_read_tool(workspace_root: PathBuf) -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "file_read".to_string(),
@@ -58,13 +61,15 @@ pub(super) fn file_read_tool() -> RegisteredTool {
                 "required": ["path"]
             }),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(FileReadTool)),
+        backend: ToolBackend::BuiltIn(Arc::new(FileReadTool { workspace_root })),
     }
 }
 
 // --- file_write ---
 
-struct FileWriteTool;
+struct FileWriteTool {
+    workspace_root: PathBuf,
+}
 
 #[async_trait]
 impl BuiltInTool for FileWriteTool {
@@ -115,18 +120,16 @@ impl BuiltInTool for FileWriteTool {
                 .to_string());
         }
 
-        // Create parent directories before resolving (so canonicalize can work)
-        let workspace_root = std::env::current_dir()
-            .map_err(|e| format!("Cannot determine working directory: {}", e))?;
-        let preliminary_path = workspace_root.join(path);
-        if let Some(parent) = preliminary_path.parent() {
+        // Security: resolve path, reject symlink escapes BEFORE creating directories.
+        // This prevents out-of-workspace directory creation via symlinked intermediates.
+        let full_path = resolve_workspace_path_for_write(path, &self.workspace_root)?;
+
+        // Create parent directories AFTER boundary validation
+        if let Some(parent) = full_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| format!("Failed to create directories: {}", e))?;
         }
-
-        // Security: resolve path, reject symlink escapes
-        let full_path = resolve_workspace_path_for_write(path)?;
 
         tokio::fs::write(&full_path, content)
             .await
@@ -140,7 +143,7 @@ impl BuiltInTool for FileWriteTool {
     }
 }
 
-pub(super) fn file_write_tool() -> RegisteredTool {
+pub(super) fn file_write_tool(workspace_root: PathBuf) -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "file_write".to_string(),
@@ -160,7 +163,7 @@ pub(super) fn file_write_tool() -> RegisteredTool {
                 "required": ["path", "content"]
             }),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(FileWriteTool)),
+        backend: ToolBackend::BuiltIn(Arc::new(FileWriteTool { workspace_root })),
     }
 }
 
@@ -170,7 +173,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_write_blocks_soul_md() {
-        let tool = FileWriteTool;
+        let dir = tempfile::tempdir().unwrap();
+        let tool = FileWriteTool {
+            workspace_root: dir.path().to_path_buf(),
+        };
         let result = tool
             .execute(&serde_json::json!({
                 "path": "SOUL.md",
@@ -182,8 +188,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_file_write_creates_subdirs_within_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = FileWriteTool {
+            workspace_root: dir.path().to_path_buf(),
+        };
+        let result = tool
+            .execute(&serde_json::json!({
+                "path": "subdir/nested/test.txt",
+                "content": "hello"
+            }))
+            .await;
+        assert!(result.is_ok());
+        assert!(dir.path().join("subdir/nested/test.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_file_write_rejects_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        // Create a symlink inside workspace pointing outside
+        let link_path = dir.path().join("escape_link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), &link_path).unwrap();
+        #[cfg(not(unix))]
+        {
+            // On non-unix, skip this test
+            return;
+        }
+
+        let tool = FileWriteTool {
+            workspace_root: dir.path().to_path_buf(),
+        };
+        let result = tool
+            .execute(&serde_json::json!({
+                "path": "escape_link/evil.txt",
+                "content": "should not be written"
+            }))
+            .await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("outside the workspace") || err_msg.contains("boundary"),
+            "Should reject symlink escape, got: {}",
+            err_msg
+        );
+        // Verify nothing was written outside
+        assert!(!outside.path().join("evil.txt").exists());
+    }
+
+    #[tokio::test]
     async fn test_file_write_blocks_soul_md_in_subdir() {
-        let tool = FileWriteTool;
+        let dir = tempfile::tempdir().unwrap();
+        let tool = FileWriteTool {
+            workspace_root: dir.path().to_path_buf(),
+        };
         let result = tool
             .execute(&serde_json::json!({
                 "path": "config/SOUL.md",

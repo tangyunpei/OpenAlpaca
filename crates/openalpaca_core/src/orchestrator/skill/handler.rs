@@ -36,7 +36,10 @@ fn preflight_permissions(frontmatter: &SkillFrontmatter) -> Result<(), String> {
             }
             Ok(())
         }
-        _ => Ok(()), // Unknown level, pass through
+        other => Err(format!(
+            "Unknown permission level '{}'. Valid levels: readonly, readwrite, admin",
+            other
+        )),
     }
 }
 
@@ -188,14 +191,10 @@ impl Orchestrator {
             }
         }
 
-        // Resolve tools: merge skill.tools.allow with intent-suggested tools
+        // Resolve tools: use ONLY the skill's declared tool allowlist.
+        // Intent-suggested tools are intentionally NOT merged here to maintain
+        // skill-level tool isolation (P1-1 security fix).
         let mut tool_names: Vec<String> = skill_doc.frontmatter.tools.allow.clone();
-        let intent_tools = self.intent_parser.suggest_tools(query);
-        for t in intent_tools {
-            if !tool_names.contains(&t) {
-                tool_names.push(t);
-            }
-        }
 
         // Force-include persona tools during bootstrap mode
         if self.is_bootstrapping() {
@@ -252,7 +251,7 @@ impl Orchestrator {
                 agent_id: "orchestrator".to_string(),
                 allowed_capabilities: resolved,
                 denied_capabilities: denied_caps,
-                require_confirmation_for: vec![],
+                require_confirmation_for: skill_doc.frontmatter.permissions.confirm.tools.clone(),
                 max_tool_calls: None,
                 max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
             });
@@ -507,5 +506,89 @@ impl Orchestrator {
         });
 
         Ok(validated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::middleware::skill::{
+        ConfirmAction, PermissionsConfig, SandboxConfig, SkillFrontmatter, ToolsConfig,
+    };
+
+    fn frontmatter_with_permission(level: &str) -> SkillFrontmatter {
+        SkillFrontmatter {
+            name: "test".to_string(),
+            description: "test skill".to_string(),
+            permissions: PermissionsConfig {
+                level: level.to_string(),
+                confirm: ConfirmAction::default(),
+                sandbox: SandboxConfig::default(),
+            },
+            tools: ToolsConfig::default(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_preflight_readonly_passes() {
+        let fm = frontmatter_with_permission("readonly");
+        assert!(preflight_permissions(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_preflight_readwrite_passes() {
+        let fm = frontmatter_with_permission("readwrite");
+        assert!(preflight_permissions(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_preflight_admin_passes() {
+        let fm = frontmatter_with_permission("admin");
+        assert!(preflight_permissions(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_preflight_unknown_level_rejected() {
+        let fm = frontmatter_with_permission("superuser");
+        let result = preflight_permissions(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown permission level"));
+    }
+
+    #[test]
+    fn test_preflight_web_fetch_without_net_rejected() {
+        let fm = SkillFrontmatter {
+            name: "test".to_string(),
+            description: "test skill".to_string(),
+            permissions: PermissionsConfig {
+                level: "readwrite".to_string(),
+                confirm: ConfirmAction::default(),
+                sandbox: SandboxConfig {
+                    enabled: true,
+                    net: false,
+                    fs_writable: Vec::new(),
+                },
+            },
+            tools: ToolsConfig {
+                allow: vec!["web_fetch".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = preflight_permissions(&fm);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("web_fetch"));
+    }
+
+    #[test]
+    fn test_confirm_tools_not_empty() {
+        // Verify the ConfirmAction struct properly holds tools
+        let confirm = ConfirmAction {
+            tools: vec!["shell_execute".to_string(), "file_write".to_string()],
+            message: Some("Are you sure?".to_string()),
+        };
+        assert_eq!(confirm.tools.len(), 2);
+        assert_eq!(confirm.tools[0], "shell_execute");
     }
 }

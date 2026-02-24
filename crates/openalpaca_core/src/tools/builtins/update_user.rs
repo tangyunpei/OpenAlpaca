@@ -72,7 +72,7 @@ impl BuiltInTool for UserUpdateTool {
                 .await
                 .map_err(|e| format!("Failed to create backup directory: {}", e))?;
 
-            let backup_path = unique_user_backup_path(backup_dir);
+            let backup_path = super::helpers::unique_backup_path(backup_dir, "USER");
             tokio::fs::copy(&self.ctx.user_path, &backup_path)
                 .await
                 .map_err(|e| format!("Failed to create backup: {}", e))?;
@@ -84,7 +84,7 @@ impl BuiltInTool for UserUpdateTool {
 
         // Prune old backups if retention limit is configured
         if let Some(max) = self.ctx.max_backups {
-            prune_user_backups(&self.ctx.backup_dir, max).await;
+            super::helpers::prune_backups(&self.ctx.backup_dir, max, "USER").await;
         }
 
         // -- Atomic write: temp file → fsync → rename --
@@ -320,49 +320,3 @@ pub(super) fn update_user_tool(ctx: UserToolContext) -> RegisteredTool {
     }
 }
 
-/// Generate a unique backup path for USER.md with nanosecond timestamp.
-fn unique_user_backup_path(backup_dir: &std::path::Path) -> std::path::PathBuf {
-    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S.%9fZ");
-    let base_name = format!("USER.{}.md", ts);
-    let candidate = backup_dir.join(&base_name);
-    if !candidate.exists() {
-        return candidate;
-    }
-    for suffix in 1..1000 {
-        let name = format!("USER.{}.{}.md", ts, suffix);
-        let candidate = backup_dir.join(&name);
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    backup_dir.join(format!("USER.{}.{}.md", ts, uuid::Uuid::new_v4()))
-}
-
-/// Prune old USER backups, keeping at most `max` files.
-async fn prune_user_backups(backup_dir: &std::path::Path, max: usize) {
-    let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(backup_dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_str()
-                    .map(|n| n.starts_with("USER.") && n.ends_with(".md"))
-                    .unwrap_or(false)
-            })
-            .map(|e| e.path())
-            .collect(),
-        Err(_) => return,
-    };
-
-    if entries.len() <= max {
-        return;
-    }
-
-    entries.sort();
-    let to_remove = entries.len() - max;
-    for path in entries.into_iter().take(to_remove) {
-        if let Err(e) = tokio::fs::remove_file(&path).await {
-            tracing::warn!("Failed to prune USER backup {}: {}", path.display(), e);
-        }
-    }
-}

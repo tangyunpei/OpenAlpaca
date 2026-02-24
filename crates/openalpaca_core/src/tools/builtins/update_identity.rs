@@ -65,7 +65,7 @@ impl BuiltInTool for IdentityUpdateTool {
                 .await
                 .map_err(|e| format!("Failed to create backup directory: {}", e))?;
 
-            let backup_path = unique_identity_backup_path(backup_dir);
+            let backup_path = super::helpers::unique_backup_path(backup_dir, "IDENTITY");
             tokio::fs::copy(&self.ctx.identity_path, &backup_path)
                 .await
                 .map_err(|e| format!("Failed to create backup: {}", e))?;
@@ -77,7 +77,7 @@ impl BuiltInTool for IdentityUpdateTool {
 
         // Prune old backups if retention limit is configured
         if let Some(max) = self.ctx.max_backups {
-            prune_identity_backups(&self.ctx.backup_dir, max).await;
+            super::helpers::prune_backups(&self.ctx.backup_dir, max, "IDENTITY").await;
         }
 
         // -- Atomic write: temp file -> fsync -> rename --
@@ -268,49 +268,3 @@ pub(super) fn update_identity_tool(ctx: IdentityToolContext) -> RegisteredTool {
     }
 }
 
-/// Generate a unique backup path for IDENTITY.md with nanosecond timestamp.
-fn unique_identity_backup_path(backup_dir: &std::path::Path) -> std::path::PathBuf {
-    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S.%9fZ");
-    let base_name = format!("IDENTITY.{}.md", ts);
-    let candidate = backup_dir.join(&base_name);
-    if !candidate.exists() {
-        return candidate;
-    }
-    for suffix in 1..1000 {
-        let name = format!("IDENTITY.{}.{}.md", ts, suffix);
-        let candidate = backup_dir.join(&name);
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    backup_dir.join(format!("IDENTITY.{}.{}.md", ts, uuid::Uuid::new_v4()))
-}
-
-/// Prune old IDENTITY backups, keeping at most `max` files.
-async fn prune_identity_backups(backup_dir: &std::path::Path, max: usize) {
-    let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(backup_dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_str()
-                    .map(|n| n.starts_with("IDENTITY.") && n.ends_with(".md"))
-                    .unwrap_or(false)
-            })
-            .map(|e| e.path())
-            .collect(),
-        Err(_) => return,
-    };
-
-    if entries.len() <= max {
-        return;
-    }
-
-    entries.sort();
-    let to_remove = entries.len() - max;
-    for path in entries.into_iter().take(to_remove) {
-        if let Err(e) = tokio::fs::remove_file(&path).await {
-            tracing::warn!("Failed to prune IDENTITY backup {}: {}", path.display(), e);
-        }
-    }
-}
