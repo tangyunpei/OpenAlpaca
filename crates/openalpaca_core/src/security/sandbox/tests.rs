@@ -160,3 +160,20 @@ async fn test_unregistered_tool() {
             .contains("not in the allowed tools list")
     );
 }
+
+#[tokio::test]
+async fn test_require_confirmation_fails_closed() {
+    let sandbox = make_sandbox();
+    let mut policy = make_policy("agent1");
+    policy.require_confirmation_for = vec!["web_search".to_string()];
+    let tc = make_tool_call("web_search");
+
+    let result = sandbox.execute_tool("agent1", &tc, &policy).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("requires human confirmation"),
+        "Should fail-closed with confirmation message, got: {}",
+        err
+    );
+}

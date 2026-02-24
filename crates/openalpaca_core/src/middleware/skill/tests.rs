@@ -289,3 +289,24 @@ tools:
         assert_eq!(fm.routing.intent, vec!["new pattern"]);
         assert_eq!(fm.tools.allow, vec!["new_tool"]);
     }
+
+    #[test]
+    fn test_routing_score_alias_maps_to_weights() {
+        let input = r#"---
+name: "Alias Test"
+description: "Test routing.score alias"
+routing:
+  intent:
+    - "test"
+  score:
+    base: 0.5
+    intent_weight: 0.3
+---
+"#;
+        let fm = parse_skill_frontmatter(input).expect("routing.score alias should parse");
+        assert!((fm.routing.weights.base - 0.5).abs() < f64::EPSILON);
+        assert!((fm.routing.weights.intent_weight - 0.3).abs() < f64::EPSILON);
+        // Unspecified fields should use defaults
+        assert!((fm.routing.weights.keyword_weight - 0.35).abs() < f64::EPSILON);
+        assert!((fm.routing.weights.recency_weight - 0.2).abs() < f64::EPSILON);
+    }

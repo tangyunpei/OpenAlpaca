@@ -1,4 +1,3 @@
-    use super::super::helpers::{prune_backups, unique_backup_path};
     use super::*;
     use crate::bus::EventBus;
 

@@ -14,10 +14,26 @@ impl BuiltInTool for WebFetchTool {
             .ok_or_else(|| "Missing required parameter: url".to_string())?;
 
         // SSRF protection: validate URL before fetching
-        validate_fetch_url(url)?;
+        crate::tools::url_validation::validate_url(url)?;
+
+        // Custom redirect policy: validate each redirect target via SSRF checks.
+        // The default `Policy::limited(5)` follows redirects blindly, allowing a
+        // malicious external server to redirect to internal/private endpoints
+        // (e.g., http://169.254.169.254/ or http://127.0.0.1/).
+        let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.error("too many redirects")
+            } else if let Err(e) =
+                crate::tools::url_validation::validate_url(attempt.url().as_str())
+            {
+                attempt.error(format!("redirect blocked by SSRF policy: {}", e))
+            } else {
+                attempt.follow()
+            }
+        });
 
         let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(5))
+            .redirect(redirect_policy)
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
         let response = client
@@ -79,77 +95,6 @@ impl BuiltInTool for WebFetchTool {
         }
         Ok(body[..end].to_string())
     }
-}
-
-/// Validate a URL before fetching to prevent SSRF attacks.
-/// Blocks:
-/// - Non-HTTP(S) schemes (file://, ftp://, etc.)
-/// - Cloud metadata endpoints (169.254.169.254, metadata.google.internal, etc.)
-/// - Private/reserved IP ranges (127.x, 10.x, 172.16-31.x, 192.168.x, [::1])
-/// - Localhost variations
-fn validate_fetch_url(url: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
-
-    // Only allow http and https
-    match parsed.scheme() {
-        "http" | "https" => {}
-        scheme => {
-            return Err(format!(
-                "URL scheme '{}' is not allowed; only http and https are permitted",
-                scheme
-            ));
-        }
-    }
-
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "URL has no host".to_string())?;
-
-    // Block cloud metadata endpoints
-    let blocked_hosts = [
-        "169.254.169.254",          // AWS/GCP/Azure metadata
-        "metadata.google.internal", // GCP metadata
-        "metadata.internal",        // Generic cloud metadata
-    ];
-    let host_lower = host.to_lowercase();
-    for blocked in &blocked_hosts {
-        if host_lower == *blocked {
-            return Err(format!(
-                "Access to '{}' is blocked (cloud metadata endpoint)",
-                host
-            ));
-        }
-    }
-
-    // Block localhost variants
-    let localhost_patterns = ["localhost", "127.0.0.1", "[::1]", "0.0.0.0"];
-    for pattern in &localhost_patterns {
-        if host_lower == *pattern {
-            return Err(format!("Access to '{}' is blocked (localhost)", host));
-        }
-    }
-
-    // Block private IP ranges
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        let is_private = match ip {
-            std::net::IpAddr::V4(ipv4) => {
-                ipv4.is_loopback()                          // 127.0.0.0/8
-                    || ipv4.is_private()                    // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-                    || ipv4.is_link_local()                 // 169.254.0.0/16
-                    || ipv4.is_unspecified()                // 0.0.0.0
-                    || (ipv4.octets()[0] == 100 && (ipv4.octets()[1] & 0xC0) == 64) // 100.64.0.0/10 (CGN)
-            }
-            std::net::IpAddr::V6(ipv6) => {
-                ipv6.is_loopback()                          // ::1
-                    || ipv6.is_unspecified() // ::
-            }
-        };
-        if is_private {
-            return Err(format!("Access to private/reserved IP '{}' is blocked", ip));
-        }
-    }
-
-    Ok(())
 }
 
 pub(super) fn web_fetch_tool() -> RegisteredTool {

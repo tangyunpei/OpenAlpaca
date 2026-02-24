@@ -1,7 +1,7 @@
 //! Shared helpers for workspace path validation, file path resolution,
 //! protected-file detection, and backup management.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Maximum file size for file_read (10 MB).
 pub(super) const MAX_FILE_READ_SIZE: u64 = 10 * 1024 * 1024;
@@ -26,12 +26,16 @@ pub(super) fn validate_workspace_path(path: &str) -> Result<(), String> {
 /// Resolve a relative path within the workspace and verify it doesn't escape
 /// the workspace boundary via symlinks or normalization.
 ///
+/// `workspace_root` is the explicit workspace directory (captured once at
+/// startup). This avoids depending on the process-global `current_dir()`,
+/// which can change or be unavailable.
+///
 /// Returns the canonicalized absolute path on success.
-pub(super) fn resolve_workspace_path(relative_path: &str) -> Result<PathBuf, String> {
+pub(super) fn resolve_workspace_path(
+    relative_path: &str,
+    workspace_root: &Path,
+) -> Result<PathBuf, String> {
     validate_workspace_path(relative_path)?;
-
-    let workspace_root = std::env::current_dir()
-        .map_err(|e| format!("Cannot determine working directory: {}", e))?;
 
     let full_path = workspace_root.join(relative_path);
 
@@ -58,11 +62,11 @@ pub(super) fn resolve_workspace_path(relative_path: &str) -> Result<PathBuf, Str
 /// Like `resolve_workspace_path` but for write targets where the file may not
 /// yet exist. Canonicalizes the parent directory and verifies it is within
 /// the workspace, then appends the file name.
-pub(super) fn resolve_workspace_path_for_write(relative_path: &str) -> Result<PathBuf, String> {
+pub(super) fn resolve_workspace_path_for_write(
+    relative_path: &str,
+    workspace_root: &Path,
+) -> Result<PathBuf, String> {
     validate_workspace_path(relative_path)?;
-
-    let workspace_root = std::env::current_dir()
-        .map_err(|e| format!("Cannot determine working directory: {}", e))?;
 
     let full_path = workspace_root.join(relative_path);
 
@@ -102,7 +106,7 @@ pub(super) fn resolve_workspace_path_for_write(relative_path: &str) -> Result<Pa
         // Since validate_workspace_path already rejected .. components,
         // and the parent hasn't been created yet (so no symlinks to resolve),
         // we can use the non-canonical path. Double-check it starts with the root.
-        if !full_path.starts_with(&workspace_root) {
+        if !full_path.starts_with(workspace_root) {
             return Err(format!(
                 "Path '{}' resolves outside the workspace boundary",
                 relative_path
@@ -139,42 +143,40 @@ pub(super) fn is_identity_path(path: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Generate a unique backup path with nanosecond timestamp + collision suffix.
+/// Generate a unique backup path with nanosecond timestamp and UUID suffix.
 ///
-/// Format: `SOUL.20260211T153042.123456789Z.md`
-/// Collision: `SOUL.20260211T153042.123456789Z.1.md`, `.2.md`, ...
-pub(super) fn unique_backup_path(backup_dir: &std::path::Path) -> PathBuf {
+/// Format: `<PREFIX>.20260211T153042.123456789Z.<uuid8>.md`
+///
+/// The 8-character UUID suffix guarantees uniqueness without filesystem
+/// checks, eliminating the TOCTOU race present in the old exists()-based
+/// approach. Lexicographic sort still orders by timestamp first (the UUID
+/// suffix only breaks ties within the same nanosecond).
+///
+/// `prefix` is the document type (e.g. "SOUL", "USER", "IDENTITY").
+pub(super) fn unique_backup_path(backup_dir: &std::path::Path, prefix: &str) -> PathBuf {
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S.%9fZ");
-    let base_name = format!("SOUL.{}.md", ts);
-    let candidate = backup_dir.join(&base_name);
-    if !candidate.exists() {
-        return candidate;
-    }
-    for suffix in 1..1000 {
-        let name = format!("SOUL.{}.{}.md", ts, suffix);
-        let candidate = backup_dir.join(&name);
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    // Fallback: UUID (uuid crate already in openalpaca_core deps)
-    backup_dir.join(format!("SOUL.{}.{}.md", ts, uuid::Uuid::new_v4()))
+    let uuid_suffix = &uuid::Uuid::new_v4().to_string()[..8];
+    let name = format!("{}.{}.{}.md", prefix, ts, uuid_suffix);
+    backup_dir.join(name)
 }
 
 /// Prune old backups in `backup_dir`, keeping at most `max` files.
 ///
-/// Backups use timestamped names (`SOUL.<ISO-timestamp>.md`), so lexicographic
-/// sorting orders them oldest-first. We remove the oldest entries that exceed
+/// Only considers files matching `<PREFIX>.*\.md`. Lexicographic sorting
+/// orders them oldest-first. We remove the oldest entries that exceed
 /// the retention limit. Errors are logged but never propagated — pruning
 /// failure must not break the update flow.
-pub(super) async fn prune_backups(backup_dir: &std::path::Path, max: usize) {
+///
+/// `prefix` is the document type (e.g. "SOUL", "USER", "IDENTITY").
+pub(super) async fn prune_backups(backup_dir: &std::path::Path, max: usize, prefix: &str) {
+    let prefix_dot = format!("{}.", prefix);
     let mut entries: Vec<PathBuf> = match std::fs::read_dir(backup_dir) {
         Ok(rd) => rd
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.file_name()
                     .to_str()
-                    .map(|n| n.starts_with("SOUL.") && n.ends_with(".md"))
+                    .map(|n| n.starts_with(&prefix_dot) && n.ends_with(".md"))
                     .unwrap_or(false)
             })
             .map(|e| e.path())

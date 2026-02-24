@@ -53,6 +53,13 @@ pub trait ToolExecutor: Send + Sync {
 
     /// List all tools this executor can handle.
     fn registered_tools(&self) -> Vec<String>;
+
+    /// Return the names of tools that execute via shell (command backends).
+    /// Used by the sanitizer to apply shell injection checks to these tools
+    /// in addition to the hardcoded `shell_execute`.
+    fn shell_like_tools(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Manages sandboxed tool execution with security checks.
@@ -136,23 +143,42 @@ impl SandboxManager {
 
         // 2. Input sanitization
         let registered = self.executor.registered_tools();
-        if let Err(violation) =
-            InputSanitizer::sanitize_tool_args(&tool_call.name, &tool_call.arguments, &registered)
-        {
+        let shell_like = self.executor.shell_like_tools();
+        if let Err(violation) = InputSanitizer::sanitize_tool_args(
+            &tool_call.name,
+            &tool_call.arguments,
+            &registered,
+            &shell_like,
+        ) {
             self.emit_security_violation(agent_id, &tool_call.name, &violation.to_string());
             return Err(violation.to_string());
         }
 
-        // 3. Confirmation check — fail-closed if tool requires confirmation
+        // 3. Confirmation check — fail-closed by design.
+        //
+        // When a tool is listed in `require_confirmation_for`, it is blocked
+        // because no interactive confirmation mechanism exists in the current
+        // agent execution context (all agent loops are autonomous/headless).
+        // This is intentional: the fail-closed default prevents dangerous tools
+        // from running without explicit human approval. A future interactive
+        // execution mode (e.g., CLI chat, GUI approval dialogs) can override
+        // this by providing a confirmation callback.
         if policy
             .require_confirmation_for
             .iter()
             .any(|t| t == &tool_call.name)
         {
             let reason = format!(
-                "Tool '{}' requires confirmation (configured via require_confirmation_for) \
-                 but no confirmation mechanism is available in this execution context",
+                "Tool '{}' requires human confirmation (configured via \
+                 require_confirmation_for) but no interactive confirmation \
+                 mechanism is available in this execution context. This is a \
+                 fail-closed safety default.",
                 tool_call.name
+            );
+            tracing::info!(
+                agent_id = agent_id,
+                tool = %tool_call.name,
+                "Tool blocked: requires confirmation (fail-closed)"
             );
             self.emit_security_violation(agent_id, &tool_call.name, &reason);
             return Err(reason);

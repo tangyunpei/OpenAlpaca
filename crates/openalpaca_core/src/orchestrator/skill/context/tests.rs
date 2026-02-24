@@ -136,3 +136,55 @@ fn test_glob_max_files_limit() {
     let results = find_matching_files(tmp.path(), "*.txt", 5).unwrap();
     assert_eq!(results.len(), 5);
 }
+
+#[tokio::test]
+async fn test_path_traversal_dotdot_blocked() {
+    let tmp = TempDir::new().unwrap();
+    // Create a file outside the skill directory
+    let parent = tmp.path().parent().unwrap();
+    let secret_path = parent.join("secret.txt");
+    std::fs::write(&secret_path, "sensitive data").unwrap();
+
+    let config = ContextConfig {
+        sources: vec![ContextSource::File {
+            path: "../secret.txt".to_string(),
+            max_bytes: 50_000,
+        }],
+        budget_tokens: 0,
+        ..default_context_config()
+    };
+
+    let result = inject_skill_context(&config, tmp.path()).await.unwrap();
+    // Path traversal should be blocked — result should be empty
+    assert!(result.is_empty(), "Path traversal should be blocked");
+    assert!(
+        !result.contains("sensitive data"),
+        "Should not read files outside skill directory"
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(&secret_path);
+}
+
+#[tokio::test]
+async fn test_path_within_skill_dir_allowed() {
+    let tmp = TempDir::new().unwrap();
+    let sub = tmp.path().join("subdir");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("nested.txt"), "nested content").unwrap();
+
+    let config = ContextConfig {
+        sources: vec![ContextSource::File {
+            path: "subdir/nested.txt".to_string(),
+            max_bytes: 50_000,
+        }],
+        budget_tokens: 0,
+        ..default_context_config()
+    };
+
+    let result = inject_skill_context(&config, tmp.path()).await.unwrap();
+    assert!(
+        result.contains("nested content"),
+        "Files within skill directory should be readable"
+    );
+}

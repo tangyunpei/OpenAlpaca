@@ -73,7 +73,7 @@ impl BuiltInTool for SoulUpdateTool {
                 .await
                 .map_err(|e| format!("Failed to create backup directory: {}", e))?;
 
-            let backup_path = unique_backup_path(backup_dir);
+            let backup_path = unique_backup_path(backup_dir, "SOUL");
             tokio::fs::copy(&self.ctx.soul_path, &backup_path)
                 .await
                 .map_err(|e| format!("Failed to create backup: {}", e))?;
@@ -85,7 +85,7 @@ impl BuiltInTool for SoulUpdateTool {
 
         // Prune old backups if retention limit is configured
         if let Some(max) = self.ctx.max_backups {
-            prune_backups(&self.ctx.backup_dir, max).await;
+            prune_backups(&self.ctx.backup_dir, max, "SOUL").await;
         }
 
         // -- Atomic write: temp file → fsync → rename --

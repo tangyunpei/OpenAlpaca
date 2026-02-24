@@ -123,7 +123,7 @@ async fn test_workspace_tools_listed_when_task_id_present() {
 }
 
 #[tokio::test]
-async fn test_workspace_tools_not_listed_without_task_id() {
+async fn test_workspace_tools_listed_even_without_task_id() {
     let registry = make_registry_with_tools(&["web_search"]);
     let executor = ContextualToolExecutor::new(
         registry,
@@ -136,9 +136,11 @@ async fn test_workspace_tools_not_listed_without_task_id() {
         },
     );
 
+    // Workspace tools are always advertised; execute() returns clear
+    // errors when task_id is absent.
     let tools = executor.registered_tools();
-    assert!(!tools.contains(&"workspace_read".to_string()));
-    assert!(!tools.contains(&"workspace_write".to_string()));
+    assert!(tools.contains(&"workspace_read".to_string()));
+    assert!(tools.contains(&"workspace_write".to_string()));
 }
 
 #[tokio::test]

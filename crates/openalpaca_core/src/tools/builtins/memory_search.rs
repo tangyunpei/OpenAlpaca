@@ -19,7 +19,14 @@ impl BuiltInTool for MemorySearchTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: query".to_string())?;
 
-        let limit = arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+        // Clamp limit to prevent excessively large SQL queries and potential
+        // u64→i64 overflow when passed to SQL LIMIT clauses downstream.
+        const MAX_MEMORY_SEARCH_LIMIT: u64 = 100;
+        let limit = arguments
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5)
+            .min(MAX_MEMORY_SEARCH_LIMIT) as usize;
 
         let owner_id = arguments
             .get("owner_id")

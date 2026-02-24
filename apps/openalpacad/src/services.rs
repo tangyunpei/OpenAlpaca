@@ -129,6 +129,10 @@ pub async fn initialize_services(
     ));
 
     // Build SkillCatalog
+    // TODO(P3-1): Currently only project-scope skills are scanned. User-scope
+    // scanning (e.g. ~/.config/openalpaca/skills/) and EventBus lifecycle wiring
+    // (SkillCatalog::new_with_bus) are implemented but not yet connected here.
+    // Use catalog.scan_multi_scope() to enable both scopes.
     let skill_catalog = {
         let catalog = openalpaca_core::orchestrator::skill_catalog::SkillCatalog::new();
         let skills_dir = config_base_dir.join("skills");
@@ -571,6 +575,9 @@ fn build_tool_registry(
         bus: bus.clone(),
         max_backups: Some(10),
     };
+    // Capture workspace root once at startup for file tools, avoiding
+    // reliance on the process-global current_dir() at tool execution time.
+    let workspace_root = std::env::current_dir().ok();
     for tool in openalpaca_core::tools::builtins::builtin_tools_with_persona_context(
         Some(db.clone()),
         embedder.clone(),
@@ -578,14 +585,20 @@ fn build_tool_registry(
         user_tool_ctx,
         identity_tool_ctx,
         Some(daemon_config.clone()),
+        workspace_root,
     ) {
         tool_registry.register(tool);
     }
 
     // Load user tools from config/tools/*.toml
     let tools_config_dir = config_base_dir.join("tools");
-    // Security-critical built-in tools that TOML configs must not override.
+    // Security-critical tool names that TOML configs must not override.
+    // Includes both registry-registered built-ins and runtime-injected tools
+    // (e.g., spawn_subagent and its variants are provided by LeadAgentToolExecutor
+    // at runtime, not the global registry, but must still be protected from
+    // TOML name collisions).
     let protected_builtins: &[&str] = &[
+        // Registry built-ins
         "update_soul",
         "update_user",
         "update_identity",
@@ -593,9 +606,14 @@ fn build_tool_registry(
         "file_read",
         "file_write",
         "memory_search",
+        // ContextualToolExecutor runtime tools
         "workspace_read",
         "workspace_write",
+        // LeadAgentToolExecutor runtime tools
         "spawn_subagent",
+        "spawn_subagents_batch",
+        "check_subagent_status",
+        "wait_for_subagents",
     ];
     for tool in openalpaca_core::tools::config::load_tools_from_dir(&tools_config_dir) {
         if protected_builtins.contains(&tool.definition.name.as_str()) {

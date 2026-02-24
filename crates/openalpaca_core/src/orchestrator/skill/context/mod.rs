@@ -34,8 +34,45 @@ pub async fn inject_skill_context(
         }
         match source {
             ContextSource::File { path, max_bytes } => {
+                // Security: reject path traversal attempts (P1-3)
+                if path.contains("..") {
+                    tracing::warn!(
+                        "Context injection: path traversal blocked for '{}'",
+                        path
+                    );
+                    continue;
+                }
                 let full_path = skill_dir.join(path);
-                match tokio::fs::read_to_string(&full_path).await {
+                // Verify the resolved path is still within the skill directory
+                let canonical = match tokio::fs::canonicalize(&full_path).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Context injection: failed to resolve '{}': {}",
+                            path,
+                            e
+                        );
+                        continue;
+                    }
+                };
+                let canonical_skill_dir = match tokio::fs::canonicalize(skill_dir).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Context injection: failed to resolve skill dir: {}",
+                            e
+                        );
+                        continue;
+                    }
+                };
+                if !canonical.starts_with(&canonical_skill_dir) {
+                    tracing::warn!(
+                        "Context injection: path '{}' escapes skill directory (blocked)",
+                        path
+                    );
+                    continue;
+                }
+                match tokio::fs::read_to_string(&canonical).await {
                     Ok(content) => {
                         let limit = (*max_bytes).min(remaining);
                         let chunk: String = content.chars().take(limit).collect();
