@@ -72,6 +72,21 @@ impl<'a> IdentityRepository<'a> {
         })
     }
 
+    /// Get the first global user (ordered by created_at).
+    /// Used by iMessage connector for auto-linking to the Mac owner.
+    pub fn get_first_global_user(&self) -> Result<Option<GlobalUser>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, display_name, created_at, updated_at FROM global_user ORDER BY created_at ASC LIMIT 1",
+            )?;
+            let mut rows = stmt.query([])?;
+            match rows.next()? {
+                Some(row) => Ok(Some(Self::row_to_global_user(row)?)),
+                None => Ok(None),
+            }
+        })
+    }
+
     // ========== ExternalIdentity ==========
 
     /// Get or create external identity

@@ -2,16 +2,18 @@
 //!
 //! Handles the integration between macOS iMessage (via chat.db polling
 //! and AppleScript sending) and the OpenAlpaca agent system.
+//!
+//! Unlike bot-based connectors (Telegram), iMessage is a native macOS
+//! integration where the Mac owner is always the trusted principal.
+//! Messages must start with a trigger prefix (`/ask` or `@openalpaca`)
+//! to be processed.
 
-use crate::common::{format_denial_message, handle_link_token, resolve_principal, LinkResult};
 use crate::{Connector, ConnectorError};
 use async_trait::async_trait;
 use openalpaca_api::events::EventSource;
 use openalpaca_core::{
-    bus::EventBus,
     gateway::{Gateway, GatewayRequest},
-    security::policy::Scope,
-    types::Capability,
+    security::policy::{Principal, Scope},
 };
 use openalpaca_storage::{Database, IdentityRepository, PreferenceRepository};
 use std::sync::Arc;
@@ -21,14 +23,33 @@ use tracing::{error, info, warn};
 use super::reader::{ChatDbReader, IncomingMessage};
 use super::sender::IMessageSender;
 
+/// Built-in trigger prefixes. A message must start with one of these to be processed.
+const TRIGGER_PREFIXES: &[&str] = &["/ask", "@openalpaca"];
+
+/// Check if the message starts with any trigger prefix.
+/// Returns the content after the prefix (trimmed), or None if no prefix matched.
+fn strip_trigger_prefix(text: &str) -> Option<String> {
+    for prefix in TRIGGER_PREFIXES {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            let content = rest.trim_start().to_string();
+            return Some(content);
+        }
+    }
+    None
+}
+
 /// IMessageConnector manages the iMessage integration lifecycle.
 ///
 /// It polls `~/Library/Messages/chat.db` for new incoming messages and
 /// routes them through the OpenAlpaca gateway, sending responses back
 /// via AppleScript (`osascript`).
+///
+/// The macOS system user is always the trusted principal — no `/link`
+/// flow is needed.
 pub struct IMessageConnector {
     db: Arc<Database>,
-    bus: Arc<EventBus>,
+    #[allow(dead_code)]
+    bus: Arc<openalpaca_core::bus::EventBus>,
     gateway: Arc<Gateway>,
     cancel_token: CancellationToken,
     chat_db_path: String,
@@ -40,7 +61,7 @@ impl IMessageConnector {
     /// The chat.db path defaults to `~/Library/Messages/chat.db`.
     pub fn new(
         db: Arc<Database>,
-        bus: Arc<EventBus>,
+        bus: Arc<openalpaca_core::bus::EventBus>,
         gateway: Arc<Gateway>,
         cancel_token: CancellationToken,
     ) -> Self {
@@ -95,6 +116,31 @@ impl IMessageConnector {
         }
     }
 
+    /// Auto-detect the macOS owner and resolve to a GlobalUser principal.
+    /// On first run: finds the first GlobalUser, or creates one from the macOS username.
+    fn resolve_owner(&self) -> Result<Principal, String> {
+        let identity_repo = IdentityRepository::new(&self.db);
+
+        // Try to find existing first global user
+        if let Ok(Some(user)) = identity_repo.get_first_global_user() {
+            return Ok(Principal::User {
+                global_id: user.id,
+            });
+        }
+
+        // No global user exists — create one from macOS username
+        let username = std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .unwrap_or_else(|_| "mac-owner".to_string());
+        let global_id = uuid::Uuid::new_v4().to_string();
+
+        identity_repo
+            .create_global_user(&global_id, Some(&username))
+            .map_err(|e| format!("Failed to create global user: {e}"))?;
+
+        Ok(Principal::User { global_id })
+    }
+
     /// Handle a single incoming iMessage.
     async fn handle_message(&self, msg: IncomingMessage) -> Result<(), String> {
         info!(
@@ -102,73 +148,31 @@ impl IMessageConnector {
             msg.sender, msg.chat_id
         );
 
-        // Step 1: Resolve principal
-        let identity_repo = IdentityRepository::new(&self.db);
-        let (principal, external_identity_id) =
-            resolve_principal(&identity_repo, "imessage", &msg.sender, None)?;
-
-        // Step 2: Handle /link commands
-        if msg.text.starts_with("/link ") {
-            let token = msg.text.strip_prefix("/link ").unwrap().trim();
-            match handle_link_token(&identity_repo, token, external_identity_id) {
-                Ok(LinkResult::Success(global_user_id)) => {
-                    IMessageSender::send(
-                        &msg.chat_id,
-                        &format!("Account linked to {}", global_user_id),
-                        msg.is_group,
-                    )
-                    .await
-                    .ok();
-                }
-                Ok(LinkResult::InvalidToken) => {
-                    IMessageSender::send(
-                        &msg.chat_id,
-                        "Invalid or expired token.",
-                        msg.is_group,
-                    )
-                    .await
-                    .ok();
-                }
-                Err(e) => {
-                    IMessageSender::send(
-                        &msg.chat_id,
-                        &format!("Error: {}", e),
-                        msg.is_group,
-                    )
-                    .await
-                    .ok();
-                }
-            }
-            return Ok(());
-        }
-
-        // Step 3: TrustGate pre-check
-        let capability = Capability {
-            name: "chat.respond".to_string(),
-        };
-        let scope = Scope::Conversation {
-            id: msg.chat_id.clone(),
-        };
-
-        if let Err(e) =
-            openalpaca_core::security::policy::TrustGate::check(&principal, &capability, &scope)
-        {
-            warn!("TrustGate denied iMessage request: {}", e);
-            IMessageSender::send(&msg.chat_id, &format_denial_message(&e), msg.is_group)
+        // Step 1: Check trigger prefix — skip messages that don't match
+        let content = match strip_trigger_prefix(&msg.text) {
+            Some(c) if !c.is_empty() => c,
+            Some(_) => {
+                IMessageSender::send(
+                    &msg.chat_id,
+                    "Usage: /ask <your question> or @openalpaca <your question>",
+                    msg.is_group,
+                )
                 .await
                 .ok();
-            return Ok(());
-        }
-
-        // Extract global_id before principal is consumed by gateway
-        let global_id_for_pref = match &principal {
-            openalpaca_core::security::policy::Principal::User { global_id } => {
-                Some(global_id.clone())
+                return Ok(());
             }
-            _ => None,
+            None => return Ok(()), // silently skip non-triggered messages
         };
 
-        // Step 4: Route through Gateway
+        // Step 2: Resolve macOS owner as principal (always Principal::User)
+        let principal = self.resolve_owner()?;
+
+        let global_id = match &principal {
+            Principal::User { global_id } => global_id.clone(),
+            _ => unreachable!("resolve_owner always returns Principal::User"),
+        };
+
+        // Step 3: Route through Gateway
         let response = self
             .gateway
             .handle_event(GatewayRequest {
@@ -176,7 +180,7 @@ impl IMessageConnector {
                     chat_id: msg.chat_id.clone(),
                     sender: msg.sender.clone(),
                 },
-                content: msg.text.clone(),
+                content,
                 principal,
                 scope: Scope::Conversation {
                     id: msg.chat_id.clone(),
@@ -185,30 +189,26 @@ impl IMessageConnector {
             })
             .await;
 
-        // Step 4.5: Map external chat_id to internal lane_key
+        // Step 3.5: Map external chat_id to internal lane_key
+        let identity_repo = IdentityRepository::new(&self.db);
         let lane_key = response.lane_key.to_string();
-        if let Err(e) = identity_repo.update_conversation_map_lane_key(
-            "imessage",
-            &msg.chat_id,
-            &lane_key,
-        ) {
+        if let Err(e) =
+            identity_repo.update_conversation_map_lane_key("imessage", &msg.chat_id, &lane_key)
+        {
             warn!("Failed to update conversation_map lane_key: {e}");
         }
 
-        // Step 4.6: Persist imessage.last_chat_id for cross-channel delivery
-        if let Some(ref gid) = global_id_for_pref {
-            let pref_repo = PreferenceRepository::new(&self.db);
-            if let Err(e) = pref_repo.set(gid, "imessage.last_chat_id", &msg.chat_id, None) {
-                warn!("Failed to persist imessage.last_chat_id: {e}");
-            }
+        // Step 3.6: Persist imessage.last_chat_id for cross-channel delivery
+        let pref_repo = PreferenceRepository::new(&self.db);
+        if let Err(e) = pref_repo.set(&global_id, "imessage.last_chat_id", &msg.chat_id, None) {
+            warn!("Failed to persist imessage.last_chat_id: {e}");
         }
 
-        // Step 5: Send response
+        // Step 4: Send response
         IMessageSender::send(&msg.chat_id, &response.content, msg.is_group)
             .await
             .map_err(|e| format!("Send failed: {}", e))?;
 
-        let _ = &self.bus; // Keep bus in scope for future event emission
         Ok(())
     }
 }
