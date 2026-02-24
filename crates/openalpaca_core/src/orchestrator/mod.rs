@@ -94,6 +94,8 @@ pub struct Orchestrator {
     identity_path: RwLock<Option<std::path::PathBuf>>,
     /// Skill catalog for progressive skill loading and invocation.
     pub skill_catalog: Arc<skill_catalog::SkillCatalog>,
+    /// Skill router for weighted scoring-based skill auto-selection.
+    pub skill_router: Arc<skill_router::SkillRouter>,
     /// Bootstrap document — `Some` = first-run onboarding active, `None` = normal operation.
     pub bootstrap_document: Arc<RwLock<Option<BootstrapDocument>>>,
     /// Path to BOOTSTRAP.md on disk (for deletion on completion).
@@ -159,6 +161,7 @@ impl Orchestrator {
         db: Option<Database>,
         embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
         skill_catalog: Arc<skill_catalog::SkillCatalog>,
+        skill_router: Arc<skill_router::SkillRouter>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
     ) -> Self {
         let task_dispatcher = TaskDispatcher::new(
@@ -191,6 +194,7 @@ impl Orchestrator {
             user_path: RwLock::new(None),
             identity_path: RwLock::new(None),
             skill_catalog,
+            skill_router,
             bootstrap_document: Arc::new(RwLock::new(None)),
             bootstrap_path: RwLock::new(None),
             daemon_config,

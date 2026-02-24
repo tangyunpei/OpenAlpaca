@@ -57,7 +57,7 @@
   <!-- Backdrop -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
-    transition:fade={{ duration: 200 }}
+    transition:fade={{ duration: 250 }}
     class="fixed inset-0 z-40 bg-[--color-drawer-backdrop] backdrop-blur-sm"
     onclick={onClose}
     onkeydown={handleKeydown}
@@ -68,19 +68,20 @@
 
   <!-- Drawer panel -->
   <div
-    transition:fly={{ x: 640, duration: 300, easing: cubicOut }}
-    class="fixed top-0 right-0 z-50 h-full w-[640px] max-w-[90vw] flex flex-col bg-card/95 backdrop-blur-2xl border-l border-border"
-    style="box-shadow: -8px 0 32px rgba(0, 0, 0, 0.4);"
+    transition:fly={{ x: 640, duration: 350, easing: cubicOut }}
+    class="fixed top-0 right-0 z-50 h-full w-[640px] max-w-[90vw] flex flex-col border-l border-border"
+    style="background: linear-gradient(180deg, hsl(226 20% 14% / 0.97) 0%, hsl(226 20% 12% / 0.98) 100%); backdrop-filter: blur(32px) saturate(1.3); box-shadow: -12px 0 40px rgba(0, 0, 0, 0.5), -2px 0 8px rgba(0, 0, 0, 0.3);"
   >
     <!-- Drawer header -->
-    <div class="flex items-center justify-between px-5 py-4 border-b border-border bg-white/2 shrink-0">
-      <h2 class="m-0 text-lg font-semibold text-foreground">Settings</h2>
+    <div class="flex items-center justify-between px-5 py-4 border-b border-border shrink-0"
+         style="background: linear-gradient(180deg, rgba(255,255,255,0.025) 0%, transparent 100%);">
+      <h2 class="m-0 text-base font-semibold text-foreground tracking-wide" style="letter-spacing: 0.01em;">Settings</h2>
       <button
-        class="flex items-center justify-center w-8 h-8 rounded-lg bg-transparent text-muted-foreground hover:bg-white/10 hover:text-foreground transition-colors cursor-pointer border-none"
+        class="flex items-center justify-center w-8 h-8 rounded-xl bg-transparent text-muted-foreground hover:bg-white/8 hover:text-foreground transition-all duration-200 cursor-pointer border border-transparent hover:border-white/5"
         onclick={onClose}
         aria-label="Close settings panel"
       >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M18 6 6 18" />
           <path d="m6 6 12 12" />
         </svg>
@@ -90,19 +91,21 @@
     <!-- Body: vertical nav rail + content -->
     <div class="flex flex-1 min-h-0">
       <!-- Vertical nav rail -->
-      <nav class="w-12 shrink-0 border-r border-border bg-white/[0.01] flex flex-col items-center py-3 gap-1">
+      <nav class="w-[52px] shrink-0 border-r border-border flex flex-col items-center py-3 gap-1"
+           style="background: rgba(0,0,0,0.12);">
         {#each drawerTabs as tab}
           <button
-            class="relative w-9 h-9 flex items-center justify-center rounded-lg transition-all duration-200 cursor-pointer border-none
+            class="relative w-10 h-10 flex items-center justify-center rounded-xl transition-all duration-250 cursor-pointer border-none
                    {drawerTab === tab.id
-                     ? 'bg-accent/15 text-accent'
-                     : 'bg-transparent text-muted-foreground hover:text-foreground hover:bg-white/5'}"
+                     ? 'text-accent'
+                     : 'bg-transparent text-muted-foreground/70 hover:text-foreground hover:bg-white/5'}"
+            style={drawerTab === tab.id ? 'background: linear-gradient(135deg, hsl(40 85% 58% / 0.1) 0%, hsl(40 85% 58% / 0.04) 100%);' : ''}
             onclick={() => handleDrawerTabChange(tab.id)}
             title={tab.label}
             aria-label={tab.label}
           >
             {#if drawerTab === tab.id}
-              <span class="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-r-full bg-accent"></span>
+              <span class="absolute left-0 top-2 bottom-2 w-[2.5px] rounded-r-full bg-accent"></span>
             {/if}
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d={tab.icon} />

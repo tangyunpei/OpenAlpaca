@@ -72,6 +72,7 @@
   function sourceIcon(source: string): string {
     switch (source) {
       case "telegram": return "TG";
+      case "imessage": return "iM";
       case "gui": return "GUI";
       case "cli": return "CLI";
       default: return source.slice(0, 3).toUpperCase();
@@ -81,6 +82,7 @@
   function sourceColor(source: string): string {
     switch (source) {
       case "telegram": return "#2AABEE";
+      case "imessage": return "#34C759";
       case "gui": return "#e94560";
       case "cli": return "#10b981";
       default: return "#8892b0";
@@ -131,6 +133,7 @@
         <option value="all">All Sources</option>
         <option value="gui">GUI</option>
         <option value="telegram">Telegram</option>
+        <option value="imessage">iMessage</option>
         <option value="cli">CLI</option>
       </select>
     </div>

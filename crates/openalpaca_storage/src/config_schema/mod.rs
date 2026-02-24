@@ -180,10 +180,10 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         key: "imessage.token",
         kind: ConfigKind::String,
         default: None,
-        description: "iMessage connector token",
+        description: "iMessage connector placeholder (not required — iMessage uses chat.db polling)",
         category: "Connectors",
         subcategory: None,
-        sensitive: true,
+        sensitive: false,
         backend: ConfigBackend::SystemConfig,
     },
     ConfigKeyDef {

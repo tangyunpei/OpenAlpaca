@@ -307,6 +307,7 @@ async fn async_main(
         Some(db.clone()),
         svcs.embedder.clone(),
         svcs.skill_catalog.clone(),
+        svcs.skill_router.clone(),
         daemon_config.clone(),
     ));
 

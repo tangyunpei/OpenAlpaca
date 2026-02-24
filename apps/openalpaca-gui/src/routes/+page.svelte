@@ -96,46 +96,62 @@
   }
 </script>
 
-<main class="w-full h-screen flex flex-col px-8 py-5 max-sm:px-3 overflow-hidden">
+<main class="w-full h-screen flex flex-col px-7 py-5 max-sm:px-3 overflow-hidden">
   <AppHeader {statusState} {info} onToggleSettings={toggleDrawer} />
 
   {#if error}
-    <div class="mb-4 rounded-lg border border-danger bg-danger/20 px-4 py-3 text-sm text-danger flex items-center justify-between gap-3 animate-fadeIn">
-      <span class="flex-1">{error}</span>
+    <div class="mb-4 rounded-xl border border-danger/40 px-4 py-3 text-sm flex items-center justify-between gap-3 animate-slideDown"
+         style="background: linear-gradient(135deg, hsl(2 68% 56% / 0.12) 0%, hsl(2 68% 56% / 0.06) 100%);">
+      <span class="flex items-center gap-2 flex-1 text-danger">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0">
+          <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg>
+        {error}
+      </span>
       <button
-        class="shrink-0 w-6 h-6 flex items-center justify-center rounded bg-transparent text-danger hover:bg-danger/30 transition-colors cursor-pointer border-none text-base leading-none"
+        class="shrink-0 w-6 h-6 flex items-center justify-center rounded-md bg-transparent text-danger/70 hover:bg-danger/20 hover:text-danger transition-colors cursor-pointer border-none"
         onclick={() => (error = null)}
         aria-label="Dismiss error"
       >&times;</button>
     </div>
   {/if}
 
-  <div class="flex flex-1 min-h-0 max-[900px]:flex-col overflow-hidden">
-    <aside class="flex-1 min-w-[300px] border-r border-primary min-h-0 max-[900px]:min-w-full max-[900px]:flex-[0_0_50%] max-[900px]:border-r-0 max-[900px]:border-b max-[900px]:border-primary">
+  <div class="flex flex-1 min-h-0 max-[900px]:flex-col overflow-hidden gap-0">
+    <!-- Chat panel (left) -->
+    <aside class="flex-1 min-w-[320px] min-h-0 max-[900px]:min-w-full max-[900px]:flex-[0_0_50%]">
       <ChatPanel />
     </aside>
 
-    <div class="flex-1 max-w-[50%] min-w-0 pl-6 overflow-y-auto min-h-0 max-[900px]:flex-auto max-[900px]:max-w-full max-[900px]:pl-0 max-[900px]:pt-4">
-      <!-- Tasks / Agents switcher -->
-      <div class="flex bg-black/25 p-1 rounded-[10px] mx-auto mb-6 gap-1 w-fit border border-white/5 backdrop-blur-[10px]">
-        <button
-          class="px-6 py-2 border-none bg-transparent text-muted-foreground cursor-pointer text-sm font-medium rounded-md transition-all duration-200 whitespace-nowrap hover:text-foreground {rightTab === 'tasks' ? 'bg-white/10 text-white shadow-sm' : ''}"
-          onclick={() => handleRightTabChange('tasks')}
-        >
-          Tasks
-          {#if activeTaskCount > 0}
-            <span class="ml-1.5 text-[0.65rem] px-1.5 py-px rounded-full bg-accent/20 text-accent font-bold">{activeTaskCount}</span>
-          {/if}
-        </button>
-        <button
-          class="px-6 py-2 border-none bg-transparent text-muted-foreground cursor-pointer text-sm font-medium rounded-md transition-all duration-200 whitespace-nowrap hover:text-foreground {rightTab === 'agents' ? 'bg-white/10 text-white shadow-sm' : ''}"
-          onclick={() => handleRightTabChange('agents')}
-        >
-          Agents
-          {#if instanceCount > 0}
-            <span class="ml-1.5 text-[0.65rem] px-1.5 py-px rounded-full bg-accent/20 text-accent font-bold">{instanceCount}</span>
-          {/if}
-        </button>
+    <!-- Separator -->
+    <div class="w-px self-stretch mx-4 max-[900px]:w-auto max-[900px]:h-px max-[900px]:mx-0 max-[900px]:my-3"
+         style="background: linear-gradient(180deg, transparent, var(--color-border-strong) 20%, var(--color-border-strong) 80%, transparent);"></div>
+
+    <!-- Right panel (tasks / agents) -->
+    <div class="flex-1 max-w-[50%] min-w-0 overflow-y-auto min-h-0 max-[900px]:flex-auto max-[900px]:max-w-full">
+      <!-- Tab switcher -->
+      <div class="flex justify-center mb-5">
+        <div class="oa-tab-group">
+          <button
+            class="oa-tab-item"
+            data-active={rightTab === 'tasks'}
+            onclick={() => handleRightTabChange('tasks')}
+          >
+            Tasks
+            {#if activeTaskCount > 0}
+              <span class="oa-count-badge">{activeTaskCount}</span>
+            {/if}
+          </button>
+          <button
+            class="oa-tab-item"
+            data-active={rightTab === 'agents'}
+            onclick={() => handleRightTabChange('agents')}
+          >
+            Agents
+            {#if instanceCount > 0}
+              <span class="oa-count-badge">{instanceCount}</span>
+            {/if}
+          </button>
+        </div>
       </div>
 
       <div>

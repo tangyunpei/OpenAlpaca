@@ -43,37 +43,51 @@
   }
 </script>
 
-<div class="flex flex-wrap gap-2.5 mb-5 items-center">
+<div class="flex flex-wrap gap-3 mb-5 items-center">
   <button
-    class="px-4 py-2 rounded-lg border border-border bg-card text-sm font-medium text-foreground cursor-pointer transition-all duration-200 hover:bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed"
+    class="px-4 py-2 rounded-xl border border-white/5 text-sm font-medium text-foreground/80 cursor-pointer transition-all duration-200 hover:border-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+    style="background: linear-gradient(180deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.02) 100%);"
     onclick={refresh}
     disabled={loading}
   >
-    {loading ? "Refreshing..." : "Refresh"}
+    {#if loading}
+      <span class="flex items-center gap-1.5">
+        <span class="w-1.5 h-1.5 rounded-full bg-accent animate-pulse"></span>
+        Refreshing
+      </span>
+    {:else}
+      Refresh
+    {/if}
   </button>
-  <div class="flex bg-black/25 p-[3px] rounded-lg border border-white/5">
+  <div class="oa-tab-group">
     <button
-      class="px-4 py-1.5 border-none bg-transparent text-muted-foreground cursor-pointer text-[0.8rem] font-medium rounded-[5px] transition-all duration-200 hover:text-foreground {filter === 'active' ? 'bg-white/10 text-white' : ''}"
+      class="oa-tab-item"
+      data-active={filter === 'active'}
       onclick={() => setFilter("active")}
-    >Active{#if activeCount > 0}<span class="ml-1 text-[0.65rem] opacity-70">({activeCount})</span>{/if}</button>
+    >Active{#if activeCount > 0}<span class="oa-count-badge">{activeCount}</span>{/if}</button>
     <button
-      class="px-4 py-1.5 border-none bg-transparent text-muted-foreground cursor-pointer text-[0.8rem] font-medium rounded-[5px] transition-all duration-200 hover:text-foreground {filter === 'completed' ? 'bg-white/10 text-white' : ''}"
+      class="oa-tab-item"
+      data-active={filter === 'completed'}
       onclick={() => setFilter("completed")}
-    >Completed{#if completedCount > 0}<span class="ml-1 text-[0.65rem] opacity-70">({completedCount})</span>{/if}</button>
+    >Completed{#if completedCount > 0}<span class="oa-count-badge">{completedCount}</span>{/if}</button>
   </div>
 </div>
 
 <div class="oa-panel">
-  <div class="oa-panel-header">
-    <h2>Tasks ({displayedTasks.length})</h2>
+  <div class="oa-panel-header flex items-center justify-between">
+    <h2>Tasks</h2>
+    <span class="text-[0.65rem] text-muted-foreground/60 font-mono">{displayedTasks.length} items</span>
   </div>
-  <div class="p-2.5 max-h-[60vh] overflow-y-auto">
-    {#each displayedTasks as task (task.id)}
-      <TaskCard {task} onclick={() => (selectedTaskId = task.id)} />
+  <div class="p-3 max-h-[60vh] overflow-y-auto">
+    {#each displayedTasks as task, idx (task.id)}
+      <div style="animation: slideUp 0.35s cubic-bezier(0.16, 1, 0.3, 1) both; animation-delay: {idx * 50}ms;">
+        <TaskCard {task} onclick={() => (selectedTaskId = task.id)} />
+      </div>
     {:else}
-      <div class="flex flex-col items-center justify-center py-14 px-10 text-center">
-        <div class="w-12 h-12 mb-3 rounded-xl bg-white/[0.03] border border-white/5 flex items-center justify-center">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="text-muted-foreground/50">
+      <div class="flex flex-col items-center justify-center py-16 px-10 text-center animate-fadeIn">
+        <div class="w-14 h-14 mb-4 rounded-2xl flex items-center justify-center border border-white/5"
+             style="background: linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="text-muted-foreground/40">
             {#if filter === "active"}
               <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48 2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48 2.83-2.83"/>
             {:else}
@@ -81,8 +95,8 @@
             {/if}
           </svg>
         </div>
-        <p class="text-muted-foreground text-sm m-0">{filter === "active" ? "No active tasks" : "No completed tasks"}</p>
-        <p class="text-muted-foreground/50 text-xs m-0 mt-1">{filter === "active" ? "Tasks will appear here when created" : "Completed tasks will be listed here"}</p>
+        <p class="text-foreground/60 text-sm font-medium m-0">{filter === "active" ? "No active tasks" : "No completed tasks"}</p>
+        <p class="text-muted-foreground/40 text-xs m-0 mt-1.5 leading-relaxed">{filter === "active" ? "Tasks will appear here when created" : "Completed tasks will be listed here"}</p>
       </div>
     {/each}
   </div>

@@ -203,6 +203,7 @@ pub type EventId = Uuid;
 #[serde(tag = "source_type", rename_all = "snake_case")]
 pub enum EventSource {
     Telegram { chat_id: String, user_id: String },
+    IMessage { chat_id: String, sender: String },
     Gui { connection_id: String },
     Cli { session_id: String },
     Api { request_id: String },

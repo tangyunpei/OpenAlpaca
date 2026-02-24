@@ -49,5 +49,17 @@ pub fn telegram_inbound(chat_id: &str, user_id: &str, content: &str) -> InboundM
     }
 }
 
+/// Helper to create an InboundMessage from iMessage-style inputs.
+#[cfg(all(feature = "imessage", target_os = "macos"))]
+pub fn imessage_inbound(chat_id: &str, sender: &str, content: &str) -> InboundMessage {
+    InboundMessage {
+        source: EventSource::IMessage {
+            chat_id: chat_id.into(),
+            sender: sender.into(),
+        },
+        content: content.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests;
