@@ -1,7 +1,7 @@
 //! NotificationDispatcher — Pushes task completion notifications to external platforms.
 //!
 //! Subscribes to the EventBus and sends notifications when tasks complete or fail.
-//! For tasks originating from Telegram, sends a message back to the originating chat.
+//! For tasks originating from Telegram or iMessage, sends a message back to the originating chat.
 
 use openalpaca_core::events::SystemEvent;
 use openalpaca_storage::{Database, IdentityRepository, PreferenceRepository, TaskRepository};
@@ -78,28 +78,29 @@ impl NotificationDispatcher {
             _ => return,
         };
 
-        // source_lane format: "{user_id}:telegram"
+        let content = format!(
+            "Task completed: {}\n\n{}",
+            task.title,
+            summary.unwrap_or("Done")
+        );
+
+        // source_lane format: "{user_id}:telegram" or "{user_id}:imessage"
         if task.source_lane.ends_with(":telegram") {
             if let Some(chat_id) = self.resolve_telegram_chat_id(&task.source_lane)
                 && let Some(ref bot) = self.telegram_bot
             {
-                let content = format!(
-                    "Task completed: {}\n\n{}",
-                    task.title,
-                    summary.unwrap_or("Done")
-                );
-                if let Err(e) = bot.send_message(ChatId(chat_id), content).await {
+                if let Err(e) = bot.send_message(ChatId(chat_id), &content).await {
                     warn!("Failed to send task completion notification: {e}");
                 }
             }
+        } else if task.source_lane.ends_with(":imessage") {
+            self.try_imessage_notification(&task.source_lane, &content)
+                .await;
         } else {
-            // Cross-channel delivery for non-Telegram-origin tasks
-            let content = format!(
-                "Task completed: {}\n\n{}",
-                task.title,
-                summary.unwrap_or("Done")
-            );
+            // Cross-channel delivery for non-connector-origin tasks
             self.try_cross_channel_telegram(&task.created_by, &content)
+                .await;
+            self.try_cross_channel_imessage(&task.created_by, &content)
                 .await;
         }
     }
@@ -111,19 +112,24 @@ impl NotificationDispatcher {
             _ => return,
         };
 
+        let content = format!("Task failed: {}\n\nError: {}", task.title, error);
+
         if task.source_lane.ends_with(":telegram") {
             if let Some(chat_id) = self.resolve_telegram_chat_id(&task.source_lane)
                 && let Some(ref bot) = self.telegram_bot
             {
-                let content = format!("Task failed: {}\n\nError: {}", task.title, error);
-                if let Err(e) = bot.send_message(ChatId(chat_id), content).await {
+                if let Err(e) = bot.send_message(ChatId(chat_id), &content).await {
                     warn!("Failed to send task failure notification: {e}");
                 }
             }
+        } else if task.source_lane.ends_with(":imessage") {
+            self.try_imessage_notification(&task.source_lane, &content)
+                .await;
         } else {
-            // Cross-channel delivery for non-Telegram-origin tasks
-            let content = format!("Task failed: {}\n\nError: {}", task.title, error);
+            // Cross-channel delivery for non-connector-origin tasks
             self.try_cross_channel_telegram(&task.created_by, &content)
+                .await;
+            self.try_cross_channel_imessage(&task.created_by, &content)
                 .await;
         }
     }
@@ -160,6 +166,66 @@ impl NotificationDispatcher {
             warn!("Failed to send cross-channel notification: {e}");
         }
     }
+
+    /// Send a notification to the iMessage chat that originated the task.
+    /// Uses the user's stored `imessage.last_chat_id` preference (set by the connector
+    /// on each incoming message) to resolve the chat identifier string.
+    #[cfg(target_os = "macos")]
+    async fn try_imessage_notification(&self, source_lane: &str, message: &str) {
+        // source_lane format: "{user_id}:imessage" — extract user_id
+        let user_id = source_lane.strip_suffix(":imessage").unwrap_or(source_lane);
+        let pref_repo = PreferenceRepository::new(&self.db);
+
+        if let Some(chat_id) = pref_repo
+            .get(user_id, "imessage.last_chat_id")
+            .ok()
+            .flatten()
+            .map(|p| p.value)
+        {
+            if let Err(e) =
+                openalpaca_connectors::imessage::IMessageSender::send(&chat_id, message, true)
+                    .await
+            {
+                warn!("Failed to send iMessage notification: {e}");
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    async fn try_imessage_notification(&self, _source_lane: &str, _message: &str) {}
+
+    /// Cross-channel iMessage delivery for tasks not originating from iMessage.
+    #[cfg(target_os = "macos")]
+    async fn try_cross_channel_imessage(&self, created_by: &str, message: &str) {
+        let pref_repo = PreferenceRepository::new(&self.db);
+
+        let should_notify = pref_repo
+            .get(created_by, "imessage.notify_task_completion")
+            .ok()
+            .flatten()
+            .map(|p| p.value == "true")
+            .unwrap_or(false);
+        if !should_notify {
+            return;
+        }
+
+        if let Some(chat_id) = pref_repo
+            .get(created_by, "imessage.last_chat_id")
+            .ok()
+            .flatten()
+            .map(|p| p.value)
+        {
+            if let Err(e) =
+                openalpaca_connectors::imessage::IMessageSender::send(&chat_id, message, true)
+                    .await
+            {
+                warn!("Failed to send cross-channel iMessage notification: {e}");
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    async fn try_cross_channel_imessage(&self, _created_by: &str, _message: &str) {}
 
     fn resolve_telegram_chat_id(&self, lane_key: &str) -> Option<i64> {
         let identity_repo = IdentityRepository::new(&self.db);

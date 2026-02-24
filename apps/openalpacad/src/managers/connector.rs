@@ -47,23 +47,27 @@ impl ConnectorManager {
                 .unwrap_or(false);
 
             if enabled {
-                let token_key = format!("{}.token", name);
-                if let Ok(Some(token)) = config_repo.get(&token_key) {
-                    match factory.spawn(
-                        token,
-                        self.db.clone(),
-                        self.bus.clone(),
-                        self.gateway.clone(),
-                    ) {
-                        Ok(handle) => {
-                            handles.insert(name.to_string(), handle);
-                            self.broadcast_status(name, "active");
-                            info!("Started connector: {}", name);
-                        }
-                        Err(e) => {
-                            self.broadcast_status(name, "error");
-                            tracing::error!("Failed to start connector {}: {}", name, e);
-                        }
+                // Some connectors (e.g. iMessage) don't require a token
+                let token = config_repo
+                    .get(&format!("{}.token", name))
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+
+                match factory.spawn(
+                    token,
+                    self.db.clone(),
+                    self.bus.clone(),
+                    self.gateway.clone(),
+                ) {
+                    Ok(handle) => {
+                        handles.insert(name.to_string(), handle);
+                        self.broadcast_status(name, "active");
+                        info!("Started connector: {}", name);
+                    }
+                    Err(e) => {
+                        self.broadcast_status(name, "error");
+                        tracing::error!("Failed to start connector {}: {}", name, e);
                     }
                 }
             }
@@ -89,6 +93,10 @@ impl ConnectorManager {
         for factory in factories {
             let name = factory.name();
 
+            // Some connectors (e.g. iMessage) don't require a token —
+            // they are "configured" by virtue of being on the right platform.
+            let token_optional = matches!(name, "imessage");
+
             let status = if running_connectors.contains(&name.to_string()) {
                 "active".to_string()
             } else {
@@ -97,7 +105,7 @@ impl ConnectorManager {
                     .map(|v| v.is_some())
                     .unwrap_or(false);
 
-                if !has_token {
+                if !has_token && !token_optional {
                     "unconfigured".to_string()
                 } else {
                     let enabled = config_repo
@@ -210,23 +218,22 @@ impl ConnectorManager {
 
         if let Some(factory) = factory {
             let config_repo = ConfigRepository::new(&self.db);
-            let token_key = format!("{}.token", name);
+            let token = config_repo
+                .get(&format!("{}.token", name))?
+                .unwrap_or_default();
 
-            if let Some(token) = config_repo.get(&token_key)? {
-                let handle = factory
-                    .spawn(
-                        token,
-                        self.db.clone(),
-                        self.bus.clone(),
-                        self.gateway.clone(),
-                    )
-                    .map_err(|e| anyhow::anyhow!("Failed to spawn {}: {}", name, e))?;
+            let handle = factory
+                .spawn(
+                    token,
+                    self.db.clone(),
+                    self.bus.clone(),
+                    self.gateway.clone(),
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to spawn {}: {}", name, e))?;
 
-                _guard.insert(name.to_string(), handle);
-                info!("Spawned connector: {}", name);
-                return Ok(());
-            }
-            anyhow::bail!("Token not configured for {}", name)
+            _guard.insert(name.to_string(), handle);
+            info!("Spawned connector: {}", name);
+            Ok(())
         } else {
             anyhow::bail!("Unknown connector: {}", name)
         }

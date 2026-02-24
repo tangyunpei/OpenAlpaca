@@ -19,8 +19,8 @@ tracing-subscriber.workspace = true
 default = []
 # Enable Telegram connector
 telegram = ["dep:teloxide"]
-# Future: iMessage connector (macOS only)
-# imessage = []
+# Enable iMessage connector (macOS only)
+imessage = ["dep:rusqlite", "dep:tokio-util"]
 # Future: WeChat connector
 # wechat = []
 
@@ -44,3 +44,7 @@ openalpaca_storage.workspace = true
 
 # Optional: Telegram (only when feature enabled)
 teloxide = { workspace = true, optional = true }
+
+# Optional: iMessage (only when feature enabled, macOS only)
+rusqlite = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }

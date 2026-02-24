@@ -1,14 +1,16 @@
 # OpenAlpaca GUI Manual
 
-The OpenAlpaca GUI is a Tauri desktop app. It ensures a local daemon (`openalpacad`) is running, then connects to it over HTTP/WebSocket using the token from `discovery.json`.
+OpenAlpaca GUI is a Tauri desktop app (`openalpaca-gui`) backed by local daemon APIs.
 
 Related docs:
-- Daemon manual: `Daemon_Manual.md`
-- Daemon HTTP API: `api/apps/openalpacad.md`
+- [Daemon Manual](Daemon_Manual.md)
+- [CLI Manual](CLI_Manual.md)
+- [GUI API Reference](api/apps/openalpaca-gui.md)
+- [Daemon API Reference](api/apps/openalpacad.md)
 
-## Running The GUI
+## Run
 
-Development:
+From repository root:
 
 ```bash
 cd apps/openalpaca-gui
@@ -16,125 +18,92 @@ bun install
 bunx tauri dev
 ```
 
-`tauri dev` runs the configured `beforeDevCommand` which builds/prepares the `openalpacad` sidecar and starts the frontend dev server.
+`tauri dev` executes configured sidecar preparation and starts frontend dev server.
 
-## Layout Overview
+## Connection Lifecycle
 
-The GUI has two main regions:
-- Left sidebar: **Chat** (always visible).
+- GUI calls Tauri command `ensure_daemon_running` to bootstrap daemon connection.
+- It opens `GET /v1/events?token=...` WebSocket and tracks connection state:
+  - `disconnected`
+  - `connecting`
+  - `connected`
+  - `error`
+- Reconnect uses exponential backoff and instance-id checks.
 
-Right panel tabs:
-- **Event Log**
-- **Connectors**
-- **Tasks**
-- **Agents**
-- **Conversations**
-- **Settings**
+## Main Layout
 
-## Connection Status
+Current default layout has two regions:
 
-The header status pill reflects the connection state to the daemon:
-- Disconnected: daemon not running or discovery not available.
-- Connecting: GUI is bootstrapping (spawning daemon and/or connecting WebSocket).
-- Connected: WebSocket is connected and events are flowing.
-- Error: the GUI failed to connect; the error banner shows details.
+- Left pane: `ChatPanel`
+- Right pane: switcher between:
+  - `Tasks`
+  - `Agents`
 
-## Chat (Left Sidebar)
+Header includes daemon connection indicator and settings drawer toggle.
 
-The chat panel sends messages to the daemon and streams responses back.
+## Settings Drawer (Primary Operations Surface)
 
-Core behavior:
-- Send: type a message and press `Enter` (use `Shift+Enter` for a newline).
-- Streaming: while the daemon is streaming, the Send button is disabled.
-- Clear: clears chat history in the database (calls `DELETE /v1/chat/history`).
+The right-side drawer contains vertical tabs:
 
-Under the hood:
-- Send message: `POST /v1/chat` (Bearer token).
-- Stream response: `GET /v1/chat/stream/{stream_id}?token=...` (SSE).
+- `Configuration`
+- `Agents`
+- `Connectors`
+- `Conversations`
+- `Event Log`
 
-## Event Log
+### Configuration Sub-Tabs
 
-Shows real-time `ServerEvent` messages from the daemon WebSocket:
-- Clear: clears the local event list in the GUI (does not delete DB history).
-- Quit OpenAlpaca: disconnects WebSocket, then sends `POST /v1/command { "command": "shutdown" }`.
+Inside `Configuration` tab (`SettingsPanel`):
 
-Event log notes:
-- The GUI keeps the most recent ~100 events in memory.
-- WebSocket endpoint: `GET /v1/events?token=...`.
+- `Configuration`: provider keys, model refresh, daemon provider settings (including web-search config)
+- `Usage`: LLM usage (`/v1/llm/usage`, `/v1/llm/usage/daily`)
+- `Latency`: orchestrator latency metrics (`/v1/orchestrator/latency*`)
+- `Decisions`: dispatch decision history (`/v1/orchestrator/decisions`)
 
-Common event types include:
-- `heartbeat`
-- `log`
-- `wake`
-- `command_received`
-- `connector_status`
-- `task_status`
-- `agent_status`
-- `key_status_changed`
-- `chat_stream_started` / `chat_stream_ended`
-- `orchestrator_config_changed`
+## Functional Areas
 
-## Connectors
+### Chat
 
-Connectors are platform integrations (example: Telegram). The panel supports:
-- Refresh: fetch connector status from the daemon.
-- Configure: set a connector token in a modal (sends `POST /v1/connectors/{id}/config`).
-- Toggle: enable/disable a connector (sends `POST /v1/connectors/{id}/action` with `enable`/`disable`).
-- Clear Config: clears config and stops the connector (action `delete`).
+- Send message: `POST /v1/chat`
+- Stream reply: `GET /v1/chat/stream/{stream_id}?token=...`
+- History: `GET /v1/chat/history`
+- Clear history: `DELETE /v1/chat/history`
 
-### Generate Bind Token
+### Tasks
 
-Click **Generate Bind Token** to create a short-lived link token (5 minutes):
-- Endpoint: `POST /v1/auth/link`
-- You then send `/link <TOKEN>` to the platform bot (Telegram) to bind the external identity to the local OpenAlpaca user.
+- List and filter active/completed tasks
+- Task detail modal with assignment output and control actions
+- Endpoints: `/v1/tasks`, `/v1/tasks/{id}`, `/v1/tasks/{id}/action`
 
-## Tasks
+### Agents
 
-Tasks represent units of work tracked by the daemon and stored in SQLite.
+- Shows template-backed agent instances and orchestration stats
+- Supports template/instance operations and config editing from drawer
+- Core endpoints include `/v1/agent-templates*`, `/v1/agent-instances*`, `/v1/agents*`
 
-In the Tasks tab:
-- Refresh: reload tasks list.
-- Active / Completed: filter the displayed list.
-- Click a task: opens a detail modal with task metadata, assignments, and any available output.
-- Actions: cancel/pause/resume (availability depends on task status).
+### Connectors
 
-Real-time updates:
-- Task status updates are driven by WebSocket `task_status` events.
+- List, configure, enable/disable, delete connector config
+- Endpoints: `/v1/connectors`, `/v1/connectors/{id}/action`, `/v1/connectors/{id}/config`
 
-## Agents
+### Conversations
 
-Agents are managed sub-agents persisted in the DB and used by the orchestrator.
+- Cross-source conversation list and message inspection
+- Endpoints: `/v1/conversations`, `/v1/conversations/{id}/messages`
 
-In the Agents tab:
-- Refresh: reload agent list.
-- New Agent: opens the agent creation flow.
-- Click an agent: opens a detail view (status, metrics, config details).
-- Actions: pause/resume (depending on current state).
+### Event Log
 
-Real-time updates:
-- Agent status updates are driven by WebSocket `agent_status` events.
+- Displays recent in-memory event feed from daemon WebSocket
+- Event shape: `openalpaca_api::events::ServerEvent`
 
-## Conversations
+## Auth Model
 
-The Conversations tab shows stored conversations across sources (GUI, CLI, Telegram):
-- Refresh the list and filter by source.
-- Select a conversation to view messages.
+- HTTP requests include bearer token from discovery connection info.
+- WebSocket/SSE streaming uses query-token style auth.
 
-Backed by:
-- `GET /v1/conversations`
-- `GET /v1/conversations/{id}/messages`
+## Troubleshooting
 
-## Settings
-
-Settings focuses on LLM configuration and usage visibility.
-
-Two sub-tabs:
-- Configuration: orchestrator model/fallbacks, provider keys, model refresh (`POST /v1/models/refresh`), discovered credentials and CLI backend status.
-- Usage: daily aggregates and per-call logs (`GET /v1/llm/usage/daily`, `GET /v1/llm/usage`), with optional agent filter.
-
-## FAQ / Troubleshooting
-
-- “Not connected to daemon”: use the GUI normally; it should auto-spawn the daemon. If it fails, check the error banner and daemon logs.
-- “Generate Bind Token failed”: the GUI must be connected and the daemon must be able to write to its database.
-- “No agents”: ensure `config/agents/*.toml` exists (daemon loads agent configs at startup) or create agents from the Agents tab.
-- “No models”: configure `config/llm.toml` and add keys; then use Settings -> Refresh Models.
+- Cannot connect: verify daemon starts and discovery token is valid.
+- Connection flaps: check daemon restarts or instance-id changes.
+- Missing models/usage data: refresh from Configuration tab and verify provider keys.
+- Connector failures: inspect connector status/events in Event Log and daemon logs.

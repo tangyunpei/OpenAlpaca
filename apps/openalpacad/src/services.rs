@@ -24,6 +24,7 @@ pub struct InitializedServices {
     pub tool_registry: Arc<openalpaca_core::tools::ToolRegistry>,
     pub security_gate: Arc<openalpaca_core::security::gate::SecurityGate>,
     pub skill_catalog: Arc<openalpaca_core::orchestrator::skill_catalog::SkillCatalog>,
+    pub skill_router: Arc<openalpaca_core::orchestrator::skill_router::SkillRouter>,
     pub secret_store: Arc<dyn openalpaca_llm::SecretStore>,
 }
 
@@ -147,6 +148,18 @@ pub async fn initialize_services(
         Arc::new(catalog)
     };
 
+    // Build SkillRouter with configurable thresholds from daemon config
+    let skill_router = {
+        let sd = &daemon_config.load().execution.skill_defaults;
+        Arc::new(
+            openalpaca_core::orchestrator::skill_router::SkillRouter::new_with_bus(
+                sd.router_auto_select_threshold,
+                sd.router_suggest_threshold,
+                bus.clone(),
+            ),
+        )
+    };
+
     Ok(InitializedServices {
         shared_context,
         llm_router,
@@ -158,6 +171,7 @@ pub async fn initialize_services(
         tool_registry,
         security_gate,
         skill_catalog,
+        skill_router,
         secret_store,
     })
 }

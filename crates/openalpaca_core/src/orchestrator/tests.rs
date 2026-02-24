@@ -36,6 +36,7 @@ fn make_orchestrator() -> Orchestrator {
         None,
         None,
         Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
     )
 }
@@ -62,6 +63,7 @@ fn make_orchestrator_with_agents(agents: Vec<SubAgent>) -> Orchestrator {
         None,
         None,
         Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
     )
 }
@@ -291,6 +293,7 @@ async fn test_simple_query_with_mock_llm() {
         None,
         None,
         Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
     );
 
@@ -426,6 +429,7 @@ fn make_orchestrator_with_llm_and_agents(
         None,
         None,
         Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
     )
 }
@@ -616,6 +620,7 @@ fn make_orchestrator_with_tools_and_llm(
         None,
         None,
         Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
     )
 }

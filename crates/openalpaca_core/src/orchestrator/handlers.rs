@@ -64,13 +64,9 @@ impl Orchestrator {
         let scope_ctx = MemoryScopeContext::new(workspace_id);
 
         // 3. Try slash commands, task queries, and skill invocations first
-        // TODO(P2-1): Switch to parse_with_skills_and_router() to enable weighted
-        // scoring-based skill auto-selection instead of regex trigger matching.
-        // The SkillRouter and parse_with_skills_and_router() are implemented but
-        // not yet wired into production message handling.
         let intent = self
             .intent_parser
-            .parse_with_skills(&content, &self.skill_catalog);
+            .parse_with_skills_and_router(&content, &self.skill_catalog, &self.skill_router);
         match &intent {
             Intent::TaskQuery { .. } | Intent::TaskControl { .. } => {
                 self.bus.publish(SystemEvent::IntentClassified {
@@ -368,7 +364,7 @@ impl Orchestrator {
     ) -> Result<String, String> {
         let intent = self
             .intent_parser
-            .parse_with_skills(content, &self.skill_catalog);
+            .parse_with_skills_and_router(content, &self.skill_catalog, &self.skill_router);
 
         self.bus.publish(SystemEvent::IntentClassified {
             request_id,
