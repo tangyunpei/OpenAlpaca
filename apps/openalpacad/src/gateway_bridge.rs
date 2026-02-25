@@ -82,6 +82,10 @@ impl MessageHandler for OrchestratorHandler {
             )
             .await;
 
-        self.build_result(request_id, result, attachment_ids)
+        // Only report attachments as used when the handler succeeded.
+        // On error, no attachments were consumed into a response.
+        let used = if result.is_ok() { attachment_ids } else { Vec::new() };
+
+        self.build_result(request_id, result, used)
     }
 }

@@ -201,6 +201,12 @@ pub struct ModelConfigEntry {
     pub input_price: Option<f64>,
     pub output_price: Option<f64>,
     pub context: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_image: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_audio: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_document: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

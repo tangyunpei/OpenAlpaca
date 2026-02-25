@@ -406,6 +406,9 @@ impl LlmRouter {
                                 output_price_per_million: 0.0,
                                 context_window: 0,
                                 discovered: true,
+                                supports_image: false,
+                                supports_audio: false,
+                                supports_document: false,
                             },
                         );
                     }
@@ -733,13 +736,43 @@ impl LlmRouter {
 /// which is the safe direction for rate limiting (better to be conservative
 /// than to exceed TPM limits).
 fn estimate_request_tokens(request: &RouterRequest) -> u32 {
-    let msg_bytes: usize = request.messages.iter().map(|m| m.content.len()).sum();
+    let msg_tokens: u32 = request
+        .messages
+        .iter()
+        .map(|m| {
+            if let Some(ref parts) = m.parts {
+                parts.iter().map(|p| estimate_content_part_tokens(p)).sum::<u32>()
+            } else {
+                (m.content.len() / 4) as u32
+            }
+        })
+        .sum();
     let tool_bytes: usize = request
         .tools
         .iter()
         .map(|t| t.description.len() + t.parameters.to_string().len())
         .sum();
-    ((msg_bytes + tool_bytes) / 4).max(100) as u32
+    (msg_tokens + (tool_bytes / 4) as u32).max(100)
+}
+
+/// Estimate tokens for a single content part (mirrors agentic_loop logic).
+fn estimate_content_part_tokens(part: &crate::ContentPart) -> u32 {
+    match part {
+        crate::ContentPart::Text { text } => (text.len() / 4) as u32,
+        crate::ContentPart::Image { detail, .. } => {
+            match detail.as_deref() {
+                Some("low") => 85,
+                _ => 1590,
+            }
+        }
+        crate::ContentPart::Audio { data, .. } => {
+            ((data.len() as f64 / 4096.0) * 25.0).ceil().max(25.0) as u32
+        }
+        crate::ContentPart::Document { extracted_text, .. } => {
+            extracted_text.as_ref().map_or(500, |t| (t.len() / 4) as u32)
+        }
+        crate::ContentPart::FileRef { .. } => 50,
+    }
 }
 
 /// Maximum prompt size (in bytes) for CLI backend fallback.

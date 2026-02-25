@@ -338,6 +338,8 @@ export interface ChatMessage {
   duration_ms?: number;
   created_at: string;
   attachments?: AttachmentDisplay[];
+  citations?: Citation[];
+  artifacts?: Artifact[];
 }
 
 /** Lightweight attachment info for display in chat messages. */
@@ -375,6 +377,23 @@ export interface ChatStreamDoneData {
   tokens_out: number;
   duration_ms: number;
   attachments_used?: string[];
+  citations?: Citation[];
+  artifacts?: Artifact[];
+}
+
+/** A citation linking a response passage to a source document. */
+export interface Citation {
+  source_file_id: string;
+  page?: number;
+  timestamp_ms?: number;
+  excerpt: string;
+}
+
+/** An artifact produced during the response. */
+export interface Artifact {
+  file_id: string;
+  label: string;
+  mime_type: string;
 }
 
 // ── File / Attachment types ─────────────────────────────────────

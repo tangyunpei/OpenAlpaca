@@ -243,6 +243,39 @@ fn process_sse_event(event_text: &str, verbose: bool, state: &mut SseState) -> R
                     state.done_content = Some(content.to_string());
                 }
 
+                // Print citations if present
+                if let Some(citations) = parsed["citations"].as_array()
+                    && !citations.is_empty()
+                {
+                    println!("{}", "Sources:".dimmed());
+                    for (i, cit) in citations.iter().enumerate() {
+                        let excerpt = cit["excerpt"].as_str().unwrap_or("");
+                        let page_str = cit["page"]
+                            .as_u64()
+                            .map(|p| format!(" (p.{})", p))
+                            .unwrap_or_default();
+                        println!(
+                            "  {}",
+                            format!("[{}] {}{}", i + 1, excerpt, page_str).dimmed()
+                        );
+                    }
+                }
+
+                // Print artifacts if present
+                if let Some(artifacts) = parsed["artifacts"].as_array()
+                    && !artifacts.is_empty()
+                {
+                    println!("{}", "Artifacts:".dimmed());
+                    for art in artifacts {
+                        let label = art["label"].as_str().unwrap_or("file");
+                        let mime = art["mime_type"].as_str().unwrap_or("");
+                        println!(
+                            "  {}",
+                            format!("- {} ({})", label, mime).dimmed()
+                        );
+                    }
+                }
+
                 println!();
                 let model = parsed["model"].as_str().unwrap_or("").to_string();
                 let tokens_in = parsed["tokens_in"].as_u64().unwrap_or(0);

@@ -145,21 +145,38 @@ pub async fn upload_file_handler(
         .into_response();
     }
 
-    // Magic bytes validation via `infer` crate
+    // Magic bytes validation via `infer` crate.
+    // Note: text/* types are excluded because text files lack reliable magic bytes.
+    // An attacker could upload binary data as text/plain — the risk is accepted since
+    // the file is stored as-is and only served back with its declared Content-Type.
     if let Some(detected) = infer::get(&data) {
         let detected_type = detected.mime_type();
-        // If declared type doesn't match detected type, reject
-        // (allow text/* to pass since infer doesn't detect plain text)
-        if !content_type.starts_with("text/") && !content_type.starts_with(detected_type.split('/').next().unwrap_or("")) {
-            return error_response(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "MIME_MISMATCH",
-                &format!(
-                    "Declared MIME '{}' doesn't match detected '{}'",
-                    content_type, detected_type
-                ),
-            )
-            .into_response();
+        if !content_type.starts_with("text/") {
+            let declared_cat = content_type.split('/').next().unwrap_or("");
+            let detected_cat = detected_type.split('/').next().unwrap_or("");
+
+            if declared_cat != detected_cat {
+                // Cross-category mismatch — definite spoofing attempt
+                return error_response(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "MIME_MISMATCH",
+                    &format!(
+                        "Declared MIME '{}' doesn't match detected '{}'",
+                        content_type, detected_type
+                    ),
+                )
+                .into_response();
+            }
+
+            if content_type != detected_type && detected_type != "application/octet-stream" {
+                // Same category but different subtype — log but allow
+                // (infer's subtype detection isn't reliable for all formats)
+                tracing::warn!(
+                    declared = %content_type,
+                    detected = %detected_type,
+                    "MIME subtype mismatch (same category, allowing)"
+                );
+            }
         }
     }
 
@@ -170,16 +187,19 @@ pub async fn upload_file_handler(
 
     let repo = FileAssetRepository::new(&state.db);
 
-    // Dedup: check if file with same hash already exists
+    // Dedup: check if file with same hash already exists and is owned by this user
     if let Ok(Some(existing)) = repo.get_by_sha256(&sha256) {
-        return Json(FileUploadResponse {
-            id: existing.id,
-            filename: existing.filename,
-            mime_type: existing.mime_type,
-            size_bytes: existing.size_bytes,
-            status: existing.status.as_str().to_string(),
-        })
-        .into_response();
+        if existing.owner_id == state.local_user_id {
+            return Json(FileUploadResponse {
+                id: existing.id,
+                filename: existing.filename,
+                mime_type: existing.mime_type,
+                size_bytes: existing.size_bytes,
+                status: existing.status.as_str().to_string(),
+            })
+            .into_response();
+        }
+        // Same content but different owner — fall through to create a new record
     }
 
     // Compute storage path
@@ -261,7 +281,14 @@ pub async fn get_file_metadata_handler(
 ) -> impl IntoResponse {
     let repo = FileAssetRepository::new(&state.db);
     match repo.get_by_id(&id) {
-        Ok(Some(asset)) => Json(asset).into_response(),
+        Ok(Some(asset)) => {
+            if asset.owner_id != state.local_user_id {
+                tracing::debug!(file_id = %id, owner = %asset.owner_id, "File owner mismatch — returning 404");
+                return error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found")
+                    .into_response();
+            }
+            Json(asset).into_response()
+        }
         Ok(None) => error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found")
             .into_response(),
         Err(e) => error_response(
@@ -280,7 +307,14 @@ pub async fn get_file_content_handler(
 ) -> impl IntoResponse {
     let repo = FileAssetRepository::new(&state.db);
     let asset = match repo.get_by_id(&id) {
-        Ok(Some(a)) => a,
+        Ok(Some(a)) => {
+            if a.owner_id != state.local_user_id {
+                tracing::debug!(file_id = %id, owner = %a.owner_id, "File owner mismatch — returning 404");
+                return error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found")
+                    .into_response();
+            }
+            a
+        }
         Ok(None) => {
             return error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found")
                 .into_response();

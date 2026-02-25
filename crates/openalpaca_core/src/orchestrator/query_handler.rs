@@ -213,7 +213,28 @@ impl Orchestrator {
                 }
             }
 
-            messages.extend(ctx.recent_messages.clone());
+            // Adapt multimodal parts in recent messages for the target model
+            let default_model = router.default_model();
+            let target_model = config_for_loop.model.as_deref().unwrap_or(&default_model);
+            let adapted_messages: Vec<ChatMessage> = ctx
+                .recent_messages
+                .iter()
+                .map(|msg| {
+                    if msg.parts.is_some() {
+                        let mut adapted = msg.clone();
+                        adapted.parts = Some(
+                            self.adapt_parts_for_model(
+                                msg.parts.clone().unwrap_or_default(),
+                                target_model,
+                            ),
+                        );
+                        adapted
+                    } else {
+                        msg.clone()
+                    }
+                })
+                .collect();
+            messages.extend(adapted_messages);
             messages.push(ChatMessage::user(query));
 
             // Per-request sandbox with ContextualToolExecutor for owner-scoped tools

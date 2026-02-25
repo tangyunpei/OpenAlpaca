@@ -129,6 +129,23 @@ pub async fn send_chat_handler(
         }
     };
 
+    // Validate attachment count
+    {
+        let config = state.daemon_config.load();
+        if body.attachments.len() > config.upload.max_files_per_message {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "TOO_MANY_ATTACHMENTS",
+                &format!(
+                    "Too many attachments: {} provided, maximum is {}",
+                    body.attachments.len(),
+                    config.upload.max_files_per_message
+                ),
+            )
+            .into_response();
+        }
+    }
+
     let principal = &state.local_user_id;
 
     let workspace_path = headers
@@ -136,44 +153,7 @@ pub async fn send_chat_handler(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    // Resolve attachment refs to ResolvedAttachment
-    let resolved_attachments = {
-        let file_repo = openalpaca_storage::FileAssetRepository::new(&state.db);
-        let mut resolved = Vec::new();
-        for att_ref in &body.attachments {
-            match file_repo.get_by_id(&att_ref.file_id) {
-                Ok(Some(asset)) => {
-                    resolved.push(openalpaca_core::gateway::ResolvedAttachment {
-                        file_id: asset.id,
-                        filename: asset.filename,
-                        mime_type: asset.mime_type,
-                        size_bytes: asset.size_bytes,
-                        extracted_text: asset.extracted_text,
-                        storage_path: asset.storage_path,
-                    });
-                }
-                Ok(None) => {
-                    return error_response(
-                        StatusCode::NOT_FOUND,
-                        "ATTACHMENT_NOT_FOUND",
-                        &format!("File not found: {}", att_ref.file_id),
-                    )
-                    .into_response();
-                }
-                Err(e) => {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "DB_ERROR",
-                        &format!("Failed to resolve attachment: {e}"),
-                    )
-                    .into_response();
-                }
-            }
-        }
-        resolved
-    };
-
-    match chat_service.send_message(body.content, resolved_attachments, principal, workspace_path) {
+    match chat_service.send_message(body.content, body.attachments, principal, workspace_path) {
         Ok(resp) => {
             // Publish to EventBus; bridge forwards to WebSocket clients
             let _ = state.gateway.bus.publish(SystemEvent::ChatStreamStarted {
@@ -263,6 +243,8 @@ fn make_sse_stream(
                     tokens_out,
                     duration_ms,
                     attachments_used,
+                    citations,
+                    artifacts,
                 } => {
                     let mut data = serde_json::json!({
                         "content": content,
@@ -273,6 +255,12 @@ fn make_sse_stream(
                     });
                     if let Some(att) = attachments_used {
                         data["attachments_used"] = serde_json::json!(att);
+                    }
+                    if let Some(cit) = citations {
+                        data["citations"] = serde_json::json!(cit);
+                    }
+                    if let Some(art) = artifacts {
+                        data["artifacts"] = serde_json::json!(art);
                     }
                     Event::default().event("done").data(data.to_string())
                 }
