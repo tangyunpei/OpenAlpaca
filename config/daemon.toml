@@ -83,7 +83,17 @@ poll_interval_secs = 30
 [upload]
 max_file_size_bytes = 52428800       # 50 MB
 max_total_storage_bytes = 524288000  # 500 MB
-allowed_mime_prefixes = ["image/", "application/pdf", "text/", "audio/"]
+allowed_mime_prefixes = [
+  "image/",
+  "application/pdf",
+  "text/",
+  "audio/",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.",
+  "application/vnd.ms-excel",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.apple.",
+]
 max_files_per_message = 10
 retention_days = 30
 
@@ -95,4 +105,6 @@ cleanup_interval_hours = 6
 orphan_grace_period_hours = 24
 max_concurrent_extractions = 2
 extraction_retry_count = 1
+attachment_ready_wait_ms = 8000
+attachment_ready_poll_interval_ms = 200
 max_image_dimension = 8192

@@ -11,7 +11,7 @@ use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 use chrono::Utc;
-use openalpaca_llm::ChatMessage;
+use openalpaca_llm::{ChatMessage, ContentPart, ImageSource};
 use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -27,6 +27,7 @@ impl Orchestrator {
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
+        current_parts: Option<&[ContentPart]>,
     ) -> Result<String, String> {
         let system_persona = match self.system_persona.read() {
             Ok(guard) => guard.clone(),
@@ -216,6 +217,31 @@ impl Orchestrator {
             // Adapt multimodal parts in recent messages for the target model
             let default_model = router.default_model();
             let target_model = config_for_loop.model.as_deref().unwrap_or(&default_model);
+            let sanitize_file_asset_images = |parts: Vec<ContentPart>| -> Vec<ContentPart> {
+                parts
+                    .into_iter()
+                    .map(|part| match part {
+                        ContentPart::Image {
+                            source: ImageSource::FileAsset {
+                                file_id,
+                                media_type,
+                            },
+                            ..
+                        } => {
+                            tracing::warn!(
+                                file_id = %file_id,
+                                media_type = %media_type,
+                                "Unresolved FileAsset image part reached query handler; replacing with placeholder"
+                            );
+                            ContentPart::Text {
+                                text: "[image attached — unresolved file asset reference]"
+                                    .to_string(),
+                            }
+                        }
+                        other => other,
+                    })
+                    .collect()
+            };
             let adapted_messages: Vec<ChatMessage> = ctx
                 .recent_messages
                 .iter()
@@ -224,7 +250,7 @@ impl Orchestrator {
                         let mut adapted = msg.clone();
                         adapted.parts = Some(
                             self.adapt_parts_for_model(
-                                msg.parts.clone().unwrap_or_default(),
+                                sanitize_file_asset_images(msg.parts.clone().unwrap_or_default()),
                                 target_model,
                             ),
                         );
@@ -235,7 +261,15 @@ impl Orchestrator {
                 })
                 .collect();
             messages.extend(adapted_messages);
-            messages.push(ChatMessage::user(query));
+            if let Some(parts) = current_parts {
+                let adapted = self.adapt_parts_for_model(
+                    sanitize_file_asset_images(parts.to_vec()),
+                    target_model,
+                );
+                messages.push(ChatMessage::user_with_parts(adapted));
+            } else {
+                messages.push(ChatMessage::user(query));
+            }
 
             // Per-request sandbox with ContextualToolExecutor for owner-scoped tools
             let ctx_exec = ToolExecutionContext {

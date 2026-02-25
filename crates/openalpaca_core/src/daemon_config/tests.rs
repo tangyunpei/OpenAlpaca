@@ -205,3 +205,63 @@ max_tools_per_round = 5
         assert!((config.execution.skill_defaults.router_suggest_threshold - 0.0).abs() < f64::EPSILON);
         assert_eq!(config.execution.skill_defaults.default_tool_rate_limit, 1);
     }
+
+    #[test]
+    fn test_upload_defaults_include_office_mimes() {
+        let config = DaemonConfig::default();
+        let prefixes = &config.upload.allowed_mime_prefixes;
+
+        // Core MIME prefixes
+        assert!(prefixes.iter().any(|p| p == "image/"), "missing image/ prefix");
+        assert!(prefixes.iter().any(|p| p == "application/pdf"), "missing application/pdf");
+        assert!(prefixes.iter().any(|p| p == "text/"), "missing text/ prefix");
+        assert!(prefixes.iter().any(|p| p == "audio/"), "missing audio/ prefix");
+
+        // Office MIME prefixes
+        assert!(
+            prefixes.iter().any(|p| p == "application/msword"),
+            "missing application/msword"
+        );
+        assert!(
+            prefixes.iter().any(|p| p == "application/vnd.openxmlformats-officedocument."),
+            "missing OOXML prefix"
+        );
+        assert!(
+            prefixes.iter().any(|p| p == "application/vnd.ms-excel"),
+            "missing application/vnd.ms-excel"
+        );
+        assert!(
+            prefixes.iter().any(|p| p == "application/vnd.ms-powerpoint"),
+            "missing application/vnd.ms-powerpoint"
+        );
+        assert!(
+            prefixes.iter().any(|p| p == "application/vnd.apple."),
+            "missing iWork prefix"
+        );
+        assert_eq!(config.upload.governance.attachment_ready_wait_ms, 8_000);
+        assert_eq!(config.upload.governance.attachment_ready_poll_interval_ms, 200);
+    }
+
+    #[test]
+    fn test_upload_governance_wait_settings_from_toml() {
+        let toml_str = r#"
+[upload.governance]
+attachment_ready_wait_ms = 12000
+attachment_ready_poll_interval_ms = 500
+"#;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.upload.governance.attachment_ready_wait_ms, 12_000);
+        assert_eq!(config.upload.governance.attachment_ready_poll_interval_ms, 500);
+    }
+
+    #[test]
+    fn test_upload_governance_wait_settings_validate_clamps() {
+        let mut config = DaemonConfig::default();
+        config.upload.governance.attachment_ready_wait_ms = 99_999;
+        config.upload.governance.attachment_ready_poll_interval_ms = 1;
+
+        config.validate();
+
+        assert_eq!(config.upload.governance.attachment_ready_wait_ms, 30_000);
+        assert_eq!(config.upload.governance.attachment_ready_poll_interval_ms, 50);
+    }

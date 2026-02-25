@@ -26,15 +26,20 @@ enum MimeMagicValidationError {
 }
 
 fn validate_magic_mime(declared_mime: &str, data: &[u8]) -> Result<(), MimeMagicValidationError> {
+    use openalpaca_core::security::sanitizer::InputSanitizer;
     match infer::get(data) {
         Some(detected) => {
             let detected_type = detected.mime_type();
-            if declared_mime != detected_type {
-                return Err(MimeMagicValidationError::Mismatch {
-                    detected: detected_type.to_string(),
-                });
+            if declared_mime == detected_type {
+                return Ok(());
             }
-            Ok(())
+            // Allow container-based formats where detection returns the container type
+            if InputSanitizer::is_container_compatible_mime(declared_mime, detected_type) {
+                return Ok(());
+            }
+            Err(MimeMagicValidationError::Mismatch {
+                detected: detected_type.to_string(),
+            })
         }
         None => {
             if declared_mime.starts_with("text/") {
@@ -413,6 +418,9 @@ mod tests {
         0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0x01, 0x00,
     ];
     const ZIP_BYTES: &[u8] = &[0x50, 0x4B, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00, 0x00];
+    const CFB_BYTES: &[u8] = &[
+        0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0x00, 0x00, 0x00, 0x00,
+    ];
     const UNDETECTABLE_BYTES: &[u8] = &[0x01, 0x02, 0x03, 0x04, 0x05];
 
     #[test]
@@ -449,5 +457,82 @@ mod tests {
         let err = validate_magic_mime("application/pdf", UNDETECTABLE_BYTES)
             .expect_err("non-text undetectable should be rejected");
         assert_eq!(err, MimeMagicValidationError::Undetectable);
+    }
+
+    // --- Office/iWork container-compatible MIME tests ---
+
+    #[test]
+    fn test_validate_magic_mime_allows_docx_as_zip() {
+        let result = validate_magic_mime(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ZIP_BYTES,
+        );
+        assert!(result.is_ok(), "DOCX (ZIP container) should be allowed");
+    }
+
+    #[test]
+    fn test_validate_magic_mime_allows_xlsx_as_zip() {
+        let result = validate_magic_mime(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ZIP_BYTES,
+        );
+        assert!(result.is_ok(), "XLSX (ZIP container) should be allowed");
+    }
+
+    #[test]
+    fn test_validate_magic_mime_allows_pptx_as_zip() {
+        let result = validate_magic_mime(
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ZIP_BYTES,
+        );
+        assert!(result.is_ok(), "PPTX (ZIP container) should be allowed");
+    }
+
+    #[test]
+    fn test_validate_magic_mime_allows_pages_as_zip() {
+        let result = validate_magic_mime("application/vnd.apple.pages", ZIP_BYTES);
+        assert!(result.is_ok(), "Pages (ZIP container) should be allowed");
+    }
+
+    #[test]
+    fn test_validate_magic_mime_allows_numbers_as_zip() {
+        let result = validate_magic_mime("application/vnd.apple.numbers", ZIP_BYTES);
+        assert!(result.is_ok(), "Numbers (ZIP container) should be allowed");
+    }
+
+    #[test]
+    fn test_validate_magic_mime_allows_keynote_as_zip() {
+        let result = validate_magic_mime("application/vnd.apple.keynote", ZIP_BYTES);
+        assert!(result.is_ok(), "Keynote (ZIP container) should be allowed");
+    }
+
+    #[test]
+    fn test_validate_magic_mime_rejects_random_type_as_zip() {
+        let err = validate_magic_mime("application/octet-stream", ZIP_BYTES)
+            .expect_err("unknown type should not be container-compatible");
+        match err {
+            MimeMagicValidationError::Mismatch { detected } => {
+                assert_eq!(detected, "application/zip");
+            }
+            other => panic!("expected mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_magic_mime_allows_doc_as_cfb() {
+        let result = validate_magic_mime("application/msword", CFB_BYTES);
+        assert!(result.is_ok(), "DOC (CFB container) should be allowed");
+    }
+
+    #[test]
+    fn test_validate_magic_mime_allows_xls_as_cfb() {
+        let result = validate_magic_mime("application/vnd.ms-excel", CFB_BYTES);
+        assert!(result.is_ok(), "XLS (CFB container) should be allowed");
+    }
+
+    #[test]
+    fn test_validate_magic_mime_allows_ppt_as_cfb() {
+        let result = validate_magic_mime("application/vnd.ms-powerpoint", CFB_BYTES);
+        assert!(result.is_ok(), "PPT (CFB container) should be allowed");
     }
 }

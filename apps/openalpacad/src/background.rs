@@ -259,7 +259,7 @@ pub fn spawn_file_processing_worker(
                     let storage_path = asset.storage_path.clone();
                     let mime_type = asset.mime_type.clone();
                     let (text, error) = tokio::task::spawn_blocking(move || {
-                        extract_text(&storage_path, &mime_type, max_text)
+                        crate::extraction::extract_text(&storage_path, &mime_type, max_text)
                     })
                     .await
                     .unwrap_or((None, Some("Extraction task panicked".to_string())));
@@ -300,44 +300,6 @@ fn parse_retry_count(error: Option<&str>) -> u32 {
         .unwrap_or(0)
 }
 
-/// Extract text content from a file based on its MIME type.
-fn extract_text(
-    storage_path: &str,
-    mime_type: &str,
-    max_chars: usize,
-) -> (Option<String>, Option<String>) {
-    if mime_type.starts_with("text/") {
-        match std::fs::read_to_string(storage_path) {
-            Ok(text) => {
-                let truncated = if text.len() > max_chars {
-                    text[..text.floor_char_boundary(max_chars)].to_string()
-                } else {
-                    text
-                };
-                (Some(truncated), None)
-            }
-            Err(e) => (None, Some(format!("Failed to read text file: {e}"))),
-        }
-    } else if mime_type == "application/pdf" {
-        match pdf_extract::extract_text(storage_path) {
-            Ok(text) => {
-                let truncated = if text.len() > max_chars {
-                    text[..text.floor_char_boundary(max_chars)].to_string()
-                } else {
-                    text
-                };
-                (Some(truncated), None)
-            }
-            Err(e) => (None, Some(format!("PDF extraction failed: {e}"))),
-        }
-    } else if mime_type.starts_with("image/") || mime_type.starts_with("audio/") {
-        // Images/audio handled natively by vision/audio models — no text extraction
-        (Some(String::new()), None)
-    } else {
-        // Unknown type — mark as ready with empty text
-        (Some(String::new()), None)
-    }
-}
 
 /// Spawn background asset cleanup task.
 ///

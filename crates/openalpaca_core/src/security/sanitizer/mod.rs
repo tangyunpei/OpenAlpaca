@@ -210,10 +210,13 @@ impl InputSanitizer {
             });
         }
 
-        // 3. Polyglot detection — inferred MIME must exactly match declared MIME
+        // 3. Polyglot detection — inferred MIME must match declared MIME,
+        //    with allowance for container-based formats (ZIP → OOXML/iWork, CFB → legacy Office)
         if let Some(inferred) = infer::get(data) {
             let inferred_mime = inferred.mime_type();
-            if declared_mime != inferred_mime {
+            if declared_mime != inferred_mime
+                && !Self::is_container_compatible_mime(declared_mime, inferred_mime)
+            {
                 return Err(SecurityViolation::InputBlocked {
                     reason: format!(
                         "MIME type mismatch: declared '{}' but content detected as '{}'",
@@ -225,9 +228,11 @@ impl InputSanitizer {
         // If infer returns None (e.g. plain text, CSV) — allow. Text formats have
         // no magic bytes and are harmless.
 
-        // 4. Archive bomb heuristic for ZIP files
-        if (declared_mime == "application/zip"
-            || declared_mime == "application/x-zip-compressed")
+        // 4. Archive bomb heuristic for ZIP-based files (plain ZIP + OOXML + iWork)
+        let is_zip_based = declared_mime == "application/zip"
+            || declared_mime == "application/x-zip-compressed"
+            || Self::is_container_compatible_mime(declared_mime, "application/zip");
+        if is_zip_based
             && let Some(ratio) = Self::estimate_zip_ratio(data)
             && ratio > 100.0
         {
@@ -251,6 +256,36 @@ impl InputSanitizer {
         }
 
         Ok(())
+    }
+
+    /// Check if a declared MIME type is compatible with a detected container type.
+    ///
+    /// ZIP-based OOXML and iWork formats detect as `application/zip`.
+    /// OLE2-based legacy Office formats detect as `application/x-cfb`.
+    /// This is a closed whitelist — only known container-based document types pass.
+    pub fn is_container_compatible_mime(declared: &str, detected: &str) -> bool {
+        // ZIP-based Office/iWork formats
+        if detected == "application/zip" {
+            return matches!(
+                declared,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                    | "application/vnd.apple.pages"
+                    | "application/vnd.apple.numbers"
+                    | "application/vnd.apple.keynote"
+            );
+        }
+        // OLE2/CFB-based legacy Office formats
+        if detected == "application/x-cfb" || detected == "application/x-ole-storage" {
+            return matches!(
+                declared,
+                "application/msword"
+                    | "application/vnd.ms-excel"
+                    | "application/vnd.ms-powerpoint"
+            );
+        }
+        false
     }
 
     /// Estimate the compression ratio from a ZIP local file header.
