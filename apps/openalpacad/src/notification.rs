@@ -227,7 +227,26 @@ impl NotificationDispatcher {
     #[cfg(not(target_os = "macos"))]
     async fn try_cross_channel_imessage(&self, _created_by: &str, _message: &str) {}
 
+    /// Resolve the Telegram chat_id for a given lane_key.
+    ///
+    /// Strategy: prefer the user's `telegram.last_chat_id` preference
+    /// (updated on every incoming message), then fall back to `conversation_map`.
+    /// This avoids routing ambiguity for users who interact from multiple
+    /// Telegram chats, since the preference always reflects the most recent chat.
     fn resolve_telegram_chat_id(&self, lane_key: &str) -> Option<i64> {
+        // Prefer the user's last active chat (stored per-message)
+        let user_id = lane_key.strip_suffix(":telegram")?;
+        let pref_repo = PreferenceRepository::new(&self.db);
+        if let Some(chat_id) = pref_repo
+            .get(user_id, "telegram.last_chat_id")
+            .ok()
+            .flatten()
+            .and_then(|p| p.value.parse::<i64>().ok())
+        {
+            return Some(chat_id);
+        }
+
+        // Fallback: conversation_map (arbitrary if multiple chats)
         let identity_repo = IdentityRepository::new(&self.db);
         identity_repo
             .get_chat_id_by_lane_key(lane_key, "telegram")

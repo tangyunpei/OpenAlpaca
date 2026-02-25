@@ -2,7 +2,7 @@
 //!
 //! Handles the integration between Telegram Bot API and the OpenAlpaca agent system.
 
-use crate::common::{LinkResult, format_denial_message, handle_link_token, resolve_principal};
+use crate::common::{LinkResult, format_denial_message, handle_link_token, redact_token, resolve_principal};
 use crate::{Connector, ConnectorError};
 use async_trait::async_trait;
 use openalpaca_api::events::EventSource;
@@ -25,7 +25,7 @@ const TELEGRAM_MAX_LENGTH: usize = 4096;
 
 /// Split a message into chunks that fit within Telegram's message limit.
 /// Prefers splitting at paragraph boundaries (\n\n), then sentence boundaries (. ),
-/// then falls back to hard cut.
+/// then falls back to hard cut at a valid UTF-8 char boundary.
 fn chunk_message(text: &str) -> Vec<String> {
     if text.len() <= TELEGRAM_MAX_LENGTH {
         return vec![text.to_string()];
@@ -40,7 +40,9 @@ fn chunk_message(text: &str) -> Vec<String> {
             break;
         }
 
-        let slice = &remaining[..TELEGRAM_MAX_LENGTH];
+        // Find a safe byte boundary to slice up to (avoids panic on multi-byte UTF-8)
+        let boundary = remaining.floor_char_boundary(TELEGRAM_MAX_LENGTH);
+        let slice = &remaining[..boundary];
 
         // Try paragraph boundary
         let split_at = slice
@@ -50,8 +52,8 @@ fn chunk_message(text: &str) -> Vec<String> {
             .or_else(|| slice.rfind(". ").map(|i| i + 2))
             // Try any newline
             .or_else(|| slice.rfind('\n').map(|i| i + 1))
-            // Hard cut
-            .unwrap_or(TELEGRAM_MAX_LENGTH);
+            // Hard cut at safe char boundary
+            .unwrap_or(boundary);
 
         chunks.push(remaining[..split_at].to_string());
         remaining = &remaining[split_at..];
@@ -214,12 +216,16 @@ impl TelegramConnector {
         };
 
         let chat_id = msg.chat.id;
-        let user_id = msg
-            .from
-            .as_ref()
-            .map(|u| u.id.0.to_string())
-            .unwrap_or_default();
-        let display_name = msg.from.as_ref().and_then(|u| u.first_name.clone().into());
+        let from = match msg.from.as_ref() {
+            Some(user) => user,
+            None => {
+                // Channel posts, anonymous admin messages, etc. have no sender.
+                // We cannot resolve identity without a user ID, so skip.
+                return Ok(());
+            }
+        };
+        let user_id = from.id.0.to_string();
+        let display_name = Some(from.first_name.clone());
 
         info!(
             "Received message from Telegram user {} in chat {}: {}",
@@ -369,7 +375,7 @@ impl TelegramConnector {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!(
             "Processing /link command for user {} with token {}",
-            user_id, token
+            user_id, redact_token(token)
         );
 
         match handle_link_token(identity_repo, token, external_identity_id) {
@@ -399,7 +405,7 @@ impl TelegramConnector {
                 .await?;
             }
             Ok(LinkResult::InvalidToken) => {
-                warn!("Invalid/expired link token: {}", token);
+                warn!("Invalid/expired link token: {}", redact_token(token));
                 bot.send_message(
                     chat_id,
                     "❌ Invalid or expired token.\nPlease generate a new token from the GUI or CLI.",
@@ -559,5 +565,52 @@ mod tests {
         assert!(limiter.check(111).is_none());
         assert!(limiter.check(222).is_none()); // Different chat, should pass
         assert!(limiter.check(111).is_some()); // Same chat, should be limited
+    }
+
+    #[test]
+    fn test_chunk_message_utf8_boundary() {
+        // Build a string of multi-byte chars that would cause a panic
+        // if we slice at a raw byte offset.
+        // Each CJK char is 3 bytes in UTF-8.
+        let cjk_char = "\u{4e16}"; // '世' = 3 bytes
+        // Fill slightly over the limit with 3-byte chars
+        let count = (TELEGRAM_MAX_LENGTH / 3) + 100;
+        let text: String = cjk_char.repeat(count);
+        assert!(text.len() > TELEGRAM_MAX_LENGTH);
+        // Must not panic
+        let chunks = chunk_message(&text);
+        assert!(chunks.len() >= 2);
+        // All chunks must be valid UTF-8 (they are Strings, so this is guaranteed)
+        for chunk in &chunks {
+            assert!(!chunk.is_empty());
+            // Verify each chunk is within the limit
+            assert!(chunk.len() <= TELEGRAM_MAX_LENGTH);
+        }
+    }
+
+    #[test]
+    fn test_chunk_message_emoji_boundary() {
+        // Emoji are 4 bytes in UTF-8
+        let emoji = "\u{1F600}"; // grinning face = 4 bytes
+        let count = (TELEGRAM_MAX_LENGTH / 4) + 100;
+        let text: String = emoji.repeat(count);
+        assert!(text.len() > TELEGRAM_MAX_LENGTH);
+        let chunks = chunk_message(&text);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(!chunk.is_empty());
+            assert!(chunk.len() <= TELEGRAM_MAX_LENGTH);
+        }
+    }
+
+    #[test]
+    fn test_floor_char_boundary_std() {
+        let s = "Hello\u{4e16}\u{754c}"; // "Hello世界" = 5 + 3 + 3 = 11 bytes
+        // Boundary in the middle of '世' (bytes 5..8)
+        assert_eq!(s.floor_char_boundary(6), 5);
+        assert_eq!(s.floor_char_boundary(7), 5);
+        assert_eq!(s.floor_char_boundary(8), 8); // exactly on boundary
+        assert_eq!(s.floor_char_boundary(100), 11); // beyond end
+        assert_eq!(s.floor_char_boundary(0), 0);
     }
 }

@@ -124,12 +124,14 @@ pub fn auto_start_connectors(
 
         if enabled {
             info!("Autostart: Spawning iMessage connector");
+            let local_user_id = config_repo.get("identity.local_user_id").ok().flatten();
             let cancel_token = CancellationToken::new();
             let connector = crate::imessage::IMessageConnector::new(
                 Arc::new(db.clone()),
                 Arc::new(bus.clone()),
                 gateway.clone(),
                 cancel_token.clone(),
+                local_user_id,
             );
 
             tokio::spawn(async move {

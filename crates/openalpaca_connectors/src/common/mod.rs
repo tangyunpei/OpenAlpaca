@@ -36,19 +36,27 @@ pub fn format_denial_message(error: &str) -> String {
     format!("⚠️ {}\n\nUse /link <token> to link your account.", error)
 }
 
+/// Redact a token for safe logging (show only first 4 chars).
+pub fn redact_token(token: &str) -> String {
+    if token.len() <= 4 {
+        "****".to_string()
+    } else {
+        let prefix: String = token.chars().take(4).collect();
+        format!("{}****", prefix)
+    }
+}
+
 /// Handle the /link command logic.
+///
+/// Uses an atomic consume-and-link transaction so that the token is not
+/// consumed if linking the identity fails.
 pub fn handle_link_token(
     identity_repo: &IdentityRepository<'_>,
     token: &str,
     external_identity_id: i64,
 ) -> Result<LinkResult, String> {
-    match identity_repo.consume_link_token(token) {
-        Ok(Some(global_user_id)) => {
-            identity_repo
-                .link_external_identity(external_identity_id, &global_user_id)
-                .map_err(|e| format!("Failed to link identity: {}", e))?;
-            Ok(LinkResult::Success(global_user_id))
-        }
+    match identity_repo.consume_and_link(token, external_identity_id) {
+        Ok(Some(global_user_id)) => Ok(LinkResult::Success(global_user_id)),
         Ok(None) => Ok(LinkResult::InvalidToken),
         Err(e) => Err(e.to_string()),
     }

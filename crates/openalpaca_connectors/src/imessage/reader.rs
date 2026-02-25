@@ -65,6 +65,16 @@ impl ChatDbReader {
         Ok(())
     }
 
+    /// Restore the watermark to a previously persisted value.
+    pub fn set_watermark(&mut self, rowid: i64) {
+        self.last_rowid = rowid;
+    }
+
+    /// Return the current watermark value for persistence.
+    pub fn watermark(&self) -> i64 {
+        self.last_rowid
+    }
+
     /// Poll for new incoming messages since the last watermark.
     ///
     /// Only messages where `is_from_me = 0` are returned (i.e., messages

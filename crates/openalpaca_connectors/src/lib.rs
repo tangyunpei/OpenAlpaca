@@ -90,8 +90,9 @@ impl ConnectorBuilder {
     pub fn imessage(
         self,
         cancel_token: tokio_util::sync::CancellationToken,
+        local_user_id: Option<String>,
     ) -> imessage::IMessageConnector {
-        imessage::IMessageConnector::new(self.db, self.bus, self.gateway, cancel_token)
+        imessage::IMessageConnector::new(self.db, self.bus, self.gateway, cancel_token, local_user_id)
     }
 }
 
@@ -166,12 +167,17 @@ impl ConnectorFactory for IMessageFactory {
         bus: EventBus,
         gateway: Arc<Gateway>,
     ) -> Result<startup::ConnectorHandle, ConnectorError> {
+        let local_user_id = openalpaca_storage::ConfigRepository::new(&db)
+            .get("identity.local_user_id")
+            .ok()
+            .flatten();
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let connector = imessage::IMessageConnector::new(
             Arc::new(db),
             Arc::new(bus),
             gateway,
             cancel_token.clone(),
+            local_user_id,
         );
 
         tokio::spawn(async move {
