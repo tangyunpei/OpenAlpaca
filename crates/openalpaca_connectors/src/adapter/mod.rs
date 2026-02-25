@@ -1,10 +1,19 @@
 use openalpaca_api::events::{EventPayload, EventSource, UnifiedEvent};
 
+/// An inbound attachment from a connector (raw bytes before storage).
+#[derive(Debug, Clone)]
+pub struct InboundAttachment {
+    pub filename: String,
+    pub mime_type: String,
+    pub data: Vec<u8>,
+}
+
 /// An inbound message from any connector, before conversion to UnifiedEvent.
 #[derive(Debug, Clone)]
 pub struct InboundMessage {
     pub source: EventSource,
     pub content: String,
+    pub attachments: Vec<InboundAttachment>,
 }
 
 /// Trait for converting connector-native messages into UnifiedEvents.
@@ -30,6 +39,7 @@ impl ConnectorAdapter for DefaultAdapter {
         } else {
             EventPayload::UserMessage {
                 content: msg.content,
+                attachment_ids: Vec::new(),
             }
         };
 
@@ -46,6 +56,7 @@ pub fn telegram_inbound(chat_id: &str, user_id: &str, content: &str) -> InboundM
             user_id: user_id.into(),
         },
         content: content.into(),
+        attachments: Vec::new(),
     }
 }
 
@@ -58,6 +69,7 @@ pub fn imessage_inbound(chat_id: &str, sender: &str, content: &str) -> InboundMe
             sender: sender.into(),
         },
         content: content.into(),
+        attachments: Vec::new(),
     }
 }
 

@@ -17,6 +17,7 @@ pub enum OutputValidationError {
 impl OutputValidationError {
     /// Generate a repair prompt that can be appended to the conversation
     /// and re-sent to the LLM for a self-repair attempt.
+    #[allow(dead_code)]
     pub fn repair_prompt(&self) -> String {
         match self {
             Self::MissingSections(sections) => {

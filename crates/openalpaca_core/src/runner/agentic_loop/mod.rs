@@ -66,7 +66,7 @@ fn estimate_messages_tokens(messages: &[ChatMessage]) -> u32 {
         .iter()
         .map(|m| {
             let content_tokens: u32 = if let Some(ref parts) = m.parts {
-                parts.iter().map(|p| estimate_part_tokens(p)).sum()
+                parts.iter().map(estimate_part_tokens).sum()
             } else {
                 (m.content.len() / 4) as u32
             };

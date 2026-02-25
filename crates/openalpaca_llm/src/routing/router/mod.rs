@@ -741,7 +741,7 @@ fn estimate_request_tokens(request: &RouterRequest) -> u32 {
         .iter()
         .map(|m| {
             if let Some(ref parts) = m.parts {
-                parts.iter().map(|p| estimate_content_part_tokens(p)).sum::<u32>()
+                parts.iter().map(estimate_content_part_tokens).sum::<u32>()
             } else {
                 (m.content.len() / 4) as u32
             }

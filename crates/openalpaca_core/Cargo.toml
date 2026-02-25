@@ -27,6 +27,7 @@ futures-util.workspace = true
 url.workspace = true
 base64.workspace = true
 sha2.workspace = true
+infer.workspace = true
 urlencoding.workspace = true
 shell-escape.workspace = true
 openalpaca_api.workspace = true

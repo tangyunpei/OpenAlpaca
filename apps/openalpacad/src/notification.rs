@@ -88,10 +88,9 @@ impl NotificationDispatcher {
         if task.source_lane.ends_with(":telegram") {
             if let Some(chat_id) = self.resolve_telegram_chat_id(&task.source_lane)
                 && let Some(ref bot) = self.telegram_bot
+                && let Err(e) = bot.send_message(ChatId(chat_id), &content).await
             {
-                if let Err(e) = bot.send_message(ChatId(chat_id), &content).await {
-                    warn!("Failed to send task completion notification: {e}");
-                }
+                warn!("Failed to send task completion notification: {e}");
             }
         } else if task.source_lane.ends_with(":imessage") {
             self.try_imessage_notification(&task.source_lane, &content)
@@ -117,10 +116,9 @@ impl NotificationDispatcher {
         if task.source_lane.ends_with(":telegram") {
             if let Some(chat_id) = self.resolve_telegram_chat_id(&task.source_lane)
                 && let Some(ref bot) = self.telegram_bot
+                && let Err(e) = bot.send_message(ChatId(chat_id), &content).await
             {
-                if let Err(e) = bot.send_message(ChatId(chat_id), &content).await {
-                    warn!("Failed to send task failure notification: {e}");
-                }
+                warn!("Failed to send task failure notification: {e}");
             }
         } else if task.source_lane.ends_with(":imessage") {
             self.try_imessage_notification(&task.source_lane, &content)
@@ -181,13 +179,11 @@ impl NotificationDispatcher {
             .ok()
             .flatten()
             .map(|p| p.value)
-        {
-            if let Err(e) =
+            && let Err(e) =
                 openalpaca_connectors::imessage::IMessageSender::send(&chat_id, message, true)
                     .await
-            {
-                warn!("Failed to send iMessage notification: {e}");
-            }
+        {
+            warn!("Failed to send iMessage notification: {e}");
         }
     }
 
@@ -214,13 +210,11 @@ impl NotificationDispatcher {
             .ok()
             .flatten()
             .map(|p| p.value)
-        {
-            if let Err(e) =
+            && let Err(e) =
                 openalpaca_connectors::imessage::IMessageSender::send(&chat_id, message, true)
                     .await
-            {
-                warn!("Failed to send cross-channel iMessage notification: {e}");
-            }
+        {
+            warn!("Failed to send cross-channel iMessage notification: {e}");
         }
     }
 

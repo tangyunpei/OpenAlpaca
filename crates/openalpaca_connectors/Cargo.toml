@@ -18,9 +18,9 @@ tracing-subscriber.workspace = true
 [features]
 default = []
 # Enable Telegram connector
-telegram = ["dep:teloxide"]
+telegram = ["dep:teloxide", "dep:sha2"]
 # Enable iMessage connector (macOS only)
-imessage = ["dep:rusqlite", "dep:tokio-util"]
+imessage = ["dep:rusqlite", "dep:tokio-util", "dep:sha2"]
 # Future: WeChat connector
 # wechat = []
 
@@ -30,6 +30,7 @@ tokio.workspace = true
 tracing.workspace = true
 async-trait = { workspace = true }
 thiserror.workspace = true
+arc-swap.workspace = true
 
 # Serialization
 serde.workspace = true
@@ -48,3 +49,6 @@ teloxide = { workspace = true, optional = true }
 # Optional: iMessage (only when feature enabled, macOS only)
 rusqlite = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
+
+# Optional: SHA-256 hashing for attachment dedup (telegram + imessage)
+sha2 = { workspace = true, optional = true }

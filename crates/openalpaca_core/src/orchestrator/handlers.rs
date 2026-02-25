@@ -24,6 +24,7 @@ impl Orchestrator {
     /// 3. Try slash commands / task queries (cheap, no LLM)
     /// 4. If LLM router configured: try LLM-based planning
     /// 5. Fallback: keyword heuristic routing
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_message(
         &self,
         request_id: Uuid,

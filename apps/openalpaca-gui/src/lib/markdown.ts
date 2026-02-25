@@ -9,6 +9,7 @@
 import { Marked } from "marked";
 import hljs from "highlight.js/lib/core";
 import katex from "katex";
+import DOMPurify from "dompurify";
 
 // Register commonly-used languages to keep the bundle lean
 import javascript from "highlight.js/lib/languages/javascript";
@@ -131,5 +132,17 @@ export function renderMarkdown(text: string): string {
   html = html.replace(/<\/table>/g, '</table></div>');
 
   // 4. Restore math placeholders with rendered KaTeX HTML
-  return restore(html);
+  html = restore(html);
+
+  // 5. Sanitize HTML to prevent XSS (preserve KaTeX MathML elements)
+  return DOMPurify.sanitize(html, {
+    ADD_TAGS: [
+      "math", "semantics", "mrow", "mi", "mo", "mn", "msup", "msub",
+      "mfrac", "mover", "munder", "msqrt", "mtext", "annotation",
+    ],
+    ADD_ATTR: [
+      "xmlns", "mathvariant", "encoding", "displaystyle", "columnalign",
+      "rowspacing", "columnspacing",
+    ],
+  });
 }

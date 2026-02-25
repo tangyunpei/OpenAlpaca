@@ -86,3 +86,13 @@ max_total_storage_bytes = 524288000  # 500 MB
 allowed_mime_prefixes = ["image/", "application/pdf", "text/", "audio/"]
 max_files_per_message = 10
 retention_days = 30
+
+[upload.governance]
+processing_poll_interval_secs = 10
+processing_batch_size = 5
+max_extracted_text_chars = 50000
+cleanup_interval_hours = 6
+orphan_grace_period_hours = 24
+max_concurrent_extractions = 2
+extraction_retry_count = 1
+max_image_dimension = 8192

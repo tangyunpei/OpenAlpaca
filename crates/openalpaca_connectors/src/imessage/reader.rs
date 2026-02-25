@@ -6,12 +6,23 @@
 
 use rusqlite::{Connection, OpenFlags};
 
+/// An attachment associated with an iMessage.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct IMessageAttachment {
+    pub filename: String,
+    pub mime_type: String,
+    pub transfer_name: String,
+    pub file_path: String,
+    pub total_bytes: i64,
+}
+
 /// An incoming iMessage read from chat.db.
 #[derive(Debug, Clone)]
 pub struct IncomingMessage {
     /// The ROWID from the message table.
     pub rowid: i64,
-    /// The message text content.
+    /// The message text content (may be empty for attachment-only messages).
     pub text: String,
     /// The sender identifier (phone number or email) from the handle table.
     pub sender: String,
@@ -19,6 +30,8 @@ pub struct IncomingMessage {
     pub chat_id: String,
     /// Whether this message is from a group chat (chat_identifier starts with "chat").
     pub is_group: bool,
+    /// Attachments associated with this message.
+    pub attachments: Vec<IMessageAttachment>,
 }
 
 /// Reads new messages from the macOS Messages chat.db SQLite database.
@@ -84,14 +97,14 @@ impl ChatDbReader {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT m.ROWID, m.text, h.id, c.chat_identifier
+                "SELECT m.ROWID, COALESCE(m.text, ''), h.id, c.chat_identifier
                  FROM message m
                  JOIN handle h ON m.handle_id = h.ROWID
                  JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
                  JOIN chat c ON c.ROWID = cmj.chat_id
                  WHERE m.ROWID > ?1
                    AND m.is_from_me = 0
-                   AND m.text IS NOT NULL
+                   AND (m.text IS NOT NULL OR m.cache_has_attachments = 1)
                  ORDER BY m.ROWID ASC",
             )
             .map_err(|e| format!("Failed to prepare statement: {}", e))?;
@@ -109,6 +122,7 @@ impl ChatDbReader {
                     sender,
                     chat_id,
                     is_group,
+                    attachments: Vec::new(), // populated below
                 })
             })
             .map_err(|e| format!("Failed to query messages: {}", e))?;
@@ -116,10 +130,12 @@ impl ChatDbReader {
         let mut messages = Vec::new();
         for row in rows {
             match row {
-                Ok(msg) => {
+                Ok(mut msg) => {
                     if msg.rowid > self.last_rowid {
                         self.last_rowid = msg.rowid;
                     }
+                    // Fetch attachments for this message
+                    msg.attachments = self.get_attachments_for_message(msg.rowid);
                     messages.push(msg);
                 }
                 Err(e) => {
@@ -129,5 +145,51 @@ impl ChatDbReader {
         }
 
         Ok(messages)
+    }
+
+    /// Fetch attachments for a specific message ROWID from chat.db.
+    fn get_attachments_for_message(&self, message_rowid: i64) -> Vec<IMessageAttachment> {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users".to_string());
+        let mut stmt = match self.conn.prepare(
+            "SELECT a.filename, a.mime_type, a.transfer_name, a.total_bytes
+             FROM attachment a
+             JOIN message_attachment_join maj ON a.ROWID = maj.attachment_id
+             WHERE maj.message_id = ?1",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let rows = match stmt.query_map([message_rowid], |row| {
+            let filename: Option<String> = row.get(0)?;
+            let mime_type: Option<String> = row.get(1)?;
+            let transfer_name: Option<String> = row.get(2)?;
+            let total_bytes: i64 = row.get::<_, Option<i64>>(3)?.unwrap_or(0);
+            Ok((filename, mime_type, transfer_name, total_bytes))
+        }) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut attachments = Vec::new();
+        for (filename, mime_type, transfer_name, total_bytes) in rows.flatten() {
+            // Resolve ~ to $HOME in the filename path
+            let raw_path = filename.unwrap_or_default();
+            let resolved = raw_path.replacen('~', &home, 1);
+
+            // Skip files that don't exist on disk
+            if resolved.is_empty() || !std::path::Path::new(&resolved).exists() {
+                continue;
+            }
+
+            attachments.push(IMessageAttachment {
+                filename: resolved.clone(),
+                mime_type: mime_type.unwrap_or_else(|| "application/octet-stream".to_string()),
+                transfer_name: transfer_name.unwrap_or_default(),
+                file_path: resolved,
+                total_bytes,
+            });
+        }
+        attachments
     }
 }

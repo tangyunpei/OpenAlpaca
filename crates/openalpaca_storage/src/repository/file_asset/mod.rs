@@ -132,6 +132,22 @@ impl<'a> FileAssetRepository<'a> {
         })
     }
 
+    /// List file assets by status, ordered by creation date (oldest first).
+    pub fn list_by_status(&self, status: &FileAssetStatus, limit: usize) -> Result<Vec<FileAsset>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, owner_id, sha256, filename, mime_type, size_bytes, storage_path, status, extracted_text, extract_error, metadata_json, created_at, updated_at
+                 FROM file_assets WHERE status = ?1 ORDER BY created_at ASC LIMIT ?2",
+            )?;
+            let mut assets = Vec::new();
+            let mut rows = stmt.query(rusqlite::params![status.as_str(), limit as i64])?;
+            while let Some(row) = rows.next()? {
+                assets.push(Self::row_to_asset(row)?);
+            }
+            Ok(assets)
+        })
+    }
+
     /// Get all attachment file_ids for a message.
     pub fn get_attachments_for_message(&self, message_id: i64) -> Result<Vec<(String, i32, Option<String>)>> {
         self.db.with_connection(|conn| {
@@ -157,7 +173,7 @@ impl<'a> FileAssetRepository<'a> {
             mime_type: row.get(4)?,
             size_bytes: row.get(5)?,
             storage_path: row.get(6)?,
-            status: FileAssetStatus::from_str(&status_str),
+            status: FileAssetStatus::parse(&status_str),
             extracted_text: row.get(8)?,
             extract_error: row.get(9)?,
             metadata_json: row.get(10)?,
