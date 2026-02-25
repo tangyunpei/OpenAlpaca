@@ -164,7 +164,7 @@
         <!-- Copy button (appears on hover) -->
         {#if !isThinking}
           <button
-            class="absolute -bottom-1.5 {message.role === 'user' ? 'left-1' : 'right-1'} opacity-0 group-hover:opacity-100
+            class="absolute -bottom-2.5 {message.role === 'user' ? 'left-1' : 'right-1'} z-10 opacity-0 group-hover:opacity-100
                    flex items-center gap-1 px-2 py-1 rounded-lg text-[0.6rem] font-medium
                    bg-background/90 backdrop-blur-md border border-white/8 text-muted-foreground
                    hover:text-foreground hover:border-white/15 transition-all duration-200 cursor-pointer

@@ -78,7 +78,7 @@
     <h2>Tasks</h2>
     <span class="text-[0.65rem] text-muted-foreground/60 font-mono">{displayedTasks.length} items</span>
   </div>
-  <div class="p-3 max-h-[60vh] overflow-y-auto">
+  <div class="p-3">
     {#each displayedTasks as task, idx (task.id)}
       <div style="animation: slideUp 0.35s cubic-bezier(0.16, 1, 0.3, 1) both; animation-delay: {idx * 50}ms;">
         <TaskCard {task} onclick={() => (selectedTaskId = task.id)} />

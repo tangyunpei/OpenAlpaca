@@ -132,12 +132,31 @@
     dragOver = true;
   }
 
-  function handleDragLeave() {
-    dragOver = false;
+  function handleDragLeave(e: DragEvent) {
+    // Only clear dragOver when truly leaving the container, not when
+    // moving between child elements (which causes flickering)
+    if (e.currentTarget && !(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) {
+      dragOver = false;
+    }
   }
 </script>
 
-<div class="flex flex-col h-full">
+<div
+  class="flex flex-col h-full relative"
+  ondragover={handleDragOver}
+  ondragleave={handleDragLeave}
+  ondrop={handleDrop}
+>
+  <!-- Full-panel drop overlay -->
+  {#if dragOver}
+    <div class="absolute inset-0 z-20 bg-accent/8 border-2 border-dashed border-accent/30 rounded-xl flex flex-col items-center justify-center pointer-events-none animate-fadeIn">
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="text-accent/70 mb-3">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+      </svg>
+      <span class="text-accent text-sm font-semibold">Drop files here</span>
+      <span class="text-accent/50 text-xs mt-1">Files will be attached to your next message</span>
+    </div>
+  {/if}
   <!-- Chat header -->
   <div class="flex justify-between items-center px-4 py-3 shrink-0 relative">
     <div class="flex items-center gap-2.5">
@@ -200,19 +219,8 @@
   </div>
 
   <!-- Input area -->
-  <div
-    class="px-4 py-3 shrink-0 relative"
-    ondragover={handleDragOver}
-    ondragleave={handleDragLeave}
-    ondrop={handleDrop}
-  >
+  <div class="px-4 py-3 shrink-0 relative">
     <div class="absolute top-0 left-4 right-4 h-px" style="background: linear-gradient(90deg, transparent, var(--color-border-strong) 20%, var(--color-border-strong) 80%, transparent);"></div>
-
-    {#if dragOver}
-      <div class="absolute inset-0 bg-accent/10 border-2 border-dashed border-accent/40 rounded-xl z-10 flex items-center justify-center pointer-events-none">
-        <span class="text-accent text-sm font-medium">Drop files here</span>
-      </div>
-    {/if}
 
     <!-- Pending files display -->
     {#if pending.length > 0}
