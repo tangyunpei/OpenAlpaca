@@ -16,6 +16,35 @@ use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
 use std::sync::Arc;
 use uuid::Uuid;
 
+fn sanitize_parts_for_dispatch(parts: Vec<ContentPart>) -> Vec<ContentPart> {
+    parts
+        .into_iter()
+        .filter_map(|part| match part {
+            ContentPart::Image {
+                source: ImageSource::FileAsset {
+                    file_id,
+                    media_type,
+                },
+                ..
+            } => {
+                tracing::warn!(
+                    file_id = %file_id,
+                    media_type = %media_type,
+                    "Unresolved FileAsset image part reached query handler; replacing with placeholder"
+                );
+                Some(ContentPart::Text {
+                    text: "[image attached — unresolved file asset reference]".to_string(),
+                })
+            }
+            ContentPart::Text { text } if text.trim().is_empty() => {
+                tracing::debug!("Dropping empty text content part before model dispatch");
+                None
+            }
+            other => Some(other),
+        })
+        .collect()
+}
+
 impl Orchestrator {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn handle_simple_query(
@@ -217,31 +246,6 @@ impl Orchestrator {
             // Adapt multimodal parts in recent messages for the target model
             let default_model = router.default_model();
             let target_model = config_for_loop.model.as_deref().unwrap_or(&default_model);
-            let sanitize_file_asset_images = |parts: Vec<ContentPart>| -> Vec<ContentPart> {
-                parts
-                    .into_iter()
-                    .map(|part| match part {
-                        ContentPart::Image {
-                            source: ImageSource::FileAsset {
-                                file_id,
-                                media_type,
-                            },
-                            ..
-                        } => {
-                            tracing::warn!(
-                                file_id = %file_id,
-                                media_type = %media_type,
-                                "Unresolved FileAsset image part reached query handler; replacing with placeholder"
-                            );
-                            ContentPart::Text {
-                                text: "[image attached — unresolved file asset reference]"
-                                    .to_string(),
-                            }
-                        }
-                        other => other,
-                    })
-                    .collect()
-            };
             let adapted_messages: Vec<ChatMessage> = ctx
                 .recent_messages
                 .iter()
@@ -250,7 +254,7 @@ impl Orchestrator {
                         let mut adapted = msg.clone();
                         adapted.parts = Some(
                             self.adapt_parts_for_model(
-                                sanitize_file_asset_images(msg.parts.clone().unwrap_or_default()),
+                                sanitize_parts_for_dispatch(msg.parts.clone().unwrap_or_default()),
                                 target_model,
                             ),
                         );
@@ -263,7 +267,7 @@ impl Orchestrator {
             messages.extend(adapted_messages);
             if let Some(parts) = current_parts {
                 let adapted = self.adapt_parts_for_model(
-                    sanitize_file_asset_images(parts.to_vec()),
+                    sanitize_parts_for_dispatch(parts.to_vec()),
                     target_model,
                 );
                 messages.push(ChatMessage::user_with_parts(adapted));
@@ -434,5 +438,54 @@ impl Orchestrator {
         }
         block.push_str("</available_skills>");
         block
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_parts_for_dispatch;
+    use openalpaca_llm::{ContentPart, ImageSource};
+
+    #[test]
+    fn sanitize_parts_for_dispatch_drops_empty_text_parts() {
+        let parts = vec![
+            ContentPart::Text {
+                text: "".to_string(),
+            },
+            ContentPart::Text {
+                text: "  \n\t".to_string(),
+            },
+            ContentPart::Text {
+                text: "keep me".to_string(),
+            },
+        ];
+
+        let sanitized = sanitize_parts_for_dispatch(parts);
+        assert_eq!(sanitized.len(), 1);
+        match &sanitized[0] {
+            ContentPart::Text { text } => assert_eq!(text, "keep me"),
+            other => panic!("expected text part, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sanitize_parts_for_dispatch_replaces_unresolved_file_asset_images() {
+        let parts = vec![ContentPart::Image {
+            source: ImageSource::FileAsset {
+                file_id: "f1".to_string(),
+                media_type: "image/jpeg".to_string(),
+            },
+            detail: None,
+        }];
+
+        let sanitized = sanitize_parts_for_dispatch(parts);
+        assert_eq!(sanitized.len(), 1);
+        match &sanitized[0] {
+            ContentPart::Text { text } => assert_eq!(
+                text,
+                "[image attached — unresolved file asset reference]"
+            ),
+            other => panic!("expected placeholder text, got {other:?}"),
+        }
     }
 }

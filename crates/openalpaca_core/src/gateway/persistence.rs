@@ -51,7 +51,10 @@ impl GatewayPersistence {
         repo.get_or_create_conversation(lane_key, source)?;
 
         // Build content_json
-        let mut parts = vec![serde_json::json!({"type": "text", "text": content})];
+        let mut parts = Vec::with_capacity(attachments.len() + 1);
+        if !content.trim().is_empty() {
+            parts.push(serde_json::json!({"type": "text", "text": content}));
+        }
         for att in attachments {
             parts.push(serde_json::json!({
                 "type": "file_ref",
@@ -66,6 +69,8 @@ impl GatewayPersistence {
         let filenames: Vec<&str> = attachments.iter().map(|a| a.filename.as_str()).collect();
         let display_text = if filenames.is_empty() {
             content.to_string()
+        } else if content.trim().is_empty() {
+            format!("[Attachments: {}]", filenames.join(", "))
         } else {
             format!("{}\n[Attachments: {}]", content, filenames.join(", "))
         };
@@ -128,5 +133,99 @@ impl GatewayPersistence {
         })?;
         repo.increment_message_count(lane_key)?;
         Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openalpaca_storage::Database;
+
+    fn make_db() -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open test db");
+        (dir, db)
+    }
+
+    fn sample_attachment() -> ResolvedAttachment {
+        ResolvedAttachment {
+            file_id: "file-1".to_string(),
+            filename: "sample.pdf".to_string(),
+            mime_type: "application/pdf".to_string(),
+            size_bytes: 123,
+            extracted_text: None,
+            storage_path: "/tmp/sample.pdf".to_string(),
+        }
+    }
+
+    #[test]
+    fn persist_with_attachments_skips_empty_text_part() {
+        let (_tmp, db) = make_db();
+        let persistence = GatewayPersistence::new(db.clone());
+
+        let id = persistence
+            .persist_user_message_with_attachments(
+                "user1:gui",
+                "",
+                "gui",
+                &[sample_attachment()],
+            )
+            .expect("persist message");
+        assert!(id > 0);
+
+        let repo = ConversationRepository::new(&db);
+        let msgs = repo
+            .list_recent_by_lane("user1:gui", 10)
+            .expect("load recent messages");
+        assert_eq!(msgs.len(), 1);
+        let msg = &msgs[0];
+        let content_json = msg
+            .content_json
+            .as_deref()
+            .expect("content_json should be present");
+        let parsed: serde_json::Value =
+            serde_json::from_str(content_json).expect("content_json should be valid json");
+        let parts = parsed["parts"]
+            .as_array()
+            .expect("parts should be an array");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "file_ref");
+        assert_eq!(msg.display_text.as_deref(), Some("[Attachments: sample.pdf]"));
+    }
+
+    #[test]
+    fn persist_with_attachments_keeps_non_empty_text_part() {
+        let (_tmp, db) = make_db();
+        let persistence = GatewayPersistence::new(db.clone());
+
+        let id = persistence
+            .persist_user_message_with_attachments(
+                "user2:gui",
+                "please analyze",
+                "gui",
+                &[sample_attachment()],
+            )
+            .expect("persist message");
+        assert!(id > 0);
+
+        let repo = ConversationRepository::new(&db);
+        let msgs = repo
+            .list_recent_by_lane("user2:gui", 10)
+            .expect("load recent messages");
+        assert_eq!(msgs.len(), 1);
+        let msg = &msgs[0];
+        let content_json = msg
+            .content_json
+            .as_deref()
+            .expect("content_json should be present");
+        let parsed: serde_json::Value =
+            serde_json::from_str(content_json).expect("content_json should be valid json");
+        let parts = parsed["parts"]
+            .as_array()
+            .expect("parts should be an array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "please analyze");
+        assert_eq!(parts[1]["type"], "file_ref");
     }
 }

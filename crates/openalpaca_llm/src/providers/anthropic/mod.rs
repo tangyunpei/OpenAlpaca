@@ -47,68 +47,85 @@ impl AnthropicProvider {
 
         let blocks: Vec<serde_json::Value> = parts
             .iter()
-            .map(|part| match part {
+            .filter_map(|part| match part {
                 ContentPart::Text { text } => {
-                    serde_json::json!({ "type": "text", "text": text })
+                    if text.trim().is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::json!({ "type": "text", "text": text }))
+                    }
                 }
                 ContentPart::Image { source, .. } => match source {
-                    ImageSource::Base64 { media_type, data } => {
-                        serde_json::json!({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": data.as_str(),
-                            }
-                        })
-                    }
-                    ImageSource::Url { url } => {
-                        serde_json::json!({
-                            "type": "image",
-                            "source": {
-                                "type": "url",
-                                "url": url,
-                            }
-                        })
-                    }
+                    ImageSource::Base64 { media_type, data } => Some(serde_json::json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": data.as_str(),
+                        }
+                    })),
+                    ImageSource::Url { url } => Some(serde_json::json!({
+                        "type": "image",
+                        "source": {
+                            "type": "url",
+                            "url": url,
+                        }
+                    })),
                     ImageSource::FileAsset { file_id, media_type } => {
                         // FileAsset should be resolved to Base64 before reaching the provider.
                         // If it hasn't been, emit a placeholder text block.
-                        serde_json::json!({
+                        Some(serde_json::json!({
                             "type": "text",
                             "text": format!("[image file_id={} not resolved — media_type={}]", file_id, media_type),
-                        })
+                        }))
                     }
-                }
+                },
                 ContentPart::Audio { .. } => {
                     // Anthropic does not support audio input
-                    serde_json::json!({
+                    Some(serde_json::json!({
                         "type": "text",
                         "text": "[audio content — not supported by this model]",
-                    })
+                    }))
                 }
-                ContentPart::Document { filename, mime_type, extracted_text, .. } => {
+                ContentPart::Document {
+                    filename,
+                    mime_type,
+                    extracted_text,
+                    ..
+                } => {
                     // Anthropic supports PDF via beta; fall back to extracted text for now
                     if let Some(text) = extracted_text {
-                        serde_json::json!({
+                        Some(serde_json::json!({
                             "type": "text",
                             "text": format!("[Document: {} ({})]\n{}", filename, mime_type, text),
-                        })
+                        }))
                     } else {
-                        serde_json::json!({
+                        Some(serde_json::json!({
                             "type": "text",
                             "text": format!("[Document: {} ({}) — no extracted text available]", filename, mime_type),
-                        })
+                        }))
                     }
                 }
-                ContentPart::FileRef { file_id, filename, mime_type } => {
-                    serde_json::json!({
-                        "type": "text",
-                        "text": format!("[File reference: {} ({}) id={}]", filename, mime_type, file_id),
-                    })
-                }
+                ContentPart::FileRef {
+                    file_id,
+                    filename,
+                    mime_type,
+                } => Some(serde_json::json!({
+                    "type": "text",
+                    "text": format!("[File reference: {} ({}) id={}]", filename, mime_type, file_id),
+                })),
             })
             .collect();
+
+        if blocks.is_empty() {
+            if !msg.content.trim().is_empty() {
+                return serde_json::Value::String(msg.content.clone());
+            }
+            return serde_json::Value::Array(vec![serde_json::json!({
+                "type": "text",
+                "text": "[empty message]",
+            })]);
+        }
 
         serde_json::Value::Array(blocks)
     }

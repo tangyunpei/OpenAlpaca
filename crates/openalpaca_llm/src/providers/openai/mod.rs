@@ -74,9 +74,13 @@ impl OpenAiProvider {
 
         let blocks: Vec<serde_json::Value> = parts
             .iter()
-            .map(|part| match part {
+            .filter_map(|part| match part {
                 ContentPart::Text { text } => {
-                    serde_json::json!({ "type": "text", "text": text })
+                    if text.trim().is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::json!({ "type": "text", "text": text }))
+                    }
                 }
                 ContentPart::Image { source, detail } => {
                     let url = match source {
@@ -86,52 +90,64 @@ impl OpenAiProvider {
                         ImageSource::Url { url } => url.clone(),
                         ImageSource::FileAsset { file_id, media_type } => {
                             // Should be resolved before reaching provider
-                            return serde_json::json!({
+                            return Some(serde_json::json!({
                                 "type": "text",
                                 "text": format!("[image file_id={} not resolved — media_type={}]", file_id, media_type),
-                            });
+                            }));
                         }
                     };
                     let detail_val = detail.as_deref().unwrap_or("auto");
-                    serde_json::json!({
+                    Some(serde_json::json!({
                         "type": "image_url",
                         "image_url": {
                             "url": url,
                             "detail": detail_val,
                         }
-                    })
+                    }))
                 }
-                ContentPart::Audio { data, format } => {
-                    serde_json::json!({
-                        "type": "input_audio",
-                        "input_audio": {
-                            "data": data.as_str(),
-                            "format": format,
-                        }
-                    })
-                }
-                ContentPart::Document { filename, mime_type, extracted_text, .. } => {
+                ContentPart::Audio { data, format } => Some(serde_json::json!({
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": data.as_str(),
+                        "format": format,
+                    }
+                })),
+                ContentPart::Document {
+                    filename,
+                    mime_type,
+                    extracted_text,
+                    ..
+                } => {
                     // OpenAI has no native document input; use extracted text fallback
                     if let Some(text) = extracted_text {
-                        serde_json::json!({
+                        Some(serde_json::json!({
                             "type": "text",
                             "text": format!("[Document: {} ({})]\n{}", filename, mime_type, text),
-                        })
+                        }))
                     } else {
-                        serde_json::json!({
+                        Some(serde_json::json!({
                             "type": "text",
                             "text": format!("[Document: {} ({}) — no extracted text available]", filename, mime_type),
-                        })
+                        }))
                     }
                 }
-                ContentPart::FileRef { file_id, filename, mime_type } => {
-                    serde_json::json!({
-                        "type": "text",
-                        "text": format!("[File reference: {} ({}) id={}]", filename, mime_type, file_id),
-                    })
-                }
+                ContentPart::FileRef {
+                    file_id,
+                    filename,
+                    mime_type,
+                } => Some(serde_json::json!({
+                    "type": "text",
+                    "text": format!("[File reference: {} ({}) id={}]", filename, mime_type, file_id),
+                })),
             })
             .collect();
+
+        if blocks.is_empty() {
+            if !msg.content.trim().is_empty() {
+                return serde_json::Value::String(msg.content.clone());
+            }
+            return serde_json::Value::String("[empty message]".to_string());
+        }
 
         serde_json::Value::Array(blocks)
     }
