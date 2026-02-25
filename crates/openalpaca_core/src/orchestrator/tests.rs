@@ -1,10 +1,13 @@
 use super::*;
 use crate::agent::subagent::SubAgent;
 use crate::events::SystemEvent;
+use crate::gateway::ResolvedAttachment;
 use crate::security::policy::{Principal, Scope};
 use crate::security::sandbox::SandboxManager;
 use crate::test_util::{make_agent, template_from_agent};
 use crate::tools::{RegistryToolExecutor, ToolRegistry};
+use async_trait::async_trait;
+use openalpaca_llm::ContentPart;
 use uuid::Uuid;
 
 fn make_tool_registry() -> Arc<ToolRegistry> {
@@ -66,6 +69,51 @@ fn make_orchestrator_with_agents(agents: Vec<SubAgent>) -> Orchestrator {
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
     )
+}
+
+fn make_orchestrator_with_fixed_llm_response(response: &str) -> Orchestrator {
+    use openalpaca_llm::{
+        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, ProviderType, Usage,
+    };
+
+    struct FixedMockLlm {
+        response: String,
+    }
+
+    #[async_trait]
+    impl LlmProvider for FixedMockLlm {
+        fn name(&self) -> &str {
+            "fixed-mock"
+        }
+
+        fn supports_tools(&self) -> bool {
+            false
+        }
+
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            Ok(ChatResponse {
+                content: self.response.clone(),
+                tool_calls: vec![],
+                model: "mock-model".to_string(),
+                usage: Usage {
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    ..Default::default()
+                },
+                finish_reason: FinishReason::Stop,
+            })
+        }
+    }
+
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(FixedMockLlm {
+            response: response.to_string(),
+        }),
+        ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+
+    make_orchestrator_with_llm_and_agents(Arc::new(router), vec![])
 }
 
 #[test]
@@ -840,4 +888,100 @@ async fn test_dispatch_error_falls_back_to_simple_query() {
     );
     // No tasks should be registered (dispatch failed)
     assert_eq!(orch.shared_context.task_registry.count(), 0);
+}
+
+fn make_attachment_with_text(extracted_text: &str) -> ResolvedAttachment {
+    ResolvedAttachment {
+        file_id: "file-1".to_string(),
+        filename: "note.txt".to_string(),
+        mime_type: "text/plain".to_string(),
+        size_bytes: extracted_text.len() as i64,
+        extracted_text: Some(extracted_text.to_string()),
+        storage_path: "/tmp/note.txt".to_string(),
+    }
+}
+
+#[tokio::test]
+async fn test_attachment_text_does_not_change_intent_classification() {
+    let orch = make_orchestrator_with_fixed_llm_response(
+        r#"{"status":"ok","answer":"attachment intent test"}"#,
+    );
+    let attachments = vec![make_attachment_with_text(
+        "This attachment mentions task status and list tasks repeatedly.",
+    )];
+
+    let result = orch
+        .handle_message_with_attachments(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "please summarize this file".to_string(),
+            attachments,
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+        )
+        .await
+        .expect("message should succeed");
+
+    let json: serde_json::Value = serde_json::from_str(&result).expect("response should be JSON");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["answer"], "attachment intent test");
+    assert!(json.get("count").is_none() || json["count"].is_null());
+}
+
+#[tokio::test]
+async fn test_empty_content_with_attachments_forces_simple_query() {
+    let orch = make_orchestrator_with_fixed_llm_response(
+        r#"{"status":"ok","answer":"forced simple query"}"#,
+    );
+    let attachments = vec![make_attachment_with_text(
+        "task status list tasks status status",
+    )];
+
+    let result = orch
+        .handle_message_with_attachments(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "".to_string(),
+            attachments,
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+        )
+        .await
+        .expect("message should succeed");
+
+    let json: serde_json::Value = serde_json::from_str(&result).expect("response should be JSON");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["answer"], "forced simple query");
+    assert!(json.get("count").is_none() || json["count"].is_null());
+}
+
+#[test]
+fn test_adapt_parts_document_unsupported_uses_fixed_placeholder() {
+    let router = make_planning_mock_llm(r#"{"classification":"simple_query","assignments":[]}"#);
+    let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
+
+    let adapted = orch.adapt_parts_for_model(
+        vec![ContentPart::Document {
+            file_id: "doc-1".to_string(),
+            filename: "a.pdf".to_string(),
+            mime_type: "application/pdf".to_string(),
+            extracted_text: Some("secret text".to_string()),
+        }],
+        "gpt-5-mini",
+    );
+
+    assert_eq!(adapted.len(), 1);
+    match &adapted[0] {
+        ContentPart::Text { text } => {
+            assert_eq!(
+                text,
+                "[document attached — model does not support document input]"
+            );
+        }
+        other => panic!("expected text placeholder, got {other:?}"),
+    }
 }
