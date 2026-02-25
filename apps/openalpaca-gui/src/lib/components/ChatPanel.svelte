@@ -143,6 +143,7 @@
 
 <div
   class="flex flex-col h-full relative"
+  role="application"
   ondragover={handleDragOver}
   ondragleave={handleDragLeave}
   ondrop={handleDrop}
@@ -227,6 +228,13 @@
       <div class="flex flex-wrap gap-2 mb-2">
         {#each pending as pf, idx}
           <div class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-white/8 bg-white/[0.03]">
+            {#if pf.file.type.startsWith("image/")}
+              <img
+                src={URL.createObjectURL(pf.file)}
+                alt={pf.file.name}
+                class="h-8 w-8 rounded object-cover shrink-0"
+              />
+            {/if}
             <span class="truncate max-w-[120px]" title={pf.file.name}>{pf.file.name}</span>
             <span class="text-muted-foreground/60 shrink-0">{formatFileSize(pf.file.size)}</span>
             {#if uploading && pf.progress > 0 && pf.progress < 100}
