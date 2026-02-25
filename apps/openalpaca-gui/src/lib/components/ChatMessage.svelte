@@ -1,6 +1,8 @@
 <script lang="ts">
-  import type { ChatMessage } from "$lib/types";
+  import type { ChatMessage, AttachmentDisplay } from "$lib/types";
+  import { formatFileSize } from "$lib/types";
   import { renderMarkdown } from "$lib/markdown";
+  import { downloadFile } from "$lib/api/files";
 
   interface Props {
     message: ChatMessage;
@@ -27,6 +29,28 @@
     } catch {
       // Fallback for environments where clipboard API isn't available
     }
+  }
+
+  async function handleDownload(att: AttachmentDisplay) {
+    try {
+      const blob = await downloadFile(att.file_id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = att.filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("[ChatMessage] download failed:", e);
+    }
+  }
+
+  function mimeIcon(mime: string): string {
+    if (mime.startsWith("image/")) return "img";
+    if (mime.startsWith("audio/")) return "audio";
+    if (mime === "application/pdf") return "pdf";
+    if (mime.startsWith("text/")) return "text";
+    return "file";
   }
 
   let renderedContent = $derived(renderMarkdown(message.content));
@@ -78,6 +102,34 @@
         <div class="oa-markdown {isThinking ? 'text-muted-foreground animate-thinking' : 'text-foreground'}">
           {@html renderedContent}
         </div>
+
+        {#if message.attachments && message.attachments.length > 0}
+          <div class="flex flex-wrap gap-1.5 mt-2 pt-2 border-t border-white/[0.06]">
+            {#each message.attachments as att}
+              <button
+                class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-white/8 bg-white/[0.03]
+                       hover:bg-white/[0.06] hover:border-white/12 transition-all cursor-pointer"
+                onclick={() => handleDownload(att)}
+                title="Download {att.filename}"
+              >
+                <!-- File type icon -->
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-muted-foreground">
+                  {#if mimeIcon(att.mime_type) === "img"}
+                    <rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>
+                  {:else if mimeIcon(att.mime_type) === "pdf"}
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/>
+                  {:else if mimeIcon(att.mime_type) === "audio"}
+                    <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
+                  {:else}
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+                  {/if}
+                </svg>
+                <span class="truncate max-w-[100px]">{att.filename}</span>
+                <span class="text-muted-foreground/50 shrink-0">{formatFileSize(att.size_bytes)}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
 
         <!-- Copy button (appears on hover) -->
         {#if !isThinking}

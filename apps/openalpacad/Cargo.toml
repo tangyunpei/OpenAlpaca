@@ -38,6 +38,7 @@ openalpaca_llm = { workspace = true, features = [
 teloxide = { workspace = true }
 tokio-util.workspace = true
 sha2.workspace = true
+infer.workspace = true
 signal-hook.workspace = true
 
 [target.'cfg(unix)'.dependencies]

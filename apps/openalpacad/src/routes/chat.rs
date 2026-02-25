@@ -29,6 +29,8 @@ use crate::AppState;
 #[derive(Deserialize)]
 pub struct ChatSendRequest {
     pub content: String,
+    #[serde(default)]
+    pub attachments: Vec<openalpaca_storage::AttachmentRef>,
 }
 
 #[derive(Serialize)]
@@ -134,7 +136,44 @@ pub async fn send_chat_handler(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    match chat_service.send_message(body.content, principal, workspace_path) {
+    // Resolve attachment refs to ResolvedAttachment
+    let resolved_attachments = {
+        let file_repo = openalpaca_storage::FileAssetRepository::new(&state.db);
+        let mut resolved = Vec::new();
+        for att_ref in &body.attachments {
+            match file_repo.get_by_id(&att_ref.file_id) {
+                Ok(Some(asset)) => {
+                    resolved.push(openalpaca_core::gateway::ResolvedAttachment {
+                        file_id: asset.id,
+                        filename: asset.filename,
+                        mime_type: asset.mime_type,
+                        size_bytes: asset.size_bytes,
+                        extracted_text: asset.extracted_text,
+                        storage_path: asset.storage_path,
+                    });
+                }
+                Ok(None) => {
+                    return error_response(
+                        StatusCode::NOT_FOUND,
+                        "ATTACHMENT_NOT_FOUND",
+                        &format!("File not found: {}", att_ref.file_id),
+                    )
+                    .into_response();
+                }
+                Err(e) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DB_ERROR",
+                        &format!("Failed to resolve attachment: {e}"),
+                    )
+                    .into_response();
+                }
+            }
+        }
+        resolved
+    };
+
+    match chat_service.send_message(body.content, resolved_attachments, principal, workspace_path) {
         Ok(resp) => {
             // Publish to EventBus; bridge forwards to WebSocket clients
             let _ = state.gateway.bus.publish(SystemEvent::ChatStreamStarted {
@@ -223,16 +262,20 @@ fn make_sse_stream(
                     tokens_in,
                     tokens_out,
                     duration_ms,
-                } => Event::default().event("done").data(
-                    serde_json::json!({
+                    attachments_used,
+                } => {
+                    let mut data = serde_json::json!({
                         "content": content,
                         "model": model,
                         "tokens_in": tokens_in,
                         "tokens_out": tokens_out,
                         "duration_ms": duration_ms
-                    })
-                    .to_string(),
-                ),
+                    });
+                    if let Some(att) = attachments_used {
+                        data["attachments_used"] = serde_json::json!(att);
+                    }
+                    Event::default().event("done").data(data.to_string())
+                }
                 openalpaca_core::chat::ChatStreamEvent::Error { message } => Event::default()
                     .event("error")
                     .data(serde_json::json!({"message": message}).to_string()),

@@ -46,7 +46,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 
 # daemon api (server)
-axum = { version = "0.8.8", features = ["ws"] }
+axum = { version = "0.8.8", features = ["ws", "multipart"] }
 futures-util = { version = "0.3.31", features = ["sink"] }
 tower-http = { version = "0.6.8", features = ["cors"] }
 
@@ -113,6 +113,7 @@ arc-swap = "1"
 signal-hook = "0.4.3"
 aes-gcm = "0.10"
 sha2 = "0.10"
+infer = "0.16"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
 # Internal Crates (continued)

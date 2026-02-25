@@ -17,6 +17,8 @@ fn test_insert_and_list() {
         tokens_out: None,
         duration_ms: None,
         created_at: String::new(),
+        content_json: None,
+        display_text: None,
     };
 
     let id = repo.insert(&msg).unwrap();
@@ -45,6 +47,8 @@ fn test_count_and_delete() {
             tokens_out: None,
             duration_ms: None,
             created_at: String::new(),
+            content_json: None,
+            display_text: None,
         })
         .unwrap();
     }
@@ -74,6 +78,8 @@ fn test_list_with_offset() {
             tokens_out: None,
             duration_ms: None,
             created_at: String::new(),
+            content_json: None,
+            display_text: None,
         })
         .unwrap();
     }
@@ -100,6 +106,8 @@ fn test_insert_with_metadata() {
         tokens_out: Some(200),
         duration_ms: Some(1500),
         created_at: String::new(),
+        content_json: None,
+        display_text: None,
     };
 
     repo.insert(&msg).unwrap();
@@ -129,6 +137,8 @@ fn test_list_recent_by_lane() {
             tokens_out: None,
             duration_ms: None,
             created_at: String::new(),
+            content_json: None,
+            display_text: None,
         })
         .unwrap();
     }
@@ -214,6 +224,8 @@ fn test_list_recent_fewer_than_limit() {
             tokens_out: None,
             duration_ms: None,
             created_at: String::new(),
+            content_json: None,
+            display_text: None,
         })
         .unwrap();
     }
@@ -335,6 +347,8 @@ fn test_list_by_lane_id_range() {
                 tokens_out: None,
                 duration_ms: None,
                 created_at: String::new(),
+                content_json: None,
+                display_text: None,
             })
             .unwrap();
         ids.push(id);

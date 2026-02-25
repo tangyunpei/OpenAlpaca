@@ -18,6 +18,7 @@ pub struct DaemonConfig {
     pub security: SecurityConfig,
     pub server: ServerConfig,
     pub providers: ProvidersConfig,
+    pub upload: UploadConfig,
 }
 
 // ── Orchestrator ─────────────────────────────────────────────────────
@@ -470,6 +471,41 @@ impl Default for WebSearchProviderConfig {
     }
 }
 
+// ── Upload ──────────────────────────────────────────────────────────
+
+/// Configuration for file uploads and attachment handling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UploadConfig {
+    /// Maximum single file size in bytes (default: 50 MB).
+    pub max_file_size_bytes: u64,
+    /// Maximum total asset storage in bytes (default: 500 MB).
+    pub max_total_storage_bytes: u64,
+    /// Allowed MIME type prefixes for uploads.
+    pub allowed_mime_prefixes: Vec<String>,
+    /// Maximum files per chat message.
+    pub max_files_per_message: usize,
+    /// Days to retain orphaned assets.
+    pub retention_days: u32,
+}
+
+impl Default for UploadConfig {
+    fn default() -> Self {
+        Self {
+            max_file_size_bytes: 50 * 1024 * 1024,
+            max_total_storage_bytes: 500 * 1024 * 1024,
+            allowed_mime_prefixes: vec![
+                "image/".to_string(),
+                "application/pdf".to_string(),
+                "text/".to_string(),
+                "audio/".to_string(),
+            ],
+            max_files_per_message: 10,
+            retention_days: 30,
+        }
+    }
+}
+
 // ── Validation helpers ───────────────────────────────────────────────
 
 fn clamp_val<T: PartialOrd + std::fmt::Display>(val: &mut T, min: T, max: T, name: &str) {
@@ -823,6 +859,31 @@ impl DaemonConfig {
             1,
             60,
             "providers.web_search.timeout_secs",
+        );
+        // ── Upload ──
+        clamp_val(
+            &mut self.upload.max_file_size_bytes,
+            1024,
+            500 * 1024 * 1024,
+            "upload.max_file_size_bytes",
+        );
+        clamp_val(
+            &mut self.upload.max_total_storage_bytes,
+            1024 * 1024,
+            10 * 1024 * 1024 * 1024,
+            "upload.max_total_storage_bytes",
+        );
+        clamp_val(
+            &mut self.upload.max_files_per_message,
+            1,
+            50,
+            "upload.max_files_per_message",
+        );
+        clamp_val(
+            &mut self.upload.retention_days,
+            1,
+            365,
+            "upload.retention_days",
         );
     }
 }

@@ -100,6 +100,7 @@ mod tests {
         let msg = ChatMessage {
             role: Role::Assistant,
             content: "Let me help.".to_string(),
+            parts: None,
             tool_calls: Some(vec![ToolCall {
                 id: "tc1".to_string(),
                 name: "search".to_string(),

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use openalpaca_core::{
-    gateway::{HandleResult, MessageHandler},
+    gateway::{HandleResult, MessageHandler, ResolvedAttachment},
     orchestrator::Orchestrator,
     security::policy::{Principal, Scope},
 };
@@ -15,6 +15,30 @@ pub struct OrchestratorHandler {
 impl OrchestratorHandler {
     pub fn new(orchestrator: Arc<Orchestrator>) -> Self {
         Self { orchestrator }
+    }
+
+    /// Drain LLM metadata and build HandleResult from orchestrator output.
+    fn build_result(
+        &self,
+        request_id: Uuid,
+        content: Result<String, String>,
+        attachments_used: Vec<String>,
+    ) -> Result<HandleResult, String> {
+        let meta = self
+            .orchestrator
+            .llm_metadata_map
+            .remove(&request_id)
+            .map(|(_, v)| v);
+
+        let content = content?;
+
+        Ok(HandleResult {
+            content,
+            model: meta.as_ref().map(|m| m.model.clone()),
+            tokens_in: meta.as_ref().map(|m| m.tokens_in),
+            tokens_out: meta.as_ref().map(|m| m.tokens_out),
+            attachments_used,
+        })
     }
 }
 
@@ -35,21 +59,29 @@ impl MessageHandler for OrchestratorHandler {
             .handle_message(request_id, source, content, principal, scope, lane_key, workspace_path)
             .await;
 
-        // Always drain metadata (even on error) to prevent unbounded map growth.
-        // Handlers may insert metadata before returning Err (e.g. LLM error with empty content).
-        let meta = self
+        self.build_result(request_id, result, Vec::new())
+    }
+
+    async fn handle_with_attachments(
+        &self,
+        request_id: Uuid,
+        source: String,
+        content: String,
+        attachments: Vec<ResolvedAttachment>,
+        principal: Principal,
+        scope: Scope,
+        lane_key: String,
+        workspace_path: Option<String>,
+    ) -> Result<HandleResult, String> {
+        let attachment_ids: Vec<String> = attachments.iter().map(|a| a.file_id.clone()).collect();
+
+        let result = self
             .orchestrator
-            .llm_metadata_map
-            .remove(&request_id)
-            .map(|(_, v)| v);
+            .handle_message_with_attachments(
+                request_id, source, content, attachments, principal, scope, lane_key, workspace_path,
+            )
+            .await;
 
-        let content = result?;
-
-        Ok(HandleResult {
-            content,
-            model: meta.as_ref().map(|m| m.model.clone()),
-            tokens_in: meta.as_ref().map(|m| m.tokens_in),
-            tokens_out: meta.as_ref().map(|m| m.tokens_out),
-        })
+        self.build_result(request_id, result, attachment_ids)
     }
 }

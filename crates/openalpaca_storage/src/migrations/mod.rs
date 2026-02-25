@@ -141,4 +141,14 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "memory_scope_dedup",
         sql: include_str!("026_memory_scope_dedup.sql"),
     },
+    Migration {
+        version: 27,
+        name: "file_assets",
+        sql: include_str!("027_file_assets.sql"),
+    },
+    Migration {
+        version: 28,
+        name: "message_attachments",
+        sql: include_str!("028_message_attachments.sql"),
+    },
 ];

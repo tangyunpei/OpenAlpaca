@@ -686,6 +686,8 @@ pub(super) fn persist_conversation(
         tokens_out: Some(tokens_out),
         duration_ms: Some(runtime_secs * 1000),
         created_at: String::new(),
+        content_json: None,
+        display_text: None,
     });
     let _ = conv_repo.increment_message_count(lane_key);
 }

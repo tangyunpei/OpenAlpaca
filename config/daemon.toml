@@ -78,3 +78,11 @@ stream_chunk_words = 3
 [server.embedding_indexer]
 batch_size = 50
 poll_interval_secs = 30
+
+# ── Upload ──────────────────────────────────────────────────────────
+[upload]
+max_file_size_bytes = 52428800       # 50 MB
+max_total_storage_bytes = 524288000  # 500 MB
+allowed_mime_prefixes = ["image/", "application/pdf", "text/", "audio/"]
+max_files_per_message = 10
+retention_days = 30

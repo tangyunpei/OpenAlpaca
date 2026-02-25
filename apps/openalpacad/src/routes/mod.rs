@@ -9,6 +9,7 @@ pub mod events;
 pub mod events_history;
 pub mod memory;
 pub mod dispatch_decisions;
+pub mod files;
 pub mod orchestrator_latency;
 pub mod preferences;
 pub mod settings;
@@ -46,6 +47,7 @@ pub use command::command_handler;
 pub use connectors::{connector_action_handler, connector_config_handler, list_connectors_handler};
 pub use events::events_handler;
 pub use events_history::events_history_handler;
+pub use files::{get_file_content_handler, get_file_metadata_handler, upload_file_handler};
 pub use dispatch_decisions::dispatch_decisions_handler;
 pub use orchestrator_latency::{orchestrator_latency_aggregate_handler, orchestrator_latency_handler};
 pub use memory::{

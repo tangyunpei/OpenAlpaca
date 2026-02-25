@@ -210,7 +210,7 @@ fn test_dispatch_decision_error_message_roundtrip() {
 #[test]
 fn test_migration_025_creates_error_message_schema() {
     let db = setup_db();
-    assert_eq!(db.schema_version().unwrap(), 26);
+    assert_eq!(db.schema_version().unwrap(), 28);
 
     // Verify request_id column works
     let repo = DispatchDecisionRepository::new(&db);

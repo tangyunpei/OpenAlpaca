@@ -10,7 +10,8 @@ import {
   clearChatHistory as apiClearHistory,
   createChatStream,
 } from "../api/chat";
-import type { ChatMessage, ChatStreamDoneData } from "../types";
+import { uploadFile } from "../api/files";
+import type { ChatMessage, ChatStreamDoneData, AttachmentRef, AttachmentDisplay } from "../types";
 
 export const chatMessages = writable<ChatMessage[]>([]);
 export const chatLoading = writable(false);
@@ -18,6 +19,16 @@ export const chatError = writable<string | null>(null);
 export const chatStreaming = writable(false);
 export const currentStreamId = writable<string | null>(null);
 export const activeLaneKey = writable<string | null>(null);
+
+/** Files selected by the user but not yet sent. */
+export interface PendingFile {
+  file: File;
+  progress: number;  // 0-100
+  error: string | null;
+}
+
+export const pendingFiles = writable<PendingFile[]>([]);
+export const uploadingFiles = writable(false);
 
 let nextLocalId = -1;
 
@@ -32,10 +43,67 @@ export async function loadHistory(): Promise<void> {
   }
 }
 
-/** Send a message and connect to SSE for the response. */
+/** Add files to the pending list. */
+export function addFiles(files: FileList | File[]): void {
+  const newFiles = Array.from(files).map((file) => ({
+    file,
+    progress: 0,
+    error: null,
+  }));
+  pendingFiles.update((existing) => [...existing, ...newFiles]);
+}
+
+/** Remove a pending file by index. */
+export function removePendingFile(index: number): void {
+  pendingFiles.update((files) => files.filter((_, i) => i !== index));
+}
+
+/** Clear all pending files. */
+export function clearPendingFiles(): void {
+  pendingFiles.set([]);
+}
+
+/** Send a message with optional file attachments and connect to SSE. */
 export async function sendChatMessage(content: string): Promise<void> {
   chatLoading.set(true);
   chatError.set(null);
+
+  const filesToUpload = get(pendingFiles);
+  let attachments: AttachmentRef[] = [];
+  let attachmentDisplays: AttachmentDisplay[] = [];
+
+  // Upload pending files first
+  if (filesToUpload.length > 0) {
+    uploadingFiles.set(true);
+    try {
+      const results = await Promise.all(
+        filesToUpload.map(async (pf, idx) => {
+          const resp = await uploadFile(pf.file, (loaded, total) => {
+            const pct = Math.round((loaded / total) * 100);
+            pendingFiles.update((files) =>
+              files.map((f, i) => (i === idx ? { ...f, progress: pct } : f)),
+            );
+          });
+          return resp;
+        }),
+      );
+
+      attachments = results.map((r) => ({ file_id: r.id }));
+      attachmentDisplays = results.map((r) => ({
+        file_id: r.id,
+        filename: r.filename,
+        mime_type: r.mime_type,
+        size_bytes: r.size_bytes,
+      }));
+    } catch (e) {
+      chatError.set(e instanceof Error ? e.message : "File upload failed");
+      chatLoading.set(false);
+      uploadingFiles.set(false);
+      return;
+    }
+    uploadingFiles.set(false);
+    clearPendingFiles();
+  }
 
   // Optimistic user message
   const userMsg: ChatMessage = {
@@ -44,11 +112,16 @@ export async function sendChatMessage(content: string): Promise<void> {
     role: "user",
     content,
     created_at: new Date().toISOString(),
+    attachments: attachmentDisplays.length > 0 ? attachmentDisplays : undefined,
   };
   chatMessages.update((msgs) => [...msgs, userMsg]);
 
   try {
-    const resp = await apiSendMessage({ content });
+    const req: { content: string; attachments?: AttachmentRef[] } = { content };
+    if (attachments.length > 0) {
+      req.attachments = attachments;
+    }
+    const resp = await apiSendMessage(req);
     currentStreamId.set(resp.stream_id);
     chatStreaming.set(true);
 

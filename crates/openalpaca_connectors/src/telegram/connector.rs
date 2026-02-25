@@ -324,6 +324,7 @@ impl TelegramConnector {
                     user_id: user_id.clone(),
                 },
                 content: text.clone(),
+                attachments: Vec::new(),
                 principal,
                 scope: Scope::Conversation {
                     id: chat_id.0.to_string(),

@@ -581,6 +581,7 @@ fn test_flatten_messages() {
         ChatMessage {
             role: Role::System,
             content: "You are helpful.".to_string(),
+            parts: None,
             tool_calls: None,
             tool_call_id: None,
         },
@@ -588,6 +589,7 @@ fn test_flatten_messages() {
         ChatMessage {
             role: Role::Assistant,
             content: "Hi!".to_string(),
+            parts: None,
             tool_calls: None,
             tool_call_id: None,
         },
@@ -604,6 +606,7 @@ fn test_truncate_messages_for_cli_small_input() {
         ChatMessage {
             role: Role::System,
             content: "System prompt".to_string(),
+            parts: None,
             tool_calls: None,
             tool_call_id: None,
         },
@@ -611,6 +614,7 @@ fn test_truncate_messages_for_cli_small_input() {
         ChatMessage {
             role: Role::Assistant,
             content: "Hi!".to_string(),
+            parts: None,
             tool_calls: None,
             tool_call_id: None,
         },
@@ -630,6 +634,7 @@ fn test_truncate_messages_for_cli_large_input() {
         ChatMessage {
             role: Role::System,
             content: "System prompt".to_string(),
+            parts: None,
             tool_calls: None,
             tool_call_id: None,
         },
@@ -637,6 +642,7 @@ fn test_truncate_messages_for_cli_large_input() {
         ChatMessage {
             role: Role::Assistant,
             content: big_content.clone(),
+            parts: None,
             tool_calls: None,
             tool_call_id: None,
         }, // middle — should be dropped
@@ -644,6 +650,7 @@ fn test_truncate_messages_for_cli_large_input() {
         ChatMessage {
             role: Role::Tool,
             content: "tool result".to_string(),
+            parts: None,
             tool_calls: None,
             tool_call_id: None,
         }, // second-to-last — kept
