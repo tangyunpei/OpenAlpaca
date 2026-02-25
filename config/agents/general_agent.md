@@ -1,7 +1,7 @@
 ---
 id: "general_agent"
 name: "General Purpose Agent"
-description: "Versatile agent with broad tool access for complex multi-step tasks that span multiple domains. Can read and write files, execute commands, search the web, fetch pages, generate text, and summarize content. Use when a task requires capabilities from multiple specialized agents or does not fit any single specialist."
+description: "Versatile agent with broad tool access for complex multi-step tasks that span multiple domains. Can read and write files, execute commands, search the web, and fetch pages. Use when a task requires capabilities from multiple specialized agents or does not fit any single specialist."
 icon: "swiss_knife"
 skills:
   - "file_read"
@@ -9,8 +9,6 @@ skills:
   - "shell_execute"
   - "web_search"
   - "web_fetch"
-  - "summarize"
-  - "text_generate"
   - "memory_search"
   - "workspace_read"
   - "workspace_write"

@@ -13,10 +13,15 @@ use crate::ConnectorBuilder;
 #[cfg(feature = "telegram")]
 use teloxide::dispatching::ShutdownToken;
 
+#[cfg(all(feature = "imessage", target_os = "macos"))]
+use tokio_util::sync::CancellationToken;
+
 /// Handle to a running connector, allowing graceful shutdown.
 pub enum ConnectorHandle {
     #[cfg(feature = "telegram")]
     Telegram(ShutdownToken),
+    #[cfg(all(feature = "imessage", target_os = "macos"))]
+    IMessage(CancellationToken),
     /// For future connectors or testing
     None,
 }
@@ -26,6 +31,8 @@ impl std::fmt::Debug for ConnectorHandle {
         match self {
             #[cfg(feature = "telegram")]
             ConnectorHandle::Telegram(_) => write!(f, "ConnectorHandle::Telegram"),
+            #[cfg(all(feature = "imessage", target_os = "macos"))]
+            ConnectorHandle::IMessage(_) => write!(f, "ConnectorHandle::IMessage"),
             ConnectorHandle::None => write!(f, "ConnectorHandle::None"),
         }
     }
@@ -39,6 +46,10 @@ impl ConnectorHandle {
                 if let Ok(fut) = token.shutdown() {
                     fut.await;
                 }
+            }
+            #[cfg(all(feature = "imessage", target_os = "macos"))]
+            ConnectorHandle::IMessage(token) => {
+                token.cancel();
             }
             ConnectorHandle::None => {}
         }
@@ -102,8 +113,43 @@ pub fn auto_start_connectors(
         }
     }
 
-    // Future: iMessage, WeChat...
-    // #[cfg(feature = "imessage")] ...
+    // --- iMessage (macOS only) ---
+    #[cfg(all(feature = "imessage", target_os = "macos"))]
+    {
+        let enabled = match config_repo.get("imessage.enabled") {
+            Ok(Some(v)) => v == "true",
+            Ok(None) => false, // Default to disabled — requires explicit opt-in
+            Err(_) => false,
+        };
+
+        if enabled {
+            info!("Autostart: Spawning iMessage connector");
+            let local_user_id = config_repo.get("identity.local_user_id").ok().flatten();
+            let cancel_token = CancellationToken::new();
+            let connector = crate::imessage::IMessageConnector::new(
+                Arc::new(db.clone()),
+                Arc::new(bus.clone()),
+                gateway.clone(),
+                cancel_token.clone(),
+                local_user_id,
+            );
+
+            tokio::spawn(async move {
+                if let Err(e) = connector.run_loop().await {
+                    tracing::error!("iMessage connector exited with error: {}", e);
+                }
+            });
+
+            started.insert(
+                "imessage".to_string(),
+                ConnectorHandle::IMessage(cancel_token),
+            );
+        } else {
+            info!("Connector 'imessage' is disabled in config.");
+        }
+    }
+
+    // Future: WeChat...
 
     started
 }

@@ -6,7 +6,6 @@ icon: "magnifying_glass_tilted"
 skills:
   - "file_read"
   - "shell_execute"
-  - "summarize"
   - "memory_search"
   - "workspace_read"
   - "workspace_write"
@@ -14,7 +13,6 @@ denied_skills:
   - "file_write"
   - "web_search"
   - "web_fetch"
-  - "text_generate"
 temperature: 0.2
 verbosity: "detailed"
 model: "claude-sonnet-4-6"

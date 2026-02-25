@@ -1,0 +1,133 @@
+//! Output validation for skill invocations.
+//!
+//! Validates skill output against the `output` frontmatter config:
+//! - `format: "markdown"` — checks for `required_sections` as `## Heading`
+//! - `format: "json"` — validates JSON parse, extracts from code blocks if needed
+//! - Warns (but does not reject) if output exceeds `max_tokens`
+
+use crate::middleware::skill::OutputConfig;
+
+/// Errors from output validation.
+#[derive(Debug, Clone)]
+pub enum OutputValidationError {
+    MissingSections(Vec<String>),
+    InvalidJson(String),
+}
+
+impl OutputValidationError {
+    /// Generate a repair prompt that can be appended to the conversation
+    /// and re-sent to the LLM for a self-repair attempt.
+    pub fn repair_prompt(&self) -> String {
+        match self {
+            Self::MissingSections(sections) => {
+                format!(
+                    "Your output is missing required sections: {}. \
+                     Please add them as H2 headings (## SectionName).",
+                    sections.join(", ")
+                )
+            }
+            Self::InvalidJson(err) => {
+                format!(
+                    "Your output must be valid JSON. Parse error: {}. \
+                     Please output only valid JSON.",
+                    err
+                )
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for OutputValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingSections(s) => write!(f, "Missing sections: {}", s.join(", ")),
+            Self::InvalidJson(e) => write!(f, "Invalid JSON: {}", e),
+        }
+    }
+}
+
+/// Validate skill output against output config constraints.
+///
+/// Returns `Ok(output)` (possibly cleaned up, e.g. extracted JSON) or an error
+/// with a repair prompt the caller can use for self-repair.
+pub fn validate_skill_output(
+    output: &str,
+    output_config: &OutputConfig,
+) -> Result<String, OutputValidationError> {
+    if let Some(ref format) = output_config.format {
+        match format.as_str() {
+            "markdown" => {
+                if !output_config.required_sections.is_empty() {
+                    let missing =
+                        find_missing_sections(output, &output_config.required_sections);
+                    if !missing.is_empty() {
+                        return Err(OutputValidationError::MissingSections(missing));
+                    }
+                }
+            }
+            "json" => {
+                if serde_json::from_str::<serde_json::Value>(output).is_err() {
+                    // Try to extract JSON from markdown code blocks
+                    if let Some(json_str) = extract_json_from_output(output) {
+                        serde_json::from_str::<serde_json::Value>(&json_str)
+                            .map_err(|e| OutputValidationError::InvalidJson(e.to_string()))?;
+                        return Ok(json_str);
+                    }
+                    return Err(OutputValidationError::InvalidJson(
+                        "Output is not valid JSON".to_string(),
+                    ));
+                }
+            }
+            _ => {} // "text", "patchset", or unknown — no validation
+        }
+    }
+
+    if let Some(max) = output_config.max_tokens {
+        let estimated = output.len() / 4;
+        if estimated > max {
+            tracing::warn!(
+                "Skill output exceeds max_tokens estimate ({} > {})",
+                estimated,
+                max
+            );
+        }
+    }
+
+    Ok(output.to_string())
+}
+
+fn find_missing_sections(output: &str, required: &[String]) -> Vec<String> {
+    required
+        .iter()
+        .filter(|section| {
+            let heading = format!("## {}", section);
+            !output.contains(&heading)
+        })
+        .cloned()
+        .collect()
+}
+
+fn extract_json_from_output(output: &str) -> Option<String> {
+    // Look for ```json ... ``` blocks
+    if let Some(start) = output.find("```json") {
+        let content_start = start + "```json".len();
+        if let Some(end) = output[content_start..].find("```") {
+            return Some(output[content_start..content_start + end].trim().to_string());
+        }
+    }
+    // Look for { ... }
+    if let Some(start) = output.find('{')
+        && let Some(end) = output.rfind('}')
+        && end > start
+    {
+        return Some(output[start..=end].to_string());
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests;

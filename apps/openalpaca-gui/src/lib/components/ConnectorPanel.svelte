@@ -118,7 +118,7 @@
       <code>{linkToken}</code>
     </div>
     <p class="text-sm text-muted-foreground">
-      Send <code class="bg-white/10 px-1.5 rounded">/link {linkToken}</code> to your Telegram bot.
+      Send <code class="bg-white/10 px-1.5 rounded">/link {linkToken}</code> to your Telegram bot or via iMessage.
     </p>
   </div>
 {/if}

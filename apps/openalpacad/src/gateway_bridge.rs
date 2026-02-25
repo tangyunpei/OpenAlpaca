@@ -28,10 +28,11 @@ impl MessageHandler for OrchestratorHandler {
         principal: Principal,
         scope: Scope,
         lane_key: String,
+        workspace_path: Option<String>,
     ) -> Result<HandleResult, String> {
         let result = self
             .orchestrator
-            .handle_message(request_id, source, content, principal, scope, lane_key)
+            .handle_message(request_id, source, content, principal, scope, lane_key, workspace_path)
             .await;
 
         // Always drain metadata (even on error) to prevent unbounded map growth.

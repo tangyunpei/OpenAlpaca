@@ -7,7 +7,7 @@ use axum::{
 };
 use chrono::Utc;
 use openalpaca_core::events::SystemEvent;
-use openalpaca_llm::settings_service::{
+use openalpaca_llm::config::settings_service::{
     AddKeyRequest, OrchestratorConfigResponse, ReorderKeysRequest, SetKeyPriorityRequest,
     UpdateOrchestratorRequest, ValidateKeyRequest,
 };

@@ -298,4 +298,62 @@ pub enum SystemEvent {
         auto_promotion_reason: Option<String>,
         timestamp: DateTime<Utc>,
     },
+    /// A new skill was discovered during catalog scanning
+    SkillDiscovered {
+        /// Skill ID (directory name)
+        skill_id: String,
+        /// Human-readable skill name from frontmatter
+        skill_name: String,
+        /// "project" | "user"
+        scope: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// The skill router auto-selected a skill for a user query
+    SkillSelected {
+        /// Skill ID that was selected
+        skill_id: String,
+        /// The routing score that triggered selection
+        score: f64,
+        /// User query that triggered the selection (truncated)
+        query_preview: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// A skill invocation started
+    SkillInvocationStarted {
+        request_id: Uuid,
+        /// Skill ID being invoked
+        skill_id: String,
+        /// User query (truncated)
+        query_preview: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// Skill context was injected into the prompt
+    SkillContextInjected {
+        request_id: Uuid,
+        /// Skill ID being invoked
+        skill_id: String,
+        /// Number of bytes of context injected
+        context_bytes: usize,
+        timestamp: DateTime<Utc>,
+    },
+    /// A skill invocation completed successfully
+    SkillCompleted {
+        request_id: Uuid,
+        /// Skill ID that completed
+        skill_id: String,
+        /// Duration of the skill invocation in milliseconds
+        duration_ms: u64,
+        /// First 200 chars of the output (for quick preview)
+        output_preview: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// A skill invocation failed
+    SkillFailed {
+        request_id: Uuid,
+        /// Skill ID that failed
+        skill_id: String,
+        /// Error message
+        error: String,
+        timestamp: DateTime<Utc>,
+    },
 }

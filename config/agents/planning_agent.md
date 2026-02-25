@@ -1,20 +1,18 @@
 ---
 id: "planning_agent"
 name: "Planning Agent"
-description: "Read-only analysis and design agent for planning approaches before implementation. Can read files, search the web for reference, and summarize findings, but cannot modify any files or execute commands. Use for architecture design, implementation planning, code review, dependency analysis, and producing structured plans."
+description: "Read-only analysis and design agent for planning approaches before implementation. Can read files, search the web for reference, and analyze findings, but cannot modify any files or execute commands. Use for architecture design, implementation planning, code review, dependency analysis, and producing structured plans."
 icon: "clipboard"
 skills:
   - "file_read"
   - "web_search"
   - "web_fetch"
-  - "summarize"
   - "memory_search"
   - "workspace_read"
   - "workspace_write"
 denied_skills:
   - "file_write"
   - "shell_execute"
-  - "text_generate"
 temperature: 0.5
 verbosity: "detailed"
 model: "claude-sonnet-4-6"

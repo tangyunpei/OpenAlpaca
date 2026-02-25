@@ -75,6 +75,12 @@ pub async fn command_handler(
                 .unwrap_or("Hello from process command")
                 .to_string();
 
+            let workspace_path = request
+                .args
+                .get("workspace_path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
             let response = state
                 .gateway
                 .handle_event(GatewayRequest {
@@ -84,6 +90,7 @@ pub async fn command_handler(
                     content,
                     principal: Principal::System,
                     scope: Scope::Global,
+                    workspace_path,
                 })
                 .await;
 

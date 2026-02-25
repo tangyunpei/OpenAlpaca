@@ -1,70 +1,103 @@
 # OpenAlpaca CLI Manual
 
-`openalpaca` is the command-line interface for OpenAlpaca. It talks to the local daemon (`openalpacad`) over HTTP using the token published in `discovery.json`.
+`openalpaca` is the command-line interface for controlling a local `openalpacad` instance.
 
 Related docs:
-- Daemon manual: `Daemon_Manual.md`
-- Daemon HTTP API: `api/apps/openalpacad.md`
-- Database schema: `api/database/schema.md`
+- [Daemon Manual](Daemon_Manual.md)
+- [GUI Manual](GUI_Manual.md)
+- [Daemon HTTP API](api/apps/openalpacad.md)
+- [Database Schema](api/database/schema.md)
 
-## Installation
+## Installation and Run
 
-Development (from repo root):
+From repository root (development):
 
 ```bash
 cargo run -p openalpaca -- <subcommand> [args]
 ```
 
-Release binary:
+Build release binary:
 
 ```bash
 cargo build -p openalpaca --release
 ./target/release/openalpaca --help
 ```
 
-## How The CLI Connects
+## Connection and Auth Model
 
-- The daemon binds to a random local port and writes `discovery.json` in the OpenAlpaca app data directory.
-- The CLI reads that file and sends requests with `Authorization: Bearer <token>`.
-- If the daemon is not running, most commands will fail (except parts of `config` that operate on local files).
+- The daemon writes discovery metadata to `discovery.json` under the OpenAlpaca app data directory.
+- CLI reads base URL and token from discovery.
+- Protected endpoints use `Authorization: Bearer <token>`.
+- Streaming endpoints may use query-token auth (handled by CLI internals).
 
-## Commands
+If discovery is missing or expired, daemon-backed commands fail until daemon is started/restarted.
 
-### `daemon` (start/stop/status/tail)
+## Quick Start
 
-- `openalpaca daemon status`: reads discovery + calls `GET /v1/health`.
-- `openalpaca daemon tail [--count N]`: connects to WebSocket `GET /v1/events?token=...` and prints events.
-- `openalpaca daemon start [--daemon-only]`: spawns daemon (dev convenience, logs to `daemon.log`).
-- `openalpaca daemon stop`: sends SIGTERM to daemon PID from discovery.
-- `openalpaca daemon restart`: stop then start.
+```bash
+# Start daemon (and GUI by default)
+openalpaca daemon start
+
+# Check daemon health
+openalpaca daemon status
+
+# List active tasks
+openalpaca tasks list --status active
+
+# Open interactive chat
+openalpaca chat
+```
+
+## Top-Level Commands
+
+### `daemon`
+
+Manage daemon process lifecycle.
+
+```bash
+openalpaca daemon status
+openalpaca daemon tail [--count N]
+openalpaca daemon start [--daemon-only]
+openalpaca daemon stop
+openalpaca daemon restart
+```
 
 Notes:
-`openalpaca daemon tail` is a live view of the daemon’s server events. It does not query history; for history use `GET /v1/events/history` (see `api/apps/openalpacad.md`).
+- `start` launches daemon and then GUI unless `--daemon-only` is set.
+- `restart` restarts daemon only.
+- `tail` streams live daemon events (not historical query output).
 
-### `config` (system + AI config)
+### `config`
 
-Config is split across two backends:
-- SQLite system config (daemon/CLI shared DB).
-- `config/llm.toml` (LLM router config, stored on disk in the repo working directory, matching daemon behavior).
-
-Interactive mode:
+Manage system and runtime configuration.
 
 ```bash
 openalpaca config
-```
-
-Non-interactive:
-
-```bash
-openalpaca config list [--all] [--format table|json]
-openalpaca config get <key>
 openalpaca config set <key> <value>
+openalpaca config get <key>
+openalpaca config list [--all] [--format table|json] [--verbose]
 openalpaca config reset [<key>] [--factory]
 ```
 
-`--factory` wipes the database content (agents, tasks, identities, memories, logs, usage).
+Backends:
+- DB-backed settings (`system_config`, preferences, etc.)
+- `config/llm.toml`
+- `config/daemon.toml`
 
-### `connector` (platform connectors)
+`--factory` performs full storage reset.
+
+### `gui`
+
+Manage GUI process.
+
+```bash
+openalpaca gui start
+openalpaca gui stop
+```
+
+### `connector`
+
+Manage platform connectors.
 
 ```bash
 openalpaca connector list
@@ -73,9 +106,9 @@ openalpaca connector disable <name>
 openalpaca connector delete <name>
 ```
 
-`delete` clears connector config in the DB and stops the connector. It can also sever identity/linking data for that platform (depending on connector implementation and how unlinking is handled).
+### `tasks`
 
-### `tasks` (task lifecycle)
+Task lifecycle commands.
 
 ```bash
 openalpaca tasks list [--status <status>] [--limit <n>] [--format table|json]
@@ -87,9 +120,9 @@ openalpaca tasks pause <task_id>
 openalpaca tasks resume <task_id>
 ```
 
-Supported status filters include `queued`, `running`, `paused`, `completed`, `failed`, `cancelled`, and the special view `active`.
+### `agents`
 
-### `agents` (sub-agents)
+Sub-agent and template-backed runtime control.
 
 ```bash
 openalpaca agents list [--status <status>] [--format table|json]
@@ -97,14 +130,16 @@ openalpaca agents status <agent_id> [--format table|json]
 openalpaca agents config <agent_id> [--format table|json]
 openalpaca agents pause <agent_id>
 openalpaca agents resume <agent_id>
-openalpaca agents set <agent_id> <dotted.key.path> <value>
+openalpaca agents set <agent_id> <dotted.path> <value>
 openalpaca agents create [--from-file <path>] [--interactive] [--from-chat <desc>]
 openalpaca agents remove <agent_id>
 ```
 
-If you run `openalpaca agents` with no subcommand, it defaults to interactive creation.
+`openalpaca agents` with no subcommand enters interactive creation mode.
 
-### `llm` (keys, models, usage)
+### `llm`
+
+LLM keys, usage, model metadata, and routing control.
 
 ```bash
 openalpaca llm status [--format table|json]
@@ -114,39 +149,27 @@ openalpaca llm keys remove <provider> <key_id>
 openalpaca llm keys validate --provider <name> --secret <key>
 openalpaca llm keys set-primary <provider> <key_id>
 openalpaca llm keys reorder <key_id>...
-openalpaca llm models [--format table|json]
 openalpaca llm usage [--agent <id>] [--date YYYY-MM-DD] [--key <key_id>] [--daily] [--format table|json]
+openalpaca llm models [--format table|json]
+openalpaca llm strategy --provider <name> <strategy>
 openalpaca llm credentials [--format table|json]
 openalpaca llm backends [--format table|json]
 openalpaca llm provider-usage [--format table|json]
 ```
 
-### `chat` (interactive or one-shot)
+### `chat`
 
-- Interactive REPL (when stdin is a TTY):
+Interactive or one-shot chat through daemon orchestrator.
 
 ```bash
 openalpaca chat
-```
-
-- One-shot:
-
-```bash
 openalpaca chat --message "hello"
-```
-
-- Pipe mode:
-
-```bash
 echo "hello" | openalpaca chat
 ```
 
 ## Troubleshooting
 
-- “Daemon is not running (no discovery file)”: start the daemon (GUI, `openalpaca daemon start`, or `cargo run -p openalpacad`).
-- “Discovery expired”: restart the daemon to regenerate its token.
-- WebSocket can’t connect: ensure you are using the query token form (`/v1/events?token=...`) and that the daemon is bound to `127.0.0.1`.
-
-## GUI
-
-If you’re using the desktop app, see `GUI_Manual.md`.
+- Discovery missing/expired: start or restart daemon.
+- Auth errors: ensure CLI and daemon use the same current discovery file.
+- `daemon status` unhealthy: inspect daemon logs and `RUST_LOG` settings.
+- Chat/stream failures: verify daemon is reachable on `127.0.0.1` and token is valid.
