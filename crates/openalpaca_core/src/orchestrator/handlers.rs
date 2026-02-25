@@ -1,5 +1,6 @@
-use super::{ConversationContext, Orchestrator, principal_id, role_label};
+use super::{ConversationContext, Orchestrator, principal_id, role_label, wrap_untrusted_context};
 use crate::events::SystemEvent;
+use crate::gateway::ResolvedAttachment;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::security::gate::SecurityGate;
 use crate::security::policy::{Principal, Scope};
@@ -316,6 +317,45 @@ impl Orchestrator {
         self.maybe_complete_bootstrap().await;
 
         result
+    }
+
+    /// Handle a user message with file attachments.
+    ///
+    /// Injects attachment context as low-trust blocks before delegating to
+    /// the standard `handle_message` pipeline.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn handle_message_with_attachments(
+        &self,
+        request_id: Uuid,
+        source: String,
+        content: String,
+        attachments: Vec<ResolvedAttachment>,
+        principal: Principal,
+        scope: Scope,
+        lane_key: String,
+        workspace_path: Option<String>,
+    ) -> Result<String, String> {
+        // Build augmented content with attachment context injected before the user query
+        let mut augmented = String::new();
+
+        for att in &attachments {
+            let ctx_block = if let Some(ref text) = att.extracted_text {
+                let truncated = text.chars().take(4000).collect::<String>();
+                format!("[File: {} ({})]\n{}", att.filename, att.mime_type, truncated)
+            } else {
+                format!("[File: {} ({})]", att.filename, att.mime_type)
+            };
+            let wrapped = wrap_untrusted_context(&ctx_block, "file_attachment", "user_derived");
+            augmented.push_str(&wrapped);
+            augmented.push('\n');
+        }
+
+        augmented.push_str(&content);
+
+        self.handle_message(
+            request_id, source, augmented, principal, scope, lane_key, workspace_path,
+        )
+        .await
     }
 
     /// Augment a task description with conversation context (summary + recent exchanges).

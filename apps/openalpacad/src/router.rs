@@ -144,6 +144,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/agent-instances/{id}",
             delete(crate::routes::destroy_instance_handler),
         )
+        // File upload routes (multimodal)
+        .route(
+            "/v1/files/upload",
+            post(crate::routes::upload_file_handler),
+        )
+        .route(
+            "/v1/files/{id}",
+            get(crate::routes::get_file_metadata_handler),
+        )
+        .route(
+            "/v1/files/{id}/content",
+            get(crate::routes::get_file_content_handler),
+        )
         // Chat routes (Phase 5.6)
         .route("/v1/chat", post(crate::routes::send_chat_handler))
         .route(

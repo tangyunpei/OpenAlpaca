@@ -184,6 +184,10 @@ impl Database {
             // Note: SQLite doesn't have TRUNCATE, so we use DELETE.
             // Order matters because FKs are ON.
 
+            // 0. File assets (FK: message_attachments -> file_assets, conversation_messages)
+            tx.execute("DELETE FROM conversation_message_attachments", [])?;
+            tx.execute("DELETE FROM file_assets", [])?;
+
             // 0. LLM Usage (no FKs, safe to delete first)
             tx.execute("DELETE FROM llm_call_log", [])?;
             tx.execute("DELETE FROM llm_usage_daily", [])?;

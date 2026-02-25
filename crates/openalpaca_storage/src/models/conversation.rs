@@ -15,6 +15,8 @@ pub struct ConversationMessage {
     pub tokens_out: Option<i64>,
     pub duration_ms: Option<i64>,
     pub created_at: String,
+    pub content_json: Option<String>,
+    pub display_text: Option<String>,
 }
 
 /// A conversation master record, tracking all conversations across sources.

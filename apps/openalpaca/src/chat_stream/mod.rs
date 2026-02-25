@@ -70,6 +70,19 @@ pub async fn stream_chat(
     stream_sse_events(http_resp, opts).await
 }
 
+/// POST /v1/chat with attachments → ChatSendResponse
+pub async fn send_chat_with_attachments(
+    client: &DaemonClient,
+    content: &str,
+    attachments: &[serde_json::Value],
+) -> Result<ChatSendResponse> {
+    let body = serde_json::json!({
+        "content": content,
+        "attachments": attachments,
+    });
+    client.post("/v1/chat", &body).await
+}
+
 /// Convenience: send_chat + stream_chat (for non-REPL modes)
 pub async fn send_and_stream(
     client: &DaemonClient,
@@ -77,6 +90,21 @@ pub async fn send_and_stream(
     opts: &StreamOptions,
 ) -> Result<StreamResult> {
     let resp = send_chat(client, content).await?;
+    stream_chat(client, &resp.stream_id, opts).await
+}
+
+/// Convenience: send_chat_with_attachments + stream_chat
+pub async fn send_and_stream_with_attachments(
+    client: &DaemonClient,
+    content: &str,
+    attachments: &[serde_json::Value],
+    opts: &StreamOptions,
+) -> Result<StreamResult> {
+    let resp = if attachments.is_empty() {
+        send_chat(client, content).await?
+    } else {
+        send_chat_with_attachments(client, content, attachments).await?
+    };
     stream_chat(client, &resp.stream_id, opts).await
 }
 

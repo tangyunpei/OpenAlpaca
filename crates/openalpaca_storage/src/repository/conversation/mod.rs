@@ -36,6 +36,29 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
+    /// Insert a conversation message with structured content (multimodal).
+    pub fn insert_with_structured(&self, msg: &ConversationMessage, content_json: &str, display_text: &str) -> Result<i64> {
+        self.db.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO conversation_messages (lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, content_json, display_text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                (
+                    &msg.lane_key,
+                    &msg.role,
+                    &msg.content,
+                    &msg.source,
+                    &msg.model,
+                    msg.tokens_in,
+                    msg.tokens_out,
+                    msg.duration_ms,
+                    content_json,
+                    display_text,
+                ),
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
     /// List messages for a lane, ordered by creation time ascending.
     pub fn list_by_lane(
         &self,
@@ -71,7 +94,7 @@ impl<'a> ConversationRepository<'a> {
     ) -> Result<Vec<ConversationMessage>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, created_at
+                "SELECT id, lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, created_at, content_json, display_text
                  FROM (
                      SELECT * FROM conversation_messages
                      WHERE lane_key = ?1
@@ -83,7 +106,7 @@ impl<'a> ConversationRepository<'a> {
             let mut messages = Vec::new();
             let mut rows = stmt.query(rusqlite::params![lane_key, limit])?;
             while let Some(row) = rows.next()? {
-                messages.push(Self::row_to_message(row)?);
+                messages.push(Self::row_to_message_extended(row)?);
             }
             Ok(messages)
         })
@@ -358,6 +381,25 @@ impl<'a> ConversationRepository<'a> {
             tokens_out: row.get(7)?,
             duration_ms: row.get(8)?,
             created_at: row.get(9)?,
+            content_json: None,
+            display_text: None,
+        })
+    }
+
+    fn row_to_message_extended(row: &rusqlite::Row<'_>) -> Result<ConversationMessage> {
+        Ok(ConversationMessage {
+            id: row.get(0)?,
+            lane_key: row.get(1)?,
+            role: row.get(2)?,
+            content: row.get(3)?,
+            source: row.get(4)?,
+            model: row.get(5)?,
+            tokens_in: row.get(6)?,
+            tokens_out: row.get(7)?,
+            duration_ms: row.get(8)?,
+            created_at: row.get(9)?,
+            content_json: row.get(10)?,
+            display_text: row.get(11)?,
         })
     }
 }

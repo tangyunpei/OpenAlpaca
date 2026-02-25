@@ -64,7 +64,7 @@ impl ChatService {
     /// 3. `Done { content, model, tokens_in, tokens_out, duration_ms }` — full text + metadata
     ///
     /// On error: `Thinking` → `Error { message }`.
-    pub fn send_message(&self, content: String, principal: &str, workspace_path: Option<String>) -> Result<ChatSendResponse> {
+    pub fn send_message(&self, content: String, attachments: Vec<crate::gateway::ResolvedAttachment>, principal: &str, workspace_path: Option<String>) -> Result<ChatSendResponse> {
         let lane_key = format!("{principal}:gui");
 
         let (stream_id, _rx, sink) = self.stream_manager.create_stream(&lane_key);
@@ -94,6 +94,7 @@ impl ChatService {
                         connection_id: principal_owned.clone(),
                     },
                     content: user_content.clone(),
+                    attachments,
                     principal: Principal::User {
                         global_id: principal_owned.clone(),
                     },
@@ -127,7 +128,11 @@ impl ChatService {
                 let model = response.model.as_deref().unwrap_or("default");
                 let tokens_in = response.tokens_in.unwrap_or(0) as u64;
                 let tokens_out = response.tokens_out.unwrap_or(0) as u64;
-                sink.send_done(&response.content, model, tokens_in, tokens_out, duration_ms);
+                if response.attachments_used.is_empty() {
+                    sink.send_done(&response.content, model, tokens_in, tokens_out, duration_ms);
+                } else {
+                    sink.send_done_with_attachments(&response.content, model, tokens_in, tokens_out, duration_ms, response.attachments_used);
+                }
             }
 
             // Emit ChatStreamEnded event

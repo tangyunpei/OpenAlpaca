@@ -24,6 +24,8 @@ pub enum ChatStreamEvent {
         tokens_in: u64,
         tokens_out: u64,
         duration_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        attachments_used: Option<Vec<String>>,
     },
     Error {
         message: String,
@@ -78,6 +80,32 @@ impl StreamSink {
             tokens_in,
             tokens_out,
             duration_ms,
+            attachments_used: None,
+        });
+    }
+
+    /// Send the final Done event with attachment info.
+    pub fn send_done_with_attachments(
+        &self,
+        content: &str,
+        model: &str,
+        tokens_in: u64,
+        tokens_out: u64,
+        duration_ms: u64,
+        attachments_used: Vec<String>,
+    ) {
+        let att = if attachments_used.is_empty() {
+            None
+        } else {
+            Some(attachments_used)
+        };
+        self.send_event(ChatStreamEvent::Done {
+            content: content.to_string(),
+            model: model.to_string(),
+            tokens_in,
+            tokens_out,
+            duration_ms,
+            attachments_used: att,
         });
     }
 

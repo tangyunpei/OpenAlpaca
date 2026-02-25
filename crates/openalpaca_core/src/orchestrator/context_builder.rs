@@ -1,5 +1,5 @@
 use super::{ConversationContext, Orchestrator};
-use openalpaca_llm::ChatMessage;
+use openalpaca_llm::{ChatMessage, ContentPart};
 use openalpaca_storage::ConversationRepository;
 
 impl Orchestrator {
@@ -38,18 +38,27 @@ impl Orchestrator {
         };
 
         // Step 3: Build canonical list and dedup current query
-        let mut chat_rows: Vec<(i64, String, String)> = raw_messages
+        // Include content_json for multimodal message reconstruction
+        let mut chat_rows: Vec<(i64, String, String, Option<String>)> = raw_messages
             .iter()
             .filter(|msg| {
-                (msg.role == "user" || msg.role == "assistant") && !msg.content.is_empty()
+                (msg.role == "user" || msg.role == "assistant")
+                    && (!msg.content.is_empty() || msg.content_json.is_some())
             })
-            .map(|msg| (msg.id, msg.role.clone(), msg.content.clone()))
+            .map(|msg| {
+                (
+                    msg.id,
+                    msg.role.clone(),
+                    msg.content.clone(),
+                    msg.content_json.clone(),
+                )
+            })
             .collect();
 
         // Dedup (D6) — if the last row matches current_query, drop it (Bug A fix).
         let should_dedup = chat_rows
             .last()
-            .map(|(_, role, content)| role == "user" && content == current_query)
+            .map(|(_, role, content, _)| role == "user" && content == current_query)
             .unwrap_or(false);
         if should_dedup {
             tracing::debug!("Dedup: dropping duplicate user message from recent window");
@@ -57,7 +66,7 @@ impl Orchestrator {
         }
 
         // Step 4: Get first_recent_id for the ID-range query
-        let first_recent_id = chat_rows.first().map(|(id, _, _)| *id).unwrap_or(i64::MAX);
+        let first_recent_id = chat_rows.first().map(|(id, _, _, _)| *id).unwrap_or(i64::MAX);
 
         // Step 5: Load unsummarized older messages via ID-range query (fixes 120-window bug)
         let older_window = if last_summarized_id < first_recent_id {
@@ -75,12 +84,27 @@ impl Orchestrator {
             Vec::new()
         };
 
-        // Step 6: Convert recent chat_rows to ChatMessage
+        // Step 6: Convert recent chat_rows to ChatMessage, restoring multimodal parts
         let recent_messages: Vec<ChatMessage> = chat_rows
             .iter()
-            .map(|(_, role, content)| match role.as_str() {
-                "user" => ChatMessage::user(content),
-                _ => ChatMessage::assistant(content),
+            .map(|(_, role, content, content_json)| {
+                let mut msg = match role.as_str() {
+                    "user" => ChatMessage::user(content),
+                    _ => ChatMessage::assistant(content),
+                };
+                // Reconstruct parts from content_json when present
+                if let Some(json_str) = content_json {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        if let Some(parts_arr) = parsed.get("parts") {
+                            if let Ok(parts) =
+                                serde_json::from_value::<Vec<ContentPart>>(parts_arr.clone())
+                            {
+                                msg.parts = Some(parts);
+                            }
+                        }
+                    }
+                }
+                msg
             })
             .collect();
 

@@ -231,6 +231,7 @@ impl IMessageConnector {
                     sender: msg.sender.clone(),
                 },
                 content,
+                attachments: Vec::new(),
                 principal,
                 scope: Scope::Conversation {
                     id: msg.chat_id.clone(),
