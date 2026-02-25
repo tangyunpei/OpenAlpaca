@@ -216,6 +216,8 @@ pub enum EventSource {
 pub enum EventPayload {
     UserMessage {
         content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachment_ids: Vec<String>,
     },
     Command {
         name: String,

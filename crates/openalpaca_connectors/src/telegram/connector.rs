@@ -6,9 +6,11 @@ use crate::common::{LinkResult, format_denial_message, handle_link_token, redact
 use crate::{Connector, ConnectorError};
 use async_trait::async_trait;
 use openalpaca_api::events::EventSource;
+use arc_swap::ArcSwap;
 use openalpaca_core::{
     bus::EventBus,
-    gateway::{Gateway, GatewayRequest},
+    daemon_config::DaemonConfig,
+    gateway::{Gateway, GatewayRequest, ResolvedAttachment},
     security::policy::Scope,
     types::Capability,
 };
@@ -18,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use teloxide::prelude::*;
 use teloxide::types::ChatAction;
+use teloxide::net::Download;
 use tracing::{error, info, warn};
 
 /// Telegram's max message length
@@ -143,12 +146,25 @@ impl ChatRateLimiter {
     }
 }
 
+/// Download a file from Telegram using the Bot API.
+async fn download_telegram_file(
+    bot: &Bot,
+    file_id: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    use teloxide::types::FileId;
+    let file = bot.get_file(FileId(file_id.to_string())).await?;
+    let mut buf = Vec::new();
+    bot.download_file(&file.path, &mut buf).await?;
+    Ok(buf)
+}
+
 /// TelegramConnector manages the Telegram bot lifecycle and message handling.
 pub struct TelegramConnector {
     bot: Bot,
     db: Arc<Database>,
     bus: Arc<EventBus>,
     gateway: Arc<Gateway>,
+    daemon_config: Arc<ArcSwap<DaemonConfig>>,
     rate_limiter: Arc<ChatRateLimiter>,
 }
 
@@ -159,6 +175,7 @@ impl TelegramConnector {
         db: Arc<Database>,
         bus: Arc<EventBus>,
         gateway: Arc<Gateway>,
+        daemon_config: Arc<ArcSwap<DaemonConfig>>,
     ) -> Self {
         let bot = Bot::new(token);
         Self {
@@ -166,6 +183,7 @@ impl TelegramConnector {
             db,
             bus,
             gateway,
+            daemon_config,
             rate_limiter: Arc::new(ChatRateLimiter::new(Duration::from_secs(1))),
         }
     }
@@ -181,10 +199,11 @@ impl TelegramConnector {
         let db = self.db.clone();
         let bus = self.bus.clone();
         let gateway = self.gateway.clone();
+        let daemon_config = self.daemon_config.clone();
         let rate_limiter = self.rate_limiter.clone();
 
         let mut dispatcher = Dispatcher::builder(self.bot, handler)
-            .dependencies(dptree::deps![db, bus, gateway, rate_limiter])
+            .dependencies(dptree::deps![db, bus, gateway, daemon_config, rate_limiter])
             .build();
 
         let token = dispatcher.shutdown_token();
@@ -205,15 +224,10 @@ impl TelegramConnector {
         db: Arc<Database>,
         bus: Arc<EventBus>,
         gateway: Arc<Gateway>,
+        daemon_config: Arc<ArcSwap<DaemonConfig>>,
         rate_limiter: Arc<ChatRateLimiter>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let text = match msg.text() {
-            Some(t) => t.to_string(),
-            None => {
-                // Ignore non-text messages for now
-                return Ok(());
-            }
-        };
+        let text = msg.text().unwrap_or("").to_string();
 
         let chat_id = msg.chat.id;
         let from = match msg.from.as_ref() {
@@ -316,6 +330,65 @@ impl TelegramConnector {
             warn!("Failed to send typing indicator: {}", e);
         }
 
+        // Step 3.5: Handle photo and document attachments
+        let owner_id = match &global_id_for_pref {
+            Some(gid) => gid.clone(),
+            None => user_id.clone(),
+        };
+        let mut attachments: Vec<ResolvedAttachment> = Vec::new();
+        let upload_cfg = daemon_config.load();
+        let max_file_size = upload_cfg.upload.max_file_size_bytes;
+        let max_img_dim = upload_cfg.upload.governance.max_image_dimension;
+
+        // Handle photos — msg.photo() returns Option<&[PhotoSize]>
+        if let Some(photos) = msg.photo()
+            && let Some(largest) = photos.last()
+        {
+            // sorted by size, largest last
+            match download_telegram_file(&bot, &largest.file.id.0).await {
+                Ok(data) => {
+                    let uid = &largest.file.unique_id.0;
+                    let suffix = &uid[..8.min(uid.len())];
+                    let fname = format!("photo_{suffix}.jpg");
+                    match crate::common::store_attachment(
+                        &db, &owner_id, &fname, "image/jpeg", &data,
+                        max_file_size, max_img_dim,
+                    ) {
+                        Ok(att) => attachments.push(att),
+                        Err(e) => warn!("Failed to store telegram photo: {e}"),
+                    }
+                }
+                Err(e) => warn!("Failed to download telegram photo: {e}"),
+            }
+        }
+
+        // Handle documents — msg.document() returns Option<&Document>
+        if let Some(doc) = msg.document() {
+            let file_name = doc.file_name.as_deref().unwrap_or("document");
+            let mime = doc
+                .mime_type
+                .as_ref()
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| "application/octet-stream".into());
+            match download_telegram_file(&bot, &doc.file.id.0).await {
+                Ok(data) => {
+                    match crate::common::store_attachment(
+                        &db, &owner_id, file_name, &mime, &data,
+                        max_file_size, max_img_dim,
+                    ) {
+                        Ok(att) => attachments.push(att),
+                        Err(e) => warn!("Failed to store telegram doc: {e}"),
+                    }
+                }
+                Err(e) => warn!("Failed to download telegram doc: {e}"),
+            }
+        }
+
+        // Skip if nothing useful
+        if text.is_empty() && attachments.is_empty() {
+            return Ok(());
+        }
+
         // Step 4: Route through Gateway (replaces manual pipeline)
         let response = gateway
             .handle_event(GatewayRequest {
@@ -324,7 +397,7 @@ impl TelegramConnector {
                     user_id: user_id.clone(),
                 },
                 content: text.clone(),
-                attachments: Vec::new(),
+                attachments,
                 principal,
                 scope: Scope::Conversation {
                     id: chat_id.0.to_string(),

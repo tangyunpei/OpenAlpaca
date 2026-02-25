@@ -51,6 +51,7 @@ impl HandleResult {
 
 /// Trait for processing messages through the pipeline.
 /// The daemon implements this by delegating to the Orchestrator.
+#[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait MessageHandler: Send + Sync {
     async fn handle(

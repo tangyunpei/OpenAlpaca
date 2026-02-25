@@ -8,13 +8,15 @@ fn test_default_adapter_user_message() {
             session_id: "s1".into(),
         },
         content: "hello world".into(),
+        attachments: Vec::new(),
     };
 
     let event = adapter.to_unified_event(msg);
     assert_eq!(
         event.payload,
         EventPayload::UserMessage {
-            content: "hello world".into()
+            content: "hello world".into(),
+            attachment_ids: Vec::new(),
         }
     );
     assert_eq!(
@@ -33,6 +35,7 @@ fn test_default_adapter_command() {
             connection_id: "c1".into(),
         },
         content: "/help --verbose".into(),
+        attachments: Vec::new(),
     };
 
     let event = adapter.to_unified_event(msg);
@@ -51,6 +54,7 @@ fn test_default_adapter_command_no_args() {
     let msg = InboundMessage {
         source: EventSource::Internal,
         content: "/status".into(),
+        attachments: Vec::new(),
     };
 
     let event = adapter.to_unified_event(msg);

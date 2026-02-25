@@ -9,10 +9,12 @@
 //! to be processed.
 
 use crate::{Connector, ConnectorError};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use openalpaca_api::events::EventSource;
 use openalpaca_core::{
-    gateway::{Gateway, GatewayRequest},
+    daemon_config::DaemonConfig,
+    gateway::{Gateway, GatewayRequest, ResolvedAttachment},
     security::policy::{Principal, Scope},
 };
 use openalpaca_storage::{Database, IdentityRepository, PreferenceRepository};
@@ -51,6 +53,7 @@ pub struct IMessageConnector {
     #[allow(dead_code)]
     bus: Arc<openalpaca_core::bus::EventBus>,
     gateway: Arc<Gateway>,
+    daemon_config: Arc<ArcSwap<DaemonConfig>>,
     cancel_token: CancellationToken,
     chat_db_path: String,
     local_user_id: Option<String>,
@@ -66,6 +69,7 @@ impl IMessageConnector {
         db: Arc<Database>,
         bus: Arc<openalpaca_core::bus::EventBus>,
         gateway: Arc<Gateway>,
+        daemon_config: Arc<ArcSwap<DaemonConfig>>,
         cancel_token: CancellationToken,
         local_user_id: Option<String>,
     ) -> Self {
@@ -75,6 +79,7 @@ impl IMessageConnector {
             db,
             bus,
             gateway,
+            daemon_config,
             cancel_token,
             chat_db_path,
             local_user_id,
@@ -199,8 +204,10 @@ impl IMessageConnector {
         );
 
         // Step 1: Check trigger prefix — skip messages that don't match
+        let has_attachments = !msg.attachments.is_empty();
         let content = match strip_trigger_prefix(&msg.text) {
             Some(c) if !c.is_empty() => c,
+            Some(_) if has_attachments => String::new(), // trigger with attachments only
             Some(_) => {
                 IMessageSender::send(
                     &msg.chat_id,
@@ -222,6 +229,38 @@ impl IMessageConnector {
             _ => unreachable!("resolve_owner always returns Principal::User"),
         };
 
+        // Step 2.5: Store attachments
+        let mut attachments: Vec<ResolvedAttachment> = Vec::new();
+        let upload_cfg = self.daemon_config.load();
+        let max_file_size = upload_cfg.upload.max_file_size_bytes;
+        let max_img_dim = upload_cfg.upload.governance.max_image_dimension;
+        for att in &msg.attachments {
+            let path = std::path::Path::new(&att.file_path);
+            if !path.exists() {
+                warn!("iMessage attachment file not found: {}", att.file_path);
+                continue;
+            }
+            match std::fs::read(path) {
+                Ok(data) => {
+                    let name = if att.transfer_name.is_empty() {
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "attachment".into())
+                    } else {
+                        att.transfer_name.clone()
+                    };
+                    match crate::common::store_attachment(
+                        &self.db, &global_id, &name, &att.mime_type, &data,
+                        max_file_size, max_img_dim,
+                    ) {
+                        Ok(resolved) => attachments.push(resolved),
+                        Err(e) => warn!("Failed to store iMessage attachment: {e}"),
+                    }
+                }
+                Err(e) => warn!("Failed to read iMessage attachment {}: {e}", att.file_path),
+            }
+        }
+
         // Step 3: Route through Gateway
         let response = self
             .gateway
@@ -231,7 +270,7 @@ impl IMessageConnector {
                     sender: msg.sender.clone(),
                 },
                 content,
-                attachments: Vec::new(),
+                attachments,
                 principal,
                 scope: Scope::Conversation {
                     id: msg.chat_id.clone(),

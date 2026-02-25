@@ -487,6 +487,30 @@ pub struct UploadConfig {
     pub max_files_per_message: usize,
     /// Days to retain orphaned assets.
     pub retention_days: u32,
+    /// Governance sub-section for background processing & cleanup.
+    pub governance: UploadGovernanceConfig,
+}
+
+/// Background processing and cleanup governance settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UploadGovernanceConfig {
+    /// Seconds between file processing worker polls (default: 10).
+    pub processing_poll_interval_secs: u64,
+    /// Number of assets to process per batch (default: 5).
+    pub processing_batch_size: usize,
+    /// Maximum characters to keep from extracted text (default: 50,000).
+    pub max_extracted_text_chars: usize,
+    /// Hours between orphan cleanup runs (default: 6).
+    pub cleanup_interval_hours: u64,
+    /// Hours before an unlinked asset is considered orphaned (default: 24).
+    pub orphan_grace_period_hours: u64,
+    /// Maximum concurrent extraction tasks (default: 2).
+    pub max_concurrent_extractions: usize,
+    /// Number of times to retry a failed extraction before giving up (default: 1).
+    pub extraction_retry_count: u32,
+    /// Maximum image dimension (width or height) in pixels (default: 8192).
+    pub max_image_dimension: u32,
 }
 
 impl Default for UploadConfig {
@@ -502,6 +526,22 @@ impl Default for UploadConfig {
             ],
             max_files_per_message: 10,
             retention_days: 30,
+            governance: UploadGovernanceConfig::default(),
+        }
+    }
+}
+
+impl Default for UploadGovernanceConfig {
+    fn default() -> Self {
+        Self {
+            processing_poll_interval_secs: 10,
+            processing_batch_size: 5,
+            max_extracted_text_chars: 50_000,
+            cleanup_interval_hours: 6,
+            orphan_grace_period_hours: 24,
+            max_concurrent_extractions: 2,
+            extraction_retry_count: 1,
+            max_image_dimension: 8192,
         }
     }
 }
@@ -884,6 +924,55 @@ impl DaemonConfig {
             1,
             365,
             "upload.retention_days",
+        );
+        // ── Upload > Governance ──
+        clamp_val(
+            &mut self.upload.governance.processing_poll_interval_secs,
+            5,
+            3600,
+            "upload.governance.processing_poll_interval_secs",
+        );
+        clamp_val(
+            &mut self.upload.governance.processing_batch_size,
+            1,
+            50,
+            "upload.governance.processing_batch_size",
+        );
+        clamp_val(
+            &mut self.upload.governance.max_extracted_text_chars,
+            1000,
+            500_000,
+            "upload.governance.max_extracted_text_chars",
+        );
+        clamp_val(
+            &mut self.upload.governance.cleanup_interval_hours,
+            1,
+            168,
+            "upload.governance.cleanup_interval_hours",
+        );
+        clamp_val(
+            &mut self.upload.governance.orphan_grace_period_hours,
+            1,
+            720,
+            "upload.governance.orphan_grace_period_hours",
+        );
+        clamp_val(
+            &mut self.upload.governance.max_concurrent_extractions,
+            1,
+            16,
+            "upload.governance.max_concurrent_extractions",
+        );
+        clamp_val(
+            &mut self.upload.governance.extraction_retry_count,
+            0,
+            5,
+            "upload.governance.extraction_retry_count",
+        );
+        clamp_val(
+            &mut self.upload.governance.max_image_dimension,
+            256,
+            65536,
+            "upload.governance.max_image_dimension",
         );
     }
 }

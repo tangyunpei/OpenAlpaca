@@ -143,18 +143,18 @@ pub async fn upload_file_handler(
 
     // Check total storage quota
     let repo_check = FileAssetRepository::new(&state.db);
-    if let Ok(total_used) = repo_check.total_storage_bytes() {
-        if total_used as u64 + data.len() as u64 > config.upload.max_total_storage_bytes {
-            return error_response(
-                StatusCode::INSUFFICIENT_STORAGE,
-                "STORAGE_QUOTA_EXCEEDED",
-                &format!(
-                    "Total storage quota ({} bytes) would be exceeded",
-                    config.upload.max_total_storage_bytes
-                ),
-            )
-            .into_response();
-        }
+    if let Ok(total_used) = repo_check.total_storage_bytes()
+        && total_used as u64 + data.len() as u64 > config.upload.max_total_storage_bytes
+    {
+        return error_response(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "STORAGE_QUOTA_EXCEEDED",
+            &format!(
+                "Total storage quota ({} bytes) would be exceeded",
+                config.upload.max_total_storage_bytes
+            ),
+        )
+        .into_response();
     }
 
     // MIME prefix validation
@@ -203,6 +203,26 @@ pub async fn upload_file_handler(
         }
     }
 
+    // Archive bomb + image dimension checks
+    {
+        use openalpaca_core::security::sanitizer::InputSanitizer;
+        let max_img_dim = config.upload.governance.max_image_dimension;
+        if let Err(violation) = InputSanitizer::validate_upload_with_image_limit(
+            &filename,
+            &data,
+            &content_type,
+            config.upload.max_file_size_bytes,
+            max_img_dim,
+        ) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "UPLOAD_VALIDATION_FAILED",
+                &format!("{violation}"),
+            )
+            .into_response();
+        }
+    }
+
     // Compute SHA-256
     let mut hasher = Sha256::new();
     hasher.update(&data);
@@ -211,19 +231,19 @@ pub async fn upload_file_handler(
     let repo = FileAssetRepository::new(&state.db);
 
     // Dedup: check if file with same hash already exists and is owned by this user
-    if let Ok(Some(existing)) = repo.get_by_sha256(&sha256) {
-        if existing.owner_id == state.local_user_id {
-            return Json(FileUploadResponse {
-                id: existing.id,
-                filename: existing.filename,
-                mime_type: existing.mime_type,
-                size_bytes: existing.size_bytes,
-                status: existing.status.as_str().to_string(),
-            })
-            .into_response();
-        }
-        // Same content but different owner — fall through to create a new record
+    if let Ok(Some(existing)) = repo.get_by_sha256(&sha256)
+        && existing.owner_id == state.local_user_id
+    {
+        return Json(FileUploadResponse {
+            id: existing.id,
+            filename: existing.filename,
+            mime_type: existing.mime_type,
+            size_bytes: existing.size_bytes,
+            status: existing.status.as_str().to_string(),
+        })
+        .into_response();
     }
+    // Same content but different owner — fall through to create a new record
 
     // Compute storage path
     let storage_path = match openalpaca_storage::paths::asset_storage_path(&sha256) {
@@ -239,15 +259,15 @@ pub async fn upload_file_handler(
     };
 
     // Create parent directories and write file (async to avoid blocking executor)
-    if let Some(parent) = storage_path.parent() {
-        if let Err(e) = tokio::fs::create_dir_all(parent).await {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "IO_ERROR",
-                &format!("Failed to create storage directory: {e}"),
-            )
-            .into_response();
-        }
+    if let Some(parent) = storage_path.parent()
+        && let Err(e) = tokio::fs::create_dir_all(parent).await
+    {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "IO_ERROR",
+            &format!("Failed to create storage directory: {e}"),
+        )
+        .into_response();
     }
     if let Err(e) = tokio::fs::write(&storage_path, &data).await {
         return error_response(

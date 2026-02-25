@@ -93,16 +93,13 @@ impl Orchestrator {
                     _ => ChatMessage::assistant(content),
                 };
                 // Reconstruct parts from content_json when present
-                if let Some(json_str) = content_json {
-                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
-                        if let Some(parts_arr) = parsed.get("parts") {
-                            if let Ok(parts) =
-                                serde_json::from_value::<Vec<ContentPart>>(parts_arr.clone())
-                            {
-                                msg.parts = Some(parts);
-                            }
-                        }
-                    }
+                if let Some(json_str) = content_json
+                    && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str)
+                    && let Some(parts_arr) = parsed.get("parts")
+                    && let Ok(parts) =
+                        serde_json::from_value::<Vec<ContentPart>>(parts_arr.clone())
+                {
+                    msg.parts = Some(parts);
                 }
                 msg
             })

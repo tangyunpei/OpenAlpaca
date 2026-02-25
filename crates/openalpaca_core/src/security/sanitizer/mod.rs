@@ -156,6 +156,193 @@ impl InputSanitizer {
 
         Ok(())
     }
+
+    /// Validate a file upload for security issues.
+    ///
+    /// Checks:
+    /// 1. Filename path traversal (`../`, `..\\`, null bytes, absolute paths)
+    /// 2. File size against `max_size`
+    /// 3. Polyglot detection — declared MIME must match magic-byte-inferred type
+    /// 4. Archive bomb heuristic for ZIP files (compressed/uncompressed ratio > 100:1)
+    /// 5. Image dimension bounds (width/height must not exceed `max_image_dimension`)
+    pub fn validate_upload(
+        filename: &str,
+        data: &[u8],
+        declared_mime: &str,
+        max_size: u64,
+    ) -> Result<(), SecurityViolation> {
+        Self::validate_upload_with_image_limit(filename, data, declared_mime, max_size, 8192)
+    }
+
+    /// Full upload validation with configurable image dimension limit.
+    pub fn validate_upload_with_image_limit(
+        filename: &str,
+        data: &[u8],
+        declared_mime: &str,
+        max_size: u64,
+        max_image_dimension: u32,
+    ) -> Result<(), SecurityViolation> {
+        // 1. Filename path traversal
+        if filename.contains("../") || filename.contains("..\\") {
+            return Err(SecurityViolation::InputBlocked {
+                reason: "Filename contains path traversal".to_string(),
+            });
+        }
+        if filename.contains('\0') {
+            return Err(SecurityViolation::InputBlocked {
+                reason: "Filename contains null bytes".to_string(),
+            });
+        }
+        if filename.starts_with('/') || filename.starts_with('\\') || filename.starts_with('~') {
+            return Err(SecurityViolation::InputBlocked {
+                reason: "Filename must be relative (no leading /, \\, or ~)".to_string(),
+            });
+        }
+
+        // 2. Size check
+        if data.len() as u64 > max_size {
+            return Err(SecurityViolation::InputBlocked {
+                reason: format!(
+                    "File exceeds maximum size ({} > {} bytes)",
+                    data.len(),
+                    max_size
+                ),
+            });
+        }
+
+        // 3. Polyglot detection — inferred MIME must exactly match declared MIME
+        if let Some(inferred) = infer::get(data) {
+            let inferred_mime = inferred.mime_type();
+            if declared_mime != inferred_mime {
+                return Err(SecurityViolation::InputBlocked {
+                    reason: format!(
+                        "MIME type mismatch: declared '{}' but content detected as '{}'",
+                        declared_mime, inferred_mime
+                    ),
+                });
+            }
+        }
+        // If infer returns None (e.g. plain text, CSV) — allow. Text formats have
+        // no magic bytes and are harmless.
+
+        // 4. Archive bomb heuristic for ZIP files
+        if (declared_mime == "application/zip"
+            || declared_mime == "application/x-zip-compressed")
+            && let Some(ratio) = Self::estimate_zip_ratio(data)
+            && ratio > 100.0
+        {
+            return Err(SecurityViolation::InputBlocked {
+                reason: format!(
+                    "Potential archive bomb: compression ratio {ratio:.0}:1 exceeds 100:1 limit"
+                ),
+            });
+        }
+
+        // 5. Image dimension check
+        if declared_mime.starts_with("image/")
+            && let Some((w, h)) = read_image_dimensions(data)
+            && (w > max_image_dimension || h > max_image_dimension)
+        {
+            return Err(SecurityViolation::InputBlocked {
+                reason: format!(
+                    "Image dimensions {w}x{h} exceed maximum {max_image_dimension}x{max_image_dimension}"
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Estimate the compression ratio from a ZIP local file header.
+    ///
+    /// Reads the first local file header (PK\x03\x04) and compares
+    /// compressed size (offset 18, 4 bytes LE) vs uncompressed size (offset 22, 4 bytes LE).
+    fn estimate_zip_ratio(data: &[u8]) -> Option<f64> {
+        // ZIP local file header: PK\x03\x04 at offset 0, minimum 30 bytes
+        if data.len() < 30 {
+            return None;
+        }
+        if &data[0..4] != b"PK\x03\x04" {
+            return None;
+        }
+
+        let compressed = u32::from_le_bytes([data[18], data[19], data[20], data[21]]) as f64;
+        let uncompressed = u32::from_le_bytes([data[22], data[23], data[24], data[25]]) as f64;
+
+        if compressed == 0.0 {
+            return if uncompressed > 0.0 {
+                Some(f64::INFINITY)
+            } else {
+                Some(1.0)
+            };
+        }
+
+        Some(uncompressed / compressed)
+    }
+}
+
+/// Read image dimensions from raw bytes by parsing format-specific headers.
+/// Supports PNG, JPEG, GIF, and WebP. Returns `(width, height)` or `None`.
+fn read_image_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    // PNG: bytes 16..24 contain width (4 bytes BE) and height (4 bytes BE) in IHDR
+    if data.len() >= 24 && &data[0..8] == b"\x89PNG\r\n\x1a\n" {
+        let w = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
+        let h = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
+        return Some((w, h));
+    }
+
+    // GIF: bytes 6..10 contain width (2 bytes LE) and height (2 bytes LE)
+    if data.len() >= 10 && (&data[0..6] == b"GIF87a" || &data[0..6] == b"GIF89a") {
+        let w = u16::from_le_bytes([data[6], data[7]]) as u32;
+        let h = u16::from_le_bytes([data[8], data[9]]) as u32;
+        return Some((w, h));
+    }
+
+    // WebP: "RIFF" + 4 bytes size + "WEBP" header, then VP8 subchunk with dimensions
+    if data.len() >= 30 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        // VP8 (lossy): starts at offset 12 with "VP8 " marker
+        if &data[12..16] == b"VP8 " && data.len() >= 30 {
+            // Frame dimensions at offset 26 (2 bytes LE width) and 28 (2 bytes LE height)
+            let w = u16::from_le_bytes([data[26], data[27]]) as u32;
+            let h = u16::from_le_bytes([data[28], data[29]]) as u32;
+            return Some((w, h));
+        }
+        // VP8L (lossless): starts at offset 12 with "VP8L"
+        if &data[12..16] == b"VP8L" && data.len() >= 25 {
+            // Dimensions packed in 4 bytes at offset 21: width-1 in bits 0..13, height-1 in bits 14..27
+            let bits = u32::from_le_bytes([data[21], data[22], data[23], data[24]]);
+            let w = (bits & 0x3FFF) + 1;
+            let h = ((bits >> 14) & 0x3FFF) + 1;
+            return Some((w, h));
+        }
+    }
+
+    // JPEG: scan for SOF0/SOF2 markers (0xFF 0xC0 / 0xFF 0xC2) which contain dimensions
+    if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8 {
+        let mut pos = 2;
+        while pos + 4 < data.len() {
+            if data[pos] != 0xFF {
+                pos += 1;
+                continue;
+            }
+            let marker = data[pos + 1];
+            // SOF0, SOF1, SOF2, SOF3
+            if matches!(marker, 0xC0..=0xC3) && pos + 9 < data.len() {
+                let h = u16::from_be_bytes([data[pos + 5], data[pos + 6]]) as u32;
+                let w = u16::from_be_bytes([data[pos + 7], data[pos + 8]]) as u32;
+                return Some((w, h));
+            }
+            // Skip this marker segment
+            if pos + 3 < data.len() {
+                let seg_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
+                pos += 2 + seg_len;
+            } else {
+                break;
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]

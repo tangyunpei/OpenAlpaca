@@ -19,8 +19,10 @@ pub mod imessage;
 
 pub mod startup;
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use openalpaca_core::bus::EventBus;
+use openalpaca_core::daemon_config::DaemonConfig;
 use openalpaca_core::gateway::Gateway;
 use openalpaca_storage::Database;
 use std::sync::Arc;
@@ -68,21 +70,23 @@ pub struct ConnectorBuilder {
     #[allow(dead_code)]
     bus: Arc<EventBus>,
     gateway: Arc<Gateway>,
+    daemon_config: Arc<ArcSwap<DaemonConfig>>,
 }
 
 impl ConnectorBuilder {
-    pub fn new(db: Database, bus: EventBus, gateway: Arc<Gateway>) -> Self {
+    pub fn new(db: Database, bus: EventBus, gateway: Arc<Gateway>, daemon_config: Arc<ArcSwap<DaemonConfig>>) -> Self {
         Self {
             db: Arc::new(db),
             bus: Arc::new(bus),
             gateway,
+            daemon_config,
         }
     }
 
     /// Build a Telegram connector (requires `telegram` feature).
     #[cfg(feature = "telegram")]
     pub fn telegram(self, token: String) -> telegram::TelegramConnector {
-        telegram::TelegramConnector::new(token, self.db, self.bus, self.gateway)
+        telegram::TelegramConnector::new(token, self.db, self.bus, self.gateway, self.daemon_config)
     }
 
     /// Build an iMessage connector (requires `imessage` feature, macOS only).
@@ -92,7 +96,7 @@ impl ConnectorBuilder {
         cancel_token: tokio_util::sync::CancellationToken,
         local_user_id: Option<String>,
     ) -> imessage::IMessageConnector {
-        imessage::IMessageConnector::new(self.db, self.bus, self.gateway, cancel_token, local_user_id)
+        imessage::IMessageConnector::new(self.db, self.bus, self.gateway, self.daemon_config, cancel_token, local_user_id)
     }
 }
 
@@ -115,6 +119,7 @@ pub trait ConnectorFactory: Send + Sync {
         db: Database,
         bus: EventBus,
         gateway: Arc<Gateway>,
+        daemon_config: Arc<ArcSwap<DaemonConfig>>,
     ) -> Result<startup::ConnectorHandle, ConnectorError>;
 }
 
@@ -145,8 +150,9 @@ impl ConnectorFactory for TelegramFactory {
         db: Database,
         bus: EventBus,
         gateway: Arc<Gateway>,
+        daemon_config: Arc<ArcSwap<DaemonConfig>>,
     ) -> Result<startup::ConnectorHandle, ConnectorError> {
-        let handle = startup::spawn_telegram_connector(token, db, bus, gateway);
+        let handle = startup::spawn_telegram_connector(token, db, bus, gateway, daemon_config);
         Ok(handle)
     }
 }
@@ -166,6 +172,7 @@ impl ConnectorFactory for IMessageFactory {
         db: Database,
         bus: EventBus,
         gateway: Arc<Gateway>,
+        daemon_config: Arc<ArcSwap<DaemonConfig>>,
     ) -> Result<startup::ConnectorHandle, ConnectorError> {
         let local_user_id = openalpaca_storage::ConfigRepository::new(&db)
             .get("identity.local_user_id")
@@ -176,6 +183,7 @@ impl ConnectorFactory for IMessageFactory {
             Arc::new(db),
             Arc::new(bus),
             gateway,
+            daemon_config,
             cancel_token.clone(),
             local_user_id,
         );

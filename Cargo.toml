@@ -115,6 +115,7 @@ signal-hook = "0.4.3"
 aes-gcm = "0.10"
 sha2 = "0.10"
 infer = "0.16"
+pdf-extract = "0.8"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
 # Internal Crates (continued)

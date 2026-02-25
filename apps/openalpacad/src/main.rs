@@ -392,7 +392,7 @@ async fn async_main(
     let notif_bus = bus.clone();
     let chat_bus = bus.clone();
     let connector_manager =
-        managers::connector::ConnectorManager::new(db.clone(), bus, gateway.clone());
+        managers::connector::ConnectorManager::new(db.clone(), bus, gateway.clone(), daemon_config.clone());
     connector_manager.start_all().await;
 
     // Spawn NotificationDispatcher
@@ -433,6 +433,12 @@ async fn async_main(
         );
     }
     background::spawn_memory_decay(db.clone(), daemon_config.clone(), cancel_token.clone());
+    background::spawn_file_processing_worker(
+        db.clone(),
+        daemon_config.clone(),
+        cancel_token.clone(),
+    );
+    background::spawn_asset_cleanup(db.clone(), daemon_config.clone(), cancel_token.clone());
 
     // Step 14: Build AppState and HTTP router
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
