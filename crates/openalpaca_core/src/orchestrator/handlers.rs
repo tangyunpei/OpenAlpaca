@@ -34,6 +34,38 @@ impl Orchestrator {
         lane_key: String,
         workspace_path: Option<String>,
     ) -> Result<String, String> {
+        let intent_source_content = content.clone();
+        self.handle_message_internal(
+            request_id,
+            source,
+            content,
+            intent_source_content,
+            false,
+            principal,
+            scope,
+            lane_key,
+            workspace_path,
+        )
+        .await
+    }
+
+    /// Internal message handler that separates the model input from the intent source.
+    ///
+    /// `intent_source_content` is used only for intent classification/fast-path checks.
+    /// `model_input_content` is used for planner/LLM calls and context building.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_message_internal(
+        &self,
+        request_id: Uuid,
+        source: String,
+        model_input_content: String,
+        intent_source_content: String,
+        force_simple_query: bool,
+        principal: Principal,
+        scope: Scope,
+        lane_key: String,
+        workspace_path: Option<String>,
+    ) -> Result<String, String> {
         let ack_start = Instant::now();
 
         // 1. Permission check via SecurityGate (wraps TrustGate)
@@ -44,7 +76,10 @@ impl Orchestrator {
 
         // 2. Input sanitization
         let max_input_len = self.daemon_config.load().security.max_input_length;
-        let content = SecurityGate::sanitize_input(&content, Some(max_input_len))?;
+        let model_input_content =
+            SecurityGate::sanitize_input(&model_input_content, Some(max_input_len))?;
+        let intent_source_content =
+            SecurityGate::sanitize_input(&intent_source_content, Some(max_input_len))?;
 
         // Extract owner_id from principal (before slash-command early return)
         let owner_id_str = principal_id(&principal);
@@ -66,9 +101,17 @@ impl Orchestrator {
         let scope_ctx = MemoryScopeContext::new(workspace_id);
 
         // 3. Try slash commands, task queries, and skill invocations first
-        let intent = self
-            .intent_parser
-            .parse_with_skills_and_router(&content, &self.skill_catalog, &self.skill_router);
+        let intent = if force_simple_query {
+            Intent::SimpleQuery {
+                query: intent_source_content.trim().to_string(),
+            }
+        } else {
+            self.intent_parser.parse_with_skills_and_router(
+                &intent_source_content,
+                &self.skill_catalog,
+                &self.skill_router,
+            )
+        };
         match &intent {
             Intent::TaskQuery { .. } | Intent::TaskControl { .. } => {
                 self.bus.publish(SystemEvent::IntentClassified {
@@ -88,7 +131,7 @@ impl Orchestrator {
         }
 
         // 4. Build context ONCE for all remaining paths (D6: single dedup location)
-        let ctx = self.build_context(&lane_key, &content);
+        let ctx = self.build_context(&lane_key, &model_input_content);
 
         // Build active tasks block for planner
         let active_tasks_block = if let Some(ref db) = self.db {
@@ -128,12 +171,30 @@ impl Orchestrator {
         let result: Result<String, String> = if self.is_bootstrapping() {
             mode = "bootstrap".to_string();
             self.handle_simple_query(
-                request_id, &source, &content, &lane_key, &ctx, owner_id, &scope_ctx,
+                request_id,
+                &source,
+                &model_input_content,
+                &lane_key,
+                &ctx,
+                owner_id,
+                &scope_ctx,
+            )
+            .await
+        } else if force_simple_query {
+            mode = "forced_simple_query".to_string();
+            self.handle_simple_query(
+                request_id,
+                &source,
+                &model_input_content,
+                &lane_key,
+                &ctx,
+                owner_id,
+                &scope_ctx,
             )
             .await
         } else if self.llm_router.is_some()
             && matches!(intent, Intent::SimpleQuery { .. })
-            && self.intent_parser.is_fast_path_eligible(&content)
+            && self.intent_parser.is_fast_path_eligible(&intent_source_content)
         {
             // Fast path: skip LLM planner for obviously simple messages
             mode = "fast_path".to_string();
@@ -143,7 +204,13 @@ impl Orchestrator {
                 timestamp: Utc::now(),
             });
             self.handle_simple_query(
-                request_id, &source, &content, &lane_key, &ctx, owner_id, &scope_ctx,
+                request_id,
+                &source,
+                &model_input_content,
+                &lane_key,
+                &ctx,
+                owner_id,
+                &scope_ctx,
             )
             .await
         } else if let Some(ref router) = self.llm_router {
@@ -168,7 +235,7 @@ impl Orchestrator {
             let planner_start = Instant::now();
             let plan_result = TaskPlanner::plan_hierarchical(
                 router,
-                &content,
+                &model_input_content,
                 &idle_agents,
                 &ctx.recent_messages,
                 ctx.summary.as_deref(),
@@ -191,7 +258,12 @@ impl Orchestrator {
                                 timestamp: Utc::now(),
                             });
                             self.handle_simple_query(
-                                request_id, &source, &content, &lane_key, &ctx, owner_id,
+                                request_id,
+                                &source,
+                                &model_input_content,
+                                &lane_key,
+                                &ctx,
+                                owner_id,
                                 &scope_ctx,
                             )
                             .await
@@ -203,7 +275,7 @@ impl Orchestrator {
                                 intent_type: "complex_task".to_string(),
                                 timestamp: Utc::now(),
                             });
-                            let description = &content;
+                            let description = &model_input_content;
                             let augmented = self.augment_with_context(description, &ctx);
 
                             let dispatch_start = Instant::now();
@@ -227,7 +299,12 @@ impl Orchestrator {
                                         "Dispatch planned failed: {e}, falling back to simple_query"
                                     );
                                     self.handle_simple_query(
-                                        request_id, &source, &content, &lane_key, &ctx, owner_id,
+                                        request_id,
+                                        &source,
+                                        &model_input_content,
+                                        &lane_key,
+                                        &ctx,
+                                        owner_id,
                                         &scope_ctx,
                                     )
                                     .await
@@ -243,8 +320,15 @@ impl Orchestrator {
                                 other
                             );
                             self.dispatch_with_heuristic(
-                                request_id, &source, &content, &principal, &lane_key, &ctx,
-                                owner_id, &scope_ctx,
+                                request_id,
+                                &source,
+                                &intent_source_content,
+                                &model_input_content,
+                                &principal,
+                                &lane_key,
+                                &ctx,
+                                owner_id,
+                                &scope_ctx,
                             )
                             .await
                         }
@@ -255,7 +339,14 @@ impl Orchestrator {
                     fallback_reason = Some(format!("planning_error: {e}"));
                     tracing::warn!("LLM planning failed: {}, falling back to heuristic", e);
                     self.dispatch_with_heuristic(
-                        request_id, &source, &content, &principal, &lane_key, &ctx, owner_id,
+                        request_id,
+                        &source,
+                        &intent_source_content,
+                        &model_input_content,
+                        &principal,
+                        &lane_key,
+                        &ctx,
+                        owner_id,
                         &scope_ctx,
                     )
                     .await
@@ -264,7 +355,15 @@ impl Orchestrator {
         } else {
             mode = "no_llm".to_string();
             self.dispatch_with_heuristic(
-                request_id, &source, &content, &principal, &lane_key, &ctx, owner_id, &scope_ctx,
+                request_id,
+                &source,
+                &intent_source_content,
+                &model_input_content,
+                &principal,
+                &lane_key,
+                &ctx,
+                owner_id,
+                &scope_ctx,
             )
             .await
         };
@@ -307,8 +406,13 @@ impl Orchestrator {
             let summary_fut = self.maybe_update_summary(&lane_key, &ctx);
             let extract_fut = async {
                 if let Ok(ref response_text) = result {
-                    self.maybe_extract_user_traits(&lane_key, &content, response_text, owner_id)
-                        .await;
+                    self.maybe_extract_user_traits(
+                        &lane_key,
+                        &intent_source_content,
+                        response_text,
+                        owner_id,
+                    )
+                    .await;
                 }
             };
             tokio::join!(summary_fut, extract_fut);
@@ -353,8 +457,18 @@ impl Orchestrator {
 
         augmented.push_str(&content);
 
-        self.handle_message(
-            request_id, source, augmented, principal, scope, lane_key, workspace_path,
+        let force_simple_query = content.trim().is_empty() && !attachments.is_empty();
+
+        self.handle_message_internal(
+            request_id,
+            source,
+            augmented,
+            content,
+            force_simple_query,
+            principal,
+            scope,
+            lane_key,
+            workspace_path,
         )
         .await
     }
@@ -396,7 +510,8 @@ impl Orchestrator {
         &self,
         request_id: Uuid,
         source: &str,
-        content: &str,
+        intent_content: &str,
+        model_input_content: &str,
         principal: &Principal,
         lane_key: &str,
         ctx: &ConversationContext,
@@ -405,7 +520,7 @@ impl Orchestrator {
     ) -> Result<String, String> {
         let intent = self
             .intent_parser
-            .parse_with_skills_and_router(content, &self.skill_catalog, &self.skill_router);
+            .parse_with_skills_and_router(intent_content, &self.skill_catalog, &self.skill_router);
 
         self.bus.publish(SystemEvent::IntentClassified {
             request_id,
@@ -414,20 +529,23 @@ impl Orchestrator {
         });
 
         match intent {
-            Intent::SimpleQuery { query } => {
+            Intent::SimpleQuery { .. } => {
                 self.handle_simple_query(
-                    request_id, source, &query, lane_key, ctx, owner_id, scope_ctx,
+                    request_id,
+                    source,
+                    model_input_content,
+                    lane_key,
+                    ctx,
+                    owner_id,
+                    scope_ctx,
                 )
                 .await
             }
             Intent::TaskQuery { task_id } => {
                 self.handle_task_query(task_id, &principal_id(principal))
             }
-            Intent::ComplexTask {
-                description,
-                required_skills,
-            } => {
-                let augmented = self.augment_with_context(&description, ctx);
+            Intent::ComplexTask { required_skills, .. } => {
+                let augmented = self.augment_with_context(model_input_content, ctx);
                 match self.task_dispatcher.dispatch(
                     request_id,
                     source,
@@ -458,7 +576,7 @@ impl Orchestrator {
                                 self.handle_simple_query(
                                     request_id,
                                     source,
-                                    &description,
+                                    model_input_content,
                                     lane_key,
                                     ctx,
                                     owner_id,
@@ -522,12 +640,9 @@ impl Orchestrator {
                 ContentPart::Audio { .. } if !supports_audio => ContentPart::Text {
                     text: "[audio attached — model does not support audio input]".to_string(),
                 },
-                ContentPart::Document { filename, extracted_text, .. } if !supports_document => {
-                    let text = extracted_text.as_deref().unwrap_or("[no text extracted]");
-                    ContentPart::Text {
-                        text: format!("[Document: {}]\n{}", filename, text),
-                    }
-                }
+                ContentPart::Document { .. } if !supports_document => ContentPart::Text {
+                    text: "[document attached — model does not support document input]".to_string(),
+                },
                 _ => part,
             })
             .collect()

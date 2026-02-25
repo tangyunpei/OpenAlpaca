@@ -32,6 +32,19 @@ export const uploadingFiles = writable(false);
 
 let nextLocalId = -1;
 
+export function applyDoneDataToMessage(message: ChatMessage, data: ChatStreamDoneData): ChatMessage {
+  return {
+    ...message,
+    content: data.content,
+    model: data.model,
+    tokens_in: data.tokens_in,
+    tokens_out: data.tokens_out,
+    duration_ms: data.duration_ms,
+    citations: data.citations,
+    artifacts: data.artifacts,
+  };
+}
+
 /** Load conversation history from the API. */
 export async function loadHistory(): Promise<void> {
   try {
@@ -179,14 +192,7 @@ export async function sendChatMessage(content: string): Promise<void> {
         chatMessages.update((msgs) =>
           msgs.map((m) =>
             m.id === assistantMsgId
-              ? {
-                  ...m,
-                  content: data.content,
-                  model: data.model,
-                  tokens_in: data.tokens_in,
-                  tokens_out: data.tokens_out,
-                  duration_ms: data.duration_ms,
-                }
+              ? applyDoneDataToMessage(m, data)
               : m,
           ),
         );

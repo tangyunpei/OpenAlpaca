@@ -18,7 +18,7 @@ tokio-tungstenite.workspace = true
 # CLI
 clap.workspace = true
 reqwest = { workspace = true, features = ["stream", "multipart"] }
-mime_guess = "2"
+mime_guess.workspace = true
 tokio-stream.workspace = true
 colored.workspace = true
 urlencoding.workspace = true

@@ -19,6 +19,33 @@ use tokio_util::io::ReaderStream;
 
 use crate::AppState;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MimeMagicValidationError {
+    Mismatch { detected: String },
+    Undetectable,
+}
+
+fn validate_magic_mime(declared_mime: &str, data: &[u8]) -> Result<(), MimeMagicValidationError> {
+    match infer::get(data) {
+        Some(detected) => {
+            let detected_type = detected.mime_type();
+            if declared_mime != detected_type {
+                return Err(MimeMagicValidationError::Mismatch {
+                    detected: detected_type.to_string(),
+                });
+            }
+            Ok(())
+        }
+        None => {
+            if declared_mime.starts_with("text/") {
+                Ok(())
+            } else {
+                Err(MimeMagicValidationError::Undetectable)
+            }
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct FileUploadResponse {
     pub id: String,
@@ -146,36 +173,32 @@ pub async fn upload_file_handler(
     }
 
     // Magic bytes validation via `infer` crate.
-    // Note: text/* types are excluded because text files lack reliable magic bytes.
-    // An attacker could upload binary data as text/plain — the risk is accepted since
-    // the file is stored as-is and only served back with its declared Content-Type.
-    if let Some(detected) = infer::get(&data) {
-        let detected_type = detected.mime_type();
-        if !content_type.starts_with("text/") {
-            let declared_cat = content_type.split('/').next().unwrap_or("");
-            let detected_cat = detected_type.split('/').next().unwrap_or("");
-
-            if declared_cat != detected_cat {
-                // Cross-category mismatch — definite spoofing attempt
+    // Strict mode: when a type is detected, it must exactly match the declared MIME.
+    // Text/* is only exempt when detection fails entirely.
+    match validate_magic_mime(&content_type, &data) {
+        Ok(()) => {}
+        Err(MimeMagicValidationError::Mismatch { detected }) => {
+            return error_response(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "MIME_MISMATCH",
+                &format!(
+                    "Declared MIME '{}' doesn't match detected '{}'",
+                    content_type, detected
+                ),
+            )
+            .into_response();
+        }
+        Err(MimeMagicValidationError::Undetectable) => {
+            if !content_type.starts_with("text/") {
                 return error_response(
                     StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    "MIME_MISMATCH",
+                    "MIME_UNDETECTABLE",
                     &format!(
-                        "Declared MIME '{}' doesn't match detected '{}'",
-                        content_type, detected_type
+                        "Could not detect file type from content for declared MIME '{}'",
+                        content_type
                     ),
                 )
                 .into_response();
-            }
-
-            if content_type != detected_type && detected_type != "application/octet-stream" {
-                // Same category but different subtype — log but allow
-                // (infer's subtype detection isn't reliable for all formats)
-                tracing::warn!(
-                    declared = %content_type,
-                    detected = %detected_type,
-                    "MIME subtype mismatch (same category, allowing)"
-                );
             }
         }
     }
@@ -359,4 +382,52 @@ pub async fn get_file_content_handler(
     }
 
     (headers, body).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Real file signatures to exercise infer-based MIME detection.
+    const JPEG_BYTES: &[u8] = &[
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0x01, 0x00,
+    ];
+    const ZIP_BYTES: &[u8] = &[0x50, 0x4B, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00, 0x00];
+    const UNDETECTABLE_BYTES: &[u8] = &[0x01, 0x02, 0x03, 0x04, 0x05];
+
+    #[test]
+    fn test_validate_magic_mime_rejects_image_subtype_mismatch() {
+        let err = validate_magic_mime("image/png", JPEG_BYTES).expect_err("must reject mismatch");
+        match err {
+            MimeMagicValidationError::Mismatch { detected } => {
+                assert_eq!(detected, "image/jpeg");
+            }
+            other => panic!("expected mismatch error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_magic_mime_rejects_pdf_vs_zip_mismatch() {
+        let err =
+            validate_magic_mime("application/pdf", ZIP_BYTES).expect_err("must reject mismatch");
+        match err {
+            MimeMagicValidationError::Mismatch { detected } => {
+                assert_eq!(detected, "application/zip");
+            }
+            other => panic!("expected mismatch error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_magic_mime_allows_undetectable_text() {
+        let result = validate_magic_mime("text/plain", UNDETECTABLE_BYTES);
+        assert!(result.is_ok(), "text/* should be allowed when undetectable");
+    }
+
+    #[test]
+    fn test_validate_magic_mime_rejects_undetectable_non_text() {
+        let err = validate_magic_mime("application/pdf", UNDETECTABLE_BYTES)
+            .expect_err("non-text undetectable should be rejected");
+        assert_eq!(err, MimeMagicValidationError::Undetectable);
+    }
 }
