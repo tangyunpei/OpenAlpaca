@@ -64,7 +64,34 @@ impl ChatService {
     /// 3. `Done { content, model, tokens_in, tokens_out, duration_ms }` — full text + metadata
     ///
     /// On error: `Thinking` → `Error { message }`.
-    pub fn send_message(&self, content: String, attachments: Vec<crate::gateway::ResolvedAttachment>, principal: &str, workspace_path: Option<String>) -> Result<ChatSendResponse> {
+    pub fn send_message(&self, content: String, attachment_refs: Vec<openalpaca_storage::AttachmentRef>, principal: &str, workspace_path: Option<String>) -> Result<ChatSendResponse> {
+        // Resolve AttachmentRef -> ResolvedAttachment via DB lookup
+        let file_repo = openalpaca_storage::FileAssetRepository::new(&self.db);
+        let mut attachments = Vec::new();
+        for att_ref in &attachment_refs {
+            match file_repo.get_by_id(&att_ref.file_id) {
+                Ok(Some(asset)) => {
+                    if asset.owner_id != principal {
+                        anyhow::bail!("Access denied to attachment: {}", att_ref.file_id);
+                    }
+                    attachments.push(crate::gateway::ResolvedAttachment {
+                        file_id: asset.id,
+                        filename: asset.filename,
+                        mime_type: asset.mime_type,
+                        size_bytes: asset.size_bytes,
+                        extracted_text: asset.extracted_text,
+                        storage_path: asset.storage_path,
+                    });
+                }
+                Ok(None) => {
+                    anyhow::bail!("Attachment not found: {}", att_ref.file_id);
+                }
+                Err(e) => {
+                    anyhow::bail!("Failed to resolve attachment {}: {}", att_ref.file_id, e);
+                }
+            }
+        }
+
         let lane_key = format!("{principal}:gui");
 
         let (stream_id, _rx, sink) = self.stream_manager.create_stream(&lane_key);

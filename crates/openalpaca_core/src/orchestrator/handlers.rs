@@ -6,6 +6,7 @@ use crate::security::gate::SecurityGate;
 use crate::security::policy::{Principal, Scope};
 use crate::types::Capability;
 use chrono::Utc;
+use openalpaca_llm::ContentPart;
 use openalpaca_storage::repository::TaskRepository;
 use openalpaca_storage::repository::orchestrator_latency::{
     OrchestratorLatencyRecord, OrchestratorLatencyRepository,
@@ -491,5 +492,44 @@ impl Orchestrator {
                 .await
             }
         }
+    }
+
+    /// Adapt multimodal content parts for a model's capabilities.
+    ///
+    /// Replaces unsupported content types with text placeholders based on
+    /// the model's capability flags in the registry.
+    pub(super) fn adapt_parts_for_model(
+        &self,
+        parts: Vec<ContentPart>,
+        model_id: &str,
+    ) -> Vec<ContentPart> {
+        let router = match &self.llm_router {
+            Some(r) => r,
+            None => return parts,
+        };
+        let registry = router.model_registry();
+
+        let supports_image = registry.supports_image(model_id);
+        let supports_audio = registry.supports_audio(model_id);
+        let supports_document = registry.supports_document(model_id);
+
+        parts
+            .into_iter()
+            .map(|part| match &part {
+                ContentPart::Image { .. } if !supports_image => ContentPart::Text {
+                    text: "[image attached — model does not support vision]".to_string(),
+                },
+                ContentPart::Audio { .. } if !supports_audio => ContentPart::Text {
+                    text: "[audio attached — model does not support audio input]".to_string(),
+                },
+                ContentPart::Document { filename, extracted_text, .. } if !supports_document => {
+                    let text = extracted_text.as_deref().unwrap_or("[no text extracted]");
+                    ContentPart::Text {
+                        text: format!("[Document: {}]\n{}", filename, text),
+                    }
+                }
+                _ => part,
+            })
+            .collect()
     }
 }

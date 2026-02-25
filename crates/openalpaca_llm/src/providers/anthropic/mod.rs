@@ -35,6 +35,84 @@ impl AnthropicProvider {
         }
     }
 
+    /// Build Anthropic content blocks from a ChatMessage.
+    ///
+    /// If the message has multimodal `parts`, builds an array of content blocks
+    /// in Anthropic's format. If parts is None, returns a plain string value.
+    fn build_message_content(msg: &ChatMessage) -> serde_json::Value {
+        let parts = match &msg.parts {
+            Some(parts) if !parts.is_empty() => parts,
+            _ => return serde_json::Value::String(msg.content.clone()),
+        };
+
+        let blocks: Vec<serde_json::Value> = parts
+            .iter()
+            .map(|part| match part {
+                ContentPart::Text { text } => {
+                    serde_json::json!({ "type": "text", "text": text })
+                }
+                ContentPart::Image { source, .. } => match source {
+                    ImageSource::Base64 { media_type, data } => {
+                        serde_json::json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": data.as_str(),
+                            }
+                        })
+                    }
+                    ImageSource::Url { url } => {
+                        serde_json::json!({
+                            "type": "image",
+                            "source": {
+                                "type": "url",
+                                "url": url,
+                            }
+                        })
+                    }
+                    ImageSource::FileAsset { file_id, media_type } => {
+                        // FileAsset should be resolved to Base64 before reaching the provider.
+                        // If it hasn't been, emit a placeholder text block.
+                        serde_json::json!({
+                            "type": "text",
+                            "text": format!("[image file_id={} not resolved — media_type={}]", file_id, media_type),
+                        })
+                    }
+                }
+                ContentPart::Audio { .. } => {
+                    // Anthropic does not support audio input
+                    serde_json::json!({
+                        "type": "text",
+                        "text": "[audio content — not supported by this model]",
+                    })
+                }
+                ContentPart::Document { filename, mime_type, extracted_text, .. } => {
+                    // Anthropic supports PDF via beta; fall back to extracted text for now
+                    if let Some(text) = extracted_text {
+                        serde_json::json!({
+                            "type": "text",
+                            "text": format!("[Document: {} ({})]\n{}", filename, mime_type, text),
+                        })
+                    } else {
+                        serde_json::json!({
+                            "type": "text",
+                            "text": format!("[Document: {} ({}) — no extracted text available]", filename, mime_type),
+                        })
+                    }
+                }
+                ContentPart::FileRef { file_id, filename, mime_type } => {
+                    serde_json::json!({
+                        "type": "text",
+                        "text": format!("[File reference: {} ({}) id={}]", filename, mime_type, file_id),
+                    })
+                }
+            })
+            .collect();
+
+        serde_json::Value::Array(blocks)
+    }
+
     fn build_request_body(&self, request: &ChatRequest) -> serde_json::Value {
         let model = request.model.as_deref().unwrap_or(&self.model);
         let max_tokens = request.max_tokens.unwrap_or(self.max_tokens);
@@ -54,7 +132,7 @@ impl AnthropicProvider {
                 Role::User => {
                     messages.push(serde_json::json!({
                         "role": "user",
-                        "content": msg.content,
+                        "content": Self::build_message_content(msg),
                     }));
                 }
                 Role::Assistant => {

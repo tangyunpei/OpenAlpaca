@@ -62,23 +62,23 @@ fn estimate_part_tokens(part: &openalpaca_llm::ContentPart) -> u32 {
 /// When multimodal parts are present, estimates per-part tokens instead.
 /// Consistent with `estimate_request_tokens` in the LLM router.
 fn estimate_messages_tokens(messages: &[ChatMessage]) -> u32 {
-    let bytes: usize = messages
+    let tokens: u32 = messages
         .iter()
         .map(|m| {
-            let content_tokens = if let Some(ref parts) = m.parts {
-                parts.iter().map(|p| estimate_part_tokens(p) as usize).sum()
+            let content_tokens: u32 = if let Some(ref parts) = m.parts {
+                parts.iter().map(|p| estimate_part_tokens(p)).sum()
             } else {
-                m.content.len()
+                (m.content.len() / 4) as u32
             };
-            content_tokens
-                + m.tool_calls.as_ref().map_or(0, |tcs| {
-                    tcs.iter()
-                        .map(|tc| tc.name.len() + tc.arguments.to_string().len())
-                        .sum()
-                })
+            let tool_call_tokens: u32 = m.tool_calls.as_ref().map_or(0, |tcs| {
+                tcs.iter()
+                    .map(|tc| ((tc.name.len() + tc.arguments.to_string().len()) / 4) as u32)
+                    .sum()
+            });
+            content_tokens + tool_call_tokens
         })
         .sum();
-    (bytes / 4).max(100) as u32
+    tokens.max(100)
 }
 
 /// Compress context by replacing older rounds with a compact summary.

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ChatMessage, AttachmentDisplay } from "$lib/types";
+  import type { ChatMessage, AttachmentDisplay, Citation, Artifact } from "$lib/types";
   import { formatFileSize } from "$lib/types";
   import { renderMarkdown } from "$lib/markdown";
   import { downloadFile } from "$lib/api/files";
@@ -126,6 +126,36 @@
                 </svg>
                 <span class="truncate max-w-[100px]">{att.filename}</span>
                 <span class="text-muted-foreground/50 shrink-0">{formatFileSize(att.size_bytes)}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+
+        {#if message.citations && message.citations.length > 0}
+          <div class="flex flex-col gap-1 mt-2 pt-2 border-t border-white/[0.06]">
+            <span class="text-[0.65rem] text-muted-foreground/50 uppercase tracking-wider font-medium">Sources</span>
+            {#each message.citations as cit, i}
+              <div class="flex items-start gap-1.5 text-xs text-muted-foreground">
+                <span class="shrink-0 text-accent/60 font-mono">[{i + 1}]</span>
+                <span class="break-words">{cit.excerpt}{#if cit.page} <span class="text-muted-foreground/40">(p.{cit.page})</span>{/if}</span>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        {#if message.artifacts && message.artifacts.length > 0}
+          <div class="flex flex-wrap gap-1.5 mt-2 pt-2 border-t border-white/[0.06]">
+            {#each message.artifacts as art}
+              <button
+                class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-accent/15 bg-accent/[0.04]
+                       hover:bg-accent/[0.08] hover:border-accent/25 transition-all cursor-pointer"
+                onclick={() => handleDownload({ file_id: art.file_id, filename: art.label, mime_type: art.mime_type, size_bytes: 0 })}
+                title="Download {art.label}"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-accent/60">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+                <span class="truncate max-w-[120px]">{art.label}</span>
               </button>
             {/each}
           </div>

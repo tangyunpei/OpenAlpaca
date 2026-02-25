@@ -62,6 +62,80 @@ impl OpenAiProvider {
         }
     }
 
+    /// Build OpenAI content value from a ChatMessage.
+    ///
+    /// If the message has multimodal `parts`, builds an array of content objects
+    /// in OpenAI's format. If parts is None, returns a plain string value.
+    fn build_message_content(msg: &ChatMessage) -> serde_json::Value {
+        let parts = match &msg.parts {
+            Some(parts) if !parts.is_empty() => parts,
+            _ => return serde_json::Value::String(msg.content.clone()),
+        };
+
+        let blocks: Vec<serde_json::Value> = parts
+            .iter()
+            .map(|part| match part {
+                ContentPart::Text { text } => {
+                    serde_json::json!({ "type": "text", "text": text })
+                }
+                ContentPart::Image { source, detail } => {
+                    let url = match source {
+                        ImageSource::Base64 { media_type, data } => {
+                            format!("data:{};base64,{}", media_type, data.as_str())
+                        }
+                        ImageSource::Url { url } => url.clone(),
+                        ImageSource::FileAsset { file_id, media_type } => {
+                            // Should be resolved before reaching provider
+                            return serde_json::json!({
+                                "type": "text",
+                                "text": format!("[image file_id={} not resolved — media_type={}]", file_id, media_type),
+                            });
+                        }
+                    };
+                    let detail_val = detail.as_deref().unwrap_or("auto");
+                    serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": url,
+                            "detail": detail_val,
+                        }
+                    })
+                }
+                ContentPart::Audio { data, format } => {
+                    serde_json::json!({
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": data.as_str(),
+                            "format": format,
+                        }
+                    })
+                }
+                ContentPart::Document { filename, mime_type, extracted_text, .. } => {
+                    // OpenAI has no native document input; use extracted text fallback
+                    if let Some(text) = extracted_text {
+                        serde_json::json!({
+                            "type": "text",
+                            "text": format!("[Document: {} ({})]\n{}", filename, mime_type, text),
+                        })
+                    } else {
+                        serde_json::json!({
+                            "type": "text",
+                            "text": format!("[Document: {} ({}) — no extracted text available]", filename, mime_type),
+                        })
+                    }
+                }
+                ContentPart::FileRef { file_id, filename, mime_type } => {
+                    serde_json::json!({
+                        "type": "text",
+                        "text": format!("[File reference: {} ({}) id={}]", filename, mime_type, file_id),
+                    })
+                }
+            })
+            .collect();
+
+        serde_json::Value::Array(blocks)
+    }
+
     pub(crate) fn build_request_body(&self, request: &ChatRequest) -> serde_json::Value {
         let model = request.model.as_deref().unwrap_or(&self.model);
         let max_tokens = request.max_tokens.unwrap_or(self.max_tokens);
@@ -77,9 +151,15 @@ impl OpenAiProvider {
                     Role::Tool => "tool",
                 };
 
+                let content = if matches!(msg.role, Role::User) {
+                    Self::build_message_content(msg)
+                } else {
+                    serde_json::Value::String(msg.content.clone())
+                };
+
                 let mut obj = serde_json::json!({
                     "role": role,
-                    "content": msg.content,
+                    "content": content,
                 });
 
                 if let Some(ref tool_calls) = msg.tool_calls {
