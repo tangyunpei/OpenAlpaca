@@ -53,17 +53,21 @@ pub struct IMessageConnector {
     gateway: Arc<Gateway>,
     cancel_token: CancellationToken,
     chat_db_path: String,
+    local_user_id: Option<String>,
 }
 
 impl IMessageConnector {
     /// Create a new IMessageConnector.
     ///
     /// The chat.db path defaults to `~/Library/Messages/chat.db`.
+    /// If `local_user_id` is provided, it is used as the principal identity
+    /// for all messages (bypassing the heuristic `resolve_owner` fallback).
     pub fn new(
         db: Arc<Database>,
         bus: Arc<openalpaca_core::bus::EventBus>,
         gateway: Arc<Gateway>,
         cancel_token: CancellationToken,
+        local_user_id: Option<String>,
     ) -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/Users".to_string());
         let chat_db_path = format!("{}/Library/Messages/chat.db", home);
@@ -73,37 +77,74 @@ impl IMessageConnector {
             gateway,
             cancel_token,
             chat_db_path,
+            local_user_id,
         }
     }
 
     /// Main polling loop.
     ///
-    /// Initialises the ROWID watermark to the current maximum so that
-    /// historical messages are skipped, then polls every 2 seconds for
-    /// new incoming messages.
+    /// Restores the persisted ROWID watermark so that messages received
+    /// while the connector was offline are still processed. On first run
+    /// (no persisted watermark), initializes to the current max ROWID to
+    /// avoid replaying the entire history.
     pub async fn run_loop(&self) -> Result<(), ConnectorError> {
         info!("Starting iMessage connector...");
         let mut reader =
             ChatDbReader::new(&self.chat_db_path).map_err(ConnectorError::InitFailed)?;
 
-        // Initialize watermark to current max ROWID
-        reader
-            .initialize_watermark()
-            .map_err(ConnectorError::InitFailed)?;
-        info!("iMessage connector initialized, watermark set");
+        // Restore persisted watermark, or initialize to current max ROWID
+        let config_repo = openalpaca_storage::ConfigRepository::new(&self.db);
+        let persisted_watermark = config_repo
+            .get("imessage.last_rowid")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<i64>().ok());
+
+        if let Some(watermark) = persisted_watermark {
+            reader.set_watermark(watermark);
+            info!("iMessage connector restored watermark to ROWID {}", watermark);
+        } else {
+            reader
+                .initialize_watermark()
+                .map_err(ConnectorError::InitFailed)?;
+            info!("iMessage connector initialized, watermark set to current max ROWID");
+        }
 
         loop {
             tokio::select! {
                 _ = self.cancel_token.cancelled() => {
                     info!("iMessage connector shutting down");
+                    // Persist watermark on clean shutdown so offline messages
+                    // are not lost on restart.
+                    let config_repo = openalpaca_storage::ConfigRepository::new(&self.db);
+                    if let Err(e) = config_repo.set(
+                        "imessage.last_rowid",
+                        &reader.watermark().to_string(),
+                        "int",
+                    ) {
+                        warn!("Failed to persist iMessage watermark on shutdown: {e}");
+                    }
                     return Ok(());
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
                     match reader.poll_new_messages() {
                         Ok(messages) => {
+                            let had_messages = !messages.is_empty();
                             for msg in messages {
                                 if let Err(e) = self.handle_message(msg).await {
                                     error!("Failed to handle iMessage: {}", e);
+                                }
+                            }
+                            // Persist watermark after processing so offline
+                            // messages are not lost on restart.
+                            if had_messages {
+                                let config_repo = openalpaca_storage::ConfigRepository::new(&self.db);
+                                if let Err(e) = config_repo.set(
+                                    "imessage.last_rowid",
+                                    &reader.watermark().to_string(),
+                                    "int",
+                                ) {
+                                    warn!("Failed to persist iMessage watermark: {e}");
                                 }
                             }
                         }
@@ -116,19 +157,28 @@ impl IMessageConnector {
         }
     }
 
-    /// Auto-detect the macOS owner and resolve to a GlobalUser principal.
-    /// On first run: finds the first GlobalUser, or creates one from the macOS username.
+    /// Resolve the macOS owner as a GlobalUser principal.
+    ///
+    /// Resolution order:
+    /// 1. Use the explicit `local_user_id` passed at construction (from daemon bootstrap).
+    /// 2. Read `identity.local_user_id` from `system_config` (standalone mode).
+    /// 3. Last resort: create a new global user from the macOS username.
     fn resolve_owner(&self) -> Result<Principal, String> {
-        let identity_repo = IdentityRepository::new(&self.db);
-
-        // Try to find existing first global user
-        if let Ok(Some(user)) = identity_repo.get_first_global_user() {
+        // 1. Prefer explicit local_user_id from daemon bootstrap
+        if let Some(ref id) = self.local_user_id {
             return Ok(Principal::User {
-                global_id: user.id,
+                global_id: id.clone(),
             });
         }
 
-        // No global user exists — create one from macOS username
+        // 2. Fallback: read from system_config (standalone mode)
+        let config_repo = openalpaca_storage::ConfigRepository::new(&self.db);
+        if let Ok(Some(id)) = config_repo.get("identity.local_user_id") {
+            return Ok(Principal::User { global_id: id });
+        }
+
+        // 3. Last resort: create from macOS username
+        let identity_repo = IdentityRepository::new(&self.db);
         let username = std::env::var("USER")
             .or_else(|_| std::env::var("LOGNAME"))
             .unwrap_or_else(|_| "mac-owner".to_string());

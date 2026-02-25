@@ -230,30 +230,70 @@ impl<'a> IdentityRepository<'a> {
         })
     }
 
-    /// Consume a link token (returns GlobalUser ID if valid)
+    /// Consume a link token atomically (returns GlobalUser ID if valid).
+    ///
+    /// Uses a single UPDATE with WHERE conditions to avoid TOCTOU races:
+    /// the token is only consumed if it exists, has not been used, and has
+    /// not expired — all checked atomically in one statement.
     pub fn consume_link_token(&self, token: &str) -> Result<Option<String>> {
         let now = Utc::now();
+        let now_str = now.to_rfc3339();
 
         self.db.with_connection(|conn| {
-            // Check if token exists, not expired, and not used
-            let mut stmt = conn.prepare(
+            // Atomically mark the token as used only if it is valid.
+            // The WHERE clause ensures: exists AND not used AND not expired.
+            let rows_affected = conn.execute(
+                "UPDATE link_token SET used_at = ?1
+                 WHERE token = ?2 AND used_at IS NULL AND expires_at > ?1",
+                rusqlite::params![now_str, token],
+            )?;
+
+            if rows_affected == 0 {
+                // Token was invalid, already used, expired, or does not exist.
+                return Ok(None);
+            }
+
+            // Fetch the global_user_id for the (now consumed) token.
+            let global_user_id: String = conn.query_row(
+                "SELECT global_user_id FROM link_token WHERE token = ?1",
+                [token],
+                |row| row.get(0),
+            )?;
+
+            Ok(Some(global_user_id))
+        })
+    }
+
+    /// Consume a link token AND link the external identity in a single transaction.
+    /// Returns the global_user_id on success, None if token is invalid/expired/used.
+    pub fn consume_and_link(
+        &self,
+        token: &str,
+        external_identity_id: i64,
+    ) -> Result<Option<String>> {
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+
+        self.db.with_connection(|conn| {
+            let tx = conn.unchecked_transaction()?;
+
+            // Check token validity
+            let mut stmt = tx.prepare(
                 "SELECT id, global_user_id, expires_at, used_at FROM link_token WHERE token = ?1",
             )?;
             let mut rows = stmt.query([token])?;
 
-            match rows.next()? {
+            let (token_id, global_user_id) = match rows.next()? {
                 Some(row) => {
                     let id: i64 = row.get(0)?;
                     let global_user_id: String = row.get(1)?;
                     let expires_at_str: String = row.get(2)?;
                     let used_at: Option<String> = row.get(3)?;
 
-                    // Already used?
                     if used_at.is_some() {
                         return Ok(None);
                     }
 
-                    // Expired?
                     let expires_at = DateTime::parse_from_rfc3339(&expires_at_str)
                         .map(|dt| dt.with_timezone(&Utc))
                         .unwrap_or_else(|_| Utc::now());
@@ -261,16 +301,28 @@ impl<'a> IdentityRepository<'a> {
                         return Ok(None);
                     }
 
-                    // Mark as used
-                    conn.execute(
-                        "UPDATE link_token SET used_at = ?1 WHERE id = ?2",
-                        (now.to_rfc3339(), id),
-                    )?;
-
-                    Ok(Some(global_user_id))
+                    (id, global_user_id)
                 }
-                None => Ok(None),
-            }
+                None => return Ok(None),
+            };
+            // Must drop the statement before executing more SQL on the same transaction
+            drop(rows);
+            drop(stmt);
+
+            // Mark token as used
+            tx.execute(
+                "UPDATE link_token SET used_at = ?1 WHERE id = ?2",
+                (&now_str, token_id),
+            )?;
+
+            // Link the identity
+            tx.execute(
+                "UPDATE external_identity SET global_user_id = ?1, linked_at = ?2 WHERE id = ?3",
+                (&global_user_id, &now_str, external_identity_id),
+            )?;
+
+            tx.commit()?;
+            Ok(Some(global_user_id))
         })
     }
 
@@ -381,7 +433,7 @@ impl<'a> IdentityRepository<'a> {
     pub fn get_chat_id_by_lane_key(&self, lane_key: &str, provider: &str) -> Result<Option<i64>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT provider_conversation_id FROM conversation_map WHERE lane_key = ?1 AND provider = ?2",
+                "SELECT provider_conversation_id FROM conversation_map WHERE lane_key = ?1 AND provider = ?2 ORDER BY created_at DESC LIMIT 1",
             )?;
             let mut rows = stmt.query(rusqlite::params![lane_key, provider])?;
             match rows.next()? {
