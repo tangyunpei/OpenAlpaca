@@ -5,12 +5,14 @@ use crate::memory::scope_context::MemoryScopeContext;
 use crate::security::gate::SecurityGate;
 use crate::security::policy::{Principal, Scope};
 use crate::types::Capability;
+use base64::Engine as _;
 use chrono::Utc;
-use openalpaca_llm::ContentPart;
+use openalpaca_llm::{ContentPart, ImageSource};
 use openalpaca_storage::repository::TaskRepository;
 use openalpaca_storage::repository::orchestrator_latency::{
     OrchestratorLatencyRecord, OrchestratorLatencyRepository,
 };
+use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -42,6 +44,7 @@ impl Orchestrator {
             content,
             intent_source_content,
             false,
+            None, // no structured parts for text-only messages
             principal,
             scope,
             lane_key,
@@ -62,6 +65,7 @@ impl Orchestrator {
         model_input_content: String,
         intent_source_content: String,
         force_simple_query: bool,
+        current_parts: Option<Vec<ContentPart>>,
         principal: Principal,
         scope: Scope,
         lane_key: String,
@@ -179,6 +183,7 @@ impl Orchestrator {
                 &ctx,
                 owner_id,
                 &scope_ctx,
+                current_parts.as_deref(),
             )
             .await
         } else if force_simple_query {
@@ -191,6 +196,7 @@ impl Orchestrator {
                 &ctx,
                 owner_id,
                 &scope_ctx,
+                current_parts.as_deref(),
             )
             .await
         } else if self.llm_router.is_some()
@@ -212,6 +218,7 @@ impl Orchestrator {
                 &ctx,
                 owner_id,
                 &scope_ctx,
+                current_parts.as_deref(),
             )
             .await
         } else if let Some(ref router) = self.llm_router {
@@ -266,6 +273,7 @@ impl Orchestrator {
                                 &ctx,
                                 owner_id,
                                 &scope_ctx,
+                                current_parts.as_deref(),
                             )
                             .await
                         }
@@ -307,6 +315,7 @@ impl Orchestrator {
                                         &ctx,
                                         owner_id,
                                         &scope_ctx,
+                                        current_parts.as_deref(),
                                     )
                                     .await
                                 }
@@ -330,6 +339,7 @@ impl Orchestrator {
                                 &ctx,
                                 owner_id,
                                 &scope_ctx,
+                                current_parts.as_deref(),
                             )
                             .await
                         }
@@ -349,6 +359,7 @@ impl Orchestrator {
                         &ctx,
                         owner_id,
                         &scope_ctx,
+                        current_parts.as_deref(),
                     )
                     .await
                 }
@@ -365,6 +376,7 @@ impl Orchestrator {
                 &ctx,
                 owner_id,
                 &scope_ctx,
+                current_parts.as_deref(),
             )
             .await
         };
@@ -441,31 +453,84 @@ impl Orchestrator {
         lane_key: String,
         workspace_path: Option<String>,
     ) -> Result<String, String> {
-        // Build augmented content with attachment context injected before the user query
-        let mut augmented = String::new();
+        // 1. Build structured ContentParts from attachments
+        let mut parts: Vec<ContentPart> = Vec::new();
+        for att in &attachments {
+            if att.mime_type.starts_with("image/") {
+                match tokio::fs::read(&att.storage_path).await {
+                    Ok(bytes) => {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                        parts.push(ContentPart::Image {
+                            source: ImageSource::Base64 {
+                                media_type: att.mime_type.clone(),
+                                data: Arc::new(b64),
+                            },
+                            detail: None,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            file_id = %att.file_id,
+                            path = %att.storage_path,
+                            "Failed to read image bytes for multimodal input: {e}"
+                        );
+                        parts.push(ContentPart::Text {
+                            text: "[image attached — failed to read image bytes]".to_string(),
+                        });
+                    }
+                }
+            } else {
+                parts.push(ContentPart::Document {
+                    file_id: att.file_id.clone(),
+                    filename: att.filename.clone(),
+                    mime_type: att.mime_type.clone(),
+                    extracted_text: att.extracted_text.clone(),
+                });
+                if att.extracted_text.is_none() && !att.mime_type.starts_with("audio/") {
+                    parts.push(ContentPart::Text {
+                        text: "[document attached — text extraction pending]".to_string(),
+                    });
+                }
+            }
+        }
+        // Add text query as final part
+        if !content.trim().is_empty() {
+            parts.push(ContentPart::Text {
+                text: content.clone(),
+            });
+        }
 
+        // 2. Build text-only augmented string for intent classification
+        //    (intent parser and planner only understand text)
+        let mut augmented = String::new();
         for att in &attachments {
             let ctx_block = if let Some(ref text) = att.extracted_text {
                 let truncated = text.chars().take(4000).collect::<String>();
                 format!("[File: {} ({})]\n{}", att.filename, att.mime_type, truncated)
-            } else {
+            } else if att.mime_type.starts_with("image/") || att.mime_type.starts_with("audio/") {
                 format!("[File: {} ({})]", att.filename, att.mime_type)
+            } else {
+                format!(
+                    "[File: {} ({})]\n[document attached — text extraction pending]",
+                    att.filename, att.mime_type
+                )
             };
             let wrapped = wrap_untrusted_context(&ctx_block, "file_attachment", "user_derived");
             augmented.push_str(&wrapped);
             augmented.push('\n');
         }
-
         augmented.push_str(&content);
 
         let force_simple_query = content.trim().is_empty() && !attachments.is_empty();
 
+        // 3. Pass BOTH the text augmented string AND the structured parts
         self.handle_message_internal(
             request_id,
             source,
             augmented,
             content,
             force_simple_query,
+            Some(parts),
             principal,
             scope,
             lane_key,
@@ -518,6 +583,7 @@ impl Orchestrator {
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
+        current_parts: Option<&[ContentPart]>,
     ) -> Result<String, String> {
         let intent = self
             .intent_parser
@@ -539,6 +605,7 @@ impl Orchestrator {
                     ctx,
                     owner_id,
                     scope_ctx,
+                    current_parts,
                 )
                 .await
             }
@@ -582,6 +649,7 @@ impl Orchestrator {
                                     ctx,
                                     owner_id,
                                     scope_ctx,
+                                    current_parts,
                                 )
                                 .await
                             }

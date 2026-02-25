@@ -7,7 +7,8 @@ use crate::security::sandbox::SandboxManager;
 use crate::test_util::{make_agent, template_from_agent};
 use crate::tools::{RegistryToolExecutor, ToolRegistry};
 use async_trait::async_trait;
-use openalpaca_llm::ContentPart;
+use base64::Engine as _;
+use openalpaca_llm::{ChatRequest, ContentPart, ImageSource};
 use uuid::Uuid;
 
 fn make_tool_registry() -> Arc<ToolRegistry> {
@@ -113,6 +114,53 @@ fn make_orchestrator_with_fixed_llm_response(response: &str) -> Orchestrator {
         "claude-sonnet-4-5-20250929".to_string(),
     );
 
+    make_orchestrator_with_llm_and_agents(Arc::new(router), vec![])
+}
+
+fn make_orchestrator_with_capturing_llm(
+    captured_requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+) -> Orchestrator {
+    use openalpaca_llm::{
+        ChatResponse, FinishReason, LlmError, LlmProvider, ProviderType, Usage,
+    };
+
+    struct CapturingMockLlm {
+        captured_requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CapturingMockLlm {
+        fn name(&self) -> &str {
+            "capturing-mock"
+        }
+
+        fn supports_tools(&self) -> bool {
+            false
+        }
+
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            if let Ok(mut guard) = self.captured_requests.lock() {
+                guard.push(request);
+            }
+            Ok(ChatResponse {
+                content: r#"{"status":"ok","answer":"captured"}"#.to_string(),
+                tool_calls: vec![],
+                model: "mock-model".to_string(),
+                usage: Usage {
+                    input_tokens: 12,
+                    output_tokens: 8,
+                    ..Default::default()
+                },
+                finish_reason: FinishReason::Stop,
+            })
+        }
+    }
+
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(CapturingMockLlm { captured_requests }),
+        ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
     make_orchestrator_with_llm_and_agents(Arc::new(router), vec![])
 }
 
@@ -984,4 +1032,163 @@ fn test_adapt_parts_document_unsupported_uses_fixed_placeholder() {
         }
         other => panic!("expected text placeholder, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn test_attachment_image_is_converted_to_base64_part() {
+    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::<ChatRequest>::new()));
+    let orch = make_orchestrator_with_capturing_llm(captured_requests.clone());
+
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let img_path = tmp_dir.path().join("image.jpg");
+    let image_bytes = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x12, 0x34];
+    std::fs::write(&img_path, &image_bytes).unwrap();
+    let expected_b64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+
+    let attachments = vec![ResolvedAttachment {
+        file_id: "img-1".to_string(),
+        filename: "image.jpg".to_string(),
+        mime_type: "image/jpeg".to_string(),
+        size_bytes: image_bytes.len() as i64,
+        extracted_text: None,
+        storage_path: img_path.to_string_lossy().to_string(),
+    }];
+
+    let _ = orch
+        .handle_message_with_attachments(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "what is in this image?".to_string(),
+            attachments,
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let guard = captured_requests.lock().unwrap();
+    let req = guard.last().expect("expected at least one captured request");
+    let user_msg = req
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == openalpaca_llm::Role::User && m.parts.is_some())
+        .expect("expected user message with parts");
+    let parts = user_msg.parts.as_ref().unwrap();
+    let image_part = parts
+        .iter()
+        .find_map(|p| match p {
+            ContentPart::Image { source, .. } => Some(source),
+            _ => None,
+        })
+        .expect("expected image part");
+    match image_part {
+        ImageSource::Base64 { media_type, data } => {
+            assert_eq!(media_type, "image/jpeg");
+            assert_eq!(data.as_str(), expected_b64);
+        }
+        other => panic!("expected base64 image source, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_attachment_image_read_failure_inserts_placeholder_text() {
+    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::<ChatRequest>::new()));
+    let orch = make_orchestrator_with_capturing_llm(captured_requests.clone());
+
+    let attachments = vec![ResolvedAttachment {
+        file_id: "img-missing".to_string(),
+        filename: "missing.jpg".to_string(),
+        mime_type: "image/jpeg".to_string(),
+        size_bytes: 0,
+        extracted_text: None,
+        storage_path: "/tmp/openalpaca-does-not-exist.jpg".to_string(),
+    }];
+
+    let _ = orch
+        .handle_message_with_attachments(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "describe this image".to_string(),
+            attachments,
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let guard = captured_requests.lock().unwrap();
+    let req = guard.last().expect("expected at least one captured request");
+    let user_msg = req
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == openalpaca_llm::Role::User && m.parts.is_some())
+        .expect("expected user message with parts");
+    let parts = user_msg.parts.as_ref().unwrap();
+    assert!(parts.iter().any(|p| matches!(
+        p,
+        ContentPart::Text { text }
+            if text == "[image attached — failed to read image bytes]"
+    )));
+}
+
+#[tokio::test]
+async fn test_attachment_document_pending_adds_pending_text_part() {
+    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::<ChatRequest>::new()));
+    let orch = make_orchestrator_with_capturing_llm(captured_requests.clone());
+
+    let attachments = vec![ResolvedAttachment {
+        file_id: "doc-1".to_string(),
+        filename: "resume.pdf".to_string(),
+        mime_type: "application/pdf".to_string(),
+        size_bytes: 123,
+        extracted_text: None,
+        storage_path: "/tmp/resume.pdf".to_string(),
+    }];
+
+    let _ = orch
+        .handle_message_with_attachments(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "summarize this".to_string(),
+            attachments,
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let guard = captured_requests.lock().unwrap();
+    let req = guard.last().expect("expected at least one captured request");
+    let user_msg = req
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == openalpaca_llm::Role::User && m.parts.is_some())
+        .expect("expected user message with parts");
+    let parts = user_msg.parts.as_ref().unwrap();
+    assert!(parts.iter().any(|p| matches!(
+        p,
+        ContentPart::Document {
+            file_id,
+            filename,
+            mime_type,
+            extracted_text
+        } if file_id == "doc-1"
+            && filename == "resume.pdf"
+            && mime_type == "application/pdf"
+            && extracted_text.is_none()
+    )));
+    assert!(parts.iter().any(|p| matches!(
+        p,
+        ContentPart::Text { text }
+            if text == "[document attached — text extraction pending]"
+    )));
 }

@@ -509,6 +509,10 @@ pub struct UploadGovernanceConfig {
     pub max_concurrent_extractions: usize,
     /// Number of times to retry a failed extraction before giving up (default: 1).
     pub extraction_retry_count: u32,
+    /// Max time to wait for attachment processing before chat proceeds (default: 8000ms).
+    pub attachment_ready_wait_ms: u64,
+    /// Poll interval when waiting for attachment readiness (default: 200ms).
+    pub attachment_ready_poll_interval_ms: u64,
     /// Maximum image dimension (width or height) in pixels (default: 8192).
     pub max_image_dimension: u32,
 }
@@ -523,6 +527,11 @@ impl Default for UploadConfig {
                 "application/pdf".to_string(),
                 "text/".to_string(),
                 "audio/".to_string(),
+                "application/msword".to_string(),
+                "application/vnd.openxmlformats-officedocument.".to_string(),
+                "application/vnd.ms-excel".to_string(),
+                "application/vnd.ms-powerpoint".to_string(),
+                "application/vnd.apple.".to_string(),
             ],
             max_files_per_message: 10,
             retention_days: 30,
@@ -541,6 +550,8 @@ impl Default for UploadGovernanceConfig {
             orphan_grace_period_hours: 24,
             max_concurrent_extractions: 2,
             extraction_retry_count: 1,
+            attachment_ready_wait_ms: 8_000,
+            attachment_ready_poll_interval_ms: 200,
             max_image_dimension: 8192,
         }
     }
@@ -967,6 +978,18 @@ impl DaemonConfig {
             0,
             5,
             "upload.governance.extraction_retry_count",
+        );
+        clamp_val(
+            &mut self.upload.governance.attachment_ready_wait_ms,
+            0,
+            30_000,
+            "upload.governance.attachment_ready_wait_ms",
+        );
+        clamp_val(
+            &mut self.upload.governance.attachment_ready_poll_interval_ms,
+            50,
+            2_000,
+            "upload.governance.attachment_ready_poll_interval_ms",
         );
         clamp_val(
             &mut self.upload.governance.max_image_dimension,

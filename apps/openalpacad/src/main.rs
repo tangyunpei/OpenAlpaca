@@ -11,6 +11,7 @@ mod background;
 mod bootstrap;
 mod event_bridge;
 mod events;
+mod extraction;
 mod gateway_bridge;
 mod hot_reload;
 mod managers;
