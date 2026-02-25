@@ -307,6 +307,7 @@ async fn async_main(
         Some(db.clone()),
         svcs.embedder.clone(),
         svcs.skill_catalog.clone(),
+        svcs.skill_router.clone(),
         daemon_config.clone(),
     ));
 
@@ -427,7 +428,6 @@ async fn async_main(
         background::spawn_embedding_indexer(
             emb.clone(),
             db.clone(),
-            local_user_id.clone(),
             daemon_config.clone(),
             cancel_token.clone(),
         );

@@ -9,9 +9,9 @@ use openalpaca_llm::config::{
     EmbeddingsConfig, KeyConfig, LlmRouterConfig, OrchestratorLlmConfig, ProviderConfig,
     read_config, write_config,
 };
-use openalpaca_llm::credential_discovery::CredentialDiscoveryConfig;
-use openalpaca_llm::key_encryption::KeyEncryptor;
-use openalpaca_llm::secret_store::{KeyringSecretStore, MemorySecretStore, SecretStore};
+use openalpaca_llm::keys::credential_discovery::CredentialDiscoveryConfig;
+use openalpaca_llm::keys::key_encryption::KeyEncryptor;
+use openalpaca_llm::keys::secret_store::{KeyringSecretStore, MemorySecretStore, SecretStore};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

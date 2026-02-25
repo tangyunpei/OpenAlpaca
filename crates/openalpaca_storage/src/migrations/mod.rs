@@ -136,4 +136,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "dispatch_decision_error_message",
         sql: include_str!("025_dispatch_decision_error_message.sql"),
     },
+    Migration {
+        version: 26,
+        name: "memory_scope_dedup",
+        sql: include_str!("026_memory_scope_dedup.sql"),
+    },
 ];

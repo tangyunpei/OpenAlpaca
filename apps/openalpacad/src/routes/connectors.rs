@@ -31,6 +31,7 @@ pub async fn list_connectors_handler(State(state): State<Arc<AppState>>) -> impl
         .map(|(id, status)| {
             let name = match id.as_str() {
                 "telegram" => "Telegram",
+                "imessage" => "iMessage",
                 _ => &id,
             };
             ConnectorStatus {

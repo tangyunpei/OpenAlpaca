@@ -5,7 +5,6 @@ description: "Fast read-only codebase exploration: reads files, searches content
 icon: "eye"
 skills:
   - "file_read"
-  - "summarize"
   - "memory_search"
   - "workspace_read"
 denied_skills:
@@ -13,7 +12,6 @@ denied_skills:
   - "shell_execute"
   - "web_search"
   - "web_fetch"
-  - "text_generate"
 temperature: 0.2
 verbosity: "concise"
 model: "claude-haiku-4-5-20251001"

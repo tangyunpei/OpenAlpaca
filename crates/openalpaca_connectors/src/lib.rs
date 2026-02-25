@@ -14,6 +14,9 @@ pub mod common;
 #[cfg(feature = "telegram")]
 pub mod telegram;
 
+#[cfg(all(feature = "imessage", target_os = "macos"))]
+pub mod imessage;
+
 pub mod startup;
 
 use async_trait::async_trait;
@@ -81,11 +84,24 @@ impl ConnectorBuilder {
     pub fn telegram(self, token: String) -> telegram::TelegramConnector {
         telegram::TelegramConnector::new(token, self.db, self.bus, self.gateway)
     }
+
+    /// Build an iMessage connector (requires `imessage` feature, macOS only).
+    #[cfg(all(feature = "imessage", target_os = "macos"))]
+    pub fn imessage(
+        self,
+        cancel_token: tokio_util::sync::CancellationToken,
+        local_user_id: Option<String>,
+    ) -> imessage::IMessageConnector {
+        imessage::IMessageConnector::new(self.db, self.bus, self.gateway, cancel_token, local_user_id)
+    }
 }
 
 // Re-exports for convenience
 #[cfg(feature = "telegram")]
 pub use telegram::TelegramConnector;
+
+#[cfg(all(feature = "imessage", target_os = "macos"))]
+pub use imessage::IMessageConnector;
 
 /// Factory trait for creating connectors dynamically
 pub trait ConnectorFactory: Send + Sync {
@@ -107,6 +123,8 @@ pub fn get_supported_connectors() -> Vec<Box<dyn ConnectorFactory>> {
     let connectors: Vec<Box<dyn ConnectorFactory>> = vec![
         #[cfg(feature = "telegram")]
         Box::new(TelegramFactory),
+        #[cfg(all(feature = "imessage", target_os = "macos"))]
+        Box::new(IMessageFactory),
     ];
 
     connectors
@@ -130,5 +148,44 @@ impl ConnectorFactory for TelegramFactory {
     ) -> Result<startup::ConnectorHandle, ConnectorError> {
         let handle = startup::spawn_telegram_connector(token, db, bus, gateway);
         Ok(handle)
+    }
+}
+
+#[cfg(all(feature = "imessage", target_os = "macos"))]
+struct IMessageFactory;
+
+#[cfg(all(feature = "imessage", target_os = "macos"))]
+impl ConnectorFactory for IMessageFactory {
+    fn name(&self) -> &str {
+        "imessage"
+    }
+
+    fn spawn(
+        &self,
+        _token: String,
+        db: Database,
+        bus: EventBus,
+        gateway: Arc<Gateway>,
+    ) -> Result<startup::ConnectorHandle, ConnectorError> {
+        let local_user_id = openalpaca_storage::ConfigRepository::new(&db)
+            .get("identity.local_user_id")
+            .ok()
+            .flatten();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let connector = imessage::IMessageConnector::new(
+            Arc::new(db),
+            Arc::new(bus),
+            gateway,
+            cancel_token.clone(),
+            local_user_id,
+        );
+
+        tokio::spawn(async move {
+            if let Err(e) = connector.run_loop().await {
+                tracing::error!("iMessage connector exited with error: {}", e);
+            }
+        });
+
+        Ok(startup::ConnectorHandle::IMessage(cancel_token))
     }
 }

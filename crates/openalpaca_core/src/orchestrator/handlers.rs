@@ -30,6 +30,7 @@ impl Orchestrator {
         principal: Principal,
         scope: Scope,
         lane_key: String,
+        workspace_path: Option<String>,
     ) -> Result<String, String> {
         let ack_start = Instant::now();
 
@@ -50,16 +51,22 @@ impl Orchestrator {
             _ => None,
         };
 
-        // Resolve workspace context for memory scoping
-        let workspace_id = std::env::current_dir()
-            .ok()
-            .and_then(|d| crate::memory::workspace::resolve_workspace_id(&d));
+        // Resolve workspace context for memory scoping.
+        // Prefer request-provided workspace path (from GUI/CLI) over daemon CWD.
+        let workspace_id = if let Some(ref ws_path) = workspace_path {
+            crate::memory::workspace::resolve_workspace_id(std::path::Path::new(ws_path))
+        } else {
+            tracing::debug!("No workspace_path in request, falling back to daemon CWD");
+            std::env::current_dir()
+                .ok()
+                .and_then(|d| crate::memory::workspace::resolve_workspace_id(&d))
+        };
         let scope_ctx = MemoryScopeContext::new(workspace_id);
 
         // 3. Try slash commands, task queries, and skill invocations first
         let intent = self
             .intent_parser
-            .parse_with_skills(&content, &self.skill_catalog);
+            .parse_with_skills_and_router(&content, &self.skill_catalog, &self.skill_router);
         match &intent {
             Intent::TaskQuery { .. } | Intent::TaskControl { .. } => {
                 self.bus.publish(SystemEvent::IntentClassified {
@@ -357,7 +364,7 @@ impl Orchestrator {
     ) -> Result<String, String> {
         let intent = self
             .intent_parser
-            .parse_with_skills(content, &self.skill_catalog);
+            .parse_with_skills_and_router(content, &self.skill_catalog, &self.skill_router);
 
         self.bus.publish(SystemEvent::IntentClassified {
             request_id,

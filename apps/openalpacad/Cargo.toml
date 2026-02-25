@@ -22,7 +22,7 @@ tower-http = { workspace = true }
 
 # Workspace crates
 openalpaca_core = { workspace = true }
-openalpaca_connectors = { workspace = true, features = ["telegram"] }
+openalpaca_connectors = { workspace = true, features = ["telegram", "imessage"] }
 openalpaca_api = { workspace = true }
 openalpaca_storage = { workspace = true }
 openalpaca_wake = { workspace = true }

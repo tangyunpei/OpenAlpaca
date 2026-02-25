@@ -30,42 +30,49 @@
     }
   }
 
-  function borderClass(status: string): string {
+  function borderAccentStyle(status: string): string {
     const key = getStatusColor(status);
     switch (key) {
       case "status-success":
-        return "border-l-success";
+        return "border-left-color: hsl(160 52% 44%);";
       case "status-warning":
-        return "border-l-amber-400";
+        return "border-left-color: hsl(38 92% 50%);";
       case "status-paused":
-        return "border-l-blue-400";
+        return "border-left-color: hsl(210 70% 55%);";
       case "status-error":
-        return "border-l-danger";
-      case "status-dim":
+        return "border-left-color: hsl(2 68% 56%);";
       default:
-        return "border-l-muted-foreground";
+        return "border-left-color: hsl(222 14% 35%);";
     }
   }
 </script>
 
 <div
-  class="w-[120px] h-[120px] flex flex-col justify-between p-3 bg-white/3 rounded-2xl border border-white/5 border-l-4 {borderClass(instance.status)} transition-all duration-150 hover:bg-white/6 hover:scale-[1.02] hover:shadow-md"
+  class="w-[130px] h-[130px] flex flex-col justify-between p-3.5 rounded-2xl border border-white/[0.05] border-l-[3px] transition-all duration-200 hover:scale-[1.03] hover:shadow-lg group cursor-default"
+  style="background: linear-gradient(180deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%); {borderAccentStyle(instance.status)}"
 >
   <!-- Instance ID -->
-  <div class="text-[0.7rem] font-mono text-muted-foreground truncate" title={instance.id}>
+  <div class="text-[0.68rem] font-mono text-muted-foreground/60 truncate group-hover:text-muted-foreground transition-colors" title={instance.id}>
     ::{shortId}
   </div>
 
   <!-- Status -->
-  <div class="flex items-center gap-1.5 mt-auto">
-    <span class="w-2 h-2 rounded-full shrink-0 transition-colors duration-300 {statusDotClass(instance.status)} {instance.status === 'busy' ? 'animate-pulse' : ''}"></span>
-    <span class="text-xs font-medium text-foreground capitalize">{instance.status}</span>
+  <div class="flex items-center gap-2 mt-auto">
+    <span class="relative flex items-center justify-center w-2.5 h-2.5">
+      <span class="w-2 h-2 rounded-full shrink-0 transition-colors duration-300 {statusDotClass(instance.status)}"></span>
+      {#if instance.status === 'busy'}
+        <span class="absolute inset-0 rounded-full {statusDotClass(instance.status)} opacity-40 animate-ping" style="animation-duration: 1.5s;"></span>
+      {/if}
+    </span>
+    <span class="text-xs font-medium text-foreground/80 capitalize">{instance.status}</span>
   </div>
 
   <!-- Task ID (if present) -->
   {#if instance.current_task}
-    <div class="text-[0.65rem] text-muted-foreground truncate mt-1" title={instance.current_task}>
-      <span class="font-mono px-1 rounded {instance.status === 'busy' ? 'bg-accent/10 text-accent/80' : 'bg-white/5'}">{instance.current_task.slice(0, 8)}</span>
+    <div class="text-[0.62rem] text-muted-foreground/50 truncate mt-1.5" title={instance.current_task}>
+      <span class="font-mono px-1.5 py-px rounded-md border
+                   {instance.status === 'busy' ? 'border-accent/15 text-accent/70' : 'border-white/[0.04] text-muted-foreground/50'}"
+            style={instance.status === 'busy' ? 'background: hsl(40 85% 58% / 0.06);' : 'background: rgba(255,255,255,0.025);'}>{instance.current_task.slice(0, 8)}</span>
     </div>
   {:else}
     <div class="h-4"></div>

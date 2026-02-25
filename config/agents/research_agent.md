@@ -6,7 +6,6 @@ icon: "magnifying_glass"
 skills:
   - "web_search"
   - "web_fetch"
-  - "summarize"
   - "workspace_read"
   - "workspace_write"
 denied_skills:

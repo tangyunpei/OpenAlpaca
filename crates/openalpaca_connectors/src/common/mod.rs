@@ -36,19 +36,27 @@ pub fn format_denial_message(error: &str) -> String {
     format!("⚠️ {}\n\nUse /link <token> to link your account.", error)
 }
 
+/// Redact a token for safe logging (show only first 4 chars).
+pub fn redact_token(token: &str) -> String {
+    if token.len() <= 4 {
+        "****".to_string()
+    } else {
+        let prefix: String = token.chars().take(4).collect();
+        format!("{}****", prefix)
+    }
+}
+
 /// Handle the /link command logic.
+///
+/// Uses an atomic consume-and-link transaction so that the token is not
+/// consumed if linking the identity fails.
 pub fn handle_link_token(
     identity_repo: &IdentityRepository<'_>,
     token: &str,
     external_identity_id: i64,
 ) -> Result<LinkResult, String> {
-    match identity_repo.consume_link_token(token) {
-        Ok(Some(global_user_id)) => {
-            identity_repo
-                .link_external_identity(external_identity_id, &global_user_id)
-                .map_err(|e| format!("Failed to link identity: {}", e))?;
-            Ok(LinkResult::Success(global_user_id))
-        }
+    match identity_repo.consume_and_link(token, external_identity_id) {
+        Ok(Some(global_user_id)) => Ok(LinkResult::Success(global_user_id)),
         Ok(None) => Ok(LinkResult::InvalidToken),
         Err(e) => Err(e.to_string()),
     }
@@ -63,64 +71,4 @@ pub enum LinkResult {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use openalpaca_storage::Database;
-    use tempfile::tempdir;
-
-    fn test_db() -> Database {
-        let dir = tempdir().unwrap();
-        Database::open(&dir.path().join("test.db")).unwrap()
-    }
-
-    #[test]
-    fn test_resolve_principal_untrusted() {
-        let db = test_db();
-        let repo = IdentityRepository::new(&db);
-
-        // Test untrusted
-        let (principal, _) =
-            resolve_principal(&repo, "telegram", "user123", Some("Alice")).unwrap();
-        assert!(matches!(principal, Principal::External { id, .. } if id == "user123"));
-    }
-
-    #[test]
-    fn test_resolve_principal_trusted() {
-        let db = test_db();
-        let repo = IdentityRepository::new(&db);
-
-        // Link user first
-        repo.create_global_user("global1", None).unwrap();
-        let ext = repo
-            .get_or_create_external_identity("telegram", "user123", None)
-            .unwrap();
-        repo.link_external_identity(ext.id, "global1").unwrap();
-
-        // Test trusted
-        let (principal, _) = resolve_principal(&repo, "telegram", "user123", None).unwrap();
-        assert!(matches!(principal, Principal::User { global_id } if global_id == "global1"));
-    }
-
-    #[test]
-    fn test_handle_link_token_flow() {
-        let db = test_db();
-        let repo = IdentityRepository::new(&db);
-
-        repo.create_global_user("global1", None).unwrap();
-        repo.create_link_token("global1", "TOKEN1").unwrap();
-        let ext = repo
-            .get_or_create_external_identity("telegram", "user123", None)
-            .unwrap();
-
-        // Consume
-        let res = handle_link_token(&repo, "TOKEN1", ext.id).unwrap();
-        assert!(matches!(res, LinkResult::Success(uid) if uid == "global1"));
-
-        // Verify linked in DB
-        let ext_after = repo
-            .get_external_identity("telegram", "user123")
-            .unwrap()
-            .unwrap();
-        assert_eq!(ext_after.global_user_id, Some("global1".to_string()));
-    }
-}
+mod tests;

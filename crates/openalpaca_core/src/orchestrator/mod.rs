@@ -6,8 +6,7 @@
 pub mod dispatcher;
 pub mod intent;
 pub mod replanner;
-pub mod skill_catalog;
-pub mod skill_matcher;
+pub mod skill;
 pub mod task_planner;
 pub mod task_state;
 
@@ -17,9 +16,13 @@ mod extraction;
 mod handlers;
 mod memory_ops;
 mod query_handler;
-mod skill_handler;
 mod summary;
 mod task_ops;
+
+pub use skill::catalog as skill_catalog;
+pub use skill::matcher as skill_matcher;
+pub use skill::router as skill_router;
+pub use skill::smoke as skill_smoke;
 
 #[cfg(test)]
 mod tests;
@@ -91,6 +94,8 @@ pub struct Orchestrator {
     identity_path: RwLock<Option<std::path::PathBuf>>,
     /// Skill catalog for progressive skill loading and invocation.
     pub skill_catalog: Arc<skill_catalog::SkillCatalog>,
+    /// Skill router for weighted scoring-based skill auto-selection.
+    pub skill_router: Arc<skill_router::SkillRouter>,
     /// Bootstrap document — `Some` = first-run onboarding active, `None` = normal operation.
     pub bootstrap_document: Arc<RwLock<Option<BootstrapDocument>>>,
     /// Path to BOOTSTRAP.md on disk (for deletion on completion).
@@ -156,6 +161,7 @@ impl Orchestrator {
         db: Option<Database>,
         embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
         skill_catalog: Arc<skill_catalog::SkillCatalog>,
+        skill_router: Arc<skill_router::SkillRouter>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
     ) -> Self {
         let task_dispatcher = TaskDispatcher::new(
@@ -188,6 +194,7 @@ impl Orchestrator {
             user_path: RwLock::new(None),
             identity_path: RwLock::new(None),
             skill_catalog,
+            skill_router,
             bootstrap_document: Arc::new(RwLock::new(None)),
             bootstrap_path: RwLock::new(None),
             daemon_config,
