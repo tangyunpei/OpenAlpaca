@@ -3,6 +3,7 @@
 //! POST /v1/files/upload   — Upload a file (multipart)
 //! GET  /v1/files/{id}     — Get file metadata
 //! GET  /v1/files/{id}/content — Stream file content
+//! POST /v1/files/{id}/open — Open file with system default app
 
 use axum::{
     Json,
@@ -14,6 +15,7 @@ use axum::{
 use openalpaca_storage::{FileAsset, FileAssetRepository, FileAssetStatus};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use tokio_util::io::ReaderStream;
 
@@ -60,6 +62,114 @@ pub struct FileUploadResponse {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FileOpenResponse {
+    pub id: String,
+    pub status: String,
+}
+
+type OpenFileFn = fn(&str, &str, &str) -> Result<(), String>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OpenFileApiError {
+    NotFound,
+    Db(String),
+    OpenFailed(String),
+}
+
+fn sanitize_open_filename(filename: &str) -> String {
+    let basename = FsPath::new(filename)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("attachment");
+    let mut out: String = basename
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    out = out.trim().to_string();
+    if out.is_empty() {
+        "attachment".to_string()
+    } else {
+        out
+    }
+}
+
+fn prepare_open_target_path(
+    storage_path: &str,
+    file_id: &str,
+    filename: &str,
+) -> Result<PathBuf, String> {
+    let open_dir = std::env::temp_dir().join("openalpaca-open");
+    std::fs::create_dir_all(&open_dir).map_err(|e| format!("Failed to prepare open dir: {e}"))?;
+    let safe_name = sanitize_open_filename(filename);
+    let target = open_dir.join(format!("{file_id}-{safe_name}"));
+    if target.exists() {
+        std::fs::remove_file(&target).map_err(|e| format!("Failed to refresh open target: {e}"))?;
+    }
+    std::fs::copy(storage_path, &target)
+        .map_err(|e| format!("Failed to stage file for open: {e}"))?;
+    Ok(target)
+}
+
+fn open_with_system_default(
+    storage_path: &str,
+    file_id: &str,
+    filename: &str,
+) -> Result<(), String> {
+    let target = prepare_open_target_path(storage_path, file_id, filename)?;
+    opener::open(target).map_err(|e| e.to_string())
+}
+
+async fn open_asset_for_user(
+    db: &openalpaca_storage::Database,
+    file_id: &str,
+    local_user_id: &str,
+    open_file_fn: OpenFileFn,
+) -> Result<FileOpenResponse, OpenFileApiError> {
+    let repo = FileAssetRepository::new(db);
+    let asset = match repo.get_by_id(file_id) {
+        Ok(Some(asset)) => {
+            if asset.owner_id != local_user_id {
+                tracing::debug!(
+                    file_id = %file_id,
+                    owner = %asset.owner_id,
+                    "File owner mismatch — returning 404"
+                );
+                return Err(OpenFileApiError::NotFound);
+            }
+            asset
+        }
+        Ok(None) => return Err(OpenFileApiError::NotFound),
+        Err(e) => return Err(OpenFileApiError::Db(e.to_string())),
+    };
+
+    let storage_path = asset.storage_path;
+    let filename = asset.filename;
+    let asset_id = asset.id;
+    match tokio::task::spawn_blocking(move || open_file_fn(&storage_path, &asset_id, &filename))
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(OpenFileApiError::OpenFailed(e)),
+        Err(e) => {
+            return Err(OpenFileApiError::OpenFailed(format!(
+                "Failed to join open task: {e}"
+            )));
+        }
+    }
+
+    Ok(FileOpenResponse {
+        id: file_id.to_string(),
+        status: "opened".to_string(),
+    })
+}
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error: ErrorDetail,
@@ -81,6 +191,20 @@ fn error_response(status: StatusCode, code: &str, message: &str) -> impl IntoRes
             },
         }),
     )
+}
+
+fn open_file_error_response(err: OpenFileApiError) -> axum::response::Response {
+    match err {
+        OpenFileApiError::NotFound => {
+            error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found").into_response()
+        }
+        OpenFileApiError::Db(e) => {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e).into_response()
+        }
+        OpenFileApiError::OpenFailed(e) => {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "OPEN_FAILED", &e).into_response()
+        }
+    }
 }
 
 /// POST /v1/files/upload — Multipart file upload
@@ -111,10 +235,7 @@ pub async fn upload_file_handler(
         }
     };
 
-    let filename = field
-        .file_name()
-        .unwrap_or("unnamed")
-        .to_string();
+    let filename = field.file_name().unwrap_or("unnamed").to_string();
     let content_type = field
         .content_type()
         .unwrap_or("application/octet-stream")
@@ -337,8 +458,9 @@ pub async fn get_file_metadata_handler(
             }
             Json(asset).into_response()
         }
-        Ok(None) => error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found")
-            .into_response(),
+        Ok(None) => {
+            error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found").into_response()
+        }
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "DB_ERROR",
@@ -409,9 +531,29 @@ pub async fn get_file_content_handler(
     (headers, body).into_response()
 }
 
+/// POST /v1/files/{id}/open — Open file with system default app
+pub async fn open_file_handler(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match open_asset_for_user(
+        &state.db,
+        &id,
+        &state.local_user_id,
+        open_with_system_default,
+    )
+    .await
+    {
+        Ok(resp) => Json(resp).into_response(),
+        Err(err) => open_file_error_response(err),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openalpaca_storage::Database;
+    use tempfile::TempDir;
 
     // Real file signatures to exercise infer-based MIME detection.
     const JPEG_BYTES: &[u8] = &[
@@ -534,5 +676,130 @@ mod tests {
     fn test_validate_magic_mime_allows_ppt_as_cfb() {
         let result = validate_magic_mime("application/vnd.ms-powerpoint", CFB_BYTES);
         assert!(result.is_ok(), "PPT (CFB container) should be allowed");
+    }
+
+    fn open_ok(_path: &str, _file_id: &str, _filename: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn open_fail(_path: &str, _file_id: &str, _filename: &str) -> Result<(), String> {
+        Err("open failed".to_string())
+    }
+
+    fn test_db() -> (TempDir, Database) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open test db");
+        (dir, db)
+    }
+
+    fn sample_asset(id: &str, owner_id: &str) -> FileAsset {
+        FileAsset {
+            id: id.to_string(),
+            owner_id: owner_id.to_string(),
+            sha256: "sha".to_string(),
+            filename: "file.pdf".to_string(),
+            mime_type: "application/pdf".to_string(),
+            size_bytes: 123,
+            storage_path: "/tmp/does-not-matter.pdf".to_string(),
+            status: FileAssetStatus::Ready,
+            extracted_text: None,
+            extract_error: None,
+            metadata_json: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_open_asset_for_user_not_found() {
+        let (_dir, db) = test_db();
+        let err = open_asset_for_user(&db, "missing", "user1", open_ok)
+            .await
+            .expect_err("missing file should return error");
+        assert_eq!(err, OpenFileApiError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_open_asset_for_user_owner_mismatch_returns_not_found() {
+        let (_dir, db) = test_db();
+        let repo = FileAssetRepository::new(&db);
+        repo.insert(&sample_asset("f1", "other-user"))
+            .expect("insert asset");
+
+        let err = open_asset_for_user(&db, "f1", "user1", open_ok)
+            .await
+            .expect_err("owner mismatch should return not found");
+        assert_eq!(err, OpenFileApiError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_open_asset_for_user_open_failed_returns_open_failed() {
+        let (_dir, db) = test_db();
+        let repo = FileAssetRepository::new(&db);
+        repo.insert(&sample_asset("f2", "user1"))
+            .expect("insert asset");
+
+        let err = open_asset_for_user(&db, "f2", "user1", open_fail)
+            .await
+            .expect_err("open failure should be surfaced");
+        assert_eq!(err, OpenFileApiError::OpenFailed("open failed".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_open_asset_for_user_success_returns_opened_status() {
+        let (_dir, db) = test_db();
+        let repo = FileAssetRepository::new(&db);
+        repo.insert(&sample_asset("f3", "user1"))
+            .expect("insert asset");
+
+        let resp = open_asset_for_user(&db, "f3", "user1", open_ok)
+            .await
+            .expect("open should succeed");
+        assert_eq!(
+            resp,
+            FileOpenResponse {
+                id: "f3".to_string(),
+                status: "opened".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_open_file_error_response_not_found_uses_404() {
+        let response = open_file_error_response(OpenFileApiError::NotFound);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
+        assert_eq!(payload["error"]["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn test_open_file_error_response_open_failed_uses_500_and_code() {
+        let response = open_file_error_response(OpenFileApiError::OpenFailed("boom".to_string()));
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
+        assert_eq!(payload["error"]["code"], "OPEN_FAILED");
+    }
+
+    #[test]
+    fn test_prepare_open_target_path_keeps_original_extension() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let source = dir.path().join("source.bin");
+        std::fs::write(&source, b"hello").expect("write source");
+        let target = prepare_open_target_path(
+            source.to_str().expect("source path"),
+            "file-1",
+            "Resume 2026.docx",
+        )
+        .expect("prepare target");
+        assert!(target.to_string_lossy().ends_with(".docx"));
+        let copied = std::fs::read(&target).expect("read copied");
+        assert_eq!(copied, b"hello");
+        let _ = std::fs::remove_file(&target);
     }
 }

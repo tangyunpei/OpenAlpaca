@@ -9,11 +9,11 @@ pub mod types;
 
 // TODO: Remove backward-compat re-exports once all consumers use canonical paths
 // (apps/ imports were updated in the reorganize branch; external consumers may remain)
+pub use config::settings_service;
 pub use keys::credential_discovery;
 pub use keys::key_encryption;
 pub use keys::key_pool;
 pub use keys::secret_store;
-pub use config::settings_service;
 pub use routing::cost_tracker;
 pub use routing::model_registry;
 pub use routing::provider_usage;
@@ -44,11 +44,17 @@ pub use keys::key_pool::{
     ApiKey, CallResult, KeyGuard, KeyHealthStatus, KeyPool, KeyPoolError, KeyPriority, KeySource,
     KeyStatus, ProviderType, SelectionStrategy, mask_secret,
 };
-pub use keys::secret_store::{CachingSecretStore, KeyringSecretStore, MemorySecretStore, SecretStore};
-pub use routing::cost_tracker::{CallRecord, CostSnapshot, CostTracker, ModelUsageStats, UsageStats};
+pub use keys::secret_store::{
+    CachingSecretStore, KeyringSecretStore, MemorySecretStore, SecretStore,
+};
+pub use routing::cost_tracker::{
+    CallRecord, CostSnapshot, CostTracker, ModelUsageStats, UsageStats,
+};
 pub use routing::model_registry::{ModelEntry, ModelInfo, ModelRegistry, PricingInfo};
 pub use routing::provider_usage::{ExternalUsage, ProviderUsageSummary, ProviderUsageTracker};
-pub use routing::rate_limiter::{CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter};
+pub use routing::rate_limiter::{
+    CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter,
+};
 pub use routing::router::{
     LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RequestContext, RouterRequest,
 };

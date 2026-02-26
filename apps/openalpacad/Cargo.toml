@@ -43,6 +43,7 @@ pdf-extract.workspace = true
 zip.workspace = true
 calamine.workspace = true
 signal-hook.workspace = true
+opener.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

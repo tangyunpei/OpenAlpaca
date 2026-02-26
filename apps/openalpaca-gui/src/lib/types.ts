@@ -428,6 +428,11 @@ export interface FileUploadResponse {
   status: string;
 }
 
+export interface FileOpenResponse {
+  id: string;
+  status: "opened";
+}
+
 export interface AttachmentRef {
   file_id: string;
   caption?: string;

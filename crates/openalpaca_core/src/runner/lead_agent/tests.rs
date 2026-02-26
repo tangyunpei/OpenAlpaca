@@ -424,8 +424,7 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
     let contextual = Arc::new(ContextualToolExecutor::new(registry, ctx_exec));
 
     // batch_spawn_tool = None -> not in registered_tools
-    let executor =
-        LeadAgentToolExecutor::new(spawn_tool, None, check_tool, wait_tool, contextual);
+    let executor = LeadAgentToolExecutor::new(spawn_tool, None, check_tool, wait_tool, contextual);
     let tools = executor.registered_tools();
     assert!(!tools.contains(&"spawn_subagents_batch".to_string()));
     assert!(tools.contains(&"spawn_subagent".to_string()));
@@ -494,13 +493,8 @@ fn test_batch_spawn_tool_present_when_enabled() {
     let contextual = Arc::new(ContextualToolExecutor::new(registry, ctx_exec));
 
     // batch_spawn_tool = Some -> IS in registered_tools
-    let executor = LeadAgentToolExecutor::new(
-        spawn_tool,
-        batch_tool,
-        check_tool,
-        wait_tool,
-        contextual,
-    );
+    let executor =
+        LeadAgentToolExecutor::new(spawn_tool, batch_tool, check_tool, wait_tool, contextual);
     let tools = executor.registered_tools();
     assert!(tools.contains(&"spawn_subagents_batch".to_string()));
     assert!(tools.contains(&"spawn_subagent".to_string()));
@@ -656,8 +650,7 @@ fn test_lead_agent_executor_delegates_shell_like_tools() {
     });
     let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
 
-    let executor =
-        LeadAgentToolExecutor::new(spawn_tool, None, check_tool, wait_tool, contextual);
+    let executor = LeadAgentToolExecutor::new(spawn_tool, None, check_tool, wait_tool, contextual);
 
     // shell_like_tools() should include "my_cmd_tool" from the registry
     let shell_tools = executor.shell_like_tools();

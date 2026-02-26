@@ -106,8 +106,13 @@ pub fn auto_start_connectors(
                 info!("Autostart: Finding Telegram Token (Source: {})", source);
 
                 // Clone dependencies to keep the originals valid for subsequent connectors
-                let connector =
-                    ConnectorBuilder::new(db.clone(), bus.clone(), gateway.clone(), daemon_config.clone()).telegram(token);
+                let connector = ConnectorBuilder::new(
+                    db.clone(),
+                    bus.clone(),
+                    gateway.clone(),
+                    daemon_config.clone(),
+                )
+                .telegram(token);
                 let handle = spawn_telegram(connector);
                 started.insert("telegram".to_string(), ConnectorHandle::Telegram(handle));
             }

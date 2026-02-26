@@ -59,8 +59,7 @@ pub fn validate_skill_output(
         match format.as_str() {
             "markdown" => {
                 if !output_config.required_sections.is_empty() {
-                    let missing =
-                        find_missing_sections(output, &output_config.required_sections);
+                    let missing = find_missing_sections(output, &output_config.required_sections);
                     if !missing.is_empty() {
                         return Err(OutputValidationError::MissingSections(missing));
                     }
@@ -113,7 +112,11 @@ fn extract_json_from_output(output: &str) -> Option<String> {
     if let Some(start) = output.find("```json") {
         let content_start = start + "```json".len();
         if let Some(end) = output[content_start..].find("```") {
-            return Some(output[content_start..content_start + end].trim().to_string());
+            return Some(
+                output[content_start..content_start + end]
+                    .trim()
+                    .to_string(),
+            );
         }
     }
     // Look for { ... }

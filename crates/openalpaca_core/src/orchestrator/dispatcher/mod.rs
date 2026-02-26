@@ -118,7 +118,11 @@ pub(super) async fn retrieve_memory_block(
         budget -= entry.len();
         inner.push_str(&entry);
     }
-    Some(super::wrap_untrusted_context(&inner, "retrieved_memory", "retrieved"))
+    Some(super::wrap_untrusted_context(
+        &inner,
+        "retrieved_memory",
+        "retrieved",
+    ))
 }
 
 /// Spawn a background task to extract memories from a completed task output.
@@ -250,11 +254,7 @@ impl TaskDispatcher {
     // ── Shared decision recording helpers ──────────────────────────────
 
     /// Record a dispatch decision (event + DB). Returns row ID for task_id backfill.
-    fn record_decision(
-        &self,
-        request_id: &str,
-        dd: &decision::DispatchDecision,
-    ) -> Option<i64> {
+    fn record_decision(&self, request_id: &str, dd: &decision::DispatchDecision) -> Option<i64> {
         let dcfg = self.daemon_config.load();
         if !dcfg.execution.planner.dispatch_analysis_enabled {
             return None;
@@ -410,8 +410,14 @@ impl TaskDispatcher {
         let decision_row_id = self.record_decision(&request_id.to_string(), &dd);
 
         let title = generate_title(description);
-        let result =
-            self.dispatch_lead_agent(description, title, created_by, lane_key, source, workspace_id);
+        let result = self.dispatch_lead_agent(
+            description,
+            title,
+            created_by,
+            lane_key,
+            source,
+            workspace_id,
+        );
         if let Ok(ref task_id) = result {
             self.backfill_decision_task_id(decision_row_id, task_id);
         }

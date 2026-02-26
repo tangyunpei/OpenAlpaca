@@ -42,8 +42,12 @@ async fn single_message(content: &str, files: &[std::path::PathBuf]) -> Result<(
     print!("{} ", "Alpaca:".cyan().bold());
     std::io::stdout().flush()?;
     let result = chat_stream::send_and_stream_with_attachments(
-        &client, content, &attachments, &Default::default(),
-    ).await?;
+        &client,
+        content,
+        &attachments,
+        &Default::default(),
+    )
+    .await?;
     if let StreamResult::Delegation { task_title, .. } = &result {
         chat_stream::poll_task_completion(&client, task_title).await?;
     }

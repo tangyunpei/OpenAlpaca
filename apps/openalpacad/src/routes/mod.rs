@@ -5,11 +5,11 @@ pub mod auth;
 pub mod chat;
 pub mod command;
 pub mod connectors;
+pub mod dispatch_decisions;
 pub mod events;
 pub mod events_history;
-pub mod memory;
-pub mod dispatch_decisions;
 pub mod files;
+pub mod memory;
 pub mod orchestrator_latency;
 pub mod preferences;
 pub mod settings;
@@ -45,14 +45,18 @@ pub use chat::{
 };
 pub use command::command_handler;
 pub use connectors::{connector_action_handler, connector_config_handler, list_connectors_handler};
+pub use dispatch_decisions::dispatch_decisions_handler;
 pub use events::events_handler;
 pub use events_history::events_history_handler;
-pub use files::{get_file_content_handler, get_file_metadata_handler, upload_file_handler};
-pub use dispatch_decisions::dispatch_decisions_handler;
-pub use orchestrator_latency::{orchestrator_latency_aggregate_handler, orchestrator_latency_handler};
+pub use files::{
+    get_file_content_handler, get_file_metadata_handler, open_file_handler, upload_file_handler,
+};
 pub use memory::{
     delete_memory_handler, get_memory_handler, index_status_handler, kb_ingest_handler,
     list_memories_handler, reindex_handler,
+};
+pub use orchestrator_latency::{
+    orchestrator_latency_aggregate_handler, orchestrator_latency_handler,
 };
 pub use preferences::{
     delete_preference_handler, get_preference_handler, list_preferences_handler,

@@ -385,30 +385,48 @@ fn test_list_conversations_for_owner() {
     let repo = ConversationRepository::new(&db);
 
     repo.get_or_create_conversation("alice:gui", "gui").unwrap();
-    repo.get_or_create_conversation("alice:telegram", "telegram").unwrap();
+    repo.get_or_create_conversation("alice:telegram", "telegram")
+        .unwrap();
     repo.get_or_create_conversation("bob:gui", "gui").unwrap();
-    repo.get_or_create_conversation("bob:telegram", "telegram").unwrap();
+    repo.get_or_create_conversation("bob:telegram", "telegram")
+        .unwrap();
 
     // Alice should only see her own conversations
-    let alice_all = repo.list_conversations_for_owner("alice", None, 50, 0).unwrap();
+    let alice_all = repo
+        .list_conversations_for_owner("alice", None, 50, 0)
+        .unwrap();
     assert_eq!(alice_all.len(), 2);
     for c in &alice_all {
-        assert!(c.lane_key.starts_with("alice:"), "unexpected lane_key: {}", c.lane_key);
+        assert!(
+            c.lane_key.starts_with("alice:"),
+            "unexpected lane_key: {}",
+            c.lane_key
+        );
     }
 
     // Bob should only see his own conversations
-    let bob_all = repo.list_conversations_for_owner("bob", None, 50, 0).unwrap();
+    let bob_all = repo
+        .list_conversations_for_owner("bob", None, 50, 0)
+        .unwrap();
     assert_eq!(bob_all.len(), 2);
     for c in &bob_all {
-        assert!(c.lane_key.starts_with("bob:"), "unexpected lane_key: {}", c.lane_key);
+        assert!(
+            c.lane_key.starts_with("bob:"),
+            "unexpected lane_key: {}",
+            c.lane_key
+        );
     }
 
     // Alice filtered by source
-    let alice_gui = repo.list_conversations_for_owner("alice", Some("gui"), 50, 0).unwrap();
+    let alice_gui = repo
+        .list_conversations_for_owner("alice", Some("gui"), 50, 0)
+        .unwrap();
     assert_eq!(alice_gui.len(), 1);
     assert_eq!(alice_gui[0].lane_key, "alice:gui");
 
     // Nonexistent owner
-    let nobody = repo.list_conversations_for_owner("nobody", None, 50, 0).unwrap();
+    let nobody = repo
+        .list_conversations_for_owner("nobody", None, 50, 0)
+        .unwrap();
     assert_eq!(nobody.len(), 0);
 }

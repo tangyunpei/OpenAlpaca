@@ -127,8 +127,11 @@ fn test_dispatch_decision_mode_filter() {
     let db = setup_db();
     let repo = DispatchDecisionRepository::new(&db);
 
-    for (mode, count) in [("lead_agent", 3), ("dag_parallel", 5), ("sequential_pipeline", 2)]
-    {
+    for (mode, count) in [
+        ("lead_agent", 3),
+        ("dag_parallel", 5),
+        ("sequential_pipeline", 2),
+    ] {
         for i in 0..count {
             repo.record(&DispatchDecisionRecord {
                 id: None,

@@ -201,12 +201,17 @@ async fn async_main(
     let user_has_content = initial_user_document
         .as_ref()
         .is_some_and(user_document_has_content);
-    let (initial_bootstrap_document, bootstrap_path) =
-        bootstrap::bootstrap_bootstrap_document(&config_base_dir, identity_has_content, user_has_content);
+    let (initial_bootstrap_document, bootstrap_path) = bootstrap::bootstrap_bootstrap_document(
+        &config_base_dir,
+        identity_has_content,
+        user_has_content,
+    );
 
     // Step 6: Load daemon config
     let daemon_config_path = config_base_dir.join("daemon.toml");
-    let daemon_config = Arc::new(ArcSwap::from_pointee(load_daemon_config(&daemon_config_path)));
+    let daemon_config = Arc::new(ArcSwap::from_pointee(load_daemon_config(
+        &daemon_config_path,
+    )));
     info!("Daemon config loaded from {}", daemon_config_path.display());
 
     // Step 7: Create event infrastructure
@@ -392,8 +397,12 @@ async fn async_main(
 
     let notif_bus = bus.clone();
     let chat_bus = bus.clone();
-    let connector_manager =
-        managers::connector::ConnectorManager::new(db.clone(), bus, gateway.clone(), daemon_config.clone());
+    let connector_manager = managers::connector::ConnectorManager::new(
+        db.clone(),
+        bus,
+        gateway.clone(),
+        daemon_config.clone(),
+    );
     connector_manager.start_all().await;
 
     // Spawn NotificationDispatcher
@@ -468,7 +477,11 @@ async fn async_main(
     let app = router::build_router(state);
 
     // Spawn heartbeat and chat cleanup
-    background::spawn_heartbeat(event_broadcaster, daemon_config.clone(), cancel_token.clone());
+    background::spawn_heartbeat(
+        event_broadcaster,
+        daemon_config.clone(),
+        cancel_token.clone(),
+    );
     background::spawn_chat_cleanup(chat_stream_manager, daemon_config, cancel_token.clone());
 
     // Step 15: Run server with graceful shutdown

@@ -2,11 +2,13 @@
 //!
 //! Handles the integration between Telegram Bot API and the OpenAlpaca agent system.
 
-use crate::common::{LinkResult, format_denial_message, handle_link_token, redact_token, resolve_principal};
+use crate::common::{
+    LinkResult, format_denial_message, handle_link_token, redact_token, resolve_principal,
+};
 use crate::{Connector, ConnectorError};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use openalpaca_api::events::EventSource;
-use arc_swap::ArcSwap;
 use openalpaca_core::{
     bus::EventBus,
     daemon_config::DaemonConfig,
@@ -18,9 +20,9 @@ use openalpaca_storage::{Database, IdentityRepository, PreferenceRepository};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use teloxide::net::Download;
 use teloxide::prelude::*;
 use teloxide::types::ChatAction;
-use teloxide::net::Download;
 use tracing::{error, info, warn};
 
 /// Telegram's max message length
@@ -70,8 +72,7 @@ fn chunk_message(text: &str) -> Vec<String> {
 #[allow(dead_code)]
 fn escape_markdown_v2(text: &str) -> String {
     let special_chars = [
-        '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.',
-        '!',
+        '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',
     ];
     let mut result = String::with_capacity(text.len() * 2);
     for ch in text.chars() {
@@ -101,7 +102,10 @@ async fn send_with_retry(
                 Err(e) => {
                     attempts += 1;
                     if attempts >= max_retries {
-                        error!("Failed to send message after {} retries: {}", max_retries, e);
+                        error!(
+                            "Failed to send message after {} retries: {}",
+                            max_retries, e
+                        );
                         return Err(Box::new(e));
                     }
                     let delay = Duration::from_secs(1 << (attempts - 1)); // 1s, 2s, 4s
@@ -250,12 +254,12 @@ impl TelegramConnector {
 
         // Check rate limiter
         if let Some(wait) = rate_limiter.check(chat_id.0) {
-            warn!(
-                "Rate limited chat {}, need to wait {:?}",
-                chat_id, wait
-            );
-            bot.send_message(chat_id, "Please wait a moment before sending another message.")
-                .await?;
+            warn!("Rate limited chat {}, need to wait {:?}", chat_id, wait);
+            bot.send_message(
+                chat_id,
+                "Please wait a moment before sending another message.",
+            )
+            .await?;
             return Ok(());
         }
 
@@ -351,8 +355,13 @@ impl TelegramConnector {
                     let suffix = &uid[..8.min(uid.len())];
                     let fname = format!("photo_{suffix}.jpg");
                     match crate::common::store_attachment(
-                        &db, &owner_id, &fname, "image/jpeg", &data,
-                        max_file_size, max_img_dim,
+                        &db,
+                        &owner_id,
+                        &fname,
+                        "image/jpeg",
+                        &data,
+                        max_file_size,
+                        max_img_dim,
                     ) {
                         Ok(att) => attachments.push(att),
                         Err(e) => warn!("Failed to store telegram photo: {e}"),
@@ -373,8 +382,13 @@ impl TelegramConnector {
             match download_telegram_file(&bot, &doc.file.id.0).await {
                 Ok(data) => {
                     match crate::common::store_attachment(
-                        &db, &owner_id, file_name, &mime, &data,
-                        max_file_size, max_img_dim,
+                        &db,
+                        &owner_id,
+                        file_name,
+                        &mime,
+                        &data,
+                        max_file_size,
+                        max_img_dim,
                     ) {
                         Ok(att) => attachments.push(att),
                         Err(e) => warn!("Failed to store telegram doc: {e}"),
@@ -428,7 +442,10 @@ impl TelegramConnector {
 
         // Step 5: Send response back to Telegram with retry and chunking
         if let Err(e) = send_with_retry(&bot, chat_id, &response.content).await {
-            error!("Failed to send response to Telegram chat {}: {}", chat_id, e);
+            error!(
+                "Failed to send response to Telegram chat {}: {}",
+                chat_id, e
+            );
         }
 
         // Note: EventBus events (UserRequest + AgentResponse) are now emitted
@@ -449,7 +466,8 @@ impl TelegramConnector {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!(
             "Processing /link command for user {} with token {}",
-            user_id, redact_token(token)
+            user_id,
+            redact_token(token)
         );
 
         match handle_link_token(identity_repo, token, external_identity_id) {

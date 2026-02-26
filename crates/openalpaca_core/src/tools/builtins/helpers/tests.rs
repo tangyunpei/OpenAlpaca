@@ -57,9 +57,21 @@ fn test_unique_backup_path_uses_prefix() {
     let user_name = user_path.file_name().unwrap().to_str().unwrap();
     let identity_name = identity_path.file_name().unwrap().to_str().unwrap();
 
-    assert!(soul_name.starts_with("SOUL."), "SOUL prefix expected: {}", soul_name);
-    assert!(user_name.starts_with("USER."), "USER prefix expected: {}", user_name);
-    assert!(identity_name.starts_with("IDENTITY."), "IDENTITY prefix expected: {}", identity_name);
+    assert!(
+        soul_name.starts_with("SOUL."),
+        "SOUL prefix expected: {}",
+        soul_name
+    );
+    assert!(
+        user_name.starts_with("USER."),
+        "USER prefix expected: {}",
+        user_name
+    );
+    assert!(
+        identity_name.starts_with("IDENTITY."),
+        "IDENTITY prefix expected: {}",
+        identity_name
+    );
 
     assert!(soul_name.ends_with(".md"));
     assert!(user_name.ends_with(".md"));

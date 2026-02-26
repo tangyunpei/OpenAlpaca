@@ -107,7 +107,10 @@ impl IMessageConnector {
 
         if let Some(watermark) = persisted_watermark {
             reader.set_watermark(watermark);
-            info!("iMessage connector restored watermark to ROWID {}", watermark);
+            info!(
+                "iMessage connector restored watermark to ROWID {}",
+                watermark
+            );
         } else {
             reader
                 .initialize_watermark()
@@ -250,8 +253,13 @@ impl IMessageConnector {
                         att.transfer_name.clone()
                     };
                     match crate::common::store_attachment(
-                        &self.db, &global_id, &name, &att.mime_type, &data,
-                        max_file_size, max_img_dim,
+                        &self.db,
+                        &global_id,
+                        &name,
+                        &att.mime_type,
+                        &data,
+                        max_file_size,
+                        max_img_dim,
                     ) {
                         Ok(resolved) => attachments.push(resolved),
                         Err(e) => warn!("Failed to store iMessage attachment: {e}"),

@@ -5,7 +5,9 @@
 
 use crate::gateway::router::ResolvedAttachment;
 use anyhow::Result;
-use openalpaca_storage::{ConversationMessage, ConversationRepository, Database, FileAssetRepository};
+use openalpaca_storage::{
+    ConversationMessage, ConversationRepository, Database, FileAssetRepository,
+};
 
 /// Handles persisting messages to the conversation_messages table.
 pub struct GatewayPersistence {
@@ -121,7 +123,11 @@ impl GatewayPersistence {
         let file_repo = FileAssetRepository::new(&self.db);
         for (i, att) in attachments.iter().enumerate() {
             if let Err(e) = file_repo.link_to_message(id, &att.file_id, i as i32, None) {
-                tracing::warn!("Failed to link attachment {} to message {}: {e}", att.file_id, id);
+                tracing::warn!(
+                    "Failed to link attachment {} to message {}: {e}",
+                    att.file_id,
+                    id
+                );
             }
         }
 
@@ -201,12 +207,7 @@ mod tests {
         let persistence = GatewayPersistence::new(db.clone());
 
         let id = persistence
-            .persist_user_message_with_attachments(
-                "user1:gui",
-                "",
-                "gui",
-                &[sample_attachment()],
-            )
+            .persist_user_message_with_attachments("user1:gui", "", "gui", &[sample_attachment()])
             .expect("persist message");
         assert!(id > 0);
 
@@ -227,7 +228,10 @@ mod tests {
             .expect("parts should be an array");
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0]["type"], "file_ref");
-        assert_eq!(msg.display_text.as_deref(), Some("[Attachments: sample.pdf]"));
+        assert_eq!(
+            msg.display_text.as_deref(),
+            Some("[Attachments: sample.pdf]")
+        );
     }
 
     #[test]
@@ -276,7 +280,9 @@ mod tests {
                 "user3:gui",
                 "review this resume",
                 "gui",
-                &[sample_attachment_with_text("Candidate has 5 years experience")],
+                &[sample_attachment_with_text(
+                    "Candidate has 5 years experience",
+                )],
             )
             .expect("persist message");
         assert!(id > 0);

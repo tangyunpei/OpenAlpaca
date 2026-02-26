@@ -25,7 +25,10 @@ pub enum ContentPart {
         detail: Option<String>,
     },
     Audio {
-        #[serde(serialize_with = "serialize_arc_string", deserialize_with = "deserialize_arc_string")]
+        #[serde(
+            serialize_with = "serialize_arc_string",
+            deserialize_with = "deserialize_arc_string"
+        )]
         data: Arc<String>,
         format: String,
     },
@@ -49,7 +52,10 @@ pub enum ContentPart {
 pub enum ImageSource {
     Base64 {
         media_type: String,
-        #[serde(serialize_with = "serialize_arc_string", deserialize_with = "deserialize_arc_string")]
+        #[serde(
+            serialize_with = "serialize_arc_string",
+            deserialize_with = "deserialize_arc_string"
+        )]
         data: Arc<String>,
     },
     Url {

@@ -180,8 +180,7 @@ impl NotificationDispatcher {
             .flatten()
             .map(|p| p.value)
             && let Err(e) =
-                openalpaca_connectors::imessage::IMessageSender::send(&chat_id, message, true)
-                    .await
+                openalpaca_connectors::imessage::IMessageSender::send(&chat_id, message, true).await
         {
             warn!("Failed to send iMessage notification: {e}");
         }
@@ -211,8 +210,7 @@ impl NotificationDispatcher {
             .flatten()
             .map(|p| p.value)
             && let Err(e) =
-                openalpaca_connectors::imessage::IMessageSender::send(&chat_id, message, true)
-                    .await
+                openalpaca_connectors::imessage::IMessageSender::send(&chat_id, message, true).await
         {
             warn!("Failed to send cross-channel iMessage notification: {e}");
         }

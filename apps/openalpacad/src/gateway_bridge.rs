@@ -56,7 +56,15 @@ impl MessageHandler for OrchestratorHandler {
     ) -> Result<HandleResult, String> {
         let result = self
             .orchestrator
-            .handle_message(request_id, source, content, principal, scope, lane_key, workspace_path)
+            .handle_message(
+                request_id,
+                source,
+                content,
+                principal,
+                scope,
+                lane_key,
+                workspace_path,
+            )
             .await;
 
         self.build_result(request_id, result, Vec::new())
@@ -78,13 +86,24 @@ impl MessageHandler for OrchestratorHandler {
         let result = self
             .orchestrator
             .handle_message_with_attachments(
-                request_id, source, content, attachments, principal, scope, lane_key, workspace_path,
+                request_id,
+                source,
+                content,
+                attachments,
+                principal,
+                scope,
+                lane_key,
+                workspace_path,
             )
             .await;
 
         // Only report attachments as used when the handler succeeded.
         // On error, no attachments were consumed into a response.
-        let used = if result.is_ok() { attachment_ids } else { Vec::new() };
+        let used = if result.is_ok() {
+            attachment_ids
+        } else {
+            Vec::new()
+        };
 
         self.build_result(request_id, result, used)
     }

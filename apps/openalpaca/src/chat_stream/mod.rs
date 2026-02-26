@@ -269,10 +269,7 @@ fn process_sse_event(event_text: &str, verbose: bool, state: &mut SseState) -> R
                     for art in artifacts {
                         let label = art["label"].as_str().unwrap_or("file");
                         let mime = art["mime_type"].as_str().unwrap_or("");
-                        println!(
-                            "  {}",
-                            format!("- {} ({})", label, mime).dimmed()
-                        );
+                        println!("  {}", format!("- {} ({})", label, mime).dimmed());
                     }
                 }
 

@@ -298,8 +298,12 @@ pub async fn get_chat_history_handler(
 
     // Verify the caller owns this lane (lane_key format: "{user_id}:{source_name}")
     if !is_lane_owned_by(lane_key, &state.local_user_id) {
-        return error_response(StatusCode::FORBIDDEN, "FORBIDDEN", "Access denied to this lane")
-            .into_response();
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "Access denied to this lane",
+        )
+        .into_response();
     }
 
     match chat_service.get_history(lane_key, limit, offset) {
@@ -340,8 +344,12 @@ pub async fn delete_chat_history_handler(
 
     // Verify the caller owns this lane (lane_key format: "{user_id}:{source_name}")
     if !is_lane_owned_by(lane_key, &state.local_user_id) {
-        return error_response(StatusCode::FORBIDDEN, "FORBIDDEN", "Access denied to this lane")
-            .into_response();
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "Access denied to this lane",
+        )
+        .into_response();
     }
 
     match chat_service.clear_history(lane_key) {
@@ -370,7 +378,12 @@ pub async fn list_conversations_handler(
     let limit = query.limit.unwrap_or(50);
     let offset = query.offset.unwrap_or(0);
 
-    match repo.list_conversations_for_owner(&state.local_user_id, query.source.as_deref(), limit, offset) {
+    match repo.list_conversations_for_owner(
+        &state.local_user_id,
+        query.source.as_deref(),
+        limit,
+        offset,
+    ) {
         Ok(conversations) => Json(ConversationsResponse { conversations }).into_response(),
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -409,8 +422,7 @@ pub async fn get_conversation_messages_handler(
 
     // Verify the caller owns this conversation
     if !is_lane_owned_by(&conv.lane_key, &state.local_user_id) {
-        return error_response(StatusCode::FORBIDDEN, "FORBIDDEN", "Access denied")
-            .into_response();
+        return error_response(StatusCode::FORBIDDEN, "FORBIDDEN", "Access denied").into_response();
     }
 
     let limit = query.limit.unwrap_or(50);

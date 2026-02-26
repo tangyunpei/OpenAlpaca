@@ -245,10 +245,7 @@ impl SkillCatalog {
             // Build alias index
             if let Ok(mut alias_idx) = self.alias_index.write() {
                 for alias in &entry.frontmatter.invoke.aliases {
-                    let alias_lower = alias
-                        .strip_prefix('/')
-                        .unwrap_or(alias)
-                        .to_lowercase();
+                    let alias_lower = alias.strip_prefix('/').unwrap_or(alias).to_lowercase();
                     alias_idx.insert(alias_lower, key.clone());
                 }
             }
@@ -283,10 +280,7 @@ impl SkillCatalog {
         }
         if let Ok(mut alias_idx) = self.alias_index.write() {
             for alias in &entry.frontmatter.invoke.aliases {
-                let alias_lower = alias
-                    .strip_prefix('/')
-                    .unwrap_or(alias)
-                    .to_lowercase();
+                let alias_lower = alias.strip_prefix('/').unwrap_or(alias).to_lowercase();
                 alias_idx.remove(&alias_lower);
             }
         }

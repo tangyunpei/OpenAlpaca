@@ -21,7 +21,12 @@ pub struct ConnectorManager {
 }
 
 impl ConnectorManager {
-    pub fn new(db: Database, bus: EventBus, gateway: Arc<Gateway>, daemon_config: Arc<ArcSwap<DaemonConfig>>) -> Self {
+    pub fn new(
+        db: Database,
+        bus: EventBus,
+        gateway: Arc<Gateway>,
+        daemon_config: Arc<ArcSwap<DaemonConfig>>,
+    ) -> Self {
         Self {
             db,
             bus,

@@ -178,9 +178,11 @@ impl Orchestrator {
 
             // Inject session summary if available (user-role to prevent prompt injection)
             if let Some(ref summary) = ctx.summary {
-                messages.push(ChatMessage::user(
-                    &super::wrap_untrusted_context(summary, "session_summary", "user_derived"),
-                ));
+                messages.push(ChatMessage::user(&super::wrap_untrusted_context(
+                    summary,
+                    "session_summary",
+                    "user_derived",
+                )));
             }
 
             // Retrieval injection: hybrid FTS+vector search for user memories
@@ -239,9 +241,11 @@ impl Orchestrator {
                         budget -= entry.len();
                         inner.push_str(&entry);
                     }
-                    messages.push(ChatMessage::user(
-                        &super::wrap_untrusted_context(&inner, "retrieved_memory", "retrieved"),
-                    ));
+                    messages.push(ChatMessage::user(&super::wrap_untrusted_context(
+                        &inner,
+                        "retrieved_memory",
+                        "retrieved",
+                    )));
                 }
             }
 
@@ -254,12 +258,10 @@ impl Orchestrator {
                 .map(|msg| {
                     if msg.parts.is_some() {
                         let mut adapted = msg.clone();
-                        adapted.parts = Some(
-                            self.adapt_parts_for_model(
-                                sanitize_parts_for_dispatch(msg.parts.clone().unwrap_or_default()),
-                                target_model,
-                            ),
-                        );
+                        adapted.parts = Some(self.adapt_parts_for_model(
+                            sanitize_parts_for_dispatch(msg.parts.clone().unwrap_or_default()),
+                            target_model,
+                        ));
                         adapted
                     } else {
                         msg.clone()
@@ -483,10 +485,9 @@ mod tests {
         let sanitized = sanitize_parts_for_dispatch(parts);
         assert_eq!(sanitized.len(), 1);
         match &sanitized[0] {
-            ContentPart::Text { text } => assert_eq!(
-                text,
-                "[image attached — unresolved file asset reference]"
-            ),
+            ContentPart::Text { text } => {
+                assert_eq!(text, "[image attached — unresolved file asset reference]")
+            }
             other => panic!("expected placeholder text, got {other:?}"),
         }
     }

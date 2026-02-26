@@ -13,8 +13,7 @@ fn test_resolve_principal_untrusted() {
     let repo = IdentityRepository::new(&db);
 
     // Test untrusted
-    let (principal, _) =
-        resolve_principal(&repo, "telegram", "user123", Some("Alice")).unwrap();
+    let (principal, _) = resolve_principal(&repo, "telegram", "user123", Some("Alice")).unwrap();
     assert!(matches!(principal, Principal::External { id, .. } if id == "user123"));
 }
 

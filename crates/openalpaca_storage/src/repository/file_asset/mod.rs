@@ -56,7 +56,13 @@ impl<'a> FileAssetRepository<'a> {
         })
     }
 
-    pub fn update_status(&self, id: &str, status: &FileAssetStatus, extracted_text: Option<&str>, extract_error: Option<&str>) -> Result<()> {
+    pub fn update_status(
+        &self,
+        id: &str,
+        status: &FileAssetStatus,
+        extracted_text: Option<&str>,
+        extract_error: Option<&str>,
+    ) -> Result<()> {
         self.db.with_connection(|conn| {
             conn.execute(
                 "UPDATE file_assets SET status = ?1, extracted_text = ?2, extract_error = ?3, updated_at = datetime('now') WHERE id = ?4",
@@ -121,7 +127,13 @@ impl<'a> FileAssetRepository<'a> {
     }
 
     /// Link a file asset to a conversation message.
-    pub fn link_to_message(&self, message_id: i64, file_id: &str, sort_order: i32, caption: Option<&str>) -> Result<()> {
+    pub fn link_to_message(
+        &self,
+        message_id: i64,
+        file_id: &str,
+        sort_order: i32,
+        caption: Option<&str>,
+    ) -> Result<()> {
         self.db.with_connection(|conn| {
             conn.execute(
                 "INSERT INTO conversation_message_attachments (message_id, file_id, sort_order, caption)
@@ -149,7 +161,10 @@ impl<'a> FileAssetRepository<'a> {
     }
 
     /// Get all attachment file_ids for a message.
-    pub fn get_attachments_for_message(&self, message_id: i64) -> Result<Vec<(String, i32, Option<String>)>> {
+    pub fn get_attachments_for_message(
+        &self,
+        message_id: i64,
+    ) -> Result<Vec<(String, i32, Option<String>)>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT file_id, sort_order, caption FROM conversation_message_attachments WHERE message_id = ?1 ORDER BY sort_order ASC",

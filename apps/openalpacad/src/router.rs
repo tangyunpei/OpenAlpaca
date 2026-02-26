@@ -34,7 +34,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/orchestrator/decisions",
             get(crate::routes::dispatch_decisions_handler),
         )
-        .route("/v1/connectors", get(crate::routes::list_connectors_handler))
+        .route(
+            "/v1/connectors",
+            get(crate::routes::list_connectors_handler),
+        )
         .route(
             "/v1/connectors/{id}/action",
             post(crate::routes::connector_action_handler),
@@ -145,10 +148,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             delete(crate::routes::destroy_instance_handler),
         )
         // File upload routes (multimodal)
-        .route(
-            "/v1/files/upload",
-            post(crate::routes::upload_file_handler),
-        )
+        .route("/v1/files/upload", post(crate::routes::upload_file_handler))
         .route(
             "/v1/files/{id}",
             get(crate::routes::get_file_metadata_handler),
@@ -156,6 +156,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/files/{id}/content",
             get(crate::routes::get_file_content_handler),
+        )
+        .route(
+            "/v1/files/{id}/open",
+            post(crate::routes::open_file_handler),
         )
         // Chat routes (Phase 5.6)
         .route("/v1/chat", post(crate::routes::send_chat_handler))
@@ -264,8 +268,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/v1/memory/{id}",
-            get(crate::routes::get_memory_handler)
-                .delete(crate::routes::delete_memory_handler),
+            get(crate::routes::get_memory_handler).delete(crate::routes::delete_memory_handler),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

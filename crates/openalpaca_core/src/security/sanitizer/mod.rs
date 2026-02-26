@@ -280,9 +280,7 @@ impl InputSanitizer {
         if detected == "application/x-cfb" || detected == "application/x-ole-storage" {
             return matches!(
                 declared,
-                "application/msword"
-                    | "application/vnd.ms-excel"
-                    | "application/vnd.ms-powerpoint"
+                "application/msword" | "application/vnd.ms-excel" | "application/vnd.ms-powerpoint"
             );
         }
         false

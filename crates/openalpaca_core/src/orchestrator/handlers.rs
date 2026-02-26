@@ -203,7 +203,9 @@ impl Orchestrator {
             .await
         } else if self.llm_router.is_some()
             && matches!(intent, Intent::SimpleQuery { .. })
-            && self.intent_parser.is_fast_path_eligible(&intent_source_content)
+            && self
+                .intent_parser
+                .is_fast_path_eligible(&intent_source_content)
         {
             // Fast path: skip LLM planner for obviously simple messages
             mode = "fast_path".to_string();
@@ -306,8 +308,7 @@ impl Orchestrator {
                             match dispatch_result {
                                 Ok(response) => Ok(response),
                                 Err(e) => {
-                                    fallback_reason =
-                                        Some(format!("dispatch_planned_failed: {e}"));
+                                    fallback_reason = Some(format!("dispatch_planned_failed: {e}"));
                                     tracing::warn!(
                                         "Dispatch planned failed: {e}, falling back to simple_query"
                                     );
@@ -328,8 +329,7 @@ impl Orchestrator {
                         }
                         other => {
                             mode = "planner_unknown".to_string();
-                            fallback_reason =
-                                Some(format!("unknown_classification: {other}"));
+                            fallback_reason = Some(format!("unknown_classification: {other}"));
                             tracing::warn!(
                                 "LLM planner returned unknown classification '{}', falling back to heuristic",
                                 other
@@ -511,7 +511,10 @@ impl Orchestrator {
         for att in &attachments {
             let ctx_block = if let Some(ref text) = att.extracted_text {
                 let truncated = text.chars().take(4000).collect::<String>();
-                format!("[File: {} ({})]\n{}", att.filename, att.mime_type, truncated)
+                format!(
+                    "[File: {} ({})]\n{}",
+                    att.filename, att.mime_type, truncated
+                )
             } else if att.mime_type.starts_with("image/") || att.mime_type.starts_with("audio/") {
                 format!("[File: {} ({})]", att.filename, att.mime_type)
             } else {
@@ -590,9 +593,11 @@ impl Orchestrator {
         scope_ctx: &MemoryScopeContext,
         current_parts: Option<&[ContentPart]>,
     ) -> Result<String, String> {
-        let intent = self
-            .intent_parser
-            .parse_with_skills_and_router(intent_content, &self.skill_catalog, &self.skill_router);
+        let intent = self.intent_parser.parse_with_skills_and_router(
+            intent_content,
+            &self.skill_catalog,
+            &self.skill_router,
+        );
 
         self.bus.publish(SystemEvent::IntentClassified {
             request_id,
@@ -618,7 +623,9 @@ impl Orchestrator {
             Intent::TaskQuery { task_id } => {
                 self.handle_task_query(task_id, &principal_id(principal))
             }
-            Intent::ComplexTask { required_skills, .. } => {
+            Intent::ComplexTask {
+                required_skills, ..
+            } => {
                 let augmented = self.augment_with_context(model_input_content, ctx);
                 match self.task_dispatcher.dispatch(
                     request_id,

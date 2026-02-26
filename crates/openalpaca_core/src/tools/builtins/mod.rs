@@ -88,9 +88,8 @@ pub fn builtin_tools(
         .clone()
         .unwrap_or_else(|| Arc::new(ArcSwap::from_pointee(DaemonConfig::default())));
 
-    let ws_root = workspace_root.unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    });
+    let ws_root = workspace_root
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     let mut tools = vec![
         web_search_tool(dc),

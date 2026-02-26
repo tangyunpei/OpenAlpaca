@@ -850,15 +850,24 @@ fn test_get_delete_owner_scoped() {
 
     // Owner B cannot get owner A's memory
     let mem = repo.get_for_owner(id_a, "owner-B").unwrap();
-    assert!(mem.is_none(), "Owner B should not be able to read owner A's memory");
+    assert!(
+        mem.is_none(),
+        "Owner B should not be able to read owner A's memory"
+    );
 
     // Owner B cannot delete owner A's memory
     let deleted = repo.delete_for_owner(id_a, "owner-B").unwrap();
-    assert!(!deleted, "Owner B should not be able to delete owner A's memory");
+    assert!(
+        !deleted,
+        "Owner B should not be able to delete owner A's memory"
+    );
 
     // Verify owner A's memory still exists
     let mem = repo.get_for_owner(id_a, "owner-A").unwrap();
-    assert!(mem.is_some(), "Owner A's memory should still exist after failed delete by B");
+    assert!(
+        mem.is_some(),
+        "Owner A's memory should still exist after failed delete by B"
+    );
 
     // Owner A can delete their own memory
     let deleted = repo.delete_for_owner(id_a, "owner-A").unwrap();
@@ -866,7 +875,10 @@ fn test_get_delete_owner_scoped() {
 
     // Verify it's gone
     let mem = repo.get_for_owner(id_a, "owner-A").unwrap();
-    assert!(mem.is_none(), "Memory should be gone after owner deletes it");
+    assert!(
+        mem.is_none(),
+        "Memory should be gone after owner deletes it"
+    );
 
     // Owner B's memory is unaffected
     let mem = repo.get_for_owner(id_b, "owner-B").unwrap();

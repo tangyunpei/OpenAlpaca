@@ -81,10 +81,8 @@ fn test_json_extracted_from_braces() {
 
 #[test]
 fn test_repair_prompt_missing_sections() {
-    let err = OutputValidationError::MissingSections(vec![
-        "Summary".to_string(),
-        "Details".to_string(),
-    ]);
+    let err =
+        OutputValidationError::MissingSections(vec!["Summary".to_string(), "Details".to_string()]);
     let prompt = err.repair_prompt();
     assert!(prompt.contains("Summary, Details"));
     assert!(prompt.contains("## SectionName"));

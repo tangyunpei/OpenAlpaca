@@ -529,9 +529,8 @@ fn bullet_list_regex() -> &'static Regex {
 }
 
 fn batch_keyword_regex() -> &'static Regex {
-    BATCH_KEYWORD_RE.get_or_init(|| {
-        Regex::new(r"(?i)\b(each|all of|every|for each|respectively)\b").unwrap()
-    })
+    BATCH_KEYWORD_RE
+        .get_or_init(|| Regex::new(r"(?i)\b(each|all of|every|for each|respectively)\b").unwrap())
 }
 
 fn explicit_quantity_regex() -> &'static Regex {
@@ -582,15 +581,19 @@ fn build_messages(
 
     if let Some(summary) = session_summary {
         let capped: String = summary.chars().take(PLANNING_SUMMARY_MAX_CHARS).collect();
-        messages.push(ChatMessage::user(
-            &super::wrap_untrusted_context(&format!("### SESSION SUMMARY ###\n{}", capped), "session_summary", "user_derived"),
-        ));
+        messages.push(ChatMessage::user(&super::wrap_untrusted_context(
+            &format!("### SESSION SUMMARY ###\n{}", capped),
+            "session_summary",
+            "user_derived",
+        )));
     }
 
     if let Some(tasks_block) = active_tasks_block {
-        messages.push(ChatMessage::user(
-            &super::wrap_untrusted_context(tasks_block, "active_tasks", "user_derived"),
-        ));
+        messages.push(ChatMessage::user(&super::wrap_untrusted_context(
+            tasks_block,
+            "active_tasks",
+            "user_derived",
+        )));
     }
 
     messages.extend_from_slice(history_tail);
@@ -716,7 +719,8 @@ impl TaskPlanner {
         limits: PlannerLimits,
         dag_prefer_predictable: bool,
     ) -> Result<TaskPlan, PlanError> {
-        let system_prompt = Self::build_hierarchical_prompt(idle_agents, limits.plan_protocol_v2_enabled);
+        let system_prompt =
+            Self::build_hierarchical_prompt(idle_agents, limits.plan_protocol_v2_enabled);
         let mut messages = build_messages(
             &system_prompt,
             user_message,
@@ -876,9 +880,7 @@ Example:
                         .get("execution_mode")
                         .and_then(|v| v.as_str())
                         .map(String::from),
-                    predictability_score: obj
-                        .get("predictability_score")
-                        .and_then(|v| v.as_f64()),
+                    predictability_score: obj.get("predictability_score").and_then(|v| v.as_f64()),
                 }
             } else {
                 return Err(PlanError::MalformedResponse(format!(
