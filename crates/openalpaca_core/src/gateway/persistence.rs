@@ -13,6 +13,8 @@ pub struct GatewayPersistence {
 }
 
 impl GatewayPersistence {
+    const PERSISTED_ATTACHMENT_TEXT_CHARS: usize = 4000;
+
     pub fn new(db: Database) -> Self {
         Self { db }
     }
@@ -56,12 +58,35 @@ impl GatewayPersistence {
             parts.push(serde_json::json!({"type": "text", "text": content}));
         }
         for att in attachments {
-            parts.push(serde_json::json!({
-                "type": "file_ref",
-                "file_id": att.file_id,
-                "filename": att.filename,
-                "mime_type": att.mime_type,
-            }));
+            let extracted = att
+                .extracted_text
+                .as_ref()
+                .map(|t| {
+                    t.chars()
+                        .take(Self::PERSISTED_ATTACHMENT_TEXT_CHARS)
+                        .collect::<String>()
+                })
+                .filter(|t| !t.trim().is_empty());
+
+            if !att.mime_type.starts_with("image/")
+                && !att.mime_type.starts_with("audio/")
+                && extracted.is_some()
+            {
+                parts.push(serde_json::json!({
+                    "type": "document",
+                    "file_id": att.file_id,
+                    "filename": att.filename,
+                    "mime_type": att.mime_type,
+                    "extracted_text": extracted,
+                }));
+            } else {
+                parts.push(serde_json::json!({
+                    "type": "file_ref",
+                    "file_id": att.file_id,
+                    "filename": att.filename,
+                    "mime_type": att.mime_type,
+                }));
+            }
         }
         let content_json = serde_json::json!({"v": 1, "parts": parts}).to_string();
 
@@ -158,6 +183,18 @@ mod tests {
         }
     }
 
+    fn sample_attachment_with_text(text: &str) -> ResolvedAttachment {
+        ResolvedAttachment {
+            file_id: "file-doc".to_string(),
+            filename: "resume.docx".to_string(),
+            mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                .to_string(),
+            size_bytes: text.len() as i64,
+            extracted_text: Some(text.to_string()),
+            storage_path: "/tmp/resume.docx".to_string(),
+        }
+    }
+
     #[test]
     fn persist_with_attachments_skips_empty_text_part() {
         let (_tmp, db) = make_db();
@@ -227,5 +264,44 @@ mod tests {
         assert_eq!(parts[0]["type"], "text");
         assert_eq!(parts[0]["text"], "please analyze");
         assert_eq!(parts[1]["type"], "file_ref");
+    }
+
+    #[test]
+    fn persist_with_attachments_stores_document_part_when_text_available() {
+        let (_tmp, db) = make_db();
+        let persistence = GatewayPersistence::new(db.clone());
+
+        let id = persistence
+            .persist_user_message_with_attachments(
+                "user3:gui",
+                "review this resume",
+                "gui",
+                &[sample_attachment_with_text("Candidate has 5 years experience")],
+            )
+            .expect("persist message");
+        assert!(id > 0);
+
+        let repo = ConversationRepository::new(&db);
+        let msgs = repo
+            .list_recent_by_lane("user3:gui", 10)
+            .expect("load recent messages");
+        assert_eq!(msgs.len(), 1);
+        let msg = &msgs[0];
+        let content_json = msg
+            .content_json
+            .as_deref()
+            .expect("content_json should be present");
+        let parsed: serde_json::Value =
+            serde_json::from_str(content_json).expect("content_json should be valid json");
+        let parts = parsed["parts"]
+            .as_array()
+            .expect("parts should be an array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "document");
+        assert_eq!(
+            parts[1]["extracted_text"],
+            "Candidate has 5 years experience"
+        );
     }
 }

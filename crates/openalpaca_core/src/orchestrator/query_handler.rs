@@ -52,6 +52,7 @@ impl Orchestrator {
         request_id: Uuid,
         _source: &str,
         query: &str,
+        tool_suggestion_query: &str,
         _lane_key: &str,
         ctx: &ConversationContext,
         owner_id: Option<&str>,
@@ -109,7 +110,8 @@ impl Orchestrator {
         }
 
         // Resolve tools based on intent analysis
-        let mut tool_names = self.intent_parser.suggest_tools(query);
+        // Tool suggestion should be based on raw user intent text, not attachment-injected context.
+        let mut tool_names = self.intent_parser.suggest_tools(tool_suggestion_query);
 
         // Force-include persona tools during bootstrap mode
         if self.is_bootstrapping() {

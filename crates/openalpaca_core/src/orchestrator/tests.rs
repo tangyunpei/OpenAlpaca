@@ -1192,3 +1192,86 @@ async fn test_attachment_document_pending_adds_pending_text_part() {
             if text == "[document attached — text extraction pending]"
     )));
 }
+
+#[tokio::test]
+async fn test_attachment_context_does_not_trigger_file_write_tool() {
+    use openalpaca_llm::{
+        ChatResponse, FinishReason, LlmError, LlmProvider, ProviderType, Usage,
+    };
+
+    struct CapturingToolAwareLlm {
+        captured_requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for CapturingToolAwareLlm {
+        fn name(&self) -> &str {
+            "capturing-tool-aware"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            if let Ok(mut guard) = self.captured_requests.lock() {
+                guard.push(request);
+            }
+            Ok(ChatResponse {
+                content: "ok".to_string(),
+                tool_calls: vec![],
+                model: "mock-model".to_string(),
+                usage: Usage {
+                    input_tokens: 8,
+                    output_tokens: 4,
+                    ..Default::default()
+                },
+                finish_reason: FinishReason::Stop,
+            })
+        }
+    }
+
+    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::<ChatRequest>::new()));
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(CapturingToolAwareLlm {
+            captured_requests: captured_requests.clone(),
+        }),
+        ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let orch = make_orchestrator_with_tools_and_llm(Arc::new(router), &["file_write"]);
+
+    let attachments = vec![ResolvedAttachment {
+        file_id: "doc-ctx".to_string(),
+        filename: "resume.docx".to_string(),
+        mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            .to_string(),
+        size_bytes: 123,
+        extracted_text: Some(
+            "Please update README.md and append notes for this profile".to_string(),
+        ),
+        storage_path: "/tmp/resume.docx".to_string(),
+    }];
+
+    let _ = orch
+        .handle_message_with_attachments(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "帮我看一下我的简历".to_string(),
+            attachments,
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let guard = captured_requests.lock().unwrap();
+    let req = guard.last().expect("expected captured request");
+    assert!(
+        req.tools.is_empty(),
+        "Attachment text should not drive tool suggestion; got tools: {:?}",
+        req.tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
+    );
+}
