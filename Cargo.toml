@@ -119,6 +119,9 @@ pdf-extract = "0.8"
 zip = "2"
 calamine = "0.26"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+opener = "0.8"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
 
 # Internal Crates (continued)
 openalpaca_connectors = { path = "crates/openalpaca_connectors" }

@@ -51,9 +51,9 @@ fn estimate_part_tokens(part: &openalpaca_llm::ContentPart) -> u32 {
             // ~25 tokens/sec; ensure non-empty audio gets at least 25 tokens
             ((data.len() as f64 / 4096.0) * 25.0).ceil().max(25.0) as u32
         }
-        openalpaca_llm::ContentPart::Document { extracted_text, .. } => {
-            extracted_text.as_ref().map_or(500, |t| (t.len() / 4) as u32)
-        }
+        openalpaca_llm::ContentPart::Document { extracted_text, .. } => extracted_text
+            .as_ref()
+            .map_or(500, |t| (t.len() / 4) as u32),
         openalpaca_llm::ContentPart::FileRef { .. } => 50,
     }
 }
@@ -118,12 +118,17 @@ fn compress_context(messages: &mut Vec<ChatMessage>, tail_keep: usize) {
                     openalpaca_llm::ContentPart::Audio { .. } => {
                         summary_parts.push(format!("- {role_label}: [sent audio]"));
                     }
-                    openalpaca_llm::ContentPart::Document { filename, extracted_text, .. } => {
+                    openalpaca_llm::ContentPart::Document {
+                        filename,
+                        extracted_text,
+                        ..
+                    } => {
                         let excerpt = extracted_text
                             .as_ref()
                             .map(|t| truncate_for_summary(t, 200))
                             .unwrap_or_default();
-                        summary_parts.push(format!("- {role_label}: [attached: {filename}] {excerpt}"));
+                        summary_parts
+                            .push(format!("- {role_label}: [attached: {filename}] {excerpt}"));
                     }
                     openalpaca_llm::ContentPart::FileRef { filename, .. } => {
                         summary_parts.push(format!("- {role_label}: [attached: {filename}]"));

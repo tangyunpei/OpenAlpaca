@@ -78,8 +78,16 @@ pub trait MessageHandler: Send + Sync {
         workspace_path: Option<String>,
     ) -> Result<HandleResult, String> {
         let _ = attachments; // default: ignore attachments
-        self.handle(request_id, source, content, principal, scope, lane_key, workspace_path)
-            .await
+        self.handle(
+            request_id,
+            source,
+            content,
+            principal,
+            scope,
+            lane_key,
+            workspace_path,
+        )
+        .await
     }
 }
 

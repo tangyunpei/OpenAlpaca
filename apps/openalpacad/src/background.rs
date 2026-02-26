@@ -66,7 +66,10 @@ pub fn spawn_embedding_indexer(
                 }
             }
             if total_count > 0 {
-                tracing::info!("Indexed {total_count} embeddings across {} owners", owner_ids.len());
+                tracing::info!(
+                    "Indexed {total_count} embeddings across {} owners",
+                    owner_ids.len()
+                );
             }
         }
     });
@@ -299,7 +302,6 @@ fn parse_retry_count(error: Option<&str>) -> u32 {
         .and_then(|n| n.parse::<u32>().ok())
         .unwrap_or(0)
 }
-
 
 /// Spawn background asset cleanup task.
 ///

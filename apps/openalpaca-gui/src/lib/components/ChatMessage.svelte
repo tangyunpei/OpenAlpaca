@@ -3,7 +3,11 @@
   import type { ChatMessage, AttachmentDisplay, Citation, Artifact } from "$lib/types";
   import { formatFileSize } from "$lib/types";
   import { renderMarkdown } from "$lib/markdown";
-  import { downloadFile } from "$lib/api/files";
+  import {
+    downloadFile,
+    openFileWithSystemDefault,
+    saveBlobWithDialog,
+  } from "$lib/api/files";
 
   interface Props {
     message: ChatMessage;
@@ -17,6 +21,7 @@
   let imageUrls = $state<Record<string, string>>({});
   let lightboxUrl = $state<string | null>(null);
   let lightboxFilename = $state("");
+  let lightboxAttachment = $state<AttachmentDisplay | null>(null);
 
   function formatTime(ts: string): string {
     try {
@@ -37,17 +42,80 @@
     }
   }
 
+  async function downloadAttachment(att: AttachmentDisplay) {
+    const blob = await downloadFile(att.file_id);
+    const saveResult = await saveBlobWithDialog(att.filename || "download", blob);
+    if (saveResult === "saved" || saveResult === "cancelled") {
+      return;
+    }
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = att.filename || "download";
+    a.rel = "noopener";
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+
   async function handleDownload(att: AttachmentDisplay) {
     try {
-      const blob = await downloadFile(att.file_id);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = att.filename;
-      a.click();
-      URL.revokeObjectURL(url);
+      await downloadAttachment(att);
     } catch (e) {
       console.error("[ChatMessage] download failed:", e);
+    }
+  }
+
+  function isBrowserPreviewable(mime: string): boolean {
+    const normalized = mime.toLowerCase();
+    return (
+      normalized === "application/pdf" ||
+      normalized.startsWith("text/") ||
+      normalized.startsWith("audio/") ||
+      normalized.startsWith("video/")
+    );
+  }
+
+  async function openAttachmentInBrowser(att: AttachmentDisplay) {
+    const blob = await downloadFile(att.file_id);
+    const blobUrl = URL.createObjectURL(blob);
+    const opened = window.open(blobUrl, "_blank");
+    if (!opened) {
+      URL.revokeObjectURL(blobUrl);
+      throw new Error("Preview window blocked");
+    }
+    try {
+      opened.opener = null;
+    } catch {
+      // Best effort only; continue preview flow.
+    }
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+  }
+
+  async function handleOpenAttachment(att: AttachmentDisplay) {
+    if (isBrowserPreviewable(att.mime_type)) {
+      try {
+        await openAttachmentInBrowser(att);
+        return;
+      } catch (e) {
+        console.warn("[ChatMessage] browser preview failed:", e);
+      }
+    }
+
+    try {
+      await openFileWithSystemDefault(att.file_id);
+      return;
+    } catch (e) {
+      console.warn("[ChatMessage] system open failed:", e);
+    }
+
+    try {
+      await downloadAttachment(att);
+    } catch (e) {
+      console.error("[ChatMessage] fallback download failed:", e);
     }
   }
 
@@ -68,12 +136,14 @@
     if (url) {
       lightboxUrl = url;
       lightboxFilename = att.filename;
+      lightboxAttachment = att;
     }
   }
 
   function closeLightbox() {
     lightboxUrl = null;
     lightboxFilename = "";
+    lightboxAttachment = null;
   }
 
   function handleLightboxKeydown(e: KeyboardEvent) {
@@ -170,6 +240,7 @@
             {#each imageAttachments as att}
               <button
                 class="relative group/img rounded-lg overflow-hidden border border-white/8 hover:border-white/20 transition-all cursor-pointer bg-transparent p-0"
+                type="button"
                 onclick={() => openLightbox(att)}
                 title={att.filename}
               >
@@ -200,26 +271,44 @@
         {#if fileAttachments.length > 0}
           <div class="flex flex-wrap gap-1.5 mt-2 {imageAttachments.length === 0 ? 'pt-2 border-t border-white/[0.06]' : ''}">
             {#each fileAttachments as att}
-              <button
-                class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-white/8 bg-white/[0.03]
-                       hover:bg-white/[0.06] hover:border-white/12 transition-all cursor-pointer"
-                onclick={() => handleDownload(att)}
-                title="Download {att.filename}"
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-muted-foreground">
-                  {#if mimeIcon(att.mime_type) === "pdf"}
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/>
-                  {:else if mimeIcon(att.mime_type) === "audio"}
-                    <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
-                  {:else}
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+              <div class="flex items-center gap-1">
+                <button
+                  class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-white/8 bg-white/[0.03]
+                         hover:bg-white/[0.06] hover:border-white/12 transition-all cursor-pointer"
+                  type="button"
+                  onclick={() => handleOpenAttachment(att)}
+                  title={`Open ${att.filename}`}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-muted-foreground">
+                    {#if mimeIcon(att.mime_type) === "pdf"}
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/>
+                    {:else if mimeIcon(att.mime_type) === "audio"}
+                      <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
+                    {:else}
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+                    {/if}
+                  </svg>
+                  <span class="truncate max-w-[100px]">{att.filename}</span>
+                  {#if att.size_bytes > 0}
+                    <span class="text-muted-foreground/50 shrink-0">{formatFileSize(att.size_bytes)}</span>
                   {/if}
-                </svg>
-                <span class="truncate max-w-[100px]">{att.filename}</span>
-                {#if att.size_bytes > 0}
-                  <span class="text-muted-foreground/50 shrink-0">{formatFileSize(att.size_bytes)}</span>
-                {/if}
-              </button>
+                </button>
+                <button
+                  class="flex items-center justify-center w-7 h-7 rounded-lg border border-white/8 bg-white/[0.03]
+                         hover:bg-white/[0.06] hover:border-white/12 transition-all cursor-pointer"
+                  type="button"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    handleDownload(att);
+                  }}
+                  title={`Download ${att.filename}`}
+                  aria-label={`Download ${att.filename}`}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-muted-foreground">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                  </svg>
+                </button>
+              </div>
             {/each}
           </div>
         {/if}
@@ -242,6 +331,7 @@
               <button
                 class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-accent/15 bg-accent/[0.04]
                        hover:bg-accent/[0.08] hover:border-accent/25 transition-all cursor-pointer"
+                type="button"
                 onclick={() => handleDownload({ file_id: art.file_id, filename: art.label, mime_type: art.mime_type, size_bytes: 0 })}
                 title="Download {art.label}"
               >
@@ -262,6 +352,7 @@
                    bg-background/90 backdrop-blur-md border border-white/8 text-muted-foreground
                    hover:text-foreground hover:border-white/15 transition-all duration-200 cursor-pointer
                    shadow-sm"
+            type="button"
             onclick={handleCopy}
             aria-label="Copy message"
           >
@@ -315,11 +406,11 @@
       <div class="flex items-center gap-2">
         <button
           class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-white/10 text-white/80 hover:bg-white/20 transition-colors cursor-pointer border-none"
+          type="button"
           onclick={() => {
-            const a = document.createElement("a");
-            a.href = lightboxUrl!;
-            a.download = lightboxFilename;
-            a.click();
+            if (lightboxAttachment) {
+              handleDownload(lightboxAttachment);
+            }
           }}
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -329,6 +420,7 @@
         </button>
         <button
           class="flex items-center justify-center w-8 h-8 rounded-lg bg-white/10 text-white/80 hover:bg-white/20 transition-colors cursor-pointer border-none"
+          type="button"
           onclick={closeLightbox}
           aria-label="Close preview"
         >
@@ -340,12 +432,17 @@
     </div>
 
     <!-- Image -->
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-    <img
-      src={lightboxUrl}
-      alt={lightboxFilename}
-      class="max-w-[90vw] max-h-[85vh] object-contain rounded-lg shadow-2xl"
+    <button
+      class="p-0 m-0 bg-transparent border-none"
+      type="button"
       onclick={(e) => e.stopPropagation()}
-    />
+      aria-label="Image preview"
+    >
+      <img
+        src={lightboxUrl}
+        alt={lightboxFilename}
+        class="max-w-[90vw] max-h-[85vh] object-contain rounded-lg shadow-2xl"
+      />
+    </button>
   </div>
 {/if}

@@ -1,7 +1,9 @@
 use crate::LlmProvider;
-use crate::routing::cost_tracker::CostTracker;
 use crate::error::LlmError;
-use crate::keys::key_pool::{ApiKey, KeyPool, KeyPriority, KeySource, ProviderType, SelectionStrategy};
+use crate::keys::key_pool::{
+    ApiKey, KeyPool, KeyPriority, KeySource, ProviderType, SelectionStrategy,
+};
+use crate::routing::cost_tracker::CostTracker;
 use crate::routing::model_registry::ModelRegistry;
 use crate::routing::router::{LlmRouter, ProviderEntry};
 use arc_swap::ArcSwap;

@@ -32,12 +32,8 @@ impl BuiltInTool for ShellExecuteTool {
         const MAX_OUTPUT_BYTES: usize = 512 * 1024; // 512 KB
         let stdout_raw = &output.stdout;
         let stderr_raw = &output.stderr;
-        let stdout = String::from_utf8_lossy(
-            &stdout_raw[..stdout_raw.len().min(MAX_OUTPUT_BYTES)],
-        );
-        let stderr = String::from_utf8_lossy(
-            &stderr_raw[..stderr_raw.len().min(MAX_OUTPUT_BYTES)],
-        );
+        let stdout = String::from_utf8_lossy(&stdout_raw[..stdout_raw.len().min(MAX_OUTPUT_BYTES)]);
+        let stderr = String::from_utf8_lossy(&stderr_raw[..stderr_raw.len().min(MAX_OUTPUT_BYTES)]);
 
         if output.status.success() {
             let mut result = String::new();

@@ -1314,7 +1314,11 @@ pub async fn run_lead_agent(
                 block.push_str(&entry);
             }
             messages.push(ChatMessage::user(
-                &crate::orchestrator::wrap_untrusted_context(&block, "retrieved_memory", "retrieved"),
+                &crate::orchestrator::wrap_untrusted_context(
+                    &block,
+                    "retrieved_memory",
+                    "retrieved",
+                ),
             ));
         }
     }

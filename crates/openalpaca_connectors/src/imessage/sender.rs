@@ -88,20 +88,14 @@ mod tests {
 
     #[test]
     fn test_escape_applescript_mixed() {
-        assert_eq!(
-            escape_applescript(r#"a\"b"#),
-            r#"a\\\"b"#,
-        );
+        assert_eq!(escape_applescript(r#"a\"b"#), r#"a\\\"b"#,);
     }
 
     #[test]
     fn test_escape_applescript_newlines() {
         assert_eq!(escape_applescript("line1\nline2"), "line1\\nline2");
         assert_eq!(escape_applescript("line1\rline2"), "line1\\rline2");
-        assert_eq!(
-            escape_applescript("line1\r\nline2"),
-            "line1\\r\\nline2"
-        );
+        assert_eq!(escape_applescript("line1\r\nline2"), "line1\\r\\nline2");
     }
 
     #[test]
@@ -111,9 +105,6 @@ mod tests {
         let escaped = escape_applescript(malicious);
         assert!(!escaped.contains('\n'));
         assert!(!escaped.contains('\r'));
-        assert_eq!(
-            escaped,
-            "hello\\\"\\ndo shell script \\\"rm -rf ~/\\\""
-        );
+        assert_eq!(escaped, "hello\\\"\\ndo shell script \\\"rm -rf ~/\\\"");
     }
 }

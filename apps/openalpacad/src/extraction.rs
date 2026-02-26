@@ -85,7 +85,7 @@ fn extract_docx(path: &str, max_chars: usize) -> (Option<String>, Option<String>
 }
 
 fn extract_spreadsheet(path: &str, max_chars: usize) -> (Option<String>, Option<String>) {
-    use calamine::{open_workbook_auto, Reader};
+    use calamine::{Reader, open_workbook_auto};
     let mut workbook = match open_workbook_auto(path) {
         Ok(wb) => wb,
         Err(e) => return (None, Some(format!("Spreadsheet open failed: {e}"))),
@@ -146,7 +146,11 @@ fn extract_pptx(path: &str, max_chars: usize) -> (Option<String>, Option<String>
     }
 }
 
-fn extract_ole2_legacy(path: &str, kind: &str, max_chars: usize) -> (Option<String>, Option<String>) {
+fn extract_ole2_legacy(
+    path: &str,
+    kind: &str,
+    max_chars: usize,
+) -> (Option<String>, Option<String>) {
     match std::fs::read(path) {
         Ok(data) => {
             let text = extract_printable_text(&data, max_chars);
@@ -382,10 +386,7 @@ mod tests {
     fn test_extract_text_pptx_minimal_fixture() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sample.pptx");
-        write_zip_fixture(
-            &path,
-            &[("ppt/slides/slide1.xml", "<a:t>Hello PPTX</a:t>")],
-        );
+        write_zip_fixture(&path, &[("ppt/slides/slide1.xml", "<a:t>Hello PPTX</a:t>")]);
         let (text, error) = extract_text(
             path.to_str().unwrap(),
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -400,7 +401,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sample.pages");
         write_zip_fixture(&path, &[("index.xml", "<sf:p>Hello iWork</sf:p>")]);
-        let (text, error) = extract_text(path.to_str().unwrap(), "application/vnd.apple.pages", 10000);
+        let (text, error) =
+            extract_text(path.to_str().unwrap(), "application/vnd.apple.pages", 10000);
         assert!(error.is_none(), "unexpected iWork error: {error:?}");
         assert!(text.unwrap_or_default().contains("Hello iWork"));
     }
@@ -423,7 +425,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sample.ppt");
         std::fs::write(&path, b"\xD0\xCF\x11\xE0binary").unwrap();
-        let (text, error) = extract_text(path.to_str().unwrap(), "application/vnd.ms-powerpoint", 10000);
+        let (text, error) = extract_text(
+            path.to_str().unwrap(),
+            "application/vnd.ms-powerpoint",
+            10000,
+        );
         assert_eq!(text.unwrap_or_default(), "");
         assert!(
             error.unwrap_or_default().contains("Legacy .ppt format"),
@@ -443,7 +449,9 @@ mod tests {
         );
         assert!(text.is_none());
         assert!(
-            error.unwrap_or_default().contains("Spreadsheet open failed"),
+            error
+                .unwrap_or_default()
+                .contains("Spreadsheet open failed"),
             "expected spreadsheet open failure"
         );
     }
@@ -456,7 +464,9 @@ mod tests {
         let (text, error) = extract_text(path.to_str().unwrap(), "application/vnd.ms-excel", 10000);
         assert!(text.is_none());
         assert!(
-            error.unwrap_or_default().contains("Spreadsheet open failed"),
+            error
+                .unwrap_or_default()
+                .contains("Spreadsheet open failed"),
             "expected spreadsheet open failure"
         );
     }

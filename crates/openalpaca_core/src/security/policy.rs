@@ -64,7 +64,6 @@ impl TrustGate {
                     provider
                 ));
             }
-
         }
 
         // 4. Linked Users can generally do anything, BUT specific scopes might be guarded

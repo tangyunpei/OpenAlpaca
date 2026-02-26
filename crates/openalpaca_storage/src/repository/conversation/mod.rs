@@ -37,7 +37,12 @@ impl<'a> ConversationRepository<'a> {
     }
 
     /// Insert a conversation message with structured content (multimodal).
-    pub fn insert_with_structured(&self, msg: &ConversationMessage, content_json: &str, display_text: &str) -> Result<i64> {
+    pub fn insert_with_structured(
+        &self,
+        msg: &ConversationMessage,
+        content_json: &str,
+        display_text: &str,
+    ) -> Result<i64> {
         self.db.with_connection(|conn| {
             conn.execute(
                 "INSERT INTO conversation_messages (lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, content_json, display_text)

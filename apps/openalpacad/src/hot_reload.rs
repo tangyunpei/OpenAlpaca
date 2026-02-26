@@ -1,15 +1,13 @@
 use crate::bootstrap;
 use crate::events::EventBroadcaster;
-use openalpaca_core::{
-    bus::EventBus,
-    daemon_config::load_daemon_config,
-    orchestrator::Orchestrator,
-};
 use arc_swap::ArcSwap;
+use openalpaca_core::{
+    bus::EventBus, daemon_config::load_daemon_config, orchestrator::Orchestrator,
+};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -339,13 +337,12 @@ async fn handle_skills_change(ctx: &FileWatcherContext, changed_path: &Path) {
             Ok(()) => {
                 let skill_name = skill_folder.as_os_str().to_string_lossy().to_string();
                 info!("Skill hot-reloaded: {}", skill_dir.display());
-                ctx.bus.publish(
-                    openalpaca_core::events::SystemEvent::SkillCatalogUpdated {
+                ctx.bus
+                    .publish(openalpaca_core::events::SystemEvent::SkillCatalogUpdated {
                         skill_name,
                         action: "reloaded".to_string(),
                         timestamp: chrono::Utc::now(),
-                    },
-                );
+                    });
             }
             Err(e) => {
                 warn!("Skill reload failed for {}: {}", skill_dir.display(), e)
@@ -399,10 +396,7 @@ pub fn spawn_soul_reload_subscriber(
                             ring.pop_front();
                         }
 
-                        info!(
-                            "Soul hot-reloaded via EventBus: {}",
-                            soul_path.display()
-                        );
+                        info!("Soul hot-reloaded via EventBus: {}", soul_path.display());
                     }
                     Err(e) => {
                         warn!(

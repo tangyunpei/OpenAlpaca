@@ -66,7 +66,10 @@ impl Orchestrator {
         }
 
         // Step 4: Get first_recent_id for the ID-range query
-        let first_recent_id = chat_rows.first().map(|(id, _, _, _)| *id).unwrap_or(i64::MAX);
+        let first_recent_id = chat_rows
+            .first()
+            .map(|(id, _, _, _)| *id)
+            .unwrap_or(i64::MAX);
 
         // Step 5: Load unsummarized older messages via ID-range query (fixes 120-window bug)
         let older_window = if last_summarized_id < first_recent_id {
@@ -96,8 +99,7 @@ impl Orchestrator {
                 if let Some(json_str) = content_json
                     && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str)
                     && let Some(parts_arr) = parsed.get("parts")
-                    && let Ok(parts) =
-                        serde_json::from_value::<Vec<ContentPart>>(parts_arr.clone())
+                    && let Ok(parts) = serde_json::from_value::<Vec<ContentPart>>(parts_arr.clone())
                 {
                     msg.parts = Some(parts);
                 }

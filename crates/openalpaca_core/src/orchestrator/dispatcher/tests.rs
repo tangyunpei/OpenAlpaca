@@ -311,8 +311,15 @@ fn test_dispatch_planned_empty_assignments_promotes_to_lead_agent() {
         predictability_score: None,
     };
 
-    let result =
-        dispatcher.dispatch_planned(Uuid::new_v4(), "Normal task", plan, "user1", "user1:cli", "cli", None);
+    let result = dispatcher.dispatch_planned(
+        Uuid::new_v4(),
+        "Normal task",
+        plan,
+        "user1",
+        "user1:cli",
+        "cli",
+        None,
+    );
 
     // Should succeed — dispatched to lead agent as last-resort fallback
     assert!(result.is_ok());
@@ -367,10 +374,7 @@ fn test_dispatch_planned_pipeline_empty_assignments_decision_and_execution_agree
     // 2. The DispatchDecision event must record lead_agent, not sequential_pipeline
     let mut found_decision = false;
     while let Ok(event) = rx.try_recv() {
-        if let SystemEvent::DispatchDecision {
-            mode, reason, ..
-        } = event
-        {
+        if let SystemEvent::DispatchDecision { mode, reason, .. } = event {
             assert_eq!(
                 mode, "lead_agent",
                 "Decision should record lead_agent, not pipeline"

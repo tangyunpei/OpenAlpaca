@@ -186,7 +186,14 @@ impl ChatService {
                 if response.attachments_used.is_empty() {
                     sink.send_done(&response.content, model, tokens_in, tokens_out, duration_ms);
                 } else {
-                    sink.send_done_with_attachments(&response.content, model, tokens_in, tokens_out, duration_ms, response.attachments_used);
+                    sink.send_done_with_attachments(
+                        &response.content,
+                        model,
+                        tokens_in,
+                        tokens_out,
+                        duration_ms,
+                        response.attachments_used,
+                    );
                 }
             }
 
@@ -259,8 +266,8 @@ impl ChatService {
         let poll_interval_ms = poll_interval_ms.max(1);
         let refs = attachment_refs.to_vec();
         let principal_owned = principal.to_string();
-        let mut assets = Self::load_attachment_assets(db.clone(), refs.clone(), principal_owned)
-            .await?;
+        let mut assets =
+            Self::load_attachment_assets(db.clone(), refs.clone(), principal_owned).await?;
 
         let mut pending_ids: Vec<String> = assets
             .iter()
@@ -294,8 +301,7 @@ impl ChatService {
             if !pending_ids.is_empty() {
                 warn!(
                     attachments_pending = pending_ids.len(),
-                    wait_ms,
-                    "Timed out waiting for attachments; proceeding with pending assets"
+                    wait_ms, "Timed out waiting for attachments; proceeding with pending assets"
                 );
             }
         }
@@ -358,7 +364,10 @@ impl ChatService {
     }
 
     fn is_pending_status(status: &FileAssetStatus) -> bool {
-        matches!(status, FileAssetStatus::Uploaded | FileAssetStatus::Processing)
+        matches!(
+            status,
+            FileAssetStatus::Uploaded | FileAssetStatus::Processing
+        )
     }
 }
 
@@ -399,15 +408,20 @@ mod tests {
     async fn test_resolve_attachments_with_wait_ready() {
         let db = setup_db();
         let repo = FileAssetRepository::new(&db);
-        repo.insert(&build_asset("a-ready", FileAssetStatus::Ready, Some("hello")))
-            .unwrap();
+        repo.insert(&build_asset(
+            "a-ready",
+            FileAssetStatus::Ready,
+            Some("hello"),
+        ))
+        .unwrap();
 
         let refs = vec![AttachmentRef {
             file_id: "a-ready".to_string(),
             caption: None,
         }];
-        let resolved =
-            ChatService::resolve_attachments_with_wait(db, &refs, "u1", 200, 20).await.unwrap();
+        let resolved = ChatService::resolve_attachments_with_wait(db, &refs, "u1", 200, 20)
+            .await
+            .unwrap();
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].file_id, "a-ready");
         assert_eq!(resolved[0].extracted_text.as_deref(), Some("hello"));
@@ -428,8 +442,9 @@ mod tests {
             file_id: "a-error".to_string(),
             caption: None,
         }];
-        let resolved =
-            ChatService::resolve_attachments_with_wait(db, &refs, "u1", 200, 20).await.unwrap();
+        let resolved = ChatService::resolve_attachments_with_wait(db, &refs, "u1", 200, 20)
+            .await
+            .unwrap();
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].file_id, "a-error");
         assert!(resolved[0].extracted_text.is_none());
@@ -450,8 +465,9 @@ mod tests {
             file_id: "a-pending".to_string(),
             caption: None,
         }];
-        let resolved =
-            ChatService::resolve_attachments_with_wait(db, &refs, "u1", 60, 20).await.unwrap();
+        let resolved = ChatService::resolve_attachments_with_wait(db, &refs, "u1", 60, 20)
+            .await
+            .unwrap();
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].file_id, "a-pending");
         assert!(resolved[0].extracted_text.is_none());

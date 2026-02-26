@@ -76,7 +76,10 @@ pub fn asset_storage_path(sha256: &str) -> anyhow::Result<PathBuf> {
     if sha256.len() < 4 {
         anyhow::bail!("SHA-256 hash too short: {}", sha256);
     }
-    Ok(assets_dir()?.join(&sha256[0..2]).join(&sha256[2..4]).join(sha256))
+    Ok(assets_dir()?
+        .join(&sha256[0..2])
+        .join(&sha256[2..4])
+        .join(sha256))
 }
 
 #[cfg(test)]

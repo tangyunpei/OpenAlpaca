@@ -74,7 +74,12 @@ pub struct ConnectorBuilder {
 }
 
 impl ConnectorBuilder {
-    pub fn new(db: Database, bus: EventBus, gateway: Arc<Gateway>, daemon_config: Arc<ArcSwap<DaemonConfig>>) -> Self {
+    pub fn new(
+        db: Database,
+        bus: EventBus,
+        gateway: Arc<Gateway>,
+        daemon_config: Arc<ArcSwap<DaemonConfig>>,
+    ) -> Self {
         Self {
             db: Arc::new(db),
             bus: Arc::new(bus),
@@ -96,7 +101,14 @@ impl ConnectorBuilder {
         cancel_token: tokio_util::sync::CancellationToken,
         local_user_id: Option<String>,
     ) -> imessage::IMessageConnector {
-        imessage::IMessageConnector::new(self.db, self.bus, self.gateway, self.daemon_config, cancel_token, local_user_id)
+        imessage::IMessageConnector::new(
+            self.db,
+            self.bus,
+            self.gateway,
+            self.daemon_config,
+            cancel_token,
+            local_user_id,
+        )
     }
 }
 

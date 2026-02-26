@@ -120,9 +120,7 @@ fn make_orchestrator_with_fixed_llm_response(response: &str) -> Orchestrator {
 fn make_orchestrator_with_capturing_llm(
     captured_requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
 ) -> Orchestrator {
-    use openalpaca_llm::{
-        ChatResponse, FinishReason, LlmError, LlmProvider, ProviderType, Usage,
-    };
+    use openalpaca_llm::{ChatResponse, FinishReason, LlmError, LlmProvider, ProviderType, Usage};
 
     struct CapturingMockLlm {
         captured_requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
@@ -1069,7 +1067,9 @@ async fn test_attachment_image_is_converted_to_base64_part() {
         .unwrap();
 
     let guard = captured_requests.lock().unwrap();
-    let req = guard.last().expect("expected at least one captured request");
+    let req = guard
+        .last()
+        .expect("expected at least one captured request");
     let user_msg = req
         .messages
         .iter()
@@ -1122,7 +1122,9 @@ async fn test_attachment_image_read_failure_inserts_placeholder_text() {
         .unwrap();
 
     let guard = captured_requests.lock().unwrap();
-    let req = guard.last().expect("expected at least one captured request");
+    let req = guard
+        .last()
+        .expect("expected at least one captured request");
     let user_msg = req
         .messages
         .iter()
@@ -1166,7 +1168,9 @@ async fn test_attachment_document_pending_adds_pending_text_part() {
         .unwrap();
 
     let guard = captured_requests.lock().unwrap();
-    let req = guard.last().expect("expected at least one captured request");
+    let req = guard
+        .last()
+        .expect("expected at least one captured request");
     let user_msg = req
         .messages
         .iter()
@@ -1195,9 +1199,7 @@ async fn test_attachment_document_pending_adds_pending_text_part() {
 
 #[tokio::test]
 async fn test_attachment_context_does_not_trigger_file_write_tool() {
-    use openalpaca_llm::{
-        ChatResponse, FinishReason, LlmError, LlmProvider, ProviderType, Usage,
-    };
+    use openalpaca_llm::{ChatResponse, FinishReason, LlmError, LlmProvider, ProviderType, Usage};
 
     struct CapturingToolAwareLlm {
         captured_requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,

@@ -6,7 +6,7 @@ use openalpaca_storage::IdentityRepository;
 #[cfg(any(feature = "telegram", feature = "imessage"))]
 use openalpaca_core::gateway::ResolvedAttachment;
 #[cfg(any(feature = "telegram", feature = "imessage"))]
-use openalpaca_storage::{Database, FileAsset, FileAssetStatus, FileAssetRepository};
+use openalpaca_storage::{Database, FileAsset, FileAssetRepository, FileAssetStatus};
 
 /// Resolve a Principal from an external identity.
 ///
@@ -90,7 +90,7 @@ pub fn store_attachment(
     max_image_dimension: u32,
 ) -> Result<ResolvedAttachment, String> {
     use openalpaca_core::security::sanitizer::InputSanitizer;
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     // Validate upload (defense-in-depth for connector-sourced files)
     if let Err(violation) = InputSanitizer::validate_upload_with_image_limit(
@@ -132,8 +132,7 @@ pub fn store_attachment(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create asset directory: {e}"))?;
     }
-    std::fs::write(&storage_path, data)
-        .map_err(|e| format!("Failed to write asset file: {e}"))?;
+    std::fs::write(&storage_path, data).map_err(|e| format!("Failed to write asset file: {e}"))?;
 
     // 5. Insert DB row
     let file_id = uuid::Uuid::new_v4().to_string();

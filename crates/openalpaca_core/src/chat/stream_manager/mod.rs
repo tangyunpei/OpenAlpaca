@@ -156,9 +156,21 @@ impl StreamSink {
         citations: Vec<Citation>,
         artifacts: Vec<Artifact>,
     ) {
-        let att = if attachments_used.is_empty() { None } else { Some(attachments_used) };
-        let cit = if citations.is_empty() { None } else { Some(citations) };
-        let art = if artifacts.is_empty() { None } else { Some(artifacts) };
+        let att = if attachments_used.is_empty() {
+            None
+        } else {
+            Some(attachments_used)
+        };
+        let cit = if citations.is_empty() {
+            None
+        } else {
+            Some(citations)
+        };
+        let art = if artifacts.is_empty() {
+            None
+        } else {
+            Some(artifacts)
+        };
         self.send_event(ChatStreamEvent::Done {
             content: content.to_string(),
             model: model.to_string(),

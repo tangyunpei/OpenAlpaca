@@ -504,12 +504,7 @@ impl IntentParser {
             "followed by",
             "multiple steps",
         ];
-        const DELEGATION_SIGNALS: &[&str] = &[
-            "assign to",
-            "delegate",
-            "use agent",
-            "spawn agent",
-        ];
+        const DELEGATION_SIGNALS: &[&str] = &["assign to", "delegate", "use agent", "spawn agent"];
 
         // 1. Short content only
         if content.len() > 200 {

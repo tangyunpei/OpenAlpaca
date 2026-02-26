@@ -22,6 +22,8 @@ tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 directories.workspace = true
+tauri-plugin-dialog.workspace = true
+tauri-plugin-fs.workspace = true
 
 tauri = { version = "2", features = [] }
 openalpaca_api = { workspace = true }
