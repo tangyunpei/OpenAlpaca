@@ -5,6 +5,7 @@
 //! - Ensuring the daemon is running (spawning if needed)
 
 use openalpaca_storage::discovery::{self, ConnectionInfo};
+use openalpaca_storage::paths;
 use std::process::Command;
 use std::time::Duration;
 
@@ -89,7 +90,14 @@ fn spawn_daemon() -> anyhow::Result<()> {
         }
     };
 
+    let app_dir = paths::app_dir()?;
+    std::fs::create_dir_all(&app_dir)?;
+    let config_dir = app_dir.join("config");
+    std::fs::create_dir_all(&config_dir)?;
+
     tracing::info!("Spawning daemon: {}", path_to_use.display());
+    tracing::info!("Daemon runtime dir: {}", app_dir.display());
+    tracing::info!("Daemon config dir: {}", config_dir.display());
 
     #[cfg(unix)]
     {
@@ -99,7 +107,9 @@ fn spawn_daemon() -> anyhow::Result<()> {
         let mut cmd = Command::new(&path_to_use);
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stderr(std::process::Stdio::null())
+            .current_dir(&app_dir)
+            .env("OPENALPACA_CONFIG_DIR", &config_dir);
 
         // Create new session (detach from parent)
         unsafe {
@@ -122,6 +132,8 @@ fn spawn_daemon() -> anyhow::Result<()> {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
+            .current_dir(&app_dir)
+            .env("OPENALPACA_CONFIG_DIR", &config_dir)
             .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
             .spawn()?;
     }

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn test_builtin_tools_count_without_db() {
-    let tools = builtin_tools(None, None, None, None);
+    let tools = builtin_tools(None, None, None, None, None);
     assert_eq!(tools.len(), 5);
 }
 
@@ -11,13 +11,13 @@ fn test_builtin_tools_count_with_db() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
-    let tools = builtin_tools(Some(db), None, Some(dc), None);
+    let tools = builtin_tools(Some(db), None, Some(dc), None, None);
     assert_eq!(tools.len(), 6);
 }
 
 #[test]
 fn test_all_tools_have_valid_definitions() {
-    for tool in builtin_tools(None, None, None, None) {
+    for tool in builtin_tools(None, None, None, None, None) {
         assert!(!tool.definition.name.is_empty());
         assert!(!tool.definition.description.is_empty());
         assert!(tool.definition.parameters.is_object());
@@ -37,7 +37,7 @@ fn test_builtin_tools_with_soul_context_includes_update_soul() {
         max_backups: None,
     };
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
-    let tools = builtin_tools_with_soul_context(Some(db), None, ctx, Some(dc), None);
+    let tools = builtin_tools_with_soul_context(Some(db), None, ctx, Some(dc), None, None);
     assert_eq!(tools.len(), 7, "Should have 7 tools (6 base + update_soul)");
     assert!(
         tools.iter().any(|t| t.definition.name == "update_soul"),
@@ -79,7 +79,7 @@ fn test_builtin_tools_uses_explicit_workspace_root() {
     let ws_root = dir.path().to_path_buf();
 
     // Pass an explicit workspace root — should not fall back to current_dir()
-    let tools = builtin_tools(None, None, None, Some(ws_root.clone()));
+    let tools = builtin_tools(None, None, None, None, Some(ws_root.clone()));
     assert_eq!(tools.len(), 5);
 
     // Verify tools were created (they compile and register without error
@@ -93,6 +93,6 @@ fn test_builtin_tools_uses_explicit_workspace_root() {
 fn test_builtin_tools_falls_back_to_current_dir_when_none() {
     // When workspace_root is None, should fall back to current_dir()
     // This must not panic even if current_dir() is available.
-    let tools = builtin_tools(None, None, None, None);
+    let tools = builtin_tools(None, None, None, None, None);
     assert_eq!(tools.len(), 5);
 }

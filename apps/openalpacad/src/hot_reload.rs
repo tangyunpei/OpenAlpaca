@@ -34,6 +34,7 @@ pub struct FileWatcherContext {
     pub secret_store: Arc<dyn openalpaca_llm::SecretStore>,
     pub skill_catalog: Arc<openalpaca_core::orchestrator::skill_catalog::SkillCatalog>,
     pub daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
+    pub web_search_config: Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
     pub bus: EventBus,
     pub fs_watch_handle: Option<openalpaca_wake::FileWatchHandle>,
 
@@ -308,6 +309,13 @@ async fn handle_llm_config_change(ctx: &FileWatcherContext) {
                             }
                         }
                     }
+
+                    // 5. Reload web_search config
+                    let ws_cfg = new_config
+                        .web_search
+                        .clone()
+                        .unwrap_or_default();
+                    ctx.web_search_config.store(Arc::new(ws_cfg));
 
                     info!(
                         "LLM config hot-reloaded from {}",

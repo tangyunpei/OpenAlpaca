@@ -23,6 +23,30 @@ cargo build -p openalpaca --release
 ./target/release/openalpaca --help
 ```
 
+### macOS Package Install (No Cargo on target machine)
+
+Build a distributable package on a macOS build machine:
+
+```bash
+./scripts/release/package-macos.sh
+```
+
+Install on a target macOS machine from local artifact or URL:
+
+```bash
+# local file
+./scripts/release/install.sh --file ./dist/openalpaca-macos-<target>-v<version>.tar.gz
+
+# remote URL
+./scripts/release/install.sh --url https://example.com/openalpaca-macos-<target>-v<version>.tar.gz
+```
+
+Defaults:
+- binaries: `~/.local/openalpaca`
+- GUI app: `~/Applications/openalpaca-gui.app`
+- PATH link: `~/.local/bin/openalpaca`
+- runtime config/data: `~/Library/Application Support/OpenAlpaca/`
+
 ## Connection and Auth Model
 
 - The daemon writes discovery metadata to `discovery.json` under the OpenAlpaca app data directory.
@@ -66,6 +90,8 @@ Notes:
 - `start` launches daemon and then GUI unless `--daemon-only` is set.
 - `restart` restarts daemon only.
 - `tail` streams live daemon events (not historical query output).
+- Optional daemon binary override: `OPENALPACA_DAEMON_BIN=/abs/path/openalpacad`.
+- Daemon startup sets `OPENALPACA_CONFIG_DIR` to `~/Library/Application Support/OpenAlpaca/config`.
 
 ### `config`
 
@@ -94,6 +120,9 @@ Manage GUI process.
 openalpaca gui start
 openalpaca gui stop
 ```
+
+Optional GUI app override:
+- `OPENALPACA_GUI_APP=/abs/path/openalpaca-gui.app`
 
 ### `connector`
 

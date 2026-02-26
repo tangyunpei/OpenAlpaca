@@ -264,17 +264,6 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["server", "embedding_indexer"],
         field: "batch_size",
     },
-    // Providers: Web Search
-    TomlMapping {
-        schema_key: "daemon.providers.web_search.api_key",
-        section: &["providers", "web_search"],
-        field: "api_key",
-    },
-    TomlMapping {
-        schema_key: "daemon.providers.web_search.timeout_secs",
-        section: &["providers", "web_search"],
-        field: "timeout_secs",
-    },
     // Alias: system.max_agents → same as daemon.dag.max_concurrent_agents
     TomlMapping {
         schema_key: "system.max_agents",

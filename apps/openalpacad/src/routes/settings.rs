@@ -490,27 +490,27 @@ pub async fn rescan_credentials(State(state): State<Arc<AppState>>) -> impl Into
 
 /// GET /v1/settings/llm/cli-backends — list CLI backend status
 pub async fn get_cli_backends(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Read CLI backends config from llm.toml
-    let llm_config_path = std::env::current_dir()
-        .unwrap_or_default()
-        .join("config/llm.toml");
-
-    let cli_config = if llm_config_path.exists() {
-        openalpaca_llm::read_config(&llm_config_path)
-            .ok()
-            .and_then(|c| c.cli_backends)
-            .unwrap_or_default()
-    } else {
-        openalpaca_llm::CliBackendsConfig::default()
-    };
+    let cli_config = load_cli_backends_config(&state.llm_config_path);
 
     let statuses = openalpaca_llm::detect_cli_backends(&cli_config);
-    let _ = &state; // acknowledge state usage
     (
         StatusCode::OK,
         Json(serde_json::to_value(statuses).unwrap()),
     )
         .into_response()
+}
+
+fn load_cli_backends_config(
+    llm_config_path: &std::path::Path,
+) -> openalpaca_llm::CliBackendsConfig {
+    if llm_config_path.exists() {
+        openalpaca_llm::read_config(llm_config_path)
+            .ok()
+            .and_then(|cfg| cfg.cli_backends)
+            .unwrap_or_default()
+    } else {
+        openalpaca_llm::CliBackendsConfig::default()
+    }
 }
 
 /// GET /v1/settings/llm/providers/usage — provider-level usage summaries
@@ -635,10 +635,9 @@ struct WebSearchConfigResponse {
     timeout_secs: u64,
 }
 
-/// GET /v1/daemon/config/providers — read daemon provider configuration
+/// GET /v1/daemon/config/providers — read web search provider configuration (from llm.toml)
 pub async fn get_daemon_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let cfg = state.daemon_config.load();
-    let ws = &cfg.providers.web_search;
+    let ws = state.web_search_config.load();
 
     let hint = if ws.api_key.len() > 4 {
         format!("****{}", &ws.api_key[ws.api_key.len() - 4..])
@@ -665,53 +664,106 @@ pub struct UpdateWebSearchRequest {
     pub timeout_secs: Option<u64>,
 }
 
-/// PUT /v1/daemon/config/providers/web-search — update web search provider config
+/// PUT /v1/daemon/config/providers/web-search — update web search provider config (writes to llm.toml)
 pub async fn update_web_search_config(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateWebSearchRequest>,
 ) -> impl IntoResponse {
-    use openalpaca_core::daemon_config::load_daemon_config;
-
-    // Load current config from disk (not in-memory) to preserve all fields
-    let mut cfg = load_daemon_config(&state.daemon_config_path);
-
-    // Apply patches
-    if let Some(ref key) = body.api_key {
-        cfg.providers.web_search.api_key = key.clone();
-    }
-    if let Some(timeout) = body.timeout_secs {
-        cfg.providers.web_search.timeout_secs = timeout;
-    }
-
-    // Validate ranges
-    cfg.validate();
-
-    // Serialize and write back
-    let toml_str = match toml::to_string_pretty(&cfg) {
-        Ok(s) => s,
+    // Load current LLM config from disk to preserve all fields
+    let mut llm_cfg = match openalpaca_llm::read_config(&state.llm_config_path) {
+        Ok(c) => c,
         Err(e) => {
             return settings_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "SERIALIZE_FAILED",
-                &format!("Failed to serialize config: {}", e),
+                "CONFIG_READ_FAILED",
+                &format!("Failed to read llm.toml: {}", e),
             )
             .into_response();
         }
     };
 
-    if let Err(e) = tokio::fs::write(&state.daemon_config_path, &toml_str).await {
-        return settings_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "DISK_WRITE_FAILED",
-            &format!("Failed to write daemon.toml: {}", e),
-        )
-        .into_response();
+    // Ensure web_search section exists
+    let ws = llm_cfg.web_search.get_or_insert_with(Default::default);
+
+    // Apply patches
+    if let Some(ref key) = body.api_key {
+        ws.api_key = key.clone();
+    }
+    if let Some(timeout) = body.timeout_secs {
+        ws.timeout_secs = timeout;
     }
 
-    // The file watcher will hot-reload the config. Also publish event for GUI.
+    // Snapshot the updated config before releasing the mutable borrow.
+    let updated_ws = ws.clone();
+
+    // Write back to llm.toml
+    match openalpaca_llm::write_config(&state.llm_config_path, &llm_cfg) {
+        Ok(()) => {}
+        Err(e) => {
+            return settings_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DISK_WRITE_FAILED",
+                &format!("Failed to write llm.toml: {}", e),
+            )
+            .into_response();
+        }
+    }
+
+    // Immediately update the in-memory ArcSwap so subsequent GET reads
+    // return the fresh value without waiting for the file-watcher hot-reload.
+    state
+        .web_search_config
+        .store(std::sync::Arc::new(updated_ws));
+
+    // Also publish event for GUI reactivity (WebSocket push).
     let _ = state.gateway.bus.publish(SystemEvent::DaemonConfigChanged {
         timestamp: Utc::now(),
     });
 
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_cli_backends_config;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("temp dir should be creatable");
+        dir
+    }
+
+    #[test]
+    fn cli_backends_config_uses_explicit_llm_config_path() {
+        let dir = temp_dir("openalpacad-cli-backends");
+        let llm_path = dir.join("llm.toml");
+        fs::write(
+            &llm_path,
+            r#"
+[cli_backends.claude_code]
+enabled = false
+"#,
+        )
+        .expect("llm.toml should be writable");
+
+        let cfg = load_cli_backends_config(&llm_path);
+        let claude = cfg.claude_code.expect("claude config should be present");
+        assert_eq!(claude.enabled, Some(false));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cli_backends_config_returns_default_when_missing() {
+        let dir = temp_dir("openalpacad-cli-backends-missing");
+        let missing = dir.join("missing.toml");
+
+        let cfg = load_cli_backends_config(&missing);
+        assert!(cfg.claude_code.is_none());
+        assert!(cfg.codex.is_none());
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }

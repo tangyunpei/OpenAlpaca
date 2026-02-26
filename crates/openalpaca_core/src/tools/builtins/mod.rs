@@ -17,7 +17,7 @@ mod web_search;
 use crate::bus::EventBus;
 use crate::daemon_config::DaemonConfig;
 use arc_swap::ArcSwap;
-use openalpaca_llm::ToolDefinition;
+use openalpaca_llm::{ToolDefinition, WebSearchConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -82,17 +82,17 @@ pub fn builtin_tools(
     db: Option<openalpaca_storage::Database>,
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
+    web_search_config: Option<Arc<ArcSwap<WebSearchConfig>>>,
     workspace_root: Option<PathBuf>,
 ) -> Vec<RegisteredTool> {
-    let dc = daemon_config
-        .clone()
-        .unwrap_or_else(|| Arc::new(ArcSwap::from_pointee(DaemonConfig::default())));
+    let ws_cfg = web_search_config
+        .unwrap_or_else(|| Arc::new(ArcSwap::from_pointee(WebSearchConfig::default())));
 
     let ws_root = workspace_root
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     let mut tools = vec![
-        web_search_tool(dc),
+        web_search_tool(ws_cfg),
         web_fetch_tool(),
         file_read_tool(ws_root.clone()),
         file_write_tool(ws_root),
@@ -111,9 +111,10 @@ pub fn builtin_tools_with_soul_context(
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     soul_ctx: SoulToolContext,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
+    web_search_config: Option<Arc<ArcSwap<WebSearchConfig>>>,
     workspace_root: Option<PathBuf>,
 ) -> Vec<RegisteredTool> {
-    let mut tools = builtin_tools(db, embedder, daemon_config, workspace_root);
+    let mut tools = builtin_tools(db, embedder, daemon_config, web_search_config, workspace_root);
     tools.push(update_soul_tool(soul_ctx));
     tools
 }
@@ -127,9 +128,10 @@ pub fn builtin_tools_with_persona_context(
     user_ctx: UserToolContext,
     identity_ctx: IdentityToolContext,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
+    web_search_config: Option<Arc<ArcSwap<WebSearchConfig>>>,
     workspace_root: Option<PathBuf>,
 ) -> Vec<RegisteredTool> {
-    let mut tools = builtin_tools(db, embedder, daemon_config, workspace_root);
+    let mut tools = builtin_tools(db, embedder, daemon_config, web_search_config, workspace_root);
     tools.push(update_soul_tool(soul_ctx));
     tools.push(update_user_tool(user_ctx));
     tools.push(update_identity_tool(identity_ctx));

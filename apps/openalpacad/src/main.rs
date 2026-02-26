@@ -85,6 +85,7 @@ fn main() -> Result<()> {
     // so we do it here in the single-threaded preamble.
     let config_base_dir = bootstrap::resolve_config_base_dir();
     info!("Config base dir: {}", config_base_dir.display());
+    bootstrap::seed_default_configs(&config_base_dir);
     if !config_base_dir.join("llm.toml").exists() {
         warn!(
             "config/llm.toml not found under {}. LLM routing and summary generation will be disabled (echo stub).",
@@ -299,6 +300,7 @@ async fn async_main(
 
     // Step 10: Construct Orchestrator
     let llm_router_for_reload = svcs.llm_router.clone();
+    let web_search_config_for_reload = svcs.web_search_config.clone();
     let lane_manager = Arc::new(LaneManager::new());
 
     let orchestrator = Arc::new(Orchestrator::new(
@@ -341,7 +343,7 @@ async fn async_main(
             user_path: user_path.clone(),
             identity_path: identity_path.clone(),
             bootstrap_path: bootstrap_path.clone(),
-            llm_config_path,
+            llm_config_path: llm_config_path.clone(),
             daemon_config_path: daemon_config_path.clone(),
             skills_dir,
             orchestrator: orchestrator.clone(),
@@ -349,6 +351,7 @@ async fn async_main(
             secret_store: svcs.secret_store,
             skill_catalog: svcs.skill_catalog,
             daemon_config: daemon_config.clone(),
+            web_search_config: web_search_config_for_reload,
             bus: bus.clone(),
             fs_watch_handle,
             soul_hashes: recent_soul_hashes.clone(),
@@ -470,8 +473,10 @@ async fn async_main(
         embedder: svcs.embedder,
         local_user_id,
         default_lane_key,
+        llm_config_path,
         daemon_config: daemon_config.clone(),
         daemon_config_path,
+        web_search_config: svcs.web_search_config,
     });
 
     let app = router::build_router(state);

@@ -1,12 +1,11 @@
-use crate::daemon_config::DaemonConfig;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use openalpaca_llm::ToolDefinition;
+use openalpaca_llm::{ToolDefinition, WebSearchConfig};
 use std::sync::Arc;
 
 struct WebSearchTool {
-    daemon_config: Arc<ArcSwap<DaemonConfig>>,
+    config: Arc<ArcSwap<WebSearchConfig>>,
 }
 
 #[async_trait]
@@ -24,12 +23,11 @@ impl BuiltInTool for WebSearchTool {
             .min(20) as u32;
 
         // Read config (hot-reloadable via ArcSwap)
-        let cfg = self.daemon_config.load();
-        let ws_cfg = &cfg.providers.web_search;
+        let ws_cfg = self.config.load();
 
         if ws_cfg.api_key.is_empty() {
             return Err("web_search is not configured. \
-                 Set providers.web_search.api_key in daemon.toml \
+                 Set web_search.api_key in llm.toml \
                  with your Brave Search API key."
                 .to_string());
         }
@@ -98,7 +96,7 @@ impl BuiltInTool for WebSearchTool {
     }
 }
 
-pub(super) fn web_search_tool(daemon_config: Arc<ArcSwap<DaemonConfig>>) -> RegisteredTool {
+pub(super) fn web_search_tool(config: Arc<ArcSwap<WebSearchConfig>>) -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "web_search".to_string(),
@@ -120,7 +118,7 @@ pub(super) fn web_search_tool(daemon_config: Arc<ArcSwap<DaemonConfig>>) -> Regi
                 "required": ["query"]
             }),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(WebSearchTool { daemon_config })),
+        backend: ToolBackend::BuiltIn(Arc::new(WebSearchTool { config })),
     }
 }
 
@@ -130,8 +128,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_web_search_no_api_key_returns_helpful_error() {
-        let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
-        let tool = WebSearchTool { daemon_config: dc };
+        let cfg = Arc::new(ArcSwap::from_pointee(WebSearchConfig::default()));
+        let tool = WebSearchTool { config: cfg };
         let result = tool
             .execute(&serde_json::json!({"query": "rust language"}))
             .await;
@@ -151,8 +149,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_web_search_missing_query() {
-        let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
-        let tool = WebSearchTool { daemon_config: dc };
+        let cfg = Arc::new(ArcSwap::from_pointee(WebSearchConfig::default()));
+        let tool = WebSearchTool { config: cfg };
         let result = tool.execute(&serde_json::json!({})).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing required parameter"));
@@ -162,8 +160,8 @@ mod tests {
     async fn test_web_search_count_clamped() {
         // Without a valid API key, execution fails at the key check.
         // This verifies the parameter extraction path doesn't panic.
-        let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
-        let tool = WebSearchTool { daemon_config: dc };
+        let cfg = Arc::new(ArcSwap::from_pointee(WebSearchConfig::default()));
+        let tool = WebSearchTool { config: cfg };
         let result = tool
             .execute(&serde_json::json!({"query": "test", "count": 100}))
             .await;

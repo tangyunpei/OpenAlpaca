@@ -27,9 +27,9 @@ pub use cli_backend::{
 pub use config::llm_config::{
     EmbeddingsConfig, EndpointsConfig, EnvVarsConfig, KeyConfig, LlmConfig, LlmRouterConfig,
     LlmRuntimeConfig, ModelConfigEntry, OrchestratorLlmConfig, ProviderConfig, ProviderDefaults,
-    SecurityConfig, TimeoutsConfig, build_provider, build_provider_with_runtime, build_router,
-    build_router_with_secret_store, collect_secret_refs, migrate_llm_secrets, read_config,
-    resolve_key_from_config, reverse_migrate_llm_secrets, write_config,
+    SecurityConfig, TimeoutsConfig, WebSearchConfig, build_provider, build_provider_with_runtime,
+    build_router, build_router_with_secret_store, collect_secret_refs, migrate_llm_secrets,
+    read_config, resolve_key_from_config, reverse_migrate_llm_secrets, write_config,
 };
 pub use config::settings_service::{
     LlmSettingsService, OrchestratorConfigResponse, UpdateOrchestratorRequest,

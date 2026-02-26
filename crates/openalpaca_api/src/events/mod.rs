@@ -105,7 +105,7 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
-    /// Event triggered when daemon config changes (e.g. providers.web_search)
+    /// Event triggered when daemon config changes (e.g. execution limits, server settings)
     DaemonConfigChanged {
         ts: DateTime<Utc>,
         instance_id: String,

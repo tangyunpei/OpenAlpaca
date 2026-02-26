@@ -30,6 +30,8 @@ pub struct AppState {
     pub embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     pub local_user_id: String,
     pub default_lane_key: String,
+    pub llm_config_path: PathBuf,
     pub daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
     pub daemon_config_path: PathBuf,
+    pub web_search_config: Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
 }
