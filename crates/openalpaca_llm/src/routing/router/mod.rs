@@ -3,11 +3,11 @@
 
 use crate::LlmProvider;
 use crate::config::LlmRuntimeConfig;
-use crate::routing::cost_tracker::{CallRecord, CostTracker};
 use crate::error::LlmError;
 use crate::keys::key_pool::{
     ApiKey, CallResult, KeyPool, KeyPoolError, KeyStatus, ProviderType, SelectionStrategy,
 };
+use crate::routing::cost_tracker::{CallRecord, CostTracker};
 use crate::routing::model_registry::{ModelEntry, ModelInfo, ModelRegistry};
 use crate::routing::rate_limiter::{
     CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter,
@@ -537,6 +537,7 @@ impl LlmRouter {
         let estimated_tokens = estimate_request_tokens(request);
         let backoff_base = std::time::Duration::from_millis(rate_config.backoff_base_ms);
         let backoff_cap = std::time::Duration::from_millis(rate_config.backoff_cap_ms);
+        const OVERLOAD_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(10);
 
         // Allow up to 2 rate-limit wait cycles before giving up.
         let mut rate_limit_waits = 0;
@@ -602,6 +603,15 @@ impl LlmRouter {
                         return Ok(response);
                     }
                     Err(LlmError::RateLimited { retry_after_ms }) => {
+                        tracing::warn!(
+                            model = model,
+                            key_id = %key_guard.id,
+                            retry_after_ms,
+                            attempt = attempt + 1,
+                            max_attempts = max_retries,
+                            error_kind = "rate_limited",
+                            "Provider rate-limited key; applying key cooldown and rotating"
+                        );
                         pool.report_result(
                             &key_guard.id,
                             CallResult::RateLimited { retry_after_ms },
@@ -609,6 +619,49 @@ impl LlmRouter {
                         .await;
                         self.rate_limiter_registry.report_failure().await;
                         // Try next key — token bucket naturally throttles re-requests
+                        continue;
+                    }
+                    Err(LlmError::Overloaded {
+                        status,
+                        retry_after_ms,
+                    }) => {
+                        let overload_cap = backoff_cap.min(OVERLOAD_BACKOFF_CAP);
+                        let recommended = retry_after_ms
+                            .map(std::time::Duration::from_millis)
+                            .map(|d| d.min(backoff_cap))
+                            .unwrap_or_else(|| {
+                                backoff_with_jitter(backoff_base, attempt as u32, overload_cap)
+                            });
+                        let jitter = backoff_with_jitter(
+                            std::time::Duration::from_millis(50),
+                            attempt as u32,
+                            std::time::Duration::from_millis(750),
+                        );
+                        let wait = recommended.saturating_add(jitter).min(backoff_cap);
+
+                        tracing::warn!(
+                            model = model,
+                            key_id = %key_guard.id,
+                            status,
+                            retry_after_ms = ?retry_after_ms,
+                            wait_ms = wait.as_millis() as u64,
+                            attempt = attempt + 1,
+                            max_attempts = max_retries,
+                            error_kind = "overloaded",
+                            "Provider overloaded; retrying without key cooldown"
+                        );
+
+                        // Overload is provider-level transient pressure, not a per-key quota issue.
+                        pool.report_result(
+                            &key_guard.id,
+                            CallResult::Error(format!(
+                                "provider_overloaded(status={status}, retry_after_ms={:?})",
+                                retry_after_ms
+                            )),
+                        )
+                        .await;
+                        self.rate_limiter_registry.report_failure().await;
+                        tokio::time::sleep(wait).await;
                         continue;
                     }
                     Err(e) if e.is_auth_error() => {
@@ -626,6 +679,7 @@ impl LlmRouter {
                             backoff_with_jitter(backoff_base, attempt as u32, backoff_cap);
                         tracing::warn!(
                             model = model,
+                            key_id = %key_guard.id,
                             error = %e,
                             attempt = attempt,
                             backoff_ms = backoff.as_millis() as u64,
@@ -759,18 +813,16 @@ fn estimate_request_tokens(request: &RouterRequest) -> u32 {
 fn estimate_content_part_tokens(part: &crate::ContentPart) -> u32 {
     match part {
         crate::ContentPart::Text { text } => (text.len() / 4) as u32,
-        crate::ContentPart::Image { detail, .. } => {
-            match detail.as_deref() {
-                Some("low") => 85,
-                _ => 1590,
-            }
-        }
+        crate::ContentPart::Image { detail, .. } => match detail.as_deref() {
+            Some("low") => 85,
+            _ => 1590,
+        },
         crate::ContentPart::Audio { data, .. } => {
             ((data.len() as f64 / 4096.0) * 25.0).ceil().max(25.0) as u32
         }
-        crate::ContentPart::Document { extracted_text, .. } => {
-            extracted_text.as_ref().map_or(500, |t| (t.len() / 4) as u32)
-        }
+        crate::ContentPart::Document { extracted_text, .. } => extracted_text
+            .as_ref()
+            .map_or(500, |t| (t.len() / 4) as u32),
         crate::ContentPart::FileRef { .. } => 50,
     }
 }

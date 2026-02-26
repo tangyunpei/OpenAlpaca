@@ -12,6 +12,12 @@ pub enum LlmError {
     #[error("Rate limited, retry after {retry_after_ms}ms")]
     RateLimited { retry_after_ms: u64 },
 
+    #[error("Provider overloaded (status {status}), retry_after_ms={retry_after_ms:?}")]
+    Overloaded {
+        status: u16,
+        retry_after_ms: Option<u64>,
+    },
+
     #[error("Provider not configured")]
     NotConfigured,
 
@@ -40,6 +46,7 @@ impl LlmError {
         match self {
             Self::Http(_) => true,
             Self::RateLimited { .. } => true,
+            Self::Overloaded { .. } => true,
             Self::Api { status, .. } => *status >= 500,
             _ => false,
         }

@@ -148,6 +148,108 @@ async fn test_key_rotation_on_rate_limit() {
 }
 
 #[tokio::test]
+async fn test_overloaded_error_does_not_cooldown_key() {
+    let provider = Arc::new(MockProvider::new(
+        "anthropic",
+        vec![
+            Err(LlmError::Overloaded {
+                status: 529,
+                retry_after_ms: Some(5),
+            }),
+            Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929")),
+        ],
+    ));
+
+    let key_pool = KeyPool::new(
+        vec![ApiKey::new(
+            "k1".to_string(),
+            ProviderType::Anthropic,
+            "sk-1".to_string(),
+        )],
+        SelectionStrategy::RoundRobin,
+    );
+
+    let mut providers = HashMap::new();
+    providers.insert(
+        ProviderType::Anthropic,
+        ProviderEntry {
+            provider: provider,
+            key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+        },
+    );
+
+    let router = LlmRouter::new(
+        providers,
+        ModelRegistry::with_defaults(),
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+
+    let result = router.complete(make_request(None)).await;
+    assert!(result.is_ok());
+
+    let statuses = router
+        .key_statuses(ProviderType::Anthropic)
+        .await
+        .expect("anthropic provider key statuses should exist");
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].consecutive_rate_limits, 0);
+    assert!(statuses[0].is_available);
+}
+
+#[tokio::test]
+async fn test_openai_overloaded_error_does_not_cooldown_key() {
+    let provider = Arc::new(MockProvider::new(
+        "openai",
+        vec![
+            Err(LlmError::Overloaded {
+                status: 503,
+                retry_after_ms: Some(10),
+            }),
+            Ok(MockProvider::ok_response("gpt-5.2")),
+        ],
+    ));
+
+    let key_pool = KeyPool::new(
+        vec![ApiKey::new(
+            "k1".to_string(),
+            ProviderType::OpenAI,
+            "sk-1".to_string(),
+        )],
+        SelectionStrategy::RoundRobin,
+    );
+
+    let mut providers = HashMap::new();
+    providers.insert(
+        ProviderType::OpenAI,
+        ProviderEntry {
+            provider: provider,
+            key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+        },
+    );
+
+    let router = LlmRouter::new(
+        providers,
+        ModelRegistry::with_defaults(),
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "gpt-5.2".to_string(),
+    );
+
+    let result = router.complete(make_request(Some("gpt-5.2"))).await;
+    assert!(result.is_ok());
+
+    let statuses = router
+        .key_statuses(ProviderType::OpenAI)
+        .await
+        .expect("openai provider key statuses should exist");
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].consecutive_rate_limits, 0);
+    assert!(statuses[0].is_available);
+}
+
+#[tokio::test]
 async fn test_fallback_chain() {
     // Anthropic provider always rate-limits
     let anthropic = Arc::new(MockProvider::new(
@@ -472,11 +574,7 @@ impl LlmProvider for KeyAwareMockProvider {
     async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
         Err(LlmError::NotConfigured)
     }
-    async fn chat_with_key(
-        &self,
-        key: &str,
-        _req: ChatRequest,
-    ) -> Result<ChatResponse, LlmError> {
+    async fn chat_with_key(&self, key: &str, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
         if key.starts_with("sk-ant-oat") {
             Err(LlmError::AuthenticationFailed(
                 "managed token cannot auth against HTTP API".into(),

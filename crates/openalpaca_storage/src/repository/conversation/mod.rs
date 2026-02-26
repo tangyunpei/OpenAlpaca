@@ -68,7 +68,7 @@ impl<'a> ConversationRepository<'a> {
     ) -> Result<Vec<ConversationMessage>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, created_at
+                "SELECT id, lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, created_at, content_json, display_text
                  FROM conversation_messages
                  WHERE lane_key = ?1
                  ORDER BY created_at ASC, id ASC
@@ -79,7 +79,7 @@ impl<'a> ConversationRepository<'a> {
             let mut rows = stmt.query(rusqlite::params![lane_key, limit, offset])?;
 
             while let Some(row) = rows.next()? {
-                messages.push(Self::row_to_message(row)?);
+                messages.push(Self::row_to_message_extended(row)?);
             }
 
             Ok(messages)

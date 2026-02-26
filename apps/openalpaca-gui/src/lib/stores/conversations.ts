@@ -6,6 +6,65 @@ import { writable } from "svelte/store";
 import { listConversations, getConversationMessages } from "../api/conversations";
 import type { Conversation, ChatMessage } from "../types";
 
+type StructuredMessagePart = {
+  type: string;
+  file_id?: string;
+  filename?: string;
+  mime_type?: string;
+};
+
+function normalizeHistoryMessage(message: ChatMessage): ChatMessage {
+  const normalized: ChatMessage = { ...message };
+  if (
+    normalized.content.trim().length === 0 &&
+    normalized.display_text &&
+    normalized.display_text.trim().length > 0
+  ) {
+    normalized.content = normalized.display_text;
+  }
+  if (
+    (!normalized.attachments || normalized.attachments.length === 0) &&
+    normalized.content_json
+  ) {
+    try {
+      const parsed = JSON.parse(normalized.content_json) as { parts?: StructuredMessagePart[] };
+      const parts = Array.isArray(parsed.parts) ? parsed.parts : [];
+      const seen = new Set<string>();
+      const attachments = [];
+      for (const part of parts) {
+        if (
+          (part.type === "file_ref" || part.type === "document") &&
+          part.file_id &&
+          part.filename &&
+          part.mime_type &&
+          !seen.has(part.file_id)
+        ) {
+          seen.add(part.file_id);
+          attachments.push({
+            file_id: part.file_id,
+            filename: part.filename,
+            mime_type: part.mime_type,
+            size_bytes: 0,
+          });
+        }
+      }
+      if (attachments.length > 0) {
+        normalized.attachments = attachments;
+      }
+    } catch {
+      // ignore malformed content_json
+    }
+  }
+  if (
+    normalized.content.trim().length === 0 &&
+    normalized.attachments &&
+    normalized.attachments.length > 0
+  ) {
+    normalized.content = "[Attachment]";
+  }
+  return normalized;
+}
+
 /** All conversations */
 export const conversations = writable<Conversation[]>([]);
 
@@ -55,7 +114,7 @@ export async function loadConversationMessages(
   selectedConversationId.set(conversationId);
   try {
     const resp = await getConversationMessages(conversationId, limit ?? 100, offset ?? 0);
-    selectedMessages.set(resp.messages);
+    selectedMessages.set(resp.messages.map(normalizeHistoryMessage));
     selectedMessagesTotal.set(resp.total);
   } catch (e) {
     console.error("[conversations-store] Failed to load messages:", e);
