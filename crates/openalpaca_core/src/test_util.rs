@@ -31,10 +31,7 @@ pub(crate) fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
 /// Templates with "lead_orchestration" skill are marked singleton
 /// (matching production behavior where the lead agent is the singleton).
 pub(crate) fn template_from_agent(agent: &SubAgent) -> AgentTemplate {
-    let is_lead = agent
-        .skills
-        .iter()
-        .any(|s| s.name == "lead_orchestration");
+    let is_lead = agent.skills.iter().any(|s| s.name == "lead_orchestration");
     AgentTemplate {
         frontmatter: AgentTemplateFrontmatter {
             id: agent.template_id.clone(),

@@ -67,8 +67,7 @@ fn test_supports_tools_false() {
         ClaudeCodeCliProvider::new(PathBuf::from("/usr/bin/claude"), Duration::from_secs(120));
     assert!(!provider.supports_tools());
 
-    let provider =
-        CodexCliProvider::new(PathBuf::from("/usr/bin/codex"), Duration::from_secs(120));
+    let provider = CodexCliProvider::new(PathBuf::from("/usr/bin/codex"), Duration::from_secs(120));
     assert!(!provider.supports_tools());
 }
 

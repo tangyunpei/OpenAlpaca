@@ -2,10 +2,20 @@ use crate::LlmProvider;
 use crate::error::LlmError;
 use crate::types::*;
 use async_trait::async_trait;
+use reqwest::header::HeaderMap;
 
 const DEFAULT_MODEL: &str = "gpt-4o";
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
+
+fn parse_retry_after_ms(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<f64>().ok())
+        .map(|secs| ((secs.max(0.0)) * 1000.0).round() as u64)
+        .filter(|ms| *ms > 0)
+}
 
 pub struct OpenAiProvider {
     client: reqwest::Client,
@@ -62,6 +72,96 @@ impl OpenAiProvider {
         }
     }
 
+    /// Build OpenAI content value from a ChatMessage.
+    ///
+    /// If the message has multimodal `parts`, builds an array of content objects
+    /// in OpenAI's format. If parts is None, returns a plain string value.
+    fn build_message_content(msg: &ChatMessage) -> serde_json::Value {
+        let parts = match &msg.parts {
+            Some(parts) if !parts.is_empty() => parts,
+            _ => return serde_json::Value::String(msg.content.clone()),
+        };
+
+        let blocks: Vec<serde_json::Value> = parts
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text } => {
+                    if text.trim().is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::json!({ "type": "text", "text": text }))
+                    }
+                }
+                ContentPart::Image { source, detail } => {
+                    let url = match source {
+                        ImageSource::Base64 { media_type, data } => {
+                            format!("data:{};base64,{}", media_type, data.as_str())
+                        }
+                        ImageSource::Url { url } => url.clone(),
+                        ImageSource::FileAsset { file_id, media_type } => {
+                            // Should be resolved before reaching provider
+                            return Some(serde_json::json!({
+                                "type": "text",
+                                "text": format!("[image file_id={} not resolved — media_type={}]", file_id, media_type),
+                            }));
+                        }
+                    };
+                    let detail_val = detail.as_deref().unwrap_or("auto");
+                    Some(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": url,
+                            "detail": detail_val,
+                        }
+                    }))
+                }
+                ContentPart::Audio { data, format } => Some(serde_json::json!({
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": data.as_str(),
+                        "format": format,
+                    }
+                })),
+                ContentPart::Document {
+                    filename,
+                    mime_type,
+                    extracted_text,
+                    ..
+                } => {
+                    // OpenAI has no native document input; use extracted text fallback
+                    if let Some(text) = extracted_text {
+                        Some(serde_json::json!({
+                            "type": "text",
+                            "text": format!("[Document: {} ({})]\n{}", filename, mime_type, text),
+                        }))
+                    } else {
+                        Some(serde_json::json!({
+                            "type": "text",
+                            "text": format!("[Document: {} ({}) — no extracted text available]", filename, mime_type),
+                        }))
+                    }
+                }
+                ContentPart::FileRef {
+                    file_id,
+                    filename,
+                    mime_type,
+                } => Some(serde_json::json!({
+                    "type": "text",
+                    "text": format!("[File reference: {} ({}) id={}]", filename, mime_type, file_id),
+                })),
+            })
+            .collect();
+
+        if blocks.is_empty() {
+            if !msg.content.trim().is_empty() {
+                return serde_json::Value::String(msg.content.clone());
+            }
+            return serde_json::Value::String("[empty message]".to_string());
+        }
+
+        serde_json::Value::Array(blocks)
+    }
+
     pub(crate) fn build_request_body(&self, request: &ChatRequest) -> serde_json::Value {
         let model = request.model.as_deref().unwrap_or(&self.model);
         let max_tokens = request.max_tokens.unwrap_or(self.max_tokens);
@@ -77,9 +177,15 @@ impl OpenAiProvider {
                     Role::Tool => "tool",
                 };
 
+                let content = if matches!(msg.role, Role::User) {
+                    Self::build_message_content(msg)
+                } else {
+                    serde_json::Value::String(msg.content.clone())
+                };
+
                 let mut obj = serde_json::json!({
                     "role": role,
-                    "content": msg.content,
+                    "content": content,
                 });
 
                 if let Some(ref tool_calls) = msg.tool_calls {
@@ -247,6 +353,7 @@ impl LlmProvider for OpenAiProvider {
     ) -> Result<ChatResponse, LlmError> {
         let body = self.build_request_body(&request);
         let url = format!("{}/chat/completions", self.base_url);
+        let model_id = request.model.as_deref().unwrap_or(&self.model);
 
         let mut req_builder = self
             .client
@@ -268,14 +375,31 @@ impl LlmProvider for OpenAiProvider {
         let status = response.status().as_u16();
 
         if status == 429 {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1);
-            return Err(LlmError::RateLimited {
-                retry_after_ms: retry_after * 1000,
+            let retry_after_ms = parse_retry_after_ms(response.headers()).unwrap_or(1_000);
+            tracing::warn!(
+                provider = "openai",
+                model = model_id,
+                status,
+                retry_after_ms,
+                error_kind = "rate_limited",
+                "Provider returned rate limit"
+            );
+            return Err(LlmError::RateLimited { retry_after_ms });
+        }
+
+        if status == 503 || status == 529 {
+            let retry_after_ms = parse_retry_after_ms(response.headers());
+            tracing::warn!(
+                provider = "openai",
+                model = model_id,
+                status,
+                retry_after_ms = ?retry_after_ms,
+                error_kind = "overloaded",
+                "Provider returned transient overload"
+            );
+            return Err(LlmError::Overloaded {
+                status,
+                retry_after_ms,
             });
         }
 

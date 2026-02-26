@@ -53,7 +53,8 @@ pub async fn initialize_services(
     let llm_router = build_llm_router(&llm_config_path, &*secret_store);
 
     // Build LLM settings service
-    let llm_settings_service = build_llm_settings_service(&llm_router, &llm_config_path, &secret_store).await;
+    let llm_settings_service =
+        build_llm_settings_service(&llm_router, &llm_config_path, &secret_store).await;
 
     // Load LLM config for embedder / token manager
     let llm_config: Option<openalpaca_llm::LlmRouterConfig> = if llm_config_path.exists() {
@@ -138,7 +139,10 @@ pub async fn initialize_services(
         let catalog = openalpaca_core::orchestrator::skill_catalog::SkillCatalog::new();
         let skills_dir = config_base_dir.join("skills");
         if skills_dir.exists() {
-            let count = catalog.scan_directory(&skills_dir, openalpaca_core::middleware::skill::SkillScope::Project);
+            let count = catalog.scan_directory(
+                &skills_dir,
+                openalpaca_core::middleware::skill::SkillScope::Project,
+            );
             info!(
                 "Skill catalog: loaded {} skill(s) from {}",
                 count,
@@ -215,8 +219,7 @@ fn load_agent_templates(
                                 let subagent = template.to_subagent(&template_id, "");
                                 // Reset to Idle (to_subagent sets Busy)
                                 let mut idle_agent = subagent;
-                                idle_agent.status =
-                                    openalpaca_core::agent::AgentStatus::Idle;
+                                idle_agent.status = openalpaca_core::agent::AgentStatus::Idle;
                                 idle_agent.current_task = None;
                                 shared_context.agent_registry.register(idle_agent);
 
@@ -230,11 +233,7 @@ fn load_agent_templates(
                                 );
                             }
                             Err(e) => {
-                                warn!(
-                                    "Failed to parse agent template {}: {}",
-                                    path.display(),
-                                    e
-                                );
+                                warn!("Failed to parse agent template {}: {}", path.display(), e);
                             }
                         }
                     }
@@ -248,9 +247,7 @@ fn load_agent_templates(
             Some("toml") => {
                 match std::fs::read_to_string(&path) {
                     Ok(content) => {
-                        match toml::from_str::<openalpaca_core::agent::AgentConfigFile>(
-                            &content,
-                        ) {
+                        match toml::from_str::<openalpaca_core::agent::AgentConfigFile>(&content) {
                             Ok(agent_config) => {
                                 // Register in-memory
                                 let subagent = agent_config.clone().into_subagent();
@@ -265,9 +262,7 @@ fn load_agent_templates(
                                 // Initialize metrics row if not exists
                                 if let Ok(None) = repo.get_metrics(&agent_id) {
                                     let _ = repo.upsert_metrics(
-                                        &openalpaca_storage::AgentMetrics::new_empty(
-                                            &agent_id,
-                                        ),
+                                        &openalpaca_storage::AgentMetrics::new_empty(&agent_id),
                                     );
                                 }
 
@@ -277,11 +272,7 @@ fn load_agent_templates(
                                 );
                             }
                             Err(e) => {
-                                warn!(
-                                    "Failed to parse agent config {}: {}",
-                                    path.display(),
-                                    e
-                                );
+                                warn!("Failed to parse agent config {}: {}", path.display(), e);
                             }
                         }
                     }
@@ -359,15 +350,11 @@ fn persist_template_to_db(
 
     // Initialize metrics row if not exists
     if let Ok(None) = repo.get_metrics(template_id) {
-        let _ = repo.upsert_metrics(
-            &openalpaca_storage::AgentMetrics::new_empty(template_id),
-        );
+        let _ = repo.upsert_metrics(&openalpaca_storage::AgentMetrics::new_empty(template_id));
     }
 }
 
-fn initialize_secret_store(
-    llm_config_path: &Path,
-) -> (Arc<dyn openalpaca_llm::SecretStore>, bool) {
+fn initialize_secret_store(llm_config_path: &Path) -> (Arc<dyn openalpaca_llm::SecretStore>, bool) {
     let use_keychain = if llm_config_path.exists() {
         openalpaca_llm::read_config(llm_config_path)
             .ok()
@@ -379,9 +366,8 @@ fn initialize_secret_store(
 
     if use_keychain {
         // Opt-in keychain mode: CachingSecretStore + prefetch
-        let caching = openalpaca_llm::CachingSecretStore::new(Box::new(
-            openalpaca_llm::KeyringSecretStore,
-        ));
+        let caching =
+            openalpaca_llm::CachingSecretStore::new(Box::new(openalpaca_llm::KeyringSecretStore));
 
         let refs: Vec<String> = if llm_config_path.exists() {
             openalpaca_llm::read_config(llm_config_path)
@@ -425,10 +411,7 @@ fn initialize_secret_store(
                 );
                 // Temporarily create a keyring store to read the secrets
                 let temp_keyring = openalpaca_llm::KeyringSecretStore;
-                match openalpaca_llm::reverse_migrate_llm_secrets(
-                    llm_config_path,
-                    &temp_keyring,
-                ) {
+                match openalpaca_llm::reverse_migrate_llm_secrets(llm_config_path, &temp_keyring) {
                     Ok(0) => info!("No keys needed reverse migration"),
                     Ok(n) => info!(
                         "Reverse-migrated {n} secret(s) from OS keychain to local encrypted storage"

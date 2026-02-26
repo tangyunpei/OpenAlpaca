@@ -104,6 +104,35 @@ impl DaemonClient {
         let resp = self.http.get(&url).send().await?;
         check_response(resp).await
     }
+
+    /// POST /v1/files/upload — Upload a file via multipart form.
+    pub async fn upload_file(&self, path: &std::path::Path) -> Result<serde_json::Value> {
+        use reqwest::multipart;
+
+        let filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".to_string());
+
+        let data = tokio::fs::read(path)
+            .await
+            .with_context(|| format!("Failed to read file: {}", path.display()))?;
+
+        let mime = mime_guess::from_path(path)
+            .first_or_octet_stream()
+            .to_string();
+
+        let part = multipart::Part::bytes(data)
+            .file_name(filename)
+            .mime_str(&mime)?;
+
+        let form = multipart::Form::new().part("file", part);
+
+        let url = format!("{}/v1/files/upload", self.base_url);
+        let resp = self.http.post(&url).multipart(form).send().await?;
+        let resp = check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
 }
 
 /// Check HTTP response status. On non-2xx, try to parse daemon JSON error.

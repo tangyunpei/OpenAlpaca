@@ -721,7 +721,10 @@ fn test_task_plan_use_lead_agent_with_dag() {
     }"#;
     let plan = TaskPlanner::parse_response(json).unwrap();
     assert!(plan.use_lead_agent);
-    assert!(plan.dag.is_none(), "DAG should be stripped when use_lead_agent is true");
+    assert!(
+        plan.dag.is_none(),
+        "DAG should be stripped when use_lead_agent is true"
+    );
     assert_eq!(
         plan.auto_promotion_reason.as_deref(),
         Some("mutual_exclusivity_stripped")
@@ -997,8 +1000,16 @@ fn test_build_messages_untrusted_context_uses_user_role() {
     assert_eq!(msgs[0].content, system_prompt);
 
     // Session summary and active tasks must be User role, not System
-    assert_eq!(msgs[1].role, openalpaca_llm::Role::User, "Summary should be user role");
-    assert_eq!(msgs[2].role, openalpaca_llm::Role::User, "Tasks should be user role");
+    assert_eq!(
+        msgs[1].role,
+        openalpaca_llm::Role::User,
+        "Summary should be user role"
+    );
+    assert_eq!(
+        msgs[2].role,
+        openalpaca_llm::Role::User,
+        "Tasks should be user role"
+    );
 
     // Both must contain the untrusted-context framing
     assert!(

@@ -1,7 +1,9 @@
 use crate::LlmProvider;
-use crate::routing::cost_tracker::CostTracker;
 use crate::error::LlmError;
-use crate::keys::key_pool::{ApiKey, KeyPool, KeyPriority, KeySource, ProviderType, SelectionStrategy};
+use crate::keys::key_pool::{
+    ApiKey, KeyPool, KeyPriority, KeySource, ProviderType, SelectionStrategy,
+};
+use crate::routing::cost_tracker::CostTracker;
 use crate::routing::model_registry::ModelRegistry;
 use crate::routing::router::{LlmRouter, ProviderEntry};
 use arc_swap::ArcSwap;
@@ -201,6 +203,12 @@ pub struct ModelConfigEntry {
     pub input_price: Option<f64>,
     pub output_price: Option<f64>,
     pub context: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_image: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_audio: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_document: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

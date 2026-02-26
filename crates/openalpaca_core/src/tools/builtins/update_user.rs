@@ -319,4 +319,3 @@ pub(super) fn update_user_tool(ctx: UserToolContext) -> RegisteredTool {
         backend: ToolBackend::BuiltIn(Arc::new(UserUpdateTool { ctx })),
     }
 }
-

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -9,10 +10,90 @@ pub enum Role {
     Tool,
 }
 
+// ── Multimodal content types ────────────────────────────────────────
+
+/// A single content part within a multimodal message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text {
+        text: String,
+    },
+    Image {
+        source: ImageSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+    Audio {
+        #[serde(
+            serialize_with = "serialize_arc_string",
+            deserialize_with = "deserialize_arc_string"
+        )]
+        data: Arc<String>,
+        format: String,
+    },
+    Document {
+        file_id: String,
+        filename: String,
+        mime_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        extracted_text: Option<String>,
+    },
+    FileRef {
+        file_id: String,
+        filename: String,
+        mime_type: String,
+    },
+}
+
+/// Source for an image content part.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ImageSource {
+    Base64 {
+        media_type: String,
+        #[serde(
+            serialize_with = "serialize_arc_string",
+            deserialize_with = "deserialize_arc_string"
+        )]
+        data: Arc<String>,
+    },
+    Url {
+        url: String,
+    },
+    /// Resolved at provider serialization boundary — loads from disk and base64-encodes lazily.
+    FileAsset {
+        file_id: String,
+        media_type: String,
+    },
+}
+
+fn serialize_arc_string<S>(val: &Arc<String>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    s.serialize_str(val)
+}
+
+fn deserialize_arc_string<'de, D>(d: D) -> Result<Arc<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    Ok(Arc::new(s))
+}
+
+// ── ChatMessage ─────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
+    /// Multimodal content parts. When present, providers serialize these
+    /// instead of the plain `content` string. When `None`, the message is
+    /// text-only and `content` is used directly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parts: Option<Vec<ContentPart>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -24,6 +105,7 @@ impl ChatMessage {
         Self {
             role: Role::System,
             content: content.to_string(),
+            parts: None,
             tool_calls: None,
             tool_call_id: None,
         }
@@ -33,6 +115,27 @@ impl ChatMessage {
         Self {
             role: Role::User,
             content: content.to_string(),
+            parts: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    /// Create a user message with multimodal content parts.
+    pub fn user_with_parts(parts: Vec<ContentPart>) -> Self {
+        // Extract text content for the `content` field (used for logging, search, intent)
+        let text: String = parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Self {
+            role: Role::User,
+            content: text,
+            parts: Some(parts),
             tool_calls: None,
             tool_call_id: None,
         }
@@ -42,6 +145,7 @@ impl ChatMessage {
         Self {
             role: Role::Assistant,
             content: content.to_string(),
+            parts: None,
             tool_calls: None,
             tool_call_id: None,
         }
@@ -51,6 +155,7 @@ impl ChatMessage {
         Self {
             role: Role::Assistant,
             content: response.content.clone(),
+            parts: None,
             tool_calls: if response.tool_calls.is_empty() {
                 None
             } else {
@@ -64,8 +169,20 @@ impl ChatMessage {
         Self {
             role: Role::Tool,
             content: content.to_string(),
+            parts: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.to_string()),
+        }
+    }
+
+    /// Returns the effective content parts for this message.
+    /// If `parts` is `Some`, returns those; otherwise wraps `content` in a single `Text` part.
+    pub fn effective_parts(&self) -> Vec<ContentPart> {
+        match &self.parts {
+            Some(parts) if !parts.is_empty() => parts.clone(),
+            _ => vec![ContentPart::Text {
+                text: self.content.clone(),
+            }],
         }
     }
 }

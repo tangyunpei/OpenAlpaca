@@ -1,6 +1,8 @@
 //! Startup logic for auto-discovering and spawning connectors.
 
+use arc_swap::ArcSwap;
 use openalpaca_core::bus::EventBus;
+use openalpaca_core::daemon_config::DaemonConfig;
 use openalpaca_core::gateway::Gateway;
 use openalpaca_storage::{ConfigRepository, Database};
 use std::sync::Arc;
@@ -63,6 +65,7 @@ pub fn auto_start_connectors(
     db: Database,
     bus: EventBus,
     gateway: Arc<Gateway>,
+    daemon_config: Arc<ArcSwap<DaemonConfig>>,
 ) -> std::collections::HashMap<String, ConnectorHandle> {
     let mut started = std::collections::HashMap::new();
 
@@ -103,8 +106,13 @@ pub fn auto_start_connectors(
                 info!("Autostart: Finding Telegram Token (Source: {})", source);
 
                 // Clone dependencies to keep the originals valid for subsequent connectors
-                let connector =
-                    ConnectorBuilder::new(db.clone(), bus.clone(), gateway.clone()).telegram(token);
+                let connector = ConnectorBuilder::new(
+                    db.clone(),
+                    bus.clone(),
+                    gateway.clone(),
+                    daemon_config.clone(),
+                )
+                .telegram(token);
                 let handle = spawn_telegram(connector);
                 started.insert("telegram".to_string(), ConnectorHandle::Telegram(handle));
             }
@@ -130,6 +138,7 @@ pub fn auto_start_connectors(
                 Arc::new(db.clone()),
                 Arc::new(bus.clone()),
                 gateway.clone(),
+                daemon_config.clone(),
                 cancel_token.clone(),
                 local_user_id,
             );
@@ -161,8 +170,9 @@ pub fn spawn_telegram_connector(
     db: Database,
     bus: EventBus,
     gateway: Arc<Gateway>,
+    daemon_config: Arc<ArcSwap<DaemonConfig>>,
 ) -> ConnectorHandle {
-    let connector = ConnectorBuilder::new(db, bus, gateway).telegram(token);
+    let connector = ConnectorBuilder::new(db, bus, gateway, daemon_config).telegram(token);
     ConnectorHandle::Telegram(spawn_telegram(connector))
 }
 

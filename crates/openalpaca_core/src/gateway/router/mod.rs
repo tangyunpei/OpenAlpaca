@@ -11,6 +11,17 @@ use openalpaca_storage::Database;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// A resolved attachment with metadata, ready for processing by handlers.
+#[derive(Debug, Clone)]
+pub struct ResolvedAttachment {
+    pub file_id: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub size_bytes: i64,
+    pub extracted_text: Option<String>,
+    pub storage_path: String,
+}
+
 /// Rich result from message handling, carrying optional LLM metadata.
 ///
 /// Non-LLM paths (task queries, commands, etc.) use `HandleResult::text()` which
@@ -21,6 +32,8 @@ pub struct HandleResult {
     pub model: Option<String>,
     pub tokens_in: Option<u32>,
     pub tokens_out: Option<u32>,
+    /// File IDs of attachments consumed during handling.
+    pub attachments_used: Vec<String>,
 }
 
 impl HandleResult {
@@ -31,12 +44,14 @@ impl HandleResult {
             model: None,
             tokens_in: None,
             tokens_out: None,
+            attachments_used: Vec::new(),
         }
     }
 }
 
 /// Trait for processing messages through the pipeline.
 /// The daemon implements this by delegating to the Orchestrator.
+#[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait MessageHandler: Send + Sync {
     async fn handle(
@@ -49,12 +64,39 @@ pub trait MessageHandler: Send + Sync {
         lane_key: String,
         workspace_path: Option<String>,
     ) -> Result<HandleResult, String>;
+
+    /// Handle a message with attachments. Default delegates to `handle()`.
+    async fn handle_with_attachments(
+        &self,
+        request_id: Uuid,
+        source: String,
+        content: String,
+        attachments: Vec<ResolvedAttachment>,
+        principal: Principal,
+        scope: Scope,
+        lane_key: String,
+        workspace_path: Option<String>,
+    ) -> Result<HandleResult, String> {
+        let _ = attachments; // default: ignore attachments
+        self.handle(
+            request_id,
+            source,
+            content,
+            principal,
+            scope,
+            lane_key,
+            workspace_path,
+        )
+        .await
+    }
 }
 
 /// Inbound request to the Gateway.
 pub struct GatewayRequest {
     pub source: EventSource,
     pub content: String,
+    /// Resolved file attachments for multimodal messages.
+    pub attachments: Vec<ResolvedAttachment>,
     pub principal: Principal,
     pub scope: Scope,
     /// Optional workspace path provided by the client (GUI project dir, CLI cwd).
@@ -76,6 +118,8 @@ pub struct GatewayResponse {
     pub tokens_in: Option<u32>,
     /// Output tokens generated (if LLM was called).
     pub tokens_out: Option<u32>,
+    /// File IDs of attachments consumed during handling.
+    pub attachments_used: Vec<String>,
 }
 
 /// The unified entry point for all inbound messages.
@@ -132,28 +176,52 @@ impl Gateway {
         lane.record_message();
 
         // Persist user message
-        if let Some(ref p) = self.persistence
-            && let Err(e) = p.persist_user_message(&lane_key_str, &req.content, &source_name)
-        {
-            tracing::warn!("Failed to persist user message: {e}");
+        if let Some(ref p) = self.persistence {
+            if req.attachments.is_empty() {
+                if let Err(e) = p.persist_user_message(&lane_key_str, &req.content, &source_name) {
+                    tracing::warn!("Failed to persist user message: {e}");
+                }
+            } else if let Err(e) = p.persist_user_message_with_attachments(
+                &lane_key_str,
+                &req.content,
+                &source_name,
+                &req.attachments,
+            ) {
+                tracing::warn!("Failed to persist user message with attachments: {e}");
+            }
         }
 
         let start = std::time::Instant::now();
 
-        // Delegate to the handler
-        match self
-            .handler
-            .handle(
-                request_id,
-                source_name.clone(),
-                req.content,
-                req.principal,
-                req.scope,
-                lane_key_str.clone(),
-                req.workspace_path,
-            )
-            .await
-        {
+        // Delegate to the handler — use attachment-aware path when attachments present
+        let handler_result = if req.attachments.is_empty() {
+            self.handler
+                .handle(
+                    request_id,
+                    source_name.clone(),
+                    req.content,
+                    req.principal,
+                    req.scope,
+                    lane_key_str.clone(),
+                    req.workspace_path,
+                )
+                .await
+        } else {
+            self.handler
+                .handle_with_attachments(
+                    request_id,
+                    source_name.clone(),
+                    req.content,
+                    req.attachments,
+                    req.principal,
+                    req.scope,
+                    lane_key_str.clone(),
+                    req.workspace_path,
+                )
+                .await
+        };
+
+        match handler_result {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 // Persist assistant message
@@ -174,6 +242,7 @@ impl Gateway {
                     model: result.model,
                     tokens_in: result.tokens_in,
                     tokens_out: result.tokens_out,
+                    attachments_used: result.attachments_used,
                 }
             }
             Err(e) => GatewayResponse {
@@ -183,6 +252,7 @@ impl Gateway {
                 model: None,
                 tokens_in: None,
                 tokens_out: None,
+                attachments_used: Vec::new(),
             },
         }
     }
@@ -199,6 +269,7 @@ impl Gateway {
                 request_id: Uuid::new_v4().to_string(),
             },
             content: content.to_string(),
+            attachments: Vec::new(),
             principal: Principal::System,
             scope: Scope::Global,
             workspace_path: None,

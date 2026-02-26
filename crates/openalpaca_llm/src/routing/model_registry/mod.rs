@@ -33,6 +33,12 @@ pub struct ModelInfo {
     /// Defaults are `false`; models discovered via API get `true`.
     /// The GUI dropdown only shows discovered models.
     pub discovered: bool,
+    /// Whether this model accepts image content parts natively.
+    pub supports_image: bool,
+    /// Whether this model accepts audio content parts natively.
+    pub supports_audio: bool,
+    /// Whether this model accepts document (PDF) content parts natively.
+    pub supports_document: bool,
 }
 
 /// Registry mapping model IDs to their provider and pricing metadata.
@@ -62,6 +68,9 @@ impl ModelRegistry {
                     output_price_per_million: 75.0,
                     context_window: 200_000,
                     discovered: false,
+                    supports_image: true,
+                    supports_audio: false,
+                    supports_document: true,
                 },
             );
         }
@@ -74,6 +83,9 @@ impl ModelRegistry {
                     output_price_per_million: 15.0,
                     context_window: 200_000,
                     discovered: false,
+                    supports_image: true,
+                    supports_audio: false,
+                    supports_document: true,
                 },
             );
         }
@@ -85,6 +97,9 @@ impl ModelRegistry {
                 output_price_per_million: 5.0,
                 context_window: 200_000,
                 discovered: false,
+                supports_image: true,
+                supports_audio: false,
+                supports_document: true,
             },
         );
 
@@ -97,6 +112,9 @@ impl ModelRegistry {
                 output_price_per_million: 14.0,
                 context_window: 128_000,
                 discovered: false,
+                supports_image: true,
+                supports_audio: true,
+                supports_document: false,
             },
         );
         models.insert(
@@ -107,6 +125,9 @@ impl ModelRegistry {
                 output_price_per_million: 2.0,
                 context_window: 128_000,
                 discovered: false,
+                supports_image: true,
+                supports_audio: true,
+                supports_document: false,
             },
         );
         models.insert(
@@ -117,6 +138,9 @@ impl ModelRegistry {
                 output_price_per_million: 0.40,
                 context_window: 128_000,
                 discovered: false,
+                supports_image: true,
+                supports_audio: true,
+                supports_document: false,
             },
         );
 
@@ -141,6 +165,9 @@ impl ModelRegistry {
                         output_price_per_million: entry.output_price.unwrap_or(0.0),
                         context_window: entry.context.unwrap_or(200_000),
                         discovered: false,
+                        supports_image: entry.supports_image.unwrap_or(false),
+                        supports_audio: entry.supports_audio.unwrap_or(false),
+                        supports_document: entry.supports_document.unwrap_or(false),
                     },
                 );
             }
@@ -164,6 +191,9 @@ impl ModelRegistry {
                         output_price_per_million: entry.output_price.unwrap_or(0.0),
                         context_window: entry.context.unwrap_or(200_000),
                         discovered: false,
+                        supports_image: entry.supports_image.unwrap_or(false),
+                        supports_audio: entry.supports_audio.unwrap_or(false),
+                        supports_document: entry.supports_document.unwrap_or(false),
                     },
                 );
             }
@@ -199,6 +229,36 @@ impl ModelRegistry {
     /// Get full model info (cloned).
     pub fn get_model_info(&self, model_id: &str) -> Option<ModelInfo> {
         self.models.read().unwrap().get(model_id).cloned()
+    }
+
+    /// Check if a model supports image input.
+    pub fn supports_image(&self, model_id: &str) -> bool {
+        self.models
+            .read()
+            .unwrap()
+            .get(model_id)
+            .map(|info| info.supports_image)
+            .unwrap_or(false)
+    }
+
+    /// Check if a model supports audio input.
+    pub fn supports_audio(&self, model_id: &str) -> bool {
+        self.models
+            .read()
+            .unwrap()
+            .get(model_id)
+            .map(|info| info.supports_audio)
+            .unwrap_or(false)
+    }
+
+    /// Check if a model supports document (PDF) input.
+    pub fn supports_document(&self, model_id: &str) -> bool {
+        self.models
+            .read()
+            .unwrap()
+            .get(model_id)
+            .map(|info| info.supports_document)
+            .unwrap_or(false)
     }
 
     /// Register or update a model entry.

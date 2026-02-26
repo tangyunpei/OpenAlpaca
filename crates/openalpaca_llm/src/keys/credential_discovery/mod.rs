@@ -3,9 +3,11 @@
 //! Reads OAuth credentials from well-known paths for Claude Code and Codex CLI,
 //! manages token refresh, and injects merged key pools into the router.
 
-use crate::keys::key_pool::{ApiKey, KeyPool, KeyPriority, KeySource, ProviderType, SelectionStrategy};
-use crate::routing::router::LlmRouter;
 use crate::config::settings_service::LlmSettingsService;
+use crate::keys::key_pool::{
+    ApiKey, KeyPool, KeyPriority, KeySource, ProviderType, SelectionStrategy,
+};
+use crate::routing::router::LlmRouter;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;

@@ -110,9 +110,7 @@ impl<'a> DispatchDecisionRepository<'a> {
                         mode: row.get(3)?,
                         reason: row.get(4)?,
                         agent_count: row.get::<_, i64>(5)? as usize,
-                        dag_node_count: row
-                            .get::<_, Option<i64>>(6)?
-                            .map(|v| v as usize),
+                        dag_node_count: row.get::<_, Option<i64>>(6)?.map(|v| v as usize),
                         predictability_score: row.get(7)?,
                         planner_requested_mode: row.get(8)?,
                         error_message: row.get(9)?,

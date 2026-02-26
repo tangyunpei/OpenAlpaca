@@ -172,8 +172,7 @@ async fn test_respects_cost_limit() {
 
 #[tokio::test]
 async fn test_handles_provider_error() {
-    let provider =
-        MockProvider::new(vec![Err(LlmError::Http("connection refused".to_string()))]);
+    let provider = MockProvider::new(vec![Err(LlmError::Http("connection refused".to_string()))]);
     let messages = vec![ChatMessage::user("hello")];
     let config = LoopConfig::default();
 

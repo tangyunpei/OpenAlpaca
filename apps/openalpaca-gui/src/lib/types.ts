@@ -337,10 +337,26 @@ export interface ChatMessage {
   tokens_out?: number;
   duration_ms?: number;
   created_at: string;
+  attachments?: AttachmentDisplay[];
+  citations?: Citation[];
+  artifacts?: Artifact[];
+  /** Raw structured message payload from backend persistence. */
+  content_json?: string | null;
+  /** Backend-rendered fallback text for attachment-only user turns. */
+  display_text?: string | null;
+}
+
+/** Lightweight attachment info for display in chat messages. */
+export interface AttachmentDisplay {
+  file_id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
 }
 
 export interface ChatSendRequest {
   content: string;
+  attachments?: AttachmentRef[];
 }
 
 export interface ChatSendResponse {
@@ -364,6 +380,62 @@ export interface ChatStreamDoneData {
   tokens_in: number;
   tokens_out: number;
   duration_ms: number;
+  attachments_used?: string[];
+  citations?: Citation[];
+  artifacts?: Artifact[];
+}
+
+/** A citation linking a response passage to a source document. */
+export interface Citation {
+  source_file_id: string;
+  page?: number;
+  timestamp_ms?: number;
+  excerpt: string;
+}
+
+/** An artifact produced during the response. */
+export interface Artifact {
+  file_id: string;
+  label: string;
+  mime_type: string;
+}
+
+// ── File / Attachment types ─────────────────────────────────────
+
+export type FileAssetStatus = "uploaded" | "processing" | "ready" | "error";
+
+export interface FileAsset {
+  id: string;
+  owner_id: string;
+  sha256: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  storage_path: string;
+  status: FileAssetStatus;
+  extracted_text: string | null;
+  extract_error: string | null;
+  metadata_json: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FileUploadResponse {
+  id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  status: string;
+}
+
+export interface FileOpenResponse {
+  id: string;
+  status: "opened";
+}
+
+export interface AttachmentRef {
+  file_id: string;
+  caption?: string;
 }
 
 // ── Conversation types ────────────────────────────────────────────
@@ -457,4 +529,13 @@ export interface DispatchDecisionRecord {
   planner_requested_mode: string | null;
   error_message: string | null;
   timestamp: string;
+}
+
+// ── Shared utilities ────────────────────────────────────────────
+
+/** Format a byte count as a human-readable string (e.g., "1.2 MB"). */
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

@@ -68,11 +68,7 @@ impl SkillRouter {
     }
 
     /// Create a new SkillRouter with an event bus for lifecycle events.
-    pub fn new_with_bus(
-        auto_select_threshold: f64,
-        suggest_threshold: f64,
-        bus: EventBus,
-    ) -> Self {
+    pub fn new_with_bus(auto_select_threshold: f64, suggest_threshold: f64, bus: EventBus) -> Self {
         Self {
             recent_skills: RwLock::new(Vec::new()),
             recency_window: DEFAULT_RECENCY_WINDOW,
@@ -125,11 +121,7 @@ impl SkillRouter {
             };
 
             // Recency bonus: skill was recently used
-            let recency_bonus = if recent.contains(skill_id) {
-                1.0
-            } else {
-                0.0
-            };
+            let recency_bonus = if recent.contains(skill_id) { 1.0 } else { 0.0 };
 
             // Negative keyword hit
             let negative_hit = fm
@@ -140,7 +132,11 @@ impl SkillRouter {
 
             // Compute score
             let score = weights.base
-                + if intent_match { weights.intent_weight } else { 0.0 }
+                + if intent_match {
+                    weights.intent_weight
+                } else {
+                    0.0
+                }
                 + keyword_ratio * weights.keyword_weight
                 + recency_bonus * weights.recency_weight
                 - if negative_hit { NEGATIVE_PENALTY } else { 0.0 };
@@ -156,7 +152,11 @@ impl SkillRouter {
         }
 
         // Sort by score descending
-        scores.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scores.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Determine selected and suggestions
         let mut selected: Option<String> = None;

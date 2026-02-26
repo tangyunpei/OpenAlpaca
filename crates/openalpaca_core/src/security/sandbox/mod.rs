@@ -196,8 +196,8 @@ impl SandboxManager {
         // own internal timeouts and must not be subject to the per-tool sandbox
         // timeout, which is typically much shorter than the time subagents need to
         // complete their work.
-        let is_coordination_tool = tool_call.name == "wait_for_subagents"
-            || tool_call.name == "check_subagent_status";
+        let is_coordination_tool =
+            tool_call.name == "wait_for_subagents" || tool_call.name == "check_subagent_status";
 
         let executor = self.executor.clone();
         let tool_name = tool_call.name.clone();

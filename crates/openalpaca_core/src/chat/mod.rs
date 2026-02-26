@@ -4,4 +4,6 @@ pub mod service;
 pub mod stream_manager;
 
 pub use service::ChatService;
-pub use stream_manager::{ChatStreamEvent, ChatStreamManager, StreamSink, chunk_by_words};
+pub use stream_manager::{
+    Artifact, ChatStreamEvent, ChatStreamManager, Citation, StreamSink, chunk_by_words,
+};

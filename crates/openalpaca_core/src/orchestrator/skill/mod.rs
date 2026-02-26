@@ -1,7 +1,7 @@
 pub mod catalog;
-pub mod smoke;
 pub mod matcher;
 pub mod router;
+pub mod smoke;
 
 pub(crate) mod context;
 pub(crate) mod handler;

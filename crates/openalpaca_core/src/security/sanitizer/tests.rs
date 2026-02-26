@@ -197,3 +197,150 @@ fn test_non_extra_shell_tool_not_affected() {
     let result = InputSanitizer::sanitize_tool_args("file_write", &args, &[], &extra);
     assert!(result.is_ok());
 }
+
+// --- Container-compatible MIME tests ---
+
+#[test]
+fn test_is_container_compatible_docx_zip() {
+    assert!(InputSanitizer::is_container_compatible_mime(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/zip",
+    ));
+}
+
+#[test]
+fn test_is_container_compatible_xlsx_zip() {
+    assert!(InputSanitizer::is_container_compatible_mime(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/zip",
+    ));
+}
+
+#[test]
+fn test_is_container_compatible_pptx_zip() {
+    assert!(InputSanitizer::is_container_compatible_mime(
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/zip",
+    ));
+}
+
+#[test]
+fn test_is_container_compatible_iwork_zip() {
+    for mime in &[
+        "application/vnd.apple.pages",
+        "application/vnd.apple.numbers",
+        "application/vnd.apple.keynote",
+    ] {
+        assert!(
+            InputSanitizer::is_container_compatible_mime(mime, "application/zip"),
+            "iWork {mime} should be ZIP-compatible"
+        );
+    }
+}
+
+#[test]
+fn test_is_container_compatible_legacy_office_cfb() {
+    for mime in &[
+        "application/msword",
+        "application/vnd.ms-excel",
+        "application/vnd.ms-powerpoint",
+    ] {
+        assert!(
+            InputSanitizer::is_container_compatible_mime(mime, "application/x-cfb"),
+            "Legacy Office {mime} should be CFB-compatible"
+        );
+    }
+}
+
+#[test]
+fn test_is_container_compatible_legacy_office_ole_storage() {
+    for mime in &[
+        "application/msword",
+        "application/vnd.ms-excel",
+        "application/vnd.ms-powerpoint",
+    ] {
+        assert!(
+            InputSanitizer::is_container_compatible_mime(mime, "application/x-ole-storage"),
+            "Legacy Office {mime} should be OLE-storage-compatible"
+        );
+    }
+}
+
+#[test]
+fn test_is_container_compatible_rejects_unknown() {
+    assert!(!InputSanitizer::is_container_compatible_mime(
+        "application/octet-stream",
+        "application/zip",
+    ));
+}
+
+#[test]
+fn test_is_container_compatible_rejects_unknown_container() {
+    assert!(!InputSanitizer::is_container_compatible_mime(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/pdf",
+    ));
+}
+
+// --- Audio MIME alias tests ---
+
+#[test]
+fn test_audio_mime_m4a_aliases() {
+    // All M4A alias combinations should be compatible
+    let aliases = ["audio/m4a", "audio/mp4", "audio/x-m4a"];
+    for a in &aliases {
+        for b in &aliases {
+            assert!(
+                InputSanitizer::is_audio_mime_compatible(a, b),
+                "{a} should be compatible with {b}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_audio_mime_wav_aliases() {
+    let aliases = ["audio/wav", "audio/x-wav", "audio/wave"];
+    for a in &aliases {
+        for b in &aliases {
+            assert!(
+                InputSanitizer::is_audio_mime_compatible(a, b),
+                "{a} should be compatible with {b}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_audio_mime_flac_aliases() {
+    assert!(InputSanitizer::is_audio_mime_compatible(
+        "audio/flac",
+        "audio/x-flac"
+    ));
+    assert!(InputSanitizer::is_audio_mime_compatible(
+        "audio/x-flac",
+        "audio/flac"
+    ));
+}
+
+#[test]
+fn test_audio_mime_rejects_unrelated() {
+    // Different audio formats should NOT be compatible
+    assert!(!InputSanitizer::is_audio_mime_compatible(
+        "audio/mpeg",
+        "audio/m4a"
+    ));
+    assert!(!InputSanitizer::is_audio_mime_compatible(
+        "audio/wav",
+        "audio/m4a"
+    ));
+    assert!(!InputSanitizer::is_audio_mime_compatible(
+        "audio/flac",
+        "audio/mp4"
+    ));
+    // Non-audio types should also fail
+    assert!(!InputSanitizer::is_audio_mime_compatible(
+        "application/pdf",
+        "audio/m4a"
+    ));
+}

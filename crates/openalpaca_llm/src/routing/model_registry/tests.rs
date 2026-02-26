@@ -43,6 +43,9 @@ fn test_custom_registry() {
             output_price_per_million: 0.0,
             context_window: 4096,
             discovered: false,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
         },
     );
     let registry = ModelRegistry::new(models);
@@ -64,6 +67,9 @@ fn test_register_model() {
             output_price_per_million: 2.0,
             context_window: 32_000,
             discovered: false,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
         },
     );
     assert_eq!(
@@ -84,6 +90,9 @@ fn test_register_if_absent() {
             output_price_per_million: 0.0,
             context_window: 0,
             discovered: false,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
         },
     );
     assert_eq!(
@@ -100,6 +109,9 @@ fn test_register_if_absent() {
             output_price_per_million: 0.0,
             context_window: 4096,
             discovered: false,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
         },
     );
     assert_eq!(
@@ -125,6 +137,9 @@ fn test_register_discovered() {
             output_price_per_million: 0.0,
             context_window: 0,
             discovered: true,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
         },
     );
     let info = registry.get_model_info("gpt-5.2").unwrap();
@@ -141,6 +156,9 @@ fn test_register_discovered() {
             output_price_per_million: 0.0,
             context_window: 0,
             discovered: false, // even if passed false, method forces true
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
         },
     );
     let info = registry.get_model_info("new-api-model").unwrap();
@@ -164,6 +182,9 @@ fn test_list_discovered_models() {
             output_price_per_million: 0.0,
             context_window: 0,
             discovered: true,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
         },
     );
 

@@ -49,6 +49,7 @@ fn test_sink_send_done() {
             tokens_in,
             tokens_out,
             duration_ms,
+            ..
         } => {
             assert_eq!(content, "full response");
             assert_eq!(model, "gpt-4");

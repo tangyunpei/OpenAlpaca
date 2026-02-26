@@ -75,6 +75,7 @@ async fn test_handle_event_echo() {
             content: "hello".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
+            attachments: Vec::new(),
             workspace_path: None,
         })
         .await;
@@ -97,6 +98,7 @@ async fn test_handle_event_creates_lane() {
         content: "hi".to_string(),
         principal: Principal::System,
         scope: Scope::Global,
+        attachments: Vec::new(),
         workspace_path: None,
     })
     .await;
@@ -111,6 +113,7 @@ async fn test_handle_event_creates_lane() {
         content: "again".to_string(),
         principal: Principal::System,
         scope: Scope::Global,
+        attachments: Vec::new(),
         workspace_path: None,
     })
     .await;
@@ -128,6 +131,7 @@ async fn test_handle_event_error_propagation() {
             content: "test".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
+            attachments: Vec::new(),
             workspace_path: None,
         })
         .await;
@@ -147,6 +151,7 @@ async fn test_handle_event_emits_user_request() {
         content: "hello bus".to_string(),
         principal: Principal::System,
         scope: Scope::Global,
+        attachments: Vec::new(),
         workspace_path: None,
     })
     .await;
@@ -175,6 +180,7 @@ async fn test_handle_event_records_message_on_lane() {
         content: "msg1".to_string(),
         principal: Principal::System,
         scope: Scope::Global,
+        attachments: Vec::new(),
         workspace_path: None,
     })
     .await;
@@ -186,6 +192,7 @@ async fn test_handle_event_records_message_on_lane() {
         content: "msg2".to_string(),
         principal: Principal::System,
         scope: Scope::Global,
+        attachments: Vec::new(),
         workspace_path: None,
     })
     .await;
@@ -211,6 +218,7 @@ async fn test_principal_aware_lane_derivation() {
                 global_id: "global1".to_string(),
             },
             scope: Scope::Global,
+            attachments: Vec::new(),
             workspace_path: None,
         })
         .await;
@@ -231,6 +239,7 @@ async fn test_principal_aware_lane_derivation() {
                 id: "tg_user_456".to_string(),
             },
             scope: Scope::Global,
+            attachments: Vec::new(),
             workspace_path: None,
         })
         .await;
@@ -247,6 +256,7 @@ async fn test_principal_aware_lane_derivation() {
             content: "yo".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
+            attachments: Vec::new(),
             workspace_path: None,
         })
         .await;
@@ -289,6 +299,7 @@ async fn test_gateway_persists_messages() {
         content: "hello from telegram".to_string(),
         principal: Principal::System,
         scope: Scope::Global,
+        attachments: Vec::new(),
         workspace_path: None,
     })
     .await;
@@ -340,6 +351,7 @@ async fn test_full_gateway_stack_integration() {
             content: "hello".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
+            attachments: Vec::new(),
             workspace_path: None,
         })
         .await;
@@ -351,6 +363,7 @@ async fn test_full_gateway_stack_integration() {
             content: "/status".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
+            attachments: Vec::new(),
             workspace_path: None,
         })
         .await;
@@ -363,6 +376,7 @@ async fn test_full_gateway_stack_integration() {
             content: "follow-up".to_string(),
             principal: Principal::System,
             scope: Scope::Global,
+            attachments: Vec::new(),
             workspace_path: None,
         })
         .await;

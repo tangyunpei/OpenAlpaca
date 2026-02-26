@@ -540,9 +540,8 @@ impl<'a> MemoryRepository<'a> {
     /// Returns `None` if the memory doesn't exist or belongs to a different owner.
     pub fn get_for_owner(&self, id: i64, owner_id: &str) -> Result<Option<MemoryV2>> {
         self.db.with_connection(|conn| {
-            let sql = format!(
-                "SELECT {ALL_COLUMNS_PLAIN} FROM memory WHERE id = ?1 AND owner_id = ?2"
-            );
+            let sql =
+                format!("SELECT {ALL_COLUMNS_PLAIN} FROM memory WHERE id = ?1 AND owner_id = ?2");
             let mut stmt = conn.prepare(&sql)?;
             let mut rows = stmt.query(rusqlite::params![id, owner_id])?;
             match rows.next()? {
@@ -645,9 +644,7 @@ impl<'a> MemoryRepository<'a> {
                 param_idx += 1;
             }
 
-            sql.push_str(&format!(
-                " ORDER BY v.distance ASC LIMIT ?{param_idx}"
-            ));
+            sql.push_str(&format!(" ORDER BY v.distance ASC LIMIT ?{param_idx}"));
             params.push(Box::new(limit as i64));
 
             let param_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -697,7 +694,14 @@ impl<'a> MemoryRepository<'a> {
         // AND-join: all terms must be present in the matched memory
         let query_terms = terms.join(" AND ");
 
-        let all = self.search_fts(owner_id, &query_terms, limit * 2, None, scope_filter, scope_id_filter)?;
+        let all = self.search_fts(
+            owner_id,
+            &query_terms,
+            limit * 2,
+            None,
+            scope_filter,
+            scope_id_filter,
+        )?;
 
         // Compute Jaccard word-overlap score for each result
         let new_words: std::collections::HashSet<String> = content

@@ -52,10 +52,8 @@ async fn test_custom_poll_interval() {
     let file_path = dir_path.join("custom_poll_trigger.txt");
 
     let (tx, mut rx) = mpsc::channel(10);
-    let watcher = FilesystemWatcher::with_poll_interval(
-        vec![dir_path.clone()],
-        Duration::from_millis(500),
-    );
+    let watcher =
+        FilesystemWatcher::with_poll_interval(vec![dir_path.clone()], Duration::from_millis(500));
 
     watcher.start(tx).await.unwrap();
 

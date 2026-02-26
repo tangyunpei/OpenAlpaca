@@ -70,6 +70,19 @@ pub async fn stream_chat(
     stream_sse_events(http_resp, opts).await
 }
 
+/// POST /v1/chat with attachments → ChatSendResponse
+pub async fn send_chat_with_attachments(
+    client: &DaemonClient,
+    content: &str,
+    attachments: &[serde_json::Value],
+) -> Result<ChatSendResponse> {
+    let body = serde_json::json!({
+        "content": content,
+        "attachments": attachments,
+    });
+    client.post("/v1/chat", &body).await
+}
+
 /// Convenience: send_chat + stream_chat (for non-REPL modes)
 pub async fn send_and_stream(
     client: &DaemonClient,
@@ -77,6 +90,21 @@ pub async fn send_and_stream(
     opts: &StreamOptions,
 ) -> Result<StreamResult> {
     let resp = send_chat(client, content).await?;
+    stream_chat(client, &resp.stream_id, opts).await
+}
+
+/// Convenience: send_chat_with_attachments + stream_chat
+pub async fn send_and_stream_with_attachments(
+    client: &DaemonClient,
+    content: &str,
+    attachments: &[serde_json::Value],
+    opts: &StreamOptions,
+) -> Result<StreamResult> {
+    let resp = if attachments.is_empty() {
+        send_chat(client, content).await?
+    } else {
+        send_chat_with_attachments(client, content, attachments).await?
+    };
     stream_chat(client, &resp.stream_id, opts).await
 }
 
@@ -213,6 +241,36 @@ fn process_sse_event(event_text: &str, verbose: bool, state: &mut SseState) -> R
                 // Capture content for delegation detection
                 if let Some(content) = parsed["content"].as_str() {
                     state.done_content = Some(content.to_string());
+                }
+
+                // Print citations if present
+                if let Some(citations) = parsed["citations"].as_array()
+                    && !citations.is_empty()
+                {
+                    println!("{}", "Sources:".dimmed());
+                    for (i, cit) in citations.iter().enumerate() {
+                        let excerpt = cit["excerpt"].as_str().unwrap_or("");
+                        let page_str = cit["page"]
+                            .as_u64()
+                            .map(|p| format!(" (p.{})", p))
+                            .unwrap_or_default();
+                        println!(
+                            "  {}",
+                            format!("[{}] {}{}", i + 1, excerpt, page_str).dimmed()
+                        );
+                    }
+                }
+
+                // Print artifacts if present
+                if let Some(artifacts) = parsed["artifacts"].as_array()
+                    && !artifacts.is_empty()
+                {
+                    println!("{}", "Artifacts:".dimmed());
+                    for art in artifacts {
+                        let label = art["label"].as_str().unwrap_or("file");
+                        let mime = art["mime_type"].as_str().unwrap_or("");
+                        println!("  {}", format!("- {} ({})", label, mime).dimmed());
+                    }
                 }
 
                 println!();

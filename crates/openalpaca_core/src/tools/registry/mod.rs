@@ -199,9 +199,7 @@ async fn execute_http(
     let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= 10 {
             attempt.error("too many redirects")
-        } else if let Err(e) =
-            crate::tools::url_validation::validate_url(attempt.url().as_str())
-        {
+        } else if let Err(e) = crate::tools::url_validation::validate_url(attempt.url().as_str()) {
             attempt.error(format!("redirect blocked by SSRF policy: {}", e))
         } else {
             attempt.follow()
@@ -241,8 +239,7 @@ async fn execute_http(
         let mut body_bytes = Vec::with_capacity(8192);
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk =
-                chunk.map_err(|e| format!("Failed to read response body: {}", e))?;
+            let chunk = chunk.map_err(|e| format!("Failed to read response body: {}", e))?;
             body_bytes.extend_from_slice(&chunk);
             if body_bytes.len() >= MAX_HTTP_RESPONSE_BYTES {
                 body_bytes.truncate(MAX_HTTP_RESPONSE_BYTES);
@@ -311,12 +308,8 @@ async fn execute_command(
     const MAX_OUTPUT_BYTES: usize = 512 * 1024; // 512 KB
     let stdout_raw = &output.stdout;
     let stderr_raw = &output.stderr;
-    let stdout = String::from_utf8_lossy(
-        &stdout_raw[..stdout_raw.len().min(MAX_OUTPUT_BYTES)],
-    );
-    let stderr = String::from_utf8_lossy(
-        &stderr_raw[..stderr_raw.len().min(MAX_OUTPUT_BYTES)],
-    );
+    let stdout = String::from_utf8_lossy(&stdout_raw[..stdout_raw.len().min(MAX_OUTPUT_BYTES)]);
+    let stderr = String::from_utf8_lossy(&stderr_raw[..stderr_raw.len().min(MAX_OUTPUT_BYTES)]);
 
     if output.status.success() {
         Ok(stdout.to_string())

@@ -1,6 +1,5 @@
 use super::context::inject_skill_context;
 use super::output::validate_skill_output;
-use crate::orchestrator::{ConversationContext, Orchestrator};
 use crate::events::SystemEvent;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::bootstrap::bootstrap_to_prompt_block;
@@ -9,6 +8,7 @@ use crate::middleware::identity::identity_to_prompt_block;
 use crate::middleware::prompt::{AgentPersona, PromptAssembler, format_tool_guidance};
 use crate::middleware::skill::{SkillFrontmatter, skill_to_prompt_block};
 use crate::middleware::user::user_to_prompt_block;
+use crate::orchestrator::{ConversationContext, Orchestrator};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
@@ -30,9 +30,7 @@ fn preflight_permissions(frontmatter: &SkillFrontmatter) -> Result<(), String> {
             if !frontmatter.permissions.sandbox.net
                 && frontmatter.tools.allow.iter().any(|t| t == "web_fetch")
             {
-                return Err(
-                    "Skill requires web_fetch tool but sandbox.net is false".into(),
-                );
+                return Err("Skill requires web_fetch tool but sandbox.net is false".into());
             }
             Ok(())
         }
@@ -70,9 +68,7 @@ impl Orchestrator {
         });
 
         let result = self
-            .handle_skill_invocation_inner(
-                request_id, skill_name, query, ctx, owner_id, scope_ctx,
-            )
+            .handle_skill_invocation_inner(request_id, skill_name, query, ctx, owner_id, scope_ctx)
             .await;
 
         // Emit SkillCompleted or SkillFailed based on result
@@ -207,7 +203,12 @@ impl Orchestrator {
 
         // Tool allow/deny enforcement
         let skill_deny = &skill_doc.frontmatter.tools.deny;
-        let global_deny = &self.daemon_config.load().execution.skill_defaults.global_tool_deny;
+        let global_deny = &self
+            .daemon_config
+            .load()
+            .execution
+            .skill_defaults
+            .global_tool_deny;
 
         // Remove any denied tools (skill-level + global)
         tool_names.retain(|t| !skill_deny.contains(t) && !global_deny.contains(t));
@@ -291,7 +292,11 @@ impl Orchestrator {
             // Inject session summary if available (user-role to prevent prompt injection)
             if let Some(ref summary) = ctx.summary {
                 messages.push(ChatMessage::user(
-                    &crate::orchestrator::wrap_untrusted_context(summary, "session_summary", "user_derived"),
+                    &crate::orchestrator::wrap_untrusted_context(
+                        summary,
+                        "session_summary",
+                        "user_derived",
+                    ),
                 ));
             }
 
@@ -351,7 +356,11 @@ impl Orchestrator {
                         inner.push_str(&entry);
                     }
                     messages.push(ChatMessage::user(
-                        &crate::orchestrator::wrap_untrusted_context(&inner, "retrieved_memory", "retrieved"),
+                        &crate::orchestrator::wrap_untrusted_context(
+                            &inner,
+                            "retrieved_memory",
+                            "retrieved",
+                        ),
                     ));
                 }
             }

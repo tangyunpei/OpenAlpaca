@@ -8,7 +8,7 @@ fn test_database_creation() {
 
     let db = Database::open(&db_path).unwrap();
     assert!(db_path.exists());
-    assert_eq!(db.schema_version().unwrap(), 26);
+    assert_eq!(db.schema_version().unwrap(), 28);
 }
 
 #[test]
@@ -20,7 +20,7 @@ fn test_migrations_idempotent() {
     let _db1 = Database::open(&db_path).unwrap();
     let db2 = Database::open(&db_path).unwrap();
 
-    assert_eq!(db2.schema_version().unwrap(), 26);
+    assert_eq!(db2.schema_version().unwrap(), 28);
 }
 
 #[test]
@@ -47,15 +47,17 @@ fn test_sqlite_vec_available() {
     let db = Database::open(&dir.path().join("test.db")).unwrap();
     db.with_connection(|conn| {
         // 1. Verify extension loaded
-        let version: String = conn.query_row(
-            "SELECT vec_version()", [], |row| row.get(0)
-        )?;
-        assert!(!version.is_empty(), "vec_version() should return a version string");
+        let version: String = conn.query_row("SELECT vec_version()", [], |row| row.get(0))?;
+        assert!(
+            !version.is_empty(),
+            "vec_version() should return a version string"
+        );
 
         // 2. Verify migration created the table
         let exists: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_vec')",
-            [], |row| row.get(0),
+            [],
+            |row| row.get(0),
         )?;
         assert!(exists, "memory_vec table should exist after migration");
 
@@ -66,13 +68,12 @@ fn test_sqlite_vec_available() {
         )?;
 
         // 4. Verify round-trip
-        let count: i64 = conn.query_row(
-            "SELECT count(*) FROM memory_vec", [], |row| row.get(0)
-        )?;
+        let count: i64 = conn.query_row("SELECT count(*) FROM memory_vec", [], |row| row.get(0))?;
         assert_eq!(count, 1);
 
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
 }
 
 #[test]
@@ -88,7 +89,8 @@ fn test_fts_update_sync() {
             [],
         )?;
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
 
     // Update content to "new" keyword
     db.with_connection(|c| {
