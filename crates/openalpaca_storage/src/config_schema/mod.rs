@@ -197,6 +197,16 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         backend: ConfigBackend::SystemConfig,
     },
     ConfigKeyDef {
+        key: "imessage.allow_from_me",
+        kind: ConfigKind::Bool,
+        default: Some("true"),
+        description: "Allow iMessage connector to process messages sent by this Mac user (useful for self-chat)",
+        category: "Connectors",
+        subcategory: None,
+        sensitive: false,
+        backend: ConfigBackend::SystemConfig,
+    },
+    ConfigKeyDef {
         key: "discord.token",
         kind: ConfigKind::String,
         default: None,

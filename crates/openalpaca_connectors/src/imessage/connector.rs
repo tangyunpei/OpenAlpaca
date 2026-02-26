@@ -117,6 +117,14 @@ impl IMessageConnector {
                 .map_err(ConnectorError::InitFailed)?;
             info!("iMessage connector initialized, watermark set to current max ROWID");
         }
+        let allow_from_me = config_repo
+            .get_bool("imessage.allow_from_me")
+            .unwrap_or(true);
+        if allow_from_me {
+            info!(
+                "iMessage connector enabled self-sent message processing (imessage.allow_from_me=true)"
+            );
+        }
 
         loop {
             tokio::select! {
@@ -135,7 +143,7 @@ impl IMessageConnector {
                     return Ok(());
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
-                    match reader.poll_new_messages() {
+                    match reader.poll_new_messages(allow_from_me) {
                         Ok(messages) => {
                             let had_messages = !messages.is_empty();
                             for msg in messages {
