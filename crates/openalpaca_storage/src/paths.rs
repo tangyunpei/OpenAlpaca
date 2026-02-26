@@ -65,6 +65,23 @@ pub fn database_path() -> anyhow::Result<PathBuf> {
     Ok(app_dir()?.join("openalpaca.db"))
 }
 
+/// Path to the assets directory for file storage.
+pub fn assets_dir() -> anyhow::Result<PathBuf> {
+    Ok(app_dir()?.join("assets"))
+}
+
+/// Sharded storage path for a file asset by SHA-256 hash.
+/// e.g., assets/ab/cd/abcdef1234...
+pub fn asset_storage_path(sha256: &str) -> anyhow::Result<PathBuf> {
+    if sha256.len() < 4 {
+        anyhow::bail!("SHA-256 hash too short: {}", sha256);
+    }
+    Ok(assets_dir()?
+        .join(&sha256[0..2])
+        .join(&sha256[2..4])
+        .join(sha256))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,10 +91,13 @@ mod tests {
         let app = app_dir().unwrap();
         let discovery = discovery_path().unwrap();
         let lock = lock_path().unwrap();
+        let assets = assets_dir().unwrap();
 
         assert!(discovery.starts_with(&app));
         assert!(lock.starts_with(&app));
+        assert!(assets.starts_with(&app));
         assert!(discovery.ends_with("discovery.json"));
         assert!(lock.ends_with("openalpacad.lock"));
+        assert!(assets.ends_with("assets"));
     }
 }

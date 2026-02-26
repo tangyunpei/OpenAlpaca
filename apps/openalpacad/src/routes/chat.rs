@@ -29,6 +29,8 @@ use crate::AppState;
 #[derive(Deserialize)]
 pub struct ChatSendRequest {
     pub content: String,
+    #[serde(default)]
+    pub attachments: Vec<openalpaca_storage::AttachmentRef>,
 }
 
 #[derive(Serialize)]
@@ -127,6 +129,23 @@ pub async fn send_chat_handler(
         }
     };
 
+    // Validate attachment count
+    {
+        let config = state.daemon_config.load();
+        if body.attachments.len() > config.upload.max_files_per_message {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "TOO_MANY_ATTACHMENTS",
+                &format!(
+                    "Too many attachments: {} provided, maximum is {}",
+                    body.attachments.len(),
+                    config.upload.max_files_per_message
+                ),
+            )
+            .into_response();
+        }
+    }
+
     let principal = &state.local_user_id;
 
     let workspace_path = headers
@@ -134,7 +153,7 @@ pub async fn send_chat_handler(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    match chat_service.send_message(body.content, principal, workspace_path) {
+    match chat_service.send_message(body.content, body.attachments, principal, workspace_path) {
         Ok(resp) => {
             // Publish to EventBus; bridge forwards to WebSocket clients
             let _ = state.gateway.bus.publish(SystemEvent::ChatStreamStarted {
@@ -223,16 +242,28 @@ fn make_sse_stream(
                     tokens_in,
                     tokens_out,
                     duration_ms,
-                } => Event::default().event("done").data(
-                    serde_json::json!({
+                    attachments_used,
+                    citations,
+                    artifacts,
+                } => {
+                    let mut data = serde_json::json!({
                         "content": content,
                         "model": model,
                         "tokens_in": tokens_in,
                         "tokens_out": tokens_out,
                         "duration_ms": duration_ms
-                    })
-                    .to_string(),
-                ),
+                    });
+                    if let Some(att) = attachments_used {
+                        data["attachments_used"] = serde_json::json!(att);
+                    }
+                    if let Some(cit) = citations {
+                        data["citations"] = serde_json::json!(cit);
+                    }
+                    if let Some(art) = artifacts {
+                        data["artifacts"] = serde_json::json!(art);
+                    }
+                    Event::default().event("done").data(data.to_string())
+                }
                 openalpaca_core::chat::ChatStreamEvent::Error { message } => Event::default()
                     .event("error")
                     .data(serde_json::json!({"message": message}).to_string()),
@@ -267,8 +298,12 @@ pub async fn get_chat_history_handler(
 
     // Verify the caller owns this lane (lane_key format: "{user_id}:{source_name}")
     if !is_lane_owned_by(lane_key, &state.local_user_id) {
-        return error_response(StatusCode::FORBIDDEN, "FORBIDDEN", "Access denied to this lane")
-            .into_response();
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "Access denied to this lane",
+        )
+        .into_response();
     }
 
     match chat_service.get_history(lane_key, limit, offset) {
@@ -309,8 +344,12 @@ pub async fn delete_chat_history_handler(
 
     // Verify the caller owns this lane (lane_key format: "{user_id}:{source_name}")
     if !is_lane_owned_by(lane_key, &state.local_user_id) {
-        return error_response(StatusCode::FORBIDDEN, "FORBIDDEN", "Access denied to this lane")
-            .into_response();
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "Access denied to this lane",
+        )
+        .into_response();
     }
 
     match chat_service.clear_history(lane_key) {
@@ -339,7 +378,12 @@ pub async fn list_conversations_handler(
     let limit = query.limit.unwrap_or(50);
     let offset = query.offset.unwrap_or(0);
 
-    match repo.list_conversations_for_owner(&state.local_user_id, query.source.as_deref(), limit, offset) {
+    match repo.list_conversations_for_owner(
+        &state.local_user_id,
+        query.source.as_deref(),
+        limit,
+        offset,
+    ) {
         Ok(conversations) => Json(ConversationsResponse { conversations }).into_response(),
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -378,8 +422,7 @@ pub async fn get_conversation_messages_handler(
 
     // Verify the caller owns this conversation
     if !is_lane_owned_by(&conv.lane_key, &state.local_user_id) {
-        return error_response(StatusCode::FORBIDDEN, "FORBIDDEN", "Access denied")
-            .into_response();
+        return error_response(StatusCode::FORBIDDEN, "FORBIDDEN", "Access denied").into_response();
     }
 
     let limit = query.limit.unwrap_or(50);

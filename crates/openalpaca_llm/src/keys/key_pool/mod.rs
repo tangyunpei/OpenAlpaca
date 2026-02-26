@@ -423,6 +423,13 @@ impl KeyPool {
                         key.rate_state.consecutive_rate_limits += 1;
                         let cooldown = Duration::from_millis(retry_after_ms);
                         key.rate_state.cooldown_until = Some(Instant::now() + cooldown);
+                        tracing::warn!(
+                            key_id = %key.id,
+                            provider = %key.provider,
+                            retry_after_ms,
+                            consecutive_rate_limits = key.rate_state.consecutive_rate_limits,
+                            "Key entered rate-limit cooldown"
+                        );
                     }
                     CallResult::Error(_) => {
                         // Don't cooldown on general errors, just on rate limits

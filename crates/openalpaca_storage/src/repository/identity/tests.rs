@@ -87,6 +87,8 @@ fn test_migrate_lane_on_link() {
         tokens_out: None,
         duration_ms: None,
         created_at: String::new(),
+        content_json: None,
+        display_text: None,
     };
     conv_repo.insert(&msg).unwrap();
     conv_repo
@@ -155,6 +157,8 @@ fn test_migrate_lane_relink_no_unique_violation() {
         tokens_out: None,
         duration_ms: None,
         created_at: String::new(),
+        content_json: None,
+        display_text: None,
     };
     conv_repo.insert(&msg).unwrap();
 

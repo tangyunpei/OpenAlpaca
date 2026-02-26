@@ -10,7 +10,8 @@ import {
   clearChatHistory as apiClearHistory,
   createChatStream,
 } from "../api/chat";
-import type { ChatMessage, ChatStreamDoneData } from "../types";
+import { uploadFile } from "../api/files";
+import type { ChatMessage, ChatStreamDoneData, AttachmentRef, AttachmentDisplay } from "../types";
 
 export const chatMessages = writable<ChatMessage[]>([]);
 export const chatLoading = writable(false);
@@ -19,36 +20,188 @@ export const chatStreaming = writable(false);
 export const currentStreamId = writable<string | null>(null);
 export const activeLaneKey = writable<string | null>(null);
 
+/** Files selected by the user but not yet sent. */
+export interface PendingFile {
+  file: File;
+  progress: number;  // 0-100
+  error: string | null;
+}
+
+export const pendingFiles = writable<PendingFile[]>([]);
+export const uploadingFiles = writable(false);
+
 let nextLocalId = -1;
+
+type StructuredMessagePart = {
+  type: string;
+  file_id?: string;
+  filename?: string;
+  mime_type?: string;
+};
+
+function normalizeHistoryMessage(message: ChatMessage): ChatMessage {
+  const normalized: ChatMessage = { ...message };
+  if (
+    normalized.content.trim().length === 0 &&
+    normalized.display_text &&
+    normalized.display_text.trim().length > 0
+  ) {
+    normalized.content = normalized.display_text;
+  }
+
+  if (
+    (!normalized.attachments || normalized.attachments.length === 0) &&
+    normalized.content_json
+  ) {
+    try {
+      const parsed = JSON.parse(normalized.content_json) as { parts?: StructuredMessagePart[] };
+      const parts = Array.isArray(parsed.parts) ? parsed.parts : [];
+      const seen = new Set<string>();
+      const attachments: AttachmentDisplay[] = [];
+      for (const part of parts) {
+        if (
+          (part.type === "file_ref" || part.type === "document") &&
+          part.file_id &&
+          part.filename &&
+          part.mime_type &&
+          !seen.has(part.file_id)
+        ) {
+          seen.add(part.file_id);
+          attachments.push({
+            file_id: part.file_id,
+            filename: part.filename,
+            mime_type: part.mime_type,
+            size_bytes: 0,
+          });
+        }
+      }
+      if (attachments.length > 0) {
+        normalized.attachments = attachments;
+      }
+    } catch {
+      // ignore malformed content_json
+    }
+  }
+
+  if (
+    normalized.content.trim().length === 0 &&
+    normalized.attachments &&
+    normalized.attachments.length > 0
+  ) {
+    normalized.content = "[Attachment]";
+  }
+
+  return normalized;
+}
+
+export function applyDoneDataToMessage(message: ChatMessage, data: ChatStreamDoneData): ChatMessage {
+  return {
+    ...message,
+    content: data.content,
+    model: data.model,
+    tokens_in: data.tokens_in,
+    tokens_out: data.tokens_out,
+    duration_ms: data.duration_ms,
+    citations: data.citations,
+    artifacts: data.artifacts,
+  };
+}
 
 /** Load conversation history from the API. */
 export async function loadHistory(): Promise<void> {
   try {
     const resp = await getChatHistory(100, 0);
-    chatMessages.set(resp.messages);
+    chatMessages.set(resp.messages.map(normalizeHistoryMessage));
     activeLaneKey.set(resp.lane_key);
   } catch (e) {
     console.error("[chat-store] Failed to load history:", e);
   }
 }
 
-/** Send a message and connect to SSE for the response. */
+/** Add files to the pending list. */
+export function addFiles(files: FileList | File[]): void {
+  const newFiles = Array.from(files).map((file) => ({
+    file,
+    progress: 0,
+    error: null,
+  }));
+  pendingFiles.update((existing) => [...existing, ...newFiles]);
+}
+
+/** Remove a pending file by index. */
+export function removePendingFile(index: number): void {
+  pendingFiles.update((files) => files.filter((_, i) => i !== index));
+}
+
+/** Clear all pending files. */
+export function clearPendingFiles(): void {
+  pendingFiles.set([]);
+}
+
+/** Send a message with optional file attachments and connect to SSE. */
 export async function sendChatMessage(content: string): Promise<void> {
   chatLoading.set(true);
   chatError.set(null);
+
+  const filesToUpload = get(pendingFiles);
+  let attachments: AttachmentRef[] = [];
+  let attachmentDisplays: AttachmentDisplay[] = [];
+
+  // Upload pending files first
+  if (filesToUpload.length > 0) {
+    uploadingFiles.set(true);
+    try {
+      const results = await Promise.all(
+        filesToUpload.map(async (pf, idx) => {
+          const resp = await uploadFile(pf.file, (loaded, total) => {
+            const pct = Math.round((loaded / total) * 100);
+            pendingFiles.update((files) =>
+              files.map((f, i) => (i === idx ? { ...f, progress: pct } : f)),
+            );
+          });
+          return resp;
+        }),
+      );
+
+      attachments = results.map((r) => ({ file_id: r.id }));
+      attachmentDisplays = results.map((r) => ({
+        file_id: r.id,
+        filename: r.filename,
+        mime_type: r.mime_type,
+        size_bytes: r.size_bytes,
+      }));
+    } catch (e) {
+      chatError.set(e instanceof Error ? e.message : "File upload failed");
+      chatLoading.set(false);
+      uploadingFiles.set(false);
+      return;
+    }
+    uploadingFiles.set(false);
+    clearPendingFiles();
+  }
 
   // Optimistic user message
   const userMsg: ChatMessage = {
     id: nextLocalId--,
     lane_key: get(activeLaneKey) ?? "(pending)",
     role: "user",
-    content,
+    content:
+      content.trim().length > 0
+        ? content
+        : attachmentDisplays.length > 0
+          ? "[Attachment]"
+          : content,
     created_at: new Date().toISOString(),
+    attachments: attachmentDisplays.length > 0 ? attachmentDisplays : undefined,
   };
   chatMessages.update((msgs) => [...msgs, userMsg]);
 
   try {
-    const resp = await apiSendMessage({ content });
+    const req: { content: string; attachments?: AttachmentRef[] } = { content };
+    if (attachments.length > 0) {
+      req.attachments = attachments;
+    }
+    const resp = await apiSendMessage(req);
     currentStreamId.set(resp.stream_id);
     chatStreaming.set(true);
 
@@ -106,14 +259,7 @@ export async function sendChatMessage(content: string): Promise<void> {
         chatMessages.update((msgs) =>
           msgs.map((m) =>
             m.id === assistantMsgId
-              ? {
-                  ...m,
-                  content: data.content,
-                  model: data.model,
-                  tokens_in: data.tokens_in,
-                  tokens_out: data.tokens_out,
-                  duration_ms: data.duration_ms,
-                }
+              ? applyDoneDataToMessage(m, data)
               : m,
           ),
         );

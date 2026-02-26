@@ -37,21 +37,48 @@ fn format_tool_error(msg: &str) -> String {
     format!("[tool_error] {}", msg)
 }
 
+/// Estimate tokens for a single content part.
+fn estimate_part_tokens(part: &openalpaca_llm::ContentPart) -> u32 {
+    match part {
+        openalpaca_llm::ContentPart::Text { text } => (text.len() / 4) as u32,
+        openalpaca_llm::ContentPart::Image { detail, .. } => {
+            match detail.as_deref() {
+                Some("low") => 85,
+                _ => 1590, // high/default — one Anthropic tile
+            }
+        }
+        openalpaca_llm::ContentPart::Audio { data, .. } => {
+            // ~25 tokens/sec; ensure non-empty audio gets at least 25 tokens
+            ((data.len() as f64 / 4096.0) * 25.0).ceil().max(25.0) as u32
+        }
+        openalpaca_llm::ContentPart::Document { extracted_text, .. } => extracted_text
+            .as_ref()
+            .map_or(500, |t| (t.len() / 4) as u32),
+        openalpaca_llm::ContentPart::FileRef { .. } => 50,
+    }
+}
+
 /// Estimate tokens in a message list using the 1 token ≈ 4 bytes heuristic.
+/// When multimodal parts are present, estimates per-part tokens instead.
 /// Consistent with `estimate_request_tokens` in the LLM router.
 fn estimate_messages_tokens(messages: &[ChatMessage]) -> u32 {
-    let bytes: usize = messages
+    let tokens: u32 = messages
         .iter()
         .map(|m| {
-            m.content.len()
-                + m.tool_calls.as_ref().map_or(0, |tcs| {
-                    tcs.iter()
-                        .map(|tc| tc.name.len() + tc.arguments.to_string().len())
-                        .sum()
-                })
+            let content_tokens: u32 = if let Some(ref parts) = m.parts {
+                parts.iter().map(estimate_part_tokens).sum()
+            } else {
+                (m.content.len() / 4) as u32
+            };
+            let tool_call_tokens: u32 = m.tool_calls.as_ref().map_or(0, |tcs| {
+                tcs.iter()
+                    .map(|tc| ((tc.name.len() + tc.arguments.to_string().len()) / 4) as u32)
+                    .sum()
+            });
+            content_tokens + tool_call_tokens
         })
         .sum();
-    (bytes / 4).max(100) as u32
+    tokens.max(100)
 }
 
 /// Compress context by replacing older rounds with a compact summary.
@@ -75,6 +102,49 @@ fn compress_context(messages: &mut Vec<ChatMessage>, tail_keep: usize) {
     // Build summary from messages[2..compress_end]
     let mut summary_parts = Vec::new();
     for msg in &messages[2..compress_end] {
+        // Summarize multimodal parts when present
+        if let Some(ref parts) = msg.parts {
+            let role_label = match msg.role {
+                openalpaca_llm::Role::User => "User",
+                openalpaca_llm::Role::Assistant => "Assistant",
+                openalpaca_llm::Role::System => "System",
+                openalpaca_llm::Role::Tool => "Tool",
+            };
+            for part in parts {
+                match part {
+                    openalpaca_llm::ContentPart::Image { .. } => {
+                        summary_parts.push(format!("- {role_label}: [sent an image]"));
+                    }
+                    openalpaca_llm::ContentPart::Audio { .. } => {
+                        summary_parts.push(format!("- {role_label}: [sent audio]"));
+                    }
+                    openalpaca_llm::ContentPart::Document {
+                        filename,
+                        extracted_text,
+                        ..
+                    } => {
+                        let excerpt = extracted_text
+                            .as_ref()
+                            .map(|t| truncate_for_summary(t, 200))
+                            .unwrap_or_default();
+                        summary_parts
+                            .push(format!("- {role_label}: [attached: {filename}] {excerpt}"));
+                    }
+                    openalpaca_llm::ContentPart::FileRef { filename, .. } => {
+                        summary_parts.push(format!("- {role_label}: [attached: {filename}]"));
+                    }
+                    openalpaca_llm::ContentPart::Text { text } if !text.is_empty() => {
+                        summary_parts.push(format!(
+                            "- {role_label}: {}",
+                            truncate_for_summary(text, 200)
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            continue;
+        }
+
         match msg.role {
             openalpaca_llm::Role::Assistant => {
                 if !msg.content.is_empty() {

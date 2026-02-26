@@ -40,7 +40,11 @@ pub async fn orchestrator_latency_handler(
     );
 
     match result {
-        Ok(records) => (StatusCode::OK, Json(serde_json::json!({ "records": records }))).into_response(),
+        Ok(records) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "records": records })),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("Failed to query orchestrator latency: {}", e);
             (

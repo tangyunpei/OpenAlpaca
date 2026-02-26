@@ -9,9 +9,7 @@ fn test_system_principal_bypasses() {
     let cap = Capability {
         name: "system.shutdown".to_string(),
     };
-    assert!(
-        CapabilityManager::check_principal(&Principal::System, &cap, &Scope::Global).is_ok()
-    );
+    assert!(CapabilityManager::check_principal(&Principal::System, &cap, &Scope::Global).is_ok());
 }
 
 #[test]
@@ -50,8 +48,7 @@ fn test_denied_capability_blocked() {
         denied_capabilities: vec!["shell_execute".to_string()],
         ..default_constraints()
     };
-    let result =
-        CapabilityManager::check_agent_capability("agent1", "shell_execute", &constraints);
+    let result = CapabilityManager::check_agent_capability("agent1", "shell_execute", &constraints);
     assert!(result.is_err());
     match result.unwrap_err() {
         SecurityViolation::CapabilityDenied {
@@ -76,8 +73,7 @@ fn test_allowed_capability_enforced() {
         CapabilityManager::check_agent_capability("agent1", "web_search", &constraints).is_ok()
     );
     // Unlisted tool is blocked
-    let result =
-        CapabilityManager::check_agent_capability("agent1", "shell_execute", &constraints);
+    let result = CapabilityManager::check_agent_capability("agent1", "shell_execute", &constraints);
     assert!(result.is_err());
     match result.unwrap_err() {
         SecurityViolation::CapabilityNotAllowed { .. } => {}
@@ -88,9 +84,7 @@ fn test_allowed_capability_enforced() {
 #[test]
 fn test_empty_allow_list_allows_all() {
     let constraints = default_constraints();
-    assert!(
-        CapabilityManager::check_agent_capability("agent1", "anything", &constraints).is_ok()
-    );
+    assert!(CapabilityManager::check_agent_capability("agent1", "anything", &constraints).is_ok());
 }
 
 #[test]
@@ -102,8 +96,7 @@ fn test_capability_check_case_insensitive() {
     };
     constraints.normalize();
     assert!(
-        CapabilityManager::check_agent_capability("agent1", "shell_execute", &constraints)
-            .is_err()
+        CapabilityManager::check_agent_capability("agent1", "shell_execute", &constraints).is_err()
     );
 
     // Allow list with mixed case should match lowercase tool name (after normalize)
@@ -123,12 +116,8 @@ fn test_capability_check_case_insensitive() {
 fn test_model_access_no_constraints() {
     let constraints = default_constraints();
     assert!(
-        CapabilityManager::check_model_access(
-            "agent1",
-            "claude-sonnet-4-5-20250929",
-            &constraints
-        )
-        .is_ok()
+        CapabilityManager::check_model_access("agent1", "claude-sonnet-4-5-20250929", &constraints)
+            .is_ok()
     );
 }
 
@@ -168,12 +157,8 @@ fn test_model_access_in_allow_list() {
         ..default_constraints()
     };
     assert!(
-        CapabilityManager::check_model_access(
-            "agent1",
-            "claude-sonnet-4-5-20250929",
-            &constraints
-        )
-        .is_ok()
+        CapabilityManager::check_model_access("agent1", "claude-sonnet-4-5-20250929", &constraints)
+            .is_ok()
     );
 }
 
@@ -207,19 +192,11 @@ fn test_model_access_case_insensitive() {
     };
     constraints.normalize();
     assert!(
-        CapabilityManager::check_model_access(
-            "agent1",
-            "claude-sonnet-4-5-20250929",
-            &constraints
-        )
-        .is_ok()
+        CapabilityManager::check_model_access("agent1", "claude-sonnet-4-5-20250929", &constraints)
+            .is_ok()
     );
     assert!(
-        CapabilityManager::check_model_access(
-            "agent1",
-            "CLAUDE-SONNET-4-5-20250929",
-            &constraints
-        )
-        .is_ok()
+        CapabilityManager::check_model_access("agent1", "CLAUDE-SONNET-4-5-20250929", &constraints)
+            .is_ok()
     );
 }

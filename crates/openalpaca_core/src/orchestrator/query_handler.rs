@@ -11,10 +11,39 @@ use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 use chrono::Utc;
-use openalpaca_llm::ChatMessage;
+use openalpaca_llm::{ChatMessage, ContentPart, ImageSource};
 use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
 use std::sync::Arc;
 use uuid::Uuid;
+
+fn sanitize_parts_for_dispatch(parts: Vec<ContentPart>) -> Vec<ContentPart> {
+    parts
+        .into_iter()
+        .filter_map(|part| match part {
+            ContentPart::Image {
+                source: ImageSource::FileAsset {
+                    file_id,
+                    media_type,
+                },
+                ..
+            } => {
+                tracing::warn!(
+                    file_id = %file_id,
+                    media_type = %media_type,
+                    "Unresolved FileAsset image part reached query handler; replacing with placeholder"
+                );
+                Some(ContentPart::Text {
+                    text: "[image attached — unresolved file asset reference]".to_string(),
+                })
+            }
+            ContentPart::Text { text } if text.trim().is_empty() => {
+                tracing::debug!("Dropping empty text content part before model dispatch");
+                None
+            }
+            other => Some(other),
+        })
+        .collect()
+}
 
 impl Orchestrator {
     #[allow(clippy::too_many_arguments)]
@@ -23,10 +52,12 @@ impl Orchestrator {
         request_id: Uuid,
         _source: &str,
         query: &str,
+        tool_suggestion_query: &str,
         _lane_key: &str,
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
+        current_parts: Option<&[ContentPart]>,
     ) -> Result<String, String> {
         let system_persona = match self.system_persona.read() {
             Ok(guard) => guard.clone(),
@@ -79,7 +110,8 @@ impl Orchestrator {
         }
 
         // Resolve tools based on intent analysis
-        let mut tool_names = self.intent_parser.suggest_tools(query);
+        // Tool suggestion should be based on raw user intent text, not attachment-injected context.
+        let mut tool_names = self.intent_parser.suggest_tools(tool_suggestion_query);
 
         // Force-include persona tools during bootstrap mode
         if self.is_bootstrapping() {
@@ -146,9 +178,11 @@ impl Orchestrator {
 
             // Inject session summary if available (user-role to prevent prompt injection)
             if let Some(ref summary) = ctx.summary {
-                messages.push(ChatMessage::user(
-                    &super::wrap_untrusted_context(summary, "session_summary", "user_derived"),
-                ));
+                messages.push(ChatMessage::user(&super::wrap_untrusted_context(
+                    summary,
+                    "session_summary",
+                    "user_derived",
+                )));
             }
 
             // Retrieval injection: hybrid FTS+vector search for user memories
@@ -207,14 +241,43 @@ impl Orchestrator {
                         budget -= entry.len();
                         inner.push_str(&entry);
                     }
-                    messages.push(ChatMessage::user(
-                        &super::wrap_untrusted_context(&inner, "retrieved_memory", "retrieved"),
-                    ));
+                    messages.push(ChatMessage::user(&super::wrap_untrusted_context(
+                        &inner,
+                        "retrieved_memory",
+                        "retrieved",
+                    )));
                 }
             }
 
-            messages.extend(ctx.recent_messages.clone());
-            messages.push(ChatMessage::user(query));
+            // Adapt multimodal parts in recent messages for the target model
+            let default_model = router.default_model();
+            let target_model = config_for_loop.model.as_deref().unwrap_or(&default_model);
+            let adapted_messages: Vec<ChatMessage> = ctx
+                .recent_messages
+                .iter()
+                .map(|msg| {
+                    if msg.parts.is_some() {
+                        let mut adapted = msg.clone();
+                        adapted.parts = Some(self.adapt_parts_for_model(
+                            sanitize_parts_for_dispatch(msg.parts.clone().unwrap_or_default()),
+                            target_model,
+                        ));
+                        adapted
+                    } else {
+                        msg.clone()
+                    }
+                })
+                .collect();
+            messages.extend(adapted_messages);
+            if let Some(parts) = current_parts {
+                let adapted = self.adapt_parts_for_model(
+                    sanitize_parts_for_dispatch(parts.to_vec()),
+                    target_model,
+                );
+                messages.push(ChatMessage::user_with_parts(adapted));
+            } else {
+                messages.push(ChatMessage::user(query));
+            }
 
             // Per-request sandbox with ContextualToolExecutor for owner-scoped tools
             let ctx_exec = ToolExecutionContext {
@@ -379,5 +442,53 @@ impl Orchestrator {
         }
         block.push_str("</available_skills>");
         block
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_parts_for_dispatch;
+    use openalpaca_llm::{ContentPart, ImageSource};
+
+    #[test]
+    fn sanitize_parts_for_dispatch_drops_empty_text_parts() {
+        let parts = vec![
+            ContentPart::Text {
+                text: "".to_string(),
+            },
+            ContentPart::Text {
+                text: "  \n\t".to_string(),
+            },
+            ContentPart::Text {
+                text: "keep me".to_string(),
+            },
+        ];
+
+        let sanitized = sanitize_parts_for_dispatch(parts);
+        assert_eq!(sanitized.len(), 1);
+        match &sanitized[0] {
+            ContentPart::Text { text } => assert_eq!(text, "keep me"),
+            other => panic!("expected text part, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sanitize_parts_for_dispatch_replaces_unresolved_file_asset_images() {
+        let parts = vec![ContentPart::Image {
+            source: ImageSource::FileAsset {
+                file_id: "f1".to_string(),
+                media_type: "image/jpeg".to_string(),
+            },
+            detail: None,
+        }];
+
+        let sanitized = sanitize_parts_for_dispatch(parts);
+        assert_eq!(sanitized.len(), 1);
+        match &sanitized[0] {
+            ContentPart::Text { text } => {
+                assert_eq!(text, "[image attached — unresolved file asset reference]")
+            }
+            other => panic!("expected placeholder text, got {other:?}"),
+        }
     }
 }

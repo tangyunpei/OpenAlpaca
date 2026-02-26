@@ -4,11 +4,13 @@
 //! 1. Get a bot token from @BotFather
 //! 2. Run: TELOXIDE_TOKEN=your_token cargo run --example telegram --features telegram
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use openalpaca_connectors::TelegramConnector;
 use openalpaca_core::{
     bus::EventBus,
     context::SharedContext,
+    daemon_config::DaemonConfig,
     gateway::{Gateway, HandleResult, MessageHandler},
     lane::LaneManager,
     security::policy::{Principal, Scope},
@@ -64,7 +66,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     // 5. Create and run connector
-    let connector = TelegramConnector::new(token, Arc::new(db), Arc::new(bus), gateway);
+    let daemon_config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+    let connector =
+        TelegramConnector::new(token, Arc::new(db), Arc::new(bus), gateway, daemon_config);
 
     // Note: In a real app, you'd spawn this or run in background
     // For the example, we run it blocking.

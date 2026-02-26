@@ -7,11 +7,7 @@ use tokio_util::sync::CancellationToken;
 ///
 /// Listens on the core `EventBus` and forwards relevant events to the
 /// `EventBroadcaster` for WebSocket/SSE delivery to API clients.
-pub fn spawn_event_bridge(
-    eb: EventBroadcaster,
-    bus: &EventBus,
-    cancel: CancellationToken,
-) {
+pub fn spawn_event_bridge(eb: EventBroadcaster, bus: &EventBus, cancel: CancellationToken) {
     let mut system_rx = bus.subscribe();
     tokio::spawn(async move {
         loop {
@@ -113,13 +109,7 @@ pub fn spawn_event_bridge(
                     tracing::info!(
                         "LLM call: agent={agent_id}, model={model}, tokens={input_tokens}/{output_tokens}, cost=${cost_usd:.6}"
                     );
-                    eb.llm_call_completed(
-                        &agent_id,
-                        &model,
-                        input_tokens,
-                        output_tokens,
-                        cost_usd,
-                    );
+                    eb.llm_call_completed(&agent_id, &model, input_tokens, output_tokens, cost_usd);
                 }
                 openalpaca_core::events::SystemEvent::CircuitBreakerTripped {
                     agent_id,
@@ -385,13 +375,9 @@ pub fn spawn_event_bridge(
                     );
                 }
                 openalpaca_core::events::SystemEvent::SkillSelected {
-                    skill_id,
-                    score,
-                    ..
+                    skill_id, score, ..
                 } => {
-                    tracing::debug!(
-                        "Skill auto-selected: id={skill_id}, score={score:.3}"
-                    );
+                    tracing::debug!("Skill auto-selected: id={skill_id}, score={score:.3}");
                 }
                 openalpaca_core::events::SystemEvent::SkillInvocationStarted {
                     request_id,

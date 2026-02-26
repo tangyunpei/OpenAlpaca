@@ -1,4 +1,5 @@
 use super::*;
+use reqwest::header::{HeaderMap, HeaderValue};
 
 #[test]
 fn test_request_serialization() {
@@ -156,4 +157,77 @@ fn test_error_handling() {
     // Just verify parse_response doesn't panic on unexpected structure
     let result = provider.parse_response(error_json);
     assert!(result.is_ok()); // It parses but fields are empty/default
+}
+
+#[test]
+fn test_request_serialization_filters_empty_text_parts() {
+    let provider = AnthropicProvider::new("test-key".to_string(), None, None);
+    let request = ChatRequest {
+        messages: vec![ChatMessage::user_with_parts(vec![
+            ContentPart::Text {
+                text: "".to_string(),
+            },
+            ContentPart::Image {
+                source: ImageSource::Url {
+                    url: "https://example.com/test.jpg".to_string(),
+                },
+                detail: None,
+            },
+        ])],
+        tools: vec![],
+        model: None,
+        temperature: None,
+        max_tokens: None,
+    };
+
+    let body = provider.build_request_body(&request);
+    let messages = body["messages"]
+        .as_array()
+        .expect("messages should be an array");
+    assert_eq!(messages.len(), 1);
+    let blocks = messages[0]["content"]
+        .as_array()
+        .expect("content should be an array");
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["type"], "image");
+}
+
+#[test]
+fn test_request_serialization_empty_parts_get_placeholder() {
+    let provider = AnthropicProvider::new("test-key".to_string(), None, None);
+    let request = ChatRequest {
+        messages: vec![ChatMessage::user_with_parts(vec![ContentPart::Text {
+            text: " \n\t ".to_string(),
+        }])],
+        tools: vec![],
+        model: None,
+        temperature: None,
+        max_tokens: None,
+    };
+
+    let body = provider.build_request_body(&request);
+    let messages = body["messages"]
+        .as_array()
+        .expect("messages should be an array");
+    assert_eq!(messages.len(), 1);
+    let blocks = messages[0]["content"]
+        .as_array()
+        .expect("content should be an array");
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[0]["text"], "[empty message]");
+}
+
+#[test]
+fn test_parse_retry_after_ms_fractional() {
+    let mut headers = HeaderMap::new();
+    headers.insert("retry-after", HeaderValue::from_static("1.5"));
+    assert_eq!(parse_retry_after_ms(&headers), Some(1500));
+}
+
+#[test]
+fn test_parse_retry_after_ms_invalid() {
+    let mut headers = HeaderMap::new();
+    headers.insert("retry-after", HeaderValue::from_static("nope"));
+    assert_eq!(parse_retry_after_ms(&headers), None);
 }

@@ -46,10 +46,7 @@ fn test_analyze_dispatch_lead_agent() {
 fn test_analyze_dispatch_dag() {
     let mut plan = make_simple_plan();
     plan.dag = Some(TaskDag {
-        nodes: vec![
-            make_dag_node("n1", &[]),
-            make_dag_node("n2", &["n1"]),
-        ],
+        nodes: vec![make_dag_node("n1", &[]), make_dag_node("n2", &["n1"])],
     });
 
     let decision = analyze_plan(&plan);

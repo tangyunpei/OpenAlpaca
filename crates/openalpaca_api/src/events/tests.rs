@@ -8,6 +8,7 @@ fn test_unified_event_creation() {
         },
         EventPayload::UserMessage {
             content: "hello".into(),
+            attachment_ids: Vec::new(),
         },
     );
     assert!(!event.id.is_nil());

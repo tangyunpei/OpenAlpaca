@@ -88,6 +88,7 @@ pub async fn command_handler(
                         request_id: request_id.clone(),
                     },
                     content,
+                    attachments: Vec::new(),
                     principal: Principal::System,
                     scope: Scope::Global,
                     workspace_path,

@@ -1,14 +1,18 @@
-use super::{ConversationContext, Orchestrator, principal_id, role_label};
+use super::{ConversationContext, Orchestrator, principal_id, role_label, wrap_untrusted_context};
 use crate::events::SystemEvent;
+use crate::gateway::ResolvedAttachment;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::security::gate::SecurityGate;
 use crate::security::policy::{Principal, Scope};
 use crate::types::Capability;
+use base64::Engine as _;
 use chrono::Utc;
+use openalpaca_llm::{ContentPart, ImageSource};
 use openalpaca_storage::repository::TaskRepository;
 use openalpaca_storage::repository::orchestrator_latency::{
     OrchestratorLatencyRecord, OrchestratorLatencyRepository,
 };
+use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -22,11 +26,46 @@ impl Orchestrator {
     /// 3. Try slash commands / task queries (cheap, no LLM)
     /// 4. If LLM router configured: try LLM-based planning
     /// 5. Fallback: keyword heuristic routing
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_message(
         &self,
         request_id: Uuid,
         source: String,
         content: String,
+        principal: Principal,
+        scope: Scope,
+        lane_key: String,
+        workspace_path: Option<String>,
+    ) -> Result<String, String> {
+        let intent_source_content = content.clone();
+        self.handle_message_internal(
+            request_id,
+            source,
+            content,
+            intent_source_content,
+            false,
+            None, // no structured parts for text-only messages
+            principal,
+            scope,
+            lane_key,
+            workspace_path,
+        )
+        .await
+    }
+
+    /// Internal message handler that separates the model input from the intent source.
+    ///
+    /// `intent_source_content` is used only for intent classification/fast-path checks.
+    /// `model_input_content` is used for planner/LLM calls and context building.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_message_internal(
+        &self,
+        request_id: Uuid,
+        source: String,
+        model_input_content: String,
+        intent_source_content: String,
+        force_simple_query: bool,
+        current_parts: Option<Vec<ContentPart>>,
         principal: Principal,
         scope: Scope,
         lane_key: String,
@@ -42,7 +81,10 @@ impl Orchestrator {
 
         // 2. Input sanitization
         let max_input_len = self.daemon_config.load().security.max_input_length;
-        let content = SecurityGate::sanitize_input(&content, Some(max_input_len))?;
+        let model_input_content =
+            SecurityGate::sanitize_input(&model_input_content, Some(max_input_len))?;
+        let intent_source_content =
+            SecurityGate::sanitize_input(&intent_source_content, Some(max_input_len))?;
 
         // Extract owner_id from principal (before slash-command early return)
         let owner_id_str = principal_id(&principal);
@@ -64,9 +106,17 @@ impl Orchestrator {
         let scope_ctx = MemoryScopeContext::new(workspace_id);
 
         // 3. Try slash commands, task queries, and skill invocations first
-        let intent = self
-            .intent_parser
-            .parse_with_skills_and_router(&content, &self.skill_catalog, &self.skill_router);
+        let intent = if force_simple_query {
+            Intent::SimpleQuery {
+                query: intent_source_content.trim().to_string(),
+            }
+        } else {
+            self.intent_parser.parse_with_skills_and_router(
+                &intent_source_content,
+                &self.skill_catalog,
+                &self.skill_router,
+            )
+        };
         match &intent {
             Intent::TaskQuery { .. } | Intent::TaskControl { .. } => {
                 self.bus.publish(SystemEvent::IntentClassified {
@@ -86,7 +136,7 @@ impl Orchestrator {
         }
 
         // 4. Build context ONCE for all remaining paths (D6: single dedup location)
-        let ctx = self.build_context(&lane_key, &content);
+        let ctx = self.build_context(&lane_key, &model_input_content);
 
         // Build active tasks block for planner
         let active_tasks_block = if let Some(ref db) = self.db {
@@ -126,12 +176,36 @@ impl Orchestrator {
         let result: Result<String, String> = if self.is_bootstrapping() {
             mode = "bootstrap".to_string();
             self.handle_simple_query(
-                request_id, &source, &content, &lane_key, &ctx, owner_id, &scope_ctx,
+                request_id,
+                &source,
+                &model_input_content,
+                &intent_source_content,
+                &lane_key,
+                &ctx,
+                owner_id,
+                &scope_ctx,
+                current_parts.as_deref(),
+            )
+            .await
+        } else if force_simple_query {
+            mode = "forced_simple_query".to_string();
+            self.handle_simple_query(
+                request_id,
+                &source,
+                &model_input_content,
+                &intent_source_content,
+                &lane_key,
+                &ctx,
+                owner_id,
+                &scope_ctx,
+                current_parts.as_deref(),
             )
             .await
         } else if self.llm_router.is_some()
             && matches!(intent, Intent::SimpleQuery { .. })
-            && self.intent_parser.is_fast_path_eligible(&content)
+            && self
+                .intent_parser
+                .is_fast_path_eligible(&intent_source_content)
         {
             // Fast path: skip LLM planner for obviously simple messages
             mode = "fast_path".to_string();
@@ -141,7 +215,15 @@ impl Orchestrator {
                 timestamp: Utc::now(),
             });
             self.handle_simple_query(
-                request_id, &source, &content, &lane_key, &ctx, owner_id, &scope_ctx,
+                request_id,
+                &source,
+                &model_input_content,
+                &intent_source_content,
+                &lane_key,
+                &ctx,
+                owner_id,
+                &scope_ctx,
+                current_parts.as_deref(),
             )
             .await
         } else if let Some(ref router) = self.llm_router {
@@ -166,7 +248,7 @@ impl Orchestrator {
             let planner_start = Instant::now();
             let plan_result = TaskPlanner::plan_hierarchical(
                 router,
-                &content,
+                &model_input_content,
                 &idle_agents,
                 &ctx.recent_messages,
                 ctx.summary.as_deref(),
@@ -189,8 +271,15 @@ impl Orchestrator {
                                 timestamp: Utc::now(),
                             });
                             self.handle_simple_query(
-                                request_id, &source, &content, &lane_key, &ctx, owner_id,
+                                request_id,
+                                &source,
+                                &model_input_content,
+                                &intent_source_content,
+                                &lane_key,
+                                &ctx,
+                                owner_id,
                                 &scope_ctx,
+                                current_parts.as_deref(),
                             )
                             .await
                         }
@@ -201,7 +290,7 @@ impl Orchestrator {
                                 intent_type: "complex_task".to_string(),
                                 timestamp: Utc::now(),
                             });
-                            let description = &content;
+                            let description = &model_input_content;
                             let augmented = self.augment_with_context(description, &ctx);
 
                             let dispatch_start = Instant::now();
@@ -219,14 +308,20 @@ impl Orchestrator {
                             match dispatch_result {
                                 Ok(response) => Ok(response),
                                 Err(e) => {
-                                    fallback_reason =
-                                        Some(format!("dispatch_planned_failed: {e}"));
+                                    fallback_reason = Some(format!("dispatch_planned_failed: {e}"));
                                     tracing::warn!(
                                         "Dispatch planned failed: {e}, falling back to simple_query"
                                     );
                                     self.handle_simple_query(
-                                        request_id, &source, &content, &lane_key, &ctx, owner_id,
+                                        request_id,
+                                        &source,
+                                        &model_input_content,
+                                        &intent_source_content,
+                                        &lane_key,
+                                        &ctx,
+                                        owner_id,
                                         &scope_ctx,
+                                        current_parts.as_deref(),
                                     )
                                     .await
                                 }
@@ -234,15 +329,22 @@ impl Orchestrator {
                         }
                         other => {
                             mode = "planner_unknown".to_string();
-                            fallback_reason =
-                                Some(format!("unknown_classification: {other}"));
+                            fallback_reason = Some(format!("unknown_classification: {other}"));
                             tracing::warn!(
                                 "LLM planner returned unknown classification '{}', falling back to heuristic",
                                 other
                             );
                             self.dispatch_with_heuristic(
-                                request_id, &source, &content, &principal, &lane_key, &ctx,
-                                owner_id, &scope_ctx,
+                                request_id,
+                                &source,
+                                &intent_source_content,
+                                &model_input_content,
+                                &principal,
+                                &lane_key,
+                                &ctx,
+                                owner_id,
+                                &scope_ctx,
+                                current_parts.as_deref(),
                             )
                             .await
                         }
@@ -253,8 +355,16 @@ impl Orchestrator {
                     fallback_reason = Some(format!("planning_error: {e}"));
                     tracing::warn!("LLM planning failed: {}, falling back to heuristic", e);
                     self.dispatch_with_heuristic(
-                        request_id, &source, &content, &principal, &lane_key, &ctx, owner_id,
+                        request_id,
+                        &source,
+                        &intent_source_content,
+                        &model_input_content,
+                        &principal,
+                        &lane_key,
+                        &ctx,
+                        owner_id,
                         &scope_ctx,
+                        current_parts.as_deref(),
                     )
                     .await
                 }
@@ -262,7 +372,16 @@ impl Orchestrator {
         } else {
             mode = "no_llm".to_string();
             self.dispatch_with_heuristic(
-                request_id, &source, &content, &principal, &lane_key, &ctx, owner_id, &scope_ctx,
+                request_id,
+                &source,
+                &intent_source_content,
+                &model_input_content,
+                &principal,
+                &lane_key,
+                &ctx,
+                owner_id,
+                &scope_ctx,
+                current_parts.as_deref(),
             )
             .await
         };
@@ -305,8 +424,13 @@ impl Orchestrator {
             let summary_fut = self.maybe_update_summary(&lane_key, &ctx);
             let extract_fut = async {
                 if let Ok(ref response_text) = result {
-                    self.maybe_extract_user_traits(&lane_key, &content, response_text, owner_id)
-                        .await;
+                    self.maybe_extract_user_traits(
+                        &lane_key,
+                        &intent_source_content,
+                        response_text,
+                        owner_id,
+                    )
+                    .await;
                 }
             };
             tokio::join!(summary_fut, extract_fut);
@@ -316,6 +440,111 @@ impl Orchestrator {
         self.maybe_complete_bootstrap().await;
 
         result
+    }
+
+    /// Handle a user message with file attachments.
+    ///
+    /// Injects attachment context as low-trust blocks before delegating to
+    /// the standard `handle_message` pipeline.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn handle_message_with_attachments(
+        &self,
+        request_id: Uuid,
+        source: String,
+        content: String,
+        attachments: Vec<ResolvedAttachment>,
+        principal: Principal,
+        scope: Scope,
+        lane_key: String,
+        workspace_path: Option<String>,
+    ) -> Result<String, String> {
+        // 1. Build structured ContentParts from attachments
+        let mut parts: Vec<ContentPart> = Vec::new();
+        for att in &attachments {
+            if att.mime_type.starts_with("image/") {
+                match tokio::fs::read(&att.storage_path).await {
+                    Ok(bytes) => {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                        parts.push(ContentPart::Image {
+                            source: ImageSource::Base64 {
+                                media_type: att.mime_type.clone(),
+                                data: Arc::new(b64),
+                            },
+                            detail: None,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            file_id = %att.file_id,
+                            path = %att.storage_path,
+                            "Failed to read image bytes for multimodal input: {e}"
+                        );
+                        parts.push(ContentPart::Text {
+                            text: "[image attached — failed to read image bytes]".to_string(),
+                        });
+                    }
+                }
+            } else {
+                parts.push(ContentPart::Document {
+                    file_id: att.file_id.clone(),
+                    filename: att.filename.clone(),
+                    mime_type: att.mime_type.clone(),
+                    extracted_text: att.extracted_text.clone(),
+                });
+                if att.extracted_text.is_none() && !att.mime_type.starts_with("audio/") {
+                    parts.push(ContentPart::Text {
+                        text: "[document attached — text extraction pending]".to_string(),
+                    });
+                }
+            }
+        }
+        // Add text query as final part
+        if !content.trim().is_empty() {
+            parts.push(ContentPart::Text {
+                text: content.clone(),
+            });
+        }
+
+        // 2. Build text-only augmented string for intent classification
+        //    (intent parser and planner only understand text)
+        let mut augmented = String::new();
+        for att in &attachments {
+            let ctx_block = if let Some(ref text) = att.extracted_text {
+                let truncated = text.chars().take(4000).collect::<String>();
+                format!(
+                    "[File: {} ({})]\n{}",
+                    att.filename, att.mime_type, truncated
+                )
+            } else if att.mime_type.starts_with("image/") || att.mime_type.starts_with("audio/") {
+                format!("[File: {} ({})]", att.filename, att.mime_type)
+            } else {
+                format!(
+                    "[File: {} ({})]\n[document attached — text extraction pending]",
+                    att.filename, att.mime_type
+                )
+            };
+            let wrapped = wrap_untrusted_context(&ctx_block, "file_attachment", "user_derived");
+            augmented.push_str(&wrapped);
+            augmented.push('\n');
+        }
+        augmented.push_str(&content);
+
+        let force_simple_query = content.trim().is_empty() && !attachments.is_empty();
+
+        // 3. Pass BOTH the text augmented string AND the structured parts
+        self.handle_message_internal(
+            request_id,
+            source,
+            augmented,
+            content,
+            force_simple_query,
+            Some(parts),
+            principal,
+            scope,
+            lane_key,
+            workspace_path,
+        )
+        .await
     }
 
     /// Augment a task description with conversation context (summary + recent exchanges).
@@ -355,16 +584,20 @@ impl Orchestrator {
         &self,
         request_id: Uuid,
         source: &str,
-        content: &str,
+        intent_content: &str,
+        model_input_content: &str,
         principal: &Principal,
         lane_key: &str,
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
+        current_parts: Option<&[ContentPart]>,
     ) -> Result<String, String> {
-        let intent = self
-            .intent_parser
-            .parse_with_skills_and_router(content, &self.skill_catalog, &self.skill_router);
+        let intent = self.intent_parser.parse_with_skills_and_router(
+            intent_content,
+            &self.skill_catalog,
+            &self.skill_router,
+        );
 
         self.bus.publish(SystemEvent::IntentClassified {
             request_id,
@@ -373,9 +606,17 @@ impl Orchestrator {
         });
 
         match intent {
-            Intent::SimpleQuery { query } => {
+            Intent::SimpleQuery { .. } => {
                 self.handle_simple_query(
-                    request_id, source, &query, lane_key, ctx, owner_id, scope_ctx,
+                    request_id,
+                    source,
+                    model_input_content,
+                    intent_content,
+                    lane_key,
+                    ctx,
+                    owner_id,
+                    scope_ctx,
+                    current_parts,
                 )
                 .await
             }
@@ -383,10 +624,9 @@ impl Orchestrator {
                 self.handle_task_query(task_id, &principal_id(principal))
             }
             Intent::ComplexTask {
-                description,
-                required_skills,
+                required_skills, ..
             } => {
-                let augmented = self.augment_with_context(&description, ctx);
+                let augmented = self.augment_with_context(model_input_content, ctx);
                 match self.task_dispatcher.dispatch(
                     request_id,
                     source,
@@ -417,11 +657,13 @@ impl Orchestrator {
                                 self.handle_simple_query(
                                     request_id,
                                     source,
-                                    &description,
+                                    model_input_content,
+                                    intent_content,
                                     lane_key,
                                     ctx,
                                     owner_id,
                                     scope_ctx,
+                                    current_parts,
                                 )
                                 .await
                             }
@@ -451,5 +693,41 @@ impl Orchestrator {
                 .await
             }
         }
+    }
+
+    /// Adapt multimodal content parts for a model's capabilities.
+    ///
+    /// Replaces unsupported content types with text placeholders based on
+    /// the model's capability flags in the registry.
+    pub(super) fn adapt_parts_for_model(
+        &self,
+        parts: Vec<ContentPart>,
+        model_id: &str,
+    ) -> Vec<ContentPart> {
+        let router = match &self.llm_router {
+            Some(r) => r,
+            None => return parts,
+        };
+        let registry = router.model_registry();
+
+        let supports_image = registry.supports_image(model_id);
+        let supports_audio = registry.supports_audio(model_id);
+        let supports_document = registry.supports_document(model_id);
+
+        parts
+            .into_iter()
+            .map(|part| match &part {
+                ContentPart::Image { .. } if !supports_image => ContentPart::Text {
+                    text: "[image attached — model does not support vision]".to_string(),
+                },
+                ContentPart::Audio { .. } if !supports_audio => ContentPart::Text {
+                    text: "[audio attached — model does not support audio input]".to_string(),
+                },
+                ContentPart::Document { .. } if !supports_document => ContentPart::Text {
+                    text: "[document attached — model does not support document input]".to_string(),
+                },
+                _ => part,
+            })
+            .collect()
     }
 }

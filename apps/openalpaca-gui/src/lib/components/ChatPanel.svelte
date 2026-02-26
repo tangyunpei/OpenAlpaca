@@ -11,9 +11,16 @@
     clearHistory,
     subscribeToChatEvents,
     subscribeToTaskResultEvents,
+    pendingFiles,
+    uploadingFiles,
+    addFiles,
+    removePendingFile,
   } from "$lib/stores/chat";
+  import type { PendingFile } from "$lib/stores/chat";
+  import { get } from "svelte/store";
   import { connectionState } from "$lib/daemon";
   import type { ChatMessage } from "$lib/types";
+  import { formatFileSize } from "$lib/types";
 
   let messages = $state<ChatMessage[]>([]);
   let loading = $state(false);
@@ -25,6 +32,13 @@
   let messagesContainer: HTMLDivElement | undefined = $state();
   let textareaEl: HTMLTextAreaElement | undefined = $state();
   let inputFocused = $state(false);
+  let pending = $state<PendingFile[]>([]);
+  let uploading = $state(false);
+  let dragOver = $state(false);
+  let fileInputEl: HTMLInputElement | undefined = $state();
+
+  const unsubPending = pendingFiles.subscribe((v) => (pending = v));
+  const unsubUploading = uploadingFiles.subscribe((v) => (uploading = v));
 
   /** Auto-resize textarea to fit content */
   function autoResize() {
@@ -62,6 +76,8 @@
     unsubConnection();
     unsubChatEvents?.();
     unsubTaskEvents?.();
+    unsubPending();
+    unsubUploading();
   });
 
   async function scrollToBottom() {
@@ -73,7 +89,8 @@
 
   function handleSend() {
     const text = inputText.trim();
-    if (!text || streaming) return;
+    const hasPending = get(pendingFiles).length > 0;
+    if ((!text && !hasPending) || streaming) return;
     inputText = "";
     if (textareaEl) textareaEl.style.height = "auto";
     sendChatMessage(text);
@@ -89,9 +106,58 @@
   function handleClear() {
     clearHistory();
   }
+
+  function handleFileSelect() {
+    fileInputEl?.click();
+  }
+
+  function handleFileInput(e: Event) {
+    const input = e.target as HTMLInputElement;
+    if (input.files && input.files.length > 0) {
+      addFiles(input.files);
+      input.value = ""; // reset so same file can be re-selected
+    }
+  }
+
+  function handleDrop(e: DragEvent) {
+    e.preventDefault();
+    dragOver = false;
+    if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
+      addFiles(e.dataTransfer.files);
+    }
+  }
+
+  function handleDragOver(e: DragEvent) {
+    e.preventDefault();
+    dragOver = true;
+  }
+
+  function handleDragLeave(e: DragEvent) {
+    // Only clear dragOver when truly leaving the container, not when
+    // moving between child elements (which causes flickering)
+    if (e.currentTarget && !(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) {
+      dragOver = false;
+    }
+  }
 </script>
 
-<div class="flex flex-col h-full">
+<div
+  class="flex flex-col h-full relative"
+  role="application"
+  ondragover={handleDragOver}
+  ondragleave={handleDragLeave}
+  ondrop={handleDrop}
+>
+  <!-- Full-panel drop overlay -->
+  {#if dragOver}
+    <div class="absolute inset-0 z-20 bg-accent/8 border-2 border-dashed border-accent/30 rounded-xl flex flex-col items-center justify-center pointer-events-none animate-fadeIn">
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="text-accent/70 mb-3">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+      </svg>
+      <span class="text-accent text-sm font-semibold">Drop files here</span>
+      <span class="text-accent/50 text-xs mt-1">Files will be attached to your next message</span>
+    </div>
+  {/if}
   <!-- Chat header -->
   <div class="flex justify-between items-center px-4 py-3 shrink-0 relative">
     <div class="flex items-center gap-2.5">
@@ -156,9 +222,66 @@
   <!-- Input area -->
   <div class="px-4 py-3 shrink-0 relative">
     <div class="absolute top-0 left-4 right-4 h-px" style="background: linear-gradient(90deg, transparent, var(--color-border-strong) 20%, var(--color-border-strong) 80%, transparent);"></div>
+
+    <!-- Pending files display -->
+    {#if pending.length > 0}
+      <div class="flex flex-wrap gap-2 mb-2">
+        {#each pending as pf, idx}
+          <div class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-white/8 bg-white/[0.03]">
+            {#if pf.file.type.startsWith("image/")}
+              <img
+                src={URL.createObjectURL(pf.file)}
+                alt={pf.file.name}
+                class="h-8 w-8 rounded object-cover shrink-0"
+              />
+            {/if}
+            <span class="truncate max-w-[120px]" title={pf.file.name}>{pf.file.name}</span>
+            <span class="text-muted-foreground/60 shrink-0">{formatFileSize(pf.file.size)}</span>
+            {#if uploading && pf.progress > 0 && pf.progress < 100}
+              <span class="text-accent text-[0.6rem] font-mono shrink-0">{pf.progress}%</span>
+            {/if}
+            {#if !uploading}
+              <button
+                class="text-muted-foreground hover:text-danger transition-colors cursor-pointer p-0 bg-transparent border-none"
+                onclick={() => removePendingFile(idx)}
+                aria-label="Remove file"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </button>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+
     <div class="flex gap-2.5 items-end rounded-xl p-1.5 border transition-all duration-200
                 {inputFocused ? 'border-accent/30 shadow-[0_0_0_3px_hsl(40_85%_58%/0.06)]' : 'border-white/8'}"
          style="background: linear-gradient(180deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);">
+
+      <!-- Hidden file input -->
+      <input
+        bind:this={fileInputEl}
+        type="file"
+        multiple
+        class="hidden"
+        oninput={handleFileInput}
+      />
+
+      <!-- Attach file button -->
+      <button
+        class="p-2 text-muted-foreground hover:text-foreground transition-colors cursor-pointer bg-transparent border-none self-end shrink-0
+               disabled:opacity-30 disabled:cursor-not-allowed"
+        onclick={handleFileSelect}
+        disabled={streaming || uploading}
+        aria-label="Attach files"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+        </svg>
+      </button>
+
       <textarea
         bind:this={textareaEl}
         bind:value={inputText}
@@ -166,21 +289,27 @@
         oninput={autoResize}
         onfocus={() => inputFocused = true}
         onblur={() => inputFocused = false}
-        placeholder="Type a message..."
-        disabled={streaming}
+        placeholder={pending.length > 0 ? "Add a message about the files..." : "Type a message..."}
+        disabled={streaming || uploading}
         rows={1}
         class="flex-1 bg-transparent border-none text-foreground px-2.5 py-2 text-sm font-[inherit] resize-none min-h-[36px] max-h-[140px] outline-none placeholder:text-muted-foreground/50 disabled:opacity-50"
       ></textarea>
+
       <button
         class="px-4 py-2 text-sm font-semibold border-none rounded-lg cursor-pointer whitespace-nowrap self-end transition-all duration-200
                disabled:opacity-30 disabled:cursor-not-allowed
-               {!inputText.trim() || streaming
+               {!inputText.trim() && pending.length === 0 || streaming || uploading
                  ? 'bg-white/5 text-muted-foreground'
                  : 'bg-accent text-accent-foreground hover:brightness-110 hover:shadow-[0_2px_8px_hsl(40_85%_58%/0.25)]'}"
         onclick={handleSend}
-        disabled={!inputText.trim() || streaming}
+        disabled={(!inputText.trim() && pending.length === 0) || streaming || uploading}
       >
-        {#if streaming}
+        {#if uploading}
+          <span class="flex items-center gap-1.5">
+            <span class="w-1.5 h-1.5 rounded-full bg-current animate-pulse"></span>
+            Uploading
+          </span>
+        {:else if streaming}
           <span class="flex items-center gap-1.5">
             <span class="w-1.5 h-1.5 rounded-full bg-current animate-pulse"></span>
             Thinking

@@ -127,8 +127,11 @@ fn test_dispatch_decision_mode_filter() {
     let db = setup_db();
     let repo = DispatchDecisionRepository::new(&db);
 
-    for (mode, count) in [("lead_agent", 3), ("dag_parallel", 5), ("sequential_pipeline", 2)]
-    {
+    for (mode, count) in [
+        ("lead_agent", 3),
+        ("dag_parallel", 5),
+        ("sequential_pipeline", 2),
+    ] {
         for i in 0..count {
             repo.record(&DispatchDecisionRecord {
                 id: None,
@@ -210,7 +213,7 @@ fn test_dispatch_decision_error_message_roundtrip() {
 #[test]
 fn test_migration_025_creates_error_message_schema() {
     let db = setup_db();
-    assert_eq!(db.schema_version().unwrap(), 26);
+    assert_eq!(db.schema_version().unwrap(), 28);
 
     // Verify request_id column works
     let repo = DispatchDecisionRepository::new(&db);

@@ -76,7 +76,11 @@ fn test_aggregate_multiple_modes() {
     let db = setup_db();
     let repo = OrchestratorLatencyRepository::new(&db);
 
-    for mode in &["fast_path", "planner_complex_task", "heuristic_simple_query"] {
+    for mode in &[
+        "fast_path",
+        "planner_complex_task",
+        "heuristic_simple_query",
+    ] {
         for i in 0..5 {
             repo.record(&OrchestratorLatencyRecord {
                 id: None,
@@ -85,7 +89,11 @@ fn test_aggregate_multiple_modes() {
                 planner_ms: 10,
                 dispatch_ms: 5,
                 ack_ms: 2,
-                fallback_reason: if i == 0 { Some("test".to_string()) } else { None },
+                fallback_reason: if i == 0 {
+                    Some("test".to_string())
+                } else {
+                    None
+                },
                 auto_promotion_reason: if i == 1 {
                     Some("auto".to_string())
                 } else {

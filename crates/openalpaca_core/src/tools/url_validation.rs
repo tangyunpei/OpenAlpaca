@@ -100,7 +100,7 @@ pub fn validate_url(url: &str) -> Result<(), String> {
                     || ipv6.is_unspecified()                 // ::
                     || is_ipv6_unique_local(&ipv6)           // fc00::/7 (ULA)
                     || is_ipv6_link_local(&ipv6)             // fe80::/10
-                    || is_ipv4_mapped_private(&ipv6)         // ::ffff:x.x.x.x with private IPv4
+                    || is_ipv4_mapped_private(&ipv6) // ::ffff:x.x.x.x with private IPv4
             }
         };
         if is_private {

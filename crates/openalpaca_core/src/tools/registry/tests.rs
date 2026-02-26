@@ -190,9 +190,7 @@ async fn test_execute_http_ssrf_blocks_localhost() {
         },
     });
 
-    let result = registry
-        .execute("local_api", &serde_json::json!({}))
-        .await;
+    let result = registry.execute("local_api", &serde_json::json!({})).await;
     assert!(result.is_err());
     assert!(
         result.unwrap_err().contains("blocked"),
@@ -236,7 +234,10 @@ async fn test_http_unsubstituted_placeholder_detected() {
         "Should detect unsubstituted placeholder, got: {}",
         err
     );
-    assert!(err.contains("{units}"), "Should mention the placeholder name");
+    assert!(
+        err.contains("{units}"),
+        "Should mention the placeholder name"
+    );
 }
 
 #[tokio::test]
@@ -369,10 +370,7 @@ async fn test_schema_valid_args_pass() {
     });
 
     let result = registry
-        .execute(
-            "search",
-            &serde_json::json!({"query": "test", "limit": 5}),
-        )
+        .execute("search", &serde_json::json!({"query": "test", "limit": 5}))
         .await;
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), "ok");

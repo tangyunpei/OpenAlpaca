@@ -1,6 +1,8 @@
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use openalpaca_connectors::startup::ConnectorHandle;
 use openalpaca_core::bus::EventBus;
+use openalpaca_core::daemon_config::DaemonConfig;
 use openalpaca_core::gateway::Gateway;
 use openalpaca_storage::{ConfigRepository, Database};
 use std::collections::HashMap;
@@ -14,15 +16,22 @@ pub struct ConnectorManager {
     db: Database,
     bus: EventBus,
     gateway: Arc<Gateway>,
+    daemon_config: Arc<ArcSwap<DaemonConfig>>,
     handles: Arc<Mutex<HashMap<String, ConnectorHandle>>>,
 }
 
 impl ConnectorManager {
-    pub fn new(db: Database, bus: EventBus, gateway: Arc<Gateway>) -> Self {
+    pub fn new(
+        db: Database,
+        bus: EventBus,
+        gateway: Arc<Gateway>,
+        daemon_config: Arc<ArcSwap<DaemonConfig>>,
+    ) -> Self {
         Self {
             db,
             bus,
             gateway,
+            daemon_config,
             handles: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -59,6 +68,7 @@ impl ConnectorManager {
                     self.db.clone(),
                     self.bus.clone(),
                     self.gateway.clone(),
+                    self.daemon_config.clone(),
                 ) {
                     Ok(handle) => {
                         handles.insert(name.to_string(), handle);
@@ -228,6 +238,7 @@ impl ConnectorManager {
                     self.db.clone(),
                     self.bus.clone(),
                     self.gateway.clone(),
+                    self.daemon_config.clone(),
                 )
                 .map_err(|e| anyhow::anyhow!("Failed to spawn {}: {}", name, e))?;
 

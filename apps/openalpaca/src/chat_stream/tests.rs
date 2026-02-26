@@ -167,7 +167,8 @@ fn test_is_delegation_false_no_marker() {
 
 #[test]
 fn test_parse_task_title_found() {
-    let content = "I've created a task for this.\nTask: Research quantum computing\nYou'll see results soon.";
+    let content =
+        "I've created a task for this.\nTask: Research quantum computing\nYou'll see results soon.";
     assert_eq!(
         parse_task_title(content),
         Some("Research quantum computing".to_string())

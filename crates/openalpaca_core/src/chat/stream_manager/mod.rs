@@ -24,10 +24,42 @@ pub enum ChatStreamEvent {
         tokens_in: u64,
         tokens_out: u64,
         duration_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        attachments_used: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        citations: Option<Vec<Citation>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artifacts: Option<Vec<Artifact>>,
     },
     Error {
         message: String,
     },
+}
+
+/// A citation reference linking a response passage to a source document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Citation {
+    /// ID of the source file asset.
+    pub source_file_id: String,
+    /// Page number within the document (PDF only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
+    /// Timestamp offset in milliseconds (audio only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp_ms: Option<u64>,
+    /// Short excerpt from the source that supports the claim.
+    pub excerpt: String,
+}
+
+/// An artifact produced during the response (e.g., generated file).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Artifact {
+    /// ID of the produced file asset.
+    pub file_id: String,
+    /// Human-readable label for the artifact.
+    pub label: String,
+    /// MIME type of the artifact.
+    pub mime_type: String,
 }
 
 /// A cloneable handle for sending streaming events into a chat stream.
@@ -78,6 +110,76 @@ impl StreamSink {
             tokens_in,
             tokens_out,
             duration_ms,
+            attachments_used: None,
+            citations: None,
+            artifacts: None,
+        });
+    }
+
+    /// Send the final Done event with attachment info.
+    pub fn send_done_with_attachments(
+        &self,
+        content: &str,
+        model: &str,
+        tokens_in: u64,
+        tokens_out: u64,
+        duration_ms: u64,
+        attachments_used: Vec<String>,
+    ) {
+        let att = if attachments_used.is_empty() {
+            None
+        } else {
+            Some(attachments_used)
+        };
+        self.send_event(ChatStreamEvent::Done {
+            content: content.to_string(),
+            model: model.to_string(),
+            tokens_in,
+            tokens_out,
+            duration_ms,
+            attachments_used: att,
+            citations: None,
+            artifacts: None,
+        });
+    }
+
+    /// Send the final Done event with citation and artifact info.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_done_with_citations(
+        &self,
+        content: &str,
+        model: &str,
+        tokens_in: u64,
+        tokens_out: u64,
+        duration_ms: u64,
+        attachments_used: Vec<String>,
+        citations: Vec<Citation>,
+        artifacts: Vec<Artifact>,
+    ) {
+        let att = if attachments_used.is_empty() {
+            None
+        } else {
+            Some(attachments_used)
+        };
+        let cit = if citations.is_empty() {
+            None
+        } else {
+            Some(citations)
+        };
+        let art = if artifacts.is_empty() {
+            None
+        } else {
+            Some(artifacts)
+        };
+        self.send_event(ChatStreamEvent::Done {
+            content: content.to_string(),
+            model: model.to_string(),
+            tokens_in,
+            tokens_out,
+            duration_ms,
+            attachments_used: att,
+            citations: cit,
+            artifacts: art,
         });
     }
 
