@@ -281,3 +281,66 @@ fn test_is_container_compatible_rejects_unknown_container() {
         "application/pdf",
     ));
 }
+
+// --- Audio MIME alias tests ---
+
+#[test]
+fn test_audio_mime_m4a_aliases() {
+    // All M4A alias combinations should be compatible
+    let aliases = ["audio/m4a", "audio/mp4", "audio/x-m4a"];
+    for a in &aliases {
+        for b in &aliases {
+            assert!(
+                InputSanitizer::is_audio_mime_compatible(a, b),
+                "{a} should be compatible with {b}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_audio_mime_wav_aliases() {
+    let aliases = ["audio/wav", "audio/x-wav", "audio/wave"];
+    for a in &aliases {
+        for b in &aliases {
+            assert!(
+                InputSanitizer::is_audio_mime_compatible(a, b),
+                "{a} should be compatible with {b}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_audio_mime_flac_aliases() {
+    assert!(InputSanitizer::is_audio_mime_compatible(
+        "audio/flac",
+        "audio/x-flac"
+    ));
+    assert!(InputSanitizer::is_audio_mime_compatible(
+        "audio/x-flac",
+        "audio/flac"
+    ));
+}
+
+#[test]
+fn test_audio_mime_rejects_unrelated() {
+    // Different audio formats should NOT be compatible
+    assert!(!InputSanitizer::is_audio_mime_compatible(
+        "audio/mpeg",
+        "audio/m4a"
+    ));
+    assert!(!InputSanitizer::is_audio_mime_compatible(
+        "audio/wav",
+        "audio/m4a"
+    ));
+    assert!(!InputSanitizer::is_audio_mime_compatible(
+        "audio/flac",
+        "audio/mp4"
+    ));
+    // Non-audio types should also fail
+    assert!(!InputSanitizer::is_audio_mime_compatible(
+        "application/pdf",
+        "audio/m4a"
+    ));
+}

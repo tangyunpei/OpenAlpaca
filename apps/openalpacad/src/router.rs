@@ -1,7 +1,7 @@
 use crate::AppState;
 use axum::{
     Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     response::Json,
     routing::{delete, get, post, put},
 };
@@ -148,7 +148,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             delete(crate::routes::destroy_instance_handler),
         )
         // File upload routes (multimodal)
-        .route("/v1/files/upload", post(crate::routes::upload_file_handler))
+        .route("/v1/files/upload", post(crate::routes::upload_file_handler)
+            .route_layer(DefaultBodyLimit::max(100 * 1024 * 1024)))
         .route(
             "/v1/files/{id}",
             get(crate::routes::get_file_metadata_handler),
