@@ -216,9 +216,20 @@ impl IntentParser {
     fn is_natural_task_query(lower: &str) -> bool {
         let patterns = [
             "task status",
+            "task progress",
+            "task result",
             "what are my tasks",
+            "what is the task result",
+            "how is the task",
             "show tasks",
             "list tasks",
+            "任务状态",
+            "任务进度",
+            "任务结果",
+            "我的任务",
+            "任务怎么样",
+            "任务完成了吗",
+            "任务做完了吗",
         ];
         patterns.iter().any(|p| lower.contains(p))
     }

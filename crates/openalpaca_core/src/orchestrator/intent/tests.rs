@@ -78,6 +78,18 @@ fn test_natural_language_task_query() {
 }
 
 #[test]
+fn test_natural_language_task_result_query_english() {
+    let intent = parser().parse("what is the task result?");
+    assert_eq!(intent, Intent::TaskQuery { task_id: None });
+}
+
+#[test]
+fn test_natural_language_task_result_query_chinese() {
+    let intent = parser().parse("任务结果怎么样");
+    assert_eq!(intent, Intent::TaskQuery { task_id: None });
+}
+
+#[test]
 fn test_single_keyword_no_signal() {
     // "search" alone without complexity signal -> SimpleQuery
     let intent = parser().parse("search for cats");

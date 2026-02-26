@@ -34,7 +34,21 @@ impl Orchestrator {
                 // Try DB first, fall back to in-memory registry
                 if let Some(ref db) = self.db {
                     let repo = TaskRepository::new(db);
-                    if let Ok(tasks) = repo.list_active_by_creator(created_by, 20) {
+                    if let Ok(mut tasks) = repo.list_active_by_creator(created_by, 20) {
+                        let mut scope = "active";
+                        if tasks.is_empty()
+                            && let Ok(recent) = repo.list_by_creator(created_by, 20)
+                        {
+                            // If nothing is running, surface recent terminal tasks so
+                            // "what was the result?" queries can still resolve.
+                            tasks = recent
+                                .into_iter()
+                                .filter(|t| t.status.is_terminal())
+                                .take(5)
+                                .collect();
+                            scope = "recent_terminal";
+                        }
+
                         let task_list: Vec<serde_json::Value> = tasks
                             .iter()
                             .map(|t| {
@@ -44,13 +58,16 @@ impl Orchestrator {
                                     "status": t.status.as_str(),
                                     "progress_current": t.progress_current,
                                     "progress_total": t.progress_total,
+                                    "result_summary": t.result_summary,
                                     "created_at": t.created_at.to_rfc3339(),
+                                    "completed_at": t.completed_at.map(|ts| ts.to_rfc3339()),
                                 })
                             })
                             .collect();
                         return Ok(serde_json::json!({
                             "tasks": task_list,
                             "count": task_list.len(),
+                            "scope": scope,
                         })
                         .to_string());
                     }

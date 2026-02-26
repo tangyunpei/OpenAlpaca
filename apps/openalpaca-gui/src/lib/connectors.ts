@@ -86,6 +86,44 @@ export async function generateLinkToken(): Promise<string> {
     return data.token;
 }
 
+/**
+ * Get connector settings (config keys for the connector prefix).
+ */
+export async function getConnectorSettings(id: string): Promise<Record<string, string | null>> {
+    const conn = await ensureConnection();
+    const response = await fetch(`${conn.baseUrl}/v1/connectors/${id}/settings`, {
+        headers: {
+            'Authorization': `Bearer ${conn.token}`
+        }
+    });
+
+    if (!response.ok) {
+        throw new Error(`Failed to fetch settings: ${response.statusText}`);
+    }
+
+    return await response.json();
+}
+
+/**
+ * Update connector settings.
+ */
+export async function updateConnectorSettings(id: string, settings: Record<string, string>): Promise<void> {
+    const conn = await ensureConnection();
+    const response = await fetch(`${conn.baseUrl}/v1/connectors/${id}/settings`, {
+        method: 'PUT',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${conn.token}`
+        },
+        body: JSON.stringify({ settings })
+    });
+
+    if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || `Settings update failed: ${response.statusText}`);
+    }
+}
+
 async function ensureConnection(): Promise<ConnectionInfo> {
     const conn = get(connectionInfo);
     if (!conn) {

@@ -30,6 +30,11 @@ pub struct IncomingMessage {
     pub chat_id: String,
     /// Whether this message is from a group chat (chat_identifier starts with "chat").
     pub is_group: bool,
+    /// Whether this message was sent by the local Mac user (is_from_me = 1 in chat.db).
+    pub is_from_me: bool,
+    /// The iMessage account that sent this message (e.g. "p:+1234567890" or "e:user@icloud.com").
+    /// Used to distinguish which device/handle sent it when multiple devices share the same Apple ID.
+    pub account: String,
     /// Attachments associated with this message.
     pub attachments: Vec<IMessageAttachment>,
 }
@@ -102,9 +107,9 @@ impl ChatDbReader {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT m.ROWID, COALESCE(m.text, ''), h.id, c.chat_identifier
+                "SELECT m.ROWID, COALESCE(m.text, ''), COALESCE(h.id, ''), c.chat_identifier, m.is_from_me, COALESCE(m.account, '')
                  FROM message m
-                 JOIN handle h ON m.handle_id = h.ROWID
+                 LEFT JOIN handle h ON m.handle_id = h.ROWID
                  JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
                  JOIN chat c ON c.ROWID = cmj.chat_id
                  WHERE m.ROWID > ?1
@@ -122,6 +127,8 @@ impl ChatDbReader {
                     let text: String = row.get(1)?;
                     let sender: String = row.get(2)?;
                     let chat_id: String = row.get(3)?;
+                    let is_from_me_int: i64 = row.get(4)?;
+                    let account: String = row.get(5)?;
                     let is_group = chat_id.starts_with("chat");
                     Ok(IncomingMessage {
                         rowid,
@@ -129,6 +136,8 @@ impl ChatDbReader {
                         sender,
                         chat_id,
                         is_group,
+                        is_from_me: is_from_me_int != 0,
+                        account,
                         attachments: Vec::new(), // populated below
                     })
                 },

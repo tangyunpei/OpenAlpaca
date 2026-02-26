@@ -306,26 +306,8 @@ impl TaskDispatcher {
                 );
             }
 
-            // Update task status
-            if result.success {
-                tracing::info!(task_id = %task_id, "Task status: running → completed");
-            } else {
-                tracing::warn!(
-                    task_id = %task_id,
-                    finish_reason = ?result.loop_result.finish_reason,
-                    "Task status: running → failed"
-                );
-            }
-            finalize_task(
-                &ctx,
-                &bus,
-                db.as_ref(),
-                &task_id,
-                &db_summary,
-                result.success,
-            );
-
-            // Persist final result to conversation
+            // Persist final result to conversation before publishing completion,
+            // so follow-up turns can immediately read the result from history.
             if let Some(ref db) = db {
                 let content = format_task_result(&task_title, &final_content, result.success);
                 // Resolve model name for conversation record
@@ -347,6 +329,25 @@ impl TaskDispatcher {
                     runtime_secs,
                 );
             }
+
+            // Update task status
+            if result.success {
+                tracing::info!(task_id = %task_id, "Task status: running → completed");
+            } else {
+                tracing::warn!(
+                    task_id = %task_id,
+                    finish_reason = ?result.loop_result.finish_reason,
+                    "Task status: running → failed"
+                );
+            }
+            finalize_task(
+                &ctx,
+                &bus,
+                db.as_ref(),
+                &task_id,
+                &db_summary,
+                result.success,
+            );
 
             // Memory extraction from lead agent output (non-blocking)
             if let Some(ref db) = db {
