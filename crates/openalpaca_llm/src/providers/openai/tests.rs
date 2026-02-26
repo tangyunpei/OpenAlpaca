@@ -1,4 +1,5 @@
 use super::*;
+use reqwest::header::{HeaderMap, HeaderValue};
 
 #[test]
 fn test_request_format() {
@@ -128,7 +129,9 @@ fn test_request_serialization_filters_empty_text_parts() {
     };
 
     let body = provider.build_request_body(&request);
-    let messages = body["messages"].as_array().expect("messages should be an array");
+    let messages = body["messages"]
+        .as_array()
+        .expect("messages should be an array");
     assert_eq!(messages.len(), 1);
     let blocks = messages[0]["content"]
         .as_array()
@@ -151,7 +154,22 @@ fn test_request_serialization_empty_parts_get_placeholder() {
     };
 
     let body = provider.build_request_body(&request);
-    let messages = body["messages"].as_array().expect("messages should be an array");
+    let messages = body["messages"]
+        .as_array()
+        .expect("messages should be an array");
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["content"], "[empty message]");
+}
+
+#[test]
+fn test_parse_retry_after_ms_fractional() {
+    let mut headers = HeaderMap::new();
+    headers.insert("retry-after", HeaderValue::from_static("2.25"));
+    assert_eq!(parse_retry_after_ms(&headers), Some(2250));
+}
+
+#[test]
+fn test_parse_retry_after_ms_missing() {
+    let headers = HeaderMap::new();
+    assert_eq!(parse_retry_after_ms(&headers), None);
 }

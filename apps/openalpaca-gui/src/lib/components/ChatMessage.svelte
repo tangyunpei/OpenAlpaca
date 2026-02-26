@@ -216,7 +216,9 @@
                   {/if}
                 </svg>
                 <span class="truncate max-w-[100px]">{att.filename}</span>
-                <span class="text-muted-foreground/50 shrink-0">{formatFileSize(att.size_bytes)}</span>
+                {#if att.size_bytes > 0}
+                  <span class="text-muted-foreground/50 shrink-0">{formatFileSize(att.size_bytes)}</span>
+                {/if}
               </button>
             {/each}
           </div>

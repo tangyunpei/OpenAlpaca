@@ -2,10 +2,20 @@ use crate::LlmProvider;
 use crate::error::LlmError;
 use crate::types::*;
 use async_trait::async_trait;
+use reqwest::header::HeaderMap;
 
 const DEFAULT_MODEL: &str = "gpt-4o";
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
+
+fn parse_retry_after_ms(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<f64>().ok())
+        .map(|secs| ((secs.max(0.0)) * 1000.0).round() as u64)
+        .filter(|ms| *ms > 0)
+}
 
 pub struct OpenAiProvider {
     client: reqwest::Client,
@@ -343,6 +353,7 @@ impl LlmProvider for OpenAiProvider {
     ) -> Result<ChatResponse, LlmError> {
         let body = self.build_request_body(&request);
         let url = format!("{}/chat/completions", self.base_url);
+        let model_id = request.model.as_deref().unwrap_or(&self.model);
 
         let mut req_builder = self
             .client
@@ -364,14 +375,31 @@ impl LlmProvider for OpenAiProvider {
         let status = response.status().as_u16();
 
         if status == 429 {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1);
-            return Err(LlmError::RateLimited {
-                retry_after_ms: retry_after * 1000,
+            let retry_after_ms = parse_retry_after_ms(response.headers()).unwrap_or(1_000);
+            tracing::warn!(
+                provider = "openai",
+                model = model_id,
+                status,
+                retry_after_ms,
+                error_kind = "rate_limited",
+                "Provider returned rate limit"
+            );
+            return Err(LlmError::RateLimited { retry_after_ms });
+        }
+
+        if status == 503 || status == 529 {
+            let retry_after_ms = parse_retry_after_ms(response.headers());
+            tracing::warn!(
+                provider = "openai",
+                model = model_id,
+                status,
+                retry_after_ms = ?retry_after_ms,
+                error_kind = "overloaded",
+                "Provider returned transient overload"
+            );
+            return Err(LlmError::Overloaded {
+                status,
+                retry_after_ms,
             });
         }
 

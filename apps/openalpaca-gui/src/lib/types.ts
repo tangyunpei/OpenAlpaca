@@ -340,6 +340,10 @@ export interface ChatMessage {
   attachments?: AttachmentDisplay[];
   citations?: Citation[];
   artifacts?: Artifact[];
+  /** Raw structured message payload from backend persistence. */
+  content_json?: string | null;
+  /** Backend-rendered fallback text for attachment-only user turns. */
+  display_text?: string | null;
 }
 
 /** Lightweight attachment info for display in chat messages. */

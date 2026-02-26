@@ -2,11 +2,21 @@ use crate::LlmProvider;
 use crate::error::LlmError;
 use crate::types::*;
 use async_trait::async_trait;
+use reqwest::header::HeaderMap;
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-5-20250929";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
+
+fn parse_retry_after_ms(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<f64>().ok())
+        .map(|secs| ((secs.max(0.0)) * 1000.0).round() as u64)
+        .filter(|ms| *ms > 0)
+}
 
 pub struct AnthropicProvider {
     client: reqwest::Client,
@@ -339,6 +349,7 @@ impl LlmProvider for AnthropicProvider {
         request: ChatRequest,
     ) -> Result<ChatResponse, LlmError> {
         let body = self.build_request_body(&request);
+        let model_id = request.model.as_deref().unwrap_or(&self.model);
 
         let response = self
             .client
@@ -353,16 +364,32 @@ impl LlmProvider for AnthropicProvider {
 
         let status = response.status().as_u16();
 
-        if status == 429 || status == 529 {
-            let default_retry = if status == 529 { 30 } else { 1 };
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(default_retry);
-            return Err(LlmError::RateLimited {
-                retry_after_ms: retry_after * 1000,
+        if status == 429 {
+            let retry_after_ms = parse_retry_after_ms(response.headers()).unwrap_or(1_000);
+            tracing::warn!(
+                provider = "anthropic",
+                model = model_id,
+                status,
+                retry_after_ms,
+                error_kind = "rate_limited",
+                "Provider returned rate limit"
+            );
+            return Err(LlmError::RateLimited { retry_after_ms });
+        }
+
+        if status == 529 {
+            let retry_after_ms = parse_retry_after_ms(response.headers());
+            tracing::warn!(
+                provider = "anthropic",
+                model = model_id,
+                status,
+                retry_after_ms = ?retry_after_ms,
+                error_kind = "overloaded",
+                "Provider returned transient overload"
+            );
+            return Err(LlmError::Overloaded {
+                status,
+                retry_after_ms,
             });
         }
 

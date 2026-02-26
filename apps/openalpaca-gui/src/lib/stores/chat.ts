@@ -32,6 +32,68 @@ export const uploadingFiles = writable(false);
 
 let nextLocalId = -1;
 
+type StructuredMessagePart = {
+  type: string;
+  file_id?: string;
+  filename?: string;
+  mime_type?: string;
+};
+
+function normalizeHistoryMessage(message: ChatMessage): ChatMessage {
+  const normalized: ChatMessage = { ...message };
+  if (
+    normalized.content.trim().length === 0 &&
+    normalized.display_text &&
+    normalized.display_text.trim().length > 0
+  ) {
+    normalized.content = normalized.display_text;
+  }
+
+  if (
+    (!normalized.attachments || normalized.attachments.length === 0) &&
+    normalized.content_json
+  ) {
+    try {
+      const parsed = JSON.parse(normalized.content_json) as { parts?: StructuredMessagePart[] };
+      const parts = Array.isArray(parsed.parts) ? parsed.parts : [];
+      const seen = new Set<string>();
+      const attachments: AttachmentDisplay[] = [];
+      for (const part of parts) {
+        if (
+          (part.type === "file_ref" || part.type === "document") &&
+          part.file_id &&
+          part.filename &&
+          part.mime_type &&
+          !seen.has(part.file_id)
+        ) {
+          seen.add(part.file_id);
+          attachments.push({
+            file_id: part.file_id,
+            filename: part.filename,
+            mime_type: part.mime_type,
+            size_bytes: 0,
+          });
+        }
+      }
+      if (attachments.length > 0) {
+        normalized.attachments = attachments;
+      }
+    } catch {
+      // ignore malformed content_json
+    }
+  }
+
+  if (
+    normalized.content.trim().length === 0 &&
+    normalized.attachments &&
+    normalized.attachments.length > 0
+  ) {
+    normalized.content = "[Attachment]";
+  }
+
+  return normalized;
+}
+
 export function applyDoneDataToMessage(message: ChatMessage, data: ChatStreamDoneData): ChatMessage {
   return {
     ...message,
@@ -49,7 +111,7 @@ export function applyDoneDataToMessage(message: ChatMessage, data: ChatStreamDon
 export async function loadHistory(): Promise<void> {
   try {
     const resp = await getChatHistory(100, 0);
-    chatMessages.set(resp.messages);
+    chatMessages.set(resp.messages.map(normalizeHistoryMessage));
     activeLaneKey.set(resp.lane_key);
   } catch (e) {
     console.error("[chat-store] Failed to load history:", e);
@@ -123,7 +185,12 @@ export async function sendChatMessage(content: string): Promise<void> {
     id: nextLocalId--,
     lane_key: get(activeLaneKey) ?? "(pending)",
     role: "user",
-    content,
+    content:
+      content.trim().length > 0
+        ? content
+        : attachmentDisplays.length > 0
+          ? "[Attachment]"
+          : content,
     created_at: new Date().toISOString(),
     attachments: attachmentDisplays.length > 0 ? attachmentDisplays : undefined,
   };
