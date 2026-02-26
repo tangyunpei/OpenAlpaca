@@ -1,0 +1,11 @@
+# OpenAlpaca default daemon configuration template.
+# Missing sections fall back to daemon defaults at runtime.
+
+[security]
+max_input_length = 32768
+
+[server]
+event_broadcaster_capacity = 64
+heartbeat_interval_secs = 5
+sse_keep_alive_secs = 15
+wake_channel_capacity = 256

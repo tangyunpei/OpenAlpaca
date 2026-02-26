@@ -24,6 +24,26 @@ cargo build -p openalpacad --release
 ./target/release/openalpacad
 ```
 
+## macOS Package Install (No Cargo on target machine)
+
+Build package (builder machine):
+
+```bash
+./scripts/release/package-macos.sh
+```
+
+Install package (target machine):
+
+```bash
+./scripts/release/install.sh --file ./dist/openalpaca-macos-<target>-v<version>.tar.gz
+```
+
+Runtime paths after installer-based startup:
+- config base dir: `~/Library/Application Support/OpenAlpaca/config`
+- discovery: `~/Library/Application Support/OpenAlpaca/discovery.json`
+- database: `~/Library/Application Support/OpenAlpaca/openalpaca.db`
+- daemon log (CLI-managed startup): `~/Library/Application Support/OpenAlpaca/daemon.log`
+
 ## Startup and Lifecycle
 
 1. Initialize tracing/logging.

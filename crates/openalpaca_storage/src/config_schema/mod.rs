@@ -853,29 +853,29 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         sensitive: false,
         backend: ConfigBackend::DaemonToml,
     },
-    // -- Daemon: Providers --
+    // -- Web Search (stored in llm.toml) --
     ConfigKeyDef {
-        key: "daemon.providers.web_search.api_key",
+        key: "ai.web_search.api_key",
         kind: ConfigKind::String,
         default: None,
         description: "Brave Search API key (get one at https://brave.com/search/api/)",
-        category: "Daemon",
-        subcategory: Some("Providers"),
+        category: "AI",
+        subcategory: Some("Web Search"),
         sensitive: true,
-        backend: ConfigBackend::DaemonToml,
+        backend: ConfigBackend::LlmToml,
     },
     ConfigKeyDef {
-        key: "daemon.providers.web_search.timeout_secs",
+        key: "ai.web_search.timeout_secs",
         kind: ConfigKind::Int {
             min: Some(1),
             max: Some(60),
         },
-        default: Some("10"),
+        default: Some("15"),
         description: "Brave Search request timeout in seconds",
-        category: "Daemon",
-        subcategory: Some("Providers"),
+        category: "AI",
+        subcategory: Some("Web Search"),
         sensitive: false,
-        backend: ConfigBackend::DaemonToml,
+        backend: ConfigBackend::LlmToml,
     },
     // -- Agents --
     ConfigKeyDef {

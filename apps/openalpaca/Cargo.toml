@@ -36,3 +36,6 @@ openalpaca_llm = { workspace = true }
 openalpaca_core = { workspace = true }
 toml.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

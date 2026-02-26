@@ -76,7 +76,7 @@ fn test_categories() {
     assert!(cats.contains(&"API-Keys"));
     assert!(cats.contains(&"Agents"));
     assert!(cats.contains(&"Daemon"));
-    assert!(!cats.contains(&"AI"));
+    assert!(cats.contains(&"AI"));
 }
 
 #[test]
@@ -90,8 +90,9 @@ fn test_keys_in_category() {
 #[test]
 fn test_daemon_keys_in_category() {
     let keys = keys_in_category("Daemon");
-    // 42 daemon keys + 1 alias (system.max_agents) + 2 streaming keys + 2 providers keys + 1 lead_max_concurrent_subagents = 48 total
-    assert_eq!(keys.len(), 48);
+    // 42 daemon keys + 1 alias (system.max_agents) + 2 streaming keys + 1 lead_max_concurrent_subagents = 46 total
+    // (web_search keys moved to AI category)
+    assert_eq!(keys.len(), 46);
     assert!(keys.iter().any(|d| d.key == "system.max_agents"));
     assert!(
         keys.iter()
@@ -247,13 +248,16 @@ fn test_subcategories() {
 
     // Daemon subcategories
     let daemon_subs = subcategories_in_category("Daemon");
-    assert_eq!(daemon_subs.len(), 6);
+    assert_eq!(daemon_subs.len(), 5);
     assert!(daemon_subs.contains(&"Orchestrator"));
     assert!(daemon_subs.contains(&"Execution"));
     assert!(daemon_subs.contains(&"DAG"));
     assert!(daemon_subs.contains(&"Security"));
     assert!(daemon_subs.contains(&"Server"));
-    assert!(daemon_subs.contains(&"Providers"));
+
+    // Web Search subcategory is now under AI
+    let ai_subs = subcategories_in_category("AI");
+    assert!(ai_subs.contains(&"Web Search"));
 }
 
 #[test]

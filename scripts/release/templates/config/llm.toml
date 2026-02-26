@@ -1,0 +1,44 @@
+# OpenAlpaca default LLM configuration template.
+# This file is installed only when no user config exists.
+
+[orchestrator]
+model = "claude-haiku-4-5-20251001"
+fallback_models = ["claude-sonnet-4-6"]
+
+[providers.anthropic]
+enabled = false
+strategy = "round_robin"
+default_model = "claude-sonnet-4-6"
+default_max_tokens = 4096
+
+[providers.openai]
+enabled = false
+base_url = "https://api.openai.com/v1"
+strategy = "round_robin"
+default_model = "gpt-4o-mini"
+default_max_tokens = 4096
+
+[providers.ollama]
+enabled = false
+base_url = "http://localhost:11434/v1"
+strategy = "round_robin"
+default_model = "llama3.1"
+
+[web_search]
+api_key = ""
+timeout_secs = 15
+
+[embeddings]
+enabled = true
+provider = "local"
+model = "intfloat/multilingual-e5-base"
+dimensions = 768
+
+[timeouts]
+usage_cache_ttl_secs = 300
+usage_fetch_timeout_secs = 10
+cli_backend_timeout_secs = 120
+
+[env_vars]
+anthropic_api_key = "ANTHROPIC_API_KEY"
+openai_api_key = "OPENAI_API_KEY"

@@ -26,6 +26,7 @@ pub struct InitializedServices {
     pub skill_catalog: Arc<openalpaca_core::orchestrator::skill_catalog::SkillCatalog>,
     pub skill_router: Arc<openalpaca_core::orchestrator::skill_router::SkillRouter>,
     pub secret_store: Arc<dyn openalpaca_llm::SecretStore>,
+    pub web_search_config: Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
 }
 
 /// Initialize all core services: agent templates, LLM router, tools, security, etc.
@@ -105,6 +106,13 @@ pub async fn initialize_services(
         db.clone(),
     ));
 
+    // Extract web_search config from LLM config (hot-reloadable via ArcSwap)
+    let web_search_cfg = llm_config
+        .as_ref()
+        .and_then(|c| c.web_search.clone())
+        .unwrap_or_default();
+    let web_search_config = Arc::new(ArcSwap::from_pointee(web_search_cfg));
+
     // Build ToolRegistry
     let tool_registry = build_tool_registry(
         config_base_dir,
@@ -115,6 +123,7 @@ pub async fn initialize_services(
         identity_path,
         bus,
         daemon_config,
+        &web_search_config,
     );
 
     // Build security chain
@@ -177,6 +186,7 @@ pub async fn initialize_services(
         skill_catalog,
         skill_router,
         secret_store,
+        web_search_config,
     })
 }
 
@@ -550,6 +560,7 @@ fn build_tool_registry(
     identity_path: &Path,
     bus: &EventBus,
     daemon_config: &Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
+    web_search_config: &Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
 ) -> Arc<openalpaca_core::tools::ToolRegistry> {
     let mut tool_registry = openalpaca_core::tools::ToolRegistry::new();
 
@@ -582,6 +593,7 @@ fn build_tool_registry(
         user_tool_ctx,
         identity_tool_ctx,
         Some(daemon_config.clone()),
+        Some(web_search_config.clone()),
         workspace_root,
     ) {
         tool_registry.register(tool);

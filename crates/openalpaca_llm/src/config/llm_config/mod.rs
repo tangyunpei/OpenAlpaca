@@ -139,6 +139,26 @@ pub struct LlmRouterConfig {
     pub timeouts: Option<TimeoutsConfig>,
     pub endpoints: Option<EndpointsConfig>,
     pub env_vars: Option<EnvVarsConfig>,
+    pub web_search: Option<WebSearchConfig>,
+}
+
+/// Brave Search API configuration for the `web_search` built-in tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebSearchConfig {
+    /// Brave Search API key. If empty, web_search tool returns a helpful error.
+    pub api_key: String,
+    /// Request timeout in seconds (default: 15, range: 1–60).
+    pub timeout_secs: u64,
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            timeout_secs: 15,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

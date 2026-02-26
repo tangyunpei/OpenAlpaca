@@ -64,7 +64,48 @@ pub fn resolve_config_base_dir() -> PathBuf {
     }
 
     // 4. Last resort fallback
+    warn!(
+        "Config directory not found via OPENALPACA_CONFIG_DIR, exe path, or CWD walk; \
+         falling back to $CWD/config which may not exist"
+    );
     std::env::current_dir().unwrap_or_default().join("config")
+}
+
+// ---------------------------------------------------------------------------
+// Config file seeding (first-run / fresh install)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_LLM_TOML: &str =
+    include_str!("../../../../scripts/release/templates/config/llm.toml");
+const DEFAULT_DAEMON_TOML: &str =
+    include_str!("../../../../scripts/release/templates/config/daemon.toml");
+
+/// Seed default configuration files if they don't exist yet.
+///
+/// Called after `resolve_config_base_dir()` so that a fresh install (or GUI
+/// launching the daemon before `install.sh` runs) gets working defaults
+/// instead of an empty config directory.
+pub fn seed_default_configs(config_dir: &Path) {
+    if let Err(e) = std::fs::create_dir_all(config_dir) {
+        warn!("Cannot create config dir {}: {e}", config_dir.display());
+        return;
+    }
+
+    let llm_path = config_dir.join("llm.toml");
+    if !llm_path.exists() {
+        match std::fs::write(&llm_path, DEFAULT_LLM_TOML) {
+            Ok(()) => info!("Seeded default config: {}", llm_path.display()),
+            Err(e) => warn!("Failed to seed {}: {e}", llm_path.display()),
+        }
+    }
+
+    let daemon_path = config_dir.join("daemon.toml");
+    if !daemon_path.exists() {
+        match std::fs::write(&daemon_path, DEFAULT_DAEMON_TOML) {
+            Ok(()) => info!("Seeded default config: {}", daemon_path.display()),
+            Err(e) => warn!("Failed to seed {}: {e}", daemon_path.display()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

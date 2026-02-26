@@ -20,6 +20,26 @@ bunx tauri dev
 
 `tauri dev` executes configured sidecar preparation and starts frontend dev server.
 
+## macOS Package Install (No Cargo on target machine)
+
+Build artifact (on a macOS build machine):
+
+```bash
+./scripts/release/package-macos.sh
+```
+
+Install artifact (on target machine):
+
+```bash
+./scripts/release/install.sh --file ./dist/openalpaca-macos-<target>-v<version>.tar.gz
+```
+
+After installation:
+- GUI app path: `~/Applications/openalpaca-gui.app`
+- GUI startup will spawn daemon with:
+  - `OPENALPACA_CONFIG_DIR=~/Library/Application Support/OpenAlpaca/config`
+  - working directory `~/Library/Application Support/OpenAlpaca`
+
 ## Connection Lifecycle
 
 - GUI calls Tauri command `ensure_daemon_running` to bootstrap daemon connection.

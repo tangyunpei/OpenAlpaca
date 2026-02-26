@@ -57,9 +57,6 @@ soft_cap = 500
 identity_budget = 300
 user_profile_budget = 1000
 
-[providers.web_search]
-api_key = "BSAflpsznvhaoFN57cmTJukDS4TA-vB"
-
 [security]
 max_input_length = 32768
 

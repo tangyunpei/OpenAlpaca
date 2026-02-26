@@ -215,6 +215,16 @@ pub fn delete_ai_value(key: &str) -> Result<()> {
                 emb.dimensions = None;
             }
         }
+        "ai.web_search.api_key" => {
+            if let Some(ref mut ws) = config.web_search {
+                ws.api_key = String::new();
+            }
+        }
+        "ai.web_search.timeout_secs" => {
+            if let Some(ref mut ws) = config.web_search {
+                ws.timeout_secs = 15; // default
+            }
+        }
         k if k.ends_with(".enabled") => {
             let provider = extract_provider(k)?;
             if let Some(ref mut providers) = config.providers
@@ -316,6 +326,8 @@ pub fn list_ai_entries() -> Result<Vec<(String, String, String)>> {
         "ai.codex.discovery",
         "ai.codex.cli_enabled",
         "ai.codex.cli_path",
+        "ai.web_search.api_key",
+        "ai.web_search.timeout_secs",
     ];
 
     let mut entries = Vec::new();
@@ -326,7 +338,7 @@ pub fn list_ai_entries() -> Result<Vec<(String, String, String)>> {
                 || key.ends_with(".cli_enabled")
             {
                 "bool"
-            } else if key.ends_with(".dimensions") {
+            } else if key.ends_with(".dimensions") || key.ends_with(".timeout_secs") {
                 "int"
             } else {
                 "string"
@@ -375,6 +387,7 @@ pub fn clear_ai_config() -> Result<()> {
     config.timeouts = None;
     config.endpoints = None;
     config.env_vars = None;
+    config.web_search = None;
 
     write_config(&path, &config).map_err(|e| anyhow::anyhow!("{}", e))?;
     Ok(())
@@ -731,6 +744,22 @@ fn apply_to_config(
                 })
                 .dimensions = Some(dim);
         }
+        "ai.web_search.api_key" => {
+            config
+                .web_search
+                .get_or_insert_with(Default::default)
+                .api_key = value.to_string();
+        }
+        "ai.web_search.timeout_secs" => {
+            let secs: u64 = value
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid timeout_secs value: {}", value))?;
+            config
+                .web_search
+                .get_or_insert_with(Default::default)
+                .timeout_secs = secs;
+        }
         k if k.starts_with("ai.") && k.ends_with(".enabled") => {
             let provider = extract_provider(k)?;
             let providers = config.providers.get_or_insert_with(HashMap::new);
@@ -893,6 +922,15 @@ fn read_from_config(
             .as_ref()
             .and_then(|e| e.dimensions)
             .map(|d| d.to_string()),
+        "ai.web_search.api_key" => config
+            .web_search
+            .as_ref()
+            .filter(|ws| !ws.api_key.is_empty())
+            .map(|ws| ws.api_key.clone()),
+        "ai.web_search.timeout_secs" => config
+            .web_search
+            .as_ref()
+            .map(|ws| ws.timeout_secs.to_string()),
         k if k.ends_with(".enabled") => {
             let provider = extract_provider(k).ok()?;
             config
