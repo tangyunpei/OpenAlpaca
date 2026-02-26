@@ -216,6 +216,7 @@ impl InputSanitizer {
             let inferred_mime = inferred.mime_type();
             if declared_mime != inferred_mime
                 && !Self::is_container_compatible_mime(declared_mime, inferred_mime)
+                && !Self::is_audio_mime_compatible(declared_mime, inferred_mime)
             {
                 return Err(SecurityViolation::InputBlocked {
                     reason: format!(
@@ -256,6 +257,28 @@ impl InputSanitizer {
         }
 
         Ok(())
+    }
+
+    /// Check if two audio MIME types refer to the same format but use different aliases.
+    ///
+    /// Browsers, OS file pickers, and the `infer` crate may report different MIME
+    /// strings for the same audio format. For example, M4A may be declared as
+    /// `audio/mp4` (Chrome/Firefox) or `audio/x-m4a` (Safari) while `infer` detects
+    /// it as `audio/m4a`. This function treats known alias groups as compatible.
+    pub fn is_audio_mime_compatible(declared: &str, detected: &str) -> bool {
+        let m4a = ["audio/m4a", "audio/mp4", "audio/x-m4a"];
+        if m4a.contains(&declared) && m4a.contains(&detected) {
+            return true;
+        }
+        let wav = ["audio/wav", "audio/x-wav", "audio/wave"];
+        if wav.contains(&declared) && wav.contains(&detected) {
+            return true;
+        }
+        let flac = ["audio/flac", "audio/x-flac"];
+        if flac.contains(&declared) && flac.contains(&detected) {
+            return true;
+        }
+        false
     }
 
     /// Check if a declared MIME type is compatible with a detected container type.

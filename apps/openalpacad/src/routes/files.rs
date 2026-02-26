@@ -39,6 +39,10 @@ fn validate_magic_mime(declared_mime: &str, data: &[u8]) -> Result<(), MimeMagic
             if InputSanitizer::is_container_compatible_mime(declared_mime, detected_type) {
                 return Ok(());
             }
+            // Allow audio format aliases (e.g. audio/mp4 vs audio/m4a)
+            if InputSanitizer::is_audio_mime_compatible(declared_mime, detected_type) {
+                return Ok(());
+            }
             Err(MimeMagicValidationError::Mismatch {
                 detected: detected_type.to_string(),
             })
