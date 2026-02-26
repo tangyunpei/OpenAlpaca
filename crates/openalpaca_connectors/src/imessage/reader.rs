@@ -4,7 +4,7 @@
 //! (`~/Library/Messages/chat.db`) using a ROWID watermark to track
 //! which messages have already been seen.
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, params};
 
 /// An attachment associated with an iMessage.
 #[derive(Debug, Clone)]
@@ -88,12 +88,17 @@ impl ChatDbReader {
         self.last_rowid
     }
 
-    /// Poll for new incoming messages since the last watermark.
+    /// Poll for new messages since the last watermark.
     ///
-    /// Only messages where `is_from_me = 0` are returned (i.e., messages
-    /// sent by other people). After a successful poll the watermark is
+    /// By default, only messages where `is_from_me = 0` are returned (i.e.,
+    /// messages sent by other people). If `include_from_me` is true, both
+    /// incoming and outgoing messages are considered. After a successful poll
+    /// the watermark is
     /// advanced to the highest ROWID seen.
-    pub fn poll_new_messages(&mut self) -> Result<Vec<IncomingMessage>, String> {
+    pub fn poll_new_messages(
+        &mut self,
+        include_from_me: bool,
+    ) -> Result<Vec<IncomingMessage>, String> {
         let mut stmt = self
             .conn
             .prepare(
@@ -103,28 +108,31 @@ impl ChatDbReader {
                  JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
                  JOIN chat c ON c.ROWID = cmj.chat_id
                  WHERE m.ROWID > ?1
-                   AND m.is_from_me = 0
+                   AND (?2 = 1 OR m.is_from_me = 0)
                    AND (m.text IS NOT NULL OR m.cache_has_attachments = 1)
                  ORDER BY m.ROWID ASC",
             )
             .map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
         let rows = stmt
-            .query_map([self.last_rowid], |row| {
-                let rowid: i64 = row.get(0)?;
-                let text: String = row.get(1)?;
-                let sender: String = row.get(2)?;
-                let chat_id: String = row.get(3)?;
-                let is_group = chat_id.starts_with("chat");
-                Ok(IncomingMessage {
-                    rowid,
-                    text,
-                    sender,
-                    chat_id,
-                    is_group,
-                    attachments: Vec::new(), // populated below
-                })
-            })
+            .query_map(
+                params![self.last_rowid, if include_from_me { 1 } else { 0 }],
+                |row| {
+                    let rowid: i64 = row.get(0)?;
+                    let text: String = row.get(1)?;
+                    let sender: String = row.get(2)?;
+                    let chat_id: String = row.get(3)?;
+                    let is_group = chat_id.starts_with("chat");
+                    Ok(IncomingMessage {
+                        rowid,
+                        text,
+                        sender,
+                        chat_id,
+                        is_group,
+                        attachments: Vec::new(), // populated below
+                    })
+                },
+            )
             .map_err(|e| format!("Failed to query messages: {}", e))?;
 
         let mut messages = Vec::new();
