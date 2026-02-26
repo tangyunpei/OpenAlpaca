@@ -680,8 +680,15 @@ pub(super) fn persist_conversation(
     runtime_secs: i64,
 ) {
     let conv_repo = openalpaca_storage::ConversationRepository::new(db);
-    let _ = conv_repo.get_or_create_conversation(lane_key, source);
-    let _ = conv_repo.insert(&openalpaca_storage::ConversationMessage {
+    if let Err(e) = conv_repo.get_or_create_conversation(lane_key, source) {
+        tracing::warn!(
+            "persist_conversation: failed to get/create conversation for lane '{}': {e}",
+            lane_key
+        );
+        return;
+    }
+
+    let msg = openalpaca_storage::ConversationMessage {
         id: 0,
         lane_key: lane_key.to_string(),
         role: "assistant".to_string(),
@@ -694,6 +701,22 @@ pub(super) fn persist_conversation(
         created_at: String::new(),
         content_json: None,
         display_text: None,
-    });
-    let _ = conv_repo.increment_message_count(lane_key);
+    };
+
+    match conv_repo.insert(&msg) {
+        Ok(_) => {
+            if let Err(e) = conv_repo.increment_message_count(lane_key) {
+                tracing::warn!(
+                    "persist_conversation: failed to increment message count for lane '{}': {e}",
+                    lane_key
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                "persist_conversation: failed to insert assistant message for lane '{}': {e}",
+                lane_key
+            );
+        }
+    }
 }

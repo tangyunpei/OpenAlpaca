@@ -4,6 +4,8 @@
     performConnectorAction,
     generateLinkToken,
     configureConnector,
+    getConnectorSettings,
+    updateConnectorSettings,
     type Connector,
   } from "$lib/connectors";
 
@@ -17,9 +19,20 @@
   let linkToken = $state<string | null>(null);
   let isLoadingConnectors = $state(false);
 
+  // Generic token config modal
   let showConfigModal = $state(false);
   let configTargetId = $state<string | null>(null);
   let configToken = $state("");
+
+  // iMessage settings modal
+  let showImessageSettings = $state(false);
+  let imessageOwnerHandles = $state("");
+  let imessageBotHandle = $state("");
+  let imessageAllowFromMe = $state(false);
+  let imessageDirectRequirePrefix = $state(false);
+  let imessageGroupRequirePrefix = $state(true);
+  let isLoadingSettings = $state(false);
+  let isSavingSettings = $state(false);
 
   // Auto-load connectors when the component mounts and connection is active
   $effect(() => {
@@ -55,6 +68,10 @@
   }
 
   function openConfigModal(id: string) {
+    if (id === "imessage") {
+      openImessageSettings();
+      return;
+    }
     configTargetId = id;
     configToken = "";
     showConfigModal = true;
@@ -68,6 +85,42 @@
       await refreshConnectors();
     } catch (e) {
       alert(`Configuration failed: ${e}`);
+    }
+  }
+
+  async function openImessageSettings() {
+    showImessageSettings = true;
+    isLoadingSettings = true;
+    try {
+      const settings = await getConnectorSettings("imessage");
+      imessageOwnerHandles = settings["imessage.owner_handles"] ?? "";
+      imessageBotHandle = settings["imessage.bot_handle"] ?? "";
+      imessageAllowFromMe = settings["imessage.allow_from_me"] === "true";
+      imessageDirectRequirePrefix = settings["imessage.direct_require_prefix"] === "true";
+      imessageGroupRequirePrefix = settings["imessage.group_require_prefix"] !== "false";
+    } catch (e) {
+      console.error("Failed to load iMessage settings:", e);
+    } finally {
+      isLoadingSettings = false;
+    }
+  }
+
+  async function handleImessageSettingsSave() {
+    isSavingSettings = true;
+    try {
+      await updateConnectorSettings("imessage", {
+        "imessage.owner_handles": imessageOwnerHandles,
+        "imessage.bot_handle": imessageBotHandle,
+        "imessage.allow_from_me": imessageAllowFromMe.toString(),
+        "imessage.direct_require_prefix": imessageDirectRequirePrefix.toString(),
+        "imessage.group_require_prefix": imessageGroupRequirePrefix.toString(),
+      });
+      showImessageSettings = false;
+      await refreshConnectors();
+    } catch (e) {
+      alert(`Failed to save settings: ${e}`);
+    } finally {
+      isSavingSettings = false;
     }
   }
 
@@ -178,6 +231,7 @@
   </div>
 </div>
 
+<!-- Generic token config modal (for Telegram, etc.) -->
 {#if showConfigModal}
   <div class="fixed inset-0 bg-black/60 flex justify-center items-center z-50">
     <div class="bg-card p-6 rounded-xl w-[90%] max-w-[400px] shadow-2xl border border-border">
@@ -199,6 +253,119 @@
           onclick={handleConfigSubmit}
         >Save & Enable</button>
       </div>
+    </div>
+  </div>
+{/if}
+
+<!-- iMessage settings modal -->
+{#if showImessageSettings}
+  <div class="fixed inset-0 bg-black/60 flex justify-center items-center z-50">
+    <div class="bg-card p-6 rounded-xl w-[90%] max-w-[480px] shadow-2xl border border-border">
+      <h3 class="mt-0 text-primary text-lg">iMessage Settings</h3>
+
+      {#if isLoadingSettings}
+        <p class="text-muted-foreground text-sm">Loading settings...</p>
+      {:else}
+        <div class="space-y-4 my-4">
+          <!-- Owner Handles -->
+          <div>
+            <label for="owner-handles" class="block text-sm font-medium text-foreground mb-1">
+              Owner Handles
+            </label>
+            <input
+              id="owner-handles"
+              type="text"
+              bind:value={imessageOwnerHandles}
+              placeholder="email@icloud.com, +1234567890"
+              class="w-full p-2.5 bg-background border border-border text-foreground rounded-md text-sm"
+            />
+            <p class="text-xs text-muted-foreground mt-1">
+              Comma-separated Apple ID aliases (email/phone) to identify you in DMs.
+            </p>
+          </div>
+
+          <!-- Bot Handle -->
+          <div>
+            <label for="bot-handle" class="block text-sm font-medium text-foreground mb-1">
+              Bot Handle
+            </label>
+            <input
+              id="bot-handle"
+              type="text"
+              bind:value={imessageBotHandle}
+              placeholder="bot@icloud.com or +1234567890"
+              class="w-full p-2.5 bg-background border border-border text-foreground rounded-md text-sm"
+            />
+            <p class="text-xs text-muted-foreground mt-1">
+              The iMessage sending address used by this Mac. Messages from this account are
+              filtered out to prevent the bot from processing its own replies.
+            </p>
+          </div>
+
+          <!-- Toggle: Allow From Me -->
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-sm font-medium text-foreground">Allow From Me</p>
+              <p class="text-xs text-muted-foreground">Process messages sent by this Mac user</p>
+            </div>
+            <label class="relative inline-block w-11 h-6 shrink-0">
+              <input
+                type="checkbox"
+                bind:checked={imessageAllowFromMe}
+                class="peer sr-only"
+              />
+              <span class="block h-6 w-11 rounded-full bg-primary cursor-pointer transition-colors duration-300 peer-checked:bg-success"></span>
+              <span class="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white transition-transform duration-300 peer-checked:translate-x-5"></span>
+            </label>
+          </div>
+
+          <!-- Toggle: Direct Require Prefix -->
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-sm font-medium text-foreground">DM Require Prefix</p>
+              <p class="text-xs text-muted-foreground">Require /ask or @openalpaca for direct messages</p>
+            </div>
+            <label class="relative inline-block w-11 h-6 shrink-0">
+              <input
+                type="checkbox"
+                bind:checked={imessageDirectRequirePrefix}
+                class="peer sr-only"
+              />
+              <span class="block h-6 w-11 rounded-full bg-primary cursor-pointer transition-colors duration-300 peer-checked:bg-success"></span>
+              <span class="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white transition-transform duration-300 peer-checked:translate-x-5"></span>
+            </label>
+          </div>
+
+          <!-- Toggle: Group Require Prefix -->
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-sm font-medium text-foreground">Group Require Prefix</p>
+              <p class="text-xs text-muted-foreground">Require /ask or @openalpaca for group chats</p>
+            </div>
+            <label class="relative inline-block w-11 h-6 shrink-0">
+              <input
+                type="checkbox"
+                bind:checked={imessageGroupRequirePrefix}
+                class="peer sr-only"
+              />
+              <span class="block h-6 w-11 rounded-full bg-primary cursor-pointer transition-colors duration-300 peer-checked:bg-success"></span>
+              <span class="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white transition-transform duration-300 peer-checked:translate-x-5"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="flex justify-end gap-2.5">
+          <button
+            class="px-5 py-2 text-sm rounded-lg bg-white/5 text-muted-foreground cursor-pointer hover:bg-white/10 transition-colors"
+            onclick={() => (showImessageSettings = false)}
+          >Cancel</button>
+          <button
+            class="px-5 py-2 text-sm rounded-lg bg-primary text-foreground cursor-pointer hover:bg-accent hover:text-accent-foreground transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            onclick={handleImessageSettingsSave}
+            disabled={isSavingSettings}
+          >{isSavingSettings ? "Saving..." : "Save"}</button>
+        </div>
+      {/if}
     </div>
   </div>
 {/if}

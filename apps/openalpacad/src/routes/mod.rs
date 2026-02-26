@@ -44,7 +44,10 @@ pub use chat::{
     get_conversation_messages_handler, list_conversations_handler, send_chat_handler,
 };
 pub use command::command_handler;
-pub use connectors::{connector_action_handler, connector_config_handler, list_connectors_handler};
+pub use connectors::{
+    connector_action_handler, connector_config_handler, connector_settings_handler,
+    list_connectors_handler, update_connector_settings_handler,
+};
 pub use dispatch_decisions::dispatch_decisions_handler;
 pub use events::events_handler;
 pub use events_history::events_history_handler;

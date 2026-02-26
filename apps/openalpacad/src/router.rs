@@ -47,6 +47,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(crate::routes::connector_config_handler),
         )
         .route(
+            "/v1/connectors/{id}/settings",
+            get(crate::routes::connector_settings_handler)
+                .put(crate::routes::update_connector_settings_handler),
+        )
+        .route(
             "/v1/auth/link",
             post(crate::routes::generate_link_token_handler),
         )

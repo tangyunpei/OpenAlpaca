@@ -168,17 +168,8 @@ impl TaskDispatcher {
 
             let db_summary = final_content.chars().take(2000).collect::<String>();
 
-            // Update task status
-            finalize_task(
-                &ctx,
-                &bus,
-                db.as_ref(),
-                &task_id,
-                &db_summary,
-                result.success,
-            );
-
-            // Persist final result to conversation
+            // Persist final result to conversation before publishing completion,
+            // so follow-up turns can immediately read the result from history.
             if let Some(ref db) = db {
                 let content = format_task_result(&task_title, &final_content, result.success);
                 persist_conversation(
@@ -192,6 +183,16 @@ impl TaskDispatcher {
                     runtime_secs,
                 );
             }
+
+            // Update task status
+            finalize_task(
+                &ctx,
+                &bus,
+                db.as_ref(),
+                &task_id,
+                &db_summary,
+                result.success,
+            );
 
             // Memory extraction from DAG output (non-blocking)
             if let Some(ref db) = db {

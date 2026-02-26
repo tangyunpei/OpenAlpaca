@@ -587,15 +587,6 @@ impl TaskDispatcher {
                 pipeline_error.clone().unwrap_or_default()
             };
 
-            finalize_task(
-                &ctx,
-                &bus,
-                db.as_ref(),
-                &task_id,
-                &db_summary,
-                pipeline_success,
-            );
-
             // 5. Persist final result to conversation (single message for entire pipeline)
             let runtime_secs = start_time.elapsed().as_secs() as i64;
             // Clone for memory extraction before final_content is consumed
@@ -622,6 +613,15 @@ impl TaskDispatcher {
                     runtime_secs,
                 );
             }
+
+            finalize_task(
+                &ctx,
+                &bus,
+                db.as_ref(),
+                &task_id,
+                &db_summary,
+                pipeline_success,
+            );
 
             // Memory extraction from pipeline output (non-blocking)
             if let (Some(db), Some(output)) = (&db, &extraction_content) {
