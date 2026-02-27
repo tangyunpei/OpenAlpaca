@@ -651,11 +651,20 @@ pub(super) fn build_task_outcome(
             if let Some(ref sj) = task.state_json {
                 if let Ok(state) = serde_json::from_str::<TaskState>(sj) {
                     let fallback = if final_content.is_empty() {
-                        "Task completed."
+                        if success { "Task completed." } else { "Task failed." }
                     } else {
                         final_content
                     };
-                    return state.build_outcome(fallback, None);
+                    let mut outcome = state.build_outcome(fallback, None);
+                    if !success {
+                        outcome.outcome_kind = OutcomeKind::Failed;
+                        // Prepend error reason if it's not already in the summary
+                        if !final_content.is_empty() && !outcome.summary.contains(final_content) {
+                            outcome.summary =
+                                format!("{}\n\n{}", final_content, outcome.summary);
+                        }
+                    }
+                    return outcome;
                 }
             }
         }
@@ -663,7 +672,7 @@ pub(super) fn build_task_outcome(
 
     // Fallback: no state_json available, build minimal outcome from content
     let summary = if final_content.is_empty() {
-        "Task completed.".to_string()
+        if success { "Task completed.".to_string() } else { "Task failed.".to_string() }
     } else {
         final_content.to_string()
     };
@@ -705,7 +714,16 @@ pub(super) fn finalize_task_with_outcome(
     // Persist structured outcome fields to DB (outcome_json, outcome_kind, artifact_count)
     if let Some(db) = db {
         let repo = openalpaca_storage::repository::TaskRepository::new(db);
-        let outcome_json = serde_json::to_string(&outcome).unwrap_or_default();
+        let outcome_json = match serde_json::to_string(&outcome) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::warn!(
+                    "finalize_task_with_outcome: failed to serialize outcome for task '{}': {e}",
+                    task_id
+                );
+                String::new()
+            }
+        };
         if let Err(e) = repo.set_outcome(
             task_id,
             &outcome_json,
