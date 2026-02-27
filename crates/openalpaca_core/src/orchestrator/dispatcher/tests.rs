@@ -754,7 +754,7 @@ fn test_finalize_task_none_outcome_fields() {
         {
             assert_eq!(task_id, "t3");
             assert_eq!(outcome_kind, None);
-            assert_eq!(artifact_count, Some(0)); // defaults to 0
+            assert_eq!(artifact_count, None); // None preserved (unknown)
             assert_eq!(outcome_summary, None);
             return;
         }

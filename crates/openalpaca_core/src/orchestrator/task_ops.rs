@@ -1,5 +1,5 @@
 use super::Orchestrator;
-use super::{db_task_to_json, task_entry_to_json};
+use super::{db_task_to_json, parse_outcome, task_entry_to_json};
 use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
 use crate::lane::TaskLaneStatus;
@@ -52,26 +52,16 @@ impl Orchestrator {
                         let task_list: Vec<serde_json::Value> = tasks
                             .iter()
                             .map(|t| {
-                                let (outcome_summary, no_artifact_reason, artifacts) = t
-                                    .outcome_json
-                                    .as_deref()
-                                    .and_then(|oj| {
-                                        serde_json::from_str::<serde_json::Value>(oj).ok()
-                                    })
-                                    .map(|v| {
-                                        (
-                                            v.get("summary")
-                                                .and_then(|s| s.as_str())
-                                                .map(String::from),
-                                            v.get("no_artifact_reason")
-                                                .and_then(|s| s.as_str())
-                                                .map(String::from),
-                                            v.get("artifacts")
-                                                .cloned()
-                                                .unwrap_or(serde_json::json!([])),
-                                        )
-                                    })
-                                    .unwrap_or((None, None, serde_json::json!([])));
+                                let (outcome_summary, no_artifact_reason, artifacts) =
+                                    parse_outcome(t)
+                                        .map(|p| {
+                                            (
+                                                p.outcome_summary,
+                                                p.no_artifact_reason,
+                                                serde_json::json!(p.artifacts),
+                                            )
+                                        })
+                                        .unwrap_or((None, None, serde_json::json!([])));
 
                                 serde_json::json!({
                                     "task_id": t.id,
