@@ -53,6 +53,43 @@ pub struct TaskResponse {
     pub task: Task,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assignments: Option<Vec<openalpaca_storage::TaskAgentAssignment>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<ParsedOutcome>,
+}
+
+/// Parsed outcome fields extracted from task.outcome_json for API convenience.
+#[derive(Debug, Serialize)]
+pub struct ParsedOutcome {
+    pub summary: String,
+    pub outcome_kind: String,
+    pub artifact_count: i32,
+    pub artifacts: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_artifact_reason: Option<String>,
+}
+
+impl ParsedOutcome {
+    fn from_task(task: &Task) -> Option<Self> {
+        let oj = task.outcome_json.as_deref()?;
+        let v: serde_json::Value = serde_json::from_str(oj).ok()?;
+        Some(ParsedOutcome {
+            summary: v.get("summary")?.as_str()?.to_string(),
+            outcome_kind: task
+                .outcome_kind
+                .map(|k| k.as_str().to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            artifact_count: task.artifact_count,
+            artifacts: v
+                .get("artifacts")
+                .and_then(|a| a.as_array())
+                .cloned()
+                .unwrap_or_default(),
+            no_artifact_reason: v
+                .get("no_artifact_reason")
+                .and_then(|s| s.as_str())
+                .map(String::from),
+        })
+    }
 }
 
 // ── Handlers ──────────────────────────────────────────────────────
@@ -223,12 +260,14 @@ pub async fn get_task_handler(
     match repo.get(&id) {
         Ok(Some(task)) => {
             let assignments = repo.get_assignments(&id).unwrap_or_default();
+            let outcome = ParsedOutcome::from_task(&task);
             (
                 StatusCode::OK,
                 Json(
                     serde_json::to_value(TaskResponse {
                         task,
                         assignments: Some(assignments),
+                        outcome,
                     })
                     .unwrap_or_else(|_| serde_json::json!({"error": "serialization_failed"})),
                 ),
@@ -490,4 +529,97 @@ pub async fn task_action_handler(
             "status": new_status.as_str()
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openalpaca_storage::OutcomeKind;
+
+    fn make_test_task() -> Task {
+        Task {
+            id: "task-1".to_string(),
+            title: "Test task".to_string(),
+            description: None,
+            status: TaskStatus::Completed,
+            priority: 0,
+            progress_current: None,
+            progress_total: None,
+            result_summary: Some("Done".to_string()),
+            created_by: "user-1".to_string(),
+            source_lane: "lane-1".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            state_json: None,
+            state_version: 1,
+            outcome_json: None,
+            outcome_kind: None,
+            artifact_count: 0,
+        }
+    }
+
+    #[test]
+    fn test_parsed_outcome_from_task_text_only() {
+        let mut task = make_test_task();
+        task.outcome_kind = Some(OutcomeKind::TextOnly);
+        task.artifact_count = 0;
+        task.outcome_json = Some(
+            serde_json::json!({
+                "summary": "Generated a text summary",
+                "outcome_kind": "text_only",
+                "no_artifact_reason": "No files were requested",
+                "artifacts": []
+            })
+            .to_string(),
+        );
+
+        let outcome = ParsedOutcome::from_task(&task).expect("should parse");
+        assert_eq!(outcome.summary, "Generated a text summary");
+        assert_eq!(outcome.outcome_kind, "text_only");
+        assert_eq!(outcome.artifact_count, 0);
+        assert!(outcome.artifacts.is_empty());
+        assert_eq!(
+            outcome.no_artifact_reason.as_deref(),
+            Some("No files were requested")
+        );
+    }
+
+    #[test]
+    fn test_parsed_outcome_from_task_mixed() {
+        let mut task = make_test_task();
+        task.outcome_kind = Some(OutcomeKind::Mixed);
+        task.artifact_count = 2;
+        task.outcome_json = Some(
+            serde_json::json!({
+                "summary": "Report with charts",
+                "outcome_kind": "mixed",
+                "artifacts": [
+                    {"path": "/tmp/report.pdf", "label": "Report"},
+                    {"path": "/tmp/chart.png", "label": "Chart"},
+                ]
+            })
+            .to_string(),
+        );
+
+        let outcome = ParsedOutcome::from_task(&task).expect("should parse");
+        assert_eq!(outcome.summary, "Report with charts");
+        assert_eq!(outcome.outcome_kind, "mixed");
+        assert_eq!(outcome.artifact_count, 2);
+        assert_eq!(outcome.artifacts.len(), 2);
+        assert!(outcome.no_artifact_reason.is_none());
+    }
+
+    #[test]
+    fn test_parsed_outcome_from_task_none() {
+        let task = make_test_task();
+        assert!(ParsedOutcome::from_task(&task).is_none());
+    }
+
+    #[test]
+    fn test_parsed_outcome_from_task_malformed() {
+        let mut task = make_test_task();
+        task.outcome_json = Some("not valid json".to_string());
+        assert!(ParsedOutcome::from_task(&task).is_none());
+    }
 }

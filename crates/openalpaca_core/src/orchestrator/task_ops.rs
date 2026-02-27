@@ -52,6 +52,27 @@ impl Orchestrator {
                         let task_list: Vec<serde_json::Value> = tasks
                             .iter()
                             .map(|t| {
+                                let (outcome_summary, no_artifact_reason, artifacts) = t
+                                    .outcome_json
+                                    .as_deref()
+                                    .and_then(|oj| {
+                                        serde_json::from_str::<serde_json::Value>(oj).ok()
+                                    })
+                                    .map(|v| {
+                                        (
+                                            v.get("summary")
+                                                .and_then(|s| s.as_str())
+                                                .map(String::from),
+                                            v.get("no_artifact_reason")
+                                                .and_then(|s| s.as_str())
+                                                .map(String::from),
+                                            v.get("artifacts")
+                                                .cloned()
+                                                .unwrap_or(serde_json::json!([])),
+                                        )
+                                    })
+                                    .unwrap_or((None, None, serde_json::json!([])));
+
                                 serde_json::json!({
                                     "task_id": t.id,
                                     "title": t.title,
@@ -63,7 +84,9 @@ impl Orchestrator {
                                     "completed_at": t.completed_at.map(|ts| ts.to_rfc3339()),
                                     "outcome_kind": t.outcome_kind.map(|k| k.as_str()),
                                     "artifact_count": t.artifact_count,
-                                    "outcome_json": t.outcome_json.as_deref(),
+                                    "outcome_summary": outcome_summary,
+                                    "no_artifact_reason": no_artifact_reason,
+                                    "artifacts": artifacts,
                                 })
                             })
                             .collect();
