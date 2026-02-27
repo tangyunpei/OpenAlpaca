@@ -223,6 +223,10 @@ pub struct ArtifactPointer {
     pub agent_id: String,
     /// Step order in the pipeline/DAG that produced this artifact.
     pub step_order: i32,
+    /// Optional file asset ID for deliverable artifacts.
+    /// When set, enables file delivery to external channels.
+    #[serde(default)]
+    pub file_asset_id: Option<String>,
 }
 
 impl StepState {
@@ -416,6 +420,7 @@ impl TaskState {
                         label,
                         agent_id: step.agent_id.clone(),
                         step_order: step.step_order,
+                        file_asset_id: None,
                     });
                 }
             }
@@ -506,6 +511,7 @@ impl TaskState {
                 label: e.key.clone(),
                 agent_id: e.author_agent_id.clone(),
                 step_order: -1,
+                file_asset_id: None,
             })
             .collect()
     }

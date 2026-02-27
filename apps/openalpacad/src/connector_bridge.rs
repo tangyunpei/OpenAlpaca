@@ -173,4 +173,57 @@ impl ConnectorSendProvider for ConnectorSendBridge {
         channels.push("imessage".to_string());
         channels
     }
+
+    async fn send_file(
+        &self,
+        channel: &str,
+        recipient: &str,
+        file_path: &str,
+        filename: &str,
+        _mime_type: &str,
+        caption: Option<&str>,
+    ) -> Result<String, String> {
+        match channel {
+            "telegram" => {
+                let bot = self
+                    .telegram_bot()
+                    .ok_or("Telegram not configured (no token)")?;
+
+                let chat_id = if recipient == "default" {
+                    let pref_repo = PreferenceRepository::new(&self.db);
+                    pref_repo
+                        .get(&self.local_user_id, "telegram.last_chat_id")
+                        .ok()
+                        .flatten()
+                        .and_then(|p| p.value.parse::<i64>().ok())
+                        .ok_or("No default Telegram chat found. Please specify a chat_id.")?
+                } else {
+                    recipient
+                        .parse::<i64>()
+                        .map_err(|_| format!("Invalid Telegram chat_id: '{}'", recipient))?
+                };
+
+                use teloxide::prelude::*;
+                use teloxide::types::InputFile;
+                let input_file = InputFile::file(file_path).file_name(filename.to_string());
+                let mut request = bot.send_document(ChatId(chat_id), input_file);
+                if let Some(cap) = caption {
+                    request = request.caption(cap);
+                }
+                request
+                    .await
+                    .map_err(|e| format!("Telegram send_document failed: {}", e))?;
+                Ok(format!("Sent file '{}' to Telegram chat {}", filename, chat_id))
+            }
+            _ => Err(format!("File sending not supported on channel: '{}'", channel)),
+        }
+    }
+
+    fn file_capable_channels(&self) -> Vec<String> {
+        let mut channels = Vec::new();
+        if self.telegram_bot().is_some() {
+            channels.push("telegram".to_string());
+        }
+        channels
+    }
 }

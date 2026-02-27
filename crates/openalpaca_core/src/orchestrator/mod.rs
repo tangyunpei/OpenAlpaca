@@ -67,6 +67,24 @@ pub trait ConnectorSendProvider: Send + Sync {
     ) -> Result<String, String>;
     /// List channels that can currently send (subset of active connectors).
     fn sendable_channels(&self) -> Vec<String>;
+
+    /// Send a file via a channel. Returns Ok(delivery_summary) or Err(reason).
+    async fn send_file(
+        &self,
+        _channel: &str,
+        _recipient: &str,
+        _file_path: &str,
+        _filename: &str,
+        _mime_type: &str,
+        _caption: Option<&str>,
+    ) -> Result<String, String> {
+        Err("File sending not supported on this channel".to_string())
+    }
+
+    /// List channels that support file sending.
+    fn file_capable_channels(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 use dispatcher::TaskDispatcher;
