@@ -153,8 +153,10 @@ pub struct Task {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing)]
     pub state_json: Option<String>,
     pub state_version: i32,
+    #[serde(skip_serializing)]
     pub outcome_json: Option<String>,
     pub outcome_kind: Option<OutcomeKind>,
     pub artifact_count: i32,

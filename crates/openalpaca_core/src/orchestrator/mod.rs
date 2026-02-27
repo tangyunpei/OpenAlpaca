@@ -392,6 +392,43 @@ pub(super) fn task_entry_to_json(entry: &TaskEntry) -> String {
     obj.to_string()
 }
 
+/// Parsed outcome fields extracted from a Task's outcome_json.
+/// Shared across all response paths for consistent parsing.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ParsedOutcomeFields {
+    pub outcome_summary: Option<String>,
+    pub outcome_kind: String,
+    pub artifact_count: i32,
+    pub artifacts: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_artifact_reason: Option<String>,
+}
+
+/// Parse outcome fields from a Task.
+/// Returns None when outcome_json is absent or unparseable.
+/// Missing summary → outcome_summary: None (other fields still populated).
+pub fn parse_outcome(task: &Task) -> Option<ParsedOutcomeFields> {
+    let oj = task.outcome_json.as_deref()?;
+    let v: serde_json::Value = serde_json::from_str(oj).ok()?;
+    Some(ParsedOutcomeFields {
+        outcome_summary: v.get("summary").and_then(|s| s.as_str()).map(String::from),
+        outcome_kind: task
+            .outcome_kind
+            .map(|k| k.as_str().to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        artifact_count: task.artifact_count,
+        artifacts: v
+            .get("artifacts")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        no_artifact_reason: v
+            .get("no_artifact_reason")
+            .and_then(|s| s.as_str())
+            .map(String::from),
+    })
+}
+
 pub(super) fn db_task_to_json(task: &Task) -> String {
     let mut obj = serde_json::json!({
         "task_id": task.id,
@@ -407,22 +444,11 @@ pub(super) fn db_task_to_json(task: &Task) -> String {
         "artifact_count": task.artifact_count,
     });
 
-    // Parse outcome_json into structured fields instead of raw string
-    if let Some(ref oj) = task.outcome_json {
-        if let Ok(outcome) = serde_json::from_str::<serde_json::Value>(oj) {
-            obj["outcome_summary"] = outcome
-                .get("summary")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-            obj["no_artifact_reason"] = outcome
-                .get("no_artifact_reason")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-            obj["artifacts"] = outcome
-                .get("artifacts")
-                .cloned()
-                .unwrap_or(serde_json::json!([]));
-        }
+    // Parse outcome_json into structured fields via shared parser
+    if let Some(parsed) = parse_outcome(task) {
+        obj["outcome_summary"] = serde_json::json!(parsed.outcome_summary);
+        obj["no_artifact_reason"] = serde_json::json!(parsed.no_artifact_reason);
+        obj["artifacts"] = serde_json::json!(parsed.artifacts);
     }
 
     // Parse state_json to extract DAG node details if available

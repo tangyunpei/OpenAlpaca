@@ -858,7 +858,7 @@ pub(super) fn finalize_task(
             task_id: task_id.to_string(),
             result_summary: Some(summary.to_string()),
             outcome_kind: outcome_kind.map(|k| k.as_str().to_string()),
-            artifact_count: Some(artifact_count.unwrap_or(0)),
+            artifact_count,
             outcome_summary: outcome_summary.map(|s| s.chars().take(500).collect()),
             timestamp: now,
         });
