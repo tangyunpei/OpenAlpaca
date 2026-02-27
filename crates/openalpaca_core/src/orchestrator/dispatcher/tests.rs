@@ -36,6 +36,7 @@ fn setup_with_config(agents: Vec<SubAgent>, config: DaemonConfig) -> TaskDispatc
         None,
         None,
         daemon_config,
+        Arc::new(std::sync::RwLock::new(None)),
     )
 }
 

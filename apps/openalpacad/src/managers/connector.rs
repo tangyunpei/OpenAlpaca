@@ -90,10 +90,13 @@ impl ConnectorManager {
 
     /// List status of all potential connectors
     pub async fn list_status(&self) -> Vec<(String, String)> {
-        // Optimize: Get running connectors and release lock immediately
-        let running_connectors: Vec<String> = {
+        // Collect (name, is_alive) pairs and release lock immediately
+        let handle_info: Vec<(String, bool)> = {
             let guard = self.handles.lock().await;
-            guard.keys().cloned().collect()
+            guard
+                .iter()
+                .map(|(k, v)| (k.clone(), v.is_alive()))
+                .collect()
         };
 
         let config_repo = ConfigRepository::new(&self.db);
@@ -107,8 +110,13 @@ impl ConnectorManager {
             // they are "configured" by virtue of being on the right platform.
             let token_optional = matches!(name, "imessage");
 
-            let status = if running_connectors.contains(&name.to_string()) {
-                "active".to_string()
+            let status = if let Some((_, alive)) = handle_info.iter().find(|(n, _)| n == name) {
+                if *alive {
+                    "active".to_string()
+                } else {
+                    // Handle exists but the spawned task has exited/crashed
+                    "error".to_string()
+                }
             } else {
                 let has_token = config_repo
                     .get(&format!("{}.token", name))

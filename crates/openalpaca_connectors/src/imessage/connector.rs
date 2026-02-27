@@ -257,11 +257,6 @@ impl IMessageConnector {
             "iMessage connector started with routing config"
         );
 
-        if initial_config.bot_handle.is_none() && initial_config.allow_from_me {
-            warn!("imessage.bot_handle not configured — bot may process its own replies, \
-                   causing a feedback loop. Set this to the Mac's iMessage sending address.");
-        }
-
         loop {
             tokio::select! {
                 _ = self.cancel_token.cancelled() => {
@@ -320,7 +315,7 @@ impl IMessageConnector {
             .ok()
             .flatten()
             .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         let direct_require_prefix = config_repo
             .get_or_default("imessage.direct_require_prefix")
@@ -337,7 +332,7 @@ impl IMessageConnector {
             .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
             .unwrap_or(true);
 
-        let owner_handles: Vec<String> = config_repo
+        let mut owner_handles: Vec<String> = config_repo
             .get("imessage.owner_handles")
             .ok()
             .flatten()
@@ -355,6 +350,34 @@ impl IMessageConnector {
             .flatten()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
+
+        // Auto-populate owner_handles from bot_handle when empty.
+        // This ensures that self-sent messages (e.g. from iPhone) are recognized
+        // as owner messages without requiring explicit owner_handles configuration.
+        if owner_handles.is_empty()
+            && let Some(ref bh) = bot_handle
+        {
+            let normalized = normalize_handle(bh);
+            if !normalized.is_empty() {
+                owner_handles.push(normalized);
+            }
+        }
+
+        // Safety: force-disable allow_from_me when bot_handle is missing
+        // to prevent feedback loops (bot processes its own replies)
+        let allow_from_me = if bot_handle.is_none() && allow_from_me {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                warn!(
+                    "imessage.bot_handle not configured — forcing allow_from_me=false to prevent feedback loop. \
+                     Set imessage.bot_handle to the Mac's iMessage sending address to enable allow_from_me."
+                );
+            }
+            false
+        } else {
+            allow_from_me
+        };
 
         IMessageConfig {
             allow_from_me,
@@ -552,9 +575,20 @@ impl IMessageConnector {
         if let Err(e) = pref_repo.set(&global_id, "imessage.last_is_group", &reply_is_group.to_string(), None) {
             warn!("Failed to persist imessage.last_is_group: {e}");
         }
+        // Persist the receiving account so outbound sends use the same one
+        if !msg.account.is_empty()
+            && let Err(e) = pref_repo.set(&global_id, "imessage.last_send_account", &msg.account, None)
+        {
+            warn!("Failed to persist imessage.last_send_account: {e}");
+        }
 
-        // Step 4: Send response using stable reply target
-        IMessageSender::send(&reply_target, &response.content, reply_is_group)
+        // Step 4: Send response using stable reply target + the same account that received
+        let from_account = if msg.account.is_empty() {
+            None
+        } else {
+            Some(msg.account.as_str())
+        };
+        IMessageSender::send_from(&reply_target, &response.content, reply_is_group, from_account)
             .await
             .map_err(|e| format!("Send failed: {}", e))?;
 

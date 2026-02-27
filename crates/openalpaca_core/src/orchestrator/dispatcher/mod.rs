@@ -14,12 +14,14 @@ use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
 use crate::events::SystemEvent;
 use crate::lane::LaneManager;
+use crate::orchestrator::ConnectorStatusProvider;
 use crate::security::gate::SecurityGate;
 use arc_swap::ArcSwap;
 use chrono::Utc;
 use openalpaca_llm::LlmRouter;
 use openalpaca_storage::Database;
 use std::sync::Arc;
+use std::sync::RwLock;
 use uuid::Uuid;
 
 use crate::tools::ToolRegistry;
@@ -189,6 +191,7 @@ pub struct TaskDispatcher {
     db: Option<Database>,
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
+    connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
 }
 
 impl TaskDispatcher {
@@ -203,6 +206,7 @@ impl TaskDispatcher {
         db: Option<Database>,
         embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
+        connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
     ) -> Self {
         Self {
             shared_context,
@@ -215,6 +219,19 @@ impl TaskDispatcher {
             db,
             embedder,
             daemon_config,
+            connector_status,
+        }
+    }
+
+    /// Snapshot connector statuses for prompt injection.
+    fn connector_guidance_block(&self) -> String {
+        if let Ok(guard) = self.connector_status.read()
+            && let Some(ref provider) = *guard
+        {
+            let statuses = provider.list_status();
+            crate::middleware::prompt::format_connector_guidance(&statuses)
+        } else {
+            String::new()
         }
     }
 

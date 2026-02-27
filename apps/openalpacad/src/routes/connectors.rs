@@ -26,6 +26,7 @@ pub struct ConnectorActionBody {
 /// List all connectors and their status
 pub async fn list_connectors_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let statuses = state.connector_manager.list_status().await;
+    let config_repo = openalpaca_storage::ConfigRepository::new(&state.db);
 
     let response: Vec<ConnectorStatus> = statuses
         .into_iter()
@@ -35,11 +36,22 @@ pub async fn list_connectors_handler(State(state): State<Arc<AppState>>) -> impl
                 "imessage" => "iMessage",
                 _ => &id,
             };
+            // Token-optional connectors (iMessage) are always "configured" on their platform.
+            // Token-required connectors are configured only if a token is set.
+            let configured = match id.as_str() {
+                "imessage" => true,
+                _ => config_repo
+                    .get(&format!("{}.token", id))
+                    .ok()
+                    .flatten()
+                    .filter(|t| !t.is_empty())
+                    .is_some(),
+            };
             ConnectorStatus {
                 id: id.clone(),
                 name: name.to_string(),
                 status,
-                configured: true, // For now assume configured if we know about it
+                configured,
             }
         })
         .collect();

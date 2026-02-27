@@ -194,7 +194,13 @@ impl TelegramConnector {
 
     /// Start the connector (blocking, runs the teloxide dispatcher).
     /// Returns a ShutdownToken to stop the dispatcher.
-    pub async fn run_with_signal(self) -> teloxide::dispatching::ShutdownToken {
+    ///
+    /// The `running` flag is wrapped in a `RunningGuard` inside the spawned
+    /// task so that `is_alive()` returns `false` once the dispatcher exits.
+    pub async fn run_with_signal(
+        self,
+        running: Arc<std::sync::atomic::AtomicBool>,
+    ) -> teloxide::dispatching::ShutdownToken {
         info!("Starting Telegram Connector...");
 
         let handler = Update::filter_message().endpoint(Self::handle_message);
@@ -212,8 +218,9 @@ impl TelegramConnector {
 
         let token = dispatcher.shutdown_token();
 
-        // Spawn dispatcher loop so we can return token
+        let guard = crate::startup::RunningGuard(running);
         tokio::spawn(async move {
+            let _guard = guard;
             dispatcher.dispatch().await;
             info!("Telegram connector dispatcher finished");
         });

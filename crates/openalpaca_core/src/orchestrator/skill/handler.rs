@@ -5,7 +5,10 @@ use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::bootstrap::bootstrap_to_prompt_block;
 use crate::middleware::guard::OutputGuard;
 use crate::middleware::identity::identity_to_prompt_block;
-use crate::middleware::prompt::{AgentPersona, PromptAssembler, format_tool_guidance};
+use crate::middleware::prompt::{
+    AgentPersona, PromptAssembler, format_connector_guidance, format_message_source,
+    format_tool_guidance,
+};
 use crate::middleware::skill::{SkillFrontmatter, skill_to_prompt_block};
 use crate::middleware::user::user_to_prompt_block;
 use crate::orchestrator::{ConversationContext, Orchestrator};
@@ -49,7 +52,7 @@ impl Orchestrator {
     pub(in crate::orchestrator) async fn handle_skill_invocation(
         &self,
         request_id: Uuid,
-        _source: &str,
+        source: &str,
         skill_name: &str,
         query: &str,
         _lane_key: &str,
@@ -68,7 +71,9 @@ impl Orchestrator {
         });
 
         let result = self
-            .handle_skill_invocation_inner(request_id, skill_name, query, ctx, owner_id, scope_ctx)
+            .handle_skill_invocation_inner(
+                request_id, source, skill_name, query, ctx, owner_id, scope_ctx,
+            )
             .await;
 
         // Emit SkillCompleted or SkillFailed based on result
@@ -100,6 +105,7 @@ impl Orchestrator {
     async fn handle_skill_invocation_inner(
         &self,
         request_id: Uuid,
+        source: &str,
         skill_name: &str,
         query: &str,
         ctx: &ConversationContext,
@@ -170,6 +176,15 @@ impl Orchestrator {
             });
         }
 
+        // Connector awareness: message source is always useful for context
+        let source_block = format_message_source(source);
+        if !source_block.is_empty() {
+            system_prompt.push('\n');
+            system_prompt.push_str(&source_block);
+        }
+        // NOTE: Full connector guidance (with send_message tool mention) is injected
+        // later, after tool_names is resolved, only if send_message is available.
+
         // Inject agent identity if available
         if let Ok(guard) = self.identity_document.read()
             && let Some(ref doc) = *guard
@@ -230,6 +245,22 @@ impl Orchestrator {
                 skill_name,
                 missing
             );
+        }
+
+        // Connector guidance: only inject full guidance (mentioning send_message tool)
+        // if send_message is actually resolved in tool_defs. Checking tool_defs (not
+        // tool_names) ensures we don't mention a tool the registry couldn't resolve.
+        if tool_defs.iter().any(|d| d.name == "send_message") {
+            if let Ok(guard) = self.connector_status.read()
+                && let Some(ref provider) = *guard
+            {
+                let statuses = provider.list_status();
+                let block = format_connector_guidance(&statuses);
+                if !block.is_empty() {
+                    system_prompt.push('\n');
+                    system_prompt.push_str(&block);
+                }
+            }
         }
 
         let (tools_for_loop, policy_opt, config_for_loop);
