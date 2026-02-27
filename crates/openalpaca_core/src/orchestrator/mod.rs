@@ -402,10 +402,28 @@ pub(super) fn db_task_to_json(task: &Task) -> String {
         "result_summary": task.result_summary,
         "created_at": task.created_at.to_rfc3339(),
         "updated_at": task.updated_at.to_rfc3339(),
+        "completed_at": task.completed_at.map(|ts| ts.to_rfc3339()),
         "outcome_kind": task.outcome_kind.map(|k| k.as_str()),
         "artifact_count": task.artifact_count,
-        "outcome_json": task.outcome_json.as_deref(),
     });
+
+    // Parse outcome_json into structured fields instead of raw string
+    if let Some(ref oj) = task.outcome_json {
+        if let Ok(outcome) = serde_json::from_str::<serde_json::Value>(oj) {
+            obj["outcome_summary"] = outcome
+                .get("summary")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            obj["no_artifact_reason"] = outcome
+                .get("no_artifact_reason")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            obj["artifacts"] = outcome
+                .get("artifacts")
+                .cloned()
+                .unwrap_or(serde_json::json!([]));
+        }
+    }
 
     // Parse state_json to extract DAG node details if available
     if let Some(ref sj) = task.state_json

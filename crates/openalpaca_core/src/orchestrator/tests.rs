@@ -9,6 +9,7 @@ use crate::tools::{RegistryToolExecutor, ToolRegistry};
 use async_trait::async_trait;
 use base64::Engine as _;
 use openalpaca_llm::{ChatRequest, ContentPart, ImageSource};
+use openalpaca_storage::{OutcomeKind, TaskStatus};
 use uuid::Uuid;
 
 fn make_tool_registry() -> Arc<ToolRegistry> {
@@ -1276,4 +1277,94 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
         "Attachment text should not drive tool suggestion; got tools: {:?}",
         req.tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
     );
+}
+
+// ── db_task_to_json tests ───────────────────────────────────────────
+
+fn make_test_task() -> openalpaca_storage::Task {
+    openalpaca_storage::Task {
+        id: "task-1".to_string(),
+        title: "Test task".to_string(),
+        description: Some("A test task".to_string()),
+        status: TaskStatus::Completed,
+        priority: 0,
+        progress_current: Some(3),
+        progress_total: Some(3),
+        result_summary: Some("All done".to_string()),
+        created_by: "user-1".to_string(),
+        source_lane: "lane-1".to_string(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        completed_at: Some(chrono::Utc::now()),
+        state_json: None,
+        state_version: 1,
+        outcome_json: None,
+        outcome_kind: None,
+        artifact_count: 0,
+    }
+}
+
+#[test]
+fn test_db_task_to_json_includes_parsed_outcome() {
+    let mut task = make_test_task();
+    task.outcome_kind = Some(OutcomeKind::Mixed);
+    task.artifact_count = 2;
+    task.outcome_json = Some(
+        serde_json::json!({
+            "summary": "Generated a report and chart",
+            "outcome_kind": "mixed",
+            "no_artifact_reason": null,
+            "artifacts": [
+                {"path": "/tmp/report.pdf", "label": "Report"},
+                {"path": "/tmp/chart.png", "label": "Chart"},
+            ]
+        })
+        .to_string(),
+    );
+
+    let json_str = db_task_to_json(&task);
+    let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+    assert_eq!(v["outcome_summary"], "Generated a report and chart");
+    assert_eq!(v["outcome_kind"], "mixed");
+    assert_eq!(v["artifact_count"], 2);
+    assert!(v["artifacts"].as_array().unwrap().len() == 2);
+    assert!(v["no_artifact_reason"].is_null());
+    // completed_at should be present
+    assert!(v["completed_at"].is_string());
+    // raw outcome_json should NOT be present
+    assert!(v.get("outcome_json").is_none());
+}
+
+#[test]
+fn test_db_task_to_json_handles_no_outcome() {
+    let task = make_test_task();
+
+    let json_str = db_task_to_json(&task);
+    let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+    assert_eq!(v["task_id"], "task-1");
+    assert_eq!(v["status"], "completed");
+    // No outcome_summary or artifacts fields when outcome_json is None
+    assert!(v.get("outcome_summary").is_none());
+    assert!(v.get("artifacts").is_none());
+    assert!(v.get("no_artifact_reason").is_none());
+    // completed_at still present
+    assert!(v["completed_at"].is_string());
+}
+
+#[test]
+fn test_db_task_to_json_handles_malformed_outcome() {
+    let mut task = make_test_task();
+    task.outcome_json = Some("not valid json {{{".to_string());
+
+    let json_str = db_task_to_json(&task);
+    let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+    // Should not crash — malformed JSON is silently ignored
+    assert_eq!(v["task_id"], "task-1");
+    // No parsed outcome fields
+    assert!(v.get("outcome_summary").is_none());
+    assert!(v.get("artifacts").is_none());
+    assert!(v.get("no_artifact_reason").is_none());
 }
