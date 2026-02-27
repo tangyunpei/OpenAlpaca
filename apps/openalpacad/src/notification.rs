@@ -71,30 +71,76 @@ impl NotificationDispatcher {
                 SystemEvent::TaskCompleted {
                     task_id,
                     result_summary,
+                    outcome_kind,
+                    artifact_count,
+                    outcome_summary,
                     ..
                 } => {
-                    self.handle_completion(&task_id, result_summary.as_deref())
-                        .await;
+                    self.handle_completion(
+                        &task_id,
+                        result_summary.as_deref(),
+                        outcome_kind.as_deref(),
+                        artifact_count,
+                        outcome_summary.as_deref(),
+                    )
+                    .await;
                 }
-                SystemEvent::TaskFailed { task_id, error, .. } => {
-                    self.handle_failure(&task_id, &error).await;
+                SystemEvent::TaskFailed {
+                    task_id,
+                    error,
+                    outcome_kind,
+                    ..
+                } => {
+                    self.handle_failure(&task_id, &error, outcome_kind.as_deref())
+                        .await;
                 }
                 _ => {}
             }
         }
     }
 
-    async fn handle_completion(&self, task_id: &str, summary: Option<&str>) {
+    async fn handle_completion(
+        &self,
+        task_id: &str,
+        summary: Option<&str>,
+        outcome_kind: Option<&str>,
+        artifact_count: Option<i32>,
+        outcome_summary: Option<&str>,
+    ) {
         let repo = TaskRepository::new(&self.db);
         let task = match repo.get(task_id) {
             Ok(Some(t)) => t,
             _ => return,
         };
 
+        // Use outcome_summary if available, fall back to result_summary
+        let display_summary = outcome_summary.or(summary).unwrap_or("Done");
+
+        // Build outcome-aware notification content
+        let outcome_line = match outcome_kind {
+            Some("text_only") => "\nNo files were produced.".to_string(),
+            Some("artifact_only") => {
+                let count = artifact_count.unwrap_or(0);
+                format!(
+                    "\n{} file{} produced.",
+                    count,
+                    if count != 1 { "s" } else { "" }
+                )
+            }
+            Some("mixed") => {
+                let count = artifact_count.unwrap_or(0);
+                format!(
+                    "\n{} file{} produced (with text summary).",
+                    count,
+                    if count != 1 { "s" } else { "" }
+                )
+            }
+            _ => String::new(),
+        };
+
         let content = format!(
-            "Task completed: {}\n\n{}",
-            task.title,
-            summary.unwrap_or("Done")
+            "Task completed: {}\n\n{}{}",
+            task.title, display_summary, outcome_line
         );
 
         // source_lane format: "{user_id}:telegram" or "{user_id}:imessage"
@@ -117,14 +163,23 @@ impl NotificationDispatcher {
         }
     }
 
-    async fn handle_failure(&self, task_id: &str, error: &str) {
+    async fn handle_failure(&self, task_id: &str, error: &str, outcome_kind: Option<&str>) {
         let repo = TaskRepository::new(&self.db);
         let task = match repo.get(task_id) {
             Ok(Some(t)) => t,
             _ => return,
         };
 
-        let content = format!("Task failed: {}\n\nError: {}", task.title, error);
+        let content = format!(
+            "Task failed: {}\n\nError: {}{}",
+            task.title,
+            error,
+            if outcome_kind == Some("failed") {
+                "\nNo files were produced."
+            } else {
+                ""
+            }
+        );
 
         if task.source_lane.ends_with(":telegram") {
             if let Some(chat_id) = self.resolve_telegram_chat_id(&task.source_lane)
