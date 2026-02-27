@@ -756,13 +756,43 @@ pub(super) fn build_task_outcome(
     }
 }
 
+/// Log warnings for inconsistent terminal task states.
+///
+/// This is observability-only (never blocks or fails). It catches cases like:
+/// - Empty outcome summary at terminal time
+/// - success=true but outcome_kind=Failed (or vice versa)
+fn check_terminal_consistency(task_id: &str, success: bool, outcome: &TaskOutcome) {
+    if outcome.summary.is_empty() {
+        tracing::warn!(
+            task_id,
+            success,
+            outcome_kind = %outcome.outcome_kind.as_str(),
+            "Terminal task has empty outcome summary"
+        );
+    }
+    if success && outcome.outcome_kind == OutcomeKind::Failed {
+        tracing::warn!(
+            task_id,
+            "Task marked successful but outcome_kind=Failed — inconsistent state"
+        );
+    }
+    if !success && outcome.outcome_kind != OutcomeKind::Failed {
+        tracing::warn!(
+            task_id,
+            outcome_kind = %outcome.outcome_kind.as_str(),
+            "Task marked failed but outcome_kind is not Failed — inconsistent state"
+        );
+    }
+}
+
 /// Finalize a task with a structured outcome.
 ///
 /// This is the unified replacement for the ad-hoc assembly in each execution mode.
 /// It:
 /// 1. Builds the TaskOutcome (via `build_task_outcome`)
-/// 2. Persists the outcome to DB (outcome_json, outcome_kind, artifact_count)
-/// 3. Delegates to `finalize_task` for status update, `result_summary`, and event emission
+/// 2. Checks terminal consistency (log-only warnings)
+/// 3. Persists the outcome to DB (outcome_json, outcome_kind, artifact_count)
+/// 4. Delegates to `finalize_task` for status update, `result_summary`, and event emission
 pub(super) fn finalize_task_with_outcome(
     ctx: &crate::context::SharedContext,
     bus: &crate::bus::EventBus,
@@ -772,6 +802,9 @@ pub(super) fn finalize_task_with_outcome(
     success: bool,
 ) -> TaskOutcome {
     let outcome = build_task_outcome(db, task_id, final_content, success);
+
+    // Observability: log warnings for inconsistent terminal states
+    check_terminal_consistency(task_id, success, &outcome);
 
     // Persist structured outcome fields to DB (outcome_json, outcome_kind, artifact_count)
     if let Some(db) = db {

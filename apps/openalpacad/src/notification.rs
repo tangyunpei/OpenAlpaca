@@ -835,4 +835,56 @@ mod tests {
         // Both checks result in skipping, which is the desired behavior.
         deliver_artifacts(&db, &send, "task_1", "telegram", "12345", Some(outcome_json)).await;
     }
+
+    // ── Phase 12-B: Edge-case notification tests ──────────────────────
+
+    #[test]
+    fn test_format_completion_handles_very_long_summary() {
+        // Summary > 2000 chars should not panic or truncate at the format level
+        let long_summary: String = "x".repeat(3000);
+        let msg = format_completion_message(
+            "Long task",
+            Some(&long_summary),
+            Some("text_only"),
+            None,
+            None,
+        );
+        assert!(msg.contains("Task completed: Long task"));
+        // The long summary should appear in the message (format_completion_message
+        // does not truncate — truncation is handled by finalize_task_with_outcome)
+        assert!(msg.contains(&long_summary));
+        assert!(msg.contains("No files were produced."));
+
+        // Also test with outcome_summary being long
+        let long_outcome: String = "y".repeat(5000);
+        let msg2 = format_completion_message(
+            "Long outcome",
+            Some("short"),
+            Some("mixed"),
+            Some(2),
+            Some(&long_outcome),
+        );
+        assert!(msg2.contains(&long_outcome));
+        assert!(msg2.contains("2 files produced (with text summary)."));
+    }
+
+    #[tokio::test]
+    async fn test_deliver_artifacts_handles_malformed_outcome_json() {
+        let db = test_db();
+        let send = MockSendProvider {
+            file_capable: vec!["telegram".to_string()],
+        };
+
+        // Completely invalid JSON — should return early without panic
+        deliver_artifacts(&db, &send, "task_1", "telegram", "12345", Some("{invalid json!!!}")).await;
+
+        // Valid JSON but wrong structure — should return early without panic
+        deliver_artifacts(&db, &send, "task_2", "telegram", "12345", Some(r#"{"foo":"bar"}"#)).await;
+
+        // Empty string — should return early without panic
+        deliver_artifacts(&db, &send, "task_3", "telegram", "12345", Some("")).await;
+
+        // None — should return early without panic
+        deliver_artifacts(&db, &send, "task_4", "telegram", "12345", None).await;
+    }
 }
