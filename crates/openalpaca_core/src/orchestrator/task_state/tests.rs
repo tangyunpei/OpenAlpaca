@@ -691,3 +691,86 @@ fn test_collect_artifacts_from_workspace() {
     assert_eq!(artifacts[1].key, "chart.png");
     assert_eq!(artifacts[1].agent_id, "a2");
 }
+
+// ── Issue #3/#4: DAG state persistence & artifact consistency tests ──
+
+#[test]
+fn test_build_outcome_dag_with_workspace_artifacts() {
+    // Simulates the scenario where DAG nodes completed and workspace has
+    // Artifact entries. build_outcome_dag() should produce Mixed kind
+    // and collect workspace artifacts even when steps are not "completed".
+    let mut state = TaskState::initial("dag task", &make_assignments());
+    state.dag = Some(TaskDag {
+        nodes: vec![make_dag_node(
+            "n1",
+            DagNodeStatus::Completed,
+            Some("Analysis finished"),
+        )],
+    });
+
+    // Write an Artifact entry to workspace (as if agent wrote during DAG execution)
+    state
+        .workspace
+        .write(
+            "results.csv",
+            "col1,col2\n1,2",
+            "agent_n1",
+            WorkspaceEntryType::Artifact,
+            &[],
+        )
+        .unwrap();
+
+    let outcome = state.build_outcome_dag("fallback", None);
+    // Should be Mixed: has both text summary from node and artifact from workspace
+    assert_eq!(outcome.outcome_kind, OutcomeKind::Mixed);
+    assert_eq!(outcome.artifacts.len(), 1);
+    assert_eq!(outcome.artifacts[0].key, "results.csv");
+    assert_eq!(outcome.artifacts[0].agent_id, "agent_n1");
+    assert_eq!(outcome.artifacts[0].step_order, -1); // workspace-sourced
+    assert!(outcome.summary.contains("Analysis finished"));
+    assert!(outcome.no_artifact_reason.is_none());
+}
+
+#[test]
+fn test_scan_workspace_artifacts_all_steps() {
+    // Verifies that scanning all steps populates artifact_pointers for each
+    // step based on its agent's workspace Artifact entries.
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Step 0 done");
+    state.mark_step_running(1);
+    state.mark_step_completed(1, "Step 1 done");
+
+    // Write Artifact entries by each step's agent
+    state
+        .workspace
+        .write("data.csv", "raw data", "a1", WorkspaceEntryType::Artifact, &[])
+        .unwrap();
+    state
+        .workspace
+        .write("report.pdf", "report", "a2", WorkspaceEntryType::Artifact, &[])
+        .unwrap();
+    // Also write a non-artifact entry that should be ignored
+    state
+        .workspace
+        .write("notes.txt", "context", "a1", WorkspaceEntryType::Context, &[])
+        .unwrap();
+
+    // Scan all steps (the pattern used in the final state write)
+    let step_orders: Vec<i32> = state.steps.iter().map(|s| s.step_order).collect();
+    for order in step_orders {
+        state.scan_workspace_artifacts(order);
+    }
+
+    // Step 0 (agent "a1") should have "data.csv" but not "notes.txt" (Context)
+    assert_eq!(state.steps[0].artifact_pointers.len(), 1);
+    let ptr0: serde_json::Value =
+        serde_json::from_str(&state.steps[0].artifact_pointers[0]).unwrap();
+    assert_eq!(ptr0["key"], "data.csv");
+
+    // Step 1 (agent "a2") should have "report.pdf"
+    assert_eq!(state.steps[1].artifact_pointers.len(), 1);
+    let ptr1: serde_json::Value =
+        serde_json::from_str(&state.steps[1].artifact_pointers[0]).unwrap();
+    assert_eq!(ptr1["key"], "report.pdf");
+}
