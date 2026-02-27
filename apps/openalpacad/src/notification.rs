@@ -143,10 +143,11 @@ impl NotificationDispatcher {
                     let task_id = task_id.to_string();
                     let chat_id_str = chat_id.to_string();
                     let outcome_json = task.outcome_json.clone();
+                    let owner = task.created_by.clone();
                     tokio::spawn(async move {
                         let _ = tokio::time::timeout(
                             std::time::Duration::from_secs(60),
-                            deliver_artifacts(&db, &*send, &task_id, "telegram", &chat_id_str, outcome_json.as_deref()),
+                            deliver_artifacts(&db, &*send, &task_id, "telegram", &chat_id_str, outcome_json.as_deref(), &owner),
                         ).await;
                     });
                 }
@@ -168,10 +169,11 @@ impl NotificationDispatcher {
                     let task_id = task_id.to_string();
                     let chat_id_str = chat_id.to_string();
                     let outcome_json = task.outcome_json.clone();
+                    let owner = task.created_by.clone();
                     tokio::spawn(async move {
                         let _ = tokio::time::timeout(
                             std::time::Duration::from_secs(60),
-                            deliver_artifacts(&db, &*send, &task_id, "telegram", &chat_id_str, outcome_json.as_deref()),
+                            deliver_artifacts(&db, &*send, &task_id, "telegram", &chat_id_str, outcome_json.as_deref(), &owner),
                         ).await;
                     });
                 }
@@ -462,29 +464,45 @@ const MAX_ARTIFACT_FILE_SIZE: i64 = 50 * 1024 * 1024;
 /// Maximum number of artifacts to deliver per task.
 const MAX_ARTIFACTS_PER_TASK: usize = 5;
 
-/// Resolve a file asset for an artifact pointer.
+/// Resolve a file asset for an artifact pointer with owner validation.
 ///
 /// Resolution strategy:
 /// 1. Use `file_asset_id` if present
 /// 2. Try `key` as a file_asset ID fallback
 /// 3. Return None (workspace-only artifact)
+///
+/// After resolving, validates that the asset belongs to `expected_owner`.
+/// Returns None (with a warning) if the owner doesn't match — prevents
+/// delivering files belonging to another user.
 pub(crate) fn resolve_artifact_file(
     repo: &FileAssetRepository<'_>,
     file_asset_id: Option<&str>,
     key: &str,
+    expected_owner: &str,
 ) -> Option<openalpaca_storage::FileAsset> {
     // 1. Explicit file_asset_id
-    if let Some(id) = file_asset_id {
-        if let Ok(Some(asset)) = repo.get_by_id(id) {
-            return Some(asset);
-        }
-    }
+    let asset = if let Some(id) = file_asset_id {
+        repo.get_by_id(id).ok().flatten()
+    } else {
+        None
+    };
     // 2. Try key as file_asset ID fallback
-    if let Ok(Some(asset)) = repo.get_by_id(key) {
-        return Some(asset);
+    let asset = asset.or_else(|| repo.get_by_id(key).ok().flatten());
+
+    // 3. Validate owner
+    match asset {
+        Some(a) if a.owner_id == expected_owner => Some(a),
+        Some(a) => {
+            warn!(
+                file_id = %a.id,
+                actual_owner = %a.owner_id,
+                expected_owner,
+                "Artifact file owner mismatch — skipping delivery"
+            );
+            None
+        }
+        None => None,
     }
-    // 3. Workspace-only artifact
-    None
 }
 
 /// Deliver artifact files to a channel. Called from a spawned task with timeout.
@@ -495,6 +513,7 @@ async fn deliver_artifacts(
     channel: &str,
     recipient: &str,
     outcome_json: Option<&str>,
+    expected_owner: &str,
 ) {
     use openalpaca_core::orchestrator::task_state::TaskOutcome;
 
@@ -522,6 +541,7 @@ async fn deliver_artifacts(
             &file_repo,
             artifact.file_asset_id.as_deref(),
             &artifact.key,
+            expected_owner,
         ) {
             Some(a) => a,
             None => continue,
@@ -757,7 +777,7 @@ mod tests {
         let asset = make_file_asset("asset_1", "/tmp/test.pdf", 1024);
         repo.insert(&asset).unwrap();
 
-        let result = resolve_artifact_file(&repo, Some("asset_1"), "some_workspace_key");
+        let result = resolve_artifact_file(&repo, Some("asset_1"), "some_workspace_key", "user1");
         assert!(result.is_some());
         assert_eq!(result.unwrap().id, "asset_1");
     }
@@ -770,7 +790,7 @@ mod tests {
         repo.insert(&asset).unwrap();
 
         // No file_asset_id, but key matches a file_asset ID
-        let result = resolve_artifact_file(&repo, None, "key_as_id");
+        let result = resolve_artifact_file(&repo, None, "key_as_id", "user1");
         assert!(result.is_some());
         assert_eq!(result.unwrap().id, "key_as_id");
     }
@@ -781,7 +801,19 @@ mod tests {
         let repo = FileAssetRepository::new(&db);
 
         // No file_asset_id, key doesn't match any file_asset ID
-        let result = resolve_artifact_file(&repo, None, "workspace_only_key");
+        let result = resolve_artifact_file(&repo, None, "workspace_only_key", "user1");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_artifact_file_rejects_wrong_owner() {
+        let db = test_db();
+        let repo = FileAssetRepository::new(&db);
+        let asset = make_file_asset("asset_1", "/tmp/test.pdf", 1024);
+        repo.insert(&asset).unwrap(); // owner_id = "user1"
+
+        // Wrong owner — should return None
+        let result = resolve_artifact_file(&repo, Some("asset_1"), "key", "user2");
         assert!(result.is_none());
     }
 
@@ -813,7 +845,7 @@ mod tests {
         let outcome_json = r#"{"summary":"done","outcome_kind":"mixed","artifacts":[{"key":"k","label":"l","agent_id":"a","step_order":0}]}"#;
         // Channel is "imessage" which is NOT in file_capable_channels
         // This should return early without error
-        deliver_artifacts(&db, &send, "task_1", "imessage", "12345", Some(outcome_json)).await;
+        deliver_artifacts(&db, &send, "task_1", "imessage", "12345", Some(outcome_json), "user1").await;
         // No assertion needed — just verifying no panic
     }
 
@@ -833,7 +865,7 @@ mod tests {
         // This should skip the oversized file without panic (file doesn't exist on disk either,
         // but the size check comes after the exists check — so it will be skipped at exists check).
         // Both checks result in skipping, which is the desired behavior.
-        deliver_artifacts(&db, &send, "task_1", "telegram", "12345", Some(outcome_json)).await;
+        deliver_artifacts(&db, &send, "task_1", "telegram", "12345", Some(outcome_json), "user1").await;
     }
 
     // ── Phase 12-B: Edge-case notification tests ──────────────────────
@@ -876,15 +908,15 @@ mod tests {
         };
 
         // Completely invalid JSON — should return early without panic
-        deliver_artifacts(&db, &send, "task_1", "telegram", "12345", Some("{invalid json!!!}")).await;
+        deliver_artifacts(&db, &send, "task_1", "telegram", "12345", Some("{invalid json!!!}"), "user1").await;
 
         // Valid JSON but wrong structure — should return early without panic
-        deliver_artifacts(&db, &send, "task_2", "telegram", "12345", Some(r#"{"foo":"bar"}"#)).await;
+        deliver_artifacts(&db, &send, "task_2", "telegram", "12345", Some(r#"{"foo":"bar"}"#), "user1").await;
 
         // Empty string — should return early without panic
-        deliver_artifacts(&db, &send, "task_3", "telegram", "12345", Some("")).await;
+        deliver_artifacts(&db, &send, "task_3", "telegram", "12345", Some(""), "user1").await;
 
         // None — should return early without panic
-        deliver_artifacts(&db, &send, "task_4", "telegram", "12345", None).await;
+        deliver_artifacts(&db, &send, "task_4", "telegram", "12345", None, "user1").await;
     }
 }

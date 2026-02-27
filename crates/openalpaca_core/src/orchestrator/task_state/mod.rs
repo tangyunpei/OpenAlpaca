@@ -237,11 +237,14 @@ impl StepState {
 
     /// Add an artifact pointer for this step.
     ///
-    /// Stored as JSON `{"key":"...","label":"..."}` to avoid delimiter ambiguity
-    /// (keys may contain `:` in file paths or workspace identifiers).
-    pub fn add_artifact(&mut self, key: &str, label: &str) {
-        let json = serde_json::json!({"key": key, "label": label}).to_string();
-        self.artifact_pointers.push(json);
+    /// Stored as JSON `{"key":"...","label":"...","file_asset_id":"..."}` to avoid
+    /// delimiter ambiguity (keys may contain `:` in file paths or workspace identifiers).
+    pub fn add_artifact(&mut self, key: &str, label: &str, file_asset_id: Option<&str>) {
+        let mut obj = serde_json::json!({"key": key, "label": label});
+        if let Some(id) = file_asset_id {
+            obj["file_asset_id"] = serde_json::Value::String(id.to_string());
+        }
+        self.artifact_pointers.push(obj.to_string());
     }
 
     /// Whether this step produced any artifacts.
@@ -343,9 +346,9 @@ impl TaskState {
     }
 
     /// Add an artifact pointer to a specific step.
-    pub fn add_step_artifact(&mut self, step_order: i32, key: &str, label: &str) {
+    pub fn add_step_artifact(&mut self, step_order: i32, key: &str, label: &str, file_asset_id: Option<&str>) {
         if let Some(step) = self.steps.iter_mut().find(|s| s.step_order == step_order) {
-            step.add_artifact(key, label);
+            step.add_artifact(key, label, file_asset_id);
         }
         self.updated_at = Utc::now();
     }
@@ -388,7 +391,7 @@ impl TaskState {
         if !new_artifacts.is_empty() {
             if let Some(step) = self.steps.iter_mut().find(|s| s.step_order == step_order) {
                 for (key, label) in new_artifacts {
-                    step.add_artifact(&key, &label);
+                    step.add_artifact(&key, &label, None);
                 }
             }
             self.updated_at = Utc::now();
@@ -405,22 +408,23 @@ impl TaskState {
         for step in &self.steps {
             if step.status == "completed" {
                 for raw_pointer in &step.artifact_pointers {
-                    // Parse JSON format: {"key":"...","label":"..."}
+                    // Parse JSON format: {"key":"...","label":"...","file_asset_id":"..."}
                     // Falls back to using the raw string as both key and label
-                    let (key, label) = match serde_json::from_str::<serde_json::Value>(raw_pointer)
+                    let (key, label, file_asset_id) = match serde_json::from_str::<serde_json::Value>(raw_pointer)
                     {
                         Ok(v) => (
                             v["key"].as_str().unwrap_or(raw_pointer).to_string(),
                             v["label"].as_str().unwrap_or(raw_pointer).to_string(),
+                            v["file_asset_id"].as_str().map(|s| s.to_string()),
                         ),
-                        Err(_) => (raw_pointer.clone(), raw_pointer.clone()),
+                        Err(_) => (raw_pointer.clone(), raw_pointer.clone(), None),
                     };
                     artifacts.push(ArtifactPointer {
                         key,
                         label,
                         agent_id: step.agent_id.clone(),
                         step_order: step.step_order,
-                        file_asset_id: None,
+                        file_asset_id,
                     });
                 }
             }
