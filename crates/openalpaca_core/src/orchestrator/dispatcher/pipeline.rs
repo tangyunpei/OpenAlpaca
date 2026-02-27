@@ -183,7 +183,7 @@ impl TaskDispatcher {
                 if let Some(ref db) = db {
                     let step_i = step as i32;
                     let instance_id = agent_id.clone();
-                    update_state_with_retry(
+                    if !update_state_with_retry(
                         db,
                         &task_id,
                         move |s| {
@@ -194,7 +194,10 @@ impl TaskDispatcher {
                         },
                         "mark_step_running",
                     )
-                    .await;
+                    .await
+                    {
+                        tracing::error!("Failed to persist mark_step_running for task '{}'", task_id);
+                    }
                 }
 
                 // Emit progress event for this step.
@@ -427,7 +430,7 @@ impl TaskDispatcher {
                         let step_i = step as i32;
                         let raw_clone = raw_content.clone();
                         let aid = agent_id.clone();
-                        update_state_with_retry(db, &task_id, move |state| {
+                        if !update_state_with_retry(db, &task_id, move |state| {
                             let summary: String = raw_clone.chars().take(500).collect();
                             state.mark_step_completed(step_i, &summary);
                             if !raw_clone.is_empty() {
@@ -443,7 +446,9 @@ impl TaskDispatcher {
                                 }
                             }
                             state.scan_workspace_artifacts(step_i);
-                        }, "mark_step_completed").await;
+                        }, "mark_step_completed").await {
+                            tracing::error!("Failed to persist mark_step_completed for task '{}'", task_id);
+                        }
                     }
 
                     // Emit progress event showing step completed (step + 1 = "N+1 steps done")
@@ -488,13 +493,16 @@ impl TaskDispatcher {
                             LoopFinishReason::Error(err) => err.clone(),
                             _ => "Agent failed".to_string(),
                         };
-                        update_state_with_retry(
+                        if !update_state_with_retry(
                             db,
                             &task_id,
                             |s| s.mark_step_failed(step_i, &error_msg),
                             "mark_step_failed",
                         )
-                        .await;
+                        .await
+                        {
+                            tracing::error!("Failed to persist mark_step_failed for task '{}'", task_id);
+                        }
                     }
 
                     pipeline_success = false;
