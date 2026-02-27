@@ -67,6 +67,7 @@ pub fn auto_start_connectors(
     gateway: Arc<Gateway>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
 ) -> std::collections::HashMap<String, ConnectorHandle> {
+    let _ = &bus;
     let mut started = std::collections::HashMap::new();
 
     // Initialize Config Repository
@@ -136,7 +137,6 @@ pub fn auto_start_connectors(
             let cancel_token = CancellationToken::new();
             let connector = crate::imessage::IMessageConnector::new(
                 Arc::new(db.clone()),
-                Arc::new(bus.clone()),
                 gateway.clone(),
                 daemon_config.clone(),
                 cancel_token.clone(),
