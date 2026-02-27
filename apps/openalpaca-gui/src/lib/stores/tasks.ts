@@ -89,6 +89,19 @@ export function subscribeToTaskEvents(): () => void {
           progress_current: latest.progress_current ?? existing.progress_current,
           progress_total: latest.progress_total ?? existing.progress_total,
           result_summary: latest.result_summary ?? existing.result_summary,
+          // Merge outcome fields from WS event
+          outcome_kind: latest.outcome_kind ?? existing.outcome_kind,
+          artifact_count: latest.artifact_count ?? existing.artifact_count,
+          // Build a minimal ParsedOutcome from WS fields when available
+          outcome: latest.outcome_kind
+            ? {
+                outcome_summary: latest.outcome_summary ?? null,
+                outcome_kind: latest.outcome_kind,
+                artifact_count: latest.artifact_count ?? 0,
+                artifacts: existing.outcome?.artifacts ?? [],
+                no_artifact_reason: existing.outcome?.no_artifact_reason,
+              }
+            : existing.outcome,
           ...(latest.title ? { title: latest.title } : {}),
         });
       } else {
@@ -102,6 +115,16 @@ export function subscribeToTaskEvents(): () => void {
           progress_current: latest.progress_current,
           progress_total: latest.progress_total,
           result_summary: latest.result_summary,
+          outcome_kind: latest.outcome_kind,
+          artifact_count: latest.artifact_count,
+          outcome: latest.outcome_kind
+            ? {
+                outcome_summary: latest.outcome_summary ?? null,
+                outcome_kind: latest.outcome_kind,
+                artifact_count: latest.artifact_count ?? 0,
+                artifacts: [],
+              }
+            : undefined,
           created_by: "",
           source_lane: "",
           created_at: latest.ts,

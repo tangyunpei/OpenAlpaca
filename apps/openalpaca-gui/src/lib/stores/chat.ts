@@ -32,6 +32,10 @@ export const uploadingFiles = writable(false);
 
 let nextLocalId = -1;
 
+/** Dedupe key set: prevents duplicate task completion chat injections.
+ *  Key format: "{task_id}:{terminal_status}" */
+const injectedCompletions = new Set<string>();
+
 type StructuredMessagePart = {
   type: string;
   file_id?: string;
@@ -314,6 +318,7 @@ export async function clearHistory(): Promise<void> {
     await apiClearHistory();
     chatMessages.set([]);
     chatError.set(null);
+    resetCompletionDedupe();
   } catch (e) {
     console.error("[chat-store] Failed to clear history:", e);
     chatError.set(e instanceof Error ? e.message : String(e));
@@ -340,11 +345,36 @@ export function subscribeToTaskResultEvents(): () => void {
     const latest = $events[0] as ServerEvent;
     if (latest.type !== "task_status") return;
     if (latest.status !== "completed" && latest.status !== "failed") return;
-    if (!latest.result_summary) return;
 
-    const content = latest.status === "completed"
-      ? `**Task completed: ${latest.title || "Task"}**\n\n${latest.result_summary}`
-      : `**Task failed: ${latest.title || "Task"}**\n\n${latest.result_summary}`;
+    // Dedupe: skip if we already injected for this task + terminal status
+    const dedupeKey = `${latest.task_id}:${latest.status}`;
+    if (injectedCompletions.has(dedupeKey)) return;
+    injectedCompletions.add(dedupeKey);
+
+    // Build outcome-aware message content
+    let content: string;
+    const title = latest.title || "Task";
+
+    if (latest.status === "completed") {
+      const outcomeKind = latest.outcome_kind;
+      const artifactCount = latest.artifact_count ?? 0;
+      const summary = latest.outcome_summary || latest.result_summary || "Done";
+
+      let outcomeLabel = "";
+      if (outcomeKind === "text_only") {
+        outcomeLabel = " (text only, no files)";
+      } else if (outcomeKind === "artifact_only") {
+        outcomeLabel = ` (${artifactCount} file${artifactCount !== 1 ? "s" : ""} produced)`;
+      } else if (outcomeKind === "mixed") {
+        outcomeLabel = ` (${artifactCount} file${artifactCount !== 1 ? "s" : ""} + text)`;
+      }
+
+      content = `**Task completed: ${title}**${outcomeLabel}\n\n${summary}`;
+    } else {
+      // failed
+      const summary = latest.result_summary || "Unknown error";
+      content = `**Task failed: ${title}**\n\n${summary}`;
+    }
 
     chatMessages.update((msgs) => [
       ...msgs,
@@ -357,4 +387,9 @@ export function subscribeToTaskResultEvents(): () => void {
       },
     ]);
   });
+}
+
+/** Reset completion injection dedupe (call on clearHistory). */
+export function resetCompletionDedupe(): void {
+  injectedCompletions.clear();
 }
