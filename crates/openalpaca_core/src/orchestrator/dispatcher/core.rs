@@ -233,6 +233,7 @@ impl TaskDispatcher {
             self.bus.publish(SystemEvent::TaskFailed {
                 task_id: task_id.clone(),
                 error: "Pipeline assembly failed: some agents became unavailable".to_string(),
+                outcome_kind: None,
                 timestamp: now,
             });
             if let Some(ref db) = self.db {
