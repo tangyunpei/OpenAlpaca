@@ -246,6 +246,27 @@ impl StepState {
     }
 }
 
+/// Check if two agent identifiers refer to the same agent, accounting for the
+/// non-singleton instance ID format `template_id::uuid`.
+///
+/// Returns true when:
+/// - exact match (`"a1" == "a1"`)
+/// - one is an instance of the other (`"a1::abc123" ~ "a1"` in either direction)
+fn is_same_agent(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    // a is instance of b: "researcher::abc123" starts with "researcher::"
+    if a.starts_with(b) && a.as_bytes().get(b.len()) == Some(&b':') {
+        return true;
+    }
+    // b is instance of a: "researcher::abc123" starts with "researcher::"
+    if b.starts_with(a) && b.as_bytes().get(a.len()) == Some(&b':') {
+        return true;
+    }
+    false
+}
+
 impl TaskState {
     /// Create the initial state for a new task.
     pub fn initial(objective: &str, assignments: &[(String, String, String)]) -> Self {
@@ -355,7 +376,7 @@ impl TaskState {
             .entries
             .iter()
             .filter(|e| e.entry_type == WorkspaceEntryType::Artifact)
-            .filter(|e| e.author_agent_id == agent_id)
+            .filter(|e| is_same_agent(&e.author_agent_id, &agent_id))
             .filter(|e| !existing_keys.contains(&e.key))
             .map(|e| (e.key.clone(), e.key.clone()))
             .collect();

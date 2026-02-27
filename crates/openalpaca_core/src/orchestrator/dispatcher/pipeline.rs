@@ -178,13 +178,20 @@ impl TaskDispatcher {
                     );
                 }
 
-                // Update state_json: mark step running (with retry for version conflicts)
+                // Update state_json: mark step running + fix agent_id from template
+                // to actual instance_id (non-singleton IDs are "template::uuid").
                 if let Some(ref db) = db {
                     let step_i = step as i32;
+                    let instance_id = agent_id.clone();
                     update_state_with_retry(
                         db,
                         &task_id,
-                        |s| s.mark_step_running(step_i),
+                        move |s| {
+                            if let Some(step) = s.steps.iter_mut().find(|st| st.step_order == step_i) {
+                                step.agent_id = instance_id.clone();
+                            }
+                            s.mark_step_running(step_i);
+                        },
                         "mark_step_running",
                     )
                     .await;

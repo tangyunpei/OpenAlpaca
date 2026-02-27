@@ -439,3 +439,203 @@ fn test_build_task_outcome_empty_content_failure() {
     assert_eq!(outcome.outcome_kind, OutcomeKind::Failed);
     assert_eq!(outcome.summary, "Task failed.");
 }
+
+// ── Pipeline end-to-end: non-singleton agent + workspace artifact ────
+
+/// Mock LLM provider for e2e pipeline tests.
+/// Returns pre-scripted responses in order; repeats the last one on overflow.
+mod e2e_mock {
+    use async_trait::async_trait;
+    use openalpaca_llm::{ChatRequest, ChatResponse, LlmError, LlmProvider};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub(super) struct MockProvider {
+        responses: Vec<ChatResponse>,
+        call_count: AtomicUsize,
+    }
+
+    impl MockProvider {
+        pub fn new(responses: Vec<ChatResponse>) -> Self {
+            Self {
+                responses,
+                call_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for MockProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
+            let resp = if idx < self.responses.len() {
+                &self.responses[idx]
+            } else {
+                self.responses.last().unwrap()
+            };
+            Ok(resp.clone())
+        }
+    }
+}
+
+/// End-to-end pipeline test: dispatches a task with a non-singleton agent,
+/// the mock LLM writes an artifact via `workspace_write`, and we verify
+/// the final DB task has `artifact_count > 0`.
+///
+/// This covers the cross-module chain:
+///   dispatch_core → spawn_instance (non-singleton → "template::uuid")
+///   → pipeline mark_step_running (updates step.agent_id to instance_id)
+///   → agentic loop → workspace_write (author = instance_id)
+///   → scan_workspace_artifacts (is_same_agent match)
+///   → finalize_task_with_outcome → set_outcome(artifact_count)
+#[tokio::test]
+async fn test_pipeline_non_singleton_workspace_artifact_count() {
+    use crate::events::SystemEvent;
+    use openalpaca_llm::{ChatResponse, FinishReason, ProviderType, ToolCall, Usage};
+    use std::time::Duration;
+
+    // ── 1. Real SQLite DB ────────────────────────────────────────────
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+
+    // ── 2. Mock LLM: workspace_write(artifact) → completion ─────────
+    let mock_provider = std::sync::Arc::new(e2e_mock::MockProvider::new(vec![
+        // Round 1: agent calls workspace_write with entry_type=artifact
+        ChatResponse {
+            content: "Writing artifact.".to_string(),
+            tool_calls: vec![ToolCall {
+                id: "tc_1".to_string(),
+                name: "workspace_write".to_string(),
+                arguments: serde_json::json!({
+                    "key": "report.pdf",
+                    "content": "Generated report data",
+                    "entry_type": "artifact"
+                }),
+            }],
+            model: "claude-sonnet-4-5-20250929".to_string(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::ToolUse,
+        },
+        // Round 2: agent returns final text
+        ChatResponse {
+            content: "Task completed successfully".to_string(),
+            tool_calls: vec![],
+            model: "claude-sonnet-4-5-20250929".to_string(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+        },
+    ]));
+
+    let router = std::sync::Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        mock_provider,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    ));
+
+    // ── 3. Dispatcher with DB + router ───────────────────────────────
+    let ctx = std::sync::Arc::new(crate::context::SharedContext::new());
+    // Non-singleton agent (template_from_agent marks non-lead agents as singleton=false)
+    let agent = make_agent("researcher", vec!["web_search"]);
+    ctx.agent_registry
+        .register_template(template_from_agent(&agent));
+    // Register instance for skill matching (list_idle)
+    ctx.agent_registry.register(agent.clone());
+
+    let bus = crate::bus::EventBus::default();
+    let mut rx = bus.subscribe();
+
+    let tool_registry = std::sync::Arc::new(crate::tools::ToolRegistry::new());
+    let executor = std::sync::Arc::new(crate::tools::RegistryToolExecutor::new(
+        tool_registry.clone(),
+    ));
+    let sandbox = std::sync::Arc::new(
+        crate::security::sandbox::SandboxManager::with_defaults(executor, bus.clone()),
+    );
+    let gate = std::sync::Arc::new(crate::security::gate::SecurityGate::new(sandbox));
+    let daemon_config =
+        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(DaemonConfig::default()));
+
+    let dispatcher = TaskDispatcher::new(
+        ctx.clone(),
+        std::sync::Arc::new(crate::lane::LaneManager::new()),
+        bus.clone(),
+        Some(router),
+        gate,
+        tool_registry,
+        Some(db.clone()),
+        None,
+        daemon_config,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    );
+
+    // ── 4. Dispatch ──────────────────────────────────────────────────
+    let result = dispatcher.dispatch(
+        Uuid::new_v4(),
+        "cli",
+        "Research and produce report",
+        &["web_search".to_string()],
+        "user1",
+        "user1:cli",
+        None,
+    );
+    assert!(result.is_ok(), "dispatch failed: {:?}", result.err());
+
+    // ── 5. Wait for TaskCompleted / TaskFailed ───────────────────────
+    let mut completed_task_id = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Ok(SystemEvent::TaskCompleted { task_id, .. })) => {
+                completed_task_id = Some(task_id);
+                break;
+            }
+            Ok(Ok(SystemEvent::TaskFailed { task_id, error, .. })) => {
+                panic!(
+                    "Pipeline failed for task '{}': {}",
+                    task_id, error
+                );
+            }
+            Ok(Ok(_)) => continue,
+            Ok(Err(e)) => panic!("Event bus error: {e}"),
+            Err(_) => panic!("Timeout waiting for pipeline completion"),
+        }
+    }
+    let task_id = completed_task_id.unwrap();
+
+    // ── 6. Verify artifact_count > 0 in DB ───────────────────────────
+    let repo = openalpaca_storage::repository::TaskRepository::new(&db);
+    let task = repo
+        .get(&task_id)
+        .expect("DB read failed")
+        .expect("Task not found in DB");
+
+    assert!(
+        task.artifact_count > 0,
+        "Expected artifact_count > 0, got {}. \
+         outcome_kind={:?}, outcome_json_len={:?}, state_version={}",
+        task.artifact_count,
+        task.outcome_kind,
+        task.outcome_json.as_ref().map(|j| j.len()),
+        task.state_version,
+    );
+
+    // Bonus: verify outcome_kind is Mixed (text + artifact)
+    assert_eq!(
+        task.outcome_kind,
+        Some(openalpaca_storage::OutcomeKind::Mixed),
+        "Expected Mixed outcome (text summary + artifact)"
+    );
+}
