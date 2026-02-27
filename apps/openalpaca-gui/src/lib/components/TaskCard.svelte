@@ -45,6 +45,24 @@
   <div class="flex justify-between items-start mb-2.5 gap-3">
     <h3 class="m-0 text-[0.92rem] font-semibold flex-1 overflow-hidden text-ellipsis whitespace-nowrap leading-snug" style="letter-spacing: -0.01em;">{task.title}</h3>
     <span class="text-[0.65rem] px-2 py-0.5 rounded-lg uppercase font-bold shrink-0 border {statusBadgeClass(task.status)}" style="letter-spacing: 0.04em;">{task.status}</span>
+    {#if (task.status === "completed" || task.status === "failed") && task.outcome_kind}
+      <span class="text-[0.6rem] px-1.5 py-0.5 rounded-lg font-medium shrink-0 border
+        {task.outcome_kind === 'text_only'
+          ? 'bg-blue-400/10 text-blue-400/80 border-blue-400/15'
+          : task.outcome_kind === 'artifact_only' || task.outcome_kind === 'mixed'
+            ? 'bg-emerald-400/10 text-emerald-400/80 border-emerald-400/15'
+            : 'bg-white/[0.04] text-muted-foreground border-white/5'}">
+        {#if task.outcome_kind === 'text_only'}
+          Text only
+        {:else if task.outcome_kind === 'artifact_only'}
+          {task.artifact_count ?? 0} file{(task.artifact_count ?? 0) !== 1 ? 's' : ''}
+        {:else if task.outcome_kind === 'mixed'}
+          {task.artifact_count ?? 0} file{(task.artifact_count ?? 0) !== 1 ? 's' : ''} + text
+        {:else if task.outcome_kind === 'failed'}
+          Failed
+        {/if}
+      </span>
+    {/if}
   </div>
   {#if hasProgress}
     <div class="h-1.5 rounded-full overflow-hidden mb-1.5" style="background: rgba(255,255,255,0.06);">
@@ -60,6 +78,9 @@
               style="background: linear-gradient(135deg, rgba(139, 92, 246, 0.1) 0%, rgba(139, 92, 246, 0.05) 100%); color: rgb(167, 139, 250);">{agent.agent_id}</span>
       {/each}
     </div>
+  {/if}
+  {#if task.result_summary && (task.status === "completed" || task.status === "failed")}
+    <p class="text-[0.75rem] text-muted-foreground/70 mt-1.5 mb-0 line-clamp-2 leading-relaxed">{task.result_summary}</p>
   {/if}
   <div class="flex gap-2.5 items-center text-[0.68rem] text-muted-foreground/60 font-mono">
     <span class="px-1.5 py-px rounded-md text-foreground/70" style="background: linear-gradient(135deg, hsl(222 48% 22%) 0%, hsl(222 48% 18%) 100%);">{task.id.slice(0, 8)}</span>

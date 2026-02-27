@@ -5,6 +5,12 @@
   import { formatDateTime, getStatusColor } from "$lib/utils";
   import type { TaskDetailResponse } from "$lib/types";
 
+  interface OutcomeArtifact {
+    label?: string;
+    key?: string;
+    agent_id?: string;
+  }
+
   interface Props {
     taskId: string;
     onClose: () => void;
@@ -56,6 +62,30 @@
   );
   let canPause = $derived(detail?.task.status === "running");
   let canResume = $derived(detail?.task.status === "paused");
+
+  function outcomeKindClass(kind: string): string {
+    switch (kind) {
+      case "text_only":
+        return "bg-blue-400/20 text-blue-400";
+      case "artifact_only":
+      case "mixed":
+        return "bg-emerald-400/20 text-emerald-400";
+      case "failed":
+        return "bg-danger/20 text-danger";
+      default:
+        return "bg-white/5 text-muted-foreground";
+    }
+  }
+
+  function formatOutcomeKind(kind: string): string {
+    switch (kind) {
+      case "text_only": return "Text Only";
+      case "artifact_only": return "Artifact Only";
+      case "mixed": return "Mixed";
+      case "failed": return "Failed";
+      default: return kind;
+    }
+  }
 
   function statusBadgeClass(status: string): string {
     const key = getStatusColor(status);
@@ -153,6 +183,60 @@
         <div class="mb-4">
           <h4 class="m-0 mb-2 text-[0.85rem] text-muted-foreground uppercase tracking-[0.5px]">Result</h4>
           <p class="m-0 text-[0.9rem] text-foreground bg-black/20 px-3.5 py-2.5 rounded-lg leading-relaxed">{detail.task.result_summary}</p>
+        </div>
+      {/if}
+
+      {#if detail.outcome || detail.task.outcome_kind}
+        <div class="mb-4">
+          <h4 class="m-0 mb-2 text-[0.85rem] text-muted-foreground uppercase tracking-[0.5px]">Outcome</h4>
+          <div class="bg-black/20 px-3.5 py-2.5 rounded-lg">
+            <!-- Outcome kind badge -->
+            <div class="flex items-center gap-2 mb-2">
+              <span class="text-[0.7rem] px-2 py-0.5 rounded-full font-bold uppercase
+                {outcomeKindClass(detail.outcome?.outcome_kind ?? detail.task.outcome_kind ?? '')}">
+                {formatOutcomeKind(detail.outcome?.outcome_kind ?? detail.task.outcome_kind ?? 'unknown')}
+              </span>
+              {#if (detail.outcome?.artifact_count ?? detail.task.artifact_count ?? 0) > 0}
+                <span class="text-[0.8rem] text-muted-foreground">
+                  {detail.outcome?.artifact_count ?? detail.task.artifact_count} artifact{(detail.outcome?.artifact_count ?? detail.task.artifact_count ?? 0) !== 1 ? 's' : ''}
+                </span>
+              {/if}
+            </div>
+
+            <!-- Outcome summary -->
+            {#if detail.outcome?.outcome_summary}
+              <p class="m-0 text-[0.9rem] text-foreground leading-relaxed">{detail.outcome.outcome_summary}</p>
+            {/if}
+
+            <!-- No artifact reason -->
+            {#if detail.outcome?.no_artifact_reason}
+              <p class="m-0 mt-1.5 text-[0.8rem] text-muted-foreground/70 italic">{detail.outcome.no_artifact_reason}</p>
+            {/if}
+
+            <!-- Artifact list -->
+            {#if detail.outcome?.artifacts && detail.outcome.artifacts.length > 0}
+              <div class="mt-2 pt-2 border-t border-white/[0.06]">
+                <span class="text-[0.7rem] text-muted-foreground/50 uppercase tracking-wider font-medium">Artifacts</span>
+                <div class="flex flex-col gap-1 mt-1">
+                  {#each detail.outcome.artifacts as rawArt}
+                    {@const art = rawArt as OutcomeArtifact}
+                    <div class="flex items-center gap-2 text-[0.8rem]">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                        class="shrink-0 text-muted-foreground/50">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/>
+                        <path d="M14 2v6h6"/>
+                      </svg>
+                      <span class="text-foreground/80">{art.label ?? art.key ?? 'Unnamed'}</span>
+                      {#if art.agent_id}
+                        <span class="text-muted-foreground/40 text-[0.7rem] font-mono">{art.agent_id}</span>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          </div>
         </div>
       {/if}
 
