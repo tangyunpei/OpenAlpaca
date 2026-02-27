@@ -301,3 +301,163 @@ fn test_backward_compat_no_workspace_field() {
     assert!(state.workspace.entries.is_empty());
     assert_eq!(state.workspace.max_entries, 50);
 }
+
+// ── Artifact pointer and outcome tests ──────────────────────────
+
+#[test]
+fn test_step_add_artifact() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.add_step_artifact(0, "report.pdf", "Final report");
+    assert_eq!(state.steps[0].artifact_pointers.len(), 1);
+    // Stored as JSON to avoid delimiter ambiguity
+    let stored: serde_json::Value =
+        serde_json::from_str(&state.steps[0].artifact_pointers[0]).unwrap();
+    assert_eq!(stored["key"], "report.pdf");
+    assert_eq!(stored["label"], "Final report");
+}
+
+#[test]
+fn test_collect_artifacts_from_completed_steps_only() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    // Step 0: completed with artifact
+    state.mark_step_running(0);
+    state.add_step_artifact(0, "data.csv", "Raw data");
+    state.mark_step_completed(0, "Gathered data");
+
+    // Step 1: failed with artifact (should NOT be collected)
+    state.mark_step_running(1);
+    state.add_step_artifact(1, "draft.txt", "Draft");
+    state.mark_step_failed(1, "Failed");
+
+    let artifacts = state.collect_artifacts();
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].key, "data.csv");
+    assert_eq!(artifacts[0].agent_id, "a1");
+    assert_eq!(artifacts[0].step_order, 0);
+}
+
+#[test]
+fn test_build_outcome_text_only() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Analysis complete");
+    state.mark_step_running(1);
+    state.mark_step_completed(1, "Summary written");
+
+    let outcome = state.build_outcome("fallback", None);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::TextOnly);
+    assert!(outcome.artifacts.is_empty());
+    assert!(outcome.no_artifact_reason.is_some());
+    assert!(outcome.summary.contains("Analysis complete"));
+    assert!(outcome.summary.contains("Summary written"));
+}
+
+#[test]
+fn test_build_outcome_artifact_only() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.add_step_artifact(0, "output.zip", "Results");
+    // Complete with empty summary
+    state.mark_step_completed(0, "");
+
+    let outcome = state.build_outcome("", None);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::ArtifactOnly);
+    assert_eq!(outcome.artifacts.len(), 1);
+    assert!(outcome.no_artifact_reason.is_none());
+    // Summary should fall back to default
+    assert_eq!(outcome.summary, "Task completed.");
+}
+
+#[test]
+fn test_build_outcome_mixed() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.add_step_artifact(0, "report.pdf", "Report");
+    state.mark_step_completed(0, "Report generated successfully");
+
+    let outcome = state.build_outcome("fallback", None);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::Mixed);
+    assert_eq!(outcome.artifacts.len(), 1);
+    assert!(outcome.no_artifact_reason.is_none());
+    assert!(outcome.summary.contains("Report generated"));
+}
+
+#[test]
+fn test_build_outcome_failed() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_failed(0, "Network error");
+    state.mark_step_running(1);
+    state.mark_step_failed(1, "Dependency failed");
+
+    let outcome = state.build_outcome("All steps failed", None);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::Failed);
+    assert!(outcome.artifacts.is_empty());
+}
+
+#[test]
+fn test_build_outcome_partial_failure_not_classified_as_failed() {
+    // Some steps completed, some failed — should NOT be "failed"
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Step 1 succeeded");
+    state.mark_step_running(1);
+    state.mark_step_failed(1, "Step 2 failed");
+
+    let outcome = state.build_outcome("fallback", None);
+    // Partial failure with text output = TextOnly (not Failed)
+    assert_eq!(outcome.outcome_kind, OutcomeKind::TextOnly);
+    assert!(outcome.summary.contains("Step 1 succeeded"));
+}
+
+#[test]
+fn test_build_outcome_fallback_summary() {
+    // No steps completed — should use fallback
+    let state = TaskState::initial("obj", &make_assignments());
+    let outcome = state.build_outcome("Custom fallback text", None);
+    assert_eq!(outcome.summary, "Custom fallback text");
+}
+
+#[test]
+fn test_build_outcome_empty_fallback_uses_default() {
+    let state = TaskState::initial("obj", &make_assignments());
+    let outcome = state.build_outcome("", None);
+    assert_eq!(outcome.summary, "Task completed.");
+}
+
+#[test]
+fn test_build_outcome_custom_no_artifact_reason() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Analysis done");
+
+    let outcome = state.build_outcome(
+        "fallback",
+        Some("This was a text-only analysis task.".to_string()),
+    );
+    assert_eq!(
+        outcome.no_artifact_reason.as_deref(),
+        Some("This was a text-only analysis task.")
+    );
+}
+
+#[test]
+fn test_task_outcome_serialization_roundtrip() {
+    let outcome = TaskOutcome {
+        summary: "Task completed".to_string(),
+        outcome_kind: OutcomeKind::Mixed,
+        artifacts: vec![ArtifactPointer {
+            key: "report.pdf".to_string(),
+            label: "Final report".to_string(),
+            agent_id: "a1".to_string(),
+            step_order: 0,
+        }],
+        no_artifact_reason: None,
+    };
+    let json = serde_json::to_string(&outcome).unwrap();
+    let deserialized: TaskOutcome = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.summary, "Task completed");
+    assert_eq!(deserialized.artifacts.len(), 1);
+    assert_eq!(deserialized.outcome_kind, OutcomeKind::Mixed);
+}

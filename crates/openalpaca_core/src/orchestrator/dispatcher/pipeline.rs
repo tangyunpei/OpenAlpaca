@@ -1,8 +1,8 @@
 use super::super::task_state::TaskState;
 use super::usage;
 use super::{
-    TaskDispatcher, finalize_task, format_task_result, persist_conversation, retrieve_memory_block,
-    spawn_task_memory_extraction,
+    TaskDispatcher, finalize_task_with_outcome, format_task_result, persist_conversation,
+    retrieve_memory_block, spawn_task_memory_extraction,
 };
 use crate::agent::registry::DestroyOutcome;
 use crate::agent::subagent::{AgentStatus, SubAgent};
@@ -587,14 +587,7 @@ impl TaskDispatcher {
                 }
             }
 
-            // 4. Update task status
-            let db_summary = if pipeline_success {
-                final_content.chars().take(2000).collect::<String>()
-            } else {
-                pipeline_error.clone().unwrap_or_default()
-            };
-
-            // 5. Persist final result to conversation (single message for entire pipeline)
+            // 4. Persist final result to conversation (single message for entire pipeline)
             let runtime_secs = start_time.elapsed().as_secs() as i64;
             // Clone for memory extraction before final_content is consumed
             let extraction_content = if pipeline_success {
@@ -604,9 +597,9 @@ impl TaskDispatcher {
             };
             if let Some(ref db) = db {
                 let chat_text = if pipeline_success {
-                    final_content
+                    final_content.clone()
                 } else {
-                    pipeline_error.unwrap_or_default()
+                    pipeline_error.clone().unwrap_or_default()
                 };
                 let content = format_task_result(&task_title, &chat_text, pipeline_success);
                 persist_conversation(
@@ -621,12 +614,18 @@ impl TaskDispatcher {
                 );
             }
 
-            finalize_task(
+            // 5. Build structured outcome + update task status
+            let outcome_content = if pipeline_success {
+                &final_content
+            } else {
+                pipeline_error.as_deref().unwrap_or_default()
+            };
+            finalize_task_with_outcome(
                 &ctx,
                 &bus,
                 db.as_ref(),
                 &task_id,
-                &db_summary,
+                outcome_content,
                 pipeline_success,
             );
 

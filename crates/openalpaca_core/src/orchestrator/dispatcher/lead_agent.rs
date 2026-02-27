@@ -1,7 +1,7 @@
 use super::super::task_state::TaskState;
 use super::usage;
 use super::{
-    TaskDispatcher, finalize_task, format_task_result, persist_conversation,
+    TaskDispatcher, finalize_task_with_outcome, format_task_result, persist_conversation,
     spawn_task_memory_extraction,
 };
 use crate::agent::registry::DestroyOutcome;
@@ -111,6 +111,9 @@ impl TaskDispatcher {
                 completed_at: None,
                 state_json: None,
                 state_version: 0,
+                outcome_json: None,
+                outcome_kind: None,
+                artifact_count: 0,
             };
             if let Err(e) = repo.create(&task) {
                 tracing::warn!("Failed to persist lead agent task to DB: {e}");
@@ -282,8 +285,6 @@ impl TaskDispatcher {
                 )
             };
 
-            let db_summary = final_content.chars().take(2000).collect::<String>();
-
             // Persist LLM usage for the lead agent's own loop
             usage::record_llm_usage(
                 &router,
@@ -342,12 +343,12 @@ impl TaskDispatcher {
                     "Task status: running → failed"
                 );
             }
-            finalize_task(
+            finalize_task_with_outcome(
                 &ctx,
                 &bus,
                 db.as_ref(),
                 &task_id,
-                &db_summary,
+                &final_content,
                 result.success,
             );
 

@@ -2,6 +2,7 @@
 
 use crate::orchestrator::task_planner::TaskDag;
 use chrono::{DateTime, Utc};
+use openalpaca_storage::OutcomeKind;
 use serde::{Deserialize, Serialize};
 
 // ── Workspace types ──────────────────────────────────────────────────
@@ -194,6 +195,57 @@ pub struct TaskConstraints {
     pub pipeline_sequential: bool,
 }
 
+/// Structured outcome for a completed task.
+/// Serialized to `task.outcome_json` for durable persistence.
+///
+/// Uses `OutcomeKind` from `openalpaca_storage` directly to maintain type-safety
+/// across the storage/core boundary (core already depends on storage).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskOutcome {
+    /// Human-readable summary of the task result. Always non-empty.
+    pub summary: String,
+    /// Classified outcome kind. Typed enum shared with the storage layer.
+    pub outcome_kind: OutcomeKind,
+    /// Artifact pointers collected from all steps.
+    pub artifacts: Vec<ArtifactPointer>,
+    /// Explanation when no artifacts were produced (e.g. "Task was text-only analysis").
+    pub no_artifact_reason: Option<String>,
+}
+
+/// A pointer to an artifact produced during task execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactPointer {
+    /// Workspace key or file path identifying the artifact.
+    pub key: String,
+    /// Human-readable label (e.g. "Research summary", "Generated report").
+    pub label: String,
+    /// The agent that produced this artifact.
+    pub agent_id: String,
+    /// Step order in the pipeline/DAG that produced this artifact.
+    pub step_order: i32,
+}
+
+impl StepState {
+    /// Set the result summary for this step (capped at 500 chars).
+    pub fn set_summary(&mut self, summary: &str) {
+        self.result_summary = Some(summary.chars().take(500).collect());
+    }
+
+    /// Add an artifact pointer for this step.
+    ///
+    /// Stored as JSON `{"key":"...","label":"..."}` to avoid delimiter ambiguity
+    /// (keys may contain `:` in file paths or workspace identifiers).
+    pub fn add_artifact(&mut self, key: &str, label: &str) {
+        let json = serde_json::json!({"key": key, "label": label}).to_string();
+        self.artifact_pointers.push(json);
+    }
+
+    /// Whether this step produced any artifacts.
+    pub fn has_artifacts(&self) -> bool {
+        !self.artifact_pointers.is_empty()
+    }
+}
+
 impl TaskState {
     /// Create the initial state for a new task.
     pub fn initial(objective: &str, assignments: &[(String, String, String)]) -> Self {
@@ -255,6 +307,124 @@ impl TaskState {
             step.completed_at = Some(Utc::now());
         }
         self.updated_at = Utc::now();
+    }
+
+    /// Set a step's result summary (convenience wrapper).
+    pub fn set_step_summary(&mut self, step_order: i32, summary: &str) {
+        if let Some(step) = self.steps.iter_mut().find(|s| s.step_order == step_order) {
+            step.set_summary(summary);
+        }
+        self.updated_at = Utc::now();
+    }
+
+    /// Add an artifact pointer to a specific step.
+    pub fn add_step_artifact(&mut self, step_order: i32, key: &str, label: &str) {
+        if let Some(step) = self.steps.iter_mut().find(|s| s.step_order == step_order) {
+            step.add_artifact(key, label);
+        }
+        self.updated_at = Utc::now();
+    }
+
+    /// Collect all artifact pointers from all completed steps.
+    /// Returns them in step_order, each annotated with agent_id and step_order.
+    ///
+    /// Only completed steps contribute artifacts. A partially-failed pipeline
+    /// will collect artifacts from completed steps only.
+    pub fn collect_artifacts(&self) -> Vec<ArtifactPointer> {
+        let mut artifacts = Vec::new();
+        for step in &self.steps {
+            if step.status == "completed" {
+                for raw_pointer in &step.artifact_pointers {
+                    // Parse JSON format: {"key":"...","label":"..."}
+                    // Falls back to using the raw string as both key and label
+                    let (key, label) = match serde_json::from_str::<serde_json::Value>(raw_pointer)
+                    {
+                        Ok(v) => (
+                            v["key"].as_str().unwrap_or(raw_pointer).to_string(),
+                            v["label"].as_str().unwrap_or(raw_pointer).to_string(),
+                        ),
+                        Err(_) => (raw_pointer.clone(), raw_pointer.clone()),
+                    };
+                    artifacts.push(ArtifactPointer {
+                        key,
+                        label,
+                        agent_id: step.agent_id.clone(),
+                        step_order: step.step_order,
+                    });
+                }
+            }
+        }
+        artifacts
+    }
+
+    /// Build a TaskOutcome from the current state.
+    ///
+    /// Classification rules:
+    /// - If ALL steps failed: `OutcomeKind::Failed`
+    /// - If artifacts exist AND text summary exists: `OutcomeKind::Mixed`
+    /// - If artifacts exist but no text summary: `OutcomeKind::ArtifactOnly`
+    /// - Otherwise (text only, or no steps completed): `OutcomeKind::TextOnly`
+    ///
+    /// `fallback_summary` is used when no step has a result_summary.
+    pub fn build_outcome(
+        &self,
+        fallback_summary: &str,
+        no_artifact_reason: Option<String>,
+    ) -> TaskOutcome {
+        let artifacts = self.collect_artifacts();
+        let has_artifacts = !artifacts.is_empty();
+
+        let has_summary = self.steps.iter().any(|s| {
+            s.status == "completed" && s.result_summary.as_ref().is_some_and(|r| !r.is_empty())
+        });
+
+        let all_failed =
+            !self.steps.is_empty() && self.steps.iter().all(|s| s.status == "failed");
+
+        let outcome_kind = if all_failed {
+            OutcomeKind::Failed
+        } else if has_artifacts && has_summary {
+            OutcomeKind::Mixed
+        } else if has_artifacts {
+            OutcomeKind::ArtifactOnly
+        } else {
+            OutcomeKind::TextOnly
+        };
+
+        // Build summary: concatenate completed step summaries, fall back to provided fallback.
+        let step_summaries: Vec<String> = self
+            .steps
+            .iter()
+            .filter(|s| s.status == "completed")
+            .filter_map(|s| s.result_summary.clone())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let summary = if step_summaries.is_empty() {
+            fallback_summary.to_string()
+        } else {
+            step_summaries.join("\n\n")
+        };
+
+        // Ensure summary is never empty
+        let summary = if summary.is_empty() {
+            "Task completed.".to_string()
+        } else {
+            summary
+        };
+
+        let no_artifact_reason = if !has_artifacts {
+            no_artifact_reason.or_else(|| Some("No artifacts were produced.".to_string()))
+        } else {
+            None
+        };
+
+        TaskOutcome {
+            summary,
+            outcome_kind,
+            artifacts,
+            no_artifact_reason,
+        }
     }
 
     /// Serialize to JSON string.

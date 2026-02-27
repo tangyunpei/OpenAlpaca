@@ -1,6 +1,6 @@
 use super::super::task_planner::TaskDag;
 use super::{
-    TaskDispatcher, finalize_task, format_task_result, persist_conversation,
+    TaskDispatcher, finalize_task_with_outcome, format_task_result, persist_conversation,
     spawn_task_memory_extraction,
 };
 use crate::agent::registry::DestroyOutcome;
@@ -168,8 +168,6 @@ impl TaskDispatcher {
                 }
             };
 
-            let db_summary = final_content.chars().take(2000).collect::<String>();
-
             // Persist final result to conversation before publishing completion,
             // so follow-up turns can immediately read the result from history.
             if let Some(ref db) = db {
@@ -186,13 +184,13 @@ impl TaskDispatcher {
                 );
             }
 
-            // Update task status
-            finalize_task(
+            // Update task status with structured outcome
+            finalize_task_with_outcome(
                 &ctx,
                 &bus,
                 db.as_ref(),
                 &task_id,
-                &db_summary,
+                &final_content,
                 result.success,
             );
 
