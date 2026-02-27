@@ -761,3 +761,315 @@ fn test_finalize_task_none_outcome_fields() {
     }
     panic!("Expected TaskCompleted event");
 }
+
+// ── Phase 12-A: True-gap regression tests ─────────────────────────
+
+#[test]
+fn test_build_task_outcome_with_db_and_state_json() {
+    use super::build_task_outcome;
+    use crate::orchestrator::task_state::{TaskConstraints, TaskState, TaskWorkspace};
+    use openalpaca_storage::OutcomeKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let repo = openalpaca_storage::repository::TaskRepository::new(&db);
+
+    // Create task in DB
+    let now = chrono::Utc::now();
+    let task = openalpaca_storage::Task {
+        id: "t-outcome-db".to_string(),
+        title: "DB outcome test".to_string(),
+        description: None,
+        status: openalpaca_storage::TaskStatus::Running,
+        priority: 0,
+        progress_current: None,
+        progress_total: None,
+        result_summary: None,
+        created_by: "user1".to_string(),
+        source_lane: "cli".to_string(),
+        created_at: now,
+        updated_at: now,
+        completed_at: None,
+        state_json: None,
+        state_version: 0,
+        outcome_json: None,
+        outcome_kind: None,
+        artifact_count: 0,
+    };
+    repo.create(&task).unwrap();
+
+    // Build a TaskState with completed steps containing summaries
+    let state = TaskState {
+        objective: "Test objective".to_string(),
+        steps: vec![
+            crate::orchestrator::task_state::StepState {
+                step_order: 0,
+                agent_id: "agent-a".to_string(),
+                agent_name: "Agent A".to_string(),
+                role: "researcher".to_string(),
+                status: "completed".to_string(),
+                result_summary: Some("Found 3 relevant papers on the topic.".to_string()),
+                artifact_pointers: Vec::new(),
+                started_at: Some(now),
+                completed_at: Some(now),
+            },
+            crate::orchestrator::task_state::StepState {
+                step_order: 1,
+                agent_id: "agent-b".to_string(),
+                agent_name: "Agent B".to_string(),
+                role: "writer".to_string(),
+                status: "completed".to_string(),
+                result_summary: Some("Synthesized findings into a report.".to_string()),
+                artifact_pointers: Vec::new(),
+                started_at: Some(now),
+                completed_at: Some(now),
+            },
+        ],
+        constraints: TaskConstraints {
+            max_agents: 2,
+            pipeline_sequential: true,
+        },
+        workspace: TaskWorkspace::default(),
+        dag: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    // Persist state_json to DB
+    let state_json = state.to_json();
+    assert!(repo.update_state("t-outcome-db", &state_json, 0).unwrap());
+
+    // Call build_task_outcome with real DB — should read step summaries from state_json
+    let outcome = build_task_outcome(Some(&db), "t-outcome-db", "fallback content", true);
+
+    // Outcome should use step summaries (joined), NOT the fallback
+    assert_eq!(outcome.outcome_kind, OutcomeKind::TextOnly);
+    assert!(
+        outcome.summary.contains("Found 3 relevant papers"),
+        "Expected step summary in outcome, got: {}",
+        outcome.summary
+    );
+    assert!(
+        outcome.summary.contains("Synthesized findings"),
+        "Expected second step summary in outcome, got: {}",
+        outcome.summary
+    );
+    // Fallback should NOT be used when step summaries exist
+    assert!(
+        !outcome.summary.contains("fallback content"),
+        "Fallback should not appear when step summaries exist"
+    );
+    assert!(outcome.artifacts.is_empty());
+}
+
+#[test]
+fn test_finalize_task_with_outcome_persists_and_reads_back() {
+    use super::finalize_task_with_outcome;
+    use openalpaca_storage::OutcomeKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let repo = openalpaca_storage::repository::TaskRepository::new(&db);
+
+    // Create task in DB
+    let now = chrono::Utc::now();
+    let task = openalpaca_storage::Task {
+        id: "t-finalize".to_string(),
+        title: "Finalize test".to_string(),
+        description: None,
+        status: openalpaca_storage::TaskStatus::Running,
+        priority: 0,
+        progress_current: None,
+        progress_total: None,
+        result_summary: None,
+        created_by: "user1".to_string(),
+        source_lane: "cli".to_string(),
+        created_at: now,
+        updated_at: now,
+        completed_at: None,
+        state_json: None,
+        state_version: 0,
+        outcome_json: None,
+        outcome_kind: None,
+        artifact_count: 0,
+    };
+    repo.create(&task).unwrap();
+
+    // Register task in the in-memory registry
+    let ctx = std::sync::Arc::new(crate::context::SharedContext::new());
+    ctx.task_registry
+        .register("t-finalize".to_string(), "Finalize test".to_string());
+    let bus = crate::bus::EventBus::default();
+
+    // Call finalize_task_with_outcome — no state_json, so fallback path
+    let outcome = finalize_task_with_outcome(&ctx, &bus, Some(&db), "t-finalize", "Analysis complete", true);
+
+    // Verify returned outcome
+    assert_eq!(outcome.outcome_kind, OutcomeKind::TextOnly);
+    assert_eq!(outcome.summary, "Analysis complete");
+
+    // Read back from DB and verify persistence
+    let persisted = repo.get("t-finalize").unwrap().unwrap();
+    assert_eq!(
+        persisted.outcome_kind,
+        Some(OutcomeKind::TextOnly),
+        "outcome_kind should be persisted"
+    );
+    assert_eq!(persisted.artifact_count, 0, "artifact_count should be 0");
+    assert!(
+        persisted.outcome_json.is_some(),
+        "outcome_json should be persisted"
+    );
+
+    // Parse the persisted outcome_json and verify it matches
+    let parsed: crate::orchestrator::task_state::TaskOutcome =
+        serde_json::from_str(persisted.outcome_json.as_ref().unwrap()).unwrap();
+    assert_eq!(parsed.outcome_kind, OutcomeKind::TextOnly);
+    assert_eq!(parsed.summary, "Analysis complete");
+    assert!(parsed.artifacts.is_empty());
+    assert!(parsed.no_artifact_reason.is_some());
+
+    // Verify result_summary was also set
+    assert_eq!(
+        persisted.result_summary.as_deref(),
+        Some("Analysis complete")
+    );
+    // Verify status was updated to Completed
+    assert_eq!(persisted.status, openalpaca_storage::TaskStatus::Completed);
+}
+
+/// End-to-end pipeline test: mock LLM returns text only (no tool calls),
+/// pipeline completes, verify outcome_kind=TextOnly, artifact_count=0.
+/// Follows the pattern of `test_pipeline_non_singleton_workspace_artifact_count`.
+#[tokio::test]
+async fn test_pipeline_text_only_no_artifacts_e2e() {
+    use crate::events::SystemEvent;
+    use openalpaca_llm::{ChatResponse, FinishReason, ProviderType, Usage};
+    use std::time::Duration;
+
+    // ── 1. Real SQLite DB ────────────────────────────────────────────
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+
+    // ── 2. Mock LLM: text-only response (no tool calls) ─────────────
+    let mock_provider = std::sync::Arc::new(e2e_mock::MockProvider::new(vec![
+        ChatResponse {
+            content: "I analyzed the topic and here is my summary.".to_string(),
+            tool_calls: vec![],
+            model: "claude-sonnet-4-5-20250929".to_string(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 20,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+        },
+    ]));
+
+    let router = std::sync::Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        mock_provider,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    ));
+
+    // ── 3. Dispatcher with DB + router ───────────────────────────────
+    let ctx = std::sync::Arc::new(crate::context::SharedContext::new());
+    let agent = make_agent("analyst", vec!["analysis"]);
+    ctx.agent_registry
+        .register_template(template_from_agent(&agent));
+    ctx.agent_registry.register(agent.clone());
+
+    let bus = crate::bus::EventBus::default();
+    let mut rx = bus.subscribe();
+
+    let tool_registry = std::sync::Arc::new(crate::tools::ToolRegistry::new());
+    let executor = std::sync::Arc::new(crate::tools::RegistryToolExecutor::new(
+        tool_registry.clone(),
+    ));
+    let sandbox = std::sync::Arc::new(
+        crate::security::sandbox::SandboxManager::with_defaults(executor, bus.clone()),
+    );
+    let gate = std::sync::Arc::new(crate::security::gate::SecurityGate::new(sandbox));
+    let daemon_config =
+        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(DaemonConfig::default()));
+
+    let dispatcher = TaskDispatcher::new(
+        ctx.clone(),
+        std::sync::Arc::new(crate::lane::LaneManager::new()),
+        bus.clone(),
+        Some(router),
+        gate,
+        tool_registry,
+        Some(db.clone()),
+        None,
+        daemon_config,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    );
+
+    // ── 4. Dispatch ──────────────────────────────────────────────────
+    let result = dispatcher.dispatch(
+        Uuid::new_v4(),
+        "cli",
+        "Analyze the topic",
+        &["analysis".to_string()],
+        "user1",
+        "user1:cli",
+        None,
+    );
+    assert!(result.is_ok(), "dispatch failed: {:?}", result.err());
+
+    // ── 5. Wait for TaskCompleted / TaskFailed ───────────────────────
+    let mut completed_task_id = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Ok(SystemEvent::TaskCompleted { task_id, .. })) => {
+                completed_task_id = Some(task_id);
+                break;
+            }
+            Ok(Ok(SystemEvent::TaskFailed { task_id, error, .. })) => {
+                panic!(
+                    "Pipeline failed for task '{}': {}",
+                    task_id, error
+                );
+            }
+            Ok(Ok(_)) => continue,
+            Ok(Err(e)) => panic!("Event bus error: {e}"),
+            Err(_) => panic!("Timeout waiting for pipeline completion"),
+        }
+    }
+    let task_id = completed_task_id.unwrap();
+
+    // ── 6. Verify outcome in DB ──────────────────────────────────────
+    let repo = openalpaca_storage::repository::TaskRepository::new(&db);
+    let task = repo
+        .get(&task_id)
+        .expect("DB read failed")
+        .expect("Task not found in DB");
+
+    assert_eq!(
+        task.artifact_count, 0,
+        "Expected artifact_count=0 for text-only pipeline, got {}",
+        task.artifact_count
+    );
+
+    assert_eq!(
+        task.outcome_kind,
+        Some(openalpaca_storage::OutcomeKind::TextOnly),
+        "Expected TextOnly outcome, got {:?}",
+        task.outcome_kind
+    );
+
+    // Verify outcome_json is persisted and contains no_artifact_reason
+    assert!(
+        task.outcome_json.is_some(),
+        "outcome_json should be persisted"
+    );
+    let parsed: crate::orchestrator::task_state::TaskOutcome =
+        serde_json::from_str(task.outcome_json.as_ref().unwrap()).unwrap();
+    assert!(
+        parsed.no_artifact_reason.is_some(),
+        "no_artifact_reason should be set for text-only outcome"
+    );
+    assert!(parsed.artifacts.is_empty());
+}
