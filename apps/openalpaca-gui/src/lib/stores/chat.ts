@@ -114,9 +114,26 @@ export function applyDoneDataToMessage(message: ChatMessage, data: ChatStreamDon
 /** Load conversation history from the API. */
 export async function loadHistory(): Promise<void> {
   try {
-    const resp = await getChatHistory(100, 0);
-    chatMessages.set(resp.messages.map(normalizeHistoryMessage));
-    activeLaneKey.set(resp.lane_key);
+    const pageSize = 100;
+    let nextOffset = 0;
+    let total = 0;
+    let laneKey: string | null = null;
+    const allMessages: ChatMessage[] = [];
+
+    while (true) {
+      const resp = await getChatHistory(pageSize, nextOffset);
+      if (!laneKey) laneKey = resp.lane_key;
+      total = resp.total;
+      if (resp.messages.length === 0) break;
+      allMessages.push(...resp.messages);
+      nextOffset += resp.messages.length;
+      if (allMessages.length >= total) break;
+    }
+
+    chatMessages.set(allMessages.map(normalizeHistoryMessage));
+    if (laneKey) {
+      activeLaneKey.set(laneKey);
+    }
   } catch (e) {
     console.error("[chat-store] Failed to load history:", e);
   }

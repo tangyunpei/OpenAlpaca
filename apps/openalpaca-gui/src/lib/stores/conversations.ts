@@ -113,9 +113,30 @@ export async function loadConversationMessages(
   messagesLoading.set(true);
   selectedConversationId.set(conversationId);
   try {
-    const resp = await getConversationMessages(conversationId, limit ?? 100, offset ?? 0);
-    selectedMessages.set(resp.messages.map(normalizeHistoryMessage));
-    selectedMessagesTotal.set(resp.total);
+    // If caller specifies explicit paging, preserve one-page behavior.
+    if (limit !== undefined || offset !== undefined) {
+      const resp = await getConversationMessages(conversationId, limit ?? 100, offset ?? 0);
+      selectedMessages.set(resp.messages.map(normalizeHistoryMessage));
+      selectedMessagesTotal.set(resp.total);
+      return;
+    }
+
+    const pageSize = 100;
+    let nextOffset = 0;
+    let total = 0;
+    const allMessages: ChatMessage[] = [];
+
+    while (true) {
+      const resp = await getConversationMessages(conversationId, pageSize, nextOffset);
+      total = resp.total;
+      if (resp.messages.length === 0) break;
+      allMessages.push(...resp.messages);
+      nextOffset += resp.messages.length;
+      if (allMessages.length >= total) break;
+    }
+
+    selectedMessages.set(allMessages.map(normalizeHistoryMessage));
+    selectedMessagesTotal.set(total);
   } catch (e) {
     console.error("[conversations-store] Failed to load messages:", e);
   } finally {
