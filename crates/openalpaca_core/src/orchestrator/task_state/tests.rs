@@ -452,6 +452,7 @@ fn test_task_outcome_serialization_roundtrip() {
             label: "Final report".to_string(),
             agent_id: "a1".to_string(),
             step_order: 0,
+            file_asset_id: None,
         }],
         no_artifact_reason: None,
     };
@@ -872,4 +873,23 @@ fn test_is_same_agent_helper() {
     assert!(!is_same_agent("a1", "a10"));
     assert!(!is_same_agent("a1", "a10::xyz"));
     assert!(!is_same_agent("a10::xyz", "a1"));
+}
+
+// ── PR-11: ArtifactPointer file_asset_id backward compat ─────────
+
+#[test]
+fn test_artifact_pointer_file_asset_id_backward_compat() {
+    // Deserialize JSON without the file_asset_id field — should default to None
+    let json = r#"{"key":"report.pdf","label":"Report","agent_id":"a1","step_order":0}"#;
+    let ptr: ArtifactPointer = serde_json::from_str(json).unwrap();
+    assert_eq!(ptr.key, "report.pdf");
+    assert_eq!(ptr.label, "Report");
+    assert_eq!(ptr.agent_id, "a1");
+    assert_eq!(ptr.step_order, 0);
+    assert!(ptr.file_asset_id.is_none());
+
+    // Deserialize JSON with file_asset_id — should parse correctly
+    let json_with_id = r#"{"key":"report.pdf","label":"Report","agent_id":"a1","step_order":0,"file_asset_id":"file_abc123"}"#;
+    let ptr2: ArtifactPointer = serde_json::from_str(json_with_id).unwrap();
+    assert_eq!(ptr2.file_asset_id.as_deref(), Some("file_abc123"));
 }
