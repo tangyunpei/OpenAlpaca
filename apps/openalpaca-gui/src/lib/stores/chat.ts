@@ -349,6 +349,9 @@ export function subscribeToTaskResultEvents(): () => void {
     // Dedupe: skip if we already injected for this task + terminal status
     const dedupeKey = `${latest.task_id}:${latest.status}`;
     if (injectedCompletions.has(dedupeKey)) return;
+    if (injectedCompletions.size > 500) {
+      injectedCompletions.clear();
+    }
     injectedCompletions.add(dedupeKey);
 
     // Build outcome-aware message content

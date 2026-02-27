@@ -113,34 +113,12 @@ impl NotificationDispatcher {
             _ => return,
         };
 
-        // Use outcome_summary if available, fall back to result_summary
-        let display_summary = outcome_summary.or(summary).unwrap_or("Done");
-
-        // Build outcome-aware notification content
-        let outcome_line = match outcome_kind {
-            Some("text_only") => "\nNo files were produced.".to_string(),
-            Some("artifact_only") => {
-                let count = artifact_count.unwrap_or(0);
-                format!(
-                    "\n{} file{} produced.",
-                    count,
-                    if count != 1 { "s" } else { "" }
-                )
-            }
-            Some("mixed") => {
-                let count = artifact_count.unwrap_or(0);
-                format!(
-                    "\n{} file{} produced (with text summary).",
-                    count,
-                    if count != 1 { "s" } else { "" }
-                )
-            }
-            _ => String::new(),
-        };
-
-        let content = format!(
-            "Task completed: {}\n\n{}{}",
-            task.title, display_summary, outcome_line
+        let content = format_completion_message(
+            &task.title,
+            summary,
+            outcome_kind,
+            artifact_count,
+            outcome_summary,
         );
 
         // source_lane format: "{user_id}:telegram" or "{user_id}:imessage"
@@ -170,16 +148,7 @@ impl NotificationDispatcher {
             _ => return,
         };
 
-        let content = format!(
-            "Task failed: {}\n\nError: {}{}",
-            task.title,
-            error,
-            if outcome_kind == Some("failed") {
-                "\nNo files were produced."
-            } else {
-                ""
-            }
-        );
+        let content = format_failure_message(&task.title, error, outcome_kind);
 
         if task.source_lane.ends_with(":telegram") {
             if let Some(chat_id) = self.resolve_telegram_chat_id(&task.source_lane)
@@ -368,6 +337,7 @@ impl NotificationDispatcher {
 
     /// Resolve the Telegram chat_id for a given lane_key.
     ///
+    ///
     /// Strategy: prefer the user's `telegram.last_chat_id` preference
     /// (updated on every incoming message), then fall back to `conversation_map`.
     /// This avoids routing ambiguity for users who interact from multiple
@@ -391,5 +361,216 @@ impl NotificationDispatcher {
             .get_chat_id_by_lane_key(lane_key, "telegram")
             .ok()
             .flatten()
+    }
+}
+
+/// Build completion notification message (pure function, testable).
+fn format_completion_message(
+    title: &str,
+    summary: Option<&str>,
+    outcome_kind: Option<&str>,
+    artifact_count: Option<i32>,
+    outcome_summary: Option<&str>,
+) -> String {
+    let display_summary = outcome_summary.or(summary).unwrap_or("Done");
+
+    let outcome_line = match outcome_kind {
+        Some("text_only") => "\nNo files were produced.".to_string(),
+        Some("artifact_only") => {
+            let count = artifact_count.unwrap_or(0);
+            format!(
+                "\n{} file{} produced.",
+                count,
+                if count != 1 { "s" } else { "" }
+            )
+        }
+        Some("mixed") => {
+            let count = artifact_count.unwrap_or(0);
+            format!(
+                "\n{} file{} produced (with text summary).",
+                count,
+                if count != 1 { "s" } else { "" }
+            )
+        }
+        _ => String::new(),
+    };
+
+    format!(
+        "Task completed: {}\n\n{}{}",
+        title, display_summary, outcome_line
+    )
+}
+
+/// Build failure notification message (pure function, testable).
+fn format_failure_message(title: &str, error: &str, outcome_kind: Option<&str>) -> String {
+    format!(
+        "Task failed: {}\n\nError: {}{}",
+        title,
+        error,
+        if outcome_kind == Some("failed") {
+            "\nNo files were produced."
+        } else {
+            ""
+        }
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── format_completion_message ──────────────────────────────────────
+
+    #[test]
+    fn completion_text_only() {
+        let msg = format_completion_message(
+            "Summarize report",
+            Some("All done"),
+            Some("text_only"),
+            None,
+            Some("Summary is ready"),
+        );
+        assert!(msg.contains("Task completed: Summarize report"));
+        assert!(msg.contains("Summary is ready"));
+        assert!(msg.contains("No files were produced."));
+    }
+
+    #[test]
+    fn completion_artifact_only_plural() {
+        let msg = format_completion_message(
+            "Generate images",
+            None,
+            Some("artifact_only"),
+            Some(3),
+            None,
+        );
+        assert!(msg.contains("Task completed: Generate images"));
+        assert!(msg.contains("Done")); // no outcome_summary or summary → fallback
+        assert!(msg.contains("3 files produced."));
+    }
+
+    #[test]
+    fn completion_artifact_only_singular() {
+        let msg = format_completion_message(
+            "Create file",
+            None,
+            Some("artifact_only"),
+            Some(1),
+            None,
+        );
+        assert!(msg.contains("1 file produced."));
+        assert!(!msg.contains("files")); // singular
+    }
+
+    #[test]
+    fn completion_mixed() {
+        let msg = format_completion_message(
+            "Analyze data",
+            Some("result_summary"),
+            Some("mixed"),
+            Some(2),
+            Some("outcome_summary"),
+        );
+        assert!(msg.contains("Task completed: Analyze data"));
+        assert!(msg.contains("outcome_summary")); // outcome_summary preferred over summary
+        assert!(msg.contains("2 files produced (with text summary)."));
+    }
+
+    #[test]
+    fn completion_no_outcome_kind() {
+        let msg = format_completion_message(
+            "Simple task",
+            Some("Finished"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(msg, "Task completed: Simple task\n\nFinished");
+    }
+
+    #[test]
+    fn completion_all_none_fields() {
+        let msg = format_completion_message("Task X", None, None, None, None);
+        assert_eq!(msg, "Task completed: Task X\n\nDone");
+    }
+
+    #[test]
+    fn completion_zero_artifacts() {
+        let msg = format_completion_message(
+            "Task",
+            None,
+            Some("artifact_only"),
+            Some(0),
+            None,
+        );
+        assert!(msg.contains("0 files produced."));
+    }
+
+    #[test]
+    fn completion_outcome_summary_preferred_over_result_summary() {
+        let msg = format_completion_message(
+            "T",
+            Some("result_summary"),
+            Some("text_only"),
+            None,
+            Some("outcome_summary"),
+        );
+        assert!(msg.contains("outcome_summary"));
+        assert!(!msg.contains("result_summary"));
+    }
+
+    #[test]
+    fn completion_falls_back_to_result_summary() {
+        let msg = format_completion_message(
+            "T",
+            Some("result_summary"),
+            Some("text_only"),
+            None,
+            None, // no outcome_summary
+        );
+        assert!(msg.contains("result_summary"));
+    }
+
+    #[test]
+    fn completion_unknown_outcome_kind_ignored() {
+        let msg = format_completion_message(
+            "T",
+            Some("OK"),
+            Some("some_future_variant"),
+            Some(5),
+            None,
+        );
+        // Unknown variant falls through to _ => String::new()
+        assert_eq!(msg, "Task completed: T\n\nOK");
+    }
+
+    // ── format_failure_message ─────────────────────────────────────────
+
+    #[test]
+    fn failure_with_failed_outcome() {
+        let msg = format_failure_message("Broken task", "timeout", Some("failed"));
+        assert!(msg.contains("Task failed: Broken task"));
+        assert!(msg.contains("Error: timeout"));
+        assert!(msg.contains("No files were produced."));
+    }
+
+    #[test]
+    fn failure_without_outcome() {
+        let msg = format_failure_message("Broken task", "OOM", None);
+        assert_eq!(msg, "Task failed: Broken task\n\nError: OOM");
+    }
+
+    #[test]
+    fn failure_with_non_failed_outcome_kind() {
+        let msg = format_failure_message("T", "err", Some("text_only"));
+        // Non-"failed" outcome_kind → no extra line
+        assert!(!msg.contains("No files were produced."));
+        assert_eq!(msg, "Task failed: T\n\nError: err");
+    }
+
+    #[test]
+    fn failure_empty_error_string() {
+        let msg = format_failure_message("T", "", Some("failed"));
+        assert!(msg.contains("Error: \n"));
     }
 }

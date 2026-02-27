@@ -33,6 +33,40 @@ export const selectedTaskDetail = writable<TaskDetailResponse | null>(null);
 /** Loading state */
 export const tasksLoading = writable(false);
 
+/** Debounced + in-flight-guarded backfill.
+ *  - Debounce: coalesces rapid terminal WS events into one fetch.
+ *  - In-flight guard: if a fetch is running, new requests are deferred
+ *    and a single trailing fetch runs after the current one finishes. */
+let backfillTimer: ReturnType<typeof setTimeout> | null = null;
+let backfillInFlight = false;
+let backfillNeeded = false;
+
+function scheduleBackfill(): void {
+  if (backfillInFlight) {
+    backfillNeeded = true;
+    return;
+  }
+  if (backfillTimer !== null) return;
+  backfillTimer = setTimeout(() => {
+    backfillTimer = null;
+    runBackfill();
+  }, 200);
+}
+
+async function runBackfill(): Promise<void> {
+  backfillInFlight = true;
+  backfillNeeded = false;
+  try {
+    await loadTasks();
+  } finally {
+    backfillInFlight = false;
+    if (backfillNeeded) {
+      backfillNeeded = false;
+      scheduleBackfill();
+    }
+  }
+}
+
 /** Fetch all tasks from REST and merge into the map (preserves WebSocket-derived data) */
 export async function loadTasks(): Promise<void> {
   tasksLoading.set(true);
@@ -95,9 +129,10 @@ export function subscribeToTaskEvents(): () => void {
           // Build a minimal ParsedOutcome from WS fields when available
           outcome: latest.outcome_kind
             ? {
-                outcome_summary: latest.outcome_summary ?? null,
+                ...(existing.outcome ?? {}),
                 outcome_kind: latest.outcome_kind,
-                artifact_count: latest.artifact_count ?? 0,
+                outcome_summary: latest.outcome_summary ?? existing.outcome?.outcome_summary ?? null,
+                artifact_count: latest.artifact_count ?? existing.outcome?.artifact_count ?? 0,
                 artifacts: existing.outcome?.artifacts ?? [],
                 no_artifact_reason: existing.outcome?.no_artifact_reason,
               }
@@ -131,6 +166,10 @@ export function subscribeToTaskEvents(): () => void {
           updated_at: latest.ts,
           completed_at: null,
         });
+        // Terminal placeholder — backfill from REST to resolve "Unknown Task"
+        if (latest.status === "completed" || latest.status === "failed") {
+          scheduleBackfill();
+        }
       }
       return new Map(map);
     });
