@@ -625,6 +625,107 @@ pub(super) fn format_task_result(title: &str, summary: &str, is_success: bool) -
     }
 }
 
+use crate::orchestrator::task_state::{TaskOutcome, TaskState};
+use openalpaca_storage::OutcomeKind;
+
+/// Maximum length for the summary stored in `result_summary` column.
+const MAX_SUMMARY_LENGTH: usize = 2000;
+
+/// Build a structured TaskOutcome from the current task state.
+///
+/// Reads the task's state_json from the DB (if available), uses it to collect
+/// step summaries and artifact pointers, then classifies the outcome.
+///
+/// If state_json is unavailable (lead agent with no state, legacy tasks),
+/// falls back to constructing a minimal outcome from the provided content.
+pub(super) fn build_task_outcome(
+    db: Option<&openalpaca_storage::Database>,
+    task_id: &str,
+    final_content: &str,
+    success: bool,
+) -> TaskOutcome {
+    // Try to read state_json for rich outcome data
+    if let Some(db) = db {
+        let repo = openalpaca_storage::repository::TaskRepository::new(db);
+        if let Ok(Some(task)) = repo.get(task_id) {
+            if let Some(ref sj) = task.state_json {
+                if let Ok(state) = serde_json::from_str::<TaskState>(sj) {
+                    let fallback = if final_content.is_empty() {
+                        "Task completed."
+                    } else {
+                        final_content
+                    };
+                    return state.build_outcome(fallback, None);
+                }
+            }
+        }
+    }
+
+    // Fallback: no state_json available, build minimal outcome from content
+    let summary = if final_content.is_empty() {
+        "Task completed.".to_string()
+    } else {
+        final_content.to_string()
+    };
+
+    if success {
+        TaskOutcome {
+            summary,
+            outcome_kind: OutcomeKind::TextOnly,
+            artifacts: Vec::new(),
+            no_artifact_reason: Some("No artifacts were produced.".to_string()),
+        }
+    } else {
+        TaskOutcome {
+            summary,
+            outcome_kind: OutcomeKind::Failed,
+            artifacts: Vec::new(),
+            no_artifact_reason: None,
+        }
+    }
+}
+
+/// Finalize a task with a structured outcome.
+///
+/// This is the unified replacement for the ad-hoc assembly in each execution mode.
+/// It:
+/// 1. Builds the TaskOutcome (via `build_task_outcome`)
+/// 2. Persists the outcome to DB (outcome_json, outcome_kind, artifact_count)
+/// 3. Delegates to `finalize_task` for status update, `result_summary`, and event emission
+pub(super) fn finalize_task_with_outcome(
+    ctx: &crate::context::SharedContext,
+    bus: &crate::bus::EventBus,
+    db: Option<&openalpaca_storage::Database>,
+    task_id: &str,
+    final_content: &str,
+    success: bool,
+) -> TaskOutcome {
+    let outcome = build_task_outcome(db, task_id, final_content, success);
+
+    // Persist structured outcome fields to DB (outcome_json, outcome_kind, artifact_count)
+    if let Some(db) = db {
+        let repo = openalpaca_storage::repository::TaskRepository::new(db);
+        let outcome_json = serde_json::to_string(&outcome).unwrap_or_default();
+        if let Err(e) = repo.set_outcome(
+            task_id,
+            &outcome_json,
+            outcome.outcome_kind,
+            outcome.artifacts.len() as i32,
+        ) {
+            tracing::warn!(
+                "finalize_task_with_outcome: failed to set outcome for task '{}': {e}",
+                task_id
+            );
+        }
+    }
+
+    // Delegate status update + result_summary + event emission to existing finalize_task
+    let truncated_summary: String = outcome.summary.chars().take(MAX_SUMMARY_LENGTH).collect();
+    finalize_task(ctx, bus, db, task_id, &truncated_summary, success);
+
+    outcome
+}
+
 /// Update task status in registry + DB + emit event for a completed or failed task.
 pub(super) fn finalize_task(
     ctx: &crate::context::SharedContext,

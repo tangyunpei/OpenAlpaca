@@ -97,6 +97,9 @@ pub async fn create_task_handler(
         completed_at: None,
         state_json: None,
         state_version: 0,
+        outcome_json: None,
+        outcome_kind: None,
+        artifact_count: 0,
     };
 
     // 1. Persist to DB

@@ -393,3 +393,49 @@ fn test_dispatch_planned_pipeline_empty_assignments_decision_and_execution_agree
         "Expected DispatchDecision event to be published"
     );
 }
+
+// ── build_task_outcome tests ─────────────────────────────────────
+
+#[test]
+fn test_build_task_outcome_no_db_success() {
+    use super::build_task_outcome;
+    use openalpaca_storage::OutcomeKind;
+
+    let outcome = build_task_outcome(None, "t1", "Research completed successfully", true);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::TextOnly);
+    assert_eq!(outcome.summary, "Research completed successfully");
+    assert!(outcome.artifacts.is_empty());
+    assert!(outcome.no_artifact_reason.is_some());
+}
+
+#[test]
+fn test_build_task_outcome_no_db_failure() {
+    use super::build_task_outcome;
+    use openalpaca_storage::OutcomeKind;
+
+    let outcome = build_task_outcome(None, "t1", "Network timeout", false);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::Failed);
+    assert_eq!(outcome.summary, "Network timeout");
+    assert!(outcome.artifacts.is_empty());
+    assert!(outcome.no_artifact_reason.is_none());
+}
+
+#[test]
+fn test_build_task_outcome_empty_content_fallback() {
+    use super::build_task_outcome;
+    use openalpaca_storage::OutcomeKind;
+
+    let outcome = build_task_outcome(None, "t1", "", true);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::TextOnly);
+    assert_eq!(outcome.summary, "Task completed.");
+}
+
+#[test]
+fn test_build_task_outcome_empty_content_failure() {
+    use super::build_task_outcome;
+    use openalpaca_storage::OutcomeKind;
+
+    let outcome = build_task_outcome(None, "t1", "", false);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::Failed);
+    assert_eq!(outcome.summary, "Task completed.");
+}

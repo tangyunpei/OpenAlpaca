@@ -16,4 +16,4 @@ pub use file_asset::{AttachmentRef, FileAsset, FileAssetStatus};
 pub use identity::{ConversationMap, ExternalIdentity, GlobalUser, LinkToken};
 pub use memory::{MemoryKind, MemoryScope, MemorySource, MemoryV2};
 pub use subagent::{AgentMetrics, AgentTaskHistory, SubAgentConfig};
-pub use task::{AssignmentStatus, Task, TaskAgentAssignment, TaskStatus};
+pub use task::{AssignmentStatus, OutcomeKind, Task, TaskAgentAssignment, TaskStatus};
