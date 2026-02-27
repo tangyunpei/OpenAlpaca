@@ -5,8 +5,9 @@
 //!
 //! Unlike bot-based connectors (Telegram), iMessage is a native macOS
 //! integration where the Mac owner is always the trusted principal.
-//! Messages must start with a trigger prefix (`/ask` or `@openalpaca`)
-//! to be processed.
+//! Messages are optionally filtered by a trigger prefix (`/ask` or `@openalpaca`).
+//! Prefix requirements are configurable per-chat-type via `direct_require_prefix`
+//! and `group_require_prefix` settings.
 
 use crate::{Connector, ConnectorError};
 use arc_swap::ArcSwap;
@@ -50,11 +51,16 @@ fn normalize_handle(handle: &str) -> String {
     if trimmed.is_empty() {
         return String::new();
     }
-    // If it looks like a phone number (starts with + or digit), strip non-digits
+    // Emails: detect by '@' first to avoid misclassifying digit-prefixed emails
+    // (e.g. "123user@example.com") as phone numbers.
+    if trimmed.contains('@') {
+        return trimmed.to_lowercase();
+    }
+    // Phone numbers: starts with + or digit, strip all non-digits
     if trimmed.starts_with('+') || trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         return trimmed.chars().filter(|c| c.is_ascii_digit()).collect();
     }
-    // Otherwise treat as email: lowercase
+    // Otherwise lowercase
     trimmed.to_lowercase()
 }
 
@@ -93,11 +99,15 @@ enum ProcessDecision {
 ///   - Apply `group_require_prefix` to decide whether a prefix is needed.
 fn should_process(msg: &IncomingMessage, config: &IMessageConfig) -> ProcessDecision {
     // Filter out messages sent by the bot itself (prevents feedback loop).
-    // Match the message's account field against the configured bot_handle.
-    if let Some(ref bot_handle) = config.bot_handle {
-        if !msg.account.is_empty() && msg.account.contains(bot_handle.as_str()) {
-            return ProcessDecision::Skip("bot_own_message");
-        }
+    // Only match is_from_me=true messages: in chat.db, msg.account records the LOCAL
+    // iMessage account for ALL messages (both sent and received on that account).
+    // Without the is_from_me guard, incoming messages would be incorrectly skipped.
+    if let Some(ref bot_handle) = config.bot_handle
+        && msg.is_from_me
+        && !msg.account.is_empty()
+        && msg.account.ends_with(bot_handle.as_str())
+    {
+        return ProcessDecision::Skip("bot_own_message");
     }
 
     let has_attachments = !msg.attachments.is_empty();
@@ -127,10 +137,7 @@ fn should_process(msg: &IncomingMessage, config: &IMessageConfig) -> ProcessDeci
     let is_owner = msg.is_from_me || {
         let normalized_sender = normalize_handle(&msg.sender);
         !normalized_sender.is_empty()
-            && config
-                .owner_handles
-                .iter()
-                .any(|h| *h == normalized_sender)
+            && config.owner_handles.contains(&normalized_sender)
     };
 
     let require_prefix = if is_owner {
@@ -170,8 +177,6 @@ fn should_process(msg: &IncomingMessage, config: &IMessageConfig) -> ProcessDeci
 /// flow is needed.
 pub struct IMessageConnector {
     db: Arc<Database>,
-    #[allow(dead_code)]
-    bus: Arc<openalpaca_core::bus::EventBus>,
     gateway: Arc<Gateway>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     cancel_token: CancellationToken,
@@ -187,7 +192,6 @@ impl IMessageConnector {
     /// for all messages (bypassing the heuristic `resolve_owner` fallback).
     pub fn new(
         db: Arc<Database>,
-        bus: Arc<openalpaca_core::bus::EventBus>,
         gateway: Arc<Gateway>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
         cancel_token: CancellationToken,
@@ -197,7 +201,6 @@ impl IMessageConnector {
         let chat_db_path = format!("{}/Library/Messages/chat.db", home);
         Self {
             db,
-            bus,
             gateway,
             daemon_config,
             cancel_token,
@@ -223,7 +226,13 @@ impl IMessageConnector {
             .get("imessage.last_rowid")
             .ok()
             .flatten()
-            .and_then(|v| v.parse::<i64>().ok());
+            .and_then(|v| match v.parse::<i64>() {
+                Ok(n) => Some(n),
+                Err(e) => {
+                    warn!("Corrupt imessage.last_rowid '{v}': {e}, re-initializing");
+                    None
+                }
+            });
 
         if let Some(watermark) = persisted_watermark {
             reader.set_watermark(watermark);
@@ -248,7 +257,7 @@ impl IMessageConnector {
             "iMessage connector started with routing config"
         );
 
-        if initial_config.bot_handle.is_none() {
+        if initial_config.bot_handle.is_none() && initial_config.allow_from_me {
             warn!("imessage.bot_handle not configured — bot may process its own replies, \
                    causing a feedback loop. Set this to the Mac's iMessage sending address.");
         }
@@ -257,16 +266,7 @@ impl IMessageConnector {
             tokio::select! {
                 _ = self.cancel_token.cancelled() => {
                     info!("iMessage connector shutting down");
-                    // Persist watermark on clean shutdown so offline messages
-                    // are not lost on restart.
-                    let config_repo = openalpaca_storage::ConfigRepository::new(&self.db);
-                    if let Err(e) = config_repo.set(
-                        "imessage.last_rowid",
-                        &reader.watermark().to_string(),
-                        "int",
-                    ) {
-                        warn!("Failed to persist iMessage watermark on shutdown: {e}");
-                    }
+                    Self::persist_watermark(&self.db, reader.watermark());
                     return Ok(());
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
@@ -284,14 +284,7 @@ impl IMessageConnector {
                             // Persist watermark after processing so offline
                             // messages are not lost on restart.
                             if had_messages {
-                                let config_repo = openalpaca_storage::ConfigRepository::new(&self.db);
-                                if let Err(e) = config_repo.set(
-                                    "imessage.last_rowid",
-                                    &reader.watermark().to_string(),
-                                    "int",
-                                ) {
-                                    warn!("Failed to persist iMessage watermark: {e}");
-                                }
+                                Self::persist_watermark(&self.db, reader.watermark());
                             }
                         }
                         Err(e) => {
@@ -300,6 +293,18 @@ impl IMessageConnector {
                     }
                 }
             }
+        }
+    }
+
+    /// Persist the ROWID watermark to the database.
+    fn persist_watermark(db: &Database, watermark: i64) {
+        let config_repo = openalpaca_storage::ConfigRepository::new(db);
+        if let Err(e) = config_repo.set(
+            "imessage.last_rowid",
+            &watermark.to_string(),
+            "int",
+        ) {
+            warn!("Failed to persist iMessage watermark: {e}");
         }
     }
 
@@ -314,21 +319,22 @@ impl IMessageConnector {
             .get_or_default("imessage.allow_from_me")
             .ok()
             .flatten()
-            .map(|v| v == "true")
+            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
             .unwrap_or(false);
 
         let direct_require_prefix = config_repo
             .get_or_default("imessage.direct_require_prefix")
             .ok()
             .flatten()
-            .map(|v| v == "true")
+            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
             .unwrap_or(false);
 
+        // Canonical values: "true"/"false". Also accepts "1"/"yes" for convenience.
         let group_require_prefix = config_repo
             .get_or_default("imessage.group_require_prefix")
             .ok()
             .flatten()
-            .map(|v| v == "true")
+            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
             .unwrap_or(true);
 
         let owner_handles: Vec<String> = config_repo
@@ -337,7 +343,7 @@ impl IMessageConnector {
             .flatten()
             .map(|v| {
                 v.split(',')
-                    .map(|h| normalize_handle(h))
+                    .map(normalize_handle)
                     .filter(|h| !h.is_empty())
                     .collect()
             })
@@ -399,6 +405,26 @@ impl IMessageConnector {
         msg: IncomingMessage,
         config: &IMessageConfig,
     ) -> Result<(), String> {
+        // Compute stable reply target:
+        // - DMs: use sender handle (phone/email) — consistent across chat_identifier variants
+        // - Groups: use chat_id (group identifier required by AppleScript "chat id")
+        let (reply_target, reply_is_group) = if msg.is_group {
+            (msg.chat_id.clone(), true)
+        } else if !msg.sender.is_empty() {
+            (msg.sender.clone(), false)
+        } else {
+            // Fallback for is_from_me=1 with empty sender
+            (msg.chat_id.clone(), false)
+        };
+
+        if reply_target != msg.chat_id {
+            debug!(
+                reply_target = %reply_target,
+                chat_id = %msg.chat_id,
+                "Reply target differs from chat_id (DM sender-based addressing)"
+            );
+        }
+
         // Step 1: Evaluate routing decision
         let content = match should_process(&msg, config) {
             ProcessDecision::Process { content } => {
@@ -408,6 +434,7 @@ impl IMessageConnector {
                     is_group = msg.is_group,
                     is_from_me = msg.is_from_me,
                     account = %msg.account,
+                    reply_target = %reply_target,
                     "Accepted iMessage for processing"
                 );
                 content
@@ -425,9 +452,9 @@ impl IMessageConnector {
                 // Send usage hint for empty-after-prefix cases
                 if reason.ends_with("empty_after_prefix") {
                     IMessageSender::send(
-                        &msg.chat_id,
+                        &reply_target,
                         "Usage: /ask <your question> or @openalpaca <your question>",
-                        msg.is_group,
+                        reply_is_group,
                     )
                     .await
                     .ok();
@@ -481,6 +508,15 @@ impl IMessageConnector {
             }
         }
 
+        // If all attachments failed and content is empty, skip to avoid nonsensical response
+        if content.is_empty() && attachments.is_empty() && !msg.attachments.is_empty() {
+            warn!(
+                chat_id = %msg.chat_id,
+                "All iMessage attachments failed to store and message content is empty, skipping"
+            );
+            return Ok(());
+        }
+
         // Step 3: Route through Gateway
         let response = self
             .gateway
@@ -508,14 +544,17 @@ impl IMessageConnector {
             warn!("Failed to update conversation_map lane_key: {e}");
         }
 
-        // Step 3.6: Persist imessage.last_chat_id for cross-channel delivery
+        // Step 3.6: Persist reply metadata for cross-channel delivery / notifications
         let pref_repo = PreferenceRepository::new(&self.db);
-        if let Err(e) = pref_repo.set(&global_id, "imessage.last_chat_id", &msg.chat_id, None) {
-            warn!("Failed to persist imessage.last_chat_id: {e}");
+        if let Err(e) = pref_repo.set(&global_id, "imessage.last_reply_target", &reply_target, None) {
+            warn!("Failed to persist imessage.last_reply_target: {e}");
+        }
+        if let Err(e) = pref_repo.set(&global_id, "imessage.last_is_group", &reply_is_group.to_string(), None) {
+            warn!("Failed to persist imessage.last_is_group: {e}");
         }
 
-        // Step 4: Send response
-        IMessageSender::send(&msg.chat_id, &response.content, msg.is_group)
+        // Step 4: Send response using stable reply target
+        IMessageSender::send(&reply_target, &response.content, reply_is_group)
             .await
             .map_err(|e| format!("Send failed: {}", e))?;
 
@@ -890,9 +929,28 @@ mod tests {
     #[test]
     fn test_bot_handle_skips_own_message() {
         let config = owner_config(); // bot_handle = Some("bot@mac.com")
+        // is_from_me=true: this is the bot's own outgoing reply
         let msg = make_msg_with_account("hello", "", "+15551234567", true, "e:bot@mac.com");
         let decision = should_process(&msg, &config);
         assert_eq!(get_skip_reason(decision), "bot_own_message");
+    }
+
+    #[test]
+    fn test_bot_handle_does_not_skip_incoming_message() {
+        // is_from_me=false: incoming message where account matches bot_handle
+        // (because chat.db records the LOCAL receiving account for incoming msgs too).
+        // This must NOT be skipped — it's a real incoming message.
+        let config = owner_config(); // bot_handle = Some("bot@mac.com")
+        let msg = make_msg_with_account(
+            "/ask hello",
+            "+19995550000",
+            "+19995550000",
+            false,
+            "e:bot@mac.com",
+        );
+        let decision = should_process(&msg, &config);
+        assert!(is_process(&decision));
+        assert_eq!(get_content(decision), "hello");
     }
 
     #[test]
@@ -922,13 +980,37 @@ mod tests {
     }
 
     #[test]
-    fn test_bot_handle_partial_match() {
-        // bot_handle uses contains() matching, so partial matches work
+    fn test_bot_handle_suffix_match() {
+        // bot_handle uses ends_with() matching to handle "p:"/"e:" prefixes
         let mut config = owner_config();
         config.bot_handle = Some("+1234567890".into());
         let msg = make_msg_with_account("hello", "", "+15551234567", true, "p:+1234567890");
         let decision = should_process(&msg, &config);
         assert_eq!(get_skip_reason(decision), "bot_own_message");
+    }
+
+    #[test]
+    fn test_bot_handle_no_over_match() {
+        // Short bot_handle should not accidentally match unrelated accounts
+        let mut config = owner_config();
+        config.bot_handle = Some("bot".into());
+        let msg = make_msg_with_account("hello", "", "+15551234567", true, "e:notbot@mac.com");
+        let decision = should_process(&msg, &config);
+        // "notbot@mac.com" does not end with "bot", so should NOT be skipped
+        assert!(is_process(&decision));
+    }
+
+    #[test]
+    fn test_normalize_digit_prefixed_email() {
+        // Digit-prefixed emails should not be misclassified as phone numbers
+        assert_eq!(
+            normalize_handle("123user@example.com"),
+            "123user@example.com"
+        );
+        assert_eq!(
+            normalize_handle("+user@example.com"),
+            "+user@example.com"
+        );
     }
 
     #[test]
@@ -938,5 +1020,53 @@ mod tests {
         let msg = make_msg_with_account("/ask hello", "", "chat12345", true, "e:bot@mac.com");
         let decision = should_process(&msg, &config);
         assert_eq!(get_skip_reason(decision), "bot_own_message");
+    }
+
+    // ── Reply target computation ──
+
+    #[test]
+    fn test_dm_reply_target_uses_sender() {
+        // For DMs, reply_target should be the sender handle (not the varying chat_id)
+        let msg = make_msg("/ask hello", "+19995550000", "iMessage;-;+19995550000", false);
+        // Simulate the reply_target logic from handle_message
+        let (reply_target, reply_is_group) = if msg.is_group {
+            (msg.chat_id.clone(), true)
+        } else if !msg.sender.is_empty() {
+            (msg.sender.clone(), false)
+        } else {
+            (msg.chat_id.clone(), false)
+        };
+        assert_eq!(reply_target, "+19995550000");
+        assert!(!reply_is_group);
+    }
+
+    #[test]
+    fn test_group_reply_target_uses_chat_id() {
+        // For groups, reply_target should be the chat_id (group identifier)
+        let msg = make_msg("/ask hello", "+19995550000", "chat12345", false);
+        let (reply_target, reply_is_group) = if msg.is_group {
+            (msg.chat_id.clone(), true)
+        } else if !msg.sender.is_empty() {
+            (msg.sender.clone(), false)
+        } else {
+            (msg.chat_id.clone(), false)
+        };
+        assert_eq!(reply_target, "chat12345");
+        assert!(reply_is_group);
+    }
+
+    #[test]
+    fn test_dm_empty_sender_falls_back_to_chat_id() {
+        // is_from_me=true with empty sender should fall back to chat_id
+        let msg = make_msg("hello", "", "+15551234567", true);
+        let (reply_target, reply_is_group) = if msg.is_group {
+            (msg.chat_id.clone(), true)
+        } else if !msg.sender.is_empty() {
+            (msg.sender.clone(), false)
+        } else {
+            (msg.chat_id.clone(), false)
+        };
+        assert_eq!(reply_target, "+15551234567");
+        assert!(!reply_is_group);
     }
 }

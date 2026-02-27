@@ -3,8 +3,8 @@
 //! Provides unified connector interface for chat platforms.
 //! Each platform is feature-gated:
 //! - `telegram`: Telegram Bot API via teloxide
-//! - `imessage`: iMessage (macOS only) - future
-//! - `wechat`: WeChat - future
+//! - `imessage`: iMessage (macOS only)
+//! - `wechat`: WeChat (future)
 //!
 //! All connectors implement the `Connector` trait for a uniform interface.
 
@@ -103,7 +103,6 @@ impl ConnectorBuilder {
     ) -> imessage::IMessageConnector {
         imessage::IMessageConnector::new(
             self.db,
-            self.bus,
             self.gateway,
             self.daemon_config,
             cancel_token,
@@ -182,7 +181,7 @@ impl ConnectorFactory for IMessageFactory {
         &self,
         _token: String,
         db: Database,
-        bus: EventBus,
+        _bus: EventBus,
         gateway: Arc<Gateway>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
     ) -> Result<startup::ConnectorHandle, ConnectorError> {
@@ -193,7 +192,6 @@ impl ConnectorFactory for IMessageFactory {
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let connector = imessage::IMessageConnector::new(
             Arc::new(db),
-            Arc::new(bus),
             gateway,
             daemon_config,
             cancel_token.clone(),

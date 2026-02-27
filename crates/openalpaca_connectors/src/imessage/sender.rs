@@ -3,6 +3,7 @@
 //! Sends iMessage replies by executing AppleScript through `osascript`.
 //! Supports both direct (1-to-1) and group chat messages.
 
+use std::time::Duration;
 use tokio::process::Command;
 
 /// Sends iMessage replies using `osascript` (AppleScript).
@@ -29,6 +30,10 @@ end tell"#,
                 escaped_recipient, escaped_message,
             )
         } else {
+            // Note: Uses the first iMessage account. With multi-address setups
+            // (phone + email both registered), this may route into a different
+            // thread than expected. A future enhancement could accept an explicit
+            // `from_account` parameter.
             format!(
                 r#"tell application "Messages"
     set targetService to 1st account whose service type = iMessage
@@ -39,12 +44,17 @@ end tell"#,
             )
         };
 
-        let output = Command::new("osascript")
-            .arg("-e")
-            .arg(&script)
-            .output()
-            .await
-            .map_err(|e| format!("Failed to execute osascript: {}", e))?;
+        let output = tokio::time::timeout(
+            Duration::from_secs(15),
+            Command::new("osascript")
+                .arg("-e")
+                .arg(&script)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(|_| "osascript timed out after 15 seconds".to_string())?
+        .map_err(|e| format!("Failed to execute osascript: {}", e))?;
 
         if output.status.success() {
             Ok(())
