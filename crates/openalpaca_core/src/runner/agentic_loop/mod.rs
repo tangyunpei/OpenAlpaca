@@ -932,7 +932,6 @@ pub async fn run_agentic_loop_routed(
                             tool_call_number = tool_calls_made,
                             "Executing tool"
                         );
-
                         let result_text = if let (Some(sbx), Some(policy)) =
                             (sandbox, sandbox_policy)
                         {

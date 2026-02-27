@@ -774,3 +774,102 @@ fn test_scan_workspace_artifacts_all_steps() {
         serde_json::from_str(&state.steps[1].artifact_pointers[0]).unwrap();
     assert_eq!(ptr1["key"], "report.pdf");
 }
+
+// ── Non-singleton instance ID matching tests ─────────────────────
+
+#[test]
+fn test_scan_workspace_artifacts_matches_instance_id() {
+    // Simulates non-singleton agent: step has template_id "a1",
+    // but workspace entry was written by instance "a1::abc12345".
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Done");
+
+    // Write Artifact with non-singleton instance_id as author
+    state
+        .workspace
+        .write(
+            "result.csv",
+            "data",
+            "a1::abc12345",
+            WorkspaceEntryType::Artifact,
+            &[],
+        )
+        .unwrap();
+
+    state.scan_workspace_artifacts(0);
+
+    // Should match: "a1::abc12345" is an instance of template "a1"
+    assert_eq!(state.steps[0].artifact_pointers.len(), 1);
+    let stored: serde_json::Value =
+        serde_json::from_str(&state.steps[0].artifact_pointers[0]).unwrap();
+    assert_eq!(stored["key"], "result.csv");
+}
+
+#[test]
+fn test_scan_workspace_artifacts_instance_id_step_updated() {
+    // Simulates the case where pipeline already updated step.agent_id
+    // to the instance_id. The exact match should still work.
+    let mut state = TaskState::initial("obj", &make_assignments());
+    // Update step's agent_id to instance_id (as pipeline now does)
+    state.steps[0].agent_id = "a1::abc12345".to_string();
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Done");
+
+    state
+        .workspace
+        .write(
+            "result.csv",
+            "data",
+            "a1::abc12345",
+            WorkspaceEntryType::Artifact,
+            &[],
+        )
+        .unwrap();
+
+    state.scan_workspace_artifacts(0);
+
+    assert_eq!(state.steps[0].artifact_pointers.len(), 1);
+}
+
+#[test]
+fn test_scan_workspace_artifacts_no_cross_template_match() {
+    // Ensure "a1" does NOT match "a10::xyz" (prefix must end at "::")
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Done");
+
+    state
+        .workspace
+        .write(
+            "other.csv",
+            "data",
+            "a10::xyz789",
+            WorkspaceEntryType::Artifact,
+            &[],
+        )
+        .unwrap();
+
+    state.scan_workspace_artifacts(0);
+
+    // "a10::xyz789" should NOT match step 0's agent "a1"
+    assert!(state.steps[0].artifact_pointers.is_empty());
+}
+
+#[test]
+fn test_is_same_agent_helper() {
+    use super::is_same_agent;
+
+    // Exact match
+    assert!(is_same_agent("a1", "a1"));
+    // Instance of template
+    assert!(is_same_agent("a1::abc12345", "a1"));
+    assert!(is_same_agent("a1", "a1::abc12345"));
+    // Different agents
+    assert!(!is_same_agent("a1", "a2"));
+    assert!(!is_same_agent("a1::abc", "a2"));
+    // Prefix trap: "a1" should NOT match "a10"
+    assert!(!is_same_agent("a1", "a10"));
+    assert!(!is_same_agent("a1", "a10::xyz"));
+    assert!(!is_same_agent("a10::xyz", "a1"));
+}

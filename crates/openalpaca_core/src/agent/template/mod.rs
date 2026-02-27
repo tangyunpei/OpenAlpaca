@@ -513,8 +513,16 @@ impl AgentTemplate {
             })
             .collect();
 
-        // Merge denied_skills into denied_capabilities
-        let allowed_capabilities = fm.skills.clone();
+        // Merge denied_skills into denied_capabilities.
+        // Always include workspace tools — they are infrastructure tools
+        // available to any agent executing in a task context (pipeline/DAG).
+        // The ContextualToolExecutor already gates them on task_id presence.
+        let mut allowed_capabilities = fm.skills.clone();
+        for ws_tool in ["workspace_read", "workspace_write"] {
+            if !allowed_capabilities.iter().any(|c| c == ws_tool) {
+                allowed_capabilities.push(ws_tool.to_string());
+            }
+        }
         let denied_capabilities = fm.denied_skills.clone();
 
         SubAgent {
