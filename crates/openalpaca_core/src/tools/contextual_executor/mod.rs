@@ -157,6 +157,21 @@ impl ContextualToolExecutor {
                 .map_err(|e| format!("Failed to persist workspace: {e}"))?;
 
             if updated {
+                // If a file_asset_id was provided, associate it with the entry
+                if let Some(fid) = arguments.get("file_asset_id").and_then(|v| v.as_str()) {
+                    // Re-read, set file_asset_id, and persist again
+                    let task2 = repo
+                        .get(task_id)
+                        .map_err(|e| format!("Failed to reload task: {e}"))?
+                        .ok_or_else(|| format!("Task '{}' not found", task_id))?;
+                    let mut state2: TaskState = serde_json::from_str(
+                        task2.state_json.as_deref().unwrap_or("{}"),
+                    )
+                    .map_err(|e| format!("Failed to parse task state: {e}"))?;
+                    state2.workspace.set_file_asset_id(key, fid);
+                    let json2 = state2.to_json();
+                    let _ = repo.update_state(task_id, &json2, task2.state_version);
+                }
                 return Ok(format!("Workspace entry '{}' written successfully", key));
             }
 

@@ -28,6 +28,10 @@ pub struct WorkspaceEntry {
     pub entry_type: WorkspaceEntryType,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Optional file asset ID for entries backed by uploaded/generated files.
+    /// Enables artifact delivery to external channels (e.g. Telegram).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_asset_id: Option<String>,
 }
 
 /// The shared workspace for a task — all agents can read/write.
@@ -92,6 +96,7 @@ impl TaskWorkspace {
             existing.author_agent_id = author_agent_id.to_string();
             existing.entry_type = entry_type;
             existing.updated_at = now;
+            // Preserve existing file_asset_id (set separately via set_file_asset_id)
             return Ok(());
         }
 
@@ -127,8 +132,19 @@ impl TaskWorkspace {
             entry_type,
             created_at: now,
             updated_at: now,
+            file_asset_id: None,
         });
         Ok(())
+    }
+
+    /// Associate a file asset ID with an existing workspace entry.
+    ///
+    /// Called after a successful `write()` when the caller has a file asset
+    /// to attach. This avoids changing the `write()` signature and its callers.
+    pub fn set_file_asset_id(&mut self, key: &str, file_asset_id: &str) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.key == key) {
+            entry.file_asset_id = Some(file_asset_id.to_string());
+        }
     }
 
     /// Format workspace contents as a context string for agent prompts.
@@ -378,20 +394,20 @@ impl TaskState {
             })
             .unwrap_or_default();
 
-        let new_artifacts: Vec<(String, String)> = self
+        let new_artifacts: Vec<(String, String, Option<String>)> = self
             .workspace
             .entries
             .iter()
             .filter(|e| e.entry_type == WorkspaceEntryType::Artifact)
             .filter(|e| is_same_agent(&e.author_agent_id, &agent_id))
             .filter(|e| !existing_keys.contains(&e.key))
-            .map(|e| (e.key.clone(), e.key.clone()))
+            .map(|e| (e.key.clone(), e.key.clone(), e.file_asset_id.clone()))
             .collect();
 
         if !new_artifacts.is_empty() {
             if let Some(step) = self.steps.iter_mut().find(|s| s.step_order == step_order) {
-                for (key, label) in new_artifacts {
-                    step.add_artifact(&key, &label, None);
+                for (key, label, file_asset_id) in new_artifacts {
+                    step.add_artifact(&key, &label, file_asset_id.as_deref());
                 }
             }
             self.updated_at = Utc::now();
@@ -515,7 +531,7 @@ impl TaskState {
                 label: e.key.clone(),
                 agent_id: e.author_agent_id.clone(),
                 step_order: -1,
-                file_asset_id: None,
+                file_asset_id: e.file_asset_id.clone(),
             })
             .collect()
     }

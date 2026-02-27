@@ -490,6 +490,9 @@ You are a test agent.
     assert!(inst.id.starts_with("test_agent::"));
     assert_eq!(inst.preset.persona, "You are a test agent.");
     assert_eq!(inst.preset.temperature, 0.3);
-    assert_eq!(inst.skills.len(), 1);
+    // 1 explicit skill + 2 injected workspace tools
+    assert_eq!(inst.skills.len(), 3);
     assert_eq!(inst.skills[0].name, "file_read");
+    assert_eq!(inst.skills[1].name, "workspace_read");
+    assert_eq!(inst.skills[2].name, "workspace_write");
 }

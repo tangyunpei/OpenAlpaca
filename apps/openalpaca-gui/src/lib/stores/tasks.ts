@@ -33,42 +33,29 @@ export const selectedTaskDetail = writable<TaskDetailResponse | null>(null);
 /** Loading state */
 export const tasksLoading = writable(false);
 
-/** Debounced + in-flight-guarded backfill.
- *  - Debounce: coalesces rapid terminal WS events into one fetch.
- *  - In-flight guard: if a fetch is running, new requests are deferred
- *    and a single trailing fetch runs after the current one finishes. */
+/** Debounced backfill — coalesces rapid terminal WS events into one fetch. */
 let backfillTimer: ReturnType<typeof setTimeout> | null = null;
-let backfillInFlight = false;
-let backfillNeeded = false;
 
 function scheduleBackfill(): void {
-  if (backfillInFlight) {
-    backfillNeeded = true;
-    return;
-  }
   if (backfillTimer !== null) return;
   backfillTimer = setTimeout(() => {
     backfillTimer = null;
-    runBackfill();
+    loadTasks();
   }, 200);
 }
 
-async function runBackfill(): Promise<void> {
-  backfillInFlight = true;
-  backfillNeeded = false;
-  try {
-    await loadTasks();
-  } finally {
-    backfillInFlight = false;
-    if (backfillNeeded) {
-      backfillNeeded = false;
-      scheduleBackfill();
-    }
-  }
-}
+/** Shared in-flight guard for loadTasks — prevents concurrent REST fetches
+ *  from any callsite (direct calls, backfill, tab switch, manual refresh). */
+let loadInFlight = false;
+let loadPending = false;
 
 /** Fetch all tasks from REST and merge into the map (preserves WebSocket-derived data) */
 export async function loadTasks(): Promise<void> {
+  if (loadInFlight) {
+    loadPending = true;
+    return;
+  }
+  loadInFlight = true;
   tasksLoading.set(true);
   try {
     const tasks = await getTasks();
@@ -87,6 +74,11 @@ export async function loadTasks(): Promise<void> {
     console.error("[tasks-store] Failed to load tasks:", e);
   } finally {
     tasksLoading.set(false);
+    loadInFlight = false;
+    if (loadPending) {
+      loadPending = false;
+      loadTasks();
+    }
   }
 }
 
