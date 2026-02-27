@@ -1,7 +1,7 @@
 use super::super::task_planner::TaskDag;
 use super::{
     TaskDispatcher, finalize_task_with_outcome, format_task_result, persist_conversation,
-    spawn_task_memory_extraction,
+    spawn_task_memory_extraction, update_state_with_retry,
 };
 use crate::agent::registry::DestroyOutcome;
 use crate::context::{DagSummary, TaskEntryStatus};
@@ -182,6 +182,28 @@ impl TaskDispatcher {
                     result.total_output_tokens as i64,
                     runtime_secs,
                 );
+            }
+
+            // Write authoritative DAG state before building outcome.
+            // The in-memory `dag` has all node statuses and result_summaries
+            // from execute_dag(). DB copy may be stale if earlier
+            // persist_dag_state() calls exhausted retries under contention.
+            if let Some(ref db) = db {
+                let final_dag = dag.clone();
+                update_state_with_retry(
+                    db,
+                    &task_id,
+                    move |state| {
+                        state.dag = Some(final_dag.clone());
+                        let step_orders: Vec<i32> =
+                            state.steps.iter().map(|s| s.step_order).collect();
+                        for order in step_orders {
+                            state.scan_workspace_artifacts(order);
+                        }
+                    },
+                    "dag_final_state",
+                )
+                .await;
             }
 
             // Update task status with structured outcome
