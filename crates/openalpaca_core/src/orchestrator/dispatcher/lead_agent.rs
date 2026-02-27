@@ -1,4 +1,5 @@
 use super::super::task_state::TaskState;
+use super::update_state_with_retry;
 use super::usage;
 use super::{
     TaskDispatcher, finalize_task_with_outcome, format_task_result, persist_conversation,
@@ -213,6 +214,17 @@ impl TaskDispatcher {
                 let _ = repo.update_status(&task_id, openalpaca_storage::TaskStatus::Running);
             }
 
+            // Mark step 0 as running now (before the agentic loop) so started_at is accurate
+            if let Some(ref db) = db {
+                update_state_with_retry(
+                    db,
+                    &task_id,
+                    |s| s.mark_step_running(0),
+                    "lead_agent_mark_step_running",
+                )
+                .await;
+            }
+
             tracing::info!(task_id = %task_id, "Task status: queued → running");
 
             // Run the lead agent
@@ -252,33 +264,23 @@ impl TaskDispatcher {
 
             // Update state_json: mark lead agent step completed or failed
             if let Some(ref db) = db {
-                let repo = openalpaca_storage::repository::TaskRepository::new(db);
-                if let Ok(Some(task)) = repo.get(&task_id) {
-                    if let Some(ref sj) = task.state_json {
-                        if let Ok(mut state) = serde_json::from_str::<TaskState>(sj) {
-                            state.mark_step_running(0);
-                            if result.success {
-                                let summary: String =
-                                    result.final_content.chars().take(500).collect();
-                                state.mark_step_completed(0, &summary);
-                            } else {
-                                let error =
-                                    format!("{:?}", result.loop_result.finish_reason);
-                                state.mark_step_failed(0, &error);
-                            }
-                            if let Err(e) = repo.update_state(
-                                &task_id,
-                                &state.to_json(),
-                                task.state_version,
-                            ) {
-                                tracing::warn!(
-                                    task_id = %task_id,
-                                    "Failed to update lead agent state: {e}"
-                                );
-                            }
+                let success = result.success;
+                let summary_text: String = result.final_content.chars().take(500).collect();
+                let error_msg = format!("{:?}", result.loop_result.finish_reason);
+                update_state_with_retry(
+                    db,
+                    &task_id,
+                    move |state| {
+                        if success {
+                            state.mark_step_completed(0, &summary_text);
+                        } else {
+                            state.mark_step_failed(0, &error_msg);
                         }
-                    }
-                }
+                        state.scan_workspace_artifacts(0);
+                    },
+                    "lead_agent_step_complete",
+                )
+                .await;
             }
 
             // Destroy lead agent instance (resets singleton to Idle)
