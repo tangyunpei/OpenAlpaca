@@ -52,6 +52,12 @@ pub enum ServerEvent {
         progress_current: Option<i32>,
         progress_total: Option<i32>,
         result_summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact_count: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome_summary: Option<String>,
         ts: DateTime<Utc>,
         instance_id: String,
     },

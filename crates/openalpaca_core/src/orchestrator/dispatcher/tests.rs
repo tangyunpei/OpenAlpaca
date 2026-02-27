@@ -639,3 +639,125 @@ async fn test_pipeline_non_singleton_workspace_artifact_count() {
         "Expected Mixed outcome (text summary + artifact)"
     );
 }
+
+// ── finalize_task event emission tests ──────────────────────────
+
+#[test]
+fn test_finalize_task_emits_outcome_fields() {
+    use super::finalize_task;
+    use openalpaca_storage::OutcomeKind;
+
+    let ctx = std::sync::Arc::new(crate::context::SharedContext::new());
+    ctx.task_registry
+        .register("t1".to_string(), "Test task".to_string());
+    let bus = crate::bus::EventBus::default();
+    let mut rx = bus.subscribe();
+
+    finalize_task(
+        &ctx,
+        &bus,
+        None,
+        "t1",
+        "All done",
+        true,
+        Some(OutcomeKind::Mixed),
+        Some(2),
+        Some("Generated report and chart"),
+    );
+
+    // Drain events and find TaskCompleted
+    while let Ok(event) = rx.try_recv() {
+        if let SystemEvent::TaskCompleted {
+            task_id,
+            result_summary,
+            outcome_kind,
+            artifact_count,
+            outcome_summary,
+            ..
+        } = event
+        {
+            assert_eq!(task_id, "t1");
+            assert_eq!(result_summary, Some("All done".to_string()));
+            assert_eq!(outcome_kind, Some("mixed".to_string()));
+            assert_eq!(artifact_count, Some(2));
+            assert_eq!(
+                outcome_summary,
+                Some("Generated report and chart".to_string())
+            );
+            return;
+        }
+    }
+    panic!("Expected TaskCompleted event with outcome fields");
+}
+
+#[test]
+fn test_finalize_task_failed_emits_outcome_kind() {
+    use super::finalize_task;
+    use openalpaca_storage::OutcomeKind;
+
+    let ctx = std::sync::Arc::new(crate::context::SharedContext::new());
+    ctx.task_registry
+        .register("t2".to_string(), "Failing task".to_string());
+    let bus = crate::bus::EventBus::default();
+    let mut rx = bus.subscribe();
+
+    finalize_task(
+        &ctx,
+        &bus,
+        None,
+        "t2",
+        "Network timeout",
+        false,
+        Some(OutcomeKind::Failed),
+        None,
+        None,
+    );
+
+    while let Ok(event) = rx.try_recv() {
+        if let SystemEvent::TaskFailed {
+            task_id,
+            error,
+            outcome_kind,
+            ..
+        } = event
+        {
+            assert_eq!(task_id, "t2");
+            assert_eq!(error, "Network timeout");
+            assert_eq!(outcome_kind, Some("failed".to_string()));
+            return;
+        }
+    }
+    panic!("Expected TaskFailed event with outcome_kind");
+}
+
+#[test]
+fn test_finalize_task_none_outcome_fields() {
+    use super::finalize_task;
+
+    let ctx = std::sync::Arc::new(crate::context::SharedContext::new());
+    ctx.task_registry
+        .register("t3".to_string(), "Legacy task".to_string());
+    let bus = crate::bus::EventBus::default();
+    let mut rx = bus.subscribe();
+
+    // Pass None for all outcome params (backward compat path)
+    finalize_task(&ctx, &bus, None, "t3", "Done", true, None, None, None);
+
+    while let Ok(event) = rx.try_recv() {
+        if let SystemEvent::TaskCompleted {
+            task_id,
+            outcome_kind,
+            artifact_count,
+            outcome_summary,
+            ..
+        } = event
+        {
+            assert_eq!(task_id, "t3");
+            assert_eq!(outcome_kind, None);
+            assert_eq!(artifact_count, Some(0)); // defaults to 0
+            assert_eq!(outcome_summary, None);
+            return;
+        }
+    }
+    panic!("Expected TaskCompleted event");
+}

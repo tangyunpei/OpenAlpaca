@@ -261,6 +261,7 @@ impl TaskDispatcher {
                 self.bus.publish(crate::events::SystemEvent::TaskFailed {
                     task_id: task_id.to_string(),
                     error: "No LLM router configured".to_string(),
+                    outcome_kind: None,
                     timestamp: chrono::Utc::now(),
                 });
                 None
@@ -806,12 +807,23 @@ pub(super) fn finalize_task_with_outcome(
 
     // Delegate status update + result_summary + event emission to existing finalize_task
     let truncated_summary: String = outcome.summary.chars().take(MAX_SUMMARY_LENGTH).collect();
-    finalize_task(ctx, bus, db, task_id, &truncated_summary, success);
+    finalize_task(
+        ctx,
+        bus,
+        db,
+        task_id,
+        &truncated_summary,
+        success,
+        Some(outcome.outcome_kind),
+        Some(outcome.artifacts.len() as i32),
+        Some(&outcome.summary),
+    );
 
     outcome
 }
 
 /// Update task status in registry + DB + emit event for a completed or failed task.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn finalize_task(
     ctx: &crate::context::SharedContext,
     bus: &crate::bus::EventBus,
@@ -819,6 +831,9 @@ pub(super) fn finalize_task(
     task_id: &str,
     summary: &str,
     success: bool,
+    outcome_kind: Option<OutcomeKind>,
+    artifact_count: Option<i32>,
+    outcome_summary: Option<&str>,
 ) {
     let now = chrono::Utc::now();
     if success {
@@ -842,6 +857,9 @@ pub(super) fn finalize_task(
         bus.publish(crate::events::SystemEvent::TaskCompleted {
             task_id: task_id.to_string(),
             result_summary: Some(summary.to_string()),
+            outcome_kind: outcome_kind.map(|k| k.as_str().to_string()),
+            artifact_count: Some(artifact_count.unwrap_or(0)),
+            outcome_summary: outcome_summary.map(|s| s.chars().take(500).collect()),
             timestamp: now,
         });
     } else {
@@ -865,6 +883,7 @@ pub(super) fn finalize_task(
         bus.publish(crate::events::SystemEvent::TaskFailed {
             task_id: task_id.to_string(),
             error: summary.to_string(),
+            outcome_kind: outcome_kind.map(|k| k.as_str().to_string()),
             timestamp: now,
         });
     }

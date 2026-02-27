@@ -66,12 +66,17 @@ pub enum SystemEvent {
     TaskCompleted {
         task_id: String,
         result_summary: Option<String>,
+        outcome_kind: Option<String>,
+        artifact_count: Option<i32>,
+        /// First 500 chars of the outcome summary (may differ from result_summary).
+        outcome_summary: Option<String>,
         timestamp: DateTime<Utc>,
     },
     /// A task failed
     TaskFailed {
         task_id: String,
         error: String,
+        outcome_kind: Option<String>,
         timestamp: DateTime<Utc>,
     },
     /// An agent instance's lifecycle status changed.

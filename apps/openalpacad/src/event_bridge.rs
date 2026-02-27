@@ -29,7 +29,7 @@ pub fn spawn_event_bridge(eb: EventBroadcaster, bus: &EventBus, cancel: Cancella
                     created_by: _,
                     ..
                 } => {
-                    eb.task_status(&task_id, &title, "queued", None, None, None);
+                    eb.task_status(&task_id, &title, "queued", None, None, None, None, None, None);
                 }
                 openalpaca_core::events::SystemEvent::TaskUpdated {
                     task_id,
@@ -45,17 +45,31 @@ pub fn spawn_event_bridge(eb: EventBroadcaster, bus: &EventBus, cancel: Cancella
                         progress_current,
                         progress_total,
                         None,
+                        None,
+                        None,
+                        None,
                     );
                 }
                 openalpaca_core::events::SystemEvent::TaskCompleted {
                     task_id,
                     result_summary,
+                    outcome_kind,
+                    artifact_count,
+                    outcome_summary,
                     ..
                 } => {
-                    eb.task_status(&task_id, "", "completed", None, None, result_summary);
+                    eb.task_status(
+                        &task_id, "", "completed", None, None, result_summary,
+                        outcome_kind, artifact_count, outcome_summary,
+                    );
                 }
-                openalpaca_core::events::SystemEvent::TaskFailed { task_id, error, .. } => {
-                    eb.task_status(&task_id, "", "failed", None, None, Some(error));
+                openalpaca_core::events::SystemEvent::TaskFailed {
+                    task_id, error, outcome_kind, ..
+                } => {
+                    eb.task_status(
+                        &task_id, "", "failed", None, None, Some(error),
+                        outcome_kind, None, None,
+                    );
                 }
                 openalpaca_core::events::SystemEvent::AgentStatusChanged {
                     agent_id,
