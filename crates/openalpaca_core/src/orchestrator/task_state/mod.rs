@@ -325,6 +325,51 @@ impl TaskState {
         self.updated_at = Utc::now();
     }
 
+    /// Scan workspace for Artifact-type entries authored by the given step's agent
+    /// and register them as artifact pointers on that step (avoiding duplicates).
+    pub fn scan_workspace_artifacts(&mut self, step_order: i32) {
+        let agent_id = match self.steps.iter().find(|s| s.step_order == step_order) {
+            Some(s) => s.agent_id.clone(),
+            None => return,
+        };
+
+        // Collect existing artifact keys to avoid duplicates
+        let existing_keys: Vec<String> = self
+            .steps
+            .iter()
+            .find(|s| s.step_order == step_order)
+            .map(|s| {
+                s.artifact_pointers
+                    .iter()
+                    .filter_map(|raw| {
+                        serde_json::from_str::<serde_json::Value>(raw)
+                            .ok()
+                            .and_then(|v| v["key"].as_str().map(|s| s.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let new_artifacts: Vec<(String, String)> = self
+            .workspace
+            .entries
+            .iter()
+            .filter(|e| e.entry_type == WorkspaceEntryType::Artifact)
+            .filter(|e| e.author_agent_id == agent_id)
+            .filter(|e| !existing_keys.contains(&e.key))
+            .map(|e| (e.key.clone(), e.key.clone()))
+            .collect();
+
+        if !new_artifacts.is_empty() {
+            if let Some(step) = self.steps.iter_mut().find(|s| s.step_order == step_order) {
+                for (key, label) in new_artifacts {
+                    step.add_artifact(&key, &label);
+                }
+            }
+            self.updated_at = Utc::now();
+        }
+    }
+
     /// Collect all artifact pointers from all completed steps.
     /// Returns them in step_order, each annotated with agent_id and step_order.
     ///
@@ -411,6 +456,100 @@ impl TaskState {
             "Task completed.".to_string()
         } else {
             summary
+        };
+
+        let no_artifact_reason = if !has_artifacts {
+            no_artifact_reason.or_else(|| Some("No artifacts were produced.".to_string()))
+        } else {
+            None
+        };
+
+        TaskOutcome {
+            summary,
+            outcome_kind,
+            artifacts,
+            no_artifact_reason,
+        }
+    }
+
+    /// Collect artifact pointers from workspace entries of type Artifact.
+    pub fn collect_artifacts_from_workspace(&self) -> Vec<ArtifactPointer> {
+        self.workspace
+            .entries
+            .iter()
+            .filter(|e| e.entry_type == WorkspaceEntryType::Artifact)
+            .enumerate()
+            .map(|(i, e)| ArtifactPointer {
+                key: e.key.clone(),
+                label: e.key.clone(),
+                agent_id: e.author_agent_id.clone(),
+                step_order: i as i32,
+            })
+            .collect()
+    }
+
+    /// Build outcome from DAG node data (not steps).
+    /// Falls back to `build_outcome()` if no DAG or empty nodes.
+    pub fn build_outcome_dag(
+        &self,
+        fallback_summary: &str,
+        no_artifact_reason: Option<String>,
+    ) -> TaskOutcome {
+        use crate::orchestrator::task_planner::DagNodeStatus;
+
+        let dag = match &self.dag {
+            Some(d) if !d.nodes.is_empty() => d,
+            _ => return self.build_outcome(fallback_summary, no_artifact_reason),
+        };
+
+        // Collect artifacts: step-based + workspace-based, deduplicated
+        let mut artifacts = self.collect_artifacts();
+        let existing_keys: std::collections::HashSet<String> =
+            artifacts.iter().map(|a| a.key.clone()).collect();
+        for wa in self.collect_artifacts_from_workspace() {
+            if !existing_keys.contains(&wa.key) {
+                artifacts.push(wa);
+            }
+        }
+        let has_artifacts = !artifacts.is_empty();
+
+        // Classify from DAG node statuses
+        let all_failed = dag.nodes.iter().all(|n| {
+            matches!(n.status, DagNodeStatus::Failed | DagNodeStatus::Skipped)
+        });
+
+        // Build summary from completed node result_summaries
+        let node_summaries: Vec<&str> = dag
+            .nodes
+            .iter()
+            .filter(|n| n.status == DagNodeStatus::Completed)
+            .filter_map(|n| n.result_summary.as_deref())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let summary = if node_summaries.is_empty() {
+            if fallback_summary.is_empty() {
+                "Task completed.".to_string()
+            } else {
+                fallback_summary.to_string()
+            }
+        } else if node_summaries.len() == 1 {
+            node_summaries[0].to_string()
+        } else {
+            node_summaries
+                .iter()
+                .enumerate()
+                .map(|(i, s)| format!("{}. {}", i + 1, s))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let outcome_kind = if all_failed {
+            OutcomeKind::Failed
+        } else if has_artifacts {
+            OutcomeKind::Mixed
+        } else {
+            OutcomeKind::TextOnly
         };
 
         let no_artifact_reason = if !has_artifacts {

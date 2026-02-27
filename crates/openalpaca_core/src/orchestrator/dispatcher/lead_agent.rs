@@ -250,6 +250,37 @@ impl TaskDispatcher {
                 "Lead agent execution returned"
             );
 
+            // Update state_json: mark lead agent step completed or failed
+            if let Some(ref db) = db {
+                let repo = openalpaca_storage::repository::TaskRepository::new(db);
+                if let Ok(Some(task)) = repo.get(&task_id) {
+                    if let Some(ref sj) = task.state_json {
+                        if let Ok(mut state) = serde_json::from_str::<TaskState>(sj) {
+                            state.mark_step_running(0);
+                            if result.success {
+                                let summary: String =
+                                    result.final_content.chars().take(500).collect();
+                                state.mark_step_completed(0, &summary);
+                            } else {
+                                let error =
+                                    format!("{:?}", result.loop_result.finish_reason);
+                                state.mark_step_failed(0, &error);
+                            }
+                            if let Err(e) = repo.update_state(
+                                &task_id,
+                                &state.to_json(),
+                                task.state_version,
+                            ) {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    "Failed to update lead agent state: {e}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
             // Destroy lead agent instance (resets singleton to Idle)
             let outcome = ctx.agent_registry.destroy_instance(&lead_agent.id);
             let destroy_status = match outcome {

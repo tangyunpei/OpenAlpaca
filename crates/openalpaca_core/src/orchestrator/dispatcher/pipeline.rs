@@ -490,6 +490,7 @@ impl TaskDispatcher {
                                     tracing::warn!("Failed to auto-write step {} output to workspace: {}", step_i, e);
                                 }
                             }
+                            state.scan_workspace_artifacts(step_i);
                         }, "mark_step_completed").await;
                     }
 
