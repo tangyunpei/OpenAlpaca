@@ -117,6 +117,7 @@ impl TaskDispatcher {
         let embedder = self.embedder.clone();
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
+        let connector_block = self.connector_guidance_block();
 
         // Create cancellation token for this task
         let cancel_token = CancellationToken::new();
@@ -291,6 +292,11 @@ impl TaskDispatcher {
                     "Your output will be passed to the next agent in the pipeline. Be thorough and \
                      include all relevant details so the next agent can build on your work."
                 };
+                let connector_suffix = if !connector_block.is_empty() {
+                    format!("\n{}", connector_block)
+                } else {
+                    String::new()
+                };
                 let system_prompt = format!(
                     "<identity>\n{}\n</identity>\n\n\
                      <assignment>\n\
@@ -302,13 +308,14 @@ impl TaskDispatcher {
                      </scope>\n\n\
                      <output-format>\n\
                      {}\n\
-                     </output-format>{}",
+                     </output-format>{}{}",
                     agent.preset.persona,
                     role_description,
                     step + 1,
                     total_agents,
                     output_note,
-                    tool_guidance
+                    tool_guidance,
+                    connector_suffix,
                 );
 
                 // Build messages: system + task + workspace context

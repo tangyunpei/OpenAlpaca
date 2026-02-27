@@ -25,6 +25,7 @@ use openalpaca_core::bus::EventBus;
 use openalpaca_core::daemon_config::DaemonConfig;
 use openalpaca_core::gateway::Gateway;
 use openalpaca_storage::Database;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 /// Unified connector trait for all chat platforms.
@@ -198,12 +199,15 @@ impl ConnectorFactory for IMessageFactory {
             local_user_id,
         );
 
+        let running = Arc::new(AtomicBool::new(true));
+        let guard = startup::RunningGuard(running.clone());
         tokio::spawn(async move {
+            let _guard = guard;
             if let Err(e) = connector.run_loop().await {
                 tracing::error!("iMessage connector exited with error: {}", e);
             }
         });
 
-        Ok(startup::ConnectorHandle::IMessage(cancel_token))
+        Ok(startup::ConnectorHandle::IMessage(cancel_token, running))
     }
 }

@@ -104,6 +104,54 @@ pub fn format_tool_guidance(tools: &[openalpaca_llm::ToolDefinition]) -> String 
     )
 }
 
+/// Format a `<connector_status>` prompt block from a list of (name, status) pairs.
+///
+/// Used by `query_handler.rs`, `pipeline.rs`, `lead_agent/mod.rs`, and `dag_executor/mod.rs`
+/// to inject connector awareness into system prompts without duplicating the XML formatting.
+pub fn format_connector_guidance(statuses: &[(String, String)]) -> String {
+    let active: Vec<&(String, String)> = statuses.iter().filter(|(_, s)| s == "active").collect();
+    if active.is_empty() {
+        return String::new();
+    }
+
+    let mut block = String::from(
+        "<connector_status>\nConnected communication channels:\n",
+    );
+    for (name, _) in &active {
+        let label = match name.as_str() {
+            "imessage" => "iMessage (macOS Messages app)",
+            "telegram" => "Telegram",
+            _ => name.as_str(),
+        };
+        block.push_str(&format!("- {} [active]\n", label));
+    }
+    block.push_str(
+        "\nWhen a message arrives from one of these channels, your reply is automatically \
+         delivered back through the same channel.\n\
+         To proactively send a message to a contact via these channels, use the `send_message` tool.\n\
+         </connector_status>",
+    );
+    block
+}
+
+/// Format a `<message_source>` prompt block for the current message's origin channel.
+///
+/// Returns an empty string for "internal" sources or unknown sources.
+pub fn format_message_source(source: &str) -> String {
+    let label = match source {
+        "imessage" => "iMessage",
+        "telegram" => "Telegram",
+        "gui" => "Desktop GUI",
+        "cli" => "CLI",
+        _ => return String::new(),
+    };
+    format!(
+        "<message_source>\n\
+         This message arrived via: {label}. Your reply will be sent back via {label} automatically.\n\
+         </message_source>"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

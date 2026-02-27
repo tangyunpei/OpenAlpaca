@@ -4,7 +4,10 @@ use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::bootstrap::bootstrap_to_prompt_block;
 use crate::middleware::guard::OutputGuard;
 use crate::middleware::identity::identity_to_prompt_block;
-use crate::middleware::prompt::{AgentPersona, PromptAssembler, format_tool_guidance};
+use crate::middleware::prompt::{
+    AgentPersona, PromptAssembler, format_connector_guidance, format_message_source,
+    format_tool_guidance,
+};
 use crate::middleware::user::user_to_prompt_block;
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::sandbox::SandboxManager;
@@ -50,7 +53,7 @@ impl Orchestrator {
     pub(super) async fn handle_simple_query(
         &self,
         request_id: Uuid,
-        _source: &str,
+        source: &str,
         query: &str,
         tool_suggestion_query: &str,
         _lane_key: &str,
@@ -107,6 +110,23 @@ impl Orchestrator {
         if !skills_catalog_block.is_empty() {
             system_prompt.push('\n');
             system_prompt.push_str(&skills_catalog_block);
+        }
+
+        // Connector awareness: inject active channel list + message source
+        if let Ok(guard) = self.connector_status.read()
+            && let Some(ref provider) = *guard
+        {
+            let statuses = provider.list_status();
+            let connector_block = format_connector_guidance(&statuses);
+            if !connector_block.is_empty() {
+                system_prompt.push('\n');
+                system_prompt.push_str(&connector_block);
+            }
+        }
+        let source_block = format_message_source(source);
+        if !source_block.is_empty() {
+            system_prompt.push('\n');
+            system_prompt.push_str(&source_block);
         }
 
         // Resolve tools based on intent analysis

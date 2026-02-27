@@ -1,6 +1,7 @@
 mod file_ops;
 mod helpers;
 mod memory_search;
+mod send_message;
 mod shell_execute;
 // Stub tools — not registered (always returned "not implemented").
 // Kept for potential future implementation.
@@ -16,10 +17,14 @@ mod web_search;
 
 use crate::bus::EventBus;
 use crate::daemon_config::DaemonConfig;
+use crate::orchestrator::ConnectorSendProvider;
 use arc_swap::ArcSwap;
 use openalpaca_llm::{ToolDefinition, WebSearchConfig};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+
+/// Shared lock type for the connector send provider, set post-construction.
+pub type ConnectorSendLock = Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>>;
 
 use self::file_ops::{file_read_tool, file_write_tool};
 use self::memory_search::memory_search_tool;
@@ -119,7 +124,8 @@ pub fn builtin_tools_with_soul_context(
     tools
 }
 
-/// Return all built-in tools, including `update_soul`, `update_user`, and `update_identity`.
+/// Return all built-in tools, including `update_soul`, `update_user`, `update_identity`,
+/// and optionally `send_message`.
 #[allow(clippy::too_many_arguments)]
 pub fn builtin_tools_with_persona_context(
     db: Option<openalpaca_storage::Database>,
@@ -130,11 +136,15 @@ pub fn builtin_tools_with_persona_context(
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
     web_search_config: Option<Arc<ArcSwap<WebSearchConfig>>>,
     workspace_root: Option<PathBuf>,
+    connector_send_provider: Option<ConnectorSendLock>,
 ) -> Vec<RegisteredTool> {
     let mut tools = builtin_tools(db, embedder, daemon_config, web_search_config, workspace_root);
     tools.push(update_soul_tool(soul_ctx));
     tools.push(update_user_tool(user_ctx));
     tools.push(update_identity_tool(identity_ctx));
+    if let Some(provider) = connector_send_provider {
+        tools.push(send_message::send_message_tool(provider));
+    }
     tools
 }
 

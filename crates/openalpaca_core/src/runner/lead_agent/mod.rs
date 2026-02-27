@@ -1144,6 +1144,7 @@ pub async fn run_lead_agent(
     daemon_config: &Arc<ArcSwap<DaemonConfig>>,
     workspace_id: Option<String>,
     cancel_token: Option<CancellationToken>,
+    connector_guidance: &str,
 ) -> LeadAgentResult {
     tracing::info!(
         lead_agent = %lead_agent.id,
@@ -1249,7 +1250,12 @@ pub async fn run_lead_agent(
     let system_prompt =
         build_lead_agent_prompt_from_templates(&lead_agent.preset.persona, &worker_templates);
     let tool_guidance = format_tool_guidance(&tools);
-    let full_system = format!("{}{}", system_prompt, tool_guidance);
+    let connector_suffix = if !connector_guidance.is_empty() {
+        format!("\n{}", connector_guidance)
+    } else {
+        String::new()
+    };
+    let full_system = format!("{}{}{}", system_prompt, tool_guidance, connector_suffix);
 
     // 7. Build messages (with proactive memory injection)
     let mut messages = vec![ChatMessage::system(&full_system)];

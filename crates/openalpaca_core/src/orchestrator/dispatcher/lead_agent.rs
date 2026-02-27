@@ -180,6 +180,7 @@ impl TaskDispatcher {
         let embedder = self.embedder.clone();
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
+        let connector_block = self.connector_guidance_block();
 
         // Create cancellation token for this task
         let cancel_token = CancellationToken::new();
@@ -226,6 +227,7 @@ impl TaskDispatcher {
                 &daemon_config,
                 workspace_id.clone(),
                 Some(cancel_token),
+                &connector_block,
             )
             .await;
 
