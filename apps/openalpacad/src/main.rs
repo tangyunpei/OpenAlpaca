@@ -9,6 +9,7 @@
 
 mod background;
 mod bootstrap;
+mod connector_bridge;
 mod event_bridge;
 mod events;
 mod extraction;
@@ -400,6 +401,7 @@ async fn async_main(
 
     let notif_bus = bus.clone();
     let chat_bus = bus.clone();
+    let connector_bus = bus.clone();
     let connector_manager = managers::connector::ConnectorManager::new(
         db.clone(),
         bus,
@@ -408,18 +410,55 @@ async fn async_main(
     );
     connector_manager.start_all().await;
 
-    // Spawn NotificationDispatcher
+    // Connector awareness: cached status + send bridge
     {
-        let config_repo = openalpaca_storage::ConfigRepository::new(&db);
-        let telegram_bot = config_repo
-            .get("telegram.token")
-            .ok()
-            .flatten()
-            .map(teloxide::Bot::new);
+        // 1. Create cached status provider and populate initial state
+        let connector_status_provider = Arc::new(connector_bridge::CachedConnectorStatusProvider::new());
+        connector_status_provider.update(connector_manager.list_status().await);
+        orchestrator.set_connector_status_provider(connector_status_provider.clone());
+
+        // 2. Create send bridge (reads token lazily from DB on each send)
+        let send_bridge: Arc<dyn openalpaca_core::orchestrator::ConnectorSendProvider> =
+            Arc::new(connector_bridge::ConnectorSendBridge::new(
+                db.clone(),
+                local_user_id.clone(),
+            ));
+        // Set on orchestrator (for internal use / future features)
+        orchestrator.set_connector_send_provider(send_bridge.clone());
+        // Populate the shared lock so the send_message tool can access it
+        if let Ok(mut guard) = svcs.connector_send_lock.write() {
+            *guard = Some(send_bridge);
+        }
+
+        // 3. Spawn EventBus subscriber to keep cached status fresh
+        tokio::spawn({
+            let mut rx = connector_bus.subscribe();
+            let provider = connector_status_provider;
+            let cm = connector_manager.clone();
+            let ct = cancel_token.clone();
+            async move {
+                loop {
+                    tokio::select! {
+                        result = rx.recv() => match result {
+                            Ok(openalpaca_core::events::SystemEvent::ConnectorStatus { .. }) => {
+                                provider.update(cm.list_status().await);
+                            }
+                            Ok(_) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        },
+                        _ = ct.cancelled() => break,
+                    }
+                }
+            }
+        });
+    }
+
+    // Spawn NotificationDispatcher (reads telegram token lazily from DB)
+    {
         let notif_rx = notif_bus.subscribe();
         let dispatcher = notification::NotificationDispatcher::new(
             notif_rx,
-            telegram_bot,
             db.clone(),
             cancel_token.clone(),
         );

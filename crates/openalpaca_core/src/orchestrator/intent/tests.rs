@@ -579,3 +579,76 @@ fn test_router_no_match_falls_through() {
         intent
     );
 }
+
+// --- send_message tool suggestion tests (connector awareness) ---
+
+#[test]
+fn test_suggest_tools_bare_telegram_no_send_message() {
+    // Bare "telegram" without a send verb should NOT suggest send_message
+    let tools = parser().suggest_tools("how do I set up Telegram?");
+    assert!(
+        !tools.contains(&"send_message".to_string()),
+        "Bare 'telegram' should NOT suggest send_message: {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_bare_imessage_no_send_message() {
+    let tools = parser().suggest_tools("configure imessage connector");
+    assert!(
+        !tools.contains(&"send_message".to_string()),
+        "Bare 'imessage' should NOT suggest send_message: {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_send_via_telegram() {
+    let tools = parser().suggest_tools("send a message via telegram");
+    assert!(
+        tools.contains(&"send_message".to_string()),
+        "Expected send_message for 'send via telegram': {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_send_via_imessage() {
+    let tools = parser().suggest_tools("send this to John via imessage");
+    assert!(
+        tools.contains(&"send_message".to_string()),
+        "Expected send_message for 'send via imessage': {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_send_message_phrase() {
+    let tools = parser().suggest_tools("send message to Bob");
+    assert!(
+        tools.contains(&"send_message".to_string()),
+        "Expected send_message for 'send message': {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_forward_to() {
+    let tools = parser().suggest_tools("forward to my phone");
+    assert!(
+        tools.contains(&"send_message".to_string()),
+        "Expected send_message for 'forward to': {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_chinese_send_telegram() {
+    let tools = parser().suggest_tools("发一条消息到telegram");
+    assert!(
+        tools.contains(&"send_message".to_string()),
+        "Expected send_message for Chinese+telegram: {:?}",
+        tools
+    );
+}

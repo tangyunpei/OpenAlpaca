@@ -116,6 +116,7 @@ pub async fn execute_dag(
     daemon_config: &Arc<ArcSwap<DaemonConfig>>,
     cancel_token: Option<CancellationToken>,
     workspace_id: Option<String>,
+    connector_guidance: &str,
 ) -> DagExecutionResult {
     let start = Instant::now();
 
@@ -316,6 +317,7 @@ pub async fn execute_dag(
             let token_clone = cancel_token.clone();
 
             let workspace_id_clone = workspace_id.clone();
+            let connector_guidance_clone = connector_guidance.to_string();
             join_set.spawn(async move {
                 execute_single_node(
                     node_snapshot,
@@ -331,6 +333,7 @@ pub async fn execute_dag(
                     daemon_config_clone,
                     token_clone,
                     workspace_id_clone,
+                    connector_guidance_clone,
                 )
                 .await
             });
@@ -682,6 +685,7 @@ async fn execute_single_node(
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     cancel_token: Option<CancellationToken>,
     workspace_id: Option<String>,
+    connector_guidance: String,
 ) -> NodeResult {
     let agent_id = agent.id.clone();
 
@@ -711,6 +715,11 @@ async fn execute_single_node(
 
     // Build system prompt
     let tool_guidance = format_tool_guidance(&tools);
+    let connector_suffix = if !connector_guidance.is_empty() {
+        format!("\n{}", connector_guidance)
+    } else {
+        String::new()
+    };
     let system_prompt = format!(
         "<identity>\n{}\n</identity>\n\n\
          <assignment>\n\
@@ -725,8 +734,8 @@ async fn execute_single_node(
          <output-format>\n\
          Provide a complete, self-contained result for your sub-task. Other agents \
          will consume your output, so be specific and include all relevant details.\n\
-         </output-format>{}",
-        agent.preset.persona, node.title, node.description, tool_guidance
+         </output-format>{}{}",
+        agent.preset.persona, node.title, node.description, tool_guidance, connector_suffix
     );
 
     // Build messages: system + task + workspace context for this node

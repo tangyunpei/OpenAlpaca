@@ -48,6 +48,27 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use uuid::Uuid;
 
+/// Provides connector status to the orchestrator without core depending on openalpaca_connectors.
+/// Implemented at daemon level (same inversion pattern as MessageHandler, ToolExecutor).
+pub trait ConnectorStatusProvider: Send + Sync {
+    /// Return (connector_name, status) pairs. Status: "active", "disabled", "unconfigured", "error"
+    fn list_status(&self) -> Vec<(String, String)>;
+}
+
+/// Outbound message sending via connectors. Implemented at daemon level.
+#[async_trait::async_trait]
+pub trait ConnectorSendProvider: Send + Sync {
+    /// Send a message via a channel. Returns Ok(delivery_summary) or Err(reason).
+    async fn send_message(
+        &self,
+        channel: &str,
+        recipient: &str,
+        content: &str,
+    ) -> Result<String, String>;
+    /// List channels that can currently send (subset of active connectors).
+    fn sendable_channels(&self) -> Vec<String>;
+}
+
 use dispatcher::TaskDispatcher;
 use intent::IntentParser;
 
@@ -104,6 +125,11 @@ pub struct Orchestrator {
     pub daemon_config: Arc<ArcSwap<DaemonConfig>>,
     /// Atomic guard to prevent concurrent bootstrap completion (race condition fix).
     bootstrap_completing: AtomicBool,
+    /// Connector status provider for prompt injection (set post-construction).
+    /// `Arc` wrapping allows sharing with `TaskDispatcher` for pipeline/DAG/lead-agent prompt injection.
+    connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
+    /// Connector send provider for outbound messaging tool (set post-construction).
+    pub connector_sender: Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>>,
     /// Per-request LLM metadata from query/skill handlers → bridge.
     /// Keyed by request_id to avoid races between concurrent requests.
     /// Populated after LLM response, removed by bridge after reading.
@@ -168,6 +194,10 @@ impl Orchestrator {
         skill_router: Arc<skill_router::SkillRouter>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
     ) -> Self {
+        let connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>> =
+            Arc::new(RwLock::new(None));
+        let connector_sender: Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>> =
+            Arc::new(RwLock::new(None));
         let task_dispatcher = TaskDispatcher::new(
             shared_context.clone(),
             lane_manager.clone(),
@@ -178,6 +208,7 @@ impl Orchestrator {
             db.clone(),
             embedder.clone(),
             daemon_config.clone(),
+            connector_status.clone(),
         );
         Self {
             shared_context,
@@ -203,6 +234,8 @@ impl Orchestrator {
             bootstrap_path: RwLock::new(None),
             daemon_config,
             bootstrap_completing: AtomicBool::new(false),
+            connector_status,
+            connector_sender,
             llm_metadata_map: DashMap::new(),
         }
     }
@@ -301,6 +334,20 @@ impl Orchestrator {
     pub fn set_bootstrap_path(&self, path: std::path::PathBuf) {
         if let Ok(mut guard) = self.bootstrap_path.write() {
             *guard = Some(path);
+        }
+    }
+
+    /// Set the connector status provider (post-construction, same pattern as set_user_path).
+    pub fn set_connector_status_provider(&self, p: Arc<dyn ConnectorStatusProvider>) {
+        if let Ok(mut guard) = self.connector_status.write() {
+            *guard = Some(p);
+        }
+    }
+
+    /// Set the connector send provider (post-construction).
+    pub fn set_connector_send_provider(&self, p: Arc<dyn ConnectorSendProvider>) {
+        if let Ok(mut guard) = self.connector_sender.write() {
+            *guard = Some(p);
         }
     }
 

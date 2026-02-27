@@ -97,6 +97,7 @@ struct ToolFlags {
     shell_execute: bool,
     update_soul: bool,
     update_user: bool,
+    send_message: bool,
 }
 
 impl ToolFlags {
@@ -121,6 +122,9 @@ impl ToolFlags {
         }
         if self.shell_execute {
             out.push("shell_execute".to_string());
+        }
+        if self.send_message {
+            out.push("send_message".to_string());
         }
         out
     }
@@ -445,6 +449,19 @@ impl IntentParser {
                 || lower.contains("in shell")
                 || lower.contains("bash")
                 || lower.contains("zsh"),
+
+            send_message: lower.contains("send message")
+                || lower.contains("send to")
+                || lower.contains("发消息")
+                || lower.contains("发到")
+                || lower.contains("发给")
+                || lower.contains("转发")
+                || lower.contains("通过telegram")
+                || lower.contains("message to")
+                || lower.contains("reply via")
+                || lower.contains("forward to")
+                || (lower.contains("send") && (lower.contains("imessage") || lower.contains("telegram")))
+                || (lower.contains("发") && (lower.contains("imessage") || lower.contains("telegram"))),
         };
 
         flags.to_vec()
