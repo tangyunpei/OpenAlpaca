@@ -17,62 +17,7 @@ use openalpaca_llm::ChatMessage;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-/// Persist a state update with retry (up to 3 attempts) to handle optimistic locking conflicts.
-async fn update_state_with_retry(
-    db: &openalpaca_storage::Database,
-    task_id: &str,
-    mutate: impl Fn(&mut TaskState),
-    context: &str,
-) {
-    const MAX_RETRIES: usize = 3;
-    for attempt in 0..MAX_RETRIES {
-        let repo = openalpaca_storage::repository::TaskRepository::new(db);
-        let existing = match repo.get(task_id) {
-            Ok(Some(t)) => t,
-            _ => return,
-        };
-        let sj = match existing.state_json.as_deref() {
-            Some(s) => s,
-            None => return,
-        };
-        let mut state: TaskState = match serde_json::from_str(sj) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        mutate(&mut state);
-        match repo.update_state(task_id, &state.to_json(), existing.state_version) {
-            Ok(true) => return,
-            Ok(false) => {
-                if attempt < MAX_RETRIES - 1 {
-                    tracing::debug!(
-                        "Pipeline state update version conflict ({}) for task '{}' (attempt {}/{}), retrying",
-                        context,
-                        task_id,
-                        attempt + 1,
-                        MAX_RETRIES
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(10 * (1 << attempt))).await;
-                } else {
-                    tracing::warn!(
-                        "Pipeline state update ({}) for task '{}' failed after {} retries — state may be stale",
-                        context,
-                        task_id,
-                        MAX_RETRIES
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Pipeline state update ({}) failed for task '{}': {}",
-                    context,
-                    task_id,
-                    e
-                );
-                return;
-            }
-        }
-    }
-}
+use super::update_state_with_retry;
 
 /// Fetch the current workspace context string from the task's state in SQLite.
 /// Returns an empty string if the DB is absent, the task doesn't exist, or parsing fails.

@@ -473,17 +473,18 @@ impl TaskState {
     }
 
     /// Collect artifact pointers from workspace entries of type Artifact.
+    /// Uses `step_order = -1` for workspace-sourced artifacts since they are
+    /// not associated with a specific pipeline step or DAG node.
     pub fn collect_artifacts_from_workspace(&self) -> Vec<ArtifactPointer> {
         self.workspace
             .entries
             .iter()
             .filter(|e| e.entry_type == WorkspaceEntryType::Artifact)
-            .enumerate()
-            .map(|(i, e)| ArtifactPointer {
+            .map(|e| ArtifactPointer {
                 key: e.key.clone(),
                 label: e.key.clone(),
                 agent_id: e.author_agent_id.clone(),
-                step_order: i as i32,
+                step_order: -1,
             })
             .collect()
     }
@@ -544,10 +545,13 @@ impl TaskState {
                 .join("\n")
         };
 
+        let has_text_summary = !node_summaries.is_empty();
         let outcome_kind = if all_failed {
             OutcomeKind::Failed
-        } else if has_artifacts {
+        } else if has_artifacts && has_text_summary {
             OutcomeKind::Mixed
+        } else if has_artifacts {
+            OutcomeKind::ArtifactOnly
         } else {
             OutcomeKind::TextOnly
         };

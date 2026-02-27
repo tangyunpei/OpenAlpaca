@@ -498,7 +498,7 @@ fn test_single_step_failed_builds_outcome() {
 
     let outcome = state.build_outcome("fallback", None);
     assert_eq!(outcome.outcome_kind, OutcomeKind::Failed);
-    assert!(outcome.summary.is_empty() || outcome.summary == "fallback");
+    assert_eq!(outcome.summary, "fallback");
 }
 
 // ── PR-05: Workspace artifact scanning tests ────────────────────
