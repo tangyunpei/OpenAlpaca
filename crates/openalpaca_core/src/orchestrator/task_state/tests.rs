@@ -873,6 +873,9 @@ fn test_is_same_agent_helper() {
     assert!(!is_same_agent("a1", "a10"));
     assert!(!is_same_agent("a1", "a10::xyz"));
     assert!(!is_same_agent("a10::xyz", "a1"));
+    // Single colon should NOT match (separator is "::", not ":")
+    assert!(!is_same_agent("file:read", "file"));
+    assert!(!is_same_agent("file", "file:read"));
 }
 
 // ── PR-11: ArtifactPointer file_asset_id backward compat ─────────

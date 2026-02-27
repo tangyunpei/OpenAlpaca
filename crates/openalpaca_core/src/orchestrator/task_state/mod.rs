@@ -280,11 +280,17 @@ fn is_same_agent(a: &str, b: &str) -> bool {
         return true;
     }
     // a is instance of b: "researcher::abc123" starts with "researcher::"
-    if a.starts_with(b) && a.as_bytes().get(b.len()) == Some(&b':') {
+    if a.starts_with(b)
+        && a.as_bytes().get(b.len()) == Some(&b':')
+        && a.as_bytes().get(b.len() + 1) == Some(&b':')
+    {
         return true;
     }
     // b is instance of a: "researcher::abc123" starts with "researcher::"
-    if b.starts_with(a) && b.as_bytes().get(a.len()) == Some(&b':') {
+    if b.starts_with(a)
+        && b.as_bytes().get(a.len()) == Some(&b':')
+        && b.as_bytes().get(a.len() + 1) == Some(&b':')
+    {
         return true;
     }
     false

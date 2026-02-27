@@ -190,7 +190,7 @@ impl TaskDispatcher {
             // persist_dag_state() calls exhausted retries under contention.
             if let Some(ref db) = db {
                 let final_dag = dag.clone();
-                update_state_with_retry(
+                if !update_state_with_retry(
                     db,
                     &task_id,
                     move |state| {
@@ -203,7 +203,10 @@ impl TaskDispatcher {
                     },
                     "dag_final_state",
                 )
-                .await;
+                .await
+                {
+                    tracing::error!("Failed to persist dag_final_state for task '{}'", task_id);
+                }
             }
 
             // Update task status with structured outcome

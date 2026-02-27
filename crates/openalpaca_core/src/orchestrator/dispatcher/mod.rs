@@ -630,30 +630,33 @@ use crate::orchestrator::task_state::{TaskOutcome, TaskState};
 use openalpaca_storage::OutcomeKind;
 
 /// Persist a state update with retry (up to 3 attempts) to handle optimistic locking conflicts.
+///
+/// Returns `true` if the update was successfully persisted, `false` if all retries were
+/// exhausted or a DB error occurred.
 pub(super) async fn update_state_with_retry(
     db: &openalpaca_storage::Database,
     task_id: &str,
     mutate: impl Fn(&mut TaskState),
     context: &str,
-) {
+) -> bool {
     const MAX_RETRIES: usize = 3;
     for attempt in 0..MAX_RETRIES {
         let repo = openalpaca_storage::repository::TaskRepository::new(db);
         let existing = match repo.get(task_id) {
             Ok(Some(t)) => t,
-            _ => return,
+            _ => return false,
         };
         let sj = match existing.state_json.as_deref() {
             Some(s) => s,
-            None => return,
+            None => return false,
         };
         let mut state: TaskState = match serde_json::from_str(sj) {
             Ok(s) => s,
-            Err(_) => return,
+            Err(_) => return false,
         };
         mutate(&mut state);
         match repo.update_state(task_id, &state.to_json(), existing.state_version) {
-            Ok(true) => return,
+            Ok(true) => return true,
             Ok(false) => {
                 if attempt < MAX_RETRIES - 1 {
                     tracing::debug!(
@@ -671,6 +674,7 @@ pub(super) async fn update_state_with_retry(
                         task_id,
                         MAX_RETRIES
                     );
+                    return false;
                 }
             }
             Err(e) => {
@@ -680,10 +684,11 @@ pub(super) async fn update_state_with_retry(
                     task_id,
                     e
                 );
-                return;
+                return false;
             }
         }
     }
+    false
 }
 
 /// Maximum length for the summary stored in `result_summary` column.

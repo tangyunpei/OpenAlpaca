@@ -216,13 +216,16 @@ impl TaskDispatcher {
 
             // Mark step 0 as running now (before the agentic loop) so started_at is accurate
             if let Some(ref db) = db {
-                update_state_with_retry(
+                if !update_state_with_retry(
                     db,
                     &task_id,
                     |s| s.mark_step_running(0),
                     "lead_agent_mark_step_running",
                 )
-                .await;
+                .await
+                {
+                    tracing::error!("Failed to persist lead_agent_mark_step_running for task '{}'", task_id);
+                }
             }
 
             tracing::info!(task_id = %task_id, "Task status: queued → running");
@@ -267,7 +270,7 @@ impl TaskDispatcher {
                 let success = result.success;
                 let summary_text: String = result.final_content.chars().take(500).collect();
                 let error_msg = format!("{:?}", result.loop_result.finish_reason);
-                update_state_with_retry(
+                if !update_state_with_retry(
                     db,
                     &task_id,
                     move |state| {
@@ -280,7 +283,10 @@ impl TaskDispatcher {
                     },
                     "lead_agent_step_complete",
                 )
-                .await;
+                .await
+                {
+                    tracing::error!("Failed to persist lead_agent_step_complete for task '{}'", task_id);
+                }
             }
 
             // Destroy lead agent instance (resets singleton to Idle)

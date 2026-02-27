@@ -594,13 +594,11 @@ async fn test_pipeline_non_singleton_workspace_artifact_count() {
     assert!(result.is_ok(), "dispatch failed: {:?}", result.err());
 
     // ── 5. Wait for TaskCompleted / TaskFailed ───────────────────────
-    let mut completed_task_id = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
+    let task_id = loop {
         match tokio::time::timeout_at(deadline, rx.recv()).await {
             Ok(Ok(SystemEvent::TaskCompleted { task_id, .. })) => {
-                completed_task_id = Some(task_id);
-                break;
+                break task_id;
             }
             Ok(Ok(SystemEvent::TaskFailed { task_id, error, .. })) => {
                 panic!(
@@ -612,8 +610,7 @@ async fn test_pipeline_non_singleton_workspace_artifact_count() {
             Ok(Err(e)) => panic!("Event bus error: {e}"),
             Err(_) => panic!("Timeout waiting for pipeline completion"),
         }
-    }
-    let task_id = completed_task_id.unwrap();
+    };
 
     // ── 6. Verify artifact_count > 0 in DB ───────────────────────────
     let repo = openalpaca_storage::repository::TaskRepository::new(&db);
@@ -1019,13 +1016,11 @@ async fn test_pipeline_text_only_no_artifacts_e2e() {
     assert!(result.is_ok(), "dispatch failed: {:?}", result.err());
 
     // ── 5. Wait for TaskCompleted / TaskFailed ───────────────────────
-    let mut completed_task_id = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
+    let task_id = loop {
         match tokio::time::timeout_at(deadline, rx.recv()).await {
             Ok(Ok(SystemEvent::TaskCompleted { task_id, .. })) => {
-                completed_task_id = Some(task_id);
-                break;
+                break task_id;
             }
             Ok(Ok(SystemEvent::TaskFailed { task_id, error, .. })) => {
                 panic!(
@@ -1037,8 +1032,7 @@ async fn test_pipeline_text_only_no_artifacts_e2e() {
             Ok(Err(e)) => panic!("Event bus error: {e}"),
             Err(_) => panic!("Timeout waiting for pipeline completion"),
         }
-    }
-    let task_id = completed_task_id.unwrap();
+    };
 
     // ── 6. Verify outcome in DB ──────────────────────────────────────
     let repo = openalpaca_storage::repository::TaskRepository::new(&db);

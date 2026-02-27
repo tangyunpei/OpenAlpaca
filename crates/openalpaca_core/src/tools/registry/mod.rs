@@ -78,8 +78,11 @@ impl ToolRegistry {
 
         // Warn for each skill name that doesn't match a registered tool.
         // This helps catch typos in agent config files and stale skill references.
+        // Skip runtime-contextual tools that are resolved outside the registry
+        // (workspace tools by ContextualToolExecutor, memory_search by resolve_agent_tools).
+        const RUNTIME_TOOLS: &[&str] = &["workspace_read", "workspace_write", "memory_search"];
         for skill in skill_names {
-            if !self.tools.contains_key(skill) {
+            if !self.tools.contains_key(skill) && !RUNTIME_TOOLS.contains(&skill.as_str()) {
                 tracing::warn!(
                     skill = %skill,
                     "Skill name '{}' does not match any registered tool — \
