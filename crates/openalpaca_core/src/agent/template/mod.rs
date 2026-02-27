@@ -503,7 +503,7 @@ impl AgentTemplate {
         let fm = &self.frontmatter;
         let persona = extract_persona(self);
 
-        let skills: Vec<Skill> = fm
+        let mut skills: Vec<Skill> = fm
             .skills
             .iter()
             .map(|name| Skill {
@@ -512,6 +512,18 @@ impl AgentTemplate {
                 proficiency: 1.0,
             })
             .collect();
+
+        // Inject workspace tools into skills so they appear in tool resolution
+        // (resolve_agent_tools uses agent.skills to look up definitions).
+        for ws_tool in ["workspace_read", "workspace_write"] {
+            if !skills.iter().any(|s| s.name == ws_tool) {
+                skills.push(Skill {
+                    name: ws_tool.to_string(),
+                    category: "infrastructure".to_string(),
+                    proficiency: 1.0,
+                });
+            }
+        }
 
         // Merge denied_skills into denied_capabilities.
         // Always include workspace tools — they are infrastructure tools

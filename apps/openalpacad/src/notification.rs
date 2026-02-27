@@ -129,28 +129,16 @@ impl NotificationDispatcher {
 
         // source_lane format: "{user_id}:telegram" or "{user_id}:imessage"
         if task.source_lane.ends_with(":telegram") {
-            if let Some(chat_id) = self.resolve_telegram_chat_id(&task.source_lane)
+            let chat_id = self.resolve_telegram_chat_id(&task.source_lane);
+            if let Some(chat_id) = chat_id
                 && let Some(ref bot) = self.telegram_bot()
                 && let Err(e) = bot.send_message(ChatId(chat_id), &content).await
             {
                 warn!("Failed to send task completion notification: {e}");
             }
             // Spawn non-blocking artifact file delivery
-            if let Some(chat_id) = self.resolve_telegram_chat_id(&task.source_lane) {
-                if let Some(ref send) = self.connector_send {
-                    let db = self.db.clone();
-                    let send = send.clone();
-                    let task_id = task_id.to_string();
-                    let chat_id_str = chat_id.to_string();
-                    let outcome_json = task.outcome_json.clone();
-                    let owner = task.created_by.clone();
-                    tokio::spawn(async move {
-                        let _ = tokio::time::timeout(
-                            std::time::Duration::from_secs(60),
-                            deliver_artifacts(&db, &*send, &task_id, "telegram", &chat_id_str, outcome_json.as_deref(), &owner),
-                        ).await;
-                    });
-                }
+            if let Some(chat_id) = chat_id {
+                self.spawn_artifact_delivery(task_id, chat_id, task.outcome_json.as_deref(), &task.created_by);
             }
         } else if task.source_lane.ends_with(":imessage") {
             self.try_imessage_notification(&task.source_lane, &content)
@@ -163,20 +151,7 @@ impl NotificationDispatcher {
                 .await;
             // Spawn non-blocking artifact file delivery for cross-channel Telegram
             if let Some(chat_id) = cross_chat_id {
-                if let Some(ref send) = self.connector_send {
-                    let db = self.db.clone();
-                    let send = send.clone();
-                    let task_id = task_id.to_string();
-                    let chat_id_str = chat_id.to_string();
-                    let outcome_json = task.outcome_json.clone();
-                    let owner = task.created_by.clone();
-                    tokio::spawn(async move {
-                        let _ = tokio::time::timeout(
-                            std::time::Duration::from_secs(60),
-                            deliver_artifacts(&db, &*send, &task_id, "telegram", &chat_id_str, outcome_json.as_deref(), &owner),
-                        ).await;
-                    });
-                }
+                self.spawn_artifact_delivery(task_id, chat_id, task.outcome_json.as_deref(), &task.created_by);
             }
         }
     }
@@ -188,7 +163,14 @@ impl NotificationDispatcher {
             _ => return,
         };
 
-        let content = format_failure_message(&task.title, error, outcome_kind);
+        // Parse artifact_count from outcome_json (partially-failed pipelines may have artifacts)
+        let artifact_count: Option<i32> = task
+            .outcome_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            .and_then(|v| v["artifacts"].as_array().map(|a| a.len() as i32));
+
+        let content = format_failure_message(&task.title, error, outcome_kind, artifact_count);
 
         if task.source_lane.ends_with(":telegram") {
             if let Some(chat_id) = self.resolve_telegram_chat_id(&task.source_lane)
@@ -378,6 +360,24 @@ impl NotificationDispatcher {
     #[cfg(not(target_os = "macos"))]
     async fn try_cross_channel_imessage(&self, _created_by: &str, _message: &str) {}
 
+    /// Spawn a non-blocking artifact delivery task to a Telegram chat.
+    fn spawn_artifact_delivery(&self, task_id: &str, chat_id: i64, outcome_json: Option<&str>, owner: &str) {
+        if let Some(ref send) = self.connector_send {
+            let db = self.db.clone();
+            let send = send.clone();
+            let task_id = task_id.to_string();
+            let chat_id_str = chat_id.to_string();
+            let outcome_json = outcome_json.map(|s| s.to_string());
+            let owner = owner.to_string();
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    deliver_artifacts(&db, &*send, &task_id, "telegram", &chat_id_str, outcome_json.as_deref(), &owner),
+                ).await;
+            });
+        }
+    }
+
     /// Resolve the Telegram chat_id for a given lane_key.
     ///
     ///
@@ -445,17 +445,27 @@ fn format_completion_message(
 }
 
 /// Build failure notification message (pure function, testable).
-fn format_failure_message(title: &str, error: &str, outcome_kind: Option<&str>) -> String {
-    format!(
-        "Task failed: {}\n\nError: {}{}",
-        title,
-        error,
-        if outcome_kind == Some("failed") {
-            "\nNo files were produced."
-        } else {
-            ""
+///
+/// When `artifact_count` indicates artifacts from earlier steps, we note
+/// they may still be available instead of claiming "no files".
+fn format_failure_message(
+    title: &str,
+    error: &str,
+    outcome_kind: Option<&str>,
+    artifact_count: Option<i32>,
+) -> String {
+    let file_note = match (outcome_kind, artifact_count) {
+        (Some("failed"), Some(n)) if n > 0 => {
+            format!(
+                "\n{} file{} from earlier steps may still be available.",
+                n,
+                if n != 1 { "s" } else { "" }
+            )
         }
-    )
+        (Some("failed"), _) => "\nNo files were produced.".to_string(),
+        _ => String::new(),
+    };
+    format!("Task failed: {}\n\nError: {}{}", title, error, file_note)
 }
 
 /// Maximum file size for artifact delivery (50 MB — Telegram Bot API limit).
@@ -719,21 +729,36 @@ mod tests {
 
     #[test]
     fn failure_with_failed_outcome() {
-        let msg = format_failure_message("Broken task", "timeout", Some("failed"));
+        let msg = format_failure_message("Broken task", "timeout", Some("failed"), None);
         assert!(msg.contains("Task failed: Broken task"));
         assert!(msg.contains("Error: timeout"));
         assert!(msg.contains("No files were produced."));
     }
 
     #[test]
+    fn failure_with_failed_outcome_and_artifacts() {
+        let msg = format_failure_message("Partial task", "step 3 failed", Some("failed"), Some(2));
+        assert!(msg.contains("Task failed: Partial task"));
+        assert!(msg.contains("2 files from earlier steps may still be available."));
+        assert!(!msg.contains("No files were produced."));
+    }
+
+    #[test]
+    fn failure_with_failed_outcome_singular_artifact() {
+        let msg = format_failure_message("T", "err", Some("failed"), Some(1));
+        assert!(msg.contains("1 file from earlier steps may still be available."));
+        assert!(!msg.contains("files")); // singular
+    }
+
+    #[test]
     fn failure_without_outcome() {
-        let msg = format_failure_message("Broken task", "OOM", None);
+        let msg = format_failure_message("Broken task", "OOM", None, None);
         assert_eq!(msg, "Task failed: Broken task\n\nError: OOM");
     }
 
     #[test]
     fn failure_with_non_failed_outcome_kind() {
-        let msg = format_failure_message("T", "err", Some("text_only"));
+        let msg = format_failure_message("T", "err", Some("text_only"), None);
         // Non-"failed" outcome_kind → no extra line
         assert!(!msg.contains("No files were produced."));
         assert_eq!(msg, "Task failed: T\n\nError: err");
@@ -741,7 +766,7 @@ mod tests {
 
     #[test]
     fn failure_empty_error_string() {
-        let msg = format_failure_message("T", "", Some("failed"));
+        let msg = format_failure_message("T", "", Some("failed"), None);
         assert!(msg.contains("Error: \n"));
     }
 
@@ -853,8 +878,12 @@ mod tests {
     async fn test_deliver_artifacts_skips_oversized_files() {
         let db = test_db();
         let repo = FileAssetRepository::new(&db);
-        // Insert a file asset that exceeds 50MB
-        let oversized = make_file_asset("big_file", "/tmp/nonexistent.bin", 60 * 1024 * 1024);
+        // Create a real (small) temp file so the existence check passes,
+        // but set size_bytes > 50MB in the DB record so the size check fires.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"dummy").unwrap();
+        let path_str = tmp.path().to_str().unwrap();
+        let oversized = make_file_asset("big_file", path_str, 60 * 1024 * 1024);
         repo.insert(&oversized).unwrap();
 
         let send = MockSendProvider {
@@ -862,9 +891,7 @@ mod tests {
         };
         // outcome_json referencing the oversized file via file_asset_id
         let outcome_json = r#"{"summary":"done","outcome_kind":"artifact_only","artifacts":[{"key":"k","label":"Big file","agent_id":"a","step_order":0,"file_asset_id":"big_file"}]}"#;
-        // This should skip the oversized file without panic (file doesn't exist on disk either,
-        // but the size check comes after the exists check — so it will be skipped at exists check).
-        // Both checks result in skipping, which is the desired behavior.
+        // File exists on disk → existence check passes → size check fires → skip logged.
         deliver_artifacts(&db, &send, "task_1", "telegram", "12345", Some(outcome_json), "user1").await;
     }
 

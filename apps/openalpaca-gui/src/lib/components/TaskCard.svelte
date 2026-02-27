@@ -45,7 +45,7 @@
   <div class="flex justify-between items-start mb-2.5 gap-3">
     <h3 class="m-0 text-[0.92rem] font-semibold flex-1 overflow-hidden text-ellipsis whitespace-nowrap leading-snug" style="letter-spacing: -0.01em;">{task.title}</h3>
     <span class="text-[0.65rem] px-2 py-0.5 rounded-lg uppercase font-bold shrink-0 border {statusBadgeClass(task.status)}" style="letter-spacing: 0.04em;">{task.status}</span>
-    {#if (task.status === "completed" || task.status === "failed") && task.outcome_kind}
+    {#if (task.status === "completed" || task.status === "failed") && task.outcome_kind && task.outcome_kind !== 'failed'}
       <span class="text-[0.6rem] px-1.5 py-0.5 rounded-lg font-medium shrink-0 border
         {task.outcome_kind === 'text_only'
           ? 'bg-blue-400/10 text-blue-400/80 border-blue-400/15'
@@ -58,8 +58,6 @@
           {task.artifact_count ?? 0} file{(task.artifact_count ?? 0) !== 1 ? 's' : ''}
         {:else if task.outcome_kind === 'mixed'}
           {task.artifact_count ?? 0} file{(task.artifact_count ?? 0) !== 1 ? 's' : ''} + text
-        {:else if task.outcome_kind === 'failed'}
-          Failed
         {/if}
       </span>
     {/if}
