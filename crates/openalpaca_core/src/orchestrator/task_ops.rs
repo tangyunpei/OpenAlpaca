@@ -61,6 +61,9 @@ impl Orchestrator {
                                     "result_summary": t.result_summary,
                                     "created_at": t.created_at.to_rfc3339(),
                                     "completed_at": t.completed_at.map(|ts| ts.to_rfc3339()),
+                                    "outcome_kind": t.outcome_kind.map(|k| k.as_str()),
+                                    "artifact_count": t.artifact_count,
+                                    "outcome_json": t.outcome_json.as_deref(),
                                 })
                             })
                             .collect();

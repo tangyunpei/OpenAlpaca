@@ -437,5 +437,5 @@ fn test_build_task_outcome_empty_content_failure() {
 
     let outcome = build_task_outcome(None, "t1", "", false);
     assert_eq!(outcome.outcome_kind, OutcomeKind::Failed);
-    assert_eq!(outcome.summary, "Task completed.");
+    assert_eq!(outcome.summary, "Task failed.");
 }

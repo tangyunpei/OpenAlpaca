@@ -402,6 +402,9 @@ pub(super) fn db_task_to_json(task: &Task) -> String {
         "result_summary": task.result_summary,
         "created_at": task.created_at.to_rfc3339(),
         "updated_at": task.updated_at.to_rfc3339(),
+        "outcome_kind": task.outcome_kind.map(|k| k.as_str()),
+        "artifact_count": task.artifact_count,
+        "outcome_json": task.outcome_json.as_deref(),
     });
 
     // Parse state_json to extract DAG node details if available
