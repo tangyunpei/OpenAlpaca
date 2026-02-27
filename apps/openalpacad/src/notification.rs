@@ -4,16 +4,20 @@
 //! For tasks originating from Telegram or iMessage, sends a message back to the originating chat.
 
 use openalpaca_core::events::SystemEvent;
-use openalpaca_storage::{Database, IdentityRepository, PreferenceRepository, TaskRepository};
+use openalpaca_storage::{
+    ConfigRepository, Database, IdentityRepository, PreferenceRepository, TaskRepository,
+};
 use teloxide::prelude::*;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 /// Dispatches task completion/failure notifications to external platforms.
+///
+/// Reads the Telegram bot token lazily from `ConfigRepository` on each
+/// notification so that token changes take effect without daemon restart.
 pub struct NotificationDispatcher {
     bus_rx: broadcast::Receiver<SystemEvent>,
-    telegram_bot: Option<Bot>,
     db: Database,
     cancel_token: CancellationToken,
 }
@@ -21,16 +25,25 @@ pub struct NotificationDispatcher {
 impl NotificationDispatcher {
     pub fn new(
         bus_rx: broadcast::Receiver<SystemEvent>,
-        telegram_bot: Option<Bot>,
         db: Database,
         cancel_token: CancellationToken,
     ) -> Self {
         Self {
             bus_rx,
-            telegram_bot,
             db,
             cancel_token,
         }
+    }
+
+    /// Resolve a fresh Telegram Bot from the current config.
+    fn telegram_bot(&self) -> Option<Bot> {
+        let config_repo = openalpaca_storage::ConfigRepository::new(&self.db);
+        config_repo
+            .get("telegram.token")
+            .ok()
+            .flatten()
+            .filter(|t| !t.is_empty())
+            .map(Bot::new)
     }
 
     /// Run the notification loop. Blocks until cancelled or the bus sender is dropped.
@@ -87,7 +100,7 @@ impl NotificationDispatcher {
         // source_lane format: "{user_id}:telegram" or "{user_id}:imessage"
         if task.source_lane.ends_with(":telegram") {
             if let Some(chat_id) = self.resolve_telegram_chat_id(&task.source_lane)
-                && let Some(ref bot) = self.telegram_bot
+                && let Some(ref bot) = self.telegram_bot()
                 && let Err(e) = bot.send_message(ChatId(chat_id), &content).await
             {
                 warn!("Failed to send task completion notification: {e}");
@@ -115,7 +128,7 @@ impl NotificationDispatcher {
 
         if task.source_lane.ends_with(":telegram") {
             if let Some(chat_id) = self.resolve_telegram_chat_id(&task.source_lane)
-                && let Some(ref bot) = self.telegram_bot
+                && let Some(ref bot) = self.telegram_bot()
                 && let Err(e) = bot.send_message(ChatId(chat_id), &content).await
             {
                 warn!("Failed to send task failure notification: {e}");
@@ -134,7 +147,7 @@ impl NotificationDispatcher {
 
     /// Try cross-channel Telegram delivery for non-Telegram tasks.
     async fn try_cross_channel_telegram(&self, created_by: &str, message: &str) {
-        let bot = match &self.telegram_bot {
+        let bot = match self.telegram_bot() {
             Some(b) => b,
             None => return,
         };
@@ -145,7 +158,15 @@ impl NotificationDispatcher {
             .ok()
             .flatten()
             .map(|p| p.value == "true")
-            .unwrap_or(false);
+            .unwrap_or_else(|| {
+                // Fallback: check global default in system_config
+                ConfigRepository::new(&self.db)
+                    .get("telegram.notify_task_completion")
+                    .ok()
+                    .flatten()
+                    .map(|v| v == "true")
+                    .unwrap_or(false)
+            });
         if !should_notify {
             return;
         }
@@ -201,12 +222,20 @@ impl NotificationDispatcher {
             (None, false)
         };
 
-        if let Some(target) = target
-            && let Err(e) =
-                openalpaca_connectors::imessage::IMessageSender::send(&target, message, is_group)
-                    .await
-        {
-            warn!("Failed to send iMessage notification: {e}");
+        if let Some(target) = target {
+            let from_account = pref_repo
+                .get(user_id, "imessage.last_send_account")
+                .ok()
+                .flatten()
+                .map(|p| p.value);
+            if let Err(e) =
+                openalpaca_connectors::imessage::IMessageSender::send_from(
+                    &target, message, is_group, from_account.as_deref(),
+                )
+                .await
+            {
+                warn!("Failed to send iMessage notification: {e}");
+            }
         }
     }
 
@@ -223,7 +252,15 @@ impl NotificationDispatcher {
             .ok()
             .flatten()
             .map(|p| p.value == "true")
-            .unwrap_or(false);
+            .unwrap_or_else(|| {
+                // Fallback: check global default in system_config
+                ConfigRepository::new(&self.db)
+                    .get("imessage.notify_task_completion")
+                    .ok()
+                    .flatten()
+                    .map(|v| v == "true")
+                    .unwrap_or(false)
+            });
         if !should_notify {
             return;
         }
@@ -254,12 +291,20 @@ impl NotificationDispatcher {
             (None, false)
         };
 
-        if let Some(target) = target
-            && let Err(e) =
-                openalpaca_connectors::imessage::IMessageSender::send(&target, message, is_group)
-                    .await
-        {
-            warn!("Failed to send cross-channel iMessage notification: {e}");
+        if let Some(target) = target {
+            let from_account = pref_repo
+                .get(created_by, "imessage.last_send_account")
+                .ok()
+                .flatten()
+                .map(|p| p.value);
+            if let Err(e) =
+                openalpaca_connectors::imessage::IMessageSender::send_from(
+                    &target, message, is_group, from_account.as_deref(),
+                )
+                .await
+            {
+                warn!("Failed to send cross-channel iMessage notification: {e}");
+            }
         }
     }
 

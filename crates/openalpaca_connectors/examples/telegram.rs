@@ -72,7 +72,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Note: In a real app, you'd spawn this or run in background
     // For the example, we run it blocking.
-    let shutdown_token = connector.run_with_signal().await;
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let shutdown_token = connector.run_with_signal(running).await;
 
     // Simulate running for a bit
     tokio::signal::ctrl_c().await.unwrap();

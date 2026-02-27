@@ -4,7 +4,7 @@ use openalpaca_core::{
     agent::AgentConfigService,
     bus::EventBus,
     context::SharedContext,
-    tools::builtins::{IdentityToolContext, SoulToolContext, UserToolContext},
+    tools::builtins::{ConnectorSendLock, IdentityToolContext, SoulToolContext, UserToolContext},
 };
 use openalpaca_storage::Database;
 use std::path::Path;
@@ -27,6 +27,9 @@ pub struct InitializedServices {
     pub skill_router: Arc<openalpaca_core::orchestrator::skill_router::SkillRouter>,
     pub secret_store: Arc<dyn openalpaca_llm::SecretStore>,
     pub web_search_config: Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
+    /// Shared lock for the `send_message` tool's connector send provider.
+    /// Populated post-construction in main.rs after the ConnectorSendBridge is created.
+    pub connector_send_lock: ConnectorSendLock,
 }
 
 /// Initialize all core services: agent templates, LLM router, tools, security, etc.
@@ -114,7 +117,7 @@ pub async fn initialize_services(
     let web_search_config = Arc::new(ArcSwap::from_pointee(web_search_cfg));
 
     // Build ToolRegistry
-    let tool_registry = build_tool_registry(
+    let (tool_registry, connector_send_lock) = build_tool_registry(
         config_base_dir,
         db,
         &embedder,
@@ -187,6 +190,7 @@ pub async fn initialize_services(
         skill_router,
         secret_store,
         web_search_config,
+        connector_send_lock,
     })
 }
 
@@ -561,7 +565,7 @@ fn build_tool_registry(
     bus: &EventBus,
     daemon_config: &Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
     web_search_config: &Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
-) -> Arc<openalpaca_core::tools::ToolRegistry> {
+) -> (Arc<openalpaca_core::tools::ToolRegistry>, ConnectorSendLock) {
     let mut tool_registry = openalpaca_core::tools::ToolRegistry::new();
 
     // Register built-in tools (including update_soul and update_user)
@@ -586,6 +590,9 @@ fn build_tool_registry(
     // Capture workspace root once at startup for file tools, avoiding
     // reliance on the process-global current_dir() at tool execution time.
     let workspace_root = std::env::current_dir().ok();
+    // Create the shared lock for the send_message tool's connector send provider.
+    // The actual provider is set post-construction in main.rs after ConnectorSendBridge is created.
+    let connector_send_lock: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
     for tool in openalpaca_core::tools::builtins::builtin_tools_with_persona_context(
         Some(db.clone()),
         embedder.clone(),
@@ -595,6 +602,7 @@ fn build_tool_registry(
         Some(daemon_config.clone()),
         Some(web_search_config.clone()),
         workspace_root,
+        Some(connector_send_lock.clone()),
     ) {
         tool_registry.register(tool);
     }
@@ -623,6 +631,8 @@ fn build_tool_registry(
         "spawn_subagents_batch",
         "check_subagent_status",
         "wait_for_subagents",
+        // Connector tools
+        "send_message",
     ];
     for tool in openalpaca_core::tools::config::load_tools_from_dir(&tools_config_dir) {
         if protected_builtins.contains(&tool.definition.name.as_str()) {
@@ -650,5 +660,5 @@ fn build_tool_registry(
         tracing::error!("update_soul tool failed to register — SOUL.md updates will not work");
     }
 
-    Arc::new(tool_registry)
+    (Arc::new(tool_registry), connector_send_lock)
 }

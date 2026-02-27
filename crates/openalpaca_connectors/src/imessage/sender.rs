@@ -17,7 +17,23 @@ impl IMessageSender {
     ///   service account.
     /// - For group chats (`is_group = true`), the `recipient` is treated as
     ///   the chat identifier and the message is sent to that chat directly.
+    ///
+    /// If `from_account` is provided (e.g. `"user@icloud.com"`), the sender
+    /// selects the matching iMessage account instead of blindly picking the
+    /// first one. This prevents replies from landing in the wrong thread when
+    /// the Mac has multiple iMessage addresses (phone + email).
     pub async fn send(recipient: &str, message: &str, is_group: bool) -> Result<(), String> {
+        Self::send_from(recipient, message, is_group, None).await
+    }
+
+    /// Like [`send`] but accepts an explicit `from_account` to choose the
+    /// outgoing iMessage service account.
+    pub async fn send_from(
+        recipient: &str,
+        message: &str,
+        is_group: bool,
+        from_account: Option<&str>,
+    ) -> Result<(), String> {
         let escaped_message = escape_applescript(message);
         let escaped_recipient = escape_applescript(recipient);
 
@@ -29,11 +45,20 @@ impl IMessageSender {
 end tell"#,
                 escaped_recipient, escaped_message,
             )
+        } else if let Some(acct) = from_account {
+            // Use the explicit account to avoid routing into the wrong thread
+            // on Macs with multiple iMessage addresses (phone + email).
+            let escaped_account = escape_applescript(acct);
+            format!(
+                r#"tell application "Messages"
+    set targetService to 1st account whose id = "{}"
+    set targetBuddy to participant "{}" of targetService
+    send "{}" to targetBuddy
+end tell"#,
+                escaped_account, escaped_recipient, escaped_message,
+            )
         } else {
-            // Note: Uses the first iMessage account. With multi-address setups
-            // (phone + email both registered), this may route into a different
-            // thread than expected. A future enhancement could accept an explicit
-            // `from_account` parameter.
+            // Fallback: pick the first iMessage account.
             format!(
                 r#"tell application "Messages"
     set targetService to 1st account whose service type = iMessage
