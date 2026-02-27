@@ -721,10 +721,16 @@ pub(super) fn finalize_task_with_outcome(
                     "finalize_task_with_outcome: failed to serialize outcome for task '{}': {e}",
                     task_id
                 );
+                // Skip DB write — don't persist invalid/empty JSON
                 String::new()
             }
         };
-        if let Err(e) = repo.set_outcome(
+        if outcome_json.is_empty() {
+            tracing::warn!(
+                "finalize_task_with_outcome: skipping set_outcome for task '{}' due to empty outcome_json",
+                task_id
+            );
+        } else if let Err(e) = repo.set_outcome(
             task_id,
             &outcome_json,
             outcome.outcome_kind,
