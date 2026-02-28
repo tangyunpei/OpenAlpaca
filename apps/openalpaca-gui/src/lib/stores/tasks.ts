@@ -33,8 +33,29 @@ export const selectedTaskDetail = writable<TaskDetailResponse | null>(null);
 /** Loading state */
 export const tasksLoading = writable(false);
 
+/** Debounced backfill — coalesces rapid terminal WS events into one fetch. */
+let backfillTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleBackfill(): void {
+  if (backfillTimer !== null) return;
+  backfillTimer = setTimeout(() => {
+    backfillTimer = null;
+    loadTasks();
+  }, 200);
+}
+
+/** Shared in-flight guard for loadTasks — prevents concurrent REST fetches
+ *  from any callsite (direct calls, backfill, tab switch, manual refresh). */
+let loadInFlight = false;
+let loadPending = false;
+
 /** Fetch all tasks from REST and merge into the map (preserves WebSocket-derived data) */
 export async function loadTasks(): Promise<void> {
+  if (loadInFlight) {
+    loadPending = true;
+    return;
+  }
+  loadInFlight = true;
   tasksLoading.set(true);
   try {
     const tasks = await getTasks();
@@ -53,6 +74,11 @@ export async function loadTasks(): Promise<void> {
     console.error("[tasks-store] Failed to load tasks:", e);
   } finally {
     tasksLoading.set(false);
+    loadInFlight = false;
+    if (loadPending) {
+      loadPending = false;
+      loadTasks();
+    }
   }
 }
 
@@ -89,6 +115,20 @@ export function subscribeToTaskEvents(): () => void {
           progress_current: latest.progress_current ?? existing.progress_current,
           progress_total: latest.progress_total ?? existing.progress_total,
           result_summary: latest.result_summary ?? existing.result_summary,
+          // Merge outcome fields from WS event
+          outcome_kind: latest.outcome_kind ?? existing.outcome_kind,
+          artifact_count: latest.artifact_count ?? existing.artifact_count,
+          // Build a minimal ParsedOutcome from WS fields when available
+          outcome: latest.outcome_kind
+            ? {
+                ...(existing.outcome ?? {}),
+                outcome_kind: latest.outcome_kind,
+                outcome_summary: latest.outcome_summary ?? existing.outcome?.outcome_summary ?? null,
+                artifact_count: latest.artifact_count ?? existing.outcome?.artifact_count ?? 0,
+                artifacts: existing.outcome?.artifacts ?? [],
+                no_artifact_reason: existing.outcome?.no_artifact_reason,
+              }
+            : existing.outcome,
           ...(latest.title ? { title: latest.title } : {}),
         });
       } else {
@@ -102,12 +142,26 @@ export function subscribeToTaskEvents(): () => void {
           progress_current: latest.progress_current,
           progress_total: latest.progress_total,
           result_summary: latest.result_summary,
+          outcome_kind: latest.outcome_kind,
+          artifact_count: latest.artifact_count,
+          outcome: latest.outcome_kind
+            ? {
+                outcome_summary: latest.outcome_summary ?? null,
+                outcome_kind: latest.outcome_kind,
+                artifact_count: latest.artifact_count ?? 0,
+                artifacts: [],
+              }
+            : undefined,
           created_by: "",
           source_lane: "",
           created_at: latest.ts,
           updated_at: latest.ts,
           completed_at: null,
         });
+        // Terminal placeholder — backfill from REST to resolve "Unknown Task"
+        if (latest.status === "completed" || latest.status === "failed") {
+          scheduleBackfill();
+        }
       }
       return new Map(map);
     });

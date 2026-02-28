@@ -1,5 +1,5 @@
 use super::Orchestrator;
-use super::{db_task_to_json, task_entry_to_json};
+use super::{db_task_to_json, parse_outcome, task_entry_to_json};
 use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
 use crate::lane::TaskLaneStatus;
@@ -52,6 +52,17 @@ impl Orchestrator {
                         let task_list: Vec<serde_json::Value> = tasks
                             .iter()
                             .map(|t| {
+                                let (outcome_summary, no_artifact_reason, artifacts) =
+                                    parse_outcome(t)
+                                        .map(|p| {
+                                            (
+                                                p.outcome_summary,
+                                                p.no_artifact_reason,
+                                                serde_json::json!(p.artifacts),
+                                            )
+                                        })
+                                        .unwrap_or((None, None, serde_json::json!([])));
+
                                 serde_json::json!({
                                     "task_id": t.id,
                                     "title": t.title,
@@ -61,6 +72,11 @@ impl Orchestrator {
                                     "result_summary": t.result_summary,
                                     "created_at": t.created_at.to_rfc3339(),
                                     "completed_at": t.completed_at.map(|ts| ts.to_rfc3339()),
+                                    "outcome_kind": t.outcome_kind.map(|k| k.as_str()),
+                                    "artifact_count": t.artifact_count,
+                                    "outcome_summary": outcome_summary,
+                                    "no_artifact_reason": no_artifact_reason,
+                                    "artifacts": artifacts,
                                 })
                             })
                             .collect();

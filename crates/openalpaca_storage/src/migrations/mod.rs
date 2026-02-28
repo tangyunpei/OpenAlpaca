@@ -151,4 +151,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "message_attachments",
         sql: include_str!("028_message_attachments.sql"),
     },
+    Migration {
+        version: 29,
+        name: "task_outcome",
+        sql: include_str!("029_task_outcome.sql"),
+    },
 ];

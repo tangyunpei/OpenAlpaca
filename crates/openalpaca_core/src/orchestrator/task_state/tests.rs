@@ -301,3 +301,598 @@ fn test_backward_compat_no_workspace_field() {
     assert!(state.workspace.entries.is_empty());
     assert_eq!(state.workspace.max_entries, 50);
 }
+
+// ── Artifact pointer and outcome tests ──────────────────────────
+
+#[test]
+fn test_step_add_artifact() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.add_step_artifact(0, "report.pdf", "Final report", None);
+    assert_eq!(state.steps[0].artifact_pointers.len(), 1);
+    // Stored as JSON to avoid delimiter ambiguity
+    let stored: serde_json::Value =
+        serde_json::from_str(&state.steps[0].artifact_pointers[0]).unwrap();
+    assert_eq!(stored["key"], "report.pdf");
+    assert_eq!(stored["label"], "Final report");
+}
+
+#[test]
+fn test_collect_artifacts_from_completed_steps_only() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    // Step 0: completed with artifact
+    state.mark_step_running(0);
+    state.add_step_artifact(0, "data.csv", "Raw data", None);
+    state.mark_step_completed(0, "Gathered data");
+
+    // Step 1: failed with artifact (should NOT be collected)
+    state.mark_step_running(1);
+    state.add_step_artifact(1, "draft.txt", "Draft", None);
+    state.mark_step_failed(1, "Failed");
+
+    let artifacts = state.collect_artifacts();
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].key, "data.csv");
+    assert_eq!(artifacts[0].agent_id, "a1");
+    assert_eq!(artifacts[0].step_order, 0);
+}
+
+#[test]
+fn test_build_outcome_text_only() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Analysis complete");
+    state.mark_step_running(1);
+    state.mark_step_completed(1, "Summary written");
+
+    let outcome = state.build_outcome("fallback", None);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::TextOnly);
+    assert!(outcome.artifacts.is_empty());
+    assert!(outcome.no_artifact_reason.is_some());
+    assert!(outcome.summary.contains("Analysis complete"));
+    assert!(outcome.summary.contains("Summary written"));
+}
+
+#[test]
+fn test_build_outcome_artifact_only() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.add_step_artifact(0, "output.zip", "Results", None);
+    // Complete with empty summary
+    state.mark_step_completed(0, "");
+
+    let outcome = state.build_outcome("", None);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::ArtifactOnly);
+    assert_eq!(outcome.artifacts.len(), 1);
+    assert!(outcome.no_artifact_reason.is_none());
+    // Summary should fall back to default
+    assert_eq!(outcome.summary, "Task completed.");
+}
+
+#[test]
+fn test_build_outcome_mixed() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.add_step_artifact(0, "report.pdf", "Report", None);
+    state.mark_step_completed(0, "Report generated successfully");
+
+    let outcome = state.build_outcome("fallback", None);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::Mixed);
+    assert_eq!(outcome.artifacts.len(), 1);
+    assert!(outcome.no_artifact_reason.is_none());
+    assert!(outcome.summary.contains("Report generated"));
+}
+
+#[test]
+fn test_build_outcome_failed() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_failed(0, "Network error");
+    state.mark_step_running(1);
+    state.mark_step_failed(1, "Dependency failed");
+
+    let outcome = state.build_outcome("All steps failed", None);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::Failed);
+    assert!(outcome.artifacts.is_empty());
+}
+
+#[test]
+fn test_build_outcome_partial_failure_not_classified_as_failed() {
+    // Some steps completed, some failed — should NOT be "failed"
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Step 1 succeeded");
+    state.mark_step_running(1);
+    state.mark_step_failed(1, "Step 2 failed");
+
+    let outcome = state.build_outcome("fallback", None);
+    // Partial failure with text output = TextOnly (not Failed)
+    assert_eq!(outcome.outcome_kind, OutcomeKind::TextOnly);
+    assert!(outcome.summary.contains("Step 1 succeeded"));
+}
+
+#[test]
+fn test_build_outcome_fallback_summary() {
+    // No steps completed — should use fallback
+    let state = TaskState::initial("obj", &make_assignments());
+    let outcome = state.build_outcome("Custom fallback text", None);
+    assert_eq!(outcome.summary, "Custom fallback text");
+}
+
+#[test]
+fn test_build_outcome_empty_fallback_uses_default() {
+    let state = TaskState::initial("obj", &make_assignments());
+    let outcome = state.build_outcome("", None);
+    assert_eq!(outcome.summary, "Task completed.");
+}
+
+#[test]
+fn test_build_outcome_custom_no_artifact_reason() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Analysis done");
+
+    let outcome = state.build_outcome(
+        "fallback",
+        Some("This was a text-only analysis task.".to_string()),
+    );
+    assert_eq!(
+        outcome.no_artifact_reason.as_deref(),
+        Some("This was a text-only analysis task.")
+    );
+}
+
+#[test]
+fn test_task_outcome_serialization_roundtrip() {
+    let outcome = TaskOutcome {
+        summary: "Task completed".to_string(),
+        outcome_kind: OutcomeKind::Mixed,
+        artifacts: vec![ArtifactPointer {
+            key: "report.pdf".to_string(),
+            label: "Final report".to_string(),
+            agent_id: "a1".to_string(),
+            step_order: 0,
+            file_asset_id: None,
+        }],
+        no_artifact_reason: None,
+    };
+    let json = serde_json::to_string(&outcome).unwrap();
+    let deserialized: TaskOutcome = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.summary, "Task completed");
+    assert_eq!(deserialized.artifacts.len(), 1);
+    assert_eq!(deserialized.outcome_kind, OutcomeKind::Mixed);
+}
+
+// ── PR-04: Single-step (lead agent) outcome tests ───────────────
+
+#[test]
+fn test_single_step_completed_builds_outcome() {
+    // Simulate lead agent: 1 step, mark running then completed with summary.
+    // build_outcome() should return step summary, not fallback.
+    let assignments = vec![(
+        "lead_agent_1".to_string(),
+        "Lead Agent".to_string(),
+        "lead_orchestrator".to_string(),
+    )];
+    let mut state = TaskState::initial("Do something complex", &assignments);
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Successfully orchestrated 3 subtasks");
+
+    let outcome = state.build_outcome("This is the fallback", None);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::TextOnly);
+    assert!(outcome.summary.contains("Successfully orchestrated 3 subtasks"));
+    assert!(!outcome.summary.contains("fallback"));
+}
+
+#[test]
+fn test_single_step_failed_builds_outcome() {
+    // Simulate lead agent failure: 1 step marked failed.
+    // build_outcome() should return OutcomeKind::Failed.
+    let assignments = vec![(
+        "lead_agent_1".to_string(),
+        "Lead Agent".to_string(),
+        "lead_orchestrator".to_string(),
+    )];
+    let mut state = TaskState::initial("Do something complex", &assignments);
+    state.mark_step_running(0);
+    state.mark_step_failed(0, "CostExceeded");
+
+    let outcome = state.build_outcome("fallback", None);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::Failed);
+    assert_eq!(outcome.summary, "fallback");
+}
+
+// ── PR-05: Workspace artifact scanning tests ────────────────────
+
+#[test]
+fn test_scan_workspace_artifacts_picks_up_artifact_entries() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Done");
+
+    // Write an Artifact entry by step 0's agent
+    state
+        .workspace
+        .write("report.pdf", "data", "a1", WorkspaceEntryType::Artifact, &[])
+        .unwrap();
+
+    state.scan_workspace_artifacts(0);
+
+    // Verify artifact pointer was added
+    assert_eq!(state.steps[0].artifact_pointers.len(), 1);
+    let stored: serde_json::Value =
+        serde_json::from_str(&state.steps[0].artifact_pointers[0]).unwrap();
+    assert_eq!(stored["key"], "report.pdf");
+}
+
+#[test]
+fn test_scan_workspace_artifacts_ignores_context_entries() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Done");
+
+    // Write Context entries only — should not be picked up as artifacts
+    state
+        .workspace
+        .write("step_0_output", "result", "a1", WorkspaceEntryType::Context, &[])
+        .unwrap();
+
+    state.scan_workspace_artifacts(0);
+
+    assert!(state.steps[0].artifact_pointers.is_empty());
+}
+
+#[test]
+fn test_scan_workspace_artifacts_ignores_other_agents() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Done");
+
+    // Write Artifact by a different agent ("a2", not "a1")
+    state
+        .workspace
+        .write("other.pdf", "data", "a2", WorkspaceEntryType::Artifact, &[])
+        .unwrap();
+
+    state.scan_workspace_artifacts(0);
+
+    // Step 0's agent is "a1", so "a2"'s artifact should not be picked up
+    assert!(state.steps[0].artifact_pointers.is_empty());
+}
+
+#[test]
+fn test_scan_workspace_artifacts_avoids_duplicates() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Done");
+
+    // Add artifact pointer manually
+    state.add_step_artifact(0, "report.pdf", "Report", None);
+
+    // Write the same key to workspace as Artifact
+    state
+        .workspace
+        .write("report.pdf", "data", "a1", WorkspaceEntryType::Artifact, &[])
+        .unwrap();
+
+    state.scan_workspace_artifacts(0);
+
+    // Should still have only 1 artifact pointer (no duplicate)
+    assert_eq!(state.steps[0].artifact_pointers.len(), 1);
+}
+
+// ── PR-06: DAG outcome tests ────────────────────────────────────
+
+use crate::orchestrator::task_planner::{DagNode, DagNodeStatus, TaskDag};
+
+fn make_dag_node(id: &str, status: DagNodeStatus, summary: Option<&str>) -> DagNode {
+    DagNode {
+        node_id: id.to_string(),
+        title: format!("Node {id}"),
+        description: format!("Description for {id}"),
+        agent_id: format!("agent_{id}"),
+        agent_name: format!("Agent {id}"),
+        depends_on: Vec::new(),
+        status,
+        result_summary: summary.map(|s| s.to_string()),
+        workspace_keys: Vec::new(),
+        output_key: None,
+    }
+}
+
+#[test]
+fn test_build_outcome_dag_aggregates_node_summaries() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.dag = Some(TaskDag {
+        nodes: vec![
+            make_dag_node("n1", DagNodeStatus::Completed, Some("Researched topic")),
+            make_dag_node("n2", DagNodeStatus::Completed, Some("Wrote summary")),
+            make_dag_node("n3", DagNodeStatus::Failed, Some("Network error")),
+        ],
+    });
+
+    let outcome = state.build_outcome_dag("fallback", None);
+    // Two completed summaries should be numbered
+    assert!(outcome.summary.contains("1. Researched topic"));
+    assert!(outcome.summary.contains("2. Wrote summary"));
+    // Failed node summary should NOT appear in the output
+    assert!(!outcome.summary.contains("Network error"));
+    // Not all failed, so should be TextOnly (no artifacts)
+    assert_eq!(outcome.outcome_kind, OutcomeKind::TextOnly);
+}
+
+#[test]
+fn test_build_outcome_dag_all_failed() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.dag = Some(TaskDag {
+        nodes: vec![
+            make_dag_node("n1", DagNodeStatus::Failed, Some("Error 1")),
+            make_dag_node("n2", DagNodeStatus::Skipped, None),
+        ],
+    });
+
+    let outcome = state.build_outcome_dag("All failed fallback", None);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::Failed);
+    // No completed summaries → uses fallback
+    assert_eq!(outcome.summary, "All failed fallback");
+}
+
+#[test]
+fn test_build_outcome_dag_single_node_no_numbering() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.dag = Some(TaskDag {
+        nodes: vec![make_dag_node(
+            "n1",
+            DagNodeStatus::Completed,
+            Some("Single result"),
+        )],
+    });
+
+    let outcome = state.build_outcome_dag("fallback", None);
+    // Single node: raw text, no "1." prefix
+    assert_eq!(outcome.summary, "Single result");
+    assert!(!outcome.summary.starts_with("1."));
+}
+
+#[test]
+fn test_build_outcome_dag_falls_back_when_no_dag() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Step summary");
+    // dag is None → should delegate to build_outcome()
+    assert!(state.dag.is_none());
+
+    let outcome = state.build_outcome_dag("fallback", None);
+    // Should use step-based summary from build_outcome
+    assert!(outcome.summary.contains("Step summary"));
+}
+
+#[test]
+fn test_collect_artifacts_from_workspace() {
+    let mut state = TaskState::initial("obj", &make_assignments());
+    // Write mixed entry types
+    state
+        .workspace
+        .write("report.pdf", "data", "a1", WorkspaceEntryType::Artifact, &[])
+        .unwrap();
+    state
+        .workspace
+        .write("context_data", "info", "a1", WorkspaceEntryType::Context, &[])
+        .unwrap();
+    state
+        .workspace
+        .write("chart.png", "image", "a2", WorkspaceEntryType::Artifact, &[])
+        .unwrap();
+
+    let artifacts = state.collect_artifacts_from_workspace();
+    // Only Artifact entries should be collected
+    assert_eq!(artifacts.len(), 2);
+    assert_eq!(artifacts[0].key, "report.pdf");
+    assert_eq!(artifacts[0].agent_id, "a1");
+    assert_eq!(artifacts[1].key, "chart.png");
+    assert_eq!(artifacts[1].agent_id, "a2");
+}
+
+// ── Issue #3/#4: DAG state persistence & artifact consistency tests ──
+
+#[test]
+fn test_build_outcome_dag_with_workspace_artifacts() {
+    // Simulates the scenario where DAG nodes completed and workspace has
+    // Artifact entries. build_outcome_dag() should produce Mixed kind
+    // and collect workspace artifacts even when steps are not "completed".
+    let mut state = TaskState::initial("dag task", &make_assignments());
+    state.dag = Some(TaskDag {
+        nodes: vec![make_dag_node(
+            "n1",
+            DagNodeStatus::Completed,
+            Some("Analysis finished"),
+        )],
+    });
+
+    // Write an Artifact entry to workspace (as if agent wrote during DAG execution)
+    state
+        .workspace
+        .write(
+            "results.csv",
+            "col1,col2\n1,2",
+            "agent_n1",
+            WorkspaceEntryType::Artifact,
+            &[],
+        )
+        .unwrap();
+
+    let outcome = state.build_outcome_dag("fallback", None);
+    // Should be Mixed: has both text summary from node and artifact from workspace
+    assert_eq!(outcome.outcome_kind, OutcomeKind::Mixed);
+    assert_eq!(outcome.artifacts.len(), 1);
+    assert_eq!(outcome.artifacts[0].key, "results.csv");
+    assert_eq!(outcome.artifacts[0].agent_id, "agent_n1");
+    assert_eq!(outcome.artifacts[0].step_order, -1); // workspace-sourced
+    assert!(outcome.summary.contains("Analysis finished"));
+    assert!(outcome.no_artifact_reason.is_none());
+}
+
+#[test]
+fn test_scan_workspace_artifacts_all_steps() {
+    // Verifies that scanning all steps populates artifact_pointers for each
+    // step based on its agent's workspace Artifact entries.
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Step 0 done");
+    state.mark_step_running(1);
+    state.mark_step_completed(1, "Step 1 done");
+
+    // Write Artifact entries by each step's agent
+    state
+        .workspace
+        .write("data.csv", "raw data", "a1", WorkspaceEntryType::Artifact, &[])
+        .unwrap();
+    state
+        .workspace
+        .write("report.pdf", "report", "a2", WorkspaceEntryType::Artifact, &[])
+        .unwrap();
+    // Also write a non-artifact entry that should be ignored
+    state
+        .workspace
+        .write("notes.txt", "context", "a1", WorkspaceEntryType::Context, &[])
+        .unwrap();
+
+    // Scan all steps (the pattern used in the final state write)
+    let step_orders: Vec<i32> = state.steps.iter().map(|s| s.step_order).collect();
+    for order in step_orders {
+        state.scan_workspace_artifacts(order);
+    }
+
+    // Step 0 (agent "a1") should have "data.csv" but not "notes.txt" (Context)
+    assert_eq!(state.steps[0].artifact_pointers.len(), 1);
+    let ptr0: serde_json::Value =
+        serde_json::from_str(&state.steps[0].artifact_pointers[0]).unwrap();
+    assert_eq!(ptr0["key"], "data.csv");
+
+    // Step 1 (agent "a2") should have "report.pdf"
+    assert_eq!(state.steps[1].artifact_pointers.len(), 1);
+    let ptr1: serde_json::Value =
+        serde_json::from_str(&state.steps[1].artifact_pointers[0]).unwrap();
+    assert_eq!(ptr1["key"], "report.pdf");
+}
+
+// ── Non-singleton instance ID matching tests ─────────────────────
+
+#[test]
+fn test_scan_workspace_artifacts_matches_instance_id() {
+    // Simulates non-singleton agent: step has template_id "a1",
+    // but workspace entry was written by instance "a1::abc12345".
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Done");
+
+    // Write Artifact with non-singleton instance_id as author
+    state
+        .workspace
+        .write(
+            "result.csv",
+            "data",
+            "a1::abc12345",
+            WorkspaceEntryType::Artifact,
+            &[],
+        )
+        .unwrap();
+
+    state.scan_workspace_artifacts(0);
+
+    // Should match: "a1::abc12345" is an instance of template "a1"
+    assert_eq!(state.steps[0].artifact_pointers.len(), 1);
+    let stored: serde_json::Value =
+        serde_json::from_str(&state.steps[0].artifact_pointers[0]).unwrap();
+    assert_eq!(stored["key"], "result.csv");
+}
+
+#[test]
+fn test_scan_workspace_artifacts_instance_id_step_updated() {
+    // Simulates the case where pipeline already updated step.agent_id
+    // to the instance_id. The exact match should still work.
+    let mut state = TaskState::initial("obj", &make_assignments());
+    // Update step's agent_id to instance_id (as pipeline now does)
+    state.steps[0].agent_id = "a1::abc12345".to_string();
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Done");
+
+    state
+        .workspace
+        .write(
+            "result.csv",
+            "data",
+            "a1::abc12345",
+            WorkspaceEntryType::Artifact,
+            &[],
+        )
+        .unwrap();
+
+    state.scan_workspace_artifacts(0);
+
+    assert_eq!(state.steps[0].artifact_pointers.len(), 1);
+}
+
+#[test]
+fn test_scan_workspace_artifacts_no_cross_template_match() {
+    // Ensure "a1" does NOT match "a10::xyz" (prefix must end at "::")
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_running(0);
+    state.mark_step_completed(0, "Done");
+
+    state
+        .workspace
+        .write(
+            "other.csv",
+            "data",
+            "a10::xyz789",
+            WorkspaceEntryType::Artifact,
+            &[],
+        )
+        .unwrap();
+
+    state.scan_workspace_artifacts(0);
+
+    // "a10::xyz789" should NOT match step 0's agent "a1"
+    assert!(state.steps[0].artifact_pointers.is_empty());
+}
+
+#[test]
+fn test_is_same_agent_helper() {
+    use super::is_same_agent;
+
+    // Exact match
+    assert!(is_same_agent("a1", "a1"));
+    // Instance of template
+    assert!(is_same_agent("a1::abc12345", "a1"));
+    assert!(is_same_agent("a1", "a1::abc12345"));
+    // Different agents
+    assert!(!is_same_agent("a1", "a2"));
+    assert!(!is_same_agent("a1::abc", "a2"));
+    // Prefix trap: "a1" should NOT match "a10"
+    assert!(!is_same_agent("a1", "a10"));
+    assert!(!is_same_agent("a1", "a10::xyz"));
+    assert!(!is_same_agent("a10::xyz", "a1"));
+    // Single colon should NOT match (separator is "::", not ":")
+    assert!(!is_same_agent("file:read", "file"));
+    assert!(!is_same_agent("file", "file:read"));
+}
+
+// ── PR-11: ArtifactPointer file_asset_id backward compat ─────────
+
+#[test]
+fn test_artifact_pointer_file_asset_id_backward_compat() {
+    // Deserialize JSON without the file_asset_id field — should default to None
+    let json = r#"{"key":"report.pdf","label":"Report","agent_id":"a1","step_order":0}"#;
+    let ptr: ArtifactPointer = serde_json::from_str(json).unwrap();
+    assert_eq!(ptr.key, "report.pdf");
+    assert_eq!(ptr.label, "Report");
+    assert_eq!(ptr.agent_id, "a1");
+    assert_eq!(ptr.step_order, 0);
+    assert!(ptr.file_asset_id.is_none());
+
+    // Deserialize JSON with file_asset_id — should parse correctly
+    let json_with_id = r#"{"key":"report.pdf","label":"Report","agent_id":"a1","step_order":0,"file_asset_id":"file_abc123"}"#;
+    let ptr2: ArtifactPointer = serde_json::from_str(json_with_id).unwrap();
+    assert_eq!(ptr2.file_asset_id.as_deref(), Some("file_abc123"));
+}

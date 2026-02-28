@@ -1,7 +1,7 @@
 use super::super::task_planner::TaskDag;
 use super::{
-    TaskDispatcher, finalize_task, format_task_result, persist_conversation,
-    spawn_task_memory_extraction,
+    TaskDispatcher, finalize_task_with_outcome, format_task_result, persist_conversation,
+    spawn_task_memory_extraction, update_state_with_retry,
 };
 use crate::agent::registry::DestroyOutcome;
 use crate::context::{DagSummary, TaskEntryStatus};
@@ -168,8 +168,6 @@ impl TaskDispatcher {
                 }
             };
 
-            let db_summary = final_content.chars().take(2000).collect::<String>();
-
             // Persist final result to conversation before publishing completion,
             // so follow-up turns can immediately read the result from history.
             if let Some(ref db) = db {
@@ -186,13 +184,38 @@ impl TaskDispatcher {
                 );
             }
 
-            // Update task status
-            finalize_task(
+            // Write authoritative DAG state before building outcome.
+            // The in-memory `dag` has all node statuses and result_summaries
+            // from execute_dag(). DB copy may be stale if earlier
+            // persist_dag_state() calls exhausted retries under contention.
+            if let Some(ref db) = db {
+                let final_dag = dag.clone();
+                if !update_state_with_retry(
+                    db,
+                    &task_id,
+                    move |state| {
+                        state.dag = Some(final_dag.clone());
+                        let step_orders: Vec<i32> =
+                            state.steps.iter().map(|s| s.step_order).collect();
+                        for order in step_orders {
+                            state.scan_workspace_artifacts(order);
+                        }
+                    },
+                    "dag_final_state",
+                )
+                .await
+                {
+                    tracing::error!("Failed to persist dag_final_state for task '{}'", task_id);
+                }
+            }
+
+            // Update task status with structured outcome
+            finalize_task_with_outcome(
                 &ctx,
                 &bus,
                 db.as_ref(),
                 &task_id,
-                &db_summary,
+                &final_content,
                 result.success,
             );
 

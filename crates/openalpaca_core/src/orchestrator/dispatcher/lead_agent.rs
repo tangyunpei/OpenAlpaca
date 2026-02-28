@@ -1,7 +1,8 @@
 use super::super::task_state::TaskState;
+use super::update_state_with_retry;
 use super::usage;
 use super::{
-    TaskDispatcher, finalize_task, format_task_result, persist_conversation,
+    TaskDispatcher, finalize_task_with_outcome, format_task_result, persist_conversation,
     spawn_task_memory_extraction,
 };
 use crate::agent::registry::DestroyOutcome;
@@ -111,6 +112,9 @@ impl TaskDispatcher {
                 completed_at: None,
                 state_json: None,
                 state_version: 0,
+                outcome_json: None,
+                outcome_kind: None,
+                artifact_count: 0,
             };
             if let Err(e) = repo.create(&task) {
                 tracing::warn!("Failed to persist lead agent task to DB: {e}");
@@ -210,6 +214,20 @@ impl TaskDispatcher {
                 let _ = repo.update_status(&task_id, openalpaca_storage::TaskStatus::Running);
             }
 
+            // Mark step 0 as running now (before the agentic loop) so started_at is accurate
+            if let Some(ref db) = db {
+                if !update_state_with_retry(
+                    db,
+                    &task_id,
+                    |s| s.mark_step_running(0),
+                    "lead_agent_mark_step_running",
+                )
+                .await
+                {
+                    tracing::error!("Failed to persist lead_agent_mark_step_running for task '{}'", task_id);
+                }
+            }
+
             tracing::info!(task_id = %task_id, "Task status: queued → running");
 
             // Run the lead agent
@@ -247,6 +265,30 @@ impl TaskDispatcher {
                 "Lead agent execution returned"
             );
 
+            // Update state_json: mark lead agent step completed or failed
+            if let Some(ref db) = db {
+                let success = result.success;
+                let summary_text: String = result.final_content.chars().take(500).collect();
+                let error_msg = format!("{:?}", result.loop_result.finish_reason);
+                if !update_state_with_retry(
+                    db,
+                    &task_id,
+                    move |state| {
+                        if success {
+                            state.mark_step_completed(0, &summary_text);
+                        } else {
+                            state.mark_step_failed(0, &error_msg);
+                        }
+                        state.scan_workspace_artifacts(0);
+                    },
+                    "lead_agent_step_complete",
+                )
+                .await
+                {
+                    tracing::error!("Failed to persist lead_agent_step_complete for task '{}'", task_id);
+                }
+            }
+
             // Destroy lead agent instance (resets singleton to Idle)
             let outcome = ctx.agent_registry.destroy_instance(&lead_agent.id);
             let destroy_status = match outcome {
@@ -281,8 +323,6 @@ impl TaskDispatcher {
                     result.loop_result.finish_reason, result.subagents_spawned
                 )
             };
-
-            let db_summary = final_content.chars().take(2000).collect::<String>();
 
             // Persist LLM usage for the lead agent's own loop
             usage::record_llm_usage(
@@ -342,12 +382,12 @@ impl TaskDispatcher {
                     "Task status: running → failed"
                 );
             }
-            finalize_task(
+            finalize_task_with_outcome(
                 &ctx,
                 &bus,
                 db.as_ref(),
                 &task_id,
-                &db_summary,
+                &final_content,
                 result.success,
             );
 

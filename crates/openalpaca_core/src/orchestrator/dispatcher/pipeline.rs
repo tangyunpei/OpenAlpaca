@@ -1,8 +1,8 @@
 use super::super::task_state::TaskState;
 use super::usage;
 use super::{
-    TaskDispatcher, finalize_task, format_task_result, persist_conversation, retrieve_memory_block,
-    spawn_task_memory_extraction,
+    TaskDispatcher, finalize_task_with_outcome, format_task_result, persist_conversation,
+    retrieve_memory_block, spawn_task_memory_extraction,
 };
 use crate::agent::registry::DestroyOutcome;
 use crate::agent::subagent::{AgentStatus, SubAgent};
@@ -17,62 +17,7 @@ use openalpaca_llm::ChatMessage;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-/// Persist a state update with retry (up to 3 attempts) to handle optimistic locking conflicts.
-async fn update_state_with_retry(
-    db: &openalpaca_storage::Database,
-    task_id: &str,
-    mutate: impl Fn(&mut TaskState),
-    context: &str,
-) {
-    const MAX_RETRIES: usize = 3;
-    for attempt in 0..MAX_RETRIES {
-        let repo = openalpaca_storage::repository::TaskRepository::new(db);
-        let existing = match repo.get(task_id) {
-            Ok(Some(t)) => t,
-            _ => return,
-        };
-        let sj = match existing.state_json.as_deref() {
-            Some(s) => s,
-            None => return,
-        };
-        let mut state: TaskState = match serde_json::from_str(sj) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        mutate(&mut state);
-        match repo.update_state(task_id, &state.to_json(), existing.state_version) {
-            Ok(true) => return,
-            Ok(false) => {
-                if attempt < MAX_RETRIES - 1 {
-                    tracing::debug!(
-                        "Pipeline state update version conflict ({}) for task '{}' (attempt {}/{}), retrying",
-                        context,
-                        task_id,
-                        attempt + 1,
-                        MAX_RETRIES
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(10 * (1 << attempt))).await;
-                } else {
-                    tracing::warn!(
-                        "Pipeline state update ({}) for task '{}' failed after {} retries — state may be stale",
-                        context,
-                        task_id,
-                        MAX_RETRIES
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Pipeline state update ({}) failed for task '{}': {}",
-                    context,
-                    task_id,
-                    e
-                );
-                return;
-            }
-        }
-    }
-}
+use super::update_state_with_retry;
 
 /// Fetch the current workspace context string from the task's state in SQLite.
 /// Returns an empty string if the DB is absent, the task doesn't exist, or parsing fails.
@@ -233,16 +178,26 @@ impl TaskDispatcher {
                     );
                 }
 
-                // Update state_json: mark step running (with retry for version conflicts)
+                // Update state_json: mark step running + fix agent_id from template
+                // to actual instance_id (non-singleton IDs are "template::uuid").
                 if let Some(ref db) = db {
                     let step_i = step as i32;
-                    update_state_with_retry(
+                    let instance_id = agent_id.clone();
+                    if !update_state_with_retry(
                         db,
                         &task_id,
-                        |s| s.mark_step_running(step_i),
+                        move |s| {
+                            if let Some(step) = s.steps.iter_mut().find(|st| st.step_order == step_i) {
+                                step.agent_id = instance_id.clone();
+                            }
+                            s.mark_step_running(step_i);
+                        },
                         "mark_step_running",
                     )
-                    .await;
+                    .await
+                    {
+                        tracing::error!("Failed to persist mark_step_running for task '{}'", task_id);
+                    }
                 }
 
                 // Emit progress event for this step.
@@ -475,7 +430,7 @@ impl TaskDispatcher {
                         let step_i = step as i32;
                         let raw_clone = raw_content.clone();
                         let aid = agent_id.clone();
-                        update_state_with_retry(db, &task_id, move |state| {
+                        if !update_state_with_retry(db, &task_id, move |state| {
                             let summary: String = raw_clone.chars().take(500).collect();
                             state.mark_step_completed(step_i, &summary);
                             if !raw_clone.is_empty() {
@@ -490,7 +445,10 @@ impl TaskDispatcher {
                                     tracing::warn!("Failed to auto-write step {} output to workspace: {}", step_i, e);
                                 }
                             }
-                        }, "mark_step_completed").await;
+                            state.scan_workspace_artifacts(step_i);
+                        }, "mark_step_completed").await {
+                            tracing::error!("Failed to persist mark_step_completed for task '{}'", task_id);
+                        }
                     }
 
                     // Emit progress event showing step completed (step + 1 = "N+1 steps done")
@@ -535,13 +493,16 @@ impl TaskDispatcher {
                             LoopFinishReason::Error(err) => err.clone(),
                             _ => "Agent failed".to_string(),
                         };
-                        update_state_with_retry(
+                        if !update_state_with_retry(
                             db,
                             &task_id,
                             |s| s.mark_step_failed(step_i, &error_msg),
                             "mark_step_failed",
                         )
-                        .await;
+                        .await
+                        {
+                            tracing::error!("Failed to persist mark_step_failed for task '{}'", task_id);
+                        }
                     }
 
                     pipeline_success = false;
@@ -587,14 +548,7 @@ impl TaskDispatcher {
                 }
             }
 
-            // 4. Update task status
-            let db_summary = if pipeline_success {
-                final_content.chars().take(2000).collect::<String>()
-            } else {
-                pipeline_error.clone().unwrap_or_default()
-            };
-
-            // 5. Persist final result to conversation (single message for entire pipeline)
+            // 4. Persist final result to conversation (single message for entire pipeline)
             let runtime_secs = start_time.elapsed().as_secs() as i64;
             // Clone for memory extraction before final_content is consumed
             let extraction_content = if pipeline_success {
@@ -604,9 +558,9 @@ impl TaskDispatcher {
             };
             if let Some(ref db) = db {
                 let chat_text = if pipeline_success {
-                    final_content
+                    final_content.clone()
                 } else {
-                    pipeline_error.unwrap_or_default()
+                    pipeline_error.clone().unwrap_or_default()
                 };
                 let content = format_task_result(&task_title, &chat_text, pipeline_success);
                 persist_conversation(
@@ -621,12 +575,18 @@ impl TaskDispatcher {
                 );
             }
 
-            finalize_task(
+            // 5. Build structured outcome + update task status
+            let outcome_content = if pipeline_success {
+                &final_content
+            } else {
+                pipeline_error.as_deref().unwrap_or_default()
+            };
+            finalize_task_with_outcome(
                 &ctx,
                 &bus,
                 db.as_ref(),
                 &task_id,
-                &db_summary,
+                outcome_content,
                 pipeline_success,
             );
 

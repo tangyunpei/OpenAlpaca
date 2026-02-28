@@ -410,24 +410,26 @@ async fn async_main(
     );
     connector_manager.start_all().await;
 
-    // Connector awareness: cached status + send bridge
+    // Create send bridge before connector-awareness block so it's available for both
+    // the orchestrator and the notification dispatcher.
+    let send_bridge: Arc<dyn openalpaca_core::orchestrator::ConnectorSendProvider> =
+        Arc::new(connector_bridge::ConnectorSendBridge::new(
+            db.clone(),
+            local_user_id.clone(),
+        ));
+
+    // Connector awareness: cached status + send bridge wiring
     {
         // 1. Create cached status provider and populate initial state
         let connector_status_provider = Arc::new(connector_bridge::CachedConnectorStatusProvider::new());
         connector_status_provider.update(connector_manager.list_status().await);
         orchestrator.set_connector_status_provider(connector_status_provider.clone());
 
-        // 2. Create send bridge (reads token lazily from DB on each send)
-        let send_bridge: Arc<dyn openalpaca_core::orchestrator::ConnectorSendProvider> =
-            Arc::new(connector_bridge::ConnectorSendBridge::new(
-                db.clone(),
-                local_user_id.clone(),
-            ));
-        // Set on orchestrator (for internal use / future features)
+        // 2. Wire send bridge into orchestrator and shared lock
         orchestrator.set_connector_send_provider(send_bridge.clone());
         // Populate the shared lock so the send_message tool can access it
         if let Ok(mut guard) = svcs.connector_send_lock.write() {
-            *guard = Some(send_bridge);
+            *guard = Some(send_bridge.clone());
         }
 
         // 3. Spawn EventBus subscriber to keep cached status fresh
@@ -461,6 +463,7 @@ async fn async_main(
             notif_rx,
             db.clone(),
             cancel_token.clone(),
+            Some(send_bridge),
         );
         tokio::spawn(dispatcher.run());
     }

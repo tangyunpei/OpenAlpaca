@@ -139,6 +139,9 @@ impl TaskDispatcher {
                 completed_at: None,
                 state_json: None,
                 state_version: 0,
+                outcome_json: None,
+                outcome_kind: None,
+                artifact_count: 0,
             };
 
             let db_assignments: Vec<openalpaca_storage::TaskAgentAssignment> = matches
@@ -230,6 +233,7 @@ impl TaskDispatcher {
             self.bus.publish(SystemEvent::TaskFailed {
                 task_id: task_id.clone(),
                 error: "Pipeline assembly failed: some agents became unavailable".to_string(),
+                outcome_kind: None,
                 timestamp: now,
             });
             if let Some(ref db) = self.db {
@@ -397,6 +401,9 @@ impl TaskDispatcher {
                 completed_at: None,
                 state_json: None,
                 state_version: 0,
+                outcome_json: None,
+                outcome_kind: None,
+                artifact_count: 0,
             };
 
             let db_assignments: Vec<openalpaca_storage::TaskAgentAssignment> = dag

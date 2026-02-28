@@ -144,6 +144,9 @@ impl EventBroadcaster {
                     progress_current,
                     progress_total,
                     result_summary,
+                    outcome_kind,
+                    artifact_count,
+                    outcome_summary,
                     ..
                 } => {
                     let detail = serde_json::json!({
@@ -151,7 +154,10 @@ impl EventBroadcaster {
                         "status": status,
                         "progress_current": progress_current,
                         "progress_total": progress_total,
-                        "result_summary": result_summary
+                        "result_summary": result_summary,
+                        "outcome_kind": outcome_kind,
+                        "artifact_count": artifact_count,
+                        "outcome_summary": outcome_summary,
                     });
                     repo.log("task_status", None, Some(&detail), None)
                 }
@@ -349,6 +355,7 @@ impl EventBroadcaster {
     }
 
     /// Broadcast a task status event and persist it
+    #[allow(clippy::too_many_arguments)]
     pub fn task_status(
         &self,
         task_id: &str,
@@ -357,6 +364,9 @@ impl EventBroadcaster {
         progress_current: Option<i32>,
         progress_total: Option<i32>,
         result_summary: Option<String>,
+        outcome_kind: Option<String>,
+        artifact_count: Option<i32>,
+        outcome_summary: Option<String>,
     ) {
         let event = ServerEvent::TaskStatus {
             task_id: task_id.to_string(),
@@ -365,6 +375,9 @@ impl EventBroadcaster {
             progress_current,
             progress_total,
             result_summary,
+            outcome_kind,
+            artifact_count,
+            outcome_summary,
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };
