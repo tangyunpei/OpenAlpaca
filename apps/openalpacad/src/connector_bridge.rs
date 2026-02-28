@@ -38,6 +38,35 @@ impl ConnectorStatusProvider for CachedConnectorStatusProvider {
     }
 }
 
+// ── Telegram recipient validation ────────────────────────────────────
+
+/// Parsed Telegram recipient.
+#[derive(Debug)]
+enum TelegramRecipient {
+    Default,
+    ChatId(i64),
+}
+
+/// Validate Telegram recipient format. Returns Ok(parsed) or Err(user-facing message).
+/// Used by send_message and send_file paths. Testable without async/network.
+fn validate_telegram_recipient(recipient: &str) -> Result<TelegramRecipient, String> {
+    if recipient == "default" {
+        return Ok(TelegramRecipient::Default);
+    }
+    if recipient.starts_with('@') {
+        return Err(format!(
+            "Telegram @username ('{}') cannot be used directly. \
+             The Bot API requires a numeric chat_id. \
+             Try recipient=\"default\" instead.",
+            recipient
+        ));
+    }
+    recipient
+        .parse::<i64>()
+        .map(TelegramRecipient::ChatId)
+        .map_err(|_| format!("Invalid Telegram chat_id: '{}'", recipient))
+}
+
 // ── ConnectorSendBridge ──────────────────────────────────────────────
 
 /// Outbound message sending via Telegram and iMessage.
@@ -84,26 +113,17 @@ impl ConnectorSendProvider for ConnectorSendBridge {
                     .telegram_bot()
                     .ok_or("Telegram not configured (no token)")?;
 
-                let chat_id = if recipient == "default" {
-                    // Resolve from preferences — find the most recent Telegram chat
-                    let pref_repo = PreferenceRepository::new(&self.db);
-                    pref_repo
-                        .get(&self.local_user_id, "telegram.last_chat_id")
-                        .ok()
-                        .flatten()
-                        .and_then(|p| p.value.parse::<i64>().ok())
-                        .ok_or("No default Telegram chat found. Please specify a chat_id.")?
-                } else if recipient.starts_with('@') {
-                    return Err(format!(
-                        "Telegram @username ('{}') cannot be used directly. \
-                         The Bot API requires a numeric chat_id. \
-                         Try recipient=\"default\" instead.",
-                        recipient
-                    ));
-                } else {
-                    recipient
-                        .parse::<i64>()
-                        .map_err(|_| format!("Invalid Telegram chat_id: '{}'", recipient))?
+                let chat_id = match validate_telegram_recipient(recipient)? {
+                    TelegramRecipient::Default => {
+                        let pref_repo = PreferenceRepository::new(&self.db);
+                        pref_repo
+                            .get(&self.local_user_id, "telegram.last_chat_id")
+                            .ok()
+                            .flatten()
+                            .and_then(|p| p.value.parse::<i64>().ok())
+                            .ok_or("No default Telegram chat found. Please specify a chat_id.")?
+                    }
+                    TelegramRecipient::ChatId(id) => id,
                 };
 
                 use teloxide::prelude::*;
@@ -196,18 +216,17 @@ impl ConnectorSendProvider for ConnectorSendBridge {
                     .telegram_bot()
                     .ok_or("Telegram not configured (no token)")?;
 
-                let chat_id = if recipient == "default" {
-                    let pref_repo = PreferenceRepository::new(&self.db);
-                    pref_repo
-                        .get(&self.local_user_id, "telegram.last_chat_id")
-                        .ok()
-                        .flatten()
-                        .and_then(|p| p.value.parse::<i64>().ok())
-                        .ok_or("No default Telegram chat found. Please specify a chat_id.")?
-                } else {
-                    recipient
-                        .parse::<i64>()
-                        .map_err(|_| format!("Invalid Telegram chat_id: '{}'", recipient))?
+                let chat_id = match validate_telegram_recipient(recipient)? {
+                    TelegramRecipient::Default => {
+                        let pref_repo = PreferenceRepository::new(&self.db);
+                        pref_repo
+                            .get(&self.local_user_id, "telegram.last_chat_id")
+                            .ok()
+                            .flatten()
+                            .and_then(|p| p.value.parse::<i64>().ok())
+                            .ok_or("No default Telegram chat found. Please specify a chat_id.")?
+                    }
+                    TelegramRecipient::ChatId(id) => id,
                 };
 
                 use teloxide::prelude::*;
@@ -232,5 +251,54 @@ impl ConnectorSendProvider for ConnectorSendBridge {
             channels.push("telegram".to_string());
         }
         channels
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_telegram_recipient_default() {
+        let result = validate_telegram_recipient("default");
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), TelegramRecipient::Default));
+    }
+
+    #[test]
+    fn validate_telegram_recipient_numeric_chat_id() {
+        let result = validate_telegram_recipient("12345");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            TelegramRecipient::ChatId(id) => assert_eq!(id, 12345),
+            _ => panic!("expected ChatId"),
+        }
+    }
+
+    #[test]
+    fn validate_telegram_recipient_negative_group_chat_id() {
+        let result = validate_telegram_recipient("-100123");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            TelegramRecipient::ChatId(id) => assert_eq!(id, -100123),
+            _ => panic!("expected ChatId"),
+        }
+    }
+
+    #[test]
+    fn validate_telegram_recipient_rejects_username() {
+        let result = validate_telegram_recipient("@someuser");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("@username"));
+        assert!(err.contains("chat_id"));
+    }
+
+    #[test]
+    fn validate_telegram_recipient_rejects_non_numeric() {
+        let result = validate_telegram_recipient("abc");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Invalid Telegram chat_id"));
     }
 }

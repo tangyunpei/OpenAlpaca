@@ -2,7 +2,7 @@ use super::{ConversationContext, Orchestrator};
 use crate::events::SystemEvent;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::bootstrap::bootstrap_to_prompt_block;
-use crate::middleware::guard::OutputGuard;
+use crate::middleware::guard::{OutputGuard, detect_hallucinated_send};
 use crate::middleware::identity::identity_to_prompt_block;
 use crate::middleware::prompt::{
     AgentPersona, PromptAssembler, format_connector_guidance, format_message_source,
@@ -53,33 +53,34 @@ fn sanitize_parts_for_dispatch(parts: Vec<ContentPart>) -> Vec<ContentPart> {
 /// AND a send-related keyword — indicating the conversation is mid-messaging.
 fn detect_active_send_flow(recent_messages: &[ChatMessage]) -> bool {
     const CHANNEL_KW: &[&str] = &["telegram", "imessage"];
-    const SEND_KW: &[&str] = &[
-        "send_message",
-        "send",
-        "发送",
-        "消息",
-        "短信",
-        "recipient",
-        "chat_id",
-        "发给",
-        "发到",
+    // Tier 1: literal tool name — definitive signal
+    const TOOL_KW: &[&str] = &["send_message", "send_message("];
+    // Tier 2: recipient-solicitation vocabulary — assistant asking who/where to send
+    const RECIPIENT_KW: &[&str] = &[
+        "recipient", "chat_id", "收件人", "发给谁", "发送给",
+        "send to whom", "send it to",
     ];
     recent_messages
         .iter()
         .rev()
-        .take(4)
+        .take(6) // raw lookback cap (~3 full turns)
         .filter(|m| m.role == Role::Assistant)
+        .take(2) // check last 2 assistant messages
         .any(|m| {
             let lower = m.content.to_lowercase();
-            CHANNEL_KW.iter().any(|k| lower.contains(k))
-                && SEND_KW.iter().any(|k| lower.contains(k))
+            let has_channel = CHANNEL_KW.iter().any(|k| lower.contains(k));
+            if !has_channel {
+                return false;
+            }
+            TOOL_KW.iter().any(|k| lower.contains(k))
+                || RECIPIENT_KW.iter().any(|k| lower.contains(k))
         })
 }
 
 impl Orchestrator {
     /// Build a deterministic `<send_context>` block with resolved recipient info.
     /// This removes ambiguity: the LLM sees facts, not hints.
-    fn build_send_context(&self, owner_id: Option<&str>) -> String {
+    pub(in crate::orchestrator) fn build_send_context(&self, owner_id: Option<&str>) -> String {
         let (db, owner) = match (&self.db, owner_id) {
             (Some(db), Some(id)) => (db, id),
             _ => return String::new(),
@@ -95,32 +96,17 @@ impl Orchestrator {
         }
 
         let pref_repo = PreferenceRepository::new(db);
-        let mut block = String::from(
-            "<send_context>\n\
-             You MUST use the send_message tool to send messages via these channels.\n\
-             Do NOT refuse or claim inability — these are confirmed working capabilities on this system.\n\n\
-             Sendable channels:\n",
-        );
+        let mut block = String::from("<send_context>\n");
         for ch in &sendable {
-            let (default_available, detail) = match ch.as_str() {
-                "telegram" => {
-                    let has_default = pref_repo
-                        .get(owner, "telegram.last_chat_id")
-                        .ok()
-                        .flatten()
-                        .and_then(|p| p.value.parse::<i64>().ok())
-                        .is_some();
-                    (
-                        has_default,
-                        if has_default {
-                            "sends to your most recent Telegram chat"
-                        } else {
-                            "no recent chat — user must first message the bot"
-                        },
-                    )
-                }
+            let has_default = match ch.as_str() {
+                "telegram" => pref_repo
+                    .get(owner, "telegram.last_chat_id")
+                    .ok()
+                    .flatten()
+                    .and_then(|p| p.value.parse::<i64>().ok())
+                    .is_some(),
                 "imessage" => {
-                    let has_default = pref_repo
+                    pref_repo
                         .get(owner, "imessage.last_reply_target")
                         .ok()
                         .flatten()
@@ -129,44 +115,33 @@ impl Orchestrator {
                             .get(owner, "imessage.last_chat_id")
                             .ok()
                             .flatten()
-                            .is_some();
-                    (
-                        has_default,
-                        if has_default {
-                            "sends to your most recent iMessage conversation"
-                        } else {
-                            "no recent conversation — user must first send/receive an iMessage"
-                        },
-                    )
+                            .is_some()
                 }
-                _ => (false, "unknown channel"),
+                _ => false,
             };
 
-            let label = match ch.as_str() {
-                "telegram" => "telegram",
-                "imessage" => "imessage",
-                other => other,
+            let recipient_fmt = match ch.as_str() {
+                "telegram" => "\"default\" | numeric chat_id",
+                "imessage" => "\"default\" | phone | email",
+                _ => "\"default\"",
             };
+
+            let detail = if has_default {
+                match ch.as_str() {
+                    "telegram" => "most recent Telegram chat",
+                    "imessage" => "most recent iMessage conversation via AppleScript",
+                    _ => "most recent conversation",
+                }
+            } else {
+                "no recent conversation"
+            };
+
             block.push_str(&format!(
-                "- {}: default_available={} ({})\n",
-                label, default_available, detail
+                "- {}: default={} ({})\n  recipient: {}\n",
+                ch, has_default, detail, recipient_fmt
             ));
-            match ch.as_str() {
-                "telegram" => block.push_str(
-                    "  Recipient: \"default\" (RECOMMENDED) or numeric chat_id. @username is NOT valid.\n",
-                ),
-                "imessage" => block.push_str(
-                    "  CAPABILITY: This macOS system sends iMessages natively via AppleScript. This is a real, tested feature.\n\
-                     \x20 Recipient: \"default\" (RECOMMENDED) or phone/email.\n",
-                ),
-                _ => {}
-            }
         }
-        block.push_str(
-            "\nAction: Call send_message with the appropriate channel and recipient.\n\
-             If \"default\" is unavailable, tell the user to first send/receive a message on that channel.\n\
-             </send_context>",
-        );
+        block.push_str("</send_context>");
         block
     }
 
@@ -553,8 +528,23 @@ impl Orchestrator {
                 return Err(format!("LLM error: {}", err));
             }
 
-            // LLM chat responses are free-form text, not structured JSON
-            (result.final_content, false)
+            // Post-hoc guard: detect hallucinated send confirmations
+            let tool_name_refs: Vec<&str> = tool_names.iter().map(|s| s.as_str()).collect();
+            if detect_hallucinated_send(&tool_name_refs, result.tool_calls_made, &result.final_content) {
+                tracing::warn!(
+                    tool_calls = result.tool_calls_made,
+                    "Detected hallucinated send confirmation; overriding response"
+                );
+                (
+                    "⚠️ 消息未实际发送。模型生成了确认文本但未调用发送工具。请重新发送请求。\n\n\
+                     ⚠️ Message was NOT actually sent. The model generated confirmation text \
+                     without calling the send tool. Please retry your send request.".to_string(),
+                    false,
+                )
+            } else {
+                // LLM chat responses are free-form text, not structured JSON
+                (result.final_content, false)
+            }
         } else {
             // Fallback: echo stub (backward compatible) — produces JSON
             (
@@ -702,25 +692,84 @@ mod tests {
     }
 
     #[test]
-    fn detect_send_flow_chinese_context() {
+    fn detect_send_flow_chinese_context_without_tool_name() {
+        // Chinese text mentioning "发送消息" but NOT the literal tool name "send_message"
+        // should NOT trigger — tightened heuristic requires literal tool name.
         let messages = vec![ChatMessage::assistant(
             "好的，我将通过Telegram发送消息给您的联系人。",
+        )];
+        assert!(!detect_active_send_flow(&messages));
+    }
+
+    #[test]
+    fn detect_send_flow_chinese_context_with_tool_name() {
+        // Chinese context that ALSO mentions the tool name should trigger.
+        let messages = vec![ChatMessage::assistant(
+            "好的，我将通过Telegram使用send_message工具发送消息。",
         )];
         assert!(detect_active_send_flow(&messages));
     }
 
     #[test]
     fn detect_send_flow_only_recent_messages() {
-        // Only the last 4 messages are checked; put the relevant one at position 5+
+        // Last 2 assistant messages (within 6-message raw window) are checked;
+        // put the relevant one at position 3+ among assistants to exceed that.
         let mut messages = Vec::new();
         messages.push(ChatMessage::assistant(
             "I'll send via Telegram using send_message.",
         ));
-        // Pad with 4 more assistant messages without send context
-        for _ in 0..4 {
+        // Pad with 2 more assistant messages without send context
+        for _ in 0..2 {
             messages.push(ChatMessage::assistant("Here is some other info."));
         }
-        // The send flow message is now beyond the 4-message lookback
+        // The send flow message is now beyond the 2-assistant-message lookback
+        assert!(!detect_active_send_flow(&messages));
+    }
+
+    #[test]
+    fn detect_send_flow_survives_bursty_user_messages() {
+        // Two user messages after assistant cue — old take(2) window missed this
+        let messages = vec![
+            ChatMessage::assistant("你的 Telegram 收件人是？"),
+            ChatMessage::user("等一下"),
+            ChatMessage::user("用 default"),
+        ];
+        assert!(detect_active_send_flow(&messages));
+    }
+
+    #[test]
+    fn detect_send_flow_discussion_about_telegram_no_tool() {
+        // Talking about Telegram features without tool reference → no leak
+        let messages = vec![ChatMessage::assistant(
+            "Telegram is great for groups and channels.",
+        )];
+        assert!(!detect_active_send_flow(&messages));
+    }
+
+    #[test]
+    fn detect_send_flow_tier2_chinese_recipient_solicitation() {
+        // Tier 2: assistant asks for Telegram recipient in Chinese — should match
+        let messages = vec![ChatMessage::assistant(
+            "你的 Telegram 收件人是？",
+        )];
+        assert!(detect_active_send_flow(&messages));
+    }
+
+    #[test]
+    fn detect_send_flow_tier2_english_recipient_solicitation() {
+        // Tier 2: assistant asks who to send to on Telegram — should match
+        let messages = vec![ChatMessage::assistant(
+            "Who should I send it to on Telegram?",
+        )];
+        assert!(detect_active_send_flow(&messages));
+    }
+
+    #[test]
+    fn detect_send_flow_tier2_no_match_without_recipient_keyword() {
+        // Chinese text with channel + generic send words but NO recipient keyword → false
+        let messages = vec![ChatMessage::assistant(
+            "好的，我将通过Telegram发送消息给您的联系人。",
+        )];
         assert!(!detect_active_send_flow(&messages));
     }
 }

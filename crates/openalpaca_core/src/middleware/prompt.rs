@@ -96,9 +96,9 @@ pub fn format_tool_guidance(tools: &[openalpaca_llm::ToolDefinition]) -> String 
     format!(
         "\n\n<available_tools>\n{}\n\
          \n\
-         Use these tools to access files, fetch URLs, manage tasks, and complete the user's request.\n\
-         Always use the provided tools rather than claiming you cannot perform an action.\n\
-         If a tool call fails, report the error clearly and suggest an alternative approach.\n\
+         IMPORTANT: To perform an action you MUST call the tool function. \
+         Writing a text response about the result does NOT execute the action.\n\
+         If a tool call fails, report the error and suggest an alternative.\n\
          </available_tools>",
         tool_list
     )
@@ -109,8 +109,8 @@ pub fn format_tool_guidance(tools: &[openalpaca_llm::ToolDefinition]) -> String 
 /// Used by `query_handler.rs`, `pipeline.rs`, `lead_agent/mod.rs`, and `dag_executor/mod.rs`
 /// to inject connector awareness into system prompts without duplicating the XML formatting.
 ///
-/// When `sendable_channels` is provided, the block includes explicit send guidance
-/// instructing the LLM to use the `send_message` tool with `recipient="default"`.
+/// When `sendable_channels` is provided, channels not in the active list are
+/// labelled `[send-capable]` to indicate outbound-only availability.
 pub fn format_connector_guidance(
     statuses: &[(String, String)],
     sendable_channels: Option<&[String]>,
@@ -153,23 +153,6 @@ pub fn format_connector_guidance(
         "\nWhen a message arrives from one of these channels, your reply is automatically \
          delivered back through the same channel.",
     );
-
-    // Enhanced guidance when sendable channels are known
-    let has_sendable = sendable_channels
-        .map(|sc| !sc.is_empty())
-        .unwrap_or(false);
-    if has_sendable {
-        block.push_str(
-            "\n\nIMPORTANT — Sending messages:\n\
-             - To proactively send a message: use the `send_message` tool.\n\
-             - Prefer recipient=\"default\" — sends to the user's most recent conversation.\n\
-             - Only ask for a specific recipient if the tool returns an error or the user explicitly provides one.",
-        );
-    } else {
-        block.push_str(
-            "\nTo proactively send a message to a contact via these channels, use the `send_message` tool.",
-        );
-    }
 
     block.push_str("\n</connector_status>");
     block
@@ -271,9 +254,8 @@ mod tests {
         let statuses = vec![("telegram".to_string(), "active".to_string())];
         let result = format_connector_guidance(&statuses, None);
         assert!(result.contains("Telegram [active]"));
-        assert!(result.contains("send_message"));
-        // Without sendable_channels, should NOT contain the enhanced guidance
-        assert!(!result.contains("IMPORTANT"));
+        // No tool mentions — connector guidance is purely informational
+        assert!(!result.contains("send_message"));
     }
 
     #[test]
@@ -282,9 +264,9 @@ mod tests {
         let sendable = vec!["telegram".to_string()];
         let result = format_connector_guidance(&statuses, Some(&sendable));
         assert!(result.contains("Telegram [active]"));
-        assert!(result.contains("IMPORTANT"));
-        assert!(result.contains("send_message"));
-        assert!(result.contains("recipient=\"default\""));
+        // No tool mentions — connector guidance is purely informational
+        assert!(!result.contains("send_message"));
+        assert!(!result.contains("Do NOT refuse"));
     }
 
     #[test]
@@ -292,8 +274,8 @@ mod tests {
         let statuses = vec![("telegram".to_string(), "active".to_string())];
         let sendable: Vec<String> = vec![];
         let result = format_connector_guidance(&statuses, Some(&sendable));
-        // Empty sendable should behave like None
-        assert!(!result.contains("IMPORTANT"));
+        // Empty sendable should behave like None — no anti-refusal directive
+        assert!(!result.contains("Do NOT refuse"));
     }
 
     #[test]
@@ -308,7 +290,8 @@ mod tests {
         let result = format_connector_guidance(&statuses, Some(&sendable));
         assert!(result.contains("Telegram [active]"));
         assert!(result.contains("iMessage (macOS — sends via AppleScript) [send-capable]"));
-        assert!(result.contains("IMPORTANT"));
+        // No tool mentions — connector guidance is purely informational
+        assert!(!result.contains("send_message"));
     }
 
     #[test]

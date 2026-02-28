@@ -466,7 +466,8 @@ impl IntentParser {
                 || (lower.contains("send") && (lower.contains("imessage") || lower.contains("telegram")))
                 || (lower.contains("发") && (lower.contains("imessage") || lower.contains("telegram")))
                 || ((lower.contains("消息") || lower.contains("短信")) && (lower.contains("telegram") || lower.contains("imessage")))
-                || (lower.contains("给") && (lower.contains("telegram") || lower.contains("imessage")))
+                || (lower.contains("给") && (lower.contains("发") || lower.contains("消息") || lower.contains("短信"))
+                    && (lower.contains("telegram") || lower.contains("imessage")))
                 || (lower.contains("via ") && (lower.contains("telegram") || lower.contains("imessage"))),
         };
 

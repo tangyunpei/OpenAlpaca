@@ -730,6 +730,19 @@ fn test_suggest_tools_via_imessage_english() {
     );
 }
 
+// --- P1a: "给" without send-semantic verb should NOT trigger send_message ---
+
+#[test]
+fn test_suggest_tools_chinese_give_intro_telegram_no_send() {
+    // "给我介绍一下telegram" = "tell me about Telegram" — NOT a send intent
+    let tools = parser().suggest_tools("给我介绍一下telegram");
+    assert!(
+        !tools.contains(&"send_message".to_string()),
+        "'给我介绍一下telegram' should NOT suggest send_message: {:?}",
+        tools
+    );
+}
+
 // Verify existing negative tests still pass with expanded patterns
 
 #[test]
