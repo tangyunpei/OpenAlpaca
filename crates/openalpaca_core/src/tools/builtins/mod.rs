@@ -188,6 +188,10 @@ pub fn workspace_tool_definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "enum": ["text", "artifact", "summary", "context"],
                         "description": "The type of entry. Default: text"
+                    },
+                    "file_asset_id": {
+                        "type": "string",
+                        "description": "Optional file asset ID to associate with this entry. When set, enables file delivery to external channels (e.g. Telegram)."
                     }
                 },
                 "required": ["key", "content"]

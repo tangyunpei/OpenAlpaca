@@ -19,6 +19,7 @@ use uuid::Uuid;
 use openalpaca_core::context::TaskEntryStatus;
 use openalpaca_core::events::SystemEvent;
 use openalpaca_core::lane::TaskLaneStatus;
+use openalpaca_core::orchestrator::{ParsedOutcomeFields, parse_outcome};
 use openalpaca_storage::{Task, TaskRepository, TaskStatus};
 
 use crate::AppState;
@@ -53,6 +54,8 @@ pub struct TaskResponse {
     pub task: Task,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assignments: Option<Vec<openalpaca_storage::TaskAgentAssignment>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<ParsedOutcomeFields>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────
@@ -97,6 +100,9 @@ pub async fn create_task_handler(
         completed_at: None,
         state_json: None,
         state_version: 0,
+        outcome_json: None,
+        outcome_kind: None,
+        artifact_count: 0,
     };
 
     // 1. Persist to DB
@@ -189,6 +195,11 @@ pub async fn list_tasks_handler(
                                     "assigned_agents".to_string(),
                                     serde_json::json!(agents),
                                 );
+                                if let Some(parsed) = parse_outcome(t) {
+                                    if let Ok(outcome_val) = serde_json::to_value(parsed) {
+                                        obj.insert("outcome".to_string(), outcome_val);
+                                    }
+                                }
                             }
                             v
                         }
@@ -220,12 +231,14 @@ pub async fn get_task_handler(
     match repo.get(&id) {
         Ok(Some(task)) => {
             let assignments = repo.get_assignments(&id).unwrap_or_default();
+            let outcome = parse_outcome(&task);
             (
                 StatusCode::OK,
                 Json(
                     serde_json::to_value(TaskResponse {
                         task,
                         assignments: Some(assignments),
+                        outcome,
                     })
                     .unwrap_or_else(|_| serde_json::json!({"error": "serialization_failed"})),
                 ),
@@ -487,4 +500,201 @@ pub async fn task_action_handler(
             "status": new_status.as_str()
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openalpaca_storage::OutcomeKind;
+
+    fn make_test_task() -> Task {
+        Task {
+            id: "task-1".to_string(),
+            title: "Test task".to_string(),
+            description: None,
+            status: TaskStatus::Completed,
+            priority: 0,
+            progress_current: None,
+            progress_total: None,
+            result_summary: Some("Done".to_string()),
+            created_by: "user-1".to_string(),
+            source_lane: "lane-1".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            state_json: None,
+            state_version: 1,
+            outcome_json: None,
+            outcome_kind: None,
+            artifact_count: 0,
+        }
+    }
+
+    #[test]
+    fn test_parsed_outcome_from_task_text_only() {
+        let mut task = make_test_task();
+        task.outcome_kind = Some(OutcomeKind::TextOnly);
+        task.artifact_count = 0;
+        task.outcome_json = Some(
+            serde_json::json!({
+                "summary": "Generated a text summary",
+                "outcome_kind": "text_only",
+                "no_artifact_reason": "No files were requested",
+                "artifacts": []
+            })
+            .to_string(),
+        );
+
+        let outcome = parse_outcome(&task).expect("should parse");
+        assert_eq!(
+            outcome.outcome_summary.as_deref(),
+            Some("Generated a text summary")
+        );
+        assert_eq!(outcome.outcome_kind, "text_only");
+        assert_eq!(outcome.artifact_count, 0);
+        assert!(outcome.artifacts.is_empty());
+        assert_eq!(
+            outcome.no_artifact_reason.as_deref(),
+            Some("No files were requested")
+        );
+    }
+
+    #[test]
+    fn test_parsed_outcome_from_task_mixed() {
+        let mut task = make_test_task();
+        task.outcome_kind = Some(OutcomeKind::Mixed);
+        task.artifact_count = 2;
+        task.outcome_json = Some(
+            serde_json::json!({
+                "summary": "Report with charts",
+                "outcome_kind": "mixed",
+                "artifacts": [
+                    {"key": "report.pdf", "label": "Report", "agent_id": "researcher", "step_order": 0},
+                    {"key": "chart.png", "label": "Chart", "agent_id": "researcher", "step_order": 0},
+                ]
+            })
+            .to_string(),
+        );
+
+        let outcome = parse_outcome(&task).expect("should parse");
+        assert_eq!(outcome.outcome_summary.as_deref(), Some("Report with charts"));
+        assert_eq!(outcome.outcome_kind, "mixed");
+        assert_eq!(outcome.artifact_count, 2);
+        assert_eq!(outcome.artifacts.len(), 2);
+        assert!(outcome.no_artifact_reason.is_none());
+    }
+
+    #[test]
+    fn test_parsed_outcome_from_task_none() {
+        let task = make_test_task();
+        assert!(parse_outcome(&task).is_none());
+    }
+
+    #[test]
+    fn test_parsed_outcome_from_task_malformed() {
+        let mut task = make_test_task();
+        task.outcome_json = Some("not valid json".to_string());
+        assert!(parse_outcome(&task).is_none());
+    }
+
+    #[test]
+    fn test_parsed_outcome_from_task_artifact_only() {
+        let mut task = make_test_task();
+        task.outcome_kind = Some(OutcomeKind::ArtifactOnly);
+        task.artifact_count = 1;
+        task.outcome_json = Some(
+            serde_json::json!({
+                "summary": "Generated report",
+                "outcome_kind": "artifact_only",
+                "artifacts": [
+                    {"key": "report.pdf", "label": "Report", "agent_id": "writer", "step_order": 0},
+                ]
+            })
+            .to_string(),
+        );
+
+        let outcome = parse_outcome(&task).expect("should parse");
+        assert_eq!(outcome.outcome_summary.as_deref(), Some("Generated report"));
+        assert_eq!(outcome.outcome_kind, "artifact_only");
+        assert_eq!(outcome.artifact_count, 1);
+        assert_eq!(outcome.artifacts.len(), 1);
+        assert!(outcome.no_artifact_reason.is_none());
+    }
+
+    #[test]
+    fn test_parsed_outcome_from_task_failed() {
+        let mut task = make_test_task();
+        task.status = TaskStatus::Failed;
+        task.outcome_kind = Some(OutcomeKind::Failed);
+        task.artifact_count = 0;
+        task.outcome_json = Some(
+            serde_json::json!({
+                "summary": "Network timeout after 3 retries",
+                "outcome_kind": "failed",
+                "artifacts": []
+            })
+            .to_string(),
+        );
+
+        let outcome = parse_outcome(&task).expect("should parse");
+        assert_eq!(
+            outcome.outcome_summary.as_deref(),
+            Some("Network timeout after 3 retries")
+        );
+        assert_eq!(outcome.outcome_kind, "failed");
+        assert_eq!(outcome.artifact_count, 0);
+        assert!(outcome.artifacts.is_empty());
+    }
+
+    #[test]
+    fn test_task_serialization_suppresses_internal_fields() {
+        let mut task = make_test_task();
+        task.state_json = Some(r#"{"steps":[]}"#.to_string());
+        task.outcome_json = Some(r#"{"summary":"done"}"#.to_string());
+
+        let v = serde_json::to_value(&task).unwrap();
+        // state_json and outcome_json should not appear in serialized output
+        assert!(
+            v.get("state_json").is_none(),
+            "state_json should be suppressed from serialized Task"
+        );
+        assert!(
+            v.get("outcome_json").is_none(),
+            "outcome_json should be suppressed from serialized Task"
+        );
+        // But other fields should still be present
+        assert!(v.get("id").is_some());
+        assert!(v.get("status").is_some());
+        assert!(v.get("outcome_kind").is_some());
+        assert!(v.get("artifact_count").is_some());
+    }
+
+    #[test]
+    fn test_task_response_excludes_raw_json_fields() {
+        let mut task = make_test_task();
+        task.outcome_kind = Some(OutcomeKind::TextOnly);
+        task.outcome_json = Some(
+            serde_json::json!({
+                "summary": "Test",
+                "outcome_kind": "text_only",
+                "artifacts": []
+            })
+            .to_string(),
+        );
+
+        let outcome = parse_outcome(&task);
+        let resp = TaskResponse {
+            task,
+            assignments: None,
+            outcome,
+        };
+
+        let v = serde_json::to_value(&resp).unwrap();
+        // The task sub-object should not contain raw JSON fields
+        assert!(v["task"].get("state_json").is_none());
+        assert!(v["task"].get("outcome_json").is_none());
+        // But the parsed outcome should be present at top level
+        assert!(v.get("outcome").is_some());
+        assert_eq!(v["outcome"]["outcome_summary"], "Test");
+    }
 }

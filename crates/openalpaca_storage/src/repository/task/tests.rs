@@ -24,6 +24,9 @@ fn make_task(id: &str, title: &str) -> Task {
         completed_at: None,
         state_json: None,
         state_version: 0,
+        outcome_json: None,
+        outcome_kind: None,
+        artifact_count: 0,
     }
 }
 
@@ -286,4 +289,91 @@ fn test_delete_cascades_assignments() {
     repo.delete("t1").unwrap();
     let assignments = repo.get_assignments("t1").unwrap();
     assert!(assignments.is_empty());
+}
+
+#[test]
+fn test_set_outcome() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    repo.create(&make_task("t1", "Task")).unwrap();
+    assert!(repo
+        .set_outcome(
+            "t1",
+            r#"{"summary":"Done","artifacts":[]}"#,
+            OutcomeKind::TextOnly,
+            0,
+        )
+        .unwrap());
+
+    let task = repo.get("t1").unwrap().unwrap();
+    assert_eq!(task.outcome_kind, Some(OutcomeKind::TextOnly));
+    assert_eq!(task.artifact_count, 0);
+    assert!(task.outcome_json.is_some());
+    // result_summary is NOT set by set_outcome — it is handled by finalize_task
+    assert!(task.result_summary.is_none());
+}
+
+#[test]
+fn test_outcome_fields_default_null() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    repo.create(&make_task("t1", "Task")).unwrap();
+    let task = repo.get("t1").unwrap().unwrap();
+    assert!(task.outcome_json.is_none());
+    assert!(task.outcome_kind.is_none());
+    assert_eq!(task.artifact_count, 0);
+}
+
+#[test]
+fn test_set_outcome_updates_existing() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    repo.create(&make_task("t1", "Task")).unwrap();
+
+    // First set_outcome
+    assert!(repo
+        .set_outcome(
+            "t1",
+            r#"{"summary":"First","artifacts":[]}"#,
+            OutcomeKind::TextOnly,
+            0,
+        )
+        .unwrap());
+
+    let task = repo.get("t1").unwrap().unwrap();
+    assert_eq!(task.outcome_kind, Some(OutcomeKind::TextOnly));
+    assert_eq!(task.artifact_count, 0);
+    assert!(task.outcome_json.as_ref().unwrap().contains("First"));
+
+    // Second set_outcome with different values — should overwrite
+    assert!(repo
+        .set_outcome(
+            "t1",
+            r#"{"summary":"Second","artifacts":[{"key":"report.pdf","label":"Report","agent_id":"a1","step_order":0}]}"#,
+            OutcomeKind::Mixed,
+            1,
+        )
+        .unwrap());
+
+    let task = repo.get("t1").unwrap().unwrap();
+    assert_eq!(
+        task.outcome_kind,
+        Some(OutcomeKind::Mixed),
+        "outcome_kind should be updated to Mixed"
+    );
+    assert_eq!(
+        task.artifact_count, 1,
+        "artifact_count should be updated to 1"
+    );
+    assert!(
+        task.outcome_json.as_ref().unwrap().contains("Second"),
+        "outcome_json should contain updated summary"
+    );
+    assert!(
+        !task.outcome_json.as_ref().unwrap().contains("First"),
+        "outcome_json should not contain old summary"
+    );
 }

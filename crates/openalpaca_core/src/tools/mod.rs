@@ -30,9 +30,9 @@ pub fn resolve_agent_tools(
     let skill_names: Vec<String> = agent.skills.iter().map(|s| s.name.clone()).collect();
     let mut tools = tool_registry.definitions_for_skills(&skill_names);
 
-    // Add workspace tools only when the agent explicitly lists them as skills —
-    // otherwise they'll be offered to the LLM but blocked by capability enforcement,
-    // wasting rounds on tools the agent isn't allowed to use.
+    // Add workspace tools when the agent has them as skills. Template-based agents
+    // always have these injected by to_subagent(); this check is a safety net for
+    // agents constructed via other paths (e.g. programmatic SubAgent creation).
     if skill_names
         .iter()
         .any(|s| s == "workspace_read" || s == "workspace_write")

@@ -4,9 +4,12 @@
 //! For tasks originating from Telegram or iMessage, sends a message back to the originating chat.
 
 use openalpaca_core::events::SystemEvent;
+use openalpaca_core::orchestrator::ConnectorSendProvider;
 use openalpaca_storage::{
-    ConfigRepository, Database, IdentityRepository, PreferenceRepository, TaskRepository,
+    ConfigRepository, Database, FileAssetRepository, IdentityRepository, PreferenceRepository,
+    TaskRepository,
 };
+use std::sync::Arc;
 use teloxide::prelude::*;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -20,6 +23,7 @@ pub struct NotificationDispatcher {
     bus_rx: broadcast::Receiver<SystemEvent>,
     db: Database,
     cancel_token: CancellationToken,
+    connector_send: Option<Arc<dyn ConnectorSendProvider>>,
 }
 
 impl NotificationDispatcher {
@@ -27,11 +31,13 @@ impl NotificationDispatcher {
         bus_rx: broadcast::Receiver<SystemEvent>,
         db: Database,
         cancel_token: CancellationToken,
+        connector_send: Option<Arc<dyn ConnectorSendProvider>>,
     ) -> Self {
         Self {
             bus_rx,
             db,
             cancel_token,
+            connector_send,
         }
     }
 
@@ -71,60 +77,100 @@ impl NotificationDispatcher {
                 SystemEvent::TaskCompleted {
                     task_id,
                     result_summary,
+                    outcome_kind,
+                    artifact_count,
+                    outcome_summary,
                     ..
                 } => {
-                    self.handle_completion(&task_id, result_summary.as_deref())
-                        .await;
+                    self.handle_completion(
+                        &task_id,
+                        result_summary.as_deref(),
+                        outcome_kind.as_deref(),
+                        artifact_count,
+                        outcome_summary.as_deref(),
+                    )
+                    .await;
                 }
-                SystemEvent::TaskFailed { task_id, error, .. } => {
-                    self.handle_failure(&task_id, &error).await;
+                SystemEvent::TaskFailed {
+                    task_id,
+                    error,
+                    outcome_kind,
+                    ..
+                } => {
+                    self.handle_failure(&task_id, &error, outcome_kind.as_deref())
+                        .await;
                 }
                 _ => {}
             }
         }
     }
 
-    async fn handle_completion(&self, task_id: &str, summary: Option<&str>) {
+    async fn handle_completion(
+        &self,
+        task_id: &str,
+        summary: Option<&str>,
+        outcome_kind: Option<&str>,
+        artifact_count: Option<i32>,
+        outcome_summary: Option<&str>,
+    ) {
         let repo = TaskRepository::new(&self.db);
         let task = match repo.get(task_id) {
             Ok(Some(t)) => t,
             _ => return,
         };
 
-        let content = format!(
-            "Task completed: {}\n\n{}",
-            task.title,
-            summary.unwrap_or("Done")
+        let content = format_completion_message(
+            &task.title,
+            summary,
+            outcome_kind,
+            artifact_count,
+            outcome_summary,
         );
 
         // source_lane format: "{user_id}:telegram" or "{user_id}:imessage"
         if task.source_lane.ends_with(":telegram") {
-            if let Some(chat_id) = self.resolve_telegram_chat_id(&task.source_lane)
+            let chat_id = self.resolve_telegram_chat_id(&task.source_lane);
+            if let Some(chat_id) = chat_id
                 && let Some(ref bot) = self.telegram_bot()
                 && let Err(e) = bot.send_message(ChatId(chat_id), &content).await
             {
                 warn!("Failed to send task completion notification: {e}");
+            }
+            // Spawn non-blocking artifact file delivery
+            if let Some(chat_id) = chat_id {
+                self.spawn_artifact_delivery(task_id, chat_id, task.outcome_json.as_deref(), &task.created_by);
             }
         } else if task.source_lane.ends_with(":imessage") {
             self.try_imessage_notification(&task.source_lane, &content)
                 .await;
         } else {
             // Cross-channel delivery for non-connector-origin tasks
-            self.try_cross_channel_telegram(&task.created_by, &content)
+            let cross_chat_id = self.try_cross_channel_telegram(&task.created_by, &content)
                 .await;
             self.try_cross_channel_imessage(&task.created_by, &content)
                 .await;
+            // Spawn non-blocking artifact file delivery for cross-channel Telegram
+            if let Some(chat_id) = cross_chat_id {
+                self.spawn_artifact_delivery(task_id, chat_id, task.outcome_json.as_deref(), &task.created_by);
+            }
         }
     }
 
-    async fn handle_failure(&self, task_id: &str, error: &str) {
+    async fn handle_failure(&self, task_id: &str, error: &str, outcome_kind: Option<&str>) {
         let repo = TaskRepository::new(&self.db);
         let task = match repo.get(task_id) {
             Ok(Some(t)) => t,
             _ => return,
         };
 
-        let content = format!("Task failed: {}\n\nError: {}", task.title, error);
+        // Parse artifact_count from outcome_json (partially-failed pipelines may have artifacts)
+        let artifact_count: Option<i32> = task
+            .outcome_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            .and_then(|v| v["artifacts"].as_array().map(|a| a.len() as i32));
+
+        let content = format_failure_message(&task.title, error, outcome_kind, artifact_count);
 
         if task.source_lane.ends_with(":telegram") {
             if let Some(chat_id) = self.resolve_telegram_chat_id(&task.source_lane)
@@ -138,7 +184,8 @@ impl NotificationDispatcher {
                 .await;
         } else {
             // Cross-channel delivery for non-connector-origin tasks
-            self.try_cross_channel_telegram(&task.created_by, &content)
+            // No artifact delivery for failure notifications
+            let _ = self.try_cross_channel_telegram(&task.created_by, &content)
                 .await;
             self.try_cross_channel_imessage(&task.created_by, &content)
                 .await;
@@ -146,10 +193,11 @@ impl NotificationDispatcher {
     }
 
     /// Try cross-channel Telegram delivery for non-Telegram tasks.
-    async fn try_cross_channel_telegram(&self, created_by: &str, message: &str) {
+    /// Returns the chat_id that was sent to (for artifact delivery), or None.
+    async fn try_cross_channel_telegram(&self, created_by: &str, message: &str) -> Option<i64> {
         let bot = match self.telegram_bot() {
             Some(b) => b,
-            None => return,
+            None => return None,
         };
         let pref_repo = PreferenceRepository::new(&self.db);
 
@@ -168,7 +216,7 @@ impl NotificationDispatcher {
                     .unwrap_or(false)
             });
         if !should_notify {
-            return;
+            return None;
         }
 
         let chat_id = match pref_repo
@@ -178,12 +226,13 @@ impl NotificationDispatcher {
             .and_then(|p| p.value.parse::<i64>().ok())
         {
             Some(id) => id,
-            None => return,
+            None => return None,
         };
 
         if let Err(e) = bot.send_message(ChatId(chat_id), message).await {
             warn!("Failed to send cross-channel notification: {e}");
         }
+        Some(chat_id)
     }
 
     /// Send a notification to the iMessage chat that originated the task.
@@ -311,7 +360,26 @@ impl NotificationDispatcher {
     #[cfg(not(target_os = "macos"))]
     async fn try_cross_channel_imessage(&self, _created_by: &str, _message: &str) {}
 
+    /// Spawn a non-blocking artifact delivery task to a Telegram chat.
+    fn spawn_artifact_delivery(&self, task_id: &str, chat_id: i64, outcome_json: Option<&str>, owner: &str) {
+        if let Some(ref send) = self.connector_send {
+            let db = self.db.clone();
+            let send = send.clone();
+            let task_id = task_id.to_string();
+            let chat_id_str = chat_id.to_string();
+            let outcome_json = outcome_json.map(|s| s.to_string());
+            let owner = owner.to_string();
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    deliver_artifacts(&db, &*send, &task_id, "telegram", &chat_id_str, outcome_json.as_deref(), &owner),
+                ).await;
+            });
+        }
+    }
+
     /// Resolve the Telegram chat_id for a given lane_key.
+    ///
     ///
     /// Strategy: prefer the user's `telegram.last_chat_id` preference
     /// (updated on every incoming message), then fall back to `conversation_map`.
@@ -336,5 +404,546 @@ impl NotificationDispatcher {
             .get_chat_id_by_lane_key(lane_key, "telegram")
             .ok()
             .flatten()
+    }
+}
+
+/// Build completion notification message (pure function, testable).
+fn format_completion_message(
+    title: &str,
+    summary: Option<&str>,
+    outcome_kind: Option<&str>,
+    artifact_count: Option<i32>,
+    outcome_summary: Option<&str>,
+) -> String {
+    let display_summary = outcome_summary.or(summary).unwrap_or("Done");
+
+    let outcome_line = match outcome_kind {
+        Some("text_only") => "\nNo files were produced.".to_string(),
+        Some("artifact_only") => {
+            let count = artifact_count.unwrap_or(0);
+            format!(
+                "\n{} file{} produced.",
+                count,
+                if count != 1 { "s" } else { "" }
+            )
+        }
+        Some("mixed") => {
+            let count = artifact_count.unwrap_or(0);
+            format!(
+                "\n{} file{} produced (with text summary).",
+                count,
+                if count != 1 { "s" } else { "" }
+            )
+        }
+        _ => String::new(),
+    };
+
+    format!(
+        "Task completed: {}\n\n{}{}",
+        title, display_summary, outcome_line
+    )
+}
+
+/// Build failure notification message (pure function, testable).
+///
+/// When `artifact_count` indicates artifacts from earlier steps, we note
+/// they may still be available instead of claiming "no files".
+fn format_failure_message(
+    title: &str,
+    error: &str,
+    outcome_kind: Option<&str>,
+    artifact_count: Option<i32>,
+) -> String {
+    let file_note = match (outcome_kind, artifact_count) {
+        (Some("failed"), Some(n)) if n > 0 => {
+            format!(
+                "\n{} file{} from earlier steps may still be available.",
+                n,
+                if n != 1 { "s" } else { "" }
+            )
+        }
+        (Some("failed"), _) => "\nNo files were produced.".to_string(),
+        _ => String::new(),
+    };
+    format!("Task failed: {}\n\nError: {}{}", title, error, file_note)
+}
+
+/// Maximum file size for artifact delivery (50 MB — Telegram Bot API limit).
+const MAX_ARTIFACT_FILE_SIZE: i64 = 50 * 1024 * 1024;
+
+/// Maximum number of artifacts to deliver per task.
+const MAX_ARTIFACTS_PER_TASK: usize = 5;
+
+/// Resolve a file asset for an artifact pointer with owner validation.
+///
+/// Resolution strategy:
+/// 1. Use `file_asset_id` if present
+/// 2. Try `key` as a file_asset ID fallback
+/// 3. Return None (workspace-only artifact)
+///
+/// After resolving, validates that the asset belongs to `expected_owner`.
+/// Returns None (with a warning) if the owner doesn't match — prevents
+/// delivering files belonging to another user.
+pub(crate) fn resolve_artifact_file(
+    repo: &FileAssetRepository<'_>,
+    file_asset_id: Option<&str>,
+    key: &str,
+    expected_owner: &str,
+) -> Option<openalpaca_storage::FileAsset> {
+    // 1. Explicit file_asset_id
+    let asset = if let Some(id) = file_asset_id {
+        repo.get_by_id(id).ok().flatten()
+    } else {
+        None
+    };
+    // 2. Try key as file_asset ID fallback
+    let asset = asset.or_else(|| repo.get_by_id(key).ok().flatten());
+
+    // 3. Validate owner
+    match asset {
+        Some(a) if a.owner_id == expected_owner => Some(a),
+        Some(a) => {
+            warn!(
+                file_id = %a.id,
+                actual_owner = %a.owner_id,
+                expected_owner,
+                "Artifact file owner mismatch — skipping delivery"
+            );
+            None
+        }
+        None => None,
+    }
+}
+
+/// Deliver artifact files to a channel. Called from a spawned task with timeout.
+async fn deliver_artifacts(
+    db: &Database,
+    send: &dyn ConnectorSendProvider,
+    task_id: &str,
+    channel: &str,
+    recipient: &str,
+    outcome_json: Option<&str>,
+    expected_owner: &str,
+) {
+    use openalpaca_core::orchestrator::task_state::TaskOutcome;
+
+    let outcome_json = match outcome_json {
+        Some(oj) => oj,
+        None => return,
+    };
+    let outcome: TaskOutcome = match serde_json::from_str(outcome_json) {
+        Ok(o) => o,
+        Err(e) => {
+            warn!(task_id, "Failed to parse outcome_json for artifact delivery: {e}");
+            return;
+        }
+    };
+    if outcome.artifacts.is_empty() {
+        return;
+    }
+    if !send.file_capable_channels().contains(&channel.to_string()) {
+        return;
+    }
+
+    let file_repo = FileAssetRepository::new(db);
+    for artifact in outcome.artifacts.iter().take(MAX_ARTIFACTS_PER_TASK) {
+        let asset = match resolve_artifact_file(
+            &file_repo,
+            artifact.file_asset_id.as_deref(),
+            &artifact.key,
+            expected_owner,
+        ) {
+            Some(a) => a,
+            None => continue,
+        };
+
+        // Check file exists on disk
+        let path = std::path::Path::new(&asset.storage_path);
+        if !path.exists() {
+            warn!(task_id, file_id = %asset.id, "Artifact file not found on disk, skipping");
+            continue;
+        }
+
+        // Check file size
+        if asset.size_bytes > MAX_ARTIFACT_FILE_SIZE {
+            warn!(
+                task_id,
+                file_id = %asset.id,
+                size_bytes = asset.size_bytes,
+                "Artifact file exceeds 50MB limit, skipping"
+            );
+            continue;
+        }
+
+        let caption = Some(format!("{} ({})", artifact.label, artifact.key));
+        if let Err(e) = send
+            .send_file(
+                channel,
+                recipient,
+                &asset.storage_path,
+                &asset.filename,
+                &asset.mime_type,
+                caption.as_deref(),
+            )
+            .await
+        {
+            warn!(
+                task_id,
+                file_id = %asset.id,
+                "Failed to deliver artifact file: {e}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── format_completion_message ──────────────────────────────────────
+
+    #[test]
+    fn completion_text_only() {
+        let msg = format_completion_message(
+            "Summarize report",
+            Some("All done"),
+            Some("text_only"),
+            None,
+            Some("Summary is ready"),
+        );
+        assert!(msg.contains("Task completed: Summarize report"));
+        assert!(msg.contains("Summary is ready"));
+        assert!(msg.contains("No files were produced."));
+    }
+
+    #[test]
+    fn completion_artifact_only_plural() {
+        let msg = format_completion_message(
+            "Generate images",
+            None,
+            Some("artifact_only"),
+            Some(3),
+            None,
+        );
+        assert!(msg.contains("Task completed: Generate images"));
+        assert!(msg.contains("Done")); // no outcome_summary or summary → fallback
+        assert!(msg.contains("3 files produced."));
+    }
+
+    #[test]
+    fn completion_artifact_only_singular() {
+        let msg = format_completion_message(
+            "Create file",
+            None,
+            Some("artifact_only"),
+            Some(1),
+            None,
+        );
+        assert!(msg.contains("1 file produced."));
+        assert!(!msg.contains("files")); // singular
+    }
+
+    #[test]
+    fn completion_mixed() {
+        let msg = format_completion_message(
+            "Analyze data",
+            Some("result_summary"),
+            Some("mixed"),
+            Some(2),
+            Some("outcome_summary"),
+        );
+        assert!(msg.contains("Task completed: Analyze data"));
+        assert!(msg.contains("outcome_summary")); // outcome_summary preferred over summary
+        assert!(msg.contains("2 files produced (with text summary)."));
+    }
+
+    #[test]
+    fn completion_no_outcome_kind() {
+        let msg = format_completion_message(
+            "Simple task",
+            Some("Finished"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(msg, "Task completed: Simple task\n\nFinished");
+    }
+
+    #[test]
+    fn completion_all_none_fields() {
+        let msg = format_completion_message("Task X", None, None, None, None);
+        assert_eq!(msg, "Task completed: Task X\n\nDone");
+    }
+
+    #[test]
+    fn completion_zero_artifacts() {
+        let msg = format_completion_message(
+            "Task",
+            None,
+            Some("artifact_only"),
+            Some(0),
+            None,
+        );
+        assert!(msg.contains("0 files produced."));
+    }
+
+    #[test]
+    fn completion_outcome_summary_preferred_over_result_summary() {
+        let msg = format_completion_message(
+            "T",
+            Some("result_summary"),
+            Some("text_only"),
+            None,
+            Some("outcome_summary"),
+        );
+        assert!(msg.contains("outcome_summary"));
+        assert!(!msg.contains("result_summary"));
+    }
+
+    #[test]
+    fn completion_falls_back_to_result_summary() {
+        let msg = format_completion_message(
+            "T",
+            Some("result_summary"),
+            Some("text_only"),
+            None,
+            None, // no outcome_summary
+        );
+        assert!(msg.contains("result_summary"));
+    }
+
+    #[test]
+    fn completion_unknown_outcome_kind_ignored() {
+        let msg = format_completion_message(
+            "T",
+            Some("OK"),
+            Some("some_future_variant"),
+            Some(5),
+            None,
+        );
+        // Unknown variant falls through to _ => String::new()
+        assert_eq!(msg, "Task completed: T\n\nOK");
+    }
+
+    // ── format_failure_message ─────────────────────────────────────────
+
+    #[test]
+    fn failure_with_failed_outcome() {
+        let msg = format_failure_message("Broken task", "timeout", Some("failed"), None);
+        assert!(msg.contains("Task failed: Broken task"));
+        assert!(msg.contains("Error: timeout"));
+        assert!(msg.contains("No files were produced."));
+    }
+
+    #[test]
+    fn failure_with_failed_outcome_and_artifacts() {
+        let msg = format_failure_message("Partial task", "step 3 failed", Some("failed"), Some(2));
+        assert!(msg.contains("Task failed: Partial task"));
+        assert!(msg.contains("2 files from earlier steps may still be available."));
+        assert!(!msg.contains("No files were produced."));
+    }
+
+    #[test]
+    fn failure_with_failed_outcome_singular_artifact() {
+        let msg = format_failure_message("T", "err", Some("failed"), Some(1));
+        assert!(msg.contains("1 file from earlier steps may still be available."));
+        assert!(!msg.contains("files")); // singular
+    }
+
+    #[test]
+    fn failure_without_outcome() {
+        let msg = format_failure_message("Broken task", "OOM", None, None);
+        assert_eq!(msg, "Task failed: Broken task\n\nError: OOM");
+    }
+
+    #[test]
+    fn failure_with_non_failed_outcome_kind() {
+        let msg = format_failure_message("T", "err", Some("text_only"), None);
+        // Non-"failed" outcome_kind → no extra line
+        assert!(!msg.contains("No files were produced."));
+        assert_eq!(msg, "Task failed: T\n\nError: err");
+    }
+
+    #[test]
+    fn failure_empty_error_string() {
+        let msg = format_failure_message("T", "", Some("failed"), None);
+        assert!(msg.contains("Error: \n"));
+    }
+
+    // ── resolve_artifact_file + deliver_artifacts ─────────────────────
+
+    fn test_db() -> Database {
+        let dir = tempfile::tempdir().unwrap();
+        Database::open(&dir.path().join("test.db")).unwrap()
+    }
+
+    fn make_file_asset(id: &str, path: &str, size: i64) -> openalpaca_storage::FileAsset {
+        openalpaca_storage::FileAsset {
+            id: id.to_string(),
+            owner_id: "user1".to_string(),
+            sha256: format!("sha_{id}"),
+            filename: format!("{id}.pdf"),
+            mime_type: "application/pdf".to_string(),
+            size_bytes: size,
+            storage_path: path.to_string(),
+            status: openalpaca_storage::FileAssetStatus::Ready,
+            extracted_text: None,
+            extract_error: None,
+            metadata_json: None,
+            created_at: "2025-01-01 00:00:00".to_string(),
+            updated_at: "2025-01-01 00:00:00".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_resolve_artifact_file_uses_file_asset_id() {
+        let db = test_db();
+        let repo = FileAssetRepository::new(&db);
+        let asset = make_file_asset("asset_1", "/tmp/test.pdf", 1024);
+        repo.insert(&asset).unwrap();
+
+        let result = resolve_artifact_file(&repo, Some("asset_1"), "some_workspace_key", "user1");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().id, "asset_1");
+    }
+
+    #[test]
+    fn test_resolve_artifact_file_falls_back_to_key() {
+        let db = test_db();
+        let repo = FileAssetRepository::new(&db);
+        let asset = make_file_asset("key_as_id", "/tmp/test.pdf", 1024);
+        repo.insert(&asset).unwrap();
+
+        // No file_asset_id, but key matches a file_asset ID
+        let result = resolve_artifact_file(&repo, None, "key_as_id", "user1");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().id, "key_as_id");
+    }
+
+    #[test]
+    fn test_resolve_artifact_file_returns_none_for_workspace_key() {
+        let db = test_db();
+        let repo = FileAssetRepository::new(&db);
+
+        // No file_asset_id, key doesn't match any file_asset ID
+        let result = resolve_artifact_file(&repo, None, "workspace_only_key", "user1");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_artifact_file_rejects_wrong_owner() {
+        let db = test_db();
+        let repo = FileAssetRepository::new(&db);
+        let asset = make_file_asset("asset_1", "/tmp/test.pdf", 1024);
+        repo.insert(&asset).unwrap(); // owner_id = "user1"
+
+        // Wrong owner — should return None
+        let result = resolve_artifact_file(&repo, Some("asset_1"), "key", "user2");
+        assert!(result.is_none());
+    }
+
+    /// Mock ConnectorSendProvider for testing deliver_artifacts.
+    struct MockSendProvider {
+        file_capable: Vec<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl ConnectorSendProvider for MockSendProvider {
+        async fn send_message(&self, _c: &str, _r: &str, _m: &str) -> Result<String, String> {
+            Ok("ok".to_string())
+        }
+        fn sendable_channels(&self) -> Vec<String> {
+            self.file_capable.clone()
+        }
+        fn file_capable_channels(&self) -> Vec<String> {
+            self.file_capable.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_deliver_artifacts_skips_non_file_capable_channel() {
+        let db = test_db();
+        let send = MockSendProvider {
+            file_capable: vec!["telegram".to_string()],
+        };
+        // outcome_json with one artifact
+        let outcome_json = r#"{"summary":"done","outcome_kind":"mixed","artifacts":[{"key":"k","label":"l","agent_id":"a","step_order":0}]}"#;
+        // Channel is "imessage" which is NOT in file_capable_channels
+        // This should return early without error
+        deliver_artifacts(&db, &send, "task_1", "imessage", "12345", Some(outcome_json), "user1").await;
+        // No assertion needed — just verifying no panic
+    }
+
+    #[tokio::test]
+    async fn test_deliver_artifacts_skips_oversized_files() {
+        let db = test_db();
+        let repo = FileAssetRepository::new(&db);
+        // Create a real (small) temp file so the existence check passes,
+        // but set size_bytes > 50MB in the DB record so the size check fires.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"dummy").unwrap();
+        let path_str = tmp.path().to_str().unwrap();
+        let oversized = make_file_asset("big_file", path_str, 60 * 1024 * 1024);
+        repo.insert(&oversized).unwrap();
+
+        let send = MockSendProvider {
+            file_capable: vec!["telegram".to_string()],
+        };
+        // outcome_json referencing the oversized file via file_asset_id
+        let outcome_json = r#"{"summary":"done","outcome_kind":"artifact_only","artifacts":[{"key":"k","label":"Big file","agent_id":"a","step_order":0,"file_asset_id":"big_file"}]}"#;
+        // File exists on disk → existence check passes → size check fires → skip logged.
+        deliver_artifacts(&db, &send, "task_1", "telegram", "12345", Some(outcome_json), "user1").await;
+    }
+
+    // ── Phase 12-B: Edge-case notification tests ──────────────────────
+
+    #[test]
+    fn test_format_completion_handles_very_long_summary() {
+        // Summary > 2000 chars should not panic or truncate at the format level
+        let long_summary: String = "x".repeat(3000);
+        let msg = format_completion_message(
+            "Long task",
+            Some(&long_summary),
+            Some("text_only"),
+            None,
+            None,
+        );
+        assert!(msg.contains("Task completed: Long task"));
+        // The long summary should appear in the message (format_completion_message
+        // does not truncate — truncation is handled by finalize_task_with_outcome)
+        assert!(msg.contains(&long_summary));
+        assert!(msg.contains("No files were produced."));
+
+        // Also test with outcome_summary being long
+        let long_outcome: String = "y".repeat(5000);
+        let msg2 = format_completion_message(
+            "Long outcome",
+            Some("short"),
+            Some("mixed"),
+            Some(2),
+            Some(&long_outcome),
+        );
+        assert!(msg2.contains(&long_outcome));
+        assert!(msg2.contains("2 files produced (with text summary)."));
+    }
+
+    #[tokio::test]
+    async fn test_deliver_artifacts_handles_malformed_outcome_json() {
+        let db = test_db();
+        let send = MockSendProvider {
+            file_capable: vec!["telegram".to_string()],
+        };
+
+        // Completely invalid JSON — should return early without panic
+        deliver_artifacts(&db, &send, "task_1", "telegram", "12345", Some("{invalid json!!!}"), "user1").await;
+
+        // Valid JSON but wrong structure — should return early without panic
+        deliver_artifacts(&db, &send, "task_2", "telegram", "12345", Some(r#"{"foo":"bar"}"#), "user1").await;
+
+        // Empty string — should return early without panic
+        deliver_artifacts(&db, &send, "task_3", "telegram", "12345", Some(""), "user1").await;
+
+        // None — should return early without panic
+        deliver_artifacts(&db, &send, "task_4", "telegram", "12345", None, "user1").await;
     }
 }

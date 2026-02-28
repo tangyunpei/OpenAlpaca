@@ -26,7 +26,18 @@ export interface Task {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  outcome_kind?: string;
+  artifact_count?: number;
   assigned_agents?: TaskAssignedAgent[];
+  outcome?: ParsedOutcome;
+}
+
+export interface ParsedOutcome {
+  outcome_summary: string | null;
+  outcome_kind: string;
+  artifact_count: number;
+  artifacts: unknown[];
+  no_artifact_reason?: string;
 }
 
 export type AssignmentStatusValue = "pending" | "running" | "completed" | "failed";
@@ -46,6 +57,7 @@ export interface TaskAgentAssignment {
 export interface TaskDetailResponse {
   task: Task;
   assignments: TaskAgentAssignment[] | null;
+  outcome?: ParsedOutcome;
 }
 
 export interface CreateTaskRequest {

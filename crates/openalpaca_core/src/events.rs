@@ -66,12 +66,21 @@ pub enum SystemEvent {
     TaskCompleted {
         task_id: String,
         result_summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact_count: Option<i32>,
+        /// First 500 chars of the outcome summary (may differ from result_summary).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome_summary: Option<String>,
         timestamp: DateTime<Utc>,
     },
     /// A task failed
     TaskFailed {
         task_id: String,
         error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome_kind: Option<String>,
         timestamp: DateTime<Utc>,
     },
     /// An agent instance's lifecycle status changed.

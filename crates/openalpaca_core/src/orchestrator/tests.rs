@@ -9,6 +9,7 @@ use crate::tools::{RegistryToolExecutor, ToolRegistry};
 use async_trait::async_trait;
 use base64::Engine as _;
 use openalpaca_llm::{ChatRequest, ContentPart, ImageSource};
+use openalpaca_storage::{OutcomeKind, TaskStatus};
 use uuid::Uuid;
 
 fn make_tool_registry() -> Arc<ToolRegistry> {
@@ -1276,4 +1277,309 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
         "Attachment text should not drive tool suggestion; got tools: {:?}",
         req.tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
     );
+}
+
+// ── db_task_to_json tests ───────────────────────────────────────────
+
+fn make_test_task() -> openalpaca_storage::Task {
+    openalpaca_storage::Task {
+        id: "task-1".to_string(),
+        title: "Test task".to_string(),
+        description: Some("A test task".to_string()),
+        status: TaskStatus::Completed,
+        priority: 0,
+        progress_current: Some(3),
+        progress_total: Some(3),
+        result_summary: Some("All done".to_string()),
+        created_by: "user-1".to_string(),
+        source_lane: "lane-1".to_string(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        completed_at: Some(chrono::Utc::now()),
+        state_json: None,
+        state_version: 1,
+        outcome_json: None,
+        outcome_kind: None,
+        artifact_count: 0,
+    }
+}
+
+#[test]
+fn test_db_task_to_json_includes_parsed_outcome() {
+    let mut task = make_test_task();
+    task.outcome_kind = Some(OutcomeKind::Mixed);
+    task.artifact_count = 2;
+    task.outcome_json = Some(
+        serde_json::json!({
+            "summary": "Generated a report and chart",
+            "outcome_kind": "mixed",
+            "no_artifact_reason": null,
+            "artifacts": [
+                {"key": "report.pdf", "label": "Report", "agent_id": "researcher", "step_order": 0},
+                {"key": "chart.png", "label": "Chart", "agent_id": "researcher", "step_order": 0},
+            ]
+        })
+        .to_string(),
+    );
+
+    let json_str = db_task_to_json(&task);
+    let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+    assert_eq!(v["outcome_summary"], "Generated a report and chart");
+    assert_eq!(v["outcome_kind"], "mixed");
+    assert_eq!(v["artifact_count"], 2);
+    assert!(v["artifacts"].as_array().unwrap().len() == 2);
+    assert!(v["no_artifact_reason"].is_null());
+    // completed_at should be present
+    assert!(v["completed_at"].is_string());
+    // raw outcome_json should NOT be present
+    assert!(v.get("outcome_json").is_none());
+}
+
+#[test]
+fn test_db_task_to_json_handles_no_outcome() {
+    let task = make_test_task();
+
+    let json_str = db_task_to_json(&task);
+    let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+    assert_eq!(v["task_id"], "task-1");
+    assert_eq!(v["status"], "completed");
+    // No outcome_summary or artifacts fields when outcome_json is None
+    assert!(v.get("outcome_summary").is_none());
+    assert!(v.get("artifacts").is_none());
+    assert!(v.get("no_artifact_reason").is_none());
+    // completed_at still present
+    assert!(v["completed_at"].is_string());
+}
+
+#[test]
+fn test_db_task_to_json_handles_malformed_outcome() {
+    let mut task = make_test_task();
+    task.outcome_json = Some("not valid json {{{".to_string());
+
+    let json_str = db_task_to_json(&task);
+    let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+    // Should not crash — malformed JSON is silently ignored
+    assert_eq!(v["task_id"], "task-1");
+    // No parsed outcome fields
+    assert!(v.get("outcome_summary").is_none());
+    assert!(v.get("artifacts").is_none());
+    assert!(v.get("no_artifact_reason").is_none());
+}
+
+#[test]
+fn test_db_task_to_json_artifact_only() {
+    let mut task = make_test_task();
+    task.outcome_kind = Some(OutcomeKind::ArtifactOnly);
+    task.artifact_count = 1;
+    task.outcome_json = Some(
+        serde_json::json!({
+            "summary": "Generated CSV export",
+            "outcome_kind": "artifact_only",
+            "artifacts": [
+                {"key": "export.csv", "label": "CSV Export", "agent_id": "exporter", "step_order": 0},
+            ]
+        })
+        .to_string(),
+    );
+
+    let json_str = db_task_to_json(&task);
+    let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+    assert_eq!(v["outcome_summary"], "Generated CSV export");
+    assert_eq!(v["outcome_kind"], "artifact_only");
+    assert_eq!(v["artifact_count"], 1);
+    assert_eq!(v["artifacts"].as_array().unwrap().len(), 1);
+    assert_eq!(v["artifacts"][0]["key"], "export.csv");
+}
+
+#[test]
+fn test_db_task_to_json_failed() {
+    let mut task = make_test_task();
+    task.status = TaskStatus::Failed;
+    task.outcome_kind = Some(OutcomeKind::Failed);
+    task.artifact_count = 0;
+    task.outcome_json = Some(
+        serde_json::json!({
+            "summary": "Network timeout after 3 retries",
+            "outcome_kind": "failed",
+            "artifacts": []
+        })
+        .to_string(),
+    );
+
+    let json_str = db_task_to_json(&task);
+    let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+    assert_eq!(v["outcome_summary"], "Network timeout after 3 retries");
+    assert_eq!(v["outcome_kind"], "failed");
+    assert_eq!(v["artifact_count"], 0);
+    assert!(v["artifacts"].as_array().unwrap().is_empty());
+}
+
+// ── parse_outcome shared parser tests ──────────────────────────────
+
+#[test]
+fn test_parse_outcome_with_all_fields() {
+    let mut task = make_test_task();
+    task.outcome_kind = Some(OutcomeKind::TextOnly);
+    task.artifact_count = 0;
+    task.outcome_json = Some(
+        serde_json::json!({
+            "summary": "Found 3 results",
+            "no_artifact_reason": "Text-only output",
+            "artifacts": []
+        })
+        .to_string(),
+    );
+
+    let parsed = parse_outcome(&task).expect("should parse");
+    assert_eq!(parsed.outcome_summary.as_deref(), Some("Found 3 results"));
+    assert_eq!(parsed.outcome_kind, "text_only");
+    assert_eq!(parsed.artifact_count, 0);
+    assert!(parsed.artifacts.is_empty());
+    assert_eq!(
+        parsed.no_artifact_reason.as_deref(),
+        Some("Text-only output")
+    );
+}
+
+#[test]
+fn test_parse_outcome_missing_outcome_json() {
+    let task = make_test_task(); // outcome_json is None
+    assert!(parse_outcome(&task).is_none());
+}
+
+#[test]
+fn test_parse_outcome_missing_summary() {
+    // Missing summary → returns Some with outcome_summary: None (not None entirely)
+    let mut task = make_test_task();
+    task.outcome_kind = Some(OutcomeKind::ArtifactOnly);
+    task.artifact_count = 1;
+    task.outcome_json = Some(
+        serde_json::json!({
+            "artifacts": [
+                {"key": "report.pdf", "label": "Report", "agent_id": "writer", "step_order": 0}
+            ]
+        })
+        .to_string(),
+    );
+
+    let parsed = parse_outcome(&task).expect("should return Some even without summary");
+    assert!(parsed.outcome_summary.is_none());
+    assert_eq!(parsed.outcome_kind, "artifact_only");
+    assert_eq!(parsed.artifact_count, 1);
+    assert_eq!(parsed.artifacts.len(), 1);
+}
+
+#[test]
+fn test_parse_outcome_malformed_json() {
+    let mut task = make_test_task();
+    task.outcome_json = Some("not valid json".to_string());
+    assert!(parse_outcome(&task).is_none());
+}
+
+// ── SystemEvent serde round-trip tests ───────────────────────────
+
+#[test]
+fn test_system_event_task_completed_serde_roundtrip() {
+    let event = SystemEvent::TaskCompleted {
+        task_id: "t1".to_string(),
+        result_summary: Some("Done".to_string()),
+        outcome_kind: Some("mixed".to_string()),
+        artifact_count: Some(2),
+        outcome_summary: Some("Generated report".to_string()),
+        timestamp: chrono::Utc::now(),
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    let deserialized: SystemEvent = serde_json::from_str(&json).unwrap();
+
+    if let SystemEvent::TaskCompleted {
+        task_id,
+        outcome_kind,
+        artifact_count,
+        outcome_summary,
+        ..
+    } = deserialized
+    {
+        assert_eq!(task_id, "t1");
+        assert_eq!(outcome_kind, Some("mixed".to_string()));
+        assert_eq!(artifact_count, Some(2));
+        assert_eq!(outcome_summary, Some("Generated report".to_string()));
+    } else {
+        panic!("Expected TaskCompleted variant");
+    }
+}
+
+#[test]
+fn test_system_event_task_completed_without_new_fields() {
+    // Simulate deserializing an event that was serialized WITHOUT the new fields
+    // (backward compat: #[serde(default)] ensures missing fields become None)
+    let json = r#"{"type":"task_completed","payload":{"task_id":"t1","result_summary":"Done","timestamp":"2025-01-01T00:00:00Z"}}"#;
+    let event: SystemEvent = serde_json::from_str(json).unwrap();
+
+    if let SystemEvent::TaskCompleted {
+        task_id,
+        outcome_kind,
+        artifact_count,
+        outcome_summary,
+        ..
+    } = event
+    {
+        assert_eq!(task_id, "t1");
+        assert_eq!(outcome_kind, None);
+        assert_eq!(artifact_count, None);
+        assert_eq!(outcome_summary, None);
+    } else {
+        panic!("Expected TaskCompleted variant");
+    }
+}
+
+#[test]
+fn test_system_event_task_failed_serde_roundtrip() {
+    let event = SystemEvent::TaskFailed {
+        task_id: "t2".to_string(),
+        error: "Network timeout".to_string(),
+        outcome_kind: Some("failed".to_string()),
+        timestamp: chrono::Utc::now(),
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    let deserialized: SystemEvent = serde_json::from_str(&json).unwrap();
+
+    if let SystemEvent::TaskFailed {
+        task_id,
+        error,
+        outcome_kind,
+        ..
+    } = deserialized
+    {
+        assert_eq!(task_id, "t2");
+        assert_eq!(error, "Network timeout");
+        assert_eq!(outcome_kind, Some("failed".to_string()));
+    } else {
+        panic!("Expected TaskFailed variant");
+    }
+}
+
+#[test]
+fn test_system_event_task_failed_without_outcome_kind() {
+    // Backward compat: missing outcome_kind defaults to None
+    let json = r#"{"type":"task_failed","payload":{"task_id":"t2","error":"timeout","timestamp":"2025-01-01T00:00:00Z"}}"#;
+    let event: SystemEvent = serde_json::from_str(json).unwrap();
+
+    if let SystemEvent::TaskFailed {
+        task_id,
+        outcome_kind,
+        ..
+    } = event
+    {
+        assert_eq!(task_id, "t2");
+        assert_eq!(outcome_kind, None);
+    } else {
+        panic!("Expected TaskFailed variant");
+    }
 }

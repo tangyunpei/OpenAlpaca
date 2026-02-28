@@ -67,6 +67,24 @@ pub trait ConnectorSendProvider: Send + Sync {
     ) -> Result<String, String>;
     /// List channels that can currently send (subset of active connectors).
     fn sendable_channels(&self) -> Vec<String>;
+
+    /// Send a file via a channel. Returns Ok(delivery_summary) or Err(reason).
+    async fn send_file(
+        &self,
+        _channel: &str,
+        _recipient: &str,
+        _file_path: &str,
+        _filename: &str,
+        _mime_type: &str,
+        _caption: Option<&str>,
+    ) -> Result<String, String> {
+        Err("File sending not supported on this channel".to_string())
+    }
+
+    /// List channels that support file sending.
+    fn file_capable_channels(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 use dispatcher::TaskDispatcher;
@@ -392,6 +410,43 @@ pub(super) fn task_entry_to_json(entry: &TaskEntry) -> String {
     obj.to_string()
 }
 
+/// Parsed outcome fields extracted from a Task's outcome_json.
+/// Shared across all response paths for consistent parsing.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ParsedOutcomeFields {
+    pub outcome_summary: Option<String>,
+    pub outcome_kind: String,
+    pub artifact_count: i32,
+    pub artifacts: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_artifact_reason: Option<String>,
+}
+
+/// Parse outcome fields from a Task.
+/// Returns None when outcome_json is absent or unparseable.
+/// Missing summary → outcome_summary: None (other fields still populated).
+pub fn parse_outcome(task: &Task) -> Option<ParsedOutcomeFields> {
+    let oj = task.outcome_json.as_deref()?;
+    let v: serde_json::Value = serde_json::from_str(oj).ok()?;
+    Some(ParsedOutcomeFields {
+        outcome_summary: v.get("summary").and_then(|s| s.as_str()).map(String::from),
+        outcome_kind: task
+            .outcome_kind
+            .map(|k| k.as_str().to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        artifact_count: task.artifact_count,
+        artifacts: v
+            .get("artifacts")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        no_artifact_reason: v
+            .get("no_artifact_reason")
+            .and_then(|s| s.as_str())
+            .map(String::from),
+    })
+}
+
 pub(super) fn db_task_to_json(task: &Task) -> String {
     let mut obj = serde_json::json!({
         "task_id": task.id,
@@ -402,7 +457,17 @@ pub(super) fn db_task_to_json(task: &Task) -> String {
         "result_summary": task.result_summary,
         "created_at": task.created_at.to_rfc3339(),
         "updated_at": task.updated_at.to_rfc3339(),
+        "completed_at": task.completed_at.map(|ts| ts.to_rfc3339()),
+        "outcome_kind": task.outcome_kind.map(|k| k.as_str()),
+        "artifact_count": task.artifact_count,
     });
+
+    // Parse outcome_json into structured fields via shared parser
+    if let Some(parsed) = parse_outcome(task) {
+        obj["outcome_summary"] = serde_json::json!(parsed.outcome_summary);
+        obj["no_artifact_reason"] = serde_json::json!(parsed.no_artifact_reason);
+        obj["artifacts"] = serde_json::json!(parsed.artifacts);
+    }
 
     // Parse state_json to extract DAG node details if available
     if let Some(ref sj) = task.state_json

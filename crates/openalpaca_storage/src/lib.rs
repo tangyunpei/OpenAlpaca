@@ -17,7 +17,7 @@ pub(crate) mod test_util;
 pub use database::Database;
 pub use models::{Agent, EventLog, Memory, MemoryRole};
 pub use models::{AgentMetrics, AgentTaskHistory, SubAgentConfig};
-pub use models::{AssignmentStatus, Task, TaskAgentAssignment, TaskStatus};
+pub use models::{AssignmentStatus, OutcomeKind, Task, TaskAgentAssignment, TaskStatus};
 pub use models::{AttachmentRef, FileAsset, FileAssetStatus};
 pub use models::{Conversation, ConversationMessage};
 pub use models::{ConversationMap, ExternalIdentity, GlobalUser, LinkToken};

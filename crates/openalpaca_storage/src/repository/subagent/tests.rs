@@ -46,6 +46,9 @@ fn make_task(id: &str) -> Task {
         completed_at: None,
         state_json: None,
         state_version: 0,
+        outcome_json: None,
+        outcome_kind: None,
+        artifact_count: 0,
     }
 }
 

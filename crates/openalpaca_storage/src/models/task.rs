@@ -55,6 +55,47 @@ impl std::fmt::Display for TaskStatus {
     }
 }
 
+/// The kind of outcome a completed task produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutcomeKind {
+    TextOnly,
+    ArtifactOnly,
+    Mixed,
+    Failed,
+}
+
+impl OutcomeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TextOnly => "text_only",
+            Self::ArtifactOnly => "artifact_only",
+            Self::Mixed => "mixed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl std::str::FromStr for OutcomeKind {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "text_only" => Ok(Self::TextOnly),
+            "artifact_only" => Ok(Self::ArtifactOnly),
+            "mixed" => Ok(Self::Mixed),
+            "failed" => Ok(Self::Failed),
+            _ => anyhow::bail!("Invalid outcome kind: {}", s),
+        }
+    }
+}
+
+impl std::fmt::Display for OutcomeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Status of an agent assignment within a task
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -112,8 +153,13 @@ pub struct Task {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing)]
     pub state_json: Option<String>,
     pub state_version: i32,
+    #[serde(skip_serializing)]
+    pub outcome_json: Option<String>,
+    pub outcome_kind: Option<OutcomeKind>,
+    pub artifact_count: i32,
 }
 
 /// An agent assignment within a task

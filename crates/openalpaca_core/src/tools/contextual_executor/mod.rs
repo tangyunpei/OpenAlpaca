@@ -151,6 +151,11 @@ impl ContextualToolExecutor {
                 .workspace
                 .write(key, content, agent_id, entry_type.clone(), &[])?;
 
+            // Set file_asset_id in the same state mutation (before persisting)
+            if let Some(fid) = arguments.get("file_asset_id").and_then(|v| v.as_str()) {
+                state.workspace.set_file_asset_id(key, fid);
+            }
+
             let new_json = state.to_json();
             let updated = repo
                 .update_state(task_id, &new_json, task.state_version)
