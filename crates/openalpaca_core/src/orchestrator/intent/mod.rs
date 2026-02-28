@@ -457,11 +457,17 @@ impl IntentParser {
                 || lower.contains("发给")
                 || lower.contains("转发")
                 || lower.contains("通过telegram")
+                || lower.contains("通过imessage")
                 || lower.contains("message to")
+                || lower.contains("text to")
+                || lower.contains("msg to")
                 || lower.contains("reply via")
                 || lower.contains("forward to")
                 || (lower.contains("send") && (lower.contains("imessage") || lower.contains("telegram")))
-                || (lower.contains("发") && (lower.contains("imessage") || lower.contains("telegram"))),
+                || (lower.contains("发") && (lower.contains("imessage") || lower.contains("telegram")))
+                || ((lower.contains("消息") || lower.contains("短信")) && (lower.contains("telegram") || lower.contains("imessage")))
+                || (lower.contains("给") && (lower.contains("telegram") || lower.contains("imessage")))
+                || (lower.contains("via ") && (lower.contains("telegram") || lower.contains("imessage"))),
         };
 
         flags.to_vec()

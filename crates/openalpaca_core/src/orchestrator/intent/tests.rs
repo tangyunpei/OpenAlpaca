@@ -652,3 +652,103 @@ fn test_suggest_tools_chinese_send_telegram() {
         tools
     );
 }
+
+// --- expanded keyword pattern tests (Change 1) ---
+
+#[test]
+fn test_suggest_tools_chinese_give_imessage() {
+    // "可以给我的imessage发消息" — the "给" + "imessage" pattern
+    let tools = parser().suggest_tools("可以给我的imessage发消息");
+    assert!(
+        tools.contains(&"send_message".to_string()),
+        "Expected send_message for '给...imessage': {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_via_imessage() {
+    // "通过imessage发消息" — parity with "通过telegram"
+    let tools = parser().suggest_tools("通过imessage发消息");
+    assert!(
+        tools.contains(&"send_message".to_string()),
+        "Expected send_message for '通过imessage': {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_give_telegram_sms() {
+    // "给telegram发短信"
+    let tools = parser().suggest_tools("给telegram发短信");
+    assert!(
+        tools.contains(&"send_message".to_string()),
+        "Expected send_message for '给telegram发短信': {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_text_to_via_telegram() {
+    // "text to John via telegram"
+    let tools = parser().suggest_tools("text to John via telegram");
+    assert!(
+        tools.contains(&"send_message".to_string()),
+        "Expected send_message for 'text to...via telegram': {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_msg_to() {
+    let tools = parser().suggest_tools("msg to my friend on telegram");
+    assert!(
+        tools.contains(&"send_message".to_string()),
+        "Expected send_message for 'msg to': {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_chinese_message_telegram() {
+    // "消息" + "telegram" pattern
+    let tools = parser().suggest_tools("请给telegram发送测试短信");
+    assert!(
+        tools.contains(&"send_message".to_string()),
+        "Expected send_message for '短信+telegram': {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_via_imessage_english() {
+    let tools = parser().suggest_tools("send greetings via imessage");
+    assert!(
+        tools.contains(&"send_message".to_string()),
+        "Expected send_message for 'via imessage': {:?}",
+        tools
+    );
+}
+
+// Verify existing negative tests still pass with expanded patterns
+
+#[test]
+fn test_suggest_tools_bare_telegram_no_send_message_still_negative() {
+    // "how do I set up Telegram?" — no send verb, no 给, no 消息/短信, no "via "
+    let tools = parser().suggest_tools("how do I set up Telegram?");
+    assert!(
+        !tools.contains(&"send_message".to_string()),
+        "Bare 'telegram' should still NOT suggest send_message: {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_bare_imessage_no_send_message_still_negative() {
+    let tools = parser().suggest_tools("configure imessage connector");
+    assert!(
+        !tools.contains(&"send_message".to_string()),
+        "Bare 'imessage' should still NOT suggest send_message: {:?}",
+        tools
+    );
+}

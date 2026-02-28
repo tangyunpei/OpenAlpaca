@@ -229,7 +229,7 @@ impl TaskDispatcher {
             && let Some(ref provider) = *guard
         {
             let statuses = provider.list_status();
-            crate::middleware::prompt::format_connector_guidance(&statuses)
+            crate::middleware::prompt::format_connector_guidance(&statuses, None)
         } else {
             String::new()
         }

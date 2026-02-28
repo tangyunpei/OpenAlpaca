@@ -255,7 +255,14 @@ impl Orchestrator {
                 && let Some(ref provider) = *guard
             {
                 let statuses = provider.list_status();
-                let block = format_connector_guidance(&statuses);
+                let sc: Vec<String> = self
+                    .connector_sender
+                    .read()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|p| p.sendable_channels()))
+                    .unwrap_or_default();
+                let sc_ref = if sc.is_empty() { None } else { Some(sc.as_slice()) };
+                let block = format_connector_guidance(&statuses, sc_ref);
                 if !block.is_empty() {
                     system_prompt.push('\n');
                     system_prompt.push_str(&block);

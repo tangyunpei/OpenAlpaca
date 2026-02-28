@@ -14,8 +14,8 @@ use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 use chrono::Utc;
-use openalpaca_llm::{ChatMessage, ContentPart, ImageSource};
-use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
+use openalpaca_llm::{ChatMessage, ContentPart, ImageSource, Role};
+use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository, PreferenceRepository};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -48,7 +48,128 @@ fn sanitize_parts_for_dispatch(parts: Vec<ContentPart>) -> Vec<ContentPart> {
         .collect()
 }
 
+/// Check if recent conversation suggests an in-progress send flow.
+/// Returns true if any recent assistant message contains BOTH a channel name
+/// AND a send-related keyword — indicating the conversation is mid-messaging.
+fn detect_active_send_flow(recent_messages: &[ChatMessage]) -> bool {
+    const CHANNEL_KW: &[&str] = &["telegram", "imessage"];
+    const SEND_KW: &[&str] = &[
+        "send_message",
+        "send",
+        "发送",
+        "消息",
+        "短信",
+        "recipient",
+        "chat_id",
+        "发给",
+        "发到",
+    ];
+    recent_messages
+        .iter()
+        .rev()
+        .take(4)
+        .filter(|m| m.role == Role::Assistant)
+        .any(|m| {
+            let lower = m.content.to_lowercase();
+            CHANNEL_KW.iter().any(|k| lower.contains(k))
+                && SEND_KW.iter().any(|k| lower.contains(k))
+        })
+}
+
 impl Orchestrator {
+    /// Build a deterministic `<send_context>` block with resolved recipient info.
+    /// This removes ambiguity: the LLM sees facts, not hints.
+    fn build_send_context(&self, owner_id: Option<&str>) -> String {
+        let (db, owner) = match (&self.db, owner_id) {
+            (Some(db), Some(id)) => (db, id),
+            _ => return String::new(),
+        };
+        let sendable = self
+            .connector_sender
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|p| p.sendable_channels()))
+            .unwrap_or_default();
+        if sendable.is_empty() {
+            return String::new();
+        }
+
+        let pref_repo = PreferenceRepository::new(db);
+        let mut block = String::from(
+            "<send_context>\n\
+             You MUST use the send_message tool to send messages via these channels.\n\
+             Do NOT refuse or claim inability — these are confirmed working capabilities on this system.\n\n\
+             Sendable channels:\n",
+        );
+        for ch in &sendable {
+            let (default_available, detail) = match ch.as_str() {
+                "telegram" => {
+                    let has_default = pref_repo
+                        .get(owner, "telegram.last_chat_id")
+                        .ok()
+                        .flatten()
+                        .and_then(|p| p.value.parse::<i64>().ok())
+                        .is_some();
+                    (
+                        has_default,
+                        if has_default {
+                            "sends to your most recent Telegram chat"
+                        } else {
+                            "no recent chat — user must first message the bot"
+                        },
+                    )
+                }
+                "imessage" => {
+                    let has_default = pref_repo
+                        .get(owner, "imessage.last_reply_target")
+                        .ok()
+                        .flatten()
+                        .is_some()
+                        || pref_repo
+                            .get(owner, "imessage.last_chat_id")
+                            .ok()
+                            .flatten()
+                            .is_some();
+                    (
+                        has_default,
+                        if has_default {
+                            "sends to your most recent iMessage conversation"
+                        } else {
+                            "no recent conversation — user must first send/receive an iMessage"
+                        },
+                    )
+                }
+                _ => (false, "unknown channel"),
+            };
+
+            let label = match ch.as_str() {
+                "telegram" => "telegram",
+                "imessage" => "imessage",
+                other => other,
+            };
+            block.push_str(&format!(
+                "- {}: default_available={} ({})\n",
+                label, default_available, detail
+            ));
+            match ch.as_str() {
+                "telegram" => block.push_str(
+                    "  Recipient: \"default\" (RECOMMENDED) or numeric chat_id. @username is NOT valid.\n",
+                ),
+                "imessage" => block.push_str(
+                    "  CAPABILITY: This macOS system sends iMessages natively via AppleScript. This is a real, tested feature.\n\
+                     \x20 Recipient: \"default\" (RECOMMENDED) or phone/email.\n",
+                ),
+                _ => {}
+            }
+        }
+        block.push_str(
+            "\nAction: Call send_message with the appropriate channel and recipient.\n\
+             If \"default\" is unavailable, tell the user to first send/receive a message on that channel.\n\
+             </send_context>",
+        );
+        block
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn handle_simple_query(
         &self,
@@ -113,11 +234,22 @@ impl Orchestrator {
         }
 
         // Connector awareness: inject active channel list + message source
+        let sendable_channels: Vec<String> = self
+            .connector_sender
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|p| p.sendable_channels()))
+            .unwrap_or_default();
         if let Ok(guard) = self.connector_status.read()
             && let Some(ref provider) = *guard
         {
             let statuses = provider.list_status();
-            let connector_block = format_connector_guidance(&statuses);
+            let sc_ref = if sendable_channels.is_empty() {
+                None
+            } else {
+                Some(sendable_channels.as_slice())
+            };
+            let connector_block = format_connector_guidance(&statuses, sc_ref);
             if !connector_block.is_empty() {
                 system_prompt.push('\n');
                 system_prompt.push_str(&connector_block);
@@ -132,6 +264,13 @@ impl Orchestrator {
         // Resolve tools based on intent analysis
         // Tool suggestion should be based on raw user intent text, not attachment-injected context.
         let mut tool_names = self.intent_parser.suggest_tools(tool_suggestion_query);
+
+        // Multi-turn: keep send_message available if recent context shows active send flow
+        if !tool_names.contains(&"send_message".to_string())
+            && detect_active_send_flow(&ctx.recent_messages)
+        {
+            tool_names.push("send_message".to_string());
+        }
 
         // Force-include persona tools during bootstrap mode
         if self.is_bootstrapping() {
@@ -154,6 +293,17 @@ impl Orchestrator {
                 tool_names
             );
             system_prompt.push_str(&format_tool_guidance(&tool_defs));
+
+            // Deterministic send_context: when send_message is in the tool list,
+            // inject factual recipient info so the LLM doesn't guess or ask unnecessarily.
+            if tool_defs.iter().any(|d| d.name == "send_message") {
+                let send_ctx = self.build_send_context(owner_id);
+                if !send_ctx.is_empty() {
+                    system_prompt.push('\n');
+                    system_prompt.push_str(&send_ctx);
+                }
+            }
+
             let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
             policy_opt = Some(SandboxPolicy {
                 agent_id: "orchestrator".to_string(),
@@ -467,8 +617,8 @@ impl Orchestrator {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_parts_for_dispatch;
-    use openalpaca_llm::{ContentPart, ImageSource};
+    use super::{detect_active_send_flow, sanitize_parts_for_dispatch};
+    use openalpaca_llm::{ChatMessage, ContentPart, ImageSource};
 
     #[test]
     fn sanitize_parts_for_dispatch_drops_empty_text_parts() {
@@ -510,5 +660,67 @@ mod tests {
             }
             other => panic!("expected placeholder text, got {other:?}"),
         }
+    }
+
+    // --- detect_active_send_flow tests ---
+
+    #[test]
+    fn detect_send_flow_with_telegram_and_send_keyword() {
+        let messages = vec![ChatMessage::assistant(
+            "I can help you send a message via Telegram using the send_message tool.",
+        )];
+        assert!(detect_active_send_flow(&messages));
+    }
+
+    #[test]
+    fn detect_send_flow_no_channel_no_send() {
+        let messages = vec![ChatMessage::assistant(
+            "Sure, I'll help you with that task.",
+        )];
+        assert!(!detect_active_send_flow(&messages));
+    }
+
+    #[test]
+    fn detect_send_flow_empty_messages() {
+        assert!(!detect_active_send_flow(&[]));
+    }
+
+    #[test]
+    fn detect_send_flow_user_only_messages() {
+        let messages = vec![ChatMessage::user(
+            "send message to telegram",
+        )];
+        assert!(!detect_active_send_flow(&messages));
+    }
+
+    #[test]
+    fn detect_send_flow_channel_without_send_keyword() {
+        let messages = vec![ChatMessage::assistant(
+            "Telegram is a messaging platform.",
+        )];
+        assert!(!detect_active_send_flow(&messages));
+    }
+
+    #[test]
+    fn detect_send_flow_chinese_context() {
+        let messages = vec![ChatMessage::assistant(
+            "好的，我将通过Telegram发送消息给您的联系人。",
+        )];
+        assert!(detect_active_send_flow(&messages));
+    }
+
+    #[test]
+    fn detect_send_flow_only_recent_messages() {
+        // Only the last 4 messages are checked; put the relevant one at position 5+
+        let mut messages = Vec::new();
+        messages.push(ChatMessage::assistant(
+            "I'll send via Telegram using send_message.",
+        ));
+        // Pad with 4 more assistant messages without send context
+        for _ in 0..4 {
+            messages.push(ChatMessage::assistant("Here is some other info."));
+        }
+        // The send flow message is now beyond the 4-message lookback
+        assert!(!detect_active_send_flow(&messages));
     }
 }
