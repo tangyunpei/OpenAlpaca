@@ -93,6 +93,13 @@ impl ConnectorSendProvider for ConnectorSendBridge {
                         .flatten()
                         .and_then(|p| p.value.parse::<i64>().ok())
                         .ok_or("No default Telegram chat found. Please specify a chat_id.")?
+                } else if recipient.starts_with('@') {
+                    return Err(format!(
+                        "Telegram @username ('{}') cannot be used directly. \
+                         The Bot API requires a numeric chat_id. \
+                         Try recipient=\"default\" instead.",
+                        recipient
+                    ));
                 } else {
                     recipient
                         .parse::<i64>()

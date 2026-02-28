@@ -108,9 +108,25 @@ pub fn format_tool_guidance(tools: &[openalpaca_llm::ToolDefinition]) -> String 
 ///
 /// Used by `query_handler.rs`, `pipeline.rs`, `lead_agent/mod.rs`, and `dag_executor/mod.rs`
 /// to inject connector awareness into system prompts without duplicating the XML formatting.
-pub fn format_connector_guidance(statuses: &[(String, String)]) -> String {
+///
+/// When `sendable_channels` is provided, the block includes explicit send guidance
+/// instructing the LLM to use the `send_message` tool with `recipient="default"`.
+pub fn format_connector_guidance(
+    statuses: &[(String, String)],
+    sendable_channels: Option<&[String]>,
+) -> String {
     let active: Vec<&(String, String)> = statuses.iter().filter(|(_, s)| s == "active").collect();
-    if active.is_empty() {
+
+    // Channels that are sendable but not active (e.g. iMessage connector crashed
+    // but AppleScript sending still works independently).
+    let send_only: Vec<&str> = sendable_channels
+        .unwrap_or(&[])
+        .iter()
+        .filter(|ch| !active.iter().any(|(name, _)| name == ch.as_str()))
+        .map(|s| s.as_str())
+        .collect();
+
+    if active.is_empty() && send_only.is_empty() {
         return String::new();
     }
 
@@ -119,18 +135,43 @@ pub fn format_connector_guidance(statuses: &[(String, String)]) -> String {
     );
     for (name, _) in &active {
         let label = match name.as_str() {
-            "imessage" => "iMessage (macOS Messages app)",
+            "imessage" => "iMessage (macOS — sends via AppleScript)",
             "telegram" => "Telegram",
             _ => name.as_str(),
         };
         block.push_str(&format!("- {} [active]\n", label));
     }
+    for ch in &send_only {
+        let label = match *ch {
+            "imessage" => "iMessage (macOS — sends via AppleScript)",
+            "telegram" => "Telegram",
+            _ => ch,
+        };
+        block.push_str(&format!("- {} [send-capable]\n", label));
+    }
     block.push_str(
         "\nWhen a message arrives from one of these channels, your reply is automatically \
-         delivered back through the same channel.\n\
-         To proactively send a message to a contact via these channels, use the `send_message` tool.\n\
-         </connector_status>",
+         delivered back through the same channel.",
     );
+
+    // Enhanced guidance when sendable channels are known
+    let has_sendable = sendable_channels
+        .map(|sc| !sc.is_empty())
+        .unwrap_or(false);
+    if has_sendable {
+        block.push_str(
+            "\n\nIMPORTANT — Sending messages:\n\
+             - To proactively send a message: use the `send_message` tool.\n\
+             - Prefer recipient=\"default\" — sends to the user's most recent conversation.\n\
+             - Only ask for a specific recipient if the tool returns an error or the user explicitly provides one.",
+        );
+    } else {
+        block.push_str(
+            "\nTo proactively send a message to a contact via these channels, use the `send_message` tool.",
+        );
+    }
+
+    block.push_str("\n</connector_status>");
     block
 }
 
@@ -214,5 +255,85 @@ mod tests {
         assert!(result.contains("file_read"));
         assert!(result.contains("Fetch a URL"));
         assert!(result.contains("Read a file"));
+    }
+
+    // --- format_connector_guidance tests ---
+
+    #[test]
+    fn test_connector_guidance_no_active_channels() {
+        let statuses = vec![("telegram".to_string(), "disabled".to_string())];
+        let result = format_connector_guidance(&statuses, None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_connector_guidance_active_without_sendable() {
+        let statuses = vec![("telegram".to_string(), "active".to_string())];
+        let result = format_connector_guidance(&statuses, None);
+        assert!(result.contains("Telegram [active]"));
+        assert!(result.contains("send_message"));
+        // Without sendable_channels, should NOT contain the enhanced guidance
+        assert!(!result.contains("IMPORTANT"));
+    }
+
+    #[test]
+    fn test_connector_guidance_active_with_sendable() {
+        let statuses = vec![("telegram".to_string(), "active".to_string())];
+        let sendable = vec!["telegram".to_string()];
+        let result = format_connector_guidance(&statuses, Some(&sendable));
+        assert!(result.contains("Telegram [active]"));
+        assert!(result.contains("IMPORTANT"));
+        assert!(result.contains("send_message"));
+        assert!(result.contains("recipient=\"default\""));
+    }
+
+    #[test]
+    fn test_connector_guidance_empty_sendable() {
+        let statuses = vec![("telegram".to_string(), "active".to_string())];
+        let sendable: Vec<String> = vec![];
+        let result = format_connector_guidance(&statuses, Some(&sendable));
+        // Empty sendable should behave like None
+        assert!(!result.contains("IMPORTANT"));
+    }
+
+    #[test]
+    fn test_connector_guidance_send_only_channel() {
+        // iMessage connector crashed (status=error), but AppleScript sending still works.
+        // It should still appear as [send-capable].
+        let statuses = vec![
+            ("telegram".to_string(), "active".to_string()),
+            ("imessage".to_string(), "error".to_string()),
+        ];
+        let sendable = vec!["telegram".to_string(), "imessage".to_string()];
+        let result = format_connector_guidance(&statuses, Some(&sendable));
+        assert!(result.contains("Telegram [active]"));
+        assert!(result.contains("iMessage (macOS — sends via AppleScript) [send-capable]"));
+        assert!(result.contains("IMPORTANT"));
+    }
+
+    #[test]
+    fn test_connector_guidance_send_only_no_active() {
+        // All connectors crashed, but sending still works — should NOT be empty.
+        let statuses = vec![("imessage".to_string(), "error".to_string())];
+        let sendable = vec!["imessage".to_string()];
+        let result = format_connector_guidance(&statuses, Some(&sendable));
+        assert!(!result.is_empty());
+        assert!(result.contains("iMessage (macOS — sends via AppleScript) [send-capable]"));
+    }
+
+    #[test]
+    fn test_connector_guidance_no_active_no_sendable() {
+        // No active, no sendable — truly empty.
+        let statuses = vec![("telegram".to_string(), "disabled".to_string())];
+        let result = format_connector_guidance(&statuses, None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_connector_guidance_imessage_label_mentions_applescript() {
+        let statuses = vec![("imessage".to_string(), "active".to_string())];
+        let sendable = vec!["imessage".to_string()];
+        let result = format_connector_guidance(&statuses, Some(&sendable));
+        assert!(result.contains("AppleScript"));
     }
 }
