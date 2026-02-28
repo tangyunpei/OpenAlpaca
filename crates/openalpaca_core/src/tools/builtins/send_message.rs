@@ -26,24 +26,8 @@ impl BuiltInTool for SendMessageTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: content".to_string())?;
 
-        // Pre-validate Telegram recipient format before bridge call
-        if channel == "telegram" && recipient != "default" {
-            if recipient.starts_with('@') {
-                return Err(format!(
-                    "Telegram @username ('{}') is not directly sendable. \
-                     The Bot API requires a numeric chat_id. \
-                     Use \"default\" to send to the user's most recent conversation.",
-                    recipient
-                ));
-            }
-            if recipient.parse::<i64>().is_err() {
-                return Err(format!(
-                    "Invalid Telegram recipient '{}'. \
-                     Expected \"default\" or a numeric chat_id (e.g. 123456789).",
-                    recipient
-                ));
-            }
-        }
+        // Telegram recipient validation is handled in the bridge layer
+        // (connector_bridge.rs) which has full context for chat_id resolution.
 
         // Read the provider from the shared lock
         let provider = {
@@ -66,8 +50,7 @@ pub(super) fn send_message_tool(provider: ConnectorSendLock) -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "send_message".to_string(),
-            description: "Send a message via a connected channel (iMessage on macOS via AppleScript, Telegram via Bot API). \
-                Call this tool directly — use recipient=\"default\" for the user's most recent conversation."
+            description: "Send a message to a contact via a connected channel (iMessage, Telegram)."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -78,7 +61,7 @@ pub(super) fn send_message_tool(provider: ConnectorSendLock) -> RegisteredTool {
                     },
                     "recipient": {
                         "type": "string",
-                        "description": "Recipient. Use \"default\" (RECOMMENDED) to send to the user's most recent conversation. Only use a specific identifier if the user explicitly provides one: numeric chat_id for Telegram, phone/email for iMessage."
+                        "description": "\"default\" for most recent conversation, or specific: chat_id (Telegram), phone/email (iMessage)."
                     },
                     "content": {
                         "type": "string",
@@ -111,24 +94,8 @@ mod tests {
         })
     }
 
-    #[tokio::test]
-    async fn telegram_at_username_rejected() {
-        let tool = make_tool();
-        let result = tool.execute(&args("telegram", "@user", "hello")).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.contains("@username"), "Error should mention @username: {err}");
-        assert!(err.contains("chat_id"), "Error should suggest chat_id: {err}");
-    }
-
-    #[tokio::test]
-    async fn telegram_non_numeric_rejected() {
-        let tool = make_tool();
-        let result = tool.execute(&args("telegram", "abc", "hello")).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.contains("numeric chat_id"), "Error should mention numeric: {err}");
-    }
+    // Telegram recipient pre-validation (@username, non-numeric) is handled in the
+    // bridge layer (connector_bridge.rs), not in this tool. See Change 5 / P3.
 
     #[tokio::test]
     async fn telegram_default_passes_validation() {
