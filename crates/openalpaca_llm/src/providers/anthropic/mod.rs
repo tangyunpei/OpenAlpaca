@@ -231,6 +231,14 @@ impl AnthropicProvider {
                 })
                 .collect();
             body["tools"] = serde_json::Value::Array(tools);
+
+            if let Some(ref choice) = request.tool_choice {
+                body["tool_choice"] = match choice {
+                    ToolChoice::Auto => serde_json::json!({"type": "auto"}),
+                    ToolChoice::Any => serde_json::json!({"type": "any"}),
+                    ToolChoice::Tool(name) => serde_json::json!({"type": "tool", "name": name}),
+                };
+            }
         }
 
         body

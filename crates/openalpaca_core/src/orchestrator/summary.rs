@@ -80,6 +80,7 @@ impl Orchestrator {
                 agent_id: Some("orchestrator_summary".to_string()),
                 task_id: None,
             },
+            tool_choice: None,
         };
 
         let call_start = std::time::Instant::now();

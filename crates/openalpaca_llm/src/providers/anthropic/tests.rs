@@ -13,6 +13,7 @@ fn test_request_serialization() {
         model: None,
         temperature: Some(0.7),
         max_tokens: None,
+        tool_choice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -178,6 +179,7 @@ fn test_request_serialization_filters_empty_text_parts() {
         model: None,
         temperature: None,
         max_tokens: None,
+        tool_choice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -203,6 +205,7 @@ fn test_request_serialization_empty_parts_get_placeholder() {
         model: None,
         temperature: None,
         max_tokens: None,
+        tool_choice: None,
     };
 
     let body = provider.build_request_body(&request);

@@ -12,6 +12,7 @@ pub mod task_state;
 
 mod bootstrap;
 mod context_builder;
+mod direct_send;
 mod extraction;
 mod handlers;
 mod memory_ops;

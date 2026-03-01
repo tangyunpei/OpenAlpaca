@@ -35,6 +35,7 @@ pub struct RouterRequest {
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     pub context: RequestContext,
+    pub tool_choice: Option<ToolChoice>,
 }
 
 /// Errors from the LLM router.
@@ -569,6 +570,7 @@ impl LlmRouter {
                     model: Some(model.to_string()),
                     temperature: request.temperature,
                     max_tokens: request.max_tokens,
+                    tool_choice: request.tool_choice.clone(),
                 };
 
                 match entry
@@ -755,6 +757,7 @@ impl LlmRouter {
                 model: Some(original_model.to_string()),
                 temperature: request.temperature,
                 max_tokens: request.max_tokens,
+                tool_choice: None,
             };
             match cli_backend.chat(cli_request).await {
                 Ok(response) => {
