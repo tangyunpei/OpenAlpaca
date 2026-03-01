@@ -14,7 +14,7 @@ use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 use chrono::Utc;
-use openalpaca_llm::{ChatMessage, ContentPart, ImageSource, Role};
+use openalpaca_llm::{ChatMessage, ContentPart, ImageSource, Role, ToolChoice};
 use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository, PreferenceRepository};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -158,6 +158,21 @@ impl Orchestrator {
         scope_ctx: &MemoryScopeContext,
         current_parts: Option<&[ContentPart]>,
     ) -> Result<String, String> {
+        // Layer 1: Deterministic direct send — bypass LLM entirely
+        if let Some(result) = self.try_direct_send(tool_suggestion_query, owner_id).await {
+            let response = match result {
+                Ok(summary) => summary,
+                Err(e) => format!("⚠️ 发送失败: {e}"),
+            };
+            self.bus.publish(SystemEvent::AgentResponse {
+                request_id,
+                agent_id: "orchestrator".to_string(),
+                content: response.clone(),
+                timestamp: Utc::now(),
+            });
+            return Ok(response);
+        }
+
         let system_persona = match self.system_persona.read() {
             Ok(guard) => guard.clone(),
             Err(poisoned) => {
@@ -277,6 +292,14 @@ impl Orchestrator {
                     system_prompt.push('\n');
                     system_prompt.push_str(&send_ctx);
                 }
+                system_prompt.push_str(
+                    "\n<send_rules>\n\
+                     - If the user asks to send a message but did NOT provide specific text, \
+                     compose a brief, natural message based on context, then call send_message.\n\
+                     - NEVER claim a message was sent without calling the send_message tool.\n\
+                     - Only report success/failure based on the tool's actual return value.\n\
+                     </send_rules>"
+                );
             }
 
             let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
@@ -291,6 +314,11 @@ impl Orchestrator {
             config_for_loop = LoopConfig {
                 max_rounds: 4,
                 max_tools_per_round: 2,
+                initial_tool_choice: if tool_defs.iter().any(|d| d.name == "send_message") {
+                    Some(ToolChoice::Tool("send_message".to_string()))
+                } else {
+                    None
+                },
                 ..self.loop_config.clone()
             };
             tools_for_loop = tool_defs;

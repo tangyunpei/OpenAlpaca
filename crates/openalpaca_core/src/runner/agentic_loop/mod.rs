@@ -3,7 +3,7 @@ use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use openalpaca_llm::{
     ChatMessage, ChatRequest, FinishReason, LlmProvider, LlmRouter, LlmRouterError, RequestContext,
-    RouterRequest, ToolDefinition,
+    RouterRequest, ToolChoice, ToolDefinition,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -220,6 +220,9 @@ pub struct LoopConfig {
     /// context compression. Each "round" is roughly 3 messages (assistant +
     /// tool results). Default: `4`.
     pub context_tail_keep: usize,
+    /// Tool choice to force on the first round only (`rounds == 0`).
+    /// After the first round, reverts to `None` (auto).
+    pub initial_tool_choice: Option<ToolChoice>,
 }
 
 impl Default for LoopConfig {
@@ -236,6 +239,7 @@ impl Default for LoopConfig {
             fallback_output_rate: FALLBACK_OUTPUT_RATE,
             max_context_tokens: 0,
             context_tail_keep: 4,
+            initial_tool_choice: None,
         }
     }
 }
@@ -289,6 +293,7 @@ impl LoopConfig {
             fallback_output_rate: FALLBACK_OUTPUT_RATE,
             max_context_tokens: 0,
             context_tail_keep: 4,
+            initial_tool_choice: None,
         }
     }
 
@@ -504,6 +509,11 @@ pub async fn run_agentic_loop(
             model: None,
             temperature: None,
             max_tokens: None,
+            tool_choice: if rounds == 0 {
+                config.initial_tool_choice.clone()
+            } else {
+                None
+            },
         };
 
         tracing::debug!(
@@ -816,6 +826,11 @@ pub async fn run_agentic_loop_routed(
             temperature: None,
             max_tokens: None,
             context: context.clone(),
+            tool_choice: if rounds == 0 {
+                config.initial_tool_choice.clone()
+            } else {
+                None
+            },
         };
 
         tracing::debug!(

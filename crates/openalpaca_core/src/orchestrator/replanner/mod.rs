@@ -88,6 +88,7 @@ impl Replanner {
             temperature: Some(0.0),
             max_tokens: Some(2048),
             context: RequestContext::default(),
+            tool_choice: None,
         };
 
         let response = router

@@ -17,7 +17,7 @@ use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 use chrono::Utc;
-use openalpaca_llm::ChatMessage;
+use openalpaca_llm::{ChatMessage, ToolChoice};
 use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -298,6 +298,11 @@ impl Orchestrator {
             config_for_loop = LoopConfig {
                 max_rounds: skill_cfg.max_rounds,
                 max_tools_per_round: skill_cfg.max_tools_per_round,
+                initial_tool_choice: if tool_defs.iter().any(|d| d.name == "send_message") {
+                    Some(ToolChoice::Tool("send_message".to_string()))
+                } else {
+                    None
+                },
                 ..self.loop_config.clone()
             };
             tools_for_loop = tool_defs;

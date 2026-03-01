@@ -622,6 +622,7 @@ async fn plan_inner(
             temperature: Some(0.0),
             max_tokens: Some(limits.max_tokens),
             context: RequestContext::default(),
+            tool_choice: None,
         };
 
         let response = tokio::time::timeout(deadline, router.complete(request))

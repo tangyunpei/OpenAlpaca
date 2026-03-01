@@ -201,6 +201,17 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
 }
 
+/// Controls which tool the model should use.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolChoice {
+    /// Model decides whether to use a tool (default API behaviour).
+    Auto,
+    /// Model must use *some* tool (any).
+    Any,
+    /// Model must call this specific tool.
+    Tool(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
@@ -208,6 +219,7 @@ pub struct ChatRequest {
     pub model: Option<String>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
+    pub tool_choice: Option<ToolChoice>,
 }
 
 #[derive(Debug, Clone)]
