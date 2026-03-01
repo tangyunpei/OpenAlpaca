@@ -69,24 +69,76 @@ end tell"#,
             )
         };
 
-        let output = tokio::time::timeout(
-            Duration::from_secs(15),
-            Command::new("osascript")
-                .arg("-e")
-                .arg(&script)
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await
-        .map_err(|_| "osascript timed out after 15 seconds".to_string())?
-        .map_err(|e| format!("Failed to execute osascript: {}", e))?;
+        run_osascript(&script).await
+    }
 
-        if output.status.success() {
-            Ok(())
+    /// Send a file attachment to the given recipient or group chat.
+    pub async fn send_file(recipient: &str, file_path: &str, is_group: bool) -> Result<(), String> {
+        Self::send_file_from(recipient, file_path, is_group, None).await
+    }
+
+    /// Like [`send_file`] but accepts an explicit `from_account`.
+    pub async fn send_file_from(
+        recipient: &str,
+        file_path: &str,
+        is_group: bool,
+        from_account: Option<&str>,
+    ) -> Result<(), String> {
+        let escaped_recipient = escape_applescript(recipient);
+        let escaped_path = escape_applescript(file_path);
+
+        let script = if is_group {
+            format!(
+                r#"tell application "Messages"
+    set targetChat to chat id "{}"
+    send POSIX file "{}" to targetChat
+end tell"#,
+                escaped_recipient, escaped_path,
+            )
+        } else if let Some(acct) = from_account {
+            let escaped_account = escape_applescript(acct);
+            format!(
+                r#"tell application "Messages"
+    set targetService to 1st account whose id = "{}"
+    set targetBuddy to participant "{}" of targetService
+    send POSIX file "{}" to targetBuddy
+end tell"#,
+                escaped_account, escaped_recipient, escaped_path,
+            )
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(format!("osascript failed: {}", stderr))
-        }
+            format!(
+                r#"tell application "Messages"
+    set targetService to 1st account whose service type = iMessage
+    set targetBuddy to participant "{}" of targetService
+    send POSIX file "{}" to targetBuddy
+end tell"#,
+                escaped_recipient, escaped_path,
+            )
+        };
+
+        run_osascript(&script).await
+    }
+}
+
+/// Execute an AppleScript via `osascript` with a 15-second timeout.
+async fn run_osascript(script: &str) -> Result<(), String> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "osascript timed out after 15 seconds".to_string())?
+    .map_err(|e| format!("Failed to execute osascript: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("osascript failed: {}", stderr))
     }
 }
 
