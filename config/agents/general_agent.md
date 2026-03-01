@@ -12,6 +12,8 @@ skills:
   - "memory_search"
   - "workspace_read"
   - "workspace_write"
+  - "send_message"
+  - "send_file"
 denied_skills:
   - "update_soul"
   - "update_user"

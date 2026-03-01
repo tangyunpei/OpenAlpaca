@@ -765,3 +765,155 @@ fn test_suggest_tools_bare_imessage_no_send_message_still_negative() {
         tools
     );
 }
+
+// --- send_file tool suggestion tests ---
+
+#[test]
+fn test_suggest_tools_send_file_via_telegram() {
+    let tools = parser().suggest_tools("send a file via telegram");
+    assert!(
+        tools.contains(&"send_file".to_string()),
+        "Expected send_file: {:?}",
+        tools
+    );
+    assert!(
+        !tools.contains(&"send_message".to_string()),
+        "send_file should suppress send_message: {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_send_photo_via_imessage() {
+    let tools = parser().suggest_tools("send a photo via imessage");
+    assert!(
+        tools.contains(&"send_file".to_string()),
+        "Expected send_file: {:?}",
+        tools
+    );
+    assert!(
+        !tools.contains(&"send_message".to_string()),
+        "send_file should suppress send_message: {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_send_image_via_telegram() {
+    let tools = parser().suggest_tools("send image to friend via telegram");
+    assert!(
+        tools.contains(&"send_file".to_string()),
+        "Expected send_file: {:?}",
+        tools
+    );
+    assert!(
+        !tools.contains(&"send_message".to_string()),
+        "send_file should suppress send_message: {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_send_document() {
+    let tools = parser().suggest_tools("send document to Bob");
+    assert!(
+        tools.contains(&"send_file".to_string()),
+        "Expected send_file: {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_chinese_send_file() {
+    let tools = parser().suggest_tools("发文件到telegram");
+    assert!(
+        tools.contains(&"send_file".to_string()),
+        "Expected send_file for '发文件到telegram': {:?}",
+        tools
+    );
+    assert!(
+        !tools.contains(&"send_message".to_string()),
+        "send_file should suppress send_message: {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_chinese_send_photo() {
+    let tools = parser().suggest_tools("发图片给朋友");
+    assert!(
+        tools.contains(&"send_file".to_string()),
+        "Expected send_file for '发图片给朋友': {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_chinese_send_video() {
+    let tools = parser().suggest_tools("发视频到imessage");
+    assert!(
+        tools.contains(&"send_file".to_string()),
+        "Expected send_file for '发视频到imessage': {:?}",
+        tools
+    );
+    assert!(
+        !tools.contains(&"send_message".to_string()),
+        "send_file should suppress send_message: {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_send_message_not_suppressed_without_file() {
+    let tools = parser().suggest_tools("send greetings via imessage");
+    assert!(
+        tools.contains(&"send_message".to_string()),
+        "Expected send_message without file keywords: {:?}",
+        tools
+    );
+    assert!(
+        !tools.contains(&"send_file".to_string()),
+        "Should NOT have send_file without file keywords: {:?}",
+        tools
+    );
+}
+
+// --- multi-turn plain text continuation: intent must be empty ---
+
+#[test]
+fn test_suggest_tools_plain_continuation_chinese_no_tools() {
+    // "好的，发吧" is a plain text follow-up, no send keywords → empty
+    let tools = parser().suggest_tools("好的，发吧");
+    assert!(
+        tools.is_empty(),
+        "Plain continuation should suggest no tools: {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_plain_continuation_english_no_tools() {
+    // "ok go ahead" is a plain text follow-up → empty
+    let tools = parser().suggest_tools("ok go ahead");
+    assert!(
+        tools.is_empty(),
+        "Plain continuation should suggest no tools: {:?}",
+        tools
+    );
+}
+
+#[test]
+fn test_suggest_tools_text_send_continuation_only_send_message() {
+    // "发消息给他" has send_message keywords but no file keywords
+    let tools = parser().suggest_tools("发消息给他");
+    assert!(
+        tools.contains(&"send_message".to_string()),
+        "Expected send_message for '发消息给他': {:?}",
+        tools
+    );
+    assert!(
+        !tools.contains(&"send_file".to_string()),
+        "Should NOT have send_file for '发消息给他': {:?}",
+        tools
+    );
+}

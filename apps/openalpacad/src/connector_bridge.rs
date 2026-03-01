@@ -241,6 +241,82 @@ impl ConnectorSendProvider for ConnectorSendBridge {
                     .map_err(|e| format!("Telegram send_document failed: {}", e))?;
                 Ok(format!("Sent file '{}' to Telegram chat {}", filename, chat_id))
             }
+            #[cfg(target_os = "macos")]
+            "imessage" => {
+                let pref_repo = PreferenceRepository::new(&self.db);
+                let (target, is_group) = if recipient == "default" {
+                    let target = pref_repo
+                        .get(&self.local_user_id, "imessage.last_reply_target")
+                        .ok()
+                        .flatten()
+                        .map(|p| p.value)
+                        .or_else(|| {
+                            pref_repo
+                                .get(&self.local_user_id, "imessage.last_chat_id")
+                                .ok()
+                                .flatten()
+                                .map(|p| p.value)
+                        })
+                        .ok_or(
+                            "No default iMessage target found. Please specify a recipient.",
+                        )?;
+                    let is_group = pref_repo
+                        .get(&self.local_user_id, "imessage.last_is_group")
+                        .ok()
+                        .flatten()
+                        .map(|p| p.value == "true")
+                        .unwrap_or_else(|| target.starts_with("chat"));
+                    (target, is_group)
+                } else {
+                    let is_group = recipient.starts_with("chat");
+                    (recipient.to_string(), is_group)
+                };
+
+                let from_account = pref_repo
+                    .get(&self.local_user_id, "imessage.last_send_account")
+                    .ok()
+                    .flatten()
+                    .map(|p| p.value);
+
+                openalpaca_connectors::imessage::IMessageSender::send_file_from(
+                    &target,
+                    file_path,
+                    is_group,
+                    from_account.as_deref(),
+                )
+                .await?;
+
+                // Send caption as separate text message if provided
+                let caption_note = if let Some(cap) = caption
+                    && !cap.is_empty()
+                {
+                    match openalpaca_connectors::imessage::IMessageSender::send_from(
+                        &target,
+                        cap,
+                        is_group,
+                        from_account.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(()) => String::new(),
+                        Err(e) => {
+                            tracing::warn!(target = %target, "iMessage caption send failed (file sent OK): {e}");
+                            format!(" (note: caption failed: {})", e)
+                        }
+                    }
+                } else {
+                    String::new()
+                };
+
+                Ok(format!(
+                    "Sent file '{}' to iMessage: {}{}",
+                    filename, target, caption_note
+                ))
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            "imessage" => Err("iMessage is only available on macOS".to_string()),
+
             _ => Err(format!("File sending not supported on channel: '{}'", channel)),
         }
     }
@@ -250,6 +326,8 @@ impl ConnectorSendProvider for ConnectorSendBridge {
         if self.telegram_bot().is_some() {
             channels.push("telegram".to_string());
         }
+        #[cfg(target_os = "macos")]
+        channels.push("imessage".to_string());
         channels
     }
 }

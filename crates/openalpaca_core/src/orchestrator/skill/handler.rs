@@ -271,8 +271,8 @@ impl Orchestrator {
             );
             system_prompt.push_str(&format_tool_guidance(&tool_defs));
 
-            // Inject factual send_context when send_message is available
-            if tool_defs.iter().any(|d| d.name == "send_message") {
+            // Inject factual send_context when send_message or send_file is available
+            if tool_defs.iter().any(|d| d.name == "send_message" || d.name == "send_file") {
                 let send_ctx = self.build_send_context(owner_id);
                 if !send_ctx.is_empty() {
                     system_prompt.push('\n');
@@ -298,10 +298,19 @@ impl Orchestrator {
             config_for_loop = LoopConfig {
                 max_rounds: skill_cfg.max_rounds,
                 max_tools_per_round: skill_cfg.max_tools_per_round,
-                initial_tool_choice: if tool_defs.iter().any(|d| d.name == "send_message") {
-                    Some(ToolChoice::Tool("send_message".to_string()))
-                } else {
-                    None
+                initial_tool_choice: {
+                    let has_send_msg = tool_defs.iter().any(|d| d.name == "send_message");
+                    let has_send_file = tool_defs.iter().any(|d| d.name == "send_file");
+                    if has_send_msg && has_send_file {
+                        // Skill explicitly declared both tools — let LLM decide
+                        Some(ToolChoice::Any)
+                    } else if has_send_msg {
+                        Some(ToolChoice::Tool("send_message".to_string()))
+                    } else if has_send_file {
+                        Some(ToolChoice::Tool("send_file".to_string()))
+                    } else {
+                        None
+                    }
                 },
                 ..self.loop_config.clone()
             };

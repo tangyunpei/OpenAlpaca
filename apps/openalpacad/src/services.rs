@@ -633,6 +633,7 @@ fn build_tool_registry(
         "wait_for_subagents",
         // Connector tools
         "send_message",
+        "send_file",
     ];
     for tool in openalpaca_core::tools::config::load_tools_from_dir(&tools_config_dir) {
         if protected_builtins.contains(&tool.definition.name.as_str()) {

@@ -1,6 +1,7 @@
 mod file_ops;
 mod helpers;
 mod memory_search;
+mod send_file;
 mod send_message;
 mod shell_execute;
 // Stub tools — not registered (always returned "not implemented").
@@ -143,7 +144,8 @@ pub fn builtin_tools_with_persona_context(
     tools.push(update_user_tool(user_ctx));
     tools.push(update_identity_tool(identity_ctx));
     if let Some(provider) = connector_send_provider {
-        tools.push(send_message::send_message_tool(provider));
+        tools.push(send_message::send_message_tool(provider.clone()));
+        tools.push(send_file::send_file_tool(provider));
     }
     tools
 }

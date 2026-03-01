@@ -9,13 +9,16 @@ pub fn detect_hallucinated_send(
     tool_calls_made: usize,
     response: &str,
 ) -> bool {
-    if tool_calls_made > 0 || !tool_names.contains(&"send_message") {
+    if tool_calls_made > 0 {
+        return false;
+    }
+    if !tool_names.contains(&"send_message") && !tool_names.contains(&"send_file") {
         return false;
     }
 
-    // Chinese patterns
+    // Chinese patterns (message)
     const CN_PATTERNS: &[&str] = &["发送成功", "已发送", "已成功发送", "发送完成"];
-    // English patterns (matched case-insensitively on ASCII)
+    // English patterns (message, matched case-insensitively on ASCII)
     const EN_PATTERNS: &[&str] = &[
         "sent successfully",
         "message sent",
@@ -23,10 +26,13 @@ pub fn detect_hallucinated_send(
         "was sent",
         "been delivered",
     ];
+    // File-specific patterns
+    const FILE_EN_PATTERNS: &[&str] = &["file sent", "sent the file"];
+    const FILE_CN_PATTERNS: &[&str] = &["文件已发送", "已发送文件", "文件发送成功"];
 
     let lower = response.to_ascii_lowercase();
 
-    // ✅ emoji is a strong signal on its own when combined with send_message + 0 calls
+    // ✅ emoji is a strong signal on its own when combined with send tool + 0 calls
     if response.contains('✅') {
         return true;
     }
@@ -40,6 +46,20 @@ pub fn detect_hallucinated_send(
     for pat in EN_PATTERNS {
         if lower.contains(pat) {
             return true;
+        }
+    }
+
+    // File-specific hallucination patterns
+    if tool_names.contains(&"send_file") {
+        for pat in FILE_CN_PATTERNS {
+            if response.contains(pat) {
+                return true;
+            }
+        }
+        for pat in FILE_EN_PATTERNS {
+            if lower.contains(pat) {
+                return true;
+            }
         }
     }
 
@@ -176,6 +196,44 @@ mod tests {
             &["send_message"],
             0,
             "消息已发送到你的Telegram联系人。"
+        ));
+    }
+
+    // --- send_file hallucination guard tests ---
+
+    #[test]
+    fn hallucination_detected_send_file_english() {
+        assert!(detect_hallucinated_send(
+            &["send_file"],
+            0,
+            "File sent successfully via Telegram!"
+        ));
+    }
+
+    #[test]
+    fn hallucination_detected_send_file_chinese() {
+        assert!(detect_hallucinated_send(
+            &["send_file"],
+            0,
+            "文件已发送到你的Telegram联系人。"
+        ));
+    }
+
+    #[test]
+    fn no_hallucination_send_file_when_tool_called() {
+        assert!(!detect_hallucinated_send(
+            &["send_file"],
+            1,
+            "文件已发送到你的Telegram联系人。"
+        ));
+    }
+
+    #[test]
+    fn no_hallucination_send_file_normal_response() {
+        assert!(!detect_hallucinated_send(
+            &["send_file"],
+            0,
+            "请告诉我文件路径，我来帮你发送。"
         ));
     }
 }

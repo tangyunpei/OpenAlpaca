@@ -98,6 +98,7 @@ struct ToolFlags {
     update_soul: bool,
     update_user: bool,
     send_message: bool,
+    send_file: bool,
 }
 
 impl ToolFlags {
@@ -123,8 +124,12 @@ impl ToolFlags {
         if self.shell_execute {
             out.push("shell_execute".to_string());
         }
-        if self.send_message {
+        // Precedence: send_file suppresses send_message (send_file has caption param)
+        if self.send_message && !self.send_file {
             out.push("send_message".to_string());
+        }
+        if self.send_file {
+            out.push("send_file".to_string());
         }
         out
     }
@@ -469,6 +474,23 @@ impl IntentParser {
                 || (lower.contains("给") && (lower.contains("发") || lower.contains("消息") || lower.contains("短信"))
                     && (lower.contains("telegram") || lower.contains("imessage")))
                 || (lower.contains("via ") && (lower.contains("telegram") || lower.contains("imessage"))),
+
+            send_file: lower.contains("send file")
+                || lower.contains("send photo")
+                || lower.contains("send image")
+                || lower.contains("send document")
+                || lower.contains("send a file")
+                || lower.contains("send a photo")
+                || lower.contains("send an image")
+                || lower.contains("发文件")
+                || lower.contains("发图片")
+                || lower.contains("发照片")
+                || lower.contains("发视频")
+                || lower.contains("发附件")
+                || lower.contains("发文档")
+                || (lower.contains("file") && lower.contains("send") && (lower.contains("imessage") || lower.contains("telegram")))
+                || (lower.contains("photo") && lower.contains("send") && (lower.contains("imessage") || lower.contains("telegram")))
+                || (lower.contains("image") && lower.contains("send") && (lower.contains("imessage") || lower.contains("telegram"))),
         };
 
         flags.to_vec()
