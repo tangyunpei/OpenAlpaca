@@ -176,6 +176,21 @@ impl Orchestrator {
             .await
         } else if self.llm_router.is_some()
             && matches!(intent, Intent::SimpleQuery { .. })
+            && self.intent_parser.is_social_message(&intent_source_content)
+            && super::query_handler::detect_active_send_hints(&ctx.recent_messages)
+                == super::query_handler::ActiveSendHints::default()
+        {
+            // Social fast path: ultra-light prompt for "ok", "thanks", "好的" etc.
+            mode = "social_fast_path".to_string();
+            self.bus.publish(SystemEvent::PlannerBypassed {
+                request_id,
+                reason: "social_fast_path".to_string(),
+                timestamp: Utc::now(),
+            });
+            self.handle_social_query(request_id, &model_input_content, &ctx)
+                .await
+        } else if self.llm_router.is_some()
+            && matches!(intent, Intent::SimpleQuery { .. })
             && self
                 .intent_parser
                 .is_fast_path_eligible(&intent_source_content)

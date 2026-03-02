@@ -632,15 +632,15 @@ impl IntentParser {
             "不用",
         ];
         let trimmed_lower = lower.trim();
-        if SOCIAL.contains(&trimmed_lower)
-            || trimmed_lower.split_whitespace().count() <= 2
-        {
+        if SOCIAL.contains(&trimmed_lower) {
             return true;
         }
 
         // Compute task verbs BEFORE the short-message check to prevent
         // false positives like "Fix the bug" or "Deploy the app" being
         // treated as simple queries just because they're under 100 chars.
+        // This also prevents Chinese task messages (no whitespace between
+        // words) from being caught by the word-count heuristic.
         const TASK_VERBS: &[&str] = &[
             "create",
             "build",
@@ -669,8 +669,35 @@ impl IntentParser {
             "发送",
             "修复",
             "部署",
+            "分析",
+            "生成",
+            "设计",
+            "组织",
+            "下载",
+            "总结",
+            "搜索",
+            "运行",
+            "调试",
+            "实现",
+            "构建",
+            "获取",
+            "查找",
+            "写",
+            "做",
+            "改",
+            "找",
+            "删",
+            "测",
+            "装",
         ];
         let has_task_verb = TASK_VERBS.iter().any(|v| lower.contains(v));
+
+        // Rule 2b: Very short (≤2 whitespace words) + no task verb → simple
+        // Gated on !has_task_verb so Chinese task messages (which have no
+        // spaces and appear as 1 "word") are not falsely classified.
+        if trimmed_lower.split_whitespace().count() <= 2 && !has_task_verb {
+            return true;
+        }
 
         // Rule 3: Short + no task verbs → simple query
         // "What is a closure?" (19 chars, no verb) → true
@@ -685,6 +712,20 @@ impl IntentParser {
         }
 
         false
+    }
+
+    /// Check if a message is a short social/acknowledgement phrase.
+    ///
+    /// Used by the social fast path to skip heavy prompt assembly for
+    /// trivial conversational replies like "ok", "thanks", "好的".
+    pub fn is_social_message(&self, content: &str) -> bool {
+        const SOCIAL: &[&str] = &[
+            "thanks", "thank you", "ok", "okay", "got it", "sounds good",
+            "yes", "no", "sure", "right",
+            "好的", "没问题", "谢谢", "嗯", "明白", "收到", "对", "是的", "不是", "不用",
+        ];
+        let trimmed = content.trim().to_lowercase();
+        SOCIAL.contains(&trimmed.as_str())
     }
 }
 
