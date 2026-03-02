@@ -109,6 +109,17 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["orchestrator", "costs"],
         field: "extract_min_content_len",
     },
+    // Orchestrator: Background Models
+    TomlMapping {
+        schema_key: "daemon.orchestrator.summary_model",
+        section: &["orchestrator", "costs"],
+        field: "summary_model",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.extraction_model",
+        section: &["orchestrator", "costs"],
+        field: "extraction_model",
+    },
     // Orchestrator: Task Extraction
     TomlMapping {
         schema_key: "daemon.orchestrator.task_extract_enabled",

@@ -122,6 +122,14 @@ pub struct CostsConfig {
     pub task_extract_max_daily_cost_usd: f64,
     /// Minimum content length (chars) for task output to trigger extraction.
     pub task_extract_min_content_len: usize,
+    /// Model ID for background summary generation (e.g. claude-haiku-4-5-20251001).
+    /// If None, falls back to the router's default model.
+    #[serde(default)]
+    pub summary_model: Option<String>,
+    /// Model ID for background user trait extraction (e.g. claude-haiku-4-5-20251001).
+    /// If None, falls back to the router's default model.
+    #[serde(default)]
+    pub extraction_model: Option<String>,
 }
 
 impl Default for CostsConfig {
@@ -134,6 +142,8 @@ impl Default for CostsConfig {
             task_extract_enabled: true,
             task_extract_max_daily_cost_usd: 0.50,
             task_extract_min_content_len: 100,
+            summary_model: None,
+            extraction_model: None,
         }
     }
 }
