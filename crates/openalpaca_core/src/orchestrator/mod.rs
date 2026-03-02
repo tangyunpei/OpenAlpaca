@@ -127,9 +127,9 @@ pub struct Orchestrator {
     db: Option<Database>,
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     /// Per-lane turn counter for extraction frequency gating.
-    extraction_turn_counter: Mutex<HashMap<String, usize>>,
+    extraction_turn_counter: Arc<Mutex<HashMap<String, usize>>>,
     /// Path to USER.md for writing extraction results. Set via `set_user_path()`.
-    user_path: RwLock<Option<std::path::PathBuf>>,
+    user_path: Arc<RwLock<Option<std::path::PathBuf>>>,
     /// Path to IDENTITY.md for writing identity updates. Set via `set_identity_path()`.
     identity_path: RwLock<Option<std::path::PathBuf>>,
     /// Skill catalog for progressive skill loading and invocation.
@@ -159,7 +159,7 @@ pub struct Orchestrator {
 pub(super) struct ConversationContext {
     pub(super) summary: Option<String>,
     pub(super) recent_messages: Vec<ChatMessage>,
-    /// Raw (id, role, content) tuples for the "older" window — used by maybe_update_summary().
+    /// Raw (id, role, content) tuples for the "older" window — used by update_summary_background().
     pub(super) older_window: Vec<(i64, String, String)>,
     /// Current summary version from conversations table (for optimistic locking in update).
     pub(super) summary_version: i64,
@@ -244,8 +244,8 @@ impl Orchestrator {
             task_dispatcher,
             db,
             embedder,
-            extraction_turn_counter: Mutex::new(HashMap::new()),
-            user_path: RwLock::new(None),
+            extraction_turn_counter: Arc::new(Mutex::new(HashMap::new())),
+            user_path: Arc::new(RwLock::new(None)),
             identity_path: RwLock::new(None),
             skill_catalog,
             skill_router,

@@ -645,22 +645,58 @@ impl Orchestrator {
             }
         }
 
-        // 6 + 7. Summary update and user trait extraction run concurrently
-        // (both are fire-and-forget LLM calls that don't affect the response).
+        // 6 + 7. Summary update and user trait extraction run in background
+        // (both are fire-and-forget LLM calls that don't block the response).
         {
-            let summary_fut = self.maybe_update_summary(&lane_key, &ctx);
-            let extract_fut = async {
-                if let Ok(ref response_text) = result {
-                    self.maybe_extract_user_traits(
-                        &lane_key,
-                        &intent_source_content,
-                        response_text,
-                        owner_id,
+            use super::extraction::extract_user_traits_background;
+            use super::summary::update_summary_background;
+
+            let bg_db = self.db.clone();
+            let bg_router = self.llm_router.clone();
+            let bg_config = self.daemon_config.clone();
+            let bg_counter = self.extraction_turn_counter.clone();
+            let bg_embedder = self.embedder.clone();
+            let bg_user_path = self.user_path.clone();
+            let bg_user_doc = self.user_document.clone();
+            let bg_bus = self.bus.clone();
+            let bg_lane = lane_key.to_string();
+            let bg_intent = intent_source_content.to_string();
+            let bg_owner = owner_id.map(|s| s.to_string());
+            let bg_response = result.as_ref().ok().cloned();
+
+            drop(tokio::spawn(async move {
+                // Summary — ctx moved here
+                if let (Some(db), Some(router)) = (bg_db.clone(), bg_router.clone()) {
+                    update_summary_background(
+                        db,
+                        router,
+                        bg_config.clone(),
+                        bg_lane.clone(),
+                        ctx,
                     )
                     .await;
                 }
-            };
-            tokio::join!(summary_fut, extract_fut);
+                // Extraction
+                if let (Some(response_text), Some(owner)) = (&bg_response, &bg_owner)
+                    && let (Some(db), Some(router)) = (bg_db, bg_router)
+                {
+                    extract_user_traits_background(
+                        db,
+                        router,
+                        bg_config,
+                        bg_counter,
+                        bg_embedder,
+                        bg_user_path,
+                        bg_user_doc,
+                        bg_bus,
+                        bg_lane,
+                        bg_intent,
+                        response_text.clone(),
+                        owner.clone(),
+                    )
+                    .await;
+                }
+            }));
         }
 
         // 8. Check if bootstrap onboarding is complete

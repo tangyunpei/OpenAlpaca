@@ -90,9 +90,9 @@ fn test_keys_in_category() {
 #[test]
 fn test_daemon_keys_in_category() {
     let keys = keys_in_category("Daemon");
-    // 42 daemon keys + 1 alias (system.max_agents) + 2 streaming keys + 1 lead_max_concurrent_subagents = 46 total
+    // 42 daemon keys + 1 alias (system.max_agents) + 2 streaming keys + 1 lead_max_concurrent_subagents + 2 background model keys = 48 total
     // (web_search keys moved to AI category)
-    assert_eq!(keys.len(), 46);
+    assert_eq!(keys.len(), 48);
     assert!(keys.iter().any(|d| d.key == "system.max_agents"));
     assert!(
         keys.iter()
