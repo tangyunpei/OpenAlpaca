@@ -143,11 +143,16 @@ impl NotificationDispatcher {
         } else if task.source_lane.ends_with(":imessage") {
             self.try_imessage_notification(&task.source_lane, &content)
                 .await;
+        } else if task.source_lane.ends_with(":discord") {
+            self.try_discord_notification(&task.source_lane, &content)
+                .await;
         } else {
             // Cross-channel delivery for non-connector-origin tasks
             let cross_chat_id = self.try_cross_channel_telegram(&task.created_by, &content)
                 .await;
             self.try_cross_channel_imessage(&task.created_by, &content)
+                .await;
+            self.try_cross_channel_discord(&task.created_by, &content)
                 .await;
             // Spawn non-blocking artifact file delivery for cross-channel Telegram
             if let Some(chat_id) = cross_chat_id {
@@ -182,12 +187,17 @@ impl NotificationDispatcher {
         } else if task.source_lane.ends_with(":imessage") {
             self.try_imessage_notification(&task.source_lane, &content)
                 .await;
+        } else if task.source_lane.ends_with(":discord") {
+            self.try_discord_notification(&task.source_lane, &content)
+                .await;
         } else {
             // Cross-channel delivery for non-connector-origin tasks
             // No artifact delivery for failure notifications
             let _ = self.try_cross_channel_telegram(&task.created_by, &content)
                 .await;
             self.try_cross_channel_imessage(&task.created_by, &content)
+                .await;
+            self.try_cross_channel_discord(&task.created_by, &content)
                 .await;
         }
     }
@@ -359,6 +369,67 @@ impl NotificationDispatcher {
 
     #[cfg(not(target_os = "macos"))]
     async fn try_cross_channel_imessage(&self, _created_by: &str, _message: &str) {}
+
+    /// Send a notification to the Discord channel that originated the task.
+    /// Uses the user's stored `discord.last_channel_id` preference (set by
+    /// the connector on each incoming message) to resolve the target channel.
+    async fn try_discord_notification(&self, source_lane: &str, message: &str) {
+        if let Some(ref send) = self.connector_send {
+            let user_id = source_lane.strip_suffix(":discord").unwrap_or(source_lane);
+            let pref_repo = PreferenceRepository::new(&self.db);
+            if let Some(channel_id) = pref_repo
+                .get(user_id, "discord.last_channel_id")
+                .ok()
+                .flatten()
+                .map(|p| p.value)
+            {
+                if let Err(e) = send.send_message("discord", &channel_id, message).await {
+                    warn!("Failed to send Discord notification: {e}");
+                }
+            }
+        }
+    }
+
+    /// Cross-channel Discord delivery for tasks not originating from Discord.
+    async fn try_cross_channel_discord(&self, created_by: &str, message: &str) {
+        let send = match self.connector_send {
+            Some(ref s) => s,
+            None => return,
+        };
+        let pref_repo = PreferenceRepository::new(&self.db);
+
+        let should_notify = pref_repo
+            .get(created_by, "discord.notify_task_completion")
+            .ok()
+            .flatten()
+            .map(|p| p.value == "true")
+            .unwrap_or_else(|| {
+                // Fallback: check global default in system_config
+                ConfigRepository::new(&self.db)
+                    .get("discord.notify_task_completion")
+                    .ok()
+                    .flatten()
+                    .map(|v| v == "true")
+                    .unwrap_or(false)
+            });
+        if !should_notify {
+            return;
+        }
+
+        let channel_id = match pref_repo
+            .get(created_by, "discord.last_channel_id")
+            .ok()
+            .flatten()
+            .map(|p| p.value)
+        {
+            Some(id) => id,
+            None => return,
+        };
+
+        if let Err(e) = send.send_message("discord", &channel_id, message).await {
+            warn!("Failed to send cross-channel Discord notification: {e}");
+        }
+    }
 
     /// Spawn a non-blocking artifact delivery task to a Telegram chat.
     fn spawn_artifact_delivery(&self, task_id: &str, chat_id: i64, outcome_json: Option<&str>, owner: &str) {

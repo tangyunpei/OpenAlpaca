@@ -21,6 +21,8 @@ default = []
 telegram = ["dep:teloxide", "dep:sha2"]
 # Enable iMessage connector (macOS only)
 imessage = ["dep:rusqlite", "dep:tokio-util", "dep:sha2"]
+# Enable Discord connector
+discord = ["dep:twilight-gateway", "dep:twilight-http", "dep:twilight-model", "dep:sha2", "dep:tokio-util", "dep:reqwest", "dep:rustls"]
 # Future: WeChat connector
 # wechat = []
 
@@ -50,5 +52,12 @@ teloxide = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
 
-# Optional: SHA-256 hashing for attachment dedup (telegram + imessage)
+# Optional: SHA-256 hashing for attachment dedup (telegram + imessage + discord)
 sha2 = { workspace = true, optional = true }
+
+# Optional: Discord (only when feature enabled)
+twilight-gateway = { workspace = true, optional = true }
+twilight-http = { workspace = true, optional = true }
+twilight-model = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring"] }

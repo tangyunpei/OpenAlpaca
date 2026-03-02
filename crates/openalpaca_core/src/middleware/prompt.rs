@@ -137,6 +137,7 @@ pub fn format_connector_guidance(
         let label = match name.as_str() {
             "imessage" => "iMessage (macOS — sends via AppleScript)",
             "telegram" => "Telegram",
+            "discord" => "Discord",
             _ => name.as_str(),
         };
         block.push_str(&format!("- {} [active]\n", label));
@@ -145,6 +146,7 @@ pub fn format_connector_guidance(
         let label = match *ch {
             "imessage" => "iMessage (macOS — sends via AppleScript)",
             "telegram" => "Telegram",
+            "discord" => "Discord",
             _ => ch,
         };
         block.push_str(&format!("- {} [send-capable]\n", label));
@@ -165,6 +167,7 @@ pub fn format_message_source(source: &str) -> String {
     let label = match source {
         "imessage" => "iMessage",
         "telegram" => "Telegram",
+        "discord" => "Discord",
         "gui" => "Desktop GUI",
         "cli" => "CLI",
         _ => return String::new(),
@@ -318,5 +321,47 @@ mod tests {
         let sendable = vec!["imessage".to_string()];
         let result = format_connector_guidance(&statuses, Some(&sendable));
         assert!(result.contains("AppleScript"));
+    }
+
+    // ── Discord-specific tests ───────────────────────────────────────
+
+    #[test]
+    fn test_connector_guidance_discord_active() {
+        let statuses = vec![("discord".to_string(), "active".to_string())];
+        let result = format_connector_guidance(&statuses, None);
+        assert!(result.contains("Discord [active]"));
+    }
+
+    #[test]
+    fn test_connector_guidance_discord_send_only() {
+        let statuses = vec![("discord".to_string(), "error".to_string())];
+        let sendable = vec!["discord".to_string()];
+        let result = format_connector_guidance(&statuses, Some(&sendable));
+        assert!(result.contains("Discord [send-capable]"));
+    }
+
+    #[test]
+    fn test_connector_guidance_discord_with_others() {
+        let statuses = vec![
+            ("telegram".to_string(), "active".to_string()),
+            ("discord".to_string(), "active".to_string()),
+        ];
+        let sendable = vec!["telegram".to_string(), "discord".to_string()];
+        let result = format_connector_guidance(&statuses, Some(&sendable));
+        assert!(result.contains("Telegram [active]"));
+        assert!(result.contains("Discord [active]"));
+    }
+
+    #[test]
+    fn test_message_source_discord() {
+        let result = format_message_source("discord");
+        assert!(result.contains("Discord"));
+        assert!(result.contains("This message arrived via: Discord"));
+    }
+
+    #[test]
+    fn test_message_source_unknown_empty() {
+        let result = format_message_source("unknown_channel");
+        assert!(result.is_empty());
     }
 }

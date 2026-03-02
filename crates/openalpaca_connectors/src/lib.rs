@@ -17,6 +17,9 @@ pub mod telegram;
 #[cfg(all(feature = "imessage", target_os = "macos"))]
 pub mod imessage;
 
+#[cfg(feature = "discord")]
+pub mod discord;
+
 pub mod startup;
 
 use arc_swap::ArcSwap;
@@ -110,6 +113,18 @@ impl ConnectorBuilder {
             local_user_id,
         )
     }
+
+    /// Build a Discord connector (requires `discord` feature).
+    #[cfg(feature = "discord")]
+    pub fn discord(
+        self,
+        token: String,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> discord::DiscordConnector {
+        discord::DiscordConnector::new(
+            token, self.db, self.gateway, self.daemon_config, cancel_token,
+        )
+    }
 }
 
 // Re-exports for convenience
@@ -118,6 +133,9 @@ pub use telegram::TelegramConnector;
 
 #[cfg(all(feature = "imessage", target_os = "macos"))]
 pub use imessage::IMessageConnector;
+
+#[cfg(feature = "discord")]
+pub use discord::DiscordConnector;
 
 /// Factory trait for creating connectors dynamically
 pub trait ConnectorFactory: Send + Sync {
@@ -142,6 +160,8 @@ pub fn get_supported_connectors() -> Vec<Box<dyn ConnectorFactory>> {
         Box::new(TelegramFactory),
         #[cfg(all(feature = "imessage", target_os = "macos"))]
         Box::new(IMessageFactory),
+        #[cfg(feature = "discord")]
+        Box::new(DiscordFactory),
     ];
 
     connectors
@@ -209,5 +229,42 @@ impl ConnectorFactory for IMessageFactory {
         });
 
         Ok(startup::ConnectorHandle::IMessage(cancel_token, running))
+    }
+}
+
+#[cfg(feature = "discord")]
+struct DiscordFactory;
+
+#[cfg(feature = "discord")]
+impl ConnectorFactory for DiscordFactory {
+    fn name(&self) -> &str {
+        "discord"
+    }
+
+    fn spawn(
+        &self,
+        token: String,
+        db: Database,
+        _bus: EventBus,
+        gateway: Arc<Gateway>,
+        daemon_config: Arc<ArcSwap<DaemonConfig>>,
+    ) -> Result<startup::ConnectorHandle, ConnectorError> {
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let connector = discord::DiscordConnector::new(
+            token,
+            Arc::new(db),
+            gateway,
+            daemon_config,
+            cancel_token.clone(),
+        );
+        let running = Arc::new(AtomicBool::new(true));
+        let guard = startup::RunningGuard(running.clone());
+        tokio::spawn(async move {
+            let _guard = guard;
+            if let Err(e) = connector.run_loop().await {
+                tracing::error!("Discord connector exited with error: {}", e);
+            }
+        });
+        Ok(startup::ConnectorHandle::Discord(cancel_token, running))
     }
 }

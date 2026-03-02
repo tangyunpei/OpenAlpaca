@@ -50,18 +50,18 @@ pub(super) fn send_message_tool(provider: ConnectorSendLock) -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "send_message".to_string(),
-            description: "Send a message to a contact via a connected channel (iMessage, Telegram)."
+            description: "Send a message to a contact via a connected channel (iMessage, Telegram, Discord)."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "channel": {
                         "type": "string",
-                        "description": "Channel identifier: \"telegram\" or \"imessage\""
+                        "description": "Channel identifier: \"telegram\", \"imessage\", or \"discord\""
                     },
                     "recipient": {
                         "type": "string",
-                        "description": "\"default\" for most recent conversation, or specific: chat_id (Telegram), phone/email (iMessage)."
+                        "description": "\"default\" for most recent conversation, or specific: chat_id (Telegram), phone/email (iMessage), channel_id (Discord)."
                     },
                     "content": {
                         "type": "string",

@@ -16,7 +16,7 @@ use crate::ConnectorBuilder;
 #[cfg(feature = "telegram")]
 use teloxide::dispatching::ShutdownToken;
 
-#[cfg(all(feature = "imessage", target_os = "macos"))]
+#[cfg(any(feature = "imessage", feature = "discord"))]
 use tokio_util::sync::CancellationToken;
 
 /// Handle to a running connector, allowing graceful shutdown.
@@ -30,6 +30,8 @@ pub enum ConnectorHandle {
     Telegram(ShutdownToken, Arc<AtomicBool>),
     #[cfg(all(feature = "imessage", target_os = "macos"))]
     IMessage(CancellationToken, Arc<AtomicBool>),
+    #[cfg(feature = "discord")]
+    Discord(CancellationToken, Arc<AtomicBool>),
     /// For future connectors or testing
     None,
 }
@@ -51,6 +53,8 @@ impl std::fmt::Debug for ConnectorHandle {
             ConnectorHandle::Telegram(..) => write!(f, "ConnectorHandle::Telegram"),
             #[cfg(all(feature = "imessage", target_os = "macos"))]
             ConnectorHandle::IMessage(..) => write!(f, "ConnectorHandle::IMessage"),
+            #[cfg(feature = "discord")]
+            ConnectorHandle::Discord(..) => write!(f, "ConnectorHandle::Discord"),
             ConnectorHandle::None => write!(f, "ConnectorHandle::None"),
         }
     }
@@ -64,6 +68,8 @@ impl ConnectorHandle {
             ConnectorHandle::Telegram(_, running) => running.load(Ordering::Acquire),
             #[cfg(all(feature = "imessage", target_os = "macos"))]
             ConnectorHandle::IMessage(_, running) => running.load(Ordering::Acquire),
+            #[cfg(feature = "discord")]
+            ConnectorHandle::Discord(_, running) => running.load(Ordering::Acquire),
             ConnectorHandle::None => false,
         }
     }
@@ -78,6 +84,10 @@ impl ConnectorHandle {
             }
             #[cfg(all(feature = "imessage", target_os = "macos"))]
             ConnectorHandle::IMessage(token, _) => {
+                token.cancel();
+            }
+            #[cfg(feature = "discord")]
+            ConnectorHandle::Discord(token, _) => {
                 token.cancel();
             }
             ConnectorHandle::None => {}

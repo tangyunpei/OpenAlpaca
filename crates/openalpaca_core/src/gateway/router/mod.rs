@@ -288,6 +288,7 @@ fn derive_user_and_source(source: &EventSource) -> (String, String) {
     match source {
         EventSource::Telegram { user_id, .. } => (user_id.clone(), "telegram".to_string()),
         EventSource::IMessage { sender, .. } => (sender.clone(), "imessage".to_string()),
+        EventSource::Discord { user_id, .. } => (user_id.clone(), "discord".to_string()),
         EventSource::Gui { connection_id } => (connection_id.clone(), "gui".to_string()),
         EventSource::Cli { session_id } => (session_id.clone(), "cli".to_string()),
         EventSource::Api { request_id } => (request_id.clone(), "api".to_string()),

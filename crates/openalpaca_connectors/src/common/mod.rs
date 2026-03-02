@@ -3,9 +3,9 @@
 use openalpaca_core::security::policy::Principal;
 use openalpaca_storage::IdentityRepository;
 
-#[cfg(any(feature = "telegram", feature = "imessage"))]
+#[cfg(any(feature = "telegram", feature = "imessage", feature = "discord"))]
 use openalpaca_core::gateway::ResolvedAttachment;
-#[cfg(any(feature = "telegram", feature = "imessage"))]
+#[cfg(any(feature = "telegram", feature = "imessage", feature = "discord"))]
 use openalpaca_storage::{Database, FileAsset, FileAssetRepository, FileAssetStatus};
 
 /// Resolve a Principal from an external identity.
@@ -79,7 +79,7 @@ pub enum LinkResult {
 ///
 /// Computes SHA-256, deduplicates, writes to disk, and inserts a DB row.
 /// Returns a `ResolvedAttachment` ready for `GatewayRequest`.
-#[cfg(any(feature = "telegram", feature = "imessage"))]
+#[cfg(any(feature = "telegram", feature = "imessage", feature = "discord"))]
 pub fn store_attachment(
     db: &Database,
     owner_id: &str,

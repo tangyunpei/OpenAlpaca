@@ -80,3 +80,34 @@ fn test_telegram_inbound_helper() {
     );
     assert_eq!(msg.content, "hi there");
 }
+
+#[cfg(feature = "discord")]
+#[test]
+fn test_discord_inbound_helper() {
+    let msg = discord_inbound("987654321", "user_42", Some("guild_1"), "hello discord");
+    assert_eq!(
+        msg.source,
+        EventSource::Discord {
+            channel_id: "987654321".into(),
+            user_id: "user_42".into(),
+            guild_id: Some("guild_1".into()),
+        }
+    );
+    assert_eq!(msg.content, "hello discord");
+    assert!(msg.attachments.is_empty());
+}
+
+#[cfg(feature = "discord")]
+#[test]
+fn test_discord_inbound_helper_no_guild() {
+    let msg = discord_inbound("123", "456", None, "dm message");
+    assert_eq!(
+        msg.source,
+        EventSource::Discord {
+            channel_id: "123".into(),
+            user_id: "456".into(),
+            guild_id: None,
+        }
+    );
+    assert_eq!(msg.content, "dm message");
+}
