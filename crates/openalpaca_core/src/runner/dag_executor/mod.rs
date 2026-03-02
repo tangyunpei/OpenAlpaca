@@ -220,6 +220,10 @@ pub async fn execute_dag(
             .map(|(i, n)| (n.node_id.clone(), i))
             .collect();
 
+        // Opt-7c: Pre-load workspace snapshot once per batch instead of N times
+        // for N concurrent nodes. Each node filters by its own workspace_keys.
+        let workspace_snapshot: Arc<Option<TaskState>> = Arc::new(load_task_state(task_id, &db));
+
         for (node_id, agent_id_str, node_snapshot) in ready_info {
             if running_count >= config.max_concurrent_agents {
                 break;
@@ -318,6 +322,7 @@ pub async fn execute_dag(
 
             let workspace_id_clone = workspace_id.clone();
             let connector_guidance_clone = connector_guidance.to_string();
+            let ws_snapshot = workspace_snapshot.clone();
             join_set.spawn(async move {
                 execute_single_node(
                     node_snapshot,
@@ -334,6 +339,7 @@ pub async fn execute_dag(
                     token_clone,
                     workspace_id_clone,
                     connector_guidance_clone,
+                    ws_snapshot,
                 )
                 .await
             });
@@ -686,6 +692,7 @@ async fn execute_single_node(
     cancel_token: Option<CancellationToken>,
     workspace_id: Option<String>,
     connector_guidance: String,
+    workspace_snapshot: Arc<Option<TaskState>>,
 ) -> NodeResult {
     let agent_id = agent.id.clone();
 
@@ -744,8 +751,13 @@ async fn execute_single_node(
         ChatMessage::user(&task_description),
     ];
 
-    // Inject workspace entries that this node depends on
-    let workspace_context = load_workspace_context(&task_id, &db, &node.workspace_keys);
+    // Inject workspace entries that this node depends on.
+    // Uses pre-loaded snapshot (Opt-7c) to avoid redundant DB reads per node.
+    let workspace_context = if let Some(ref state) = *workspace_snapshot {
+        state.workspace.format_for_prompt(&node.workspace_keys)
+    } else {
+        load_workspace_context(&task_id, &db, &node.workspace_keys)
+    };
     if !workspace_context.is_empty() {
         messages.push(ChatMessage::user(&format!(
             "<workspace>\n\
@@ -847,6 +859,17 @@ pub(crate) fn mark_ready_nodes(dag: &mut TaskDag) {
 }
 
 /// Load workspace context filtered by the node's workspace_keys.
+/// Load the full TaskState from the DB — used by Opt-7c to pre-load a shared
+/// workspace snapshot once per batch instead of once per concurrent node.
+fn load_task_state(task_id: &str, db: &Option<Database>) -> Option<TaskState> {
+    let db = db.as_ref()?;
+    let repo = openalpaca_storage::repository::TaskRepository::new(db);
+    let task = repo.get(task_id).ok()??;
+    task.state_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str(json).ok())
+}
+
 fn load_workspace_context(
     task_id: &str,
     db: &Option<Database>,

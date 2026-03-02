@@ -221,54 +221,89 @@ pub async fn extract_task_memories(
         "source_path": params.source_path,
     });
 
-    let mut stored = 0usize;
+    // Opt-9: Collect valid extractions first, then batch-embed once.
+    struct ValidExtraction<'a> {
+        content: &'a str,
+        kind: MemoryKind,
+        importance: f64,
+        confidence: f64,
+    }
+
+    let mut valid: Vec<ValidExtraction<'_>> = Vec::new();
     for extraction in extractions.iter().take(5) {
         let content = match extraction.get("content").and_then(|v| v.as_str()) {
             Some(c) if !c.is_empty() => c,
             _ => continue,
         };
-        let kind_str = extraction
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("fact");
-        let importance = extraction
-            .get("importance")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.6);
         let confidence = extraction
             .get("confidence")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.7);
-
         if confidence < 0.5 {
             continue;
         }
-
+        let kind_str = extraction
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("fact");
         let kind = match kind_str {
             "preference" => MemoryKind::Preference,
             _ => MemoryKind::Fact,
         };
+        let importance = extraction
+            .get("importance")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.6);
+        valid.push(ValidExtraction {
+            content,
+            kind,
+            importance,
+            confidence,
+        });
+    }
 
-        // Use workspace scope if available, otherwise Global.
-        let (scope, scope_id) = if let Some(ref ws) = params.workspace_id {
-            (MemoryScope::Workspace, ws.as_str())
-        } else {
-            (MemoryScope::Global, "")
-        };
-        let result = persist_memory_item(
+    if valid.is_empty() {
+        return;
+    }
+
+    // Batch-embed all content strings in a single API call.
+    let batch_embeddings: Vec<Option<Vec<f32>>> = if let Some(ref emb) = embedder {
+        let texts: Vec<&str> = valid.iter().map(|v| v.content).collect();
+        match emb.embed(&texts).await {
+            Ok(embeddings) => embeddings.into_iter().map(Some).collect(),
+            Err(e) => {
+                tracing::warn!("Batch embedding failed, falling back to per-item: {e}");
+                vec![None; valid.len()]
+            }
+        }
+    } else {
+        vec![None; valid.len()]
+    };
+
+    // Use workspace scope if available, otherwise Global.
+    let (scope, scope_id) = if let Some(ref ws) = params.workspace_id {
+        (MemoryScope::Workspace, ws.as_str())
+    } else {
+        (MemoryScope::Global, "")
+    };
+
+    let mut stored = 0usize;
+    for (ext, pre_emb) in valid.iter().zip(batch_embeddings.into_iter()) {
+        let result = persist_memory_item_with_embedding(
             &repo,
             &embedder,
             &params.owner_id,
-            content,
-            kind,
+            ext.content,
+            ext.kind,
             scope,
             scope_id,
             MemorySource::Tool,
-            importance,
-            confidence,
+            ext.importance,
+            ext.confidence,
             Some(&metadata),
             supersession_threshold,
             jaccard_threshold,
+            pre_emb,
         )
         .await;
         match result {
@@ -306,8 +341,48 @@ pub async fn persist_memory_item(
     supersession_threshold: f64,
     fts_jaccard_threshold: f64,
 ) -> PersistResult {
-    // Step 1: Embed
-    let new_embedding = if let Some(emb) = embedder {
+    persist_memory_item_with_embedding(
+        repo,
+        embedder,
+        owner_id,
+        content,
+        kind,
+        scope,
+        scope_id,
+        source,
+        importance,
+        confidence,
+        metadata,
+        supersession_threshold,
+        fts_jaccard_threshold,
+        None,
+    )
+    .await
+}
+
+/// Persist a memory item with an optional pre-computed embedding (Opt-9).
+/// When `pre_embedding` is provided, skips the per-item embed call.
+#[allow(clippy::too_many_arguments)]
+pub async fn persist_memory_item_with_embedding(
+    repo: &MemoryRepository<'_>,
+    embedder: &Option<Arc<dyn Embedder>>,
+    owner_id: &str,
+    content: &str,
+    kind: MemoryKind,
+    scope: MemoryScope,
+    scope_id: &str,
+    source: MemorySource,
+    importance: f64,
+    confidence: f64,
+    metadata: Option<&serde_json::Value>,
+    supersession_threshold: f64,
+    fts_jaccard_threshold: f64,
+    pre_embedding: Option<Vec<f32>>,
+) -> PersistResult {
+    // Step 1: Use pre-computed embedding or embed on demand
+    let new_embedding = if let Some(emb) = pre_embedding {
+        Some(emb)
+    } else if let Some(emb) = embedder {
         emb.embed(&[content])
             .await
             .ok()

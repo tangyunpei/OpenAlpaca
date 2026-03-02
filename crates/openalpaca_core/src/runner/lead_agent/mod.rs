@@ -280,6 +280,9 @@ pub struct SpawnSubagentTool {
     max_concurrent_subagents: usize,
     /// Semaphore limiting concurrent subagent spawns per lead agent.
     concurrency_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Pre-computed static part of the subagent system prompt (Opt-LA-3).
+    /// Contains `{PERSONA}` and `{TOOL_GUIDANCE}` placeholders for substitution.
+    prompt_template: String,
 }
 
 impl SpawnSubagentTool {
@@ -300,6 +303,23 @@ impl SpawnSubagentTool {
         max_concurrent_subagents: usize,
         workspace_id: Option<String>,
     ) -> Self {
+        let prompt_template = "\
+            <identity>\n{PERSONA}\n</identity>\n\n\
+            <scope>\n\
+            You are a subagent working on a single objective assigned by a lead agent. \
+            Focus exclusively on your assigned objective. Do not attempt work outside your scope.\n\
+            </scope>\n\n\
+            <output-format>\n\
+            Provide a clear, complete result. Start with a brief summary of what you accomplished, \
+            followed by the detailed output. The lead agent will use your result to synthesize a \
+            final response, so be thorough and specific.\n\
+            </output-format>\n\n\
+            <constraints>\n\
+            You operate independently — you cannot communicate with other subagents directly. \
+            Use workspace_read and workspace_write tools to access or share data across agents.\n\
+            </constraints>{TOOL_GUIDANCE}"
+            .to_string();
+
         Self {
             router,
             tool_registry,
@@ -317,6 +337,7 @@ impl SpawnSubagentTool {
             max_concurrent_subagents,
             concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent_subagents)),
             workspace_id,
+            prompt_template,
         }
     }
 
@@ -430,25 +451,12 @@ impl BuiltInTool for SpawnSubagentTool {
         // 6. Resolve tools for subagent's skills
         let tools = crate::tools::resolve_agent_tools(&agent, &self.tool_registry);
 
-        // 7. Build messages with agent persona + objective
+        // 7. Build messages with agent persona + objective (uses cached template)
         let tool_guidance = format_tool_guidance(&tools);
-        let system_prompt = format!(
-            "<identity>\n{}\n</identity>\n\n\
-             <scope>\n\
-             You are a subagent working on a single objective assigned by a lead agent. \
-             Focus exclusively on your assigned objective. Do not attempt work outside your scope.\n\
-             </scope>\n\n\
-             <output-format>\n\
-             Provide a clear, complete result. Start with a brief summary of what you accomplished, \
-             followed by the detailed output. The lead agent will use your result to synthesize a \
-             final response, so be thorough and specific.\n\
-             </output-format>\n\n\
-             <constraints>\n\
-             You operate independently — you cannot communicate with other subagents directly. \
-             Use workspace_read and workspace_write tools to access or share data across agents.\n\
-             </constraints>{}",
-            agent.preset.persona, tool_guidance
-        );
+        let system_prompt = self
+            .prompt_template
+            .replace("{PERSONA}", &agent.preset.persona)
+            .replace("{TOOL_GUIDANCE}", &tool_guidance);
         let messages = vec![
             ChatMessage::system(&system_prompt),
             ChatMessage::user(objective),
@@ -1091,6 +1099,9 @@ pub fn build_lead_agent_prompt_from_templates(
          spawn_subagent: Spawning is always immediate — returns a run_id instantly. The system \
          automatically queues execution if LLM capacity is limited. Spawn all independent \
          objectives in a single round before waiting — this is the preferred pattern.\n\
+         spawn_subagents_batch: When spawning 3+ independent subagents, use spawn_subagents_batch \
+         for parallel spawning instead of individual spawn_subagent calls. This is more efficient \
+         and reduces round-trips.\n\
          check_subagent_status: Poll a single subagent by run_id. Shows whether the subagent is \
          queued, running, completed, or failed.\n\
          wait_for_subagents: Block until ALL spawned subagents finish, including any that are \

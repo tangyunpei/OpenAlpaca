@@ -519,6 +519,8 @@ static NUMBERED_LIST_RE: OnceLock<Regex> = OnceLock::new();
 static BULLET_LIST_RE: OnceLock<Regex> = OnceLock::new();
 static BATCH_KEYWORD_RE: OnceLock<Regex> = OnceLock::new();
 static EXPLICIT_QUANTITY_RE: OnceLock<Regex> = OnceLock::new();
+static CJK_ENUM_RE: OnceLock<Regex> = OnceLock::new();
+static CONJ_LIST_RE: OnceLock<Regex> = OnceLock::new();
 
 fn numbered_list_regex() -> &'static Regex {
     NUMBERED_LIST_RE.get_or_init(|| Regex::new(r"\b\d+\.\s").unwrap())
@@ -558,6 +560,20 @@ fn has_predictable_structure(content: &str) -> bool {
 
     // Explicit quantity: "into 3 languages", "to 5 files"
     if explicit_quantity_regex().is_match(content) {
+        return true;
+    }
+
+    // Chinese parallel enumeration: "翻译成法语、西语和德语"
+    let cjk_enum = CJK_ENUM_RE
+        .get_or_init(|| Regex::new(r"[\u4e00-\u9fff]+[、，][\u4e00-\u9fff]+[、，]").unwrap());
+    if cjk_enum.is_match(content) {
+        return true;
+    }
+
+    // Conjunctive list without batch keyword: "X, Y, and Z" (3+ comma-separated items)
+    let conj_list = CONJ_LIST_RE
+        .get_or_init(|| Regex::new(r"(?i)\w+,\s+\w+,\s+").unwrap());
+    if conj_list.is_match(content) {
         return true;
     }
 
@@ -612,14 +628,24 @@ async fn plan_inner(
     idle_agents: &[SubAgent],
 ) -> Result<TaskPlan, PlanError> {
     let mut last_error = PlanError::MalformedResponse("no attempts made".to_string());
+    let mut last_error_msg: Option<String> = None;
     let deadline = Duration::from_secs(limits.timeout_secs);
 
     for attempt in 0..=limits.max_retries {
+        let mut attempt_messages = messages.clone();
+        if attempt > 0
+            && let Some(ref err) = last_error_msg
+        {
+            attempt_messages.push(ChatMessage::user(&format!(
+                "Your previous response was invalid: {}. Respond with ONLY a valid JSON object.",
+                err
+            )));
+        }
         let request = RouterRequest {
             model: None,
-            messages: messages.clone(),
+            messages: attempt_messages,
             tools: Arc::new(vec![]),
-            temperature: Some(0.0),
+            temperature: Some(attempt as f32 * 0.1),
             max_tokens: Some(limits.max_tokens),
             context: RequestContext::default(),
             tool_choice: None,
@@ -637,21 +663,64 @@ async fn plan_inner(
                 if let Some(ref dag) = plan.dag
                     && let Err(e) = dag.validate(idle_agents)
                 {
+                    // Try to salvage as sequential pipeline via topological order.
+                    // Only safe when the failure is structural (node count, deps) —
+                    // NOT a cycle (no valid order) and NOT unknown agents (invalid IDs
+                    // would propagate to pipeline dispatch and fail there too).
+                    let salvageable = !e.contains("cycle") && !e.contains("unknown agent");
+                    if salvageable && !plan.assignments.is_empty() {
+                        tracing::warn!(
+                            dag_error = %e,
+                            "DAG validation failed, falling back to flat assignments"
+                        );
+                        return Ok(TaskPlan {
+                            dag: None,
+                            auto_promotion_reason: Some("dag_validation_salvaged_pipeline".into()),
+                            ..plan
+                        });
+                    }
+
+                    // Try extracting topological order as pipeline assignments
+                    if salvageable {
+                        let topo = dag.topological_order();
+                        if !topo.is_empty() {
+                            let pipeline_assignments: Vec<PlannedAssignment> = topo
+                                .iter()
+                                .filter_map(|nid| {
+                                    dag.nodes.iter().find(|n| n.node_id == *nid)
+                                })
+                                .map(|node| PlannedAssignment {
+                                    agent_id: node.agent_id.clone(),
+                                    agent_name: node.agent_name.clone(),
+                                    role_description: node.description.clone(),
+                                    matched_skills: vec![],
+                                })
+                                .collect();
+                            if !pipeline_assignments.is_empty() {
+                                tracing::warn!(
+                                    dag_error = %e,
+                                    pipeline_steps = pipeline_assignments.len(),
+                                    "DAG validation failed, salvaging as sequential pipeline"
+                                );
+                                return Ok(TaskPlan {
+                                    dag: None,
+                                    assignments: pipeline_assignments,
+                                    use_lead_agent: false,
+                                    auto_promotion_reason: Some(
+                                        "dag_to_pipeline_salvage".into(),
+                                    ),
+                                    ..plan
+                                });
+                            }
+                        }
+                    }
+
+                    // Fallback: promote to lead agent (only for cycles or truly broken DAGs)
                     let promoted = plan.assignments.is_empty() && !plan.use_lead_agent;
                     if promoted {
                         tracing::warn!(
-                            classification = %plan.classification,
-                            reasoning = ?plan.reasoning,
                             dag_error = %e,
-                            "Auto-promoting to lead agent: DAG validation failed and plan \
-                             has no flat assignments. Original use_lead_agent=false."
-                        );
-                    } else {
-                        tracing::warn!(
-                            classification = %plan.classification,
-                            reasoning = ?plan.reasoning,
-                            dag_error = %e,
-                            "DAG validation failed, falling back to flat assignments"
+                            "Auto-promoting to lead agent: DAG validation failed with no salvage path"
                         );
                     }
                     return Ok(TaskPlan {
@@ -669,6 +738,7 @@ async fn plan_inner(
                     attempt + 1,
                     limits.max_retries + 1,
                 );
+                last_error_msg = Some(msg.clone());
                 last_error = PlanError::MalformedResponse(msg);
                 // Fail fast: if response has no JSON structure at all (e.g. conversational
                 // text in user's language), retrying with the same prompt won't help
@@ -769,9 +839,14 @@ Think step-by-step before producing your JSON response:
 4. Write your reasoning into the "reasoning" field, then produce the JSON.
 
 For complex tasks, choose exactly one execution strategy:
-- Set "use_lead_agent": true when the task is open-ended, exploratory, or adaptive (PREFERRED default). Use this when the number of sub-tasks is unknown, results from one step change what comes next, or the task requires iterative refinement (e.g. debugging, research, creative exploration).
-- Provide a "dag" with nodes when ALL steps are known upfront and predictable (e.g. translating into N languages, a fixed pipeline of read-then-summarize-then-send, or batch-processing independent items).
-- If unsure, default to "use_lead_agent": true. A lead agent can always execute a simple plan, but a DAG cannot adapt if the plan is wrong.
+- Set "use_lead_agent": true when the task is genuinely exploratory, requires iterative refinement, or when the number of steps cannot be determined (e.g. debugging, open-ended research, creative exploration).
+- Provide a "dag" with nodes when steps are enumerable upfront (even if partially dependent). Use DAG when multiple independent sub-tasks are visible in the user's message.
+- Choose lead agent when the task is genuinely exploratory, adaptive, or requires iterative refinement. If the steps are clear, prefer DAG.
+
+When choosing an execution strategy:
+- lead_agent: Task is exploratory, adaptive, or requires iterative refinement.
+- dag: 2+ steps known upfront; some steps can run in parallel.
+- pipeline (assignments array): Steps are known upfront AND strictly sequential with no parallelism.
 </instructions>
 
 <examples>
@@ -790,6 +865,22 @@ User: "Translate this document into French, Spanish, and German."
   {"node_id": "node_2", "title": "Translate to Spanish", "description": "Translate the document into Spanish.", "agent_id": "translator-01", "agent_name": "Translator", "depends_on": [], "workspace_keys": [], "output_key": "spanish_translation"},
   {"node_id": "node_3", "title": "Translate to German", "description": "Translate the document into German.", "agent_id": "translator-01", "agent_name": "Translator", "depends_on": [], "workspace_keys": [], "output_key": "german_translation"}
 ]}, "use_lead_agent": false}
+
+Example 4 — Complex task with DAG (sequential dependencies):
+User: "Read the report, summarize key findings, then send the summary to the team."
+{"classification": "complex_task", "title": "Read, summarize, and send report", "assignments": [], "reasoning": "Three steps with sequential dependencies: read → summarize → send. Using DAG with dependency edges.", "dag": {"nodes": [
+  {"node_id": "n1", "title": "Read report", "description": "Read and extract content from the report.", "agent_id": "general-agent-01", "agent_name": "General Agent", "depends_on": [], "workspace_keys": [], "output_key": "report_content"},
+  {"node_id": "n2", "title": "Summarize findings", "description": "Summarize the key findings from the report.", "agent_id": "general-agent-01", "agent_name": "General Agent", "depends_on": ["n1"], "workspace_keys": ["report_content"], "output_key": "summary"},
+  {"node_id": "n3", "title": "Send summary", "description": "Send the summary to the team.", "agent_id": "general-agent-01", "agent_name": "General Agent", "depends_on": ["n2"], "workspace_keys": ["summary"]}
+]}, "use_lead_agent": false}
+
+Example 5 — Sequential pipeline (strict linear dependency, no parallelism):
+User: "Read the data file, analyze the trends, and write a report."
+{"classification": "complex_task", "title": "Analyze data and write report", "assignments": [
+  {"agent_id": "general-agent-01", "agent_name": "General Agent", "role_description": "Read and parse the data file", "matched_skills": ["file_read"]},
+  {"agent_id": "general-agent-01", "agent_name": "General Agent", "role_description": "Analyze trends in the data", "matched_skills": ["analysis"]},
+  {"agent_id": "general-agent-01", "agent_name": "General Agent", "role_description": "Write the final report", "matched_skills": ["text_generate"]}
+], "reasoning": "Strict linear pipeline: each step depends on the previous. No parallelism opportunity.", "dag": null, "use_lead_agent": false}
 
 </examples>
 
@@ -981,6 +1072,51 @@ Example:
     /// or surrounded by prose.
     fn extract_json(content: &str) -> &str {
         extract_json_block(content)
+    }
+
+    /// Lightweight LLM classification: uses a minimal prompt (~200 tokens) to determine
+    /// if a message is simple_query or complex_task. Much cheaper than full planning.
+    /// Uses `config.triage_model` (e.g. claude-haiku) to keep cost ~10x lower than
+    /// the full planner call.
+    pub async fn classify_lightweight(
+        router: &LlmRouter,
+        triage_model: Option<&str>,
+        user_message: &str,
+        timeout_secs: u64,
+    ) -> Result<String, PlanError> {
+        let messages = vec![
+            ChatMessage::system(
+                "Classify the user message. Respond ONLY with a JSON object:\n\
+                 {\"classification\": \"simple_query\"} or {\"classification\": \"complex_task\"}\n\
+                 simple_query = greetings, questions, conversation.\n\
+                 complex_task = multi-step tasks needing agent work.",
+            ),
+            ChatMessage::user(user_message),
+        ];
+        let request = RouterRequest {
+            model: triage_model.map(|s| s.to_string()),
+            messages,
+            tools: Arc::new(vec![]),
+            temperature: Some(0.0),
+            max_tokens: Some(50),
+            context: RequestContext::default(),
+            tool_choice: None,
+        };
+        let deadline = Duration::from_secs(timeout_secs);
+        let response = tokio::time::timeout(deadline, router.complete(request))
+            .await
+            .map_err(|_| PlanError::Timeout(timeout_secs))?
+            .map_err(|e| PlanError::LlmError(e.to_string()))?;
+
+        let json_str = extract_json_block(&response.content);
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str)
+            && let Some(c) = val.get("classification").and_then(|v| v.as_str())
+        {
+            return Ok(c.to_string());
+        }
+        Err(PlanError::MalformedResponse(
+            "lightweight classification failed".into(),
+        ))
     }
 }
 

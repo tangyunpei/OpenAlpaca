@@ -22,6 +22,7 @@ use openalpaca_llm::LlmRouter;
 use openalpaca_storage::Database;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::time::Instant;
 use uuid::Uuid;
 
 use crate::tools::ToolRegistry;
@@ -192,6 +193,8 @@ pub struct TaskDispatcher {
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
+    /// Cached connector guidance with 10s TTL (Opt-8b).
+    cached_connector_guidance: std::sync::Mutex<(String, Instant)>,
 }
 
 impl TaskDispatcher {
@@ -220,19 +223,34 @@ impl TaskDispatcher {
             embedder,
             daemon_config,
             connector_status,
+            cached_connector_guidance: std::sync::Mutex::new((String::new(), Instant::now())),
         }
     }
 
-    /// Snapshot connector statuses for prompt injection.
+    /// Snapshot connector statuses for prompt injection (10s TTL cache).
     fn connector_guidance_block(&self) -> String {
-        if let Ok(guard) = self.connector_status.read()
+        // Fast path: return cached value if fresh (< 10s old)
+        if let Ok(cache) = self.cached_connector_guidance.lock()
+            && cache.1.elapsed() < std::time::Duration::from_secs(10)
+            && !cache.0.is_empty()
+        {
+            return cache.0.clone();
+        }
+
+        // Slow path: compute fresh
+        let result = if let Ok(guard) = self.connector_status.read()
             && let Some(ref provider) = *guard
         {
             let statuses = provider.list_status();
             crate::middleware::prompt::format_connector_guidance(&statuses, None)
         } else {
             String::new()
+        };
+
+        if let Ok(mut cache) = self.cached_connector_guidance.lock() {
+            *cache = (result.clone(), Instant::now());
         }
+        result
     }
 
     /// Get the LLM router or fail the task with a helpful error.
@@ -666,7 +684,10 @@ pub(super) async fn update_state_with_retry(
                         attempt + 1,
                         MAX_RETRIES
                     );
-                    tokio::time::sleep(std::time::Duration::from_millis(10 * (1 << attempt))).await;
+                    // Linear backoff with pseudo-jitter (avoids rand dependency).
+                    // Jitter from task_id hash reduces contention under DAG parallelism.
+                    let pseudo_jitter = task_id.as_bytes().iter().map(|b| *b as u64).sum::<u64>() % 5;
+                    tokio::time::sleep(std::time::Duration::from_millis(10 + (attempt as u64 * 5) + pseudo_jitter)).await;
                 } else {
                     tracing::warn!(
                         "State update ({}) for task '{}' failed after {} retries — state may be stale",

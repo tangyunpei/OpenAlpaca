@@ -592,6 +592,100 @@ impl IntentParser {
 
         true
     }
+
+    /// Enhanced pre-screening: broader simple query detection using tool signals
+    /// and task-verb analysis. Catches cases that `is_fast_path_eligible()` misses
+    /// (e.g. messages with "please"/"can you" that are still simple queries).
+    ///
+    /// Returns true when the message has no actionable tool signals AND no task
+    /// verbs, meaning it's overwhelmingly likely to be a simple conversational
+    /// query that doesn't need LLM planning.
+    pub fn is_enhanced_simple_query(&self, content: &str) -> bool {
+        // Rule 1: No tool signals — suggest_tools() returns empty
+        if !self.suggest_tools(content).is_empty() {
+            return false;
+        }
+
+        let lower = content.to_lowercase();
+
+        // Rule 2: Social/follow-up patterns (always simple)
+        const SOCIAL: &[&str] = &[
+            "thanks",
+            "thank you",
+            "ok",
+            "okay",
+            "got it",
+            "sounds good",
+            "yes",
+            "no",
+            "sure",
+            "right",
+            "好的",
+            "没问题",
+            "谢谢",
+            "嗯",
+            "明白",
+            "收到",
+            "对",
+            "是的",
+            "不是",
+            "不用",
+        ];
+        let trimmed_lower = lower.trim();
+        if SOCIAL.contains(&trimmed_lower)
+            || trimmed_lower.split_whitespace().count() <= 2
+        {
+            return true;
+        }
+
+        // Compute task verbs BEFORE the short-message check to prevent
+        // false positives like "Fix the bug" or "Deploy the app" being
+        // treated as simple queries just because they're under 100 chars.
+        const TASK_VERBS: &[&str] = &[
+            "create",
+            "build",
+            "write",
+            "research",
+            "translate",
+            "send",
+            "run",
+            "debug",
+            "fix",
+            "deploy",
+            "implement",
+            "analyze",
+            "generate",
+            "design",
+            "organize",
+            "fetch",
+            "download",
+            "summarize",
+            "search for",
+            "look up",
+            "编写",
+            "创建",
+            "翻译",
+            "研究",
+            "发送",
+            "修复",
+            "部署",
+        ];
+        let has_task_verb = TASK_VERBS.iter().any(|v| lower.contains(v));
+
+        // Rule 3: Short + no task verbs → simple query
+        // "What is a closure?" (19 chars, no verb) → true
+        // "Fix the bug" (11 chars, "fix" verb) → false
+        if content.len() < 100 && !has_task_verb {
+            return true;
+        }
+
+        // Rule 4: Any length + no task verbs + no tool signals → simple query
+        if !has_task_verb {
+            return true;
+        }
+
+        false
+    }
 }
 
 #[cfg(test)]

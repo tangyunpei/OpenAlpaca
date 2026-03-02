@@ -75,7 +75,7 @@ impl Orchestrator {
             ],
             tools: Arc::new(vec![]),
             temperature: Some(0.0),
-            max_tokens: Some(512),
+            max_tokens: Some(1536),
             context: RequestContext {
                 agent_id: Some("orchestrator_summary".to_string()),
                 task_id: None,
