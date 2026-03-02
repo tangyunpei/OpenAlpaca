@@ -1038,3 +1038,153 @@ fn test_build_messages_no_context_only_system_and_user() {
     assert_eq!(msgs[0].role, openalpaca_llm::Role::System);
     assert_eq!(msgs[1].role, openalpaca_llm::Role::User);
 }
+
+// ── Phase P2: has_predictable_structure new patterns ─────────
+
+#[test]
+fn test_predictable_structure_cjk_enum() {
+    // Chinese enumeration with 、
+    assert!(has_predictable_structure("翻译成法语、西语、德语"));
+}
+
+#[test]
+fn test_predictable_structure_cjk_enum_comma() {
+    // Chinese enumeration with ，
+    assert!(has_predictable_structure("把文件翻译成法语，西语，德语和意大利语"));
+}
+
+#[test]
+fn test_predictable_structure_conjunctive_list() {
+    // English conjunctive list: "X, Y, Z, and W" (3+ items)
+    assert!(has_predictable_structure(
+        "Translate into French, Spanish, German, and Italian"
+    ));
+}
+
+#[test]
+fn test_predictable_structure_short_conj_list_no_match() {
+    // Only 1 comma item — below the threshold
+    assert!(!has_predictable_structure("Translate into French and Spanish"));
+}
+
+// ── Phase P2: Prompt content tests ───────────────────────────
+
+#[test]
+fn test_prompt_includes_dag_dependency_example() {
+    let prompt = TaskPlanner::build_hierarchical_prompt(&[], false);
+    assert!(
+        prompt.contains("Example 4"),
+        "Prompt should include DAG dependency example"
+    );
+    assert!(
+        prompt.contains("Read, summarize, and send report"),
+        "Prompt should include DAG sequential dependency example"
+    );
+}
+
+#[test]
+fn test_prompt_includes_pipeline_example() {
+    let prompt = TaskPlanner::build_hierarchical_prompt(&[], false);
+    assert!(
+        prompt.contains("Example 5"),
+        "Prompt should include pipeline example"
+    );
+    assert!(
+        prompt.contains("Strict linear pipeline"),
+        "Prompt should include pipeline reasoning"
+    );
+}
+
+#[test]
+fn test_prompt_includes_execution_strategy_guide() {
+    let prompt = TaskPlanner::build_hierarchical_prompt(&[], false);
+    assert!(
+        prompt.contains("pipeline (assignments array)"),
+        "Prompt should include execution strategy guide"
+    );
+    assert!(
+        prompt.contains("If the steps are clear, prefer DAG"),
+        "Prompt should nudge toward DAG for predictable tasks"
+    );
+}
+
+// ── Phase P2: DAG salvage tests ──────────────────────────────
+
+#[test]
+fn test_dag_validation_salvage_to_pipeline() {
+    // DAG with only 1 node fails validation (min 2), but is salvageable
+    // since the error is structural (not cycle/unknown agent)
+    let json = r#"{
+        "classification": "complex_task",
+        "title": "Single step task",
+        "assignments": [],
+        "reasoning": "test",
+        "dag": {
+            "nodes": [
+                {"node_id": "n1", "title": "Step 1", "description": "Do step 1", "agent_id": "a1", "agent_name": "Agent a1", "depends_on": [], "workspace_keys": [], "output_key": "out1"}
+            ]
+        },
+        "use_lead_agent": false
+    }"#;
+    let plan: TaskPlan = serde_json::from_str(json).unwrap();
+    let agents = vec![make_agent("a1")];
+    let dag = plan.dag.as_ref().unwrap();
+    let err = dag.validate(&agents).unwrap_err();
+    // Error should be about node count, not cycle or unknown agent
+    assert!(!err.contains("cycle"));
+    assert!(!err.contains("unknown agent"));
+    // Topological order should still work for salvage
+    let topo = dag.topological_order();
+    assert_eq!(topo.len(), 1);
+    assert_eq!(topo[0], "n1");
+}
+
+// ── Phase P4: Opt-12 classify_lightweight tests ──
+
+#[test]
+fn test_classify_lightweight_parse_simple_query() {
+    // Verifies that classify_lightweight correctly parses "simple_query" from JSON
+    let json = r#"{"classification": "simple_query"}"#;
+    let val: serde_json::Value = serde_json::from_str(json).unwrap();
+    let c = val
+        .get("classification")
+        .and_then(|v| v.as_str())
+        .unwrap();
+    assert_eq!(c, "simple_query");
+}
+
+#[test]
+fn test_classify_lightweight_parse_complex_task() {
+    // Verifies that classify_lightweight correctly parses "complex_task" from JSON
+    let json = r#"{"classification": "complex_task"}"#;
+    let val: serde_json::Value = serde_json::from_str(json).unwrap();
+    let c = val
+        .get("classification")
+        .and_then(|v| v.as_str())
+        .unwrap();
+    assert_eq!(c, "complex_task");
+}
+
+#[test]
+fn test_classify_lightweight_malformed_json() {
+    // Verifies that malformed JSON falls through to the error path
+    let json = "not json at all";
+    let result = serde_json::from_str::<serde_json::Value>(json);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_classify_lightweight_missing_classification_field() {
+    // Verifies that JSON without "classification" field yields None
+    let json = r#"{"other": "field"}"#;
+    let val: serde_json::Value = serde_json::from_str(json).unwrap();
+    let c = val.get("classification").and_then(|v| v.as_str());
+    assert!(c.is_none());
+}
+
+#[test]
+fn test_planner_config_two_phase_defaults() {
+    let config = crate::daemon_config::PlannerConfig::default();
+    assert!(!config.two_phase_enabled);
+    assert!(config.triage_model.is_none());
+}

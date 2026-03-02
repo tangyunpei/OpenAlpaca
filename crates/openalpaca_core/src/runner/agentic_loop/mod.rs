@@ -409,6 +409,10 @@ pub async fn run_agentic_loop(
     let mut last_assistant_content = String::new();
     let mut last_model: Option<String> = None;
 
+    // Incremental token estimation: track cumulative count and only estimate
+    // newly-appended messages each round, rather than re-scanning the full list.
+    let mut known_token_count: u32 = estimate_messages_tokens(&messages);
+
     tracing::info!(
         agent_id = agent_id,
         tools_count = tools.len(),
@@ -483,25 +487,25 @@ pub async fn run_agentic_loop(
 
         // Context compression: if estimated tokens exceed the budget,
         // compress older rounds into a summary to reduce cost and latency.
-        if config.max_context_tokens > 0 {
-            let est = estimate_messages_tokens(&messages);
-            if est > config.max_context_tokens {
-                tracing::info!(
-                    agent_id = agent_id,
-                    estimated_tokens = est,
-                    max_context_tokens = config.max_context_tokens,
-                    messages_before = messages.len(),
-                    "Compressing context: token budget exceeded"
-                );
-                compress_context(&mut messages, config.context_tail_keep);
-                tracing::info!(
-                    agent_id = agent_id,
-                    messages_after = messages.len(),
-                    estimated_tokens_after = estimate_messages_tokens(&messages),
-                    "Context compressed"
-                );
-            }
+        if config.max_context_tokens > 0 && known_token_count > config.max_context_tokens {
+            tracing::info!(
+                agent_id = agent_id,
+                estimated_tokens = known_token_count,
+                max_context_tokens = config.max_context_tokens,
+                messages_before = messages.len(),
+                "Compressing context: token budget exceeded"
+            );
+            compress_context(&mut messages, config.context_tail_keep);
+            known_token_count = estimate_messages_tokens(&messages);
+            tracing::info!(
+                agent_id = agent_id,
+                messages_after = messages.len(),
+                estimated_tokens_after = known_token_count,
+                "Context compressed"
+            );
         }
+
+        let prev_msg_len = messages.len();
 
         let request = ChatRequest {
             messages: messages.clone(),
@@ -551,6 +555,11 @@ pub async fn run_agentic_loop(
                 total_output += response.usage.output_tokens;
                 rounds += 1;
                 last_model = Some(response.model.clone());
+
+                // Use actual input tokens as ground truth for our estimate
+                if response.usage.input_tokens > 0 {
+                    known_token_count = response.usage.input_tokens;
+                }
 
                 tracing::debug!(
                     agent_id = agent_id,
@@ -642,6 +651,12 @@ pub async fn run_agentic_loop(
                         messages.push(ChatMessage::tool_result(&tc.id, &err));
                     }
 
+                    // Update token estimate incrementally for newly-appended messages
+                    if messages.len() > prev_msg_len {
+                        known_token_count +=
+                            estimate_messages_tokens(&messages[prev_msg_len..]);
+                    }
+
                     continue;
                 }
 
@@ -723,6 +738,10 @@ pub async fn run_agentic_loop_routed(
     // Wrap tools in Arc once — they don't change between rounds
     let tools_arc = Arc::new(tools);
 
+    // Incremental token estimation: track cumulative count and only estimate
+    // newly-appended messages each round, rather than re-scanning the full list.
+    let mut known_token_count: u32 = estimate_messages_tokens(&messages);
+
     tracing::info!(
         agent_id = agent_id,
         tools_count = tools_arc.len(),
@@ -799,25 +818,25 @@ pub async fn run_agentic_loop_routed(
 
         // Context compression: if estimated tokens exceed the budget,
         // compress older rounds into a summary to reduce cost and latency.
-        if config.max_context_tokens > 0 {
-            let est = estimate_messages_tokens(&messages);
-            if est > config.max_context_tokens {
-                tracing::info!(
-                    agent_id = agent_id,
-                    estimated_tokens = est,
-                    max_context_tokens = config.max_context_tokens,
-                    messages_before = messages.len(),
-                    "Compressing context: token budget exceeded"
-                );
-                compress_context(&mut messages, config.context_tail_keep);
-                tracing::info!(
-                    agent_id = agent_id,
-                    messages_after = messages.len(),
-                    estimated_tokens_after = estimate_messages_tokens(&messages),
-                    "Context compressed"
-                );
-            }
+        if config.max_context_tokens > 0 && known_token_count > config.max_context_tokens {
+            tracing::info!(
+                agent_id = agent_id,
+                estimated_tokens = known_token_count,
+                max_context_tokens = config.max_context_tokens,
+                messages_before = messages.len(),
+                "Compressing context: token budget exceeded"
+            );
+            compress_context(&mut messages, config.context_tail_keep);
+            known_token_count = estimate_messages_tokens(&messages);
+            tracing::info!(
+                agent_id = agent_id,
+                messages_after = messages.len(),
+                estimated_tokens_after = known_token_count,
+                "Context compressed"
+            );
         }
+
+        let prev_msg_len = messages.len();
 
         let request = RouterRequest {
             model: config.model.clone(),
@@ -902,6 +921,11 @@ pub async fn run_agentic_loop_routed(
                 rounds += 1;
                 last_model = Some(response.model.clone());
 
+                // Use actual input tokens as ground truth for our estimate
+                if response.usage.input_tokens > 0 {
+                    known_token_count = response.usage.input_tokens;
+                }
+
                 tracing::debug!(
                     agent_id = agent_id,
                     round = rounds,
@@ -983,6 +1007,12 @@ pub async fn run_agentic_loop_routed(
                     for tc in response.tool_calls.iter().skip(calls_this_round) {
                         let err = format_tool_error("max tools per round exceeded");
                         messages.push(ChatMessage::tool_result(&tc.id, &err));
+                    }
+
+                    // Update token estimate incrementally for newly-appended messages
+                    if messages.len() > prev_msg_len {
+                        known_token_count +=
+                            estimate_messages_tokens(&messages[prev_msg_len..]);
                     }
 
                     continue;

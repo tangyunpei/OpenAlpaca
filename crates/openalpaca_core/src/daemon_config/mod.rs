@@ -62,7 +62,7 @@ pub struct MemoryConfig {
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
-            prompt_recent_messages: 40,
+            prompt_recent_messages: 25,
             summary_min_new_older_messages: 12,
             summary_max_chars: 4000,
             msg_trunc_chars: 1500,
@@ -71,7 +71,7 @@ impl Default for MemoryConfig {
             decay: MemoryDecayConfig::default(),
             profile_confidence_threshold: 0.8,
             profile_update_confidence_threshold: 0.9,
-            memory_confidence_threshold: 0.5,
+            memory_confidence_threshold: 0.65,
         }
     }
 }
@@ -214,7 +214,7 @@ impl Default for LeadAgentDefaults {
             max_tool_runtime_secs: 300,
             max_cost: 5.0,
             max_concurrent_subagents: 6,
-            batch_spawn_enabled: false,
+            batch_spawn_enabled: true,
         }
     }
 }
@@ -251,6 +251,10 @@ impl Default for SkillDefaults {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// LLM planner configuration (classification + hierarchical planning).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -272,6 +276,20 @@ pub struct PlannerConfig {
     /// fields, and the planner prompt is extended with v2 schema. Phase 2 feature flag.
     #[serde(default)]
     pub plan_protocol_v2_enabled: bool,
+    /// When true, an enhanced heuristic pre-screens messages classified as
+    /// SimpleQuery to bypass the LLM planner for likely conversational queries.
+    /// Phase 1 feature flag. Default: true.
+    #[serde(default = "default_true")]
+    pub enhanced_pre_screen_enabled: bool,
+    /// When true, messages not caught by the enhanced pre-screen go through a
+    /// lightweight LLM classification before the full planner. Default: false.
+    #[serde(default)]
+    pub two_phase_enabled: bool,
+    /// Model ID for the lightweight triage classifier (Opt-12).
+    /// Should be a cheap/fast model (e.g. "claude-haiku-4-5-20251001").
+    /// If None, falls back to the router's default model.
+    #[serde(default)]
+    pub triage_model: Option<String>,
 }
 
 impl Default for PlannerConfig {
@@ -279,10 +297,13 @@ impl Default for PlannerConfig {
         Self {
             planning_timeout_secs: 60,
             max_retries: 2,
-            max_tokens: 1024,
-            dag_prefer_predictable_enabled: false,
-            dispatch_analysis_enabled: false,
-            plan_protocol_v2_enabled: false,
+            max_tokens: 2048,
+            dag_prefer_predictable_enabled: true,
+            dispatch_analysis_enabled: true,
+            plan_protocol_v2_enabled: true,
+            enhanced_pre_screen_enabled: true,
+            two_phase_enabled: false,
+            triage_model: None,
         }
     }
 }
@@ -311,10 +332,10 @@ impl Default for DagConfig {
             node_timeout_secs: 300,
             total_timeout_secs: 1800,
             max_retries_per_node: 1,
-            replan_after_every_n_nodes: 2,
+            replan_after_every_n_nodes: 5,
             max_replans: 3,
             replan_enabled: false,
-            critical_path_scheduling_enabled: false,
+            critical_path_scheduling_enabled: true,
         }
     }
 }
@@ -389,7 +410,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             event_bus_capacity: 1024,
-            event_broadcaster_capacity: 64,
+            event_broadcaster_capacity: 256,
             wake_channel_capacity: 256,
             heartbeat_interval_secs: 5,
             sse_keep_alive_secs: 15,

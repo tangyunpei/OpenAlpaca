@@ -215,17 +215,16 @@ impl TaskDispatcher {
             }
 
             // Mark step 0 as running now (before the agentic loop) so started_at is accurate
-            if let Some(ref db) = db {
-                if !update_state_with_retry(
+            if let Some(ref db) = db
+                && !update_state_with_retry(
                     db,
                     &task_id,
                     |s| s.mark_step_running(0),
                     "lead_agent_mark_step_running",
                 )
                 .await
-                {
-                    tracing::error!("Failed to persist lead_agent_mark_step_running for task '{}'", task_id);
-                }
+            {
+                tracing::error!("Failed to persist lead_agent_mark_step_running for task '{}'", task_id);
             }
 
             tracing::info!(task_id = %task_id, "Task status: queued → running");

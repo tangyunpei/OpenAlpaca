@@ -3,14 +3,14 @@ use super::*;
 #[test]
 fn test_default_config() {
     let config = DaemonConfig::default();
-    assert_eq!(config.orchestrator.memory.prompt_recent_messages, 40);
+    assert_eq!(config.orchestrator.memory.prompt_recent_messages, 25);
     assert_eq!(config.orchestrator.memory.summary_max_chars, 4000);
     assert_eq!(config.orchestrator.costs.summary_max_daily_cost_usd, 0.50);
     assert_eq!(config.execution.agent_defaults.max_rounds, 15);
     assert_eq!(config.execution.lead_agent_defaults.max_rounds, 18);
     assert_eq!(config.execution.planner.planning_timeout_secs, 60);
     assert_eq!(config.execution.planner.max_retries, 2);
-    assert_eq!(config.execution.planner.max_tokens, 1024);
+    assert_eq!(config.execution.planner.max_tokens, 2048);
     assert_eq!(config.execution.dag.max_concurrent_agents, 4);
     assert_eq!(config.security.max_input_length, 32768);
     assert_eq!(config.server.heartbeat_interval_secs, 5);
@@ -19,7 +19,7 @@ fn test_default_config() {
 #[test]
 fn test_empty_toml_gives_defaults() {
     let config: DaemonConfig = toml::from_str("").unwrap();
-    assert_eq!(config.orchestrator.memory.prompt_recent_messages, 40);
+    assert_eq!(config.orchestrator.memory.prompt_recent_messages, 25);
     assert_eq!(config.execution.dag.total_timeout_secs, 1800);
 }
 
@@ -92,12 +92,12 @@ fn test_validate_leaves_valid_values_unchanged() {
 }
 
 #[test]
-fn test_phase2_flags_default_to_false() {
+fn test_phase2_flags_default_to_true() {
     let config = DaemonConfig::default();
-    assert!(!config.execution.planner.dispatch_analysis_enabled);
-    assert!(!config.execution.planner.plan_protocol_v2_enabled);
-    assert!(!config.execution.lead_agent_defaults.batch_spawn_enabled);
-    assert!(!config.execution.dag.critical_path_scheduling_enabled);
+    assert!(config.execution.planner.dispatch_analysis_enabled);
+    assert!(config.execution.planner.plan_protocol_v2_enabled);
+    assert!(config.execution.lead_agent_defaults.batch_spawn_enabled);
+    assert!(config.execution.dag.critical_path_scheduling_enabled);
 }
 
 #[test]
@@ -128,16 +128,20 @@ fn test_dag_max_concurrent_default_4() {
 
 #[test]
 fn test_phase2_flags_backward_compat() {
-    // Parsing a TOML without Phase 2 fields should succeed with all flags false
+    // Parsing a TOML without Phase 2 fields should succeed.
+    // Field-level #[serde(default)] → bool::default() = false for present structs.
+    // Struct-level #[serde(default)] → Default::default() for absent structs.
     let toml_str = r#"
 [execution.planner]
 max_tokens = 1024
 "#;
     let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+    // planner section is present → field-level defaults (false)
     assert!(!config.execution.planner.dispatch_analysis_enabled);
     assert!(!config.execution.planner.plan_protocol_v2_enabled);
-    assert!(!config.execution.lead_agent_defaults.batch_spawn_enabled);
-    assert!(!config.execution.dag.critical_path_scheduling_enabled);
+    // lead_agent_defaults / dag sections are absent → struct Default (now true)
+    assert!(config.execution.lead_agent_defaults.batch_spawn_enabled);
+    assert!(config.execution.dag.critical_path_scheduling_enabled);
 }
 
 #[test]

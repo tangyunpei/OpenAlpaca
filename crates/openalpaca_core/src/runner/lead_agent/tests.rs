@@ -90,6 +90,7 @@ fn test_lead_agent_tool_executor_routes_correctly() {
         concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(
             DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         )),
+        prompt_template: String::new(),
     });
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
@@ -660,4 +661,38 @@ fn test_lead_agent_executor_delegates_shell_like_tools() {
          and include command-backend tools. Got: {:?}",
         shell_tools
     );
+}
+
+// ── Phase P4: LA-2 batch spawn prompt test ──
+
+#[test]
+fn test_lead_agent_prompt_includes_batch_spawn_instruction() {
+    let prompt = build_lead_agent_prompt_from_templates("Test persona", &[]);
+    assert!(
+        prompt.contains("spawn_subagents_batch"),
+        "Lead agent prompt should mention spawn_subagents_batch tool"
+    );
+    assert!(
+        prompt.contains("3+ independent subagents"),
+        "Lead agent prompt should instruct using batch for 3+ subagents"
+    );
+}
+
+// ── Phase P4: LA-3 prompt template caching test ──
+
+#[test]
+fn test_spawn_subagent_prompt_template_substitution() {
+    let template = "\
+        <identity>\n{PERSONA}\n</identity>\n\n\
+        <scope>\nYou are a subagent.\n</scope>\n\n\
+        <constraints>\nIndependent.\n</constraints>{TOOL_GUIDANCE}";
+
+    let result = template
+        .replace("{PERSONA}", "I am a researcher")
+        .replace("{TOOL_GUIDANCE}", "\n\nTools: search, browse");
+
+    assert!(result.contains("<identity>\nI am a researcher\n</identity>"));
+    assert!(result.contains("Tools: search, browse"));
+    assert!(!result.contains("{PERSONA}"));
+    assert!(!result.contains("{TOOL_GUIDANCE}"));
 }

@@ -471,9 +471,12 @@ impl TaskDispatcher {
                         None,
                     );
 
-                    // Refresh cached workspace context after step completion
-                    // (agent may have written entries via workspace_write tool)
-                    cached_workspace_context = fetch_workspace_context(db.as_ref(), &task_id);
+                    // Refresh cached workspace context only if the agent made tool calls
+                    // (conservative: assumes any tool call may have written to workspace).
+                    // Steps with no tool calls (pure LLM reasoning) skip the DB round-trip.
+                    if result.tool_calls_made > 0 {
+                        cached_workspace_context = fetch_workspace_context(db.as_ref(), &task_id);
+                    }
 
                     // Only pass actual content to next agent (not synthetic metadata)
                     if !raw_content.is_empty() {
