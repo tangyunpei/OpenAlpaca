@@ -24,7 +24,7 @@ static QUESTION_GUARD: LazyLock<Regex> = LazyLock::new(|| {
 // Chinese: "请给telegram发送你好", "帮我给imessage发测试"
 static CN_CHANNEL_FIRST: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)(?:请|帮我)?(?:给|往|向|用|通过)(?:我的)?(?P<ch>telegram|imessage)\s*(?:发送|转发)\s*(?P<content>.+)",
+        r"(?i)(?:请|帮我)?(?:给|往|向|用|通过)(?:我的)?(?P<ch>telegram|imessage|discord)\s*(?:发送|转发)\s*(?P<content>.+)",
     )
     .unwrap()
 });
@@ -33,20 +33,20 @@ static CN_CHANNEL_FIRST: LazyLock<Regex> = LazyLock::new(|| {
 // Chinese reverse: "发你好到telegram", "发送你好到telegram"
 static CN_CONTENT_FIRST: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)(?:请|帮我)?(?:发送|转发|发)\s*(?P<content>.+?)\s*(?:到|给|去)\s*(?P<ch>telegram|imessage)",
+        r"(?i)(?:请|帮我)?(?:发送|转发|发)\s*(?P<content>.+?)\s*(?:到|给|去)\s*(?P<ch>telegram|imessage|discord)",
     )
     .unwrap()
 });
 
 // English: "send hello to telegram"
 static EN_SEND_TO: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bsend\s+(?P<content>.+?)\s+(?:to|via|through)\s+(?P<ch>telegram|imessage)\b")
+    Regex::new(r"(?i)\bsend\s+(?P<content>.+?)\s+(?:to|via|through)\s+(?P<ch>telegram|imessage|discord)\b")
         .unwrap()
 });
 
 // English: "telegram send hello"
 static EN_CHANNEL_FIRST: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(?P<ch>telegram|imessage)\s+(?:send|message)\s+(?P<content>.+)").unwrap()
+    Regex::new(r"(?i)\b(?P<ch>telegram|imessage|discord)\s+(?:send|message)\s+(?P<content>.+)").unwrap()
 });
 
 // ── Literal content guard ─────────────────────────────────────────────────
@@ -105,9 +105,14 @@ pub(super) fn extract_send_params(text: &str) -> Option<DirectSendParams> {
         return None;
     }
 
-    // Ambiguity guard: both channels mentioned
+    // Ambiguity guard: multiple channels mentioned
     let lower = text.to_lowercase();
-    if lower.contains("telegram") && lower.contains("imessage") {
+    let channels_mentioned = [
+        lower.contains("telegram"),
+        lower.contains("imessage"),
+        lower.contains("discord"),
+    ];
+    if channels_mentioned.iter().filter(|&&x| x).count() > 1 {
         return None;
     }
 
@@ -194,6 +199,12 @@ impl Orchestrator {
                         .flatten()
                         .is_some()
             }
+            "discord" => pref_repo
+                .get(owner, "discord.last_channel_id")
+                .ok()
+                .flatten()
+                .and_then(|p| p.value.parse::<u64>().ok())
+                .is_some(),
             _ => false,
         };
         if !has_default {
@@ -302,5 +313,57 @@ mod tests {
     #[test]
     fn test_extract_ambiguous_multi_channel() {
         assert!(extract_send_params("send to telegram and imessage").is_none());
+    }
+
+    // ── Discord extraction tests ─────────────────────────────────────
+
+    #[test]
+    fn test_extract_discord_quoted_chinese() {
+        let p = extract_send_params("请给discord发送\"开会通知\"").unwrap();
+        assert_eq!(p.channel, "discord");
+        assert_eq!(p.content, "开会通知");
+    }
+
+    #[test]
+    fn test_extract_discord_quoted_english() {
+        let p = extract_send_params("send \"hello world\" to discord").unwrap();
+        assert_eq!(p.channel, "discord");
+        assert_eq!(p.content, "hello world");
+    }
+
+    #[test]
+    fn test_extract_discord_channel_first_english() {
+        let p = extract_send_params("discord send \"test message\"").unwrap();
+        assert_eq!(p.channel, "discord");
+        assert_eq!(p.content, "test message");
+    }
+
+    #[test]
+    fn test_extract_discord_unquoted_rejected() {
+        assert!(extract_send_params("send hello to discord").is_none());
+    }
+
+    #[test]
+    fn test_extract_discord_case_insensitive() {
+        let p = extract_send_params("send \"hi\" to Discord").unwrap();
+        assert_eq!(p.channel, "discord");
+        assert_eq!(p.content, "hi");
+    }
+
+    // ── Three-channel ambiguity tests ────────────────────────────────
+
+    #[test]
+    fn test_extract_ambiguous_telegram_discord() {
+        assert!(extract_send_params("send \"hi\" to telegram and discord").is_none());
+    }
+
+    #[test]
+    fn test_extract_ambiguous_imessage_discord() {
+        assert!(extract_send_params("send \"hi\" to imessage and discord").is_none());
+    }
+
+    #[test]
+    fn test_extract_ambiguous_all_three() {
+        assert!(extract_send_params("send to telegram imessage discord").is_none());
     }
 }

@@ -286,6 +286,26 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         sensitive: false,
         backend: ConfigBackend::SystemConfig,
     },
+    ConfigKeyDef {
+        key: "discord.guild_id",
+        kind: ConfigKind::String,
+        default: None,
+        description: "Optional: restrict the bot to a specific Discord server (guild ID snowflake)",
+        category: "Connectors",
+        subcategory: None,
+        sensitive: false,
+        backend: ConfigBackend::SystemConfig,
+    },
+    ConfigKeyDef {
+        key: "discord.notify_task_completion",
+        kind: ConfigKind::Bool,
+        default: Some("false"),
+        description: "Global default for task completion notifications via Discord. Per-user preferences override this value.",
+        category: "Connectors",
+        subcategory: None,
+        sensitive: false,
+        backend: ConfigBackend::SystemConfig,
+    },
     // -- System --
     ConfigKeyDef {
         key: "system.debug_level",

@@ -22,7 +22,7 @@ tower-http = { workspace = true }
 
 # Workspace crates
 openalpaca_core = { workspace = true }
-openalpaca_connectors = { workspace = true, features = ["telegram", "imessage"] }
+openalpaca_connectors = { workspace = true, features = ["telegram", "imessage", "discord"] }
 openalpaca_api = { workspace = true }
 openalpaca_storage = { workspace = true }
 openalpaca_wake = { workspace = true }
@@ -36,6 +36,8 @@ openalpaca_llm = { workspace = true, features = [
     "local-embeddings",
 ] }
 teloxide = { workspace = true }
+twilight-http = { workspace = true }
+twilight-model = { workspace = true }
 tokio-util.workspace = true
 sha2.workspace = true
 infer.workspace = true

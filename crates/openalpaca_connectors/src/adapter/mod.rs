@@ -73,5 +73,19 @@ pub fn imessage_inbound(chat_id: &str, sender: &str, content: &str) -> InboundMe
     }
 }
 
+/// Helper to create an InboundMessage from Discord-style inputs.
+#[cfg(feature = "discord")]
+pub fn discord_inbound(channel_id: &str, user_id: &str, guild_id: Option<&str>, content: &str) -> InboundMessage {
+    InboundMessage {
+        source: EventSource::Discord {
+            channel_id: channel_id.into(),
+            user_id: user_id.into(),
+            guild_id: guild_id.map(|s| s.to_string()),
+        },
+        content: content.into(),
+        attachments: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests;

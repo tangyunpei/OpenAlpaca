@@ -67,6 +67,31 @@ fn validate_telegram_recipient(recipient: &str) -> Result<TelegramRecipient, Str
         .map_err(|_| format!("Invalid Telegram chat_id: '{}'", recipient))
 }
 
+// ── Discord recipient validation ─────────────────────────────────────
+
+/// Parsed Discord recipient.
+#[derive(Debug)]
+enum DiscordRecipient {
+    Default,
+    ChannelId(u64),
+}
+
+/// Validate Discord recipient format. Returns Ok(parsed) or Err(user-facing message).
+fn validate_discord_recipient(recipient: &str) -> Result<DiscordRecipient, String> {
+    if recipient == "default" {
+        return Ok(DiscordRecipient::Default);
+    }
+    recipient
+        .parse::<u64>()
+        .map(DiscordRecipient::ChannelId)
+        .map_err(|_| {
+            format!(
+                "Invalid Discord channel_id: '{}'. Must be a numeric snowflake ID.",
+                recipient
+            )
+        })
+}
+
 // ── ConnectorSendBridge ──────────────────────────────────────────────
 
 /// Outbound message sending via Telegram and iMessage.
@@ -96,6 +121,17 @@ impl ConnectorSendBridge {
             .flatten()
             .filter(|t| !t.is_empty())
             .map(teloxide::Bot::new)
+    }
+
+    /// Resolve a fresh Discord HTTP client from the current config.
+    fn discord_http(&self) -> Option<twilight_http::Client> {
+        let config_repo = openalpaca_storage::ConfigRepository::new(&self.db);
+        config_repo
+            .get("discord.token")
+            .ok()
+            .flatten()
+            .filter(|t| !t.is_empty())
+            .map(|t| twilight_http::Client::new(t))
     }
 }
 
@@ -187,7 +223,38 @@ impl ConnectorSendProvider for ConnectorSendBridge {
             #[cfg(not(target_os = "macos"))]
             "imessage" => Err("iMessage is only available on macOS".to_string()),
 
-            _ => Err(format!("Unknown channel: '{}'. Available: telegram, imessage", channel)),
+            "discord" => {
+                let http = self
+                    .discord_http()
+                    .ok_or("Discord not configured (no token)")?;
+                let channel_id = match validate_discord_recipient(recipient)? {
+                    DiscordRecipient::Default => {
+                        let pref_repo = PreferenceRepository::new(&self.db);
+                        pref_repo
+                            .get(&self.local_user_id, "discord.last_channel_id")
+                            .ok()
+                            .flatten()
+                            .and_then(|p| p.value.parse::<u64>().ok())
+                            .ok_or(
+                                "No default Discord channel found. Please specify a channel_id.",
+                            )?
+                    }
+                    DiscordRecipient::ChannelId(id) => id,
+                };
+                use twilight_model::id::{Id, marker::ChannelMarker};
+                openalpaca_connectors::discord::send_with_retry(
+                    &http,
+                    Id::<ChannelMarker>::new(channel_id),
+                    content,
+                )
+                .await?;
+                Ok(format!("Sent to Discord channel {}", channel_id))
+            }
+
+            _ => Err(format!(
+                "Unknown channel: '{}'. Available: telegram, imessage, discord",
+                channel
+            )),
         }
     }
 
@@ -198,6 +265,9 @@ impl ConnectorSendProvider for ConnectorSendBridge {
         }
         #[cfg(target_os = "macos")]
         channels.push("imessage".to_string());
+        if self.discord_http().is_some() {
+            channels.push("discord".to_string());
+        }
         channels
     }
 
@@ -317,7 +387,68 @@ impl ConnectorSendProvider for ConnectorSendBridge {
             #[cfg(not(target_os = "macos"))]
             "imessage" => Err("iMessage is only available on macOS".to_string()),
 
-            _ => Err(format!("File sending not supported on channel: '{}'", channel)),
+            "discord" => {
+                let http = self
+                    .discord_http()
+                    .ok_or("Discord not configured (no token)")?;
+                let channel_id = match validate_discord_recipient(recipient)? {
+                    DiscordRecipient::Default => {
+                        let pref_repo = PreferenceRepository::new(&self.db);
+                        pref_repo
+                            .get(&self.local_user_id, "discord.last_channel_id")
+                            .ok()
+                            .flatten()
+                            .and_then(|p| p.value.parse::<u64>().ok())
+                            .ok_or(
+                                "No default Discord channel found. Please specify a channel_id.",
+                            )?
+                    }
+                    DiscordRecipient::ChannelId(id) => id,
+                };
+                use twilight_model::id::{Id, marker::ChannelMarker};
+                use twilight_model::http::attachment::Attachment;
+                let file_data = tokio::fs::read(file_path)
+                    .await
+                    .map_err(|e| format!("Failed to read file: {e}"))?;
+                let mut attempts = 0;
+                loop {
+                    let attachment =
+                        Attachment::from_bytes(filename.to_string(), file_data.clone(), 1);
+                    let attachments = [attachment];
+                    let req = http
+                        .create_message(Id::<ChannelMarker>::new(channel_id))
+                        .attachments(&attachments);
+                    let req = if let Some(cap) = caption {
+                        req.content(cap)
+                    } else {
+                        req
+                    };
+                    match req.await {
+                        Ok(_) => break,
+                        Err(e) => {
+                            attempts += 1;
+                            if attempts >= 3 {
+                                return Err(format!(
+                                    "Discord send_file failed after 3 retries: {e}"
+                                ));
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(
+                                1 << (attempts - 1),
+                            ))
+                            .await;
+                        }
+                    }
+                }
+                Ok(format!(
+                    "Sent file '{}' to Discord channel {}",
+                    filename, channel_id
+                ))
+            }
+
+            _ => Err(format!(
+                "File sending not supported on channel: '{}'",
+                channel
+            )),
         }
     }
 
@@ -328,6 +459,9 @@ impl ConnectorSendProvider for ConnectorSendBridge {
         }
         #[cfg(target_os = "macos")]
         channels.push("imessage".to_string());
+        if self.discord_http().is_some() {
+            channels.push("discord".to_string());
+        }
         channels
     }
 }
@@ -378,5 +512,40 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("Invalid Telegram chat_id"));
+    }
+
+    // ── Discord recipient validation tests ──
+
+    #[test]
+    fn validate_discord_recipient_default() {
+        let result = validate_discord_recipient("default");
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), DiscordRecipient::Default));
+    }
+
+    #[test]
+    fn validate_discord_recipient_numeric_channel_id() {
+        let result = validate_discord_recipient("123456789012345678");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            DiscordRecipient::ChannelId(id) => assert_eq!(id, 123456789012345678),
+            _ => panic!("expected ChannelId"),
+        }
+    }
+
+    #[test]
+    fn validate_discord_recipient_rejects_non_numeric() {
+        let result = validate_discord_recipient("general");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Invalid Discord channel_id"));
+        assert!(err.contains("snowflake"));
+    }
+
+    #[test]
+    fn validate_discord_recipient_rejects_negative() {
+        // Discord snowflakes are unsigned — negative numbers should fail
+        let result = validate_discord_recipient("-12345");
+        assert!(result.is_err());
     }
 }
