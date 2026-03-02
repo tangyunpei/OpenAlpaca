@@ -968,3 +968,78 @@ fn test_enhanced_simple_deploy_not_simple() {
 fn test_enhanced_simple_analyze_not_simple() {
     assert!(!parser().is_enhanced_simple_query("Analyze the data"));
 }
+
+#[test]
+fn test_enhanced_simple_chinese_analyze_not_simple() {
+    assert!(!parser().is_enhanced_simple_query("分析这个报告"));
+}
+
+#[test]
+fn test_enhanced_simple_chinese_generate_not_simple() {
+    assert!(!parser().is_enhanced_simple_query("生成一段代码"));
+}
+
+#[test]
+fn test_enhanced_simple_chinese_debug_not_simple() {
+    assert!(!parser().is_enhanced_simple_query("调试这个问题"));
+}
+
+#[test]
+fn test_enhanced_simple_chinese_search_not_simple() {
+    assert!(!parser().is_enhanced_simple_query("搜索相关资料"));
+}
+
+#[test]
+fn test_enhanced_simple_fix_it_not_simple() {
+    // 2-word English with task verb — validates the structural fix
+    assert!(!parser().is_enhanced_simple_query("fix it"));
+}
+
+#[test]
+fn test_enhanced_simple_chinese_question_is_simple() {
+    // Chinese simple query without task verbs still classified correctly
+    assert!(parser().is_enhanced_simple_query("这是什么?"));
+}
+
+// --- is_social_message tests ---
+
+#[test]
+fn test_social_message_ok() {
+    assert!(parser().is_social_message("ok"));
+}
+
+#[test]
+fn test_social_message_thanks() {
+    assert!(parser().is_social_message("thanks"));
+}
+
+#[test]
+fn test_social_message_chinese() {
+    assert!(parser().is_social_message("好的"));
+}
+
+#[test]
+fn test_social_message_whitespace() {
+    assert!(parser().is_social_message("  ok  "));
+}
+
+#[test]
+fn test_social_message_case_insensitive() {
+    assert!(parser().is_social_message("OK"));
+}
+
+#[test]
+fn test_social_message_not_question() {
+    assert!(!parser().is_social_message("what is a closure?"));
+}
+
+#[test]
+fn test_social_message_not_task() {
+    assert!(!parser().is_social_message("fix the bug"));
+}
+
+#[test]
+fn test_social_message_yes() {
+    // handlers.rs guards against send-flow breakage via ActiveSendHints check
+    assert!(parser().is_social_message("yes"));
+}

@@ -50,7 +50,7 @@ fn sanitize_parts_for_dispatch(parts: Vec<ContentPart>) -> Vec<ContentPart> {
 
 /// Fine-grained hints for which send tools to keep alive across turns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct ActiveSendHints {
+pub(super) struct ActiveSendHints {
     send_message: bool,
     send_file: bool,
 }
@@ -63,7 +63,7 @@ struct ActiveSendHints {
 /// - **Tier 1**: Literal tool name (`send_message`, `send_file`) — highest confidence.
 /// - **Tier 2**: Channel + recipient-solicitation keywords — cross-message backtrack
 ///   for Tier 1 clues, defaulting to `send_message` when no clue is found.
-fn detect_active_send_hints(recent_messages: &[ChatMessage]) -> ActiveSendHints {
+pub(super) fn detect_active_send_hints(recent_messages: &[ChatMessage]) -> ActiveSendHints {
     const CHANNEL_KW: &[&str] = &["telegram", "imessage"];
     const FILE_KW: &[&str] = &["send_file", "send_file("];
     const MSG_KW: &[&str] = &["send_message", "send_message("];
@@ -739,6 +739,140 @@ impl Orchestrator {
         });
 
         Ok(validated)
+    }
+
+    /// Ultra-fast path for social/acknowledgement messages ("ok", "thanks", "好的").
+    ///
+    /// Minimal prompt: system persona (SOUL) only. No identity, bootstrap, skills,
+    /// connectors, memory retrieval, or tools. max_rounds=1.
+    pub(super) async fn handle_social_query(
+        &self,
+        request_id: Uuid,
+        query: &str,
+        ctx: &ConversationContext,
+    ) -> Result<String, String> {
+        let router = self.llm_router.as_ref().ok_or_else(|| "No LLM router".to_string())?;
+
+        let system_persona = match self.system_persona.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("System persona lock poisoned during read; recovering");
+                poisoned.into_inner().clone()
+            }
+        };
+        let agent_persona = AgentPersona {
+            role: "Assistant".to_string(),
+            tone: "Concise and professional".to_string(),
+            domain_knowledge: vec![],
+        };
+        let system_prompt = PromptAssembler::assemble(&system_persona, &agent_persona);
+
+        let mut messages = Vec::with_capacity(2 + ctx.recent_messages.len());
+        messages.push(ChatMessage::system(&system_prompt));
+        messages.extend(ctx.recent_messages.iter().cloned());
+        messages.push(ChatMessage::user(query));
+
+        let config = LoopConfig {
+            max_rounds: 1,
+            max_tools_per_round: 0,
+            ..self.loop_config.clone()
+        };
+
+        let call_start = std::time::Instant::now();
+        let result = run_agentic_loop_routed(
+            router.as_ref(),
+            messages,
+            vec![], // no tools
+            &config,
+            None, // no sandbox
+            "orchestrator",
+            None, // no policy
+            None,
+            None,
+        )
+        .await;
+        let latency_ms = call_start.elapsed().as_millis() as i64;
+
+        // LLM usage tracking
+        let default_model = router.default_model();
+        let actual_model = result
+            .model_used
+            .as_deref()
+            .or(self.loop_config.model.as_deref())
+            .unwrap_or(&default_model);
+        let resolved_provider = router
+            .model_registry()
+            .resolve_provider(actual_model)
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let call_cost = router.cost_tracker.calculate_cost(
+            actual_model,
+            result.total_input_tokens,
+            result.total_output_tokens,
+        );
+
+        let call_status = match &result.finish_reason {
+            LoopFinishReason::Complete | LoopFinishReason::MaxRounds => "success",
+            LoopFinishReason::CostExceeded => "cost_exceeded",
+            LoopFinishReason::Cancelled => "cancelled",
+            LoopFinishReason::Error(_) => "error",
+        };
+        let call_error = match &result.finish_reason {
+            LoopFinishReason::Error(msg) => Some(msg.as_str()),
+            _ => None,
+        };
+
+        if let Some(ref db) = self.db {
+            let usage_repo = LlmUsageRepository::new(db);
+            if let Err(e) = usage_repo.record_and_log(
+                "orchestrator",
+                None,
+                &resolved_provider,
+                actual_model,
+                result.total_input_tokens as i32,
+                result.total_output_tokens as i32,
+                call_cost,
+                latency_ms,
+                call_status,
+                call_error,
+            ) {
+                tracing::warn!("Failed to persist LLM usage: {e}");
+            }
+        }
+
+        self.bus.publish(SystemEvent::LlmCallCompleted {
+            agent_id: "orchestrator".to_string(),
+            model: actual_model.to_string(),
+            input_tokens: result.total_input_tokens,
+            output_tokens: result.total_output_tokens,
+            cost_usd: call_cost,
+            timestamp: Utc::now(),
+        });
+
+        self.llm_metadata_map.insert(
+            request_id,
+            super::LlmMetadata {
+                model: actual_model.to_string(),
+                tokens_in: result.total_input_tokens,
+                tokens_out: result.total_output_tokens,
+            },
+        );
+
+        if let LoopFinishReason::Error(ref err) = result.finish_reason
+            && result.final_content.trim().is_empty()
+        {
+            return Err(format!("LLM error: {}", err));
+        }
+
+        let response = result.final_content;
+        self.bus.publish(SystemEvent::AgentResponse {
+            request_id,
+            agent_id: "orchestrator".to_string(),
+            content: response.clone(),
+            timestamp: Utc::now(),
+        });
+
+        Ok(response)
     }
 
     /// Build a lightweight `<available_skills>` block for system prompt injection.
