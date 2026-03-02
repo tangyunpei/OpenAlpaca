@@ -645,57 +645,59 @@ impl Orchestrator {
             }
         }
 
-        // 6 + 7. Summary update and user trait extraction run in background
-        // (both are fire-and-forget LLM calls that don't block the response).
+        // 6 + 7. Summary update and user trait extraction run concurrently
+        // in a background spawn (fire-and-forget, never blocks the response).
         {
             use super::extraction::extract_user_traits_background;
             use super::summary::update_summary_background;
 
+            let needs_extraction = owner_id.is_some() && result.is_ok();
+
+            // Shared fields (both tasks need these)
             let bg_db = self.db.clone();
             let bg_router = self.llm_router.clone();
             let bg_config = self.daemon_config.clone();
-            let bg_counter = self.extraction_turn_counter.clone();
-            let bg_embedder = self.embedder.clone();
-            let bg_user_path = self.user_path.clone();
-            let bg_user_doc = self.user_document.clone();
-            let bg_bus = self.bus.clone();
             let bg_lane = lane_key.to_string();
-            let bg_intent = intent_source_content.to_string();
+
+            // Extraction-only fields (clone only when needed)
+            let bg_counter = if needs_extraction { Some(self.extraction_turn_counter.clone()) } else { None };
+            let bg_embedder = if needs_extraction { self.embedder.clone() } else { None };
+            let bg_user_path = if needs_extraction { Some(self.user_path.clone()) } else { None };
+            let bg_user_doc = if needs_extraction { Some(self.user_document.clone()) } else { None };
+            let bg_bus = if needs_extraction { Some(self.bus.clone()) } else { None };
+            let bg_intent = if needs_extraction { Some(intent_source_content.to_string()) } else { None };
             let bg_owner = owner_id.map(|s| s.to_string());
             let bg_response = result.as_ref().ok().cloned();
 
             drop(tokio::spawn(async move {
-                // Summary — ctx moved here
-                if let (Some(db), Some(router)) = (bg_db.clone(), bg_router.clone()) {
-                    update_summary_background(
-                        db,
-                        router,
-                        bg_config.clone(),
-                        bg_lane.clone(),
-                        ctx,
-                    )
-                    .await;
-                }
-                // Extraction
-                if let (Some(response_text), Some(owner)) = (&bg_response, &bg_owner)
-                    && let (Some(db), Some(router)) = (bg_db, bg_router)
-                {
-                    extract_user_traits_background(
-                        db,
-                        router,
-                        bg_config,
-                        bg_counter,
-                        bg_embedder,
-                        bg_user_path,
-                        bg_user_doc,
-                        bg_bus,
-                        bg_lane,
-                        bg_intent,
-                        response_text.clone(),
-                        owner.clone(),
-                    )
-                    .await;
-                }
+                // Clone shared fields for summary (extraction consumes the originals)
+                let sum_db = bg_db.clone();
+                let sum_router = bg_router.clone();
+                let sum_config = bg_config.clone();
+                let sum_lane = bg_lane.clone();
+
+                let summary_fut = async {
+                    if let (Some(db), Some(router)) = (sum_db, sum_router) {
+                        update_summary_background(db, router, sum_config, sum_lane, ctx).await;
+                    }
+                };
+
+                let extract_fut = async {
+                    if let (Some(response_text), Some(owner)) = (&bg_response, &bg_owner)
+                        && let (Some(db), Some(router)) = (bg_db, bg_router)
+                        && let (Some(counter), Some(user_path), Some(user_doc), Some(bus), Some(intent)) =
+                            (bg_counter, bg_user_path, bg_user_doc, bg_bus, bg_intent)
+                    {
+                        extract_user_traits_background(
+                            db, router, bg_config, counter, bg_embedder,
+                            user_path, user_doc, bus,
+                            bg_lane, intent, response_text.clone(), owner.clone(),
+                        )
+                        .await;
+                    }
+                };
+
+                tokio::join!(summary_fut, extract_fut);
             }));
         }
 
