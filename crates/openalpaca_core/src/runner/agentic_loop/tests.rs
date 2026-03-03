@@ -419,3 +419,96 @@ async fn test_max_tools_per_round_enforced() {
     // Only 2 tool calls should have been counted (the 3rd was truncated)
     assert_eq!(result.tool_calls_made, 2);
 }
+
+#[tokio::test]
+async fn test_cancellation_before_first_round() {
+    let provider = MockProvider::new(vec![Ok(MockProvider::simple_response("Never reached"))]);
+    let messages = vec![ChatMessage::user("hello")];
+    let config = LoopConfig::default();
+
+    let token = CancellationToken::new();
+    token.cancel(); // pre-cancel before loop starts
+
+    let result = run_agentic_loop(
+        &provider,
+        messages,
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        Some(token),
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Cancelled);
+    assert_eq!(result.rounds_used, 0);
+    assert_eq!(result.total_input_tokens, 0);
+    assert_eq!(result.total_output_tokens, 0);
+}
+
+#[tokio::test]
+async fn test_cancellation_during_tool_execution() {
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy, ToolExecutor};
+
+    /// Executor that cancels the token when a tool runs, simulating
+    /// cancellation arriving mid-parallel-execution.
+    struct CancellingExecutor {
+        token: CancellationToken,
+    }
+
+    #[async_trait]
+    impl ToolExecutor for CancellingExecutor {
+        async fn execute(
+            &self,
+            _tool_name: &str,
+            _arguments: &serde_json::Value,
+        ) -> Result<String, String> {
+            self.token.cancel();
+            // Yield so tokio::select! can observe the cancellation
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            Ok("should be dropped".to_string())
+        }
+        fn registered_tools(&self) -> Vec<String> {
+            vec!["search".to_string()]
+        }
+    }
+
+    let token = CancellationToken::new();
+    let executor = CancellingExecutor {
+        token: token.clone(),
+    };
+    let sandbox =
+        SandboxManager::with_defaults(std::sync::Arc::new(executor), EventBus::default());
+    let policy = SandboxPolicy {
+        agent_id: "test_agent".to_string(),
+        allowed_capabilities: vec![],
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 60,
+    };
+
+    let provider = MockProvider::new(vec![
+        Ok(MockProvider::tool_use_response()),
+        Ok(MockProvider::simple_response("Never reached")),
+    ]);
+    let messages = vec![ChatMessage::user("test")];
+    let config = LoopConfig::default();
+
+    let result = run_agentic_loop(
+        &provider,
+        messages,
+        vec![],
+        &config,
+        Some(&sandbox),
+        "test_agent",
+        Some(&policy),
+        Some(token),
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Cancelled);
+    assert_eq!(result.rounds_used, 1); // LLM call completed, then cancelled during tools
+}

@@ -89,6 +89,7 @@ pub(super) async fn update_summary_background(
             task_id: None,
         },
         tool_choice: None,
+        tools_token_estimate: None,
     };
 
     let call_start = std::time::Instant::now();

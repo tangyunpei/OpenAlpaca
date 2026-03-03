@@ -124,6 +124,7 @@ pub(super) async fn extract_user_traits_background(
             task_id: None,
         },
         tool_choice: None,
+        tools_token_estimate: None,
     };
 
     let call_start = std::time::Instant::now();

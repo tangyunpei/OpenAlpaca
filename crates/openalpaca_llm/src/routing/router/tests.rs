@@ -70,6 +70,7 @@ fn make_request(model: Option<&str>) -> RouterRequest {
         max_tokens: None,
         context: RequestContext::default(),
         tool_choice: None,
+        tools_token_estimate: None,
     }
 }
 

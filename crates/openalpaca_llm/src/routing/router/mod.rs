@@ -36,6 +36,9 @@ pub struct RouterRequest {
     pub max_tokens: Option<u32>,
     pub context: RequestContext,
     pub tool_choice: Option<ToolChoice>,
+    /// Pre-computed token estimate for tool definitions.
+    /// When `Some`, `estimate_request_tokens` skips JSON re-serialization of tools.
+    pub tools_token_estimate: Option<u32>,
 }
 
 /// Errors from the LLM router.
@@ -804,12 +807,15 @@ fn estimate_request_tokens(request: &RouterRequest) -> u32 {
             }
         })
         .sum();
-    let tool_bytes: usize = request
-        .tools
-        .iter()
-        .map(|t| t.description.len() + t.parameters.to_string().len())
-        .sum();
-    (msg_tokens + (tool_bytes / 4) as u32).max(100)
+    let tool_tokens = request.tools_token_estimate.unwrap_or_else(|| {
+        let tool_bytes: usize = request
+            .tools
+            .iter()
+            .map(|t| t.description.len() + t.parameters.to_string().len())
+            .sum();
+        (tool_bytes / 4) as u32
+    });
+    (msg_tokens + tool_tokens).max(100)
 }
 
 /// Estimate tokens for a single content part (mirrors agentic_loop logic).
