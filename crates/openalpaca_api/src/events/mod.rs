@@ -210,6 +210,7 @@ pub type EventId = Uuid;
 pub enum EventSource {
     Telegram { chat_id: String, user_id: String },
     IMessage { chat_id: String, sender: String },
+    Discord { channel_id: String, user_id: String, guild_id: Option<String> },
     Gui { connection_id: String },
     Cli { session_id: String },
     Api { request_id: String },

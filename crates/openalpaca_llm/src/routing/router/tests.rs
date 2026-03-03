@@ -69,6 +69,7 @@ fn make_request(model: Option<&str>) -> RouterRequest {
         temperature: None,
         max_tokens: None,
         context: RequestContext::default(),
+        tool_choice: None,
     }
 }
 

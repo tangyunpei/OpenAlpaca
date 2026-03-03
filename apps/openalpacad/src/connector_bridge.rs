@@ -38,6 +38,60 @@ impl ConnectorStatusProvider for CachedConnectorStatusProvider {
     }
 }
 
+// ── Telegram recipient validation ────────────────────────────────────
+
+/// Parsed Telegram recipient.
+#[derive(Debug)]
+enum TelegramRecipient {
+    Default,
+    ChatId(i64),
+}
+
+/// Validate Telegram recipient format. Returns Ok(parsed) or Err(user-facing message).
+/// Used by send_message and send_file paths. Testable without async/network.
+fn validate_telegram_recipient(recipient: &str) -> Result<TelegramRecipient, String> {
+    if recipient == "default" {
+        return Ok(TelegramRecipient::Default);
+    }
+    if recipient.starts_with('@') {
+        return Err(format!(
+            "Telegram @username ('{}') cannot be used directly. \
+             The Bot API requires a numeric chat_id. \
+             Try recipient=\"default\" instead.",
+            recipient
+        ));
+    }
+    recipient
+        .parse::<i64>()
+        .map(TelegramRecipient::ChatId)
+        .map_err(|_| format!("Invalid Telegram chat_id: '{}'", recipient))
+}
+
+// ── Discord recipient validation ─────────────────────────────────────
+
+/// Parsed Discord recipient.
+#[derive(Debug)]
+enum DiscordRecipient {
+    Default,
+    ChannelId(u64),
+}
+
+/// Validate Discord recipient format. Returns Ok(parsed) or Err(user-facing message).
+fn validate_discord_recipient(recipient: &str) -> Result<DiscordRecipient, String> {
+    if recipient == "default" {
+        return Ok(DiscordRecipient::Default);
+    }
+    recipient
+        .parse::<u64>()
+        .map(DiscordRecipient::ChannelId)
+        .map_err(|_| {
+            format!(
+                "Invalid Discord channel_id: '{}'. Must be a numeric snowflake ID.",
+                recipient
+            )
+        })
+}
+
 // ── ConnectorSendBridge ──────────────────────────────────────────────
 
 /// Outbound message sending via Telegram and iMessage.
@@ -68,6 +122,17 @@ impl ConnectorSendBridge {
             .filter(|t| !t.is_empty())
             .map(teloxide::Bot::new)
     }
+
+    /// Resolve a fresh Discord HTTP client from the current config.
+    fn discord_http(&self) -> Option<twilight_http::Client> {
+        let config_repo = openalpaca_storage::ConfigRepository::new(&self.db);
+        config_repo
+            .get("discord.token")
+            .ok()
+            .flatten()
+            .filter(|t| !t.is_empty())
+            .map(|t| twilight_http::Client::new(t))
+    }
 }
 
 #[async_trait]
@@ -84,26 +149,17 @@ impl ConnectorSendProvider for ConnectorSendBridge {
                     .telegram_bot()
                     .ok_or("Telegram not configured (no token)")?;
 
-                let chat_id = if recipient == "default" {
-                    // Resolve from preferences — find the most recent Telegram chat
-                    let pref_repo = PreferenceRepository::new(&self.db);
-                    pref_repo
-                        .get(&self.local_user_id, "telegram.last_chat_id")
-                        .ok()
-                        .flatten()
-                        .and_then(|p| p.value.parse::<i64>().ok())
-                        .ok_or("No default Telegram chat found. Please specify a chat_id.")?
-                } else if recipient.starts_with('@') {
-                    return Err(format!(
-                        "Telegram @username ('{}') cannot be used directly. \
-                         The Bot API requires a numeric chat_id. \
-                         Try recipient=\"default\" instead.",
-                        recipient
-                    ));
-                } else {
-                    recipient
-                        .parse::<i64>()
-                        .map_err(|_| format!("Invalid Telegram chat_id: '{}'", recipient))?
+                let chat_id = match validate_telegram_recipient(recipient)? {
+                    TelegramRecipient::Default => {
+                        let pref_repo = PreferenceRepository::new(&self.db);
+                        pref_repo
+                            .get(&self.local_user_id, "telegram.last_chat_id")
+                            .ok()
+                            .flatten()
+                            .and_then(|p| p.value.parse::<i64>().ok())
+                            .ok_or("No default Telegram chat found. Please specify a chat_id.")?
+                    }
+                    TelegramRecipient::ChatId(id) => id,
                 };
 
                 use teloxide::prelude::*;
@@ -167,7 +223,38 @@ impl ConnectorSendProvider for ConnectorSendBridge {
             #[cfg(not(target_os = "macos"))]
             "imessage" => Err("iMessage is only available on macOS".to_string()),
 
-            _ => Err(format!("Unknown channel: '{}'. Available: telegram, imessage", channel)),
+            "discord" => {
+                let http = self
+                    .discord_http()
+                    .ok_or("Discord not configured (no token)")?;
+                let channel_id = match validate_discord_recipient(recipient)? {
+                    DiscordRecipient::Default => {
+                        let pref_repo = PreferenceRepository::new(&self.db);
+                        pref_repo
+                            .get(&self.local_user_id, "discord.last_channel_id")
+                            .ok()
+                            .flatten()
+                            .and_then(|p| p.value.parse::<u64>().ok())
+                            .ok_or(
+                                "No default Discord channel found. Please specify a channel_id.",
+                            )?
+                    }
+                    DiscordRecipient::ChannelId(id) => id,
+                };
+                use twilight_model::id::{Id, marker::ChannelMarker};
+                openalpaca_connectors::discord::send_with_retry(
+                    &http,
+                    Id::<ChannelMarker>::new(channel_id),
+                    content,
+                )
+                .await?;
+                Ok(format!("Sent to Discord channel {}", channel_id))
+            }
+
+            _ => Err(format!(
+                "Unknown channel: '{}'. Available: telegram, imessage, discord",
+                channel
+            )),
         }
     }
 
@@ -178,6 +265,9 @@ impl ConnectorSendProvider for ConnectorSendBridge {
         }
         #[cfg(target_os = "macos")]
         channels.push("imessage".to_string());
+        if self.discord_http().is_some() {
+            channels.push("discord".to_string());
+        }
         channels
     }
 
@@ -196,18 +286,17 @@ impl ConnectorSendProvider for ConnectorSendBridge {
                     .telegram_bot()
                     .ok_or("Telegram not configured (no token)")?;
 
-                let chat_id = if recipient == "default" {
-                    let pref_repo = PreferenceRepository::new(&self.db);
-                    pref_repo
-                        .get(&self.local_user_id, "telegram.last_chat_id")
-                        .ok()
-                        .flatten()
-                        .and_then(|p| p.value.parse::<i64>().ok())
-                        .ok_or("No default Telegram chat found. Please specify a chat_id.")?
-                } else {
-                    recipient
-                        .parse::<i64>()
-                        .map_err(|_| format!("Invalid Telegram chat_id: '{}'", recipient))?
+                let chat_id = match validate_telegram_recipient(recipient)? {
+                    TelegramRecipient::Default => {
+                        let pref_repo = PreferenceRepository::new(&self.db);
+                        pref_repo
+                            .get(&self.local_user_id, "telegram.last_chat_id")
+                            .ok()
+                            .flatten()
+                            .and_then(|p| p.value.parse::<i64>().ok())
+                            .ok_or("No default Telegram chat found. Please specify a chat_id.")?
+                    }
+                    TelegramRecipient::ChatId(id) => id,
                 };
 
                 use teloxide::prelude::*;
@@ -222,7 +311,144 @@ impl ConnectorSendProvider for ConnectorSendBridge {
                     .map_err(|e| format!("Telegram send_document failed: {}", e))?;
                 Ok(format!("Sent file '{}' to Telegram chat {}", filename, chat_id))
             }
-            _ => Err(format!("File sending not supported on channel: '{}'", channel)),
+            #[cfg(target_os = "macos")]
+            "imessage" => {
+                let pref_repo = PreferenceRepository::new(&self.db);
+                let (target, is_group) = if recipient == "default" {
+                    let target = pref_repo
+                        .get(&self.local_user_id, "imessage.last_reply_target")
+                        .ok()
+                        .flatten()
+                        .map(|p| p.value)
+                        .or_else(|| {
+                            pref_repo
+                                .get(&self.local_user_id, "imessage.last_chat_id")
+                                .ok()
+                                .flatten()
+                                .map(|p| p.value)
+                        })
+                        .ok_or(
+                            "No default iMessage target found. Please specify a recipient.",
+                        )?;
+                    let is_group = pref_repo
+                        .get(&self.local_user_id, "imessage.last_is_group")
+                        .ok()
+                        .flatten()
+                        .map(|p| p.value == "true")
+                        .unwrap_or_else(|| target.starts_with("chat"));
+                    (target, is_group)
+                } else {
+                    let is_group = recipient.starts_with("chat");
+                    (recipient.to_string(), is_group)
+                };
+
+                let from_account = pref_repo
+                    .get(&self.local_user_id, "imessage.last_send_account")
+                    .ok()
+                    .flatten()
+                    .map(|p| p.value);
+
+                openalpaca_connectors::imessage::IMessageSender::send_file_from(
+                    &target,
+                    file_path,
+                    is_group,
+                    from_account.as_deref(),
+                )
+                .await?;
+
+                // Send caption as separate text message if provided
+                let caption_note = if let Some(cap) = caption
+                    && !cap.is_empty()
+                {
+                    match openalpaca_connectors::imessage::IMessageSender::send_from(
+                        &target,
+                        cap,
+                        is_group,
+                        from_account.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(()) => String::new(),
+                        Err(e) => {
+                            tracing::warn!(target = %target, "iMessage caption send failed (file sent OK): {e}");
+                            format!(" (note: caption failed: {})", e)
+                        }
+                    }
+                } else {
+                    String::new()
+                };
+
+                Ok(format!(
+                    "Sent file '{}' to iMessage: {}{}",
+                    filename, target, caption_note
+                ))
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            "imessage" => Err("iMessage is only available on macOS".to_string()),
+
+            "discord" => {
+                let http = self
+                    .discord_http()
+                    .ok_or("Discord not configured (no token)")?;
+                let channel_id = match validate_discord_recipient(recipient)? {
+                    DiscordRecipient::Default => {
+                        let pref_repo = PreferenceRepository::new(&self.db);
+                        pref_repo
+                            .get(&self.local_user_id, "discord.last_channel_id")
+                            .ok()
+                            .flatten()
+                            .and_then(|p| p.value.parse::<u64>().ok())
+                            .ok_or(
+                                "No default Discord channel found. Please specify a channel_id.",
+                            )?
+                    }
+                    DiscordRecipient::ChannelId(id) => id,
+                };
+                use twilight_model::id::{Id, marker::ChannelMarker};
+                use twilight_model::http::attachment::Attachment;
+                let file_data = tokio::fs::read(file_path)
+                    .await
+                    .map_err(|e| format!("Failed to read file: {e}"))?;
+                let mut attempts = 0;
+                loop {
+                    let attachment =
+                        Attachment::from_bytes(filename.to_string(), file_data.clone(), 1);
+                    let attachments = [attachment];
+                    let req = http
+                        .create_message(Id::<ChannelMarker>::new(channel_id))
+                        .attachments(&attachments);
+                    let req = if let Some(cap) = caption {
+                        req.content(cap)
+                    } else {
+                        req
+                    };
+                    match req.await {
+                        Ok(_) => break,
+                        Err(e) => {
+                            attempts += 1;
+                            if attempts >= 3 {
+                                return Err(format!(
+                                    "Discord send_file failed after 3 retries: {e}"
+                                ));
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(
+                                1 << (attempts - 1),
+                            ))
+                            .await;
+                        }
+                    }
+                }
+                Ok(format!(
+                    "Sent file '{}' to Discord channel {}",
+                    filename, channel_id
+                ))
+            }
+
+            _ => Err(format!(
+                "File sending not supported on channel: '{}'",
+                channel
+            )),
         }
     }
 
@@ -231,6 +457,95 @@ impl ConnectorSendProvider for ConnectorSendBridge {
         if self.telegram_bot().is_some() {
             channels.push("telegram".to_string());
         }
+        #[cfg(target_os = "macos")]
+        channels.push("imessage".to_string());
+        if self.discord_http().is_some() {
+            channels.push("discord".to_string());
+        }
         channels
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_telegram_recipient_default() {
+        let result = validate_telegram_recipient("default");
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), TelegramRecipient::Default));
+    }
+
+    #[test]
+    fn validate_telegram_recipient_numeric_chat_id() {
+        let result = validate_telegram_recipient("12345");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            TelegramRecipient::ChatId(id) => assert_eq!(id, 12345),
+            _ => panic!("expected ChatId"),
+        }
+    }
+
+    #[test]
+    fn validate_telegram_recipient_negative_group_chat_id() {
+        let result = validate_telegram_recipient("-100123");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            TelegramRecipient::ChatId(id) => assert_eq!(id, -100123),
+            _ => panic!("expected ChatId"),
+        }
+    }
+
+    #[test]
+    fn validate_telegram_recipient_rejects_username() {
+        let result = validate_telegram_recipient("@someuser");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("@username"));
+        assert!(err.contains("chat_id"));
+    }
+
+    #[test]
+    fn validate_telegram_recipient_rejects_non_numeric() {
+        let result = validate_telegram_recipient("abc");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Invalid Telegram chat_id"));
+    }
+
+    // ── Discord recipient validation tests ──
+
+    #[test]
+    fn validate_discord_recipient_default() {
+        let result = validate_discord_recipient("default");
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), DiscordRecipient::Default));
+    }
+
+    #[test]
+    fn validate_discord_recipient_numeric_channel_id() {
+        let result = validate_discord_recipient("123456789012345678");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            DiscordRecipient::ChannelId(id) => assert_eq!(id, 123456789012345678),
+            _ => panic!("expected ChannelId"),
+        }
+    }
+
+    #[test]
+    fn validate_discord_recipient_rejects_non_numeric() {
+        let result = validate_discord_recipient("general");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Invalid Discord channel_id"));
+        assert!(err.contains("snowflake"));
+    }
+
+    #[test]
+    fn validate_discord_recipient_rejects_negative() {
+        // Discord snowflakes are unsigned — negative numbers should fail
+        let result = validate_discord_recipient("-12345");
+        assert!(result.is_err());
     }
 }

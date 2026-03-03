@@ -132,6 +132,7 @@ pub async fn extract_task_memories(
             agent_id: Some(AGENT_LABEL.to_string()),
             task_id: Some(params.task_id.clone()),
         },
+        tool_choice: None,
     };
 
     // LLM call

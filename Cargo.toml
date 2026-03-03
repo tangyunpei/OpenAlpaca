@@ -109,6 +109,11 @@ regex = "1.12.3"
 teloxide = { version = "0.17.0", features = ["macros"] }
 async-trait = "0.1.89"
 
+# discord (twilight ecosystem)
+twilight-gateway = "0.17"
+twilight-http = "0.17"
+twilight-model = "0.17"
+
 openalpaca_llm = { path = "crates/openalpaca_llm" }
 arc-swap = "1"
 signal-hook = "0.4.3"

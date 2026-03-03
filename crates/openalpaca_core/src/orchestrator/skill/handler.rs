@@ -3,7 +3,7 @@ use super::output::validate_skill_output;
 use crate::events::SystemEvent;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::bootstrap::bootstrap_to_prompt_block;
-use crate::middleware::guard::OutputGuard;
+use crate::middleware::guard::{OutputGuard, detect_hallucinated_send};
 use crate::middleware::identity::identity_to_prompt_block;
 use crate::middleware::prompt::{
     AgentPersona, PromptAssembler, format_connector_guidance, format_message_source,
@@ -17,7 +17,7 @@ use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
 use chrono::Utc;
-use openalpaca_llm::ChatMessage;
+use openalpaca_llm::{ChatMessage, ToolChoice};
 use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -247,26 +247,17 @@ impl Orchestrator {
             );
         }
 
-        // Connector guidance: only inject full guidance (mentioning send_message tool)
-        // if send_message is actually resolved in tool_defs. Checking tool_defs (not
-        // tool_names) ensures we don't mention a tool the registry couldn't resolve.
-        if tool_defs.iter().any(|d| d.name == "send_message") {
-            if let Ok(guard) = self.connector_status.read()
-                && let Some(ref provider) = *guard
-            {
-                let statuses = provider.list_status();
-                let sc: Vec<String> = self
-                    .connector_sender
-                    .read()
-                    .ok()
-                    .and_then(|g| g.as_ref().map(|p| p.sendable_channels()))
-                    .unwrap_or_default();
-                let sc_ref = if sc.is_empty() { None } else { Some(sc.as_slice()) };
-                let block = format_connector_guidance(&statuses, sc_ref);
-                if !block.is_empty() {
-                    system_prompt.push('\n');
-                    system_prompt.push_str(&block);
-                }
+        // Connector guidance: inject channel awareness unconditionally.
+        // The block is purely informational (no tool mentions), so it's safe
+        // regardless of which tools are resolved.
+        if let Ok(guard) = self.connector_status.read()
+            && let Some(ref provider) = *guard
+        {
+            let statuses = provider.list_status();
+            let block = format_connector_guidance(&statuses, None);
+            if !block.is_empty() {
+                system_prompt.push('\n');
+                system_prompt.push_str(&block);
             }
         }
 
@@ -279,6 +270,15 @@ impl Orchestrator {
                 tool_names
             );
             system_prompt.push_str(&format_tool_guidance(&tool_defs));
+
+            // Inject factual send_context when send_message or send_file is available
+            if tool_defs.iter().any(|d| d.name == "send_message" || d.name == "send_file") {
+                let send_ctx = self.build_send_context(owner_id);
+                if !send_ctx.is_empty() {
+                    system_prompt.push('\n');
+                    system_prompt.push_str(&send_ctx);
+                }
+            }
             let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
             let mut denied_caps: Vec<String> = skill_deny.clone();
             for g in global_deny {
@@ -298,6 +298,20 @@ impl Orchestrator {
             config_for_loop = LoopConfig {
                 max_rounds: skill_cfg.max_rounds,
                 max_tools_per_round: skill_cfg.max_tools_per_round,
+                initial_tool_choice: {
+                    let has_send_msg = tool_defs.iter().any(|d| d.name == "send_message");
+                    let has_send_file = tool_defs.iter().any(|d| d.name == "send_file");
+                    if has_send_msg && has_send_file {
+                        // Skill explicitly declared both tools — let LLM decide
+                        Some(ToolChoice::Any)
+                    } else if has_send_msg {
+                        Some(ToolChoice::Tool("send_message".to_string()))
+                    } else if has_send_file {
+                        Some(ToolChoice::Tool("send_file".to_string()))
+                    } else {
+                        None
+                    }
+                },
                 ..self.loop_config.clone()
             };
             tools_for_loop = tool_defs;
@@ -508,7 +522,22 @@ impl Orchestrator {
                 return Err(format!("LLM error: {}", err));
             }
 
-            (result.final_content, false)
+            // Post-hoc guard: detect hallucinated send confirmations
+            let tool_name_refs: Vec<&str> = tool_names.iter().map(|s| s.as_str()).collect();
+            if detect_hallucinated_send(&tool_name_refs, result.tool_calls_made, &result.final_content) {
+                tracing::warn!(
+                    tool_calls = result.tool_calls_made,
+                    "Detected hallucinated send confirmation in skill invocation; overriding response"
+                );
+                (
+                    "⚠️ 消息未实际发送。模型生成了确认文本但未调用发送工具。请重新发送请求。\n\n\
+                     ⚠️ Message was NOT actually sent. The model generated confirmation text \
+                     without calling the send tool. Please retry your send request.".to_string(),
+                    false,
+                )
+            } else {
+                (result.final_content, false)
+            }
         } else {
             // Fallback: echo stub with skill info
             (
