@@ -649,6 +649,7 @@ async fn plan_inner(
             max_tokens: Some(limits.max_tokens),
             context: RequestContext::default(),
             tool_choice: None,
+            tools_token_estimate: None,
         };
 
         let response = tokio::time::timeout(deadline, router.complete(request))
@@ -1101,6 +1102,7 @@ Example:
             max_tokens: Some(50),
             context: RequestContext::default(),
             tool_choice: None,
+            tools_token_estimate: None,
         };
         let deadline = Duration::from_secs(timeout_secs);
         let response = tokio::time::timeout(deadline, router.complete(request))

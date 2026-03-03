@@ -89,6 +89,7 @@ impl Replanner {
             max_tokens: Some(2048),
             context: RequestContext::default(),
             tool_choice: None,
+            tools_token_estimate: None,
         };
 
         let response = router
