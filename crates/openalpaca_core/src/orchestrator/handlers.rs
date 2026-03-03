@@ -20,6 +20,55 @@ use super::intent::Intent;
 use super::task_planner::{PlannerLimits, TaskPlanner};
 
 impl Orchestrator {
+    /// Build a formatted block of active tasks for planner context injection.
+    fn build_active_tasks_block(&self, owner_id: &str) -> Option<String> {
+        let db = self.db.as_ref()?;
+        let task_repo = TaskRepository::new(db);
+        match task_repo.list_active_by_creator(owner_id, 10) {
+            Ok(tasks) if !tasks.is_empty() => {
+                let mut block = String::from("### ACTIVE TASKS ###\n");
+                for t in &tasks {
+                    let progress = match (t.progress_current, t.progress_total) {
+                        (Some(c), Some(total)) => format!(" [{}/{}]", c, total),
+                        _ => String::new(),
+                    };
+                    block.push_str(&format!(
+                        "- [{}] {} ({}{})\n",
+                        &t.id[..8.min(t.id.len())],
+                        t.title,
+                        t.status.as_str(),
+                        progress
+                    ));
+                }
+                Some(block)
+            }
+            _ => None,
+        }
+    }
+
+    /// Build the idle agents list and planner limits from current config.
+    fn build_planner_inputs(&self) -> (Vec<crate::agent::SubAgent>, PlannerLimits, bool) {
+        let templates = self.shared_context.agent_registry.list_templates();
+        let idle_agents: Vec<crate::agent::SubAgent> = templates
+            .iter()
+            .map(|t| {
+                let mut agent = t.to_subagent(&t.frontmatter.id, "");
+                agent.status = crate::agent::AgentStatus::Idle;
+                agent.current_task = None;
+                agent
+            })
+            .collect();
+        let planner_cfg = &self.daemon_config.load().execution.planner;
+        let limits = PlannerLimits {
+            timeout_secs: planner_cfg.planning_timeout_secs,
+            max_retries: planner_cfg.max_retries,
+            max_tokens: planner_cfg.max_tokens,
+            plan_protocol_v2_enabled: planner_cfg.plan_protocol_v2_enabled,
+        };
+        let dag_prefer = planner_cfg.dag_prefer_predictable_enabled;
+        (idle_agents, limits, dag_prefer)
+    }
+
     /// Handle a user message through the full pipeline:
     /// 1. SecurityGate permission check (wraps TrustGate)
     /// 2. Input sanitization
@@ -138,33 +187,6 @@ impl Orchestrator {
         // 4. Build context ONCE for all remaining paths (D6: single dedup location)
         let ctx = self.build_context(&lane_key, &model_input_content);
 
-        // Build active tasks block for planner
-        let active_tasks_block = if let Some(ref db) = self.db {
-            let task_repo = TaskRepository::new(db);
-            match task_repo.list_active_by_creator(&owner_id_str, 10) {
-                Ok(tasks) if !tasks.is_empty() => {
-                    let mut block = String::from("### ACTIVE TASKS ###\n");
-                    for t in &tasks {
-                        let progress = match (t.progress_current, t.progress_total) {
-                            (Some(c), Some(total)) => format!(" [{}/{}]", c, total),
-                            _ => String::new(),
-                        };
-                        block.push_str(&format!(
-                            "- [{}] {} ({}{})\n",
-                            &t.id[..8.min(t.id.len())],
-                            t.title,
-                            t.status.as_str(),
-                            progress
-                        ));
-                    }
-                    Some(block)
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
-
         // 5. Compute result — planner path or heuristic fallback
         //    Track timing for observability (Step 1: OrchestrationStage metrics)
         let mut planner_ms: u64 = 0;
@@ -203,6 +225,21 @@ impl Orchestrator {
             .await
         } else if self.llm_router.is_some()
             && matches!(intent, Intent::SimpleQuery { .. })
+            && self.intent_parser.is_social_message(&intent_source_content)
+            && super::query_handler::detect_active_send_hints(&ctx.recent_messages)
+                == super::query_handler::ActiveSendHints::default()
+        {
+            // Social fast path: ultra-light prompt for "ok", "thanks", "好的" etc.
+            mode = "social_fast_path".to_string();
+            self.bus.publish(SystemEvent::PlannerBypassed {
+                request_id,
+                reason: "social_fast_path".to_string(),
+                timestamp: Utc::now(),
+            });
+            self.handle_social_query(request_id, &model_input_content, &ctx)
+                .await
+        } else if self.llm_router.is_some()
+            && matches!(intent, Intent::SimpleQuery { .. })
             && self
                 .intent_parser
                 .is_fast_path_eligible(&intent_source_content)
@@ -226,24 +263,189 @@ impl Orchestrator {
                 current_parts.as_deref(),
             )
             .await
+        } else if self.llm_router.is_some()
+            && matches!(intent, Intent::SimpleQuery { .. })
+            && self
+                .daemon_config
+                .load()
+                .execution
+                .planner
+                .enhanced_pre_screen_enabled
+            && self
+                .intent_parser
+                .is_enhanced_simple_query(&intent_source_content)
+        {
+            // Enhanced pre-screen: skip LLM planner for likely simple queries
+            mode = "pre_screen_simple".to_string();
+            self.bus.publish(SystemEvent::PlannerBypassed {
+                request_id,
+                reason: "enhanced_pre_screen".to_string(),
+                timestamp: Utc::now(),
+            });
+            self.handle_simple_query(
+                request_id,
+                &source,
+                &model_input_content,
+                &intent_source_content,
+                &lane_key,
+                &ctx,
+                owner_id,
+                &scope_ctx,
+                current_parts.as_deref(),
+            )
+            .await
+        } else if let Some(ref router) = self.llm_router
+            && matches!(intent, Intent::SimpleQuery { .. })
+            && self.daemon_config.load().execution.planner.two_phase_enabled
+        {
+            // Two-phase: lightweight LLM classification before full planner
+            let planner_cfg = self.daemon_config.load();
+            let triage_model = planner_cfg.execution.planner.triage_model.as_deref();
+            match TaskPlanner::classify_lightweight(
+                router,
+                triage_model,
+                &intent_source_content,
+                10,
+            )
+            .await
+            {
+                Ok(ref c) if c == "simple_query" => {
+                    mode = "two_phase_simple".to_string();
+                    self.bus.publish(SystemEvent::PlannerBypassed {
+                        request_id,
+                        reason: "two_phase_lightweight".to_string(),
+                        timestamp: Utc::now(),
+                    });
+                    self.handle_simple_query(
+                        request_id,
+                        &source,
+                        &model_input_content,
+                        &intent_source_content,
+                        &lane_key,
+                        &ctx,
+                        owner_id,
+                        &scope_ctx,
+                        current_parts.as_deref(),
+                    )
+                    .await
+                }
+                _ => {
+                    // Fall through to full planner — re-enter via heuristic dispatcher
+                    // which handles all remaining intent types including ComplexTask
+                    mode = "two_phase_complex".to_string();
+                    let (idle_agents, limits, dag_prefer) = self.build_planner_inputs();
+                    let active_tasks_block = owner_id.and_then(|id| self.build_active_tasks_block(id));
+
+                    let planner_start = Instant::now();
+                    let plan_result = TaskPlanner::plan_hierarchical(
+                        router,
+                        &model_input_content,
+                        &idle_agents,
+                        &ctx.recent_messages,
+                        ctx.summary.as_deref(),
+                        active_tasks_block.as_deref(),
+                        limits,
+                        dag_prefer,
+                    )
+                    .await;
+                    planner_ms = planner_start.elapsed().as_millis() as u64;
+
+                    match plan_result {
+                        Ok(plan) => {
+                            auto_promotion_reason = plan.auto_promotion_reason.clone();
+                            match plan.classification.as_str() {
+                                "simple_query" => {
+                                    self.handle_simple_query(
+                                        request_id,
+                                        &source,
+                                        &model_input_content,
+                                        &intent_source_content,
+                                        &lane_key,
+                                        &ctx,
+                                        owner_id,
+                                        &scope_ctx,
+                                        current_parts.as_deref(),
+                                    )
+                                    .await
+                                }
+                                "complex_task" => {
+                                    let description = &model_input_content;
+                                    let augmented =
+                                        self.augment_with_context(description, &ctx);
+                                    let dispatch_start = Instant::now();
+                                    let dispatch_result =
+                                        self.task_dispatcher.dispatch_planned(
+                                            request_id,
+                                            &augmented,
+                                            plan,
+                                            &principal_id(&principal),
+                                            &lane_key,
+                                            &source,
+                                            scope_ctx.workspace_id.clone(),
+                                        );
+                                    dispatch_ms =
+                                        dispatch_start.elapsed().as_millis() as u64;
+                                    match dispatch_result {
+                                        Ok(response) => Ok(response),
+                                        Err(e) => {
+                                            fallback_reason = Some(format!(
+                                                "two_phase_dispatch_failed: {e}"
+                                            ));
+                                            self.handle_simple_query(
+                                                request_id,
+                                                &source,
+                                                &model_input_content,
+                                                &intent_source_content,
+                                                &lane_key,
+                                                &ctx,
+                                                owner_id,
+                                                &scope_ctx,
+                                                current_parts.as_deref(),
+                                            )
+                                            .await
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    fallback_reason =
+                                        Some("two_phase_unknown_classification".to_string());
+                                    self.handle_simple_query(
+                                        request_id,
+                                        &source,
+                                        &model_input_content,
+                                        &intent_source_content,
+                                        &lane_key,
+                                        &ctx,
+                                        owner_id,
+                                        &scope_ctx,
+                                        current_parts.as_deref(),
+                                    )
+                                    .await
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            fallback_reason =
+                                Some(format!("two_phase_planner_failed: {e}"));
+                            self.handle_simple_query(
+                                request_id,
+                                &source,
+                                &model_input_content,
+                                &intent_source_content,
+                                &lane_key,
+                                &ctx,
+                                owner_id,
+                                &scope_ctx,
+                                current_parts.as_deref(),
+                            )
+                            .await
+                        }
+                    }
+                }
+            }
         } else if let Some(ref router) = self.llm_router {
-            let templates = self.shared_context.agent_registry.list_templates();
-            let idle_agents: Vec<crate::agent::SubAgent> = templates
-                .iter()
-                .map(|t| {
-                    let mut agent = t.to_subagent(&t.frontmatter.id, "");
-                    agent.status = crate::agent::AgentStatus::Idle;
-                    agent.current_task = None;
-                    agent
-                })
-                .collect();
-            let planner_cfg = &self.daemon_config.load().execution.planner;
-            let limits = PlannerLimits {
-                timeout_secs: planner_cfg.planning_timeout_secs,
-                max_retries: planner_cfg.max_retries,
-                max_tokens: planner_cfg.max_tokens,
-                plan_protocol_v2_enabled: planner_cfg.plan_protocol_v2_enabled,
-            };
+            let (idle_agents, limits, dag_prefer) = self.build_planner_inputs();
+            let active_tasks_block = owner_id.and_then(|id| self.build_active_tasks_block(id));
 
             let planner_start = Instant::now();
             let plan_result = TaskPlanner::plan_hierarchical(
@@ -254,7 +456,7 @@ impl Orchestrator {
                 ctx.summary.as_deref(),
                 active_tasks_block.as_deref(),
                 limits,
-                planner_cfg.dag_prefer_predictable_enabled,
+                dag_prefer,
             )
             .await;
             planner_ms = planner_start.elapsed().as_millis() as u64;
@@ -345,6 +547,7 @@ impl Orchestrator {
                                 owner_id,
                                 &scope_ctx,
                                 current_parts.as_deref(),
+                                None, // re-parse on rare fallback path
                             )
                             .await
                         }
@@ -365,6 +568,7 @@ impl Orchestrator {
                         owner_id,
                         &scope_ctx,
                         current_parts.as_deref(),
+                        None, // re-parse on rare fallback path
                     )
                     .await
                 }
@@ -382,6 +586,7 @@ impl Orchestrator {
                 owner_id,
                 &scope_ctx,
                 current_parts.as_deref(),
+                Some(intent.clone()), // reuse cached intent (Opt-6)
             )
             .await
         };
@@ -419,21 +624,60 @@ impl Orchestrator {
         }
 
         // 6 + 7. Summary update and user trait extraction run concurrently
-        // (both are fire-and-forget LLM calls that don't affect the response).
+        // in a background spawn (fire-and-forget, never blocks the response).
         {
-            let summary_fut = self.maybe_update_summary(&lane_key, &ctx);
-            let extract_fut = async {
-                if let Ok(ref response_text) = result {
-                    self.maybe_extract_user_traits(
-                        &lane_key,
-                        &intent_source_content,
-                        response_text,
-                        owner_id,
-                    )
-                    .await;
-                }
-            };
-            tokio::join!(summary_fut, extract_fut);
+            use super::extraction::extract_user_traits_background;
+            use super::summary::update_summary_background;
+
+            let needs_extraction = owner_id.is_some() && result.is_ok();
+
+            // Shared fields (both tasks need these)
+            let bg_db = self.db.clone();
+            let bg_router = self.llm_router.clone();
+            let bg_config = self.daemon_config.clone();
+            let bg_lane = lane_key.to_string();
+
+            // Extraction-only fields (clone only when needed)
+            let bg_counter = if needs_extraction { Some(self.extraction_turn_counter.clone()) } else { None };
+            let bg_embedder = if needs_extraction { self.embedder.clone() } else { None };
+            let bg_user_path = if needs_extraction { Some(self.user_path.clone()) } else { None };
+            let bg_user_doc = if needs_extraction { Some(self.user_document.clone()) } else { None };
+            let bg_bus = if needs_extraction { Some(self.bus.clone()) } else { None };
+            let bg_intent = if needs_extraction { Some(intent_source_content.to_string()) } else { None };
+            let bg_owner = owner_id.map(|s| s.to_string());
+            let bg_response = result.as_ref().ok().cloned();
+
+            // NOTE: ctx is intentionally moved into this spawn — do not reference it after this block
+            tokio::spawn(async move {
+                // Clone shared fields for summary (extraction consumes the originals)
+                let sum_db = bg_db.clone();
+                let sum_router = bg_router.clone();
+                let sum_config = bg_config.clone();
+                let sum_lane = bg_lane.clone();
+
+                let summary_fut = async {
+                    if let (Some(db), Some(router)) = (sum_db, sum_router) {
+                        update_summary_background(db, router, sum_config, sum_lane, ctx).await;
+                    }
+                };
+
+                let extract_fut = async {
+                    if let (Some(response_text), Some(owner)) = (&bg_response, &bg_owner)
+                        && let (Some(db), Some(router)) = (bg_db, bg_router)
+                        && let (Some(counter), Some(user_path), Some(user_doc), Some(bus), Some(intent)) =
+                            (bg_counter, bg_user_path, bg_user_doc, bg_bus, bg_intent)
+                    {
+                        extract_user_traits_background(
+                            db, router, bg_config, counter, bg_embedder,
+                            user_path, user_doc, bus,
+                            bg_lane, intent, response_text.clone(), owner.clone(),
+                        )
+                        .await;
+                    }
+                };
+
+                tokio::join!(summary_fut, extract_fut);
+            });
         }
 
         // 8. Check if bootstrap onboarding is complete
@@ -592,12 +836,15 @@ impl Orchestrator {
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
         current_parts: Option<&[ContentPart]>,
+        cached_intent: Option<Intent>,
     ) -> Result<String, String> {
-        let intent = self.intent_parser.parse_with_skills_and_router(
-            intent_content,
-            &self.skill_catalog,
-            &self.skill_router,
-        );
+        let intent = cached_intent.unwrap_or_else(|| {
+            self.intent_parser.parse_with_skills_and_router(
+                intent_content,
+                &self.skill_catalog,
+                &self.skill_router,
+            )
+        });
 
         self.bus.publish(SystemEvent::IntentClassified {
             request_id,

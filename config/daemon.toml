@@ -38,6 +38,8 @@ summary_max_daily_cost_usd = 0.5
 task_extract_enabled = true
 task_extract_max_daily_cost_usd = 0.5
 task_extract_min_content_len = 100
+# summary_model = "claude-haiku-4-5-20251001"
+# extraction_model = "claude-haiku-4-5-20251001"
 
 [orchestrator.memory]
 fts_jaccard_threshold = 0.4

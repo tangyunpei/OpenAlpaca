@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 impl Orchestrator {
     /// Check if IDENTITY.md and USER.md have been populated; if so, finalize bootstrap.
     ///
-    /// Runs post-response (like `maybe_extract_user_traits`) and:
+    /// Runs post-response (like `extract_user_traits_background`) and:
     /// 1. Checks if `bootstrap_document` is Some (bootstrap mode active)
     /// 2. Checks if `identity_document` has content AND `user_document` has content
     /// 3. If both populated: delete BOOTSTRAP.md, clear state, publish event

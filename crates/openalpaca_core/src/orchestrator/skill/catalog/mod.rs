@@ -37,6 +37,9 @@ pub struct SkillEntry {
     pub scope: SkillScope,
 }
 
+/// Cached catalog summary: `(name, description, command)` tuples.
+type CatalogSummaryCache = RwLock<Option<Vec<(String, String, Option<String>)>>>;
+
 /// Central skill catalog — lightweight at startup, loads full content on demand.
 ///
 /// Thread-safe via internal `RwLock`. All mutations go through `&self` methods.
@@ -53,6 +56,8 @@ pub struct SkillCatalog {
     validation_errors: RwLock<Vec<String>>,
     /// Optional event bus for emitting lifecycle events.
     bus: Option<EventBus>,
+    /// Cached catalog summary — invalidated on mutation (Opt-8a).
+    cached_summary: CatalogSummaryCache,
 }
 
 impl Default for SkillCatalog {
@@ -69,6 +74,7 @@ impl SkillCatalog {
             alias_index: RwLock::new(HashMap::new()),
             validation_errors: RwLock::new(Vec::new()),
             bus: None,
+            cached_summary: RwLock::new(None),
         }
     }
 
@@ -80,6 +86,7 @@ impl SkillCatalog {
             alias_index: RwLock::new(HashMap::new()),
             validation_errors: RwLock::new(Vec::new()),
             bus: Some(bus),
+            cached_summary: RwLock::new(None),
         }
     }
 
@@ -267,6 +274,7 @@ impl SkillCatalog {
             });
         }
 
+        self.invalidate_summary_cache();
         Ok(())
     }
 
@@ -371,8 +379,17 @@ impl SkillCatalog {
     }
 
     /// List all skills with their (name, description, command) for prompt catalog.
+    /// Returns a cached copy when available; rebuilt on catalog mutations.
     pub fn catalog_summary(&self) -> Vec<(String, String, Option<String>)> {
-        match self.entries.read() {
+        // Fast path: return cached summary
+        if let Ok(guard) = self.cached_summary.read()
+            && let Some(ref cached) = *guard
+        {
+            return cached.clone();
+        }
+
+        // Slow path: build summary and cache it
+        let summaries = match self.entries.read() {
             Ok(guard) => {
                 let mut summaries: Vec<(String, String, Option<String>)> = guard
                     .values()
@@ -388,6 +405,18 @@ impl SkillCatalog {
                 summaries
             }
             Err(_) => Vec::new(),
+        };
+
+        if let Ok(mut cache) = self.cached_summary.write() {
+            *cache = Some(summaries.clone());
+        }
+        summaries
+    }
+
+    /// Invalidate the cached catalog summary (call after any mutation).
+    fn invalidate_summary_cache(&self) {
+        if let Ok(mut cache) = self.cached_summary.write() {
+            *cache = None;
         }
     }
 
@@ -429,6 +458,7 @@ impl SkillCatalog {
                 entries.remove(actual);
             }
         }
+        self.invalidate_summary_cache();
     }
 
     /// Hot-reload a single skill directory.

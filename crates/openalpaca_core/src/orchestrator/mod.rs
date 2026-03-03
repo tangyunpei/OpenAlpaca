@@ -47,6 +47,7 @@ use openalpaca_storage::{Database, Task};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 use uuid::Uuid;
 
 /// Provides connector status to the orchestrator without core depending on openalpaca_connectors.
@@ -104,6 +105,15 @@ pub struct LlmMetadata {
     pub tokens_out: u32,
 }
 
+/// Cached base system prompt (invariant parts assembled once).
+/// Contains: persona + identity + bootstrap.
+/// Excludes: skills catalog (has its own cache, hot-reloaded independently),
+///           connector guidance, tools, user profile, memory (all per-request).
+struct CachedBasePrompt {
+    base: String,
+    built_at: Instant,
+}
+
 /// The Orchestrator: unified message handler for all user interactions.
 ///
 /// Intent-based routing:
@@ -127,11 +137,11 @@ pub struct Orchestrator {
     db: Option<Database>,
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     /// Per-lane turn counter for extraction frequency gating.
-    extraction_turn_counter: Mutex<HashMap<String, usize>>,
+    extraction_turn_counter: Arc<Mutex<HashMap<String, usize>>>,
     /// Path to USER.md for writing extraction results. Set via `set_user_path()`.
-    user_path: RwLock<Option<std::path::PathBuf>>,
+    user_path: Arc<RwLock<Option<std::path::PathBuf>>>,
     /// Path to IDENTITY.md for writing identity updates. Set via `set_identity_path()`.
-    identity_path: RwLock<Option<std::path::PathBuf>>,
+    identity_path: Arc<RwLock<Option<std::path::PathBuf>>>,
     /// Skill catalog for progressive skill loading and invocation.
     pub skill_catalog: Arc<skill_catalog::SkillCatalog>,
     /// Skill router for weighted scoring-based skill auto-selection.
@@ -139,7 +149,7 @@ pub struct Orchestrator {
     /// Bootstrap document — `Some` = first-run onboarding active, `None` = normal operation.
     pub bootstrap_document: Arc<RwLock<Option<BootstrapDocument>>>,
     /// Path to BOOTSTRAP.md on disk (for deletion on completion).
-    bootstrap_path: RwLock<Option<std::path::PathBuf>>,
+    bootstrap_path: Arc<RwLock<Option<std::path::PathBuf>>>,
     /// Daemon-level config (memory limits, costs, execution defaults, etc.).
     pub daemon_config: Arc<ArcSwap<DaemonConfig>>,
     /// Atomic guard to prevent concurrent bootstrap completion (race condition fix).
@@ -153,13 +163,15 @@ pub struct Orchestrator {
     /// Keyed by request_id to avoid races between concurrent requests.
     /// Populated after LLM response, removed by bridge after reading.
     pub llm_metadata_map: DashMap<Uuid, LlmMetadata>,
+    /// Cached base system prompt (persona + identity + bootstrap). TTL-based invalidation.
+    cached_base_prompt: Arc<ArcSwap<Option<CachedBasePrompt>>>,
 }
 
 /// Full conversation context for prompt building and summary update.
 pub(super) struct ConversationContext {
     pub(super) summary: Option<String>,
     pub(super) recent_messages: Vec<ChatMessage>,
-    /// Raw (id, role, content) tuples for the "older" window — used by maybe_update_summary().
+    /// Raw (id, role, content) tuples for the "older" window — used by update_summary_background().
     pub(super) older_window: Vec<(i64, String, String)>,
     /// Current summary version from conversations table (for optimistic locking in update).
     pub(super) summary_version: i64,
@@ -244,18 +256,19 @@ impl Orchestrator {
             task_dispatcher,
             db,
             embedder,
-            extraction_turn_counter: Mutex::new(HashMap::new()),
-            user_path: RwLock::new(None),
-            identity_path: RwLock::new(None),
+            extraction_turn_counter: Arc::new(Mutex::new(HashMap::new())),
+            user_path: Arc::new(RwLock::new(None)),
+            identity_path: Arc::new(RwLock::new(None)),
             skill_catalog,
             skill_router,
             bootstrap_document: Arc::new(RwLock::new(None)),
-            bootstrap_path: RwLock::new(None),
+            bootstrap_path: Arc::new(RwLock::new(None)),
             daemon_config,
             bootstrap_completing: AtomicBool::new(false),
             connector_status,
             connector_sender,
             llm_metadata_map: DashMap::new(),
+            cached_base_prompt: Arc::new(ArcSwap::from_pointee(None)),
         }
     }
 
@@ -280,6 +293,11 @@ impl Orchestrator {
         }
     }
 
+    /// Invalidate the cached base system prompt (called when persona/identity/bootstrap change).
+    fn invalidate_base_prompt_cache(&self) {
+        self.cached_base_prompt.store(Arc::new(None));
+    }
+
     pub fn update_system_persona(&self, persona: SystemPersona) {
         match self.system_persona.write() {
             Ok(mut guard) => {
@@ -291,6 +309,7 @@ impl Orchestrator {
                 *guard = persona;
             }
         }
+        self.invalidate_base_prompt_cache();
     }
 
     /// Replace the active identity document (from IDENTITY.md reload or bootstrap).
@@ -326,6 +345,7 @@ impl Orchestrator {
                 *guard = doc;
             }
         }
+        self.invalidate_base_prompt_cache();
     }
 
     /// Set the path to IDENTITY.md for writes.
@@ -347,6 +367,7 @@ impl Orchestrator {
                 *guard = doc;
             }
         }
+        self.invalidate_base_prompt_cache();
     }
 
     /// Set the path to BOOTSTRAP.md for deletion on completion.
