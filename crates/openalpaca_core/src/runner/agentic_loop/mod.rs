@@ -384,6 +384,65 @@ pub enum LoopFinishReason {
     Error(String),
 }
 
+/// Accumulates loop execution state and builds `LoopResult` on exit.
+/// Private to this module — avoids repeating the 8-field struct construction
+/// at every exit point.
+struct LoopState {
+    start: Instant,
+    rounds: usize,
+    total_input: u32,
+    total_output: u32,
+    tool_calls_made: usize,
+    last_assistant_content: String,
+    last_model: Option<String>,
+}
+
+impl LoopState {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            rounds: 0,
+            total_input: 0,
+            total_output: 0,
+            tool_calls_made: 0,
+            last_assistant_content: String::new(),
+            last_model: None,
+        }
+    }
+
+    /// Build a `LoopResult` using accumulated state.
+    fn result(&self, finish_reason: LoopFinishReason) -> LoopResult {
+        LoopResult {
+            final_content: self.last_assistant_content.clone(),
+            rounds_used: self.rounds,
+            total_input_tokens: self.total_input,
+            total_output_tokens: self.total_output,
+            tool_calls_made: self.tool_calls_made,
+            finish_reason,
+            model_used: self.last_model.clone(),
+            elapsed: self.start.elapsed(),
+        }
+    }
+
+    /// Build a `LoopResult` with custom final content.
+    fn result_with_content(
+        &self,
+        content: String,
+        finish_reason: LoopFinishReason,
+    ) -> LoopResult {
+        LoopResult {
+            final_content: content,
+            rounds_used: self.rounds,
+            total_input_tokens: self.total_input,
+            total_output_tokens: self.total_output,
+            tool_calls_made: self.tool_calls_made,
+            finish_reason,
+            model_used: self.last_model.clone(),
+            elapsed: self.start.elapsed(),
+        }
+    }
+}
+
 /// Run the agentic loop (legacy, test-only).
 ///
 /// Production code should use [`run_agentic_loop_routed`] instead, which
@@ -405,14 +464,8 @@ pub async fn run_agentic_loop(
     sandbox_policy: Option<&SandboxPolicy>,
     cancel_token: Option<CancellationToken>,
 ) -> LoopResult {
-    let start = Instant::now();
-    let mut messages = initial_messages;
-    let mut rounds = 0usize;
-    let mut total_input = 0u32;
-    let mut total_output = 0u32;
-    let mut tool_calls_made = 0usize;
-    let mut last_assistant_content = String::new();
-    let mut last_model: Option<String> = None;
+    let mut state = LoopState::new();
+    let mut messages: Arc<Vec<ChatMessage>> = Arc::new(initial_messages);
 
     // Incremental token estimation: track cumulative count and only estimate
     // newly-appended messages each round, rather than re-scanning the full list.
@@ -433,61 +486,34 @@ pub async fn run_agentic_loop(
         {
             tracing::info!(
                 agent_id = agent_id,
-                rounds = rounds,
+                rounds = state.rounds,
                 "Agentic loop cancelled"
             );
-            return LoopResult {
-                final_content: last_assistant_content,
-                rounds_used: rounds,
-                total_input_tokens: total_input,
-                total_output_tokens: total_output,
-                tool_calls_made,
-                finish_reason: LoopFinishReason::Cancelled,
-                model_used: last_model.clone(),
-                elapsed: start.elapsed(),
-            };
+            return state.result(LoopFinishReason::Cancelled);
         }
 
-        if rounds >= config.max_rounds {
+        if state.rounds >= config.max_rounds {
             tracing::info!(
                 agent_id = agent_id,
-                rounds = rounds,
+                rounds = state.rounds,
                 "Agentic loop exiting: max rounds reached"
             );
-            return LoopResult {
-                final_content: last_assistant_content,
-                rounds_used: rounds,
-                total_input_tokens: total_input,
-                total_output_tokens: total_output,
-                tool_calls_made,
-                finish_reason: LoopFinishReason::MaxRounds,
-                model_used: last_model.clone(),
-                elapsed: start.elapsed(),
-            };
+            return state.result(LoopFinishReason::MaxRounds);
         }
 
         let estimated_cost = estimate_cost(
-            total_input,
-            total_output,
+            state.total_input,
+            state.total_output,
             config.fallback_input_rate,
             config.fallback_output_rate,
         );
         if estimated_cost > config.max_cost {
             tracing::info!(
                 agent_id = agent_id,
-                rounds = rounds,
+                rounds = state.rounds,
                 "Agentic loop exiting: cost limit exceeded"
             );
-            return LoopResult {
-                final_content: last_assistant_content,
-                rounds_used: rounds,
-                total_input_tokens: total_input,
-                total_output_tokens: total_output,
-                tool_calls_made,
-                finish_reason: LoopFinishReason::CostExceeded,
-                model_used: last_model.clone(),
-                elapsed: start.elapsed(),
-            };
+            return state.result(LoopFinishReason::CostExceeded);
         }
 
         // Context compression: if estimated tokens exceed the budget,
@@ -500,7 +526,7 @@ pub async fn run_agentic_loop(
                 messages_before = messages.len(),
                 "Compressing context: token budget exceeded"
             );
-            compress_context(&mut messages, config.context_tail_keep);
+            compress_context(Arc::make_mut(&mut messages), config.context_tail_keep);
             known_token_count = estimate_messages_tokens(&messages);
             tracing::info!(
                 agent_id = agent_id,
@@ -513,12 +539,12 @@ pub async fn run_agentic_loop(
         let prev_msg_len = messages.len();
 
         let request = ChatRequest {
-            messages: messages.clone(),
-            tools: tools.clone(),
+            messages: Arc::clone(&messages),
+            tools: Arc::new(tools.clone()),
             model: None,
             temperature: None,
             max_tokens: None,
-            tool_choice: if rounds == 0 {
+            tool_choice: if state.rounds == 0 {
                 config.initial_tool_choice.clone()
             } else {
                 None
@@ -527,7 +553,7 @@ pub async fn run_agentic_loop(
 
         tracing::debug!(
             agent_id = agent_id,
-            round = rounds + 1,
+            round = state.rounds + 1,
             messages_count = messages.len(),
             "LLM call starting"
         );
@@ -537,17 +563,8 @@ pub async fn run_agentic_loop(
             tokio::select! {
                 result = provider.chat(request) => result,
                 _ = token.cancelled() => {
-                    tracing::info!(agent_id = agent_id, round = rounds + 1, "LLM call interrupted by cancellation");
-                    return LoopResult {
-                        final_content: last_assistant_content,
-                        rounds_used: rounds,
-                        total_input_tokens: total_input,
-                        total_output_tokens: total_output,
-                        tool_calls_made,
-                        finish_reason: LoopFinishReason::Cancelled,
-                        model_used: last_model.clone(),
-                        elapsed: start.elapsed(),
-                    };
+                    tracing::info!(agent_id = agent_id, round = state.rounds + 1, "LLM call interrupted by cancellation");
+                    return state.result(LoopFinishReason::Cancelled);
                 }
             }
         } else {
@@ -556,10 +573,10 @@ pub async fn run_agentic_loop(
 
         match llm_result {
             Ok(response) => {
-                total_input += response.usage.input_tokens;
-                total_output += response.usage.output_tokens;
-                rounds += 1;
-                last_model = Some(response.model.clone());
+                state.total_input += response.usage.input_tokens;
+                state.total_output += response.usage.output_tokens;
+                state.rounds += 1;
+                state.last_model = Some(response.model.clone());
 
                 // Use actual input tokens as ground truth for our estimate
                 if response.usage.input_tokens > 0 {
@@ -568,7 +585,7 @@ pub async fn run_agentic_loop(
 
                 tracing::debug!(
                     agent_id = agent_id,
-                    round = rounds,
+                    round = state.rounds,
                     model = %response.model,
                     input_tokens = response.usage.input_tokens,
                     output_tokens = response.usage.output_tokens,
@@ -578,39 +595,52 @@ pub async fn run_agentic_loop(
 
                 // Capture last content before any branching
                 if !response.content.is_empty() {
-                    last_assistant_content = response.content.clone();
+                    state.last_assistant_content = response.content.clone();
                 }
 
                 if response.finish_reason == FinishReason::ToolUse
                     && !response.tool_calls.is_empty()
                 {
                     // Record assistant message with tool calls
-                    messages.push(ChatMessage::assistant_with_tools(&response));
+                    Arc::make_mut(&mut messages).push(ChatMessage::assistant_with_tools(&response));
 
                     // Enforce max_tools_per_round
                     let calls_this_round =
                         response.tool_calls.len().min(config.max_tools_per_round);
 
                     for tc in response.tool_calls.iter().take(calls_this_round) {
+                        // Check cancellation between tool executions
+                        if let Some(ref token) = cancel_token
+                            && token.is_cancelled()
+                        {
+                            tracing::info!(
+                                agent_id = agent_id,
+                                round = state.rounds,
+                                tool_calls_completed = state.tool_calls_made,
+                                "Agentic loop cancelled between tool executions"
+                            );
+                            return state.result(LoopFinishReason::Cancelled);
+                        }
+
                         // Enforce max_tool_calls from sandbox policy
                         if let Some(policy) = sandbox_policy
                             && let Some(max_calls) = policy.max_tool_calls
-                            && tool_calls_made >= max_calls as usize
+                            && state.tool_calls_made >= max_calls as usize
                         {
                             let err = format_tool_error(
                                 "max_tool_calls limit reached — no more tool calls allowed",
                             );
-                            messages.push(ChatMessage::tool_result(&tc.id, &err));
+                            Arc::make_mut(&mut messages).push(ChatMessage::tool_result(&tc.id, &err));
                             continue;
                         }
 
-                        tool_calls_made += 1;
+                        state.tool_calls_made += 1;
 
                         tracing::debug!(
                             agent_id = agent_id,
-                            round = rounds,
+                            round = state.rounds,
                             tool = %tc.name,
-                            tool_call_number = tool_calls_made,
+                            tool_call_number = state.tool_calls_made,
                             "Executing tool"
                         );
 
@@ -640,20 +670,20 @@ pub async fn run_agentic_loop(
 
                         tracing::debug!(
                             agent_id = agent_id,
-                            round = rounds,
+                            round = state.rounds,
                             tool = %tc.name,
                             success = !result_text.starts_with("[tool_error]"),
                             result_len = result_text.len(),
                             "Tool execution completed"
                         );
 
-                        messages.push(ChatMessage::tool_result(&tc.id, &result_text));
+                        Arc::make_mut(&mut messages).push(ChatMessage::tool_result(&tc.id, &result_text));
                     }
 
                     // If we truncated, add error for remaining tool calls
                     for tc in response.tool_calls.iter().skip(calls_this_round) {
                         let err = format_tool_error("max tools per round exceeded");
-                        messages.push(ChatMessage::tool_result(&tc.id, &err));
+                        Arc::make_mut(&mut messages).push(ChatMessage::tool_result(&tc.id, &err));
                     }
 
                     // Update token estimate incrementally for newly-appended messages
@@ -668,41 +698,23 @@ pub async fn run_agentic_loop(
                 // No tool calls or stop -> done
                 tracing::info!(
                     agent_id = agent_id,
-                    rounds = rounds,
-                    total_input_tokens = total_input,
-                    total_output_tokens = total_output,
-                    tool_calls = tool_calls_made,
+                    rounds = state.rounds,
+                    total_input_tokens = state.total_input,
+                    total_output_tokens = state.total_output,
+                    tool_calls = state.tool_calls_made,
                     content_len = response.content.len(),
                     "Agentic loop completed successfully"
                 );
-                return LoopResult {
-                    final_content: response.content,
-                    rounds_used: rounds,
-                    total_input_tokens: total_input,
-                    total_output_tokens: total_output,
-                    tool_calls_made,
-                    finish_reason: LoopFinishReason::Complete,
-                    model_used: last_model.clone(),
-                    elapsed: start.elapsed(),
-                };
+                return state.result_with_content(response.content, LoopFinishReason::Complete);
             }
             Err(e) => {
                 tracing::warn!(
                     agent_id = agent_id,
-                    rounds = rounds,
+                    rounds = state.rounds,
                     error = %e,
                     "Agentic loop exiting: LLM error"
                 );
-                return LoopResult {
-                    final_content: last_assistant_content,
-                    rounds_used: rounds,
-                    total_input_tokens: total_input,
-                    total_output_tokens: total_output,
-                    tool_calls_made,
-                    finish_reason: LoopFinishReason::Error(e.to_string()),
-                    model_used: last_model.clone(),
-                    elapsed: start.elapsed(),
-                };
+                return state.result(LoopFinishReason::Error(e.to_string()));
             }
         }
     }
@@ -724,14 +736,8 @@ pub async fn run_agentic_loop_routed(
     task_id: Option<&str>,
     cancel_token: Option<CancellationToken>,
 ) -> LoopResult {
-    let start = Instant::now();
-    let mut messages = initial_messages;
-    let mut rounds = 0usize;
-    let mut total_input = 0u32;
-    let mut total_output = 0u32;
-    let mut tool_calls_made = 0usize;
-    let mut last_assistant_content = String::new();
-    let mut last_model: Option<String> = None;
+    let mut state = LoopState::new();
+    let mut messages: Arc<Vec<ChatMessage>> = Arc::new(initial_messages);
     let mut consecutive_llm_errors: usize = 0;
     const MAX_LLM_RETRIES: usize = 3;
 
@@ -762,63 +768,36 @@ pub async fn run_agentic_loop_routed(
         {
             tracing::info!(
                 agent_id = agent_id,
-                rounds = rounds,
+                rounds = state.rounds,
                 "Agentic loop cancelled"
             );
-            return LoopResult {
-                final_content: last_assistant_content,
-                rounds_used: rounds,
-                total_input_tokens: total_input,
-                total_output_tokens: total_output,
-                tool_calls_made,
-                finish_reason: LoopFinishReason::Cancelled,
-                model_used: last_model.clone(),
-                elapsed: start.elapsed(),
-            };
+            return state.result(LoopFinishReason::Cancelled);
         }
 
-        if rounds >= config.max_rounds {
+        if state.rounds >= config.max_rounds {
             tracing::info!(
                 agent_id = agent_id,
-                rounds = rounds,
+                rounds = state.rounds,
                 "Agentic loop exiting: max rounds reached"
             );
-            return LoopResult {
-                final_content: last_assistant_content,
-                rounds_used: rounds,
-                total_input_tokens: total_input,
-                total_output_tokens: total_output,
-                tool_calls_made,
-                finish_reason: LoopFinishReason::MaxRounds,
-                model_used: last_model.clone(),
-                elapsed: start.elapsed(),
-            };
+            return state.result(LoopFinishReason::MaxRounds);
         }
 
         // Check cost using local token tracking (avoids per-round async lock acquisition)
         let estimated_cost = estimate_cost(
-            total_input,
-            total_output,
+            state.total_input,
+            state.total_output,
             config.fallback_input_rate,
             config.fallback_output_rate,
         );
         if estimated_cost > config.max_cost {
             tracing::info!(
                 agent_id = agent_id,
-                rounds = rounds,
+                rounds = state.rounds,
                 estimated_cost,
                 "Agentic loop exiting: cost limit exceeded"
             );
-            return LoopResult {
-                final_content: last_assistant_content,
-                rounds_used: rounds,
-                total_input_tokens: total_input,
-                total_output_tokens: total_output,
-                tool_calls_made,
-                finish_reason: LoopFinishReason::CostExceeded,
-                model_used: last_model.clone(),
-                elapsed: start.elapsed(),
-            };
+            return state.result(LoopFinishReason::CostExceeded);
         }
 
         // Context compression: if estimated tokens exceed the budget,
@@ -831,7 +810,7 @@ pub async fn run_agentic_loop_routed(
                 messages_before = messages.len(),
                 "Compressing context: token budget exceeded"
             );
-            compress_context(&mut messages, config.context_tail_keep);
+            compress_context(Arc::make_mut(&mut messages), config.context_tail_keep);
             known_token_count = estimate_messages_tokens(&messages);
             tracing::info!(
                 agent_id = agent_id,
@@ -845,12 +824,12 @@ pub async fn run_agentic_loop_routed(
 
         let request = RouterRequest {
             model: config.model.clone(),
-            messages: messages.clone(),
+            messages: Arc::clone(&messages),
             tools: Arc::clone(&tools_arc),
             temperature: None,
             max_tokens: None,
             context: context.clone(),
-            tool_choice: if rounds == 0 {
+            tool_choice: if state.rounds == 0 {
                 config.initial_tool_choice.clone()
             } else {
                 None
@@ -859,7 +838,7 @@ pub async fn run_agentic_loop_routed(
 
         tracing::debug!(
             agent_id = agent_id,
-            round = rounds + 1,
+            round = state.rounds + 1,
             messages_count = messages.len(),
             "LLM call starting"
         );
@@ -870,17 +849,8 @@ pub async fn run_agentic_loop_routed(
             tokio::select! {
                 result = router.complete(request) => result,
                 _ = token.cancelled() => {
-                    tracing::info!(agent_id = agent_id, round = rounds + 1, "LLM call interrupted by cancellation");
-                    return LoopResult {
-                        final_content: last_assistant_content,
-                        rounds_used: rounds,
-                        total_input_tokens: total_input,
-                        total_output_tokens: total_output,
-                        tool_calls_made,
-                        finish_reason: LoopFinishReason::Cancelled,
-                        model_used: last_model.clone(),
-                        elapsed: start.elapsed(),
-                    };
+                    tracing::info!(agent_id = agent_id, round = state.rounds + 1, "LLM call interrupted by cancellation");
+                    return state.result(LoopFinishReason::Cancelled);
                 }
             }
         } else {
@@ -906,25 +876,17 @@ pub async fn run_agentic_loop_routed(
                         "Model access denied at runtime: {}",
                         violation,
                     );
-                    return LoopResult {
-                        final_content: last_assistant_content,
-                        rounds_used: rounds,
-                        total_input_tokens: total_input,
-                        total_output_tokens: total_output,
-                        tool_calls_made,
-                        finish_reason: LoopFinishReason::Error(format!(
-                            "Model access denied: {}",
-                            violation
-                        )),
-                        model_used: Some(response.model),
-                        elapsed: start.elapsed(),
-                    };
+                    state.last_model = Some(response.model.clone());
+                    return state.result(LoopFinishReason::Error(format!(
+                        "Model access denied: {}",
+                        violation
+                    )));
                 }
 
-                total_input += response.usage.input_tokens;
-                total_output += response.usage.output_tokens;
-                rounds += 1;
-                last_model = Some(response.model.clone());
+                state.total_input += response.usage.input_tokens;
+                state.total_output += response.usage.output_tokens;
+                state.rounds += 1;
+                state.last_model = Some(response.model.clone());
 
                 // Use actual input tokens as ground truth for our estimate
                 if response.usage.input_tokens > 0 {
@@ -933,7 +895,7 @@ pub async fn run_agentic_loop_routed(
 
                 tracing::debug!(
                     agent_id = agent_id,
-                    round = rounds,
+                    round = state.rounds,
                     model = %response.model,
                     input_tokens = response.usage.input_tokens,
                     output_tokens = response.usage.output_tokens,
@@ -943,37 +905,50 @@ pub async fn run_agentic_loop_routed(
 
                 // Capture last content before any branching
                 if !response.content.is_empty() {
-                    last_assistant_content = response.content.clone();
+                    state.last_assistant_content = response.content.clone();
                 }
 
                 if response.finish_reason == FinishReason::ToolUse
                     && !response.tool_calls.is_empty()
                 {
-                    messages.push(ChatMessage::assistant_with_tools(&response));
+                    Arc::make_mut(&mut messages).push(ChatMessage::assistant_with_tools(&response));
 
                     let calls_this_round =
                         response.tool_calls.len().min(config.max_tools_per_round);
 
                     for tc in response.tool_calls.iter().take(calls_this_round) {
+                        // Check cancellation between tool executions
+                        if let Some(ref token) = cancel_token
+                            && token.is_cancelled()
+                        {
+                            tracing::info!(
+                                agent_id = agent_id,
+                                round = state.rounds,
+                                tool_calls_completed = state.tool_calls_made,
+                                "Agentic loop cancelled between tool executions"
+                            );
+                            return state.result(LoopFinishReason::Cancelled);
+                        }
+
                         // Enforce max_tool_calls from sandbox policy
                         if let Some(policy) = sandbox_policy
                             && let Some(max_calls) = policy.max_tool_calls
-                            && tool_calls_made >= max_calls as usize
+                            && state.tool_calls_made >= max_calls as usize
                         {
                             let err = format_tool_error(
                                 "max_tool_calls limit reached — no more tool calls allowed",
                             );
-                            messages.push(ChatMessage::tool_result(&tc.id, &err));
+                            Arc::make_mut(&mut messages).push(ChatMessage::tool_result(&tc.id, &err));
                             continue;
                         }
 
-                        tool_calls_made += 1;
+                        state.tool_calls_made += 1;
 
                         tracing::debug!(
                             agent_id = agent_id,
-                            round = rounds,
+                            round = state.rounds,
                             tool = %tc.name,
-                            tool_call_number = tool_calls_made,
+                            tool_call_number = state.tool_calls_made,
                             "Executing tool"
                         );
                         let result_text = if let (Some(sbx), Some(policy)) =
@@ -999,19 +974,19 @@ pub async fn run_agentic_loop_routed(
 
                         tracing::debug!(
                             agent_id = agent_id,
-                            round = rounds,
+                            round = state.rounds,
                             tool = %tc.name,
                             success = !result_text.starts_with("[tool_error]"),
                             result_len = result_text.len(),
                             "Tool execution completed"
                         );
 
-                        messages.push(ChatMessage::tool_result(&tc.id, &result_text));
+                        Arc::make_mut(&mut messages).push(ChatMessage::tool_result(&tc.id, &result_text));
                     }
 
                     for tc in response.tool_calls.iter().skip(calls_this_round) {
                         let err = format_tool_error("max tools per round exceeded");
-                        messages.push(ChatMessage::tool_result(&tc.id, &err));
+                        Arc::make_mut(&mut messages).push(ChatMessage::tool_result(&tc.id, &err));
                     }
 
                     // Update token estimate incrementally for newly-appended messages
@@ -1025,23 +1000,14 @@ pub async fn run_agentic_loop_routed(
 
                 tracing::info!(
                     agent_id = agent_id,
-                    rounds = rounds,
-                    total_input_tokens = total_input,
-                    total_output_tokens = total_output,
-                    tool_calls = tool_calls_made,
+                    rounds = state.rounds,
+                    total_input_tokens = state.total_input,
+                    total_output_tokens = state.total_output,
+                    tool_calls = state.tool_calls_made,
                     content_len = response.content.len(),
                     "Agentic loop completed successfully"
                 );
-                return LoopResult {
-                    final_content: response.content,
-                    rounds_used: rounds,
-                    total_input_tokens: total_input,
-                    total_output_tokens: total_output,
-                    tool_calls_made,
-                    finish_reason: LoopFinishReason::Complete,
-                    model_used: last_model.clone(),
-                    elapsed: start.elapsed(),
-                };
+                return state.result_with_content(response.content, LoopFinishReason::Complete);
             }
             Err(e) => {
                 let is_transient = matches!(
@@ -1053,13 +1019,14 @@ pub async fn run_agentic_loop_routed(
 
                 if is_transient
                     && consecutive_llm_errors < MAX_LLM_RETRIES
-                    && rounds < config.max_rounds
+                    && state.rounds < config.max_rounds
                 {
                     consecutive_llm_errors += 1;
+                    state.rounds += 1; // count retry against round budget
                     let backoff_secs = (1u64 << consecutive_llm_errors).min(30);
                     tracing::warn!(
                         agent_id = agent_id,
-                        rounds = rounds,
+                        rounds = state.rounds,
                         error = %e,
                         attempt = consecutive_llm_errors,
                         max_attempts = MAX_LLM_RETRIES,
@@ -1070,17 +1037,8 @@ pub async fn run_agentic_loop_routed(
                         tokio::select! {
                             () = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
                             () = token.cancelled() => {
-                                tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop cancelled during retry backoff");
-                                return LoopResult {
-                                    final_content: last_assistant_content,
-                                    rounds_used: rounds,
-                                    total_input_tokens: total_input,
-                                    total_output_tokens: total_output,
-                                    tool_calls_made,
-                                    finish_reason: LoopFinishReason::Cancelled,
-                                    model_used: last_model.clone(),
-                                    elapsed: start.elapsed(),
-                                };
+                                tracing::info!(agent_id = agent_id, rounds = state.rounds, "Agentic loop cancelled during retry backoff");
+                                return state.result(LoopFinishReason::Cancelled);
                             }
                         }
                     } else {
@@ -1091,20 +1049,11 @@ pub async fn run_agentic_loop_routed(
 
                 tracing::warn!(
                     agent_id = agent_id,
-                    rounds = rounds,
+                    rounds = state.rounds,
                     error = %e,
                     "Agentic loop exiting: LLM error"
                 );
-                return LoopResult {
-                    final_content: last_assistant_content,
-                    rounds_used: rounds,
-                    total_input_tokens: total_input,
-                    total_output_tokens: total_output,
-                    tool_calls_made,
-                    finish_reason: LoopFinishReason::Error(e.to_string()),
-                    model_used: last_model.clone(),
-                    elapsed: start.elapsed(),
-                };
+                return state.result(LoopFinishReason::Error(e.to_string()));
             }
         }
     }

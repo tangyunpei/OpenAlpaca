@@ -30,7 +30,7 @@ pub struct RequestContext {
 /// A request to the LLM router.
 pub struct RouterRequest {
     pub model: Option<String>,
-    pub messages: Vec<ChatMessage>,
+    pub messages: Arc<Vec<ChatMessage>>,
     pub tools: Arc<Vec<ToolDefinition>>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
@@ -565,8 +565,8 @@ impl LlmRouter {
                 let _key_permit = key_limiter.acquire(estimated_tokens).await;
 
                 let chat_request = ChatRequest {
-                    messages: request.messages.clone(),
-                    tools: (*request.tools).clone(),
+                    messages: Arc::clone(&request.messages),
+                    tools: Arc::clone(&request.tools),
                     model: Some(model.to_string()),
                     temperature: request.temperature,
                     max_tokens: request.max_tokens,
@@ -752,8 +752,8 @@ impl LlmRouter {
             let truncated = truncate_messages_for_cli(&request.messages);
             let flattened = flatten_messages(&truncated);
             let cli_request = ChatRequest {
-                messages: vec![ChatMessage::user(&flattened)],
-                tools: vec![],
+                messages: Arc::new(vec![ChatMessage::user(&flattened)]),
+                tools: Arc::new(vec![]),
                 model: Some(original_model.to_string()),
                 temperature: request.temperature,
                 max_tokens: request.max_tokens,

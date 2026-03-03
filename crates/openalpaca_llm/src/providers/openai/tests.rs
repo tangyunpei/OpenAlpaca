@@ -1,15 +1,16 @@
 use super::*;
 use reqwest::header::{HeaderMap, HeaderValue};
+use std::sync::Arc;
 
 #[test]
 fn test_request_format() {
     let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
     let request = ChatRequest {
-        messages: vec![
+        messages: Arc::new(vec![
             ChatMessage::system("You are helpful."),
             ChatMessage::user("Hello"),
-        ],
-        tools: vec![],
+        ]),
+        tools: Arc::new(vec![]),
         model: None,
         temperature: None,
         max_tokens: None,
@@ -112,7 +113,7 @@ fn test_base_url_custom() {
 fn test_request_serialization_filters_empty_text_parts() {
     let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
     let request = ChatRequest {
-        messages: vec![ChatMessage::user_with_parts(vec![
+        messages: Arc::new(vec![ChatMessage::user_with_parts(vec![
             ContentPart::Text {
                 text: "".to_string(),
             },
@@ -122,8 +123,8 @@ fn test_request_serialization_filters_empty_text_parts() {
                 },
                 detail: None,
             },
-        ])],
-        tools: vec![],
+        ])]),
+        tools: Arc::new(vec![]),
         model: None,
         temperature: None,
         max_tokens: None,
@@ -146,10 +147,10 @@ fn test_request_serialization_filters_empty_text_parts() {
 fn test_request_serialization_empty_parts_get_placeholder() {
     let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
     let request = ChatRequest {
-        messages: vec![ChatMessage::user_with_parts(vec![ContentPart::Text {
+        messages: Arc::new(vec![ChatMessage::user_with_parts(vec![ContentPart::Text {
             text: "  \n\t".to_string(),
-        }])],
-        tools: vec![],
+        }])]),
+        tools: Arc::new(vec![]),
         model: None,
         temperature: None,
         max_tokens: None,
