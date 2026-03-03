@@ -263,6 +263,8 @@ pub(super) fn update_identity_tool(ctx: IdentityToolContext) -> RegisteredTool {
                 },
                 "required": ["mode"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(IdentityUpdateTool { ctx })),
     }

@@ -752,6 +752,8 @@ pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> Too
             },
             "required": ["subagents"]
         }),
+        strict: None,
+        input_examples: None,
     }
 }
 
@@ -818,6 +820,8 @@ pub fn check_subagent_status_tool_definition() -> ToolDefinition {
             },
             "required": ["subagent_run_id"]
         }),
+        strict: None,
+        input_examples: None,
     }
 }
 
@@ -891,6 +895,8 @@ pub fn wait_for_subagents_tool_definition() -> ToolDefinition {
             "properties": {},
             "required": []
         }),
+        strict: None,
+        input_examples: None,
     }
 }
 
@@ -945,6 +951,8 @@ pub fn spawn_subagent_tool_definition_from_templates(
             },
             "required": ["agent_id", "objective"]
         }),
+        strict: None,
+        input_examples: None,
     }
 }
 

@@ -505,6 +505,8 @@ impl Orchestrator {
                     tool_defs.iter().any(|d| d.name == "send_message"),
                     tool_defs.iter().any(|d| d.name == "send_file"),
                 ),
+                enable_caching: false,
+                thinking: None,
                 ..self.loop_config.clone()
             };
             tools_for_loop = tool_defs;
@@ -822,6 +824,8 @@ impl Orchestrator {
         let config = LoopConfig {
             max_rounds: 1,
             max_tools_per_round: 0,
+            enable_caching: false,
+            thinking: None,
             ..self.loop_config.clone()
         };
 

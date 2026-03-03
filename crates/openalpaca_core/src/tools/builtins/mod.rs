@@ -170,6 +170,8 @@ pub fn workspace_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "required": []
             }),
+            strict: None,
+            input_examples: None,
         },
         ToolDefinition {
             name: "workspace_write".to_string(),
@@ -198,6 +200,8 @@ pub fn workspace_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "required": ["key", "content"]
             }),
+            strict: None,
+            input_examples: None,
         },
     ]
 }

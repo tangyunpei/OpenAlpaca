@@ -70,6 +70,8 @@ pub(super) fn send_message_tool(provider: ConnectorSendLock) -> RegisteredTool {
                 },
                 "required": ["channel", "recipient", "content"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(SendMessageTool { provider })),
     }

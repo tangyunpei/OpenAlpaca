@@ -30,6 +30,8 @@ pub(super) fn text_generate_tool() -> RegisteredTool {
                 },
                 "required": ["prompt"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(TextGenerateTool)),
     }

@@ -90,6 +90,8 @@ impl Replanner {
             context: RequestContext::default(),
             tool_choice: None,
             tools_token_estimate: None,
+            enable_caching: false,
+            thinking: None,
         };
 
         let response = router

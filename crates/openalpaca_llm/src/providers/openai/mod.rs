@@ -2,6 +2,7 @@ use crate::LlmProvider;
 use crate::error::LlmError;
 use crate::types::*;
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::header::HeaderMap;
 
 const DEFAULT_MODEL: &str = "gpt-4o";
@@ -228,13 +229,18 @@ impl OpenAiProvider {
                 .tools
                 .iter()
                 .map(|t| {
+                    let mut function = serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    });
+                    if let Some(true) = t.strict {
+                        function["strict"] = serde_json::json!(true);
+                    }
+                    // OpenAI has no input_examples equivalent — skip silently
                     serde_json::json!({
                         "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.parameters,
-                        }
+                        "function": function,
                     })
                 })
                 .collect();
@@ -302,8 +308,165 @@ impl OpenAiProvider {
             model,
             usage,
             finish_reason,
+            thinking: None,
         })
     }
+}
+
+/// Parse an OpenAI SSE byte stream into a stream of `StreamEvent`s.
+///
+/// OpenAI SSE format:
+///   data: {"choices":[{"delta":{"content":"text"}}]}\n
+///   \n
+///   data: [DONE]\n
+fn parse_openai_sse(
+    byte_stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+) -> impl futures_util::Stream<Item = Result<StreamEvent, LlmError>> + Send {
+    futures_util::stream::unfold(
+        (Box::pin(byte_stream), String::new()),
+        |(mut stream, mut buffer)| async move {
+            loop {
+                // Try to extract complete lines from the buffer
+                while let Some(line_end) = buffer.find('\n') {
+                    let line = buffer[..line_end].trim_end().to_string();
+                    buffer = buffer[line_end + 1..].to_string();
+
+                    // Skip empty lines (SSE frame separators)
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    let data = match line.strip_prefix("data: ") {
+                        Some(d) => d,
+                        None => continue,
+                    };
+
+                    // Terminal marker
+                    if data == "[DONE]" {
+                        return None;
+                    }
+
+                    let json: serde_json::Value = match serde_json::from_str(data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+
+                    let choice = &json["choices"][0];
+                    let delta = &choice["delta"];
+
+                    // Text content delta
+                    if let Some(text) = delta["content"].as_str()
+                        && !text.is_empty()
+                    {
+                        return Some((
+                            Ok(StreamEvent::TextDelta {
+                                text: text.to_string(),
+                            }),
+                            (stream, buffer),
+                        ));
+                    }
+
+                    // Tool calls delta
+                    if let Some(tool_calls) = delta["tool_calls"].as_array() {
+                        for tc in tool_calls {
+                            let index = tc["index"].as_u64().unwrap_or(0) as usize;
+
+                            // Tool call start (has id + function.name)
+                            if let Some(id) = tc["id"].as_str() {
+                                let name = tc["function"]["name"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string();
+                                return Some((
+                                    Ok(StreamEvent::ToolUseStart {
+                                        index,
+                                        id: id.to_string(),
+                                        name,
+                                    }),
+                                    (stream, buffer),
+                                ));
+                            }
+
+                            // Tool call arguments delta
+                            if let Some(args) = tc["function"]["arguments"].as_str()
+                                && !args.is_empty()
+                            {
+                                return Some((
+                                    Ok(StreamEvent::InputJsonDelta {
+                                        index,
+                                        partial_json: args.to_string(),
+                                    }),
+                                    (stream, buffer),
+                                ));
+                            }
+                        }
+                    }
+
+                    // Finish reason
+                    if let Some(finish_reason_str) = choice["finish_reason"].as_str() {
+                        // Extract usage if present in this chunk
+                        let usage = if let Some(u) = json["usage"].as_object() {
+                            Usage {
+                                input_tokens: u
+                                    .get("prompt_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0) as u32,
+                                output_tokens: u
+                                    .get("completion_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0) as u32,
+                                ..Default::default()
+                            }
+                        } else {
+                            Usage::default()
+                        };
+
+                        // Inject synthetic Done event after Usage
+                        let done_line = format!(
+                            "data: {{\"_done\":\"{}\"}}\n",
+                            finish_reason_str
+                        );
+                        buffer = done_line + &buffer;
+
+                        return Some((
+                            Ok(StreamEvent::Usage(usage)),
+                            (stream, buffer),
+                        ));
+                    }
+
+                    // Handle synthetic _done events
+                    if let Some(fr_str) = json["_done"].as_str() {
+                        let finish_reason = match fr_str {
+                            "stop" => FinishReason::Stop,
+                            "tool_calls" => FinishReason::ToolUse,
+                            "length" => FinishReason::MaxTokens,
+                            _ => FinishReason::Stop,
+                        };
+                        return Some((
+                            Ok(StreamEvent::Done { finish_reason }),
+                            (stream, buffer),
+                        ));
+                    }
+                }
+
+                // Need more data from the byte stream
+                match stream.next().await {
+                    Some(Ok(bytes)) => {
+                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    }
+                    Some(Err(e)) => {
+                        return Some((
+                            Err(LlmError::Stream(e.to_string())),
+                            (stream, buffer),
+                        ));
+                    }
+                    None => {
+                        return None;
+                    }
+                }
+            }
+        },
+    )
 }
 
 #[async_trait]
@@ -428,6 +591,69 @@ impl LlmProvider for OpenAiProvider {
         }
 
         self.parse_response(response_body)
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn chat_streaming_with_key(
+        &self,
+        key: &str,
+        request: ChatRequest,
+    ) -> Result<ChatStream, LlmError> {
+        let mut body = self.build_request_body(&request);
+        body["stream"] = serde_json::json!(true);
+        // Request usage in stream chunks (OpenAI stream_options)
+        body["stream_options"] = serde_json::json!({"include_usage": true});
+        let url = format!("{}/chat/completions", self.base_url);
+
+        let mut req_builder = self
+            .client
+            .post(&url)
+            .header("content-type", "application/json");
+
+        if !key.is_empty() {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", key));
+        } else if let Some(ref api_key) = self.api_key {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let response = req_builder
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+
+        let status = response.status().as_u16();
+
+        if status == 429 {
+            let retry_after_ms = parse_retry_after_ms(response.headers()).unwrap_or(1_000);
+            return Err(LlmError::RateLimited { retry_after_ms });
+        }
+
+        if status == 503 || status == 529 {
+            let retry_after_ms = parse_retry_after_ms(response.headers());
+            return Err(LlmError::Overloaded {
+                status,
+                retry_after_ms,
+            });
+        }
+
+        if status >= 400 {
+            let error_body: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| LlmError::Serialization(e.to_string()))?;
+            let message = error_body["error"]["message"]
+                .as_str()
+                .unwrap_or("Unknown error")
+                .to_string();
+            return Err(LlmError::Api { status, message });
+        }
+
+        let byte_stream = response.bytes_stream();
+        Ok(Box::pin(parse_openai_sse(byte_stream)))
     }
 }
 

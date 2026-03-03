@@ -3,7 +3,7 @@ use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use openalpaca_llm::{
     ChatMessage, ChatRequest, ChatResponse, FinishReason, LlmProvider, LlmRouter, LlmRouterError,
-    RequestContext, RouterRequest, ToolChoice, ToolDefinition,
+    RequestContext, RouterRequest, StreamEvent, ThinkingConfig, ToolChoice, ToolDefinition,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -192,7 +192,13 @@ fn truncate_for_summary(text: &str, max_chars: usize) -> String {
     }
 }
 
-#[derive(Debug, Clone)]
+/// Optional callback for streaming events (UI progress, logging).
+pub type StreamCallback = Arc<dyn Fn(&StreamEvent) + Send + Sync>;
+
+/// Configuration for the agentic loop.
+///
+/// `Clone` is implemented manually because `StreamCallback` (`Arc<dyn Fn>`)
+/// implements `Clone` but not `Debug`.
 pub struct LoopConfig {
     pub max_rounds: usize,
     pub max_tools_per_round: usize,
@@ -223,6 +229,51 @@ pub struct LoopConfig {
     /// Tool choice to force on the first round only (`rounds == 0`).
     /// After the first round, reverts to `None` (auto).
     pub initial_tool_choice: Option<ToolChoice>,
+    /// Enable Anthropic prompt caching for system prompt and tools.
+    pub enable_caching: bool,
+    /// Extended thinking configuration (Anthropic only).
+    pub thinking: Option<ThinkingConfig>,
+    /// Optional streaming callback for real-time event forwarding.
+    /// When set and the backend is Router, `LlmBackend::complete()` attempts
+    /// streaming first, forwarding each event to this callback, then falls
+    /// back to non-streaming on failure.
+    pub stream_callback: Option<StreamCallback>,
+}
+
+impl Clone for LoopConfig {
+    fn clone(&self) -> Self {
+        Self {
+            max_rounds: self.max_rounds,
+            max_tools_per_round: self.max_tools_per_round,
+            max_tool_runtime: self.max_tool_runtime,
+            max_cost: self.max_cost,
+            model: self.model.clone(),
+            fallback_models: self.fallback_models.clone(),
+            agent_constraints: self.agent_constraints.clone(),
+            fallback_input_rate: self.fallback_input_rate,
+            fallback_output_rate: self.fallback_output_rate,
+            max_context_tokens: self.max_context_tokens,
+            context_tail_keep: self.context_tail_keep,
+            initial_tool_choice: self.initial_tool_choice.clone(),
+            enable_caching: self.enable_caching,
+            thinking: self.thinking.clone(),
+            stream_callback: self.stream_callback.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for LoopConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoopConfig")
+            .field("max_rounds", &self.max_rounds)
+            .field("max_tools_per_round", &self.max_tools_per_round)
+            .field("max_cost", &self.max_cost)
+            .field("model", &self.model)
+            .field("enable_caching", &self.enable_caching)
+            .field("thinking", &self.thinking)
+            .field("stream_callback", &self.stream_callback.is_some())
+            .finish()
+    }
 }
 
 impl Default for LoopConfig {
@@ -240,6 +291,9 @@ impl Default for LoopConfig {
             max_context_tokens: 0,
             context_tail_keep: 4,
             initial_tool_choice: None,
+            enable_caching: false,
+            thinking: None,
+            stream_callback: None,
         }
     }
 }
@@ -294,6 +348,9 @@ impl LoopConfig {
             max_context_tokens: 0,
             context_tail_keep: 4,
             initial_tool_choice: None,
+            enable_caching: false,
+            thinking: None,
+            stream_callback: None,
         }
     }
 
@@ -457,6 +514,10 @@ enum LlmBackend<'a> {
 
 impl<'a> LlmBackend<'a> {
     /// Complete a request via the appropriate backend.
+    ///
+    /// When `stream_callback` is `Some` and the backend is Router, attempts
+    /// streaming first. On streaming failure, falls back to non-streaming.
+    #[allow(clippy::too_many_arguments)]
     async fn complete(
         &self,
         messages: Arc<Vec<ChatMessage>>,
@@ -464,6 +525,9 @@ impl<'a> LlmBackend<'a> {
         model: Option<String>,
         tool_choice: Option<ToolChoice>,
         tools_token_estimate: Option<u32>,
+        enable_caching: bool,
+        thinking: Option<ThinkingConfig>,
+        stream_callback: Option<&StreamCallback>,
     ) -> Result<ChatResponse, LlmRouterError> {
         match self {
             LlmBackend::Direct { provider } => {
@@ -474,10 +538,63 @@ impl<'a> LlmBackend<'a> {
                     temperature: None,
                     max_tokens: None,
                     tool_choice,
+                    enable_caching,
+                    thinking,
                 };
                 provider.chat(request).await.map_err(LlmRouterError::Llm)
             }
             LlmBackend::Router { router, context } => {
+                // Try streaming if callback is set
+                if let Some(callback) = stream_callback {
+                    let stream_request = RouterRequest {
+                        model: model.clone(),
+                        messages: Arc::clone(&messages),
+                        tools: Arc::clone(&tools),
+                        temperature: None,
+                        max_tokens: None,
+                        context: context.clone(),
+                        tool_choice: tool_choice.clone(),
+                        tools_token_estimate,
+                        enable_caching,
+                        thinking: thinking.clone(),
+                    };
+                    match router.complete_streaming(stream_request).await {
+                        Ok(stream) => {
+                            // Forward events to callback while collecting
+                            use futures_util::StreamExt;
+                            let callback = Arc::clone(callback);
+                            let forwarding_stream = stream.map(move |event| {
+                                if let Ok(ref e) = event {
+                                    callback(e);
+                                }
+                                event
+                            });
+                            let model_str = model.clone().unwrap_or_else(|| router.default_model());
+                            match openalpaca_llm::collect_stream(
+                                Box::pin(forwarding_stream),
+                                model_str,
+                            )
+                            .await
+                            {
+                                Ok(response) => return Ok(response),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Streaming collection failed, falling back to non-streaming"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Streaming request failed, falling back to non-streaming"
+                            );
+                        }
+                    }
+                }
+
+                // Non-streaming path (or streaming fallback)
                 let request = RouterRequest {
                     model,
                     messages,
@@ -487,6 +604,8 @@ impl<'a> LlmBackend<'a> {
                     context: context.clone(),
                     tool_choice,
                     tools_token_estimate,
+                    enable_caching,
+                    thinking,
                 };
                 router.complete(request).await
             }
@@ -583,7 +702,13 @@ async fn run_agentic_loop_inner(
     let tools_token_estimate: Option<u32> = if backend.supports_retry() {
         let tool_bytes: usize = tools_arc
             .iter()
-            .map(|t| t.description.len() + t.parameters.to_string().len())
+            .map(|t| {
+                let base = t.description.len() + t.parameters.to_string().len();
+                let examples = t.input_examples.as_ref().map_or(0, |ex| {
+                    ex.iter().map(|e| e.to_string().len()).sum()
+                });
+                base + examples
+            })
             .sum();
         Some((tool_bytes / 4) as u32)
     } else {
@@ -685,6 +810,9 @@ async fn run_agentic_loop_inner(
                     config.model.clone(),
                     tool_choice,
                     tools_token_estimate,
+                    config.enable_caching,
+                    config.thinking.clone(),
+                    config.stream_callback.as_ref(),
                 ) => result,
                 _ = token.cancelled() => {
                     tracing::info!(agent_id = agent_id, round = state.rounds + 1, "LLM call interrupted by cancellation");
@@ -699,6 +827,9 @@ async fn run_agentic_loop_inner(
                     config.model.clone(),
                     tool_choice,
                     tools_token_estimate,
+                    config.enable_caching,
+                    config.thinking.clone(),
+                    config.stream_callback.as_ref(),
                 )
                 .await
         };
@@ -753,12 +884,35 @@ async fn run_agentic_loop_inner(
                     "LLM call completed"
                 );
 
+                if response.usage.cache_read_input_tokens > 0 {
+                    tracing::debug!(
+                        agent_id = agent_id,
+                        round = state.rounds,
+                        cache_read_tokens = response.usage.cache_read_input_tokens,
+                        cache_creation_tokens = response.usage.cache_creation_input_tokens,
+                        "Prompt cache hit"
+                    );
+                }
+
+                if let Some(ref thinking_text) = response.thinking {
+                    tracing::debug!(
+                        agent_id = agent_id,
+                        round = state.rounds,
+                        thinking_len = thinking_text.len(),
+                        "Extended thinking produced"
+                    );
+                }
+
                 // Capture last content before any branching
                 if !response.content.is_empty() {
                     state.last_assistant_content = response.content.clone();
                 }
 
                 // ── Tool execution ─────────────────────────────────
+                // IMPORTANT: Thinking blocks are NOT included in conversation history.
+                // Only the text content and tool calls are pushed as assistant messages.
+                // Anthropic API strips thinking from re-sent messages automatically,
+                // but we also omit response.thinking from the ChatMessage to be explicit.
                 if response.finish_reason == FinishReason::ToolUse
                     && !response.tool_calls.is_empty()
                 {

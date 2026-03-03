@@ -45,6 +45,8 @@ fn test_lead_agent_tool_executor_routes_correctly() {
             name: "web_search".to_string(),
             description: "test".to_string(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(NoopTool)),
     });
@@ -381,6 +383,8 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
             name: "web_search".to_string(),
             description: "test".to_string(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(NoopTool)),
     });
@@ -449,6 +453,8 @@ fn test_batch_spawn_tool_present_when_enabled() {
             name: "web_search".to_string(),
             description: "test".to_string(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(NoopTool)),
     });
@@ -603,6 +609,8 @@ fn test_lead_agent_executor_delegates_shell_like_tools() {
             name: "my_cmd_tool".to_string(),
             description: "test command tool".to_string(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::Command {
             command: "echo".to_string(),

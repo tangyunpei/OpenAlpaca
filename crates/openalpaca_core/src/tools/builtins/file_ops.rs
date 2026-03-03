@@ -60,6 +60,8 @@ pub(super) fn file_read_tool(workspace_root: PathBuf) -> RegisteredTool {
                 },
                 "required": ["path"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(FileReadTool { workspace_root })),
     }
@@ -162,6 +164,8 @@ pub(super) fn file_write_tool(workspace_root: PathBuf) -> RegisteredTool {
                 },
                 "required": ["path", "content"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(FileWriteTool { workspace_root })),
     }

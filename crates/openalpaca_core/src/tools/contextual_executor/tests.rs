@@ -20,6 +20,8 @@ fn make_registry_with_tools(names: &[&str]) -> Arc<ToolRegistry> {
                 name: name.to_string(),
                 description: format!("{} tool", name),
                 parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
             },
             backend: ToolBackend::BuiltIn(Arc::new(CaptureTool)),
         });

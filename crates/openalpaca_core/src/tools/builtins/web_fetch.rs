@@ -112,6 +112,8 @@ pub(super) fn web_fetch_tool() -> RegisteredTool {
                 },
                 "required": ["url"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(WebFetchTool)),
     }

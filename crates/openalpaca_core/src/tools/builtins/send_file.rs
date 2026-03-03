@@ -116,6 +116,8 @@ pub(super) fn send_file_tool(provider: ConnectorSendLock) -> RegisteredTool {
                 },
                 "required": ["channel", "recipient", "file_path", "filename"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(SendFileTool { provider })),
     }

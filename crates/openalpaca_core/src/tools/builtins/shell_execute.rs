@@ -78,6 +78,8 @@ pub(super) fn shell_execute_tool() -> RegisteredTool {
                 },
                 "required": ["command"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(ShellExecuteTool)),
     }

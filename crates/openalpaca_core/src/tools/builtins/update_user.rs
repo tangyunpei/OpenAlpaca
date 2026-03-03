@@ -315,6 +315,8 @@ pub(super) fn update_user_tool(ctx: UserToolContext) -> RegisteredTool {
                 },
                 "required": ["mode"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(UserUpdateTool { ctx })),
     }

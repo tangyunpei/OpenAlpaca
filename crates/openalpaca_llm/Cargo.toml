@@ -31,6 +31,11 @@ keyring.workspace = true
 directories.workspace = true
 file-lock.workspace = true
 
+# Streaming support
+futures-util.workspace = true
+bytes.workspace = true
+pin-project-lite.workspace = true
+
 # Optional: HTTP client (only when a provider feature is enabled)
 reqwest = { workspace = true, optional = true }
 

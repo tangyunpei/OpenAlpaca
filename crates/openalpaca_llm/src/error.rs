@@ -38,6 +38,9 @@ pub enum LlmError {
 
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
+
+    #[error("Stream error: {0}")]
+    Stream(String),
 }
 
 impl LlmError {
@@ -47,6 +50,7 @@ impl LlmError {
             Self::Http(_) => true,
             Self::RateLimited { .. } => true,
             Self::Overloaded { .. } => true,
+            Self::Stream(_) => true,
             Self::Api { status, .. } => *status >= 500,
             _ => false,
         }

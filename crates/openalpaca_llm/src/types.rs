@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::pin::Pin;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -194,11 +195,17 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
+    /// When `true`, the model guarantees valid JSON matching the schema exactly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+    /// Concrete examples of valid tool inputs (Anthropic `input_examples`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_examples: Option<Vec<serde_json::Value>>,
 }
 
 /// Controls which tool the model should use.
@@ -212,6 +219,45 @@ pub enum ToolChoice {
     Tool(String),
 }
 
+/// Cache control hint for Anthropic prompt caching.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// Optional TTL for cache entries. Default: provider-determined (Anthropic = 5 min).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+}
+
+impl CacheControl {
+    /// Ephemeral cache (provider default TTL, typically 5 min).
+    pub fn ephemeral() -> Self {
+        Self {
+            type_: "ephemeral".to_string(),
+            ttl: None,
+        }
+    }
+
+    /// Ephemeral cache with 1-hour TTL.
+    pub fn ephemeral_1h() -> Self {
+        Self {
+            type_: "ephemeral".to_string(),
+            ttl: Some("3600".to_string()),
+        }
+    }
+}
+
+/// Configuration for Claude's extended thinking capability.
+#[derive(Debug, Clone)]
+pub enum ThinkingConfig {
+    /// Thinking enabled with a fixed token budget (minimum 1024).
+    Enabled { budget_tokens: u32 },
+    /// Claude adaptively decides whether and how much to think.
+    Adaptive,
+    /// Thinking explicitly disabled.
+    Disabled,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub messages: Arc<Vec<ChatMessage>>,
@@ -220,6 +266,10 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     pub tool_choice: Option<ToolChoice>,
+    /// Enable Anthropic prompt caching (non-Anthropic providers ignore this).
+    pub enable_caching: bool,
+    /// Extended thinking config (Anthropic only). Non-Anthropic providers ignore this.
+    pub thinking: Option<ThinkingConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -229,6 +279,8 @@ pub struct ChatResponse {
     pub model: String,
     pub usage: Usage,
     pub finish_reason: FinishReason,
+    /// Extended thinking output (Anthropic only).
+    pub thinking: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -249,3 +301,31 @@ pub enum FinishReason {
     MaxTokens,
     Error,
 }
+
+/// A single chunk from a streaming response.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// Incremental text content.
+    TextDelta { text: String },
+    /// Incremental thinking content (Anthropic extended thinking).
+    ThinkingDelta { thinking: String },
+    /// Start of a tool use content block.
+    ToolUseStart {
+        index: usize,
+        id: String,
+        name: String,
+    },
+    /// Incremental JSON for tool input arguments.
+    InputJsonDelta { index: usize, partial_json: String },
+    /// Final usage statistics.
+    Usage(Usage),
+    /// Stream completed.
+    Done { finish_reason: FinishReason },
+    /// Stream error.
+    Error { message: String },
+}
+
+/// A boxed stream of chat events.
+pub type ChatStream = Pin<
+    Box<dyn futures_util::Stream<Item = Result<StreamEvent, crate::error::LlmError>> + Send>,
+>;

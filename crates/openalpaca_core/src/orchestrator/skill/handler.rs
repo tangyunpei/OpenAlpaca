@@ -271,6 +271,8 @@ impl Orchestrator {
                         None
                     }
                 },
+                enable_caching: false,
+                thinking: None,
                 ..self.loop_config.clone()
             };
             tools_for_loop = tool_defs;
