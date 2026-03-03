@@ -135,6 +135,14 @@ impl ToolFlags {
     }
 }
 
+/// Short social/acknowledgement phrases that never require planning or tool use.
+/// Shared between `is_enhanced_simple_query` and `is_social_message`.
+const SOCIAL_PHRASES: &[&str] = &[
+    "thanks", "thank you", "ok", "okay", "got it", "sounds good",
+    "yes", "no", "sure", "right",
+    "好的", "没问题", "谢谢", "嗯", "明白", "收到", "对", "是的", "不是", "不用",
+];
+
 /// Parses user messages into intents using keyword heuristics.
 pub struct IntentParser;
 
@@ -609,30 +617,8 @@ impl IntentParser {
         let lower = content.to_lowercase();
 
         // Rule 2: Social/follow-up patterns (always simple)
-        const SOCIAL: &[&str] = &[
-            "thanks",
-            "thank you",
-            "ok",
-            "okay",
-            "got it",
-            "sounds good",
-            "yes",
-            "no",
-            "sure",
-            "right",
-            "好的",
-            "没问题",
-            "谢谢",
-            "嗯",
-            "明白",
-            "收到",
-            "对",
-            "是的",
-            "不是",
-            "不用",
-        ];
         let trimmed_lower = lower.trim();
-        if SOCIAL.contains(&trimmed_lower) {
+        if SOCIAL_PHRASES.contains(&trimmed_lower) {
             return true;
         }
 
@@ -719,13 +705,8 @@ impl IntentParser {
     /// Used by the social fast path to skip heavy prompt assembly for
     /// trivial conversational replies like "ok", "thanks", "好的".
     pub fn is_social_message(&self, content: &str) -> bool {
-        const SOCIAL: &[&str] = &[
-            "thanks", "thank you", "ok", "okay", "got it", "sounds good",
-            "yes", "no", "sure", "right",
-            "好的", "没问题", "谢谢", "嗯", "明白", "收到", "对", "是的", "不是", "不用",
-        ];
         let trimmed = content.trim().to_lowercase();
-        SOCIAL.contains(&trimmed.as_str())
+        SOCIAL_PHRASES.contains(&trimmed.as_str())
     }
 }
 

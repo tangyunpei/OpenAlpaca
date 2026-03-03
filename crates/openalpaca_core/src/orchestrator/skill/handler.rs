@@ -2,12 +2,9 @@ use super::context::inject_skill_context;
 use super::output::validate_skill_output;
 use crate::events::SystemEvent;
 use crate::memory::scope_context::MemoryScopeContext;
-use crate::middleware::bootstrap::bootstrap_to_prompt_block;
 use crate::middleware::guard::{OutputGuard, detect_hallucinated_send};
-use crate::middleware::identity::identity_to_prompt_block;
 use crate::middleware::prompt::{
-    AgentPersona, PromptAssembler, format_connector_guidance, format_message_source,
-    format_tool_guidance,
+    format_connector_guidance, format_message_source, format_tool_guidance,
 };
 use crate::middleware::skill::{SkillFrontmatter, skill_to_prompt_block};
 use crate::middleware::user::user_to_prompt_block;
@@ -129,31 +126,8 @@ impl Orchestrator {
         let injected_context =
             inject_skill_context(&skill_doc.frontmatter.context, &entry.skill_dir).await?;
 
-        let system_persona = match self.system_persona.read() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => {
-                tracing::warn!("System persona lock poisoned during read; recovering");
-                poisoned.into_inner().clone()
-            }
-        };
-
-        let agent_persona = AgentPersona {
-            role: "Assistant".to_string(),
-            tone: "Concise and professional".to_string(),
-            domain_knowledge: vec![],
-        };
-        let mut system_prompt = PromptAssembler::assemble(&system_persona, &agent_persona);
-
-        // Inject bootstrap instructions if in first-run mode
-        if let Ok(guard) = self.bootstrap_document.read()
-            && let Some(ref doc) = *guard
-        {
-            let block = bootstrap_to_prompt_block(doc);
-            if !block.is_empty() {
-                system_prompt.push('\n');
-                system_prompt.push_str(&block);
-            }
-        }
+        // Base prompt from cache (persona + identity + bootstrap)
+        let mut system_prompt = self.get_or_build_base_prompt();
 
         // Inject skill context block
         let skill_block = skill_to_prompt_block(&skill_doc);
@@ -185,22 +159,7 @@ impl Orchestrator {
         // NOTE: Full connector guidance (with send_message tool mention) is injected
         // later, after tool_names is resolved, only if send_message is available.
 
-        // Inject agent identity if available
-        if let Ok(guard) = self.identity_document.read()
-            && let Some(ref doc) = *guard
-        {
-            let identity_budget = self
-                .daemon_config
-                .load()
-                .orchestrator
-                .prompt_budgets
-                .identity_budget;
-            let id_block = identity_to_prompt_block(doc, Some(identity_budget));
-            if !id_block.is_empty() {
-                system_prompt.push('\n');
-                system_prompt.push_str(&id_block);
-            }
-        }
+        // Identity block is already included via get_or_build_base_prompt().
 
         // Resolve tools: use ONLY the skill's declared tool allowlist.
         // Intent-suggested tools are intentionally NOT merged here to maintain

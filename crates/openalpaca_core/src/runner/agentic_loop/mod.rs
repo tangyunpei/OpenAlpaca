@@ -384,7 +384,12 @@ pub enum LoopFinishReason {
     Error(String),
 }
 
-/// Run the agentic loop.
+/// Run the agentic loop (legacy, test-only).
+///
+/// Production code should use [`run_agentic_loop_routed`] instead, which
+/// routes through `LlmRouter` with Arc-wrapped tools (cheap ref-count clone
+/// per round). This legacy version deep-clones `Vec<ToolDefinition>` each
+/// round, which is acceptable for test usage but wasteful in production.
 ///
 /// When `sandbox` is `Some`, tool calls are routed through the SandboxManager
 /// with capability checks, input sanitization, and timeout enforcement.
