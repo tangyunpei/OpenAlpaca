@@ -148,7 +148,7 @@ impl AnthropicProvider {
         let mut system_text = String::new();
         let mut messages = Vec::new();
 
-        for msg in &request.messages {
+        for msg in request.messages.iter() {
             match msg.role {
                 Role::System => {
                     if !system_text.is_empty() {

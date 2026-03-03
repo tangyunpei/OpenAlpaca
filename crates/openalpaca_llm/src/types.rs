@@ -214,8 +214,8 @@ pub enum ToolChoice {
 
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
-    pub messages: Vec<ChatMessage>,
-    pub tools: Vec<ToolDefinition>,
+    pub messages: Arc<Vec<ChatMessage>>,
+    pub tools: Arc<Vec<ToolDefinition>>,
     pub model: Option<String>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,

@@ -64,7 +64,7 @@ impl LlmProvider for MockProvider {
 fn make_request(model: Option<&str>) -> RouterRequest {
     RouterRequest {
         model: model.map(|m| m.to_string()),
-        messages: vec![ChatMessage::user("test")],
+        messages: Arc::new(vec![ChatMessage::user("test")]),
         tools: Arc::new(vec![]),
         temperature: None,
         max_tokens: None,

@@ -643,7 +643,7 @@ async fn plan_inner(
         }
         let request = RouterRequest {
             model: None,
-            messages: attempt_messages,
+            messages: Arc::new(attempt_messages),
             tools: Arc::new(vec![]),
             temperature: Some(attempt as f32 * 0.1),
             max_tokens: Some(limits.max_tokens),
@@ -1095,7 +1095,7 @@ Example:
         ];
         let request = RouterRequest {
             model: triage_model.map(|s| s.to_string()),
-            messages,
+            messages: Arc::new(messages),
             tools: Arc::new(vec![]),
             temperature: Some(0.0),
             max_tokens: Some(50),
