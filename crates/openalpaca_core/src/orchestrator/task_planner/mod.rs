@@ -650,6 +650,8 @@ async fn plan_inner(
             context: RequestContext::default(),
             tool_choice: None,
             tools_token_estimate: None,
+            enable_caching: false,
+            thinking: None,
         };
 
         let response = tokio::time::timeout(deadline, router.complete(request))
@@ -1103,6 +1105,8 @@ Example:
             context: RequestContext::default(),
             tool_choice: None,
             tools_token_estimate: None,
+            enable_caching: false,
+            thinking: None,
         };
         let deadline = Duration::from_secs(timeout_secs);
         let response = tokio::time::timeout(deadline, router.complete(request))

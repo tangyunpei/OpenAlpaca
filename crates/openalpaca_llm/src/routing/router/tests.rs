@@ -29,6 +29,7 @@ impl MockProvider {
                 ..Default::default()
             },
             finish_reason: FinishReason::Stop,
+            thinking: None,
         }
     }
 }
@@ -71,6 +72,8 @@ fn make_request(model: Option<&str>) -> RouterRequest {
         context: RequestContext::default(),
         tool_choice: None,
         tools_token_estimate: None,
+        enable_caching: false,
+        thinking: None,
     }
 }
 

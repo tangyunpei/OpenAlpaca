@@ -28,6 +28,7 @@ impl MockProvider {
                 ..Default::default()
             },
             finish_reason: FinishReason::Stop,
+            thinking: None,
         }
     }
 
@@ -46,6 +47,7 @@ impl MockProvider {
                 ..Default::default()
             },
             finish_reason: FinishReason::ToolUse,
+            thinking: None,
         }
     }
 
@@ -64,6 +66,7 @@ impl MockProvider {
                 ..Default::default()
             },
             finish_reason: FinishReason::ToolUse,
+            thinking: None,
         }
     }
 }
@@ -125,6 +128,8 @@ async fn test_respects_max_rounds() {
     let messages = vec![ChatMessage::user("search forever")];
     let config = LoopConfig {
         max_rounds: 3,
+        enable_caching: false,
+        thinking: None,
         ..Default::default()
     };
 
@@ -152,6 +157,8 @@ async fn test_respects_cost_limit() {
     let messages = vec![ChatMessage::user("expensive query")];
     let config = LoopConfig {
         max_cost: 0.50,
+        enable_caching: false,
+        thinking: None,
         ..Default::default()
     };
 
@@ -391,6 +398,7 @@ async fn test_max_tools_per_round_enforced() {
             ..Default::default()
         },
         finish_reason: FinishReason::ToolUse,
+        thinking: None,
     };
 
     let provider = MockProvider::new(vec![
@@ -400,6 +408,8 @@ async fn test_max_tools_per_round_enforced() {
     let messages = vec![ChatMessage::user("test")];
     let config = LoopConfig {
         max_tools_per_round: 2, // Only allow 2 per round
+        enable_caching: false,
+        thinking: None,
         ..Default::default()
     };
 

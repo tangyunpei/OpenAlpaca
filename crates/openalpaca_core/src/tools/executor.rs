@@ -96,6 +96,8 @@ mod tests {
                 name: "echo".to_string(),
                 description: "Echo tool".to_string(),
                 parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
             },
             backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
         });
@@ -117,6 +119,8 @@ mod tests {
                 name: "tool_a".to_string(),
                 description: "A".to_string(),
                 parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
             },
             backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
         });
@@ -136,6 +140,8 @@ mod tests {
                 name: "memory_search".to_string(),
                 description: "Search memories".to_string(),
                 parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
             },
             backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
         });
@@ -175,6 +181,8 @@ mod tests {
                 name: "memory_search".to_string(),
                 description: "Search memories".to_string(),
                 parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
             },
             backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
         });
@@ -206,6 +214,8 @@ mod tests {
                 name: "echo".to_string(),
                 description: "Echo tool".to_string(),
                 parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
             },
             backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
         });

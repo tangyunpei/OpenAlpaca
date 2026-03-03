@@ -17,6 +17,8 @@ fn make_tool(name: &str, response: &str) -> RegisteredTool {
             name: name.to_string(),
             description: format!("{} tool", name),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
             response: response.to_string(),
@@ -132,6 +134,8 @@ fn test_command_backend_tool_names_returns_command_tools() {
             name: "git_log".to_string(),
             description: "Show git log".to_string(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::Command {
             command: "git".to_string(),
@@ -154,6 +158,8 @@ async fn test_execute_http_ssrf_blocks_private_ip() {
             name: "internal_api".to_string(),
             description: "Internal API".to_string(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::Http {
             method: "GET".to_string(),
@@ -181,6 +187,8 @@ async fn test_execute_http_ssrf_blocks_localhost() {
             name: "local_api".to_string(),
             description: "Local API".to_string(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::Http {
             method: "GET".to_string(),
@@ -214,6 +222,8 @@ async fn test_http_unsubstituted_placeholder_detected() {
                 },
                 "required": ["city"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::Http {
             method: "GET".to_string(),
@@ -254,6 +264,8 @@ async fn test_http_all_placeholders_substituted_passes() {
                 },
                 "required": ["city"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::Http {
             method: "GET".to_string(),
@@ -295,6 +307,8 @@ async fn test_schema_missing_required_field() {
                 },
                 "required": ["query"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
             response: "ok".to_string(),
@@ -326,6 +340,8 @@ async fn test_schema_wrong_type() {
                 },
                 "required": ["query"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
             response: "ok".to_string(),
@@ -363,6 +379,8 @@ async fn test_schema_valid_args_pass() {
                 },
                 "required": ["query"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
             response: "ok".to_string(),
@@ -384,6 +402,8 @@ async fn test_schema_non_object_args_rejected() {
             name: "search".to_string(),
             description: "Search".to_string(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
             response: "ok".to_string(),
@@ -414,6 +434,8 @@ async fn test_command_unsubstituted_placeholder_detected() {
                 },
                 "required": ["count"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::Command {
             command: "git".to_string(),
@@ -454,6 +476,8 @@ async fn test_command_all_placeholders_substituted_runs() {
                 },
                 "required": ["msg"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::Command {
             command: "echo".to_string(),

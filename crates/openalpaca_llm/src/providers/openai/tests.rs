@@ -15,6 +15,8 @@ fn test_request_format() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        enable_caching: false,
+        thinking: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -129,6 +131,8 @@ fn test_request_serialization_filters_empty_text_parts() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        enable_caching: false,
+        thinking: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -155,6 +159,8 @@ fn test_request_serialization_empty_parts_get_placeholder() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        enable_caching: false,
+        thinking: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -176,4 +182,118 @@ fn test_parse_retry_after_ms_fractional() {
 fn test_parse_retry_after_ms_missing() {
     let headers = HeaderMap::new();
     assert_eq!(parse_retry_after_ms(&headers), None);
+}
+
+#[test]
+fn test_openai_tool_strict_mode() {
+    let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
+    let request = ChatRequest {
+        messages: Arc::new(vec![ChatMessage::user("test")]),
+        tools: Arc::new(vec![ToolDefinition {
+            name: "calc".to_string(),
+            description: "Calculate".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: Some(true),
+            input_examples: None,
+        }]),
+        model: None,
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: None,
+    };
+    let body = provider.build_request_body(&request);
+    let tools = body["tools"].as_array().unwrap();
+    assert_eq!(tools[0]["function"]["strict"], true);
+}
+
+// ── SSE Parser Tests ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_openai_sse_parser_text_event() {
+    use futures_util::StreamExt;
+
+    let raw = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"}}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n",
+        "\n",
+        "data: [DONE]\n",
+        "\n",
+    );
+
+    let byte_stream = futures_util::stream::iter(vec![Ok(bytes::Bytes::from(raw))]);
+    let events: Vec<_> = parse_openai_sse(byte_stream).collect().await;
+
+    let mut texts = Vec::new();
+    let mut got_done = false;
+    let mut got_usage = false;
+    for event in &events {
+        match event.as_ref().unwrap() {
+            StreamEvent::TextDelta { text } => texts.push(text.clone()),
+            StreamEvent::Done { finish_reason } => {
+                assert_eq!(*finish_reason, FinishReason::Stop);
+                got_done = true;
+            }
+            StreamEvent::Usage(u) => {
+                assert_eq!(u.input_tokens, 10);
+                assert_eq!(u.output_tokens, 5);
+                got_usage = true;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(texts.join(""), "Hello world");
+    assert!(got_done);
+    assert!(got_usage);
+}
+
+#[tokio::test]
+async fn test_openai_sse_parser_tool_call_event() {
+    use futures_util::StreamExt;
+
+    let raw = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"\"}}]}}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"q\\\"\"}}]}}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":\\\"rust\\\"}\"}}]}}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":10}}\n",
+        "\n",
+        "data: [DONE]\n",
+        "\n",
+    );
+
+    let byte_stream = futures_util::stream::iter(vec![Ok(bytes::Bytes::from(raw))]);
+    let events: Vec<_> = parse_openai_sse(byte_stream).collect().await;
+
+    let mut got_tool_start = false;
+    let mut json_parts = Vec::new();
+    let mut got_done = false;
+    for event in &events {
+        match event.as_ref().unwrap() {
+            StreamEvent::ToolUseStart { id, name, .. } => {
+                assert_eq!(id, "call_abc");
+                assert_eq!(name, "search");
+                got_tool_start = true;
+            }
+            StreamEvent::InputJsonDelta { partial_json, .. } => {
+                json_parts.push(partial_json.clone());
+            }
+            StreamEvent::Done { finish_reason } => {
+                assert_eq!(*finish_reason, FinishReason::ToolUse);
+                got_done = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(got_tool_start);
+    assert!(!json_parts.is_empty());
+    assert!(got_done);
 }

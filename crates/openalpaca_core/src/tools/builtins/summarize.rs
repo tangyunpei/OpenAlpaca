@@ -27,6 +27,8 @@ pub(super) fn summarize_tool() -> RegisteredTool {
                 },
                 "required": ["text"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(SummarizeTool)),
     }

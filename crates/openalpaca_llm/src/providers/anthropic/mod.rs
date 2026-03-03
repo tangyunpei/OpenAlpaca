@@ -2,6 +2,7 @@ use crate::LlmProvider;
 use crate::error::LlmError;
 use crate::types::*;
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::header::HeaderMap;
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-5-20250929";
@@ -211,7 +212,15 @@ impl AnthropicProvider {
         });
 
         if !system_text.is_empty() {
-            body["system"] = serde_json::Value::String(system_text);
+            if request.enable_caching {
+                body["system"] = serde_json::json!([{
+                    "type": "text",
+                    "text": system_text,
+                    "cache_control": { "type": "ephemeral" }
+                }]);
+            } else {
+                body["system"] = serde_json::Value::String(system_text);
+            }
         }
 
         if let Some(temp) = request.temperature {
@@ -222,12 +231,24 @@ impl AnthropicProvider {
             let tools: Vec<serde_json::Value> = request
                 .tools
                 .iter()
-                .map(|t| {
-                    serde_json::json!({
+                .enumerate()
+                .map(|(i, t)| {
+                    let mut tool = serde_json::json!({
                         "name": t.name,
                         "description": t.description,
                         "input_schema": t.parameters,
-                    })
+                    });
+                    if let Some(true) = t.strict {
+                        tool["strict"] = serde_json::json!(true);
+                    }
+                    if let Some(ref examples) = t.input_examples {
+                        tool["input_examples"] = serde_json::json!(examples);
+                    }
+                    // Cache breakpoint on the last tool
+                    if request.enable_caching && i == request.tools.len() - 1 {
+                        tool["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                    }
+                    tool
                 })
                 .collect();
             body["tools"] = serde_json::Value::Array(tools);
@@ -238,6 +259,33 @@ impl AnthropicProvider {
                     ToolChoice::Any => serde_json::json!({"type": "any"}),
                     ToolChoice::Tool(name) => serde_json::json!({"type": "tool", "name": name}),
                 };
+            }
+        }
+
+        // Extended thinking
+        if let Some(ref thinking) = request.thinking {
+            match thinking {
+                ThinkingConfig::Enabled { budget_tokens } => {
+                    if *budget_tokens < 1024 {
+                        tracing::warn!(
+                            budget_tokens,
+                            "budget_tokens < 1024 may produce poor thinking results; Anthropic minimum is 1024"
+                        );
+                    }
+                    body["thinking"] = serde_json::json!({
+                        "type": "enabled",
+                        "budget_tokens": budget_tokens,
+                    });
+                    // Anthropic requires temperature=1.0 (or unset) for thinking
+                    body.as_object_mut().unwrap().remove("temperature");
+                }
+                ThinkingConfig::Adaptive => {
+                    body["thinking"] = serde_json::json!({ "type": "adaptive" });
+                    body.as_object_mut().unwrap().remove("temperature");
+                }
+                ThinkingConfig::Disabled => {
+                    body["thinking"] = serde_json::json!({ "type": "disabled" });
+                }
             }
         }
 
@@ -272,10 +320,20 @@ impl AnthropicProvider {
 
         let mut content = String::new();
         let mut tool_calls = Vec::new();
+        let mut thinking = None;
 
         if let Some(content_blocks) = body["content"].as_array() {
             for block in content_blocks {
                 match block["type"].as_str() {
+                    Some("thinking") => {
+                        if let Some(thought) = block["thinking"].as_str() {
+                            let existing = thinking.get_or_insert_with(String::new);
+                            if !existing.is_empty() {
+                                existing.push('\n');
+                            }
+                            existing.push_str(thought);
+                        }
+                    }
                     Some("text") => {
                         if let Some(text) = block["text"].as_str() {
                             if !content.is_empty() {
@@ -302,8 +360,216 @@ impl AnthropicProvider {
             model,
             usage,
             finish_reason,
+            thinking,
         })
     }
+}
+
+/// Parse an Anthropic SSE byte stream into a stream of `StreamEvent`s.
+///
+/// Anthropic SSE format:
+///   event: <event_type>\n
+///   data: <json>\n
+///   \n
+fn parse_anthropic_sse(
+    byte_stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+) -> impl futures_util::Stream<Item = Result<StreamEvent, LlmError>> + Send {
+    futures_util::stream::unfold(
+        (Box::pin(byte_stream), String::new(), 0_usize),
+        |(mut stream, mut buffer, mut block_index)| async move {
+            loop {
+                // Try to extract a complete SSE frame from the buffer
+                while let Some(frame_end) = buffer.find("\n\n") {
+                    let frame = buffer[..frame_end].to_string();
+                    buffer = buffer[frame_end + 2..].to_string();
+
+                    let mut event_type = None;
+                    let mut data = None;
+                    for line in frame.lines() {
+                        if let Some(val) = line.strip_prefix("event: ") {
+                            event_type = Some(val.to_string());
+                        } else if let Some(val) = line.strip_prefix("data: ") {
+                            data = Some(val.to_string());
+                        }
+                    }
+
+                    let event_type = match event_type {
+                        Some(t) => t,
+                        None => continue,
+                    };
+
+                    // Terminal event
+                    if event_type == "message_stop" {
+                        return None;
+                    }
+
+                    let data = match data {
+                        Some(d) => d,
+                        None => continue,
+                    };
+
+                    let json: serde_json::Value = match serde_json::from_str(&data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+
+                    match event_type.as_str() {
+                        "content_block_start" => {
+                            let block = &json["content_block"];
+                            let block_type = block["type"].as_str().unwrap_or("");
+                            if block_type == "tool_use" {
+                                let id = block["id"].as_str().unwrap_or_default().to_string();
+                                let name = block["name"].as_str().unwrap_or_default().to_string();
+                                let idx = json["index"].as_u64().unwrap_or(block_index as u64) as usize;
+                                block_index = idx + 1;
+                                return Some((
+                                    Ok(StreamEvent::ToolUseStart {
+                                        index: idx,
+                                        id,
+                                        name,
+                                    }),
+                                    (stream, buffer, block_index),
+                                ));
+                            }
+                            // text and thinking blocks don't need start events
+                        }
+                        "content_block_delta" => {
+                            let delta = &json["delta"];
+                            let delta_type = delta["type"].as_str().unwrap_or("");
+                            match delta_type {
+                                "text_delta" => {
+                                    if let Some(text) = delta["text"].as_str() {
+                                        return Some((
+                                            Ok(StreamEvent::TextDelta {
+                                                text: text.to_string(),
+                                            }),
+                                            (stream, buffer, block_index),
+                                        ));
+                                    }
+                                }
+                                "thinking_delta" => {
+                                    if let Some(thinking) = delta["thinking"].as_str() {
+                                        return Some((
+                                            Ok(StreamEvent::ThinkingDelta {
+                                                thinking: thinking.to_string(),
+                                            }),
+                                            (stream, buffer, block_index),
+                                        ));
+                                    }
+                                }
+                                "input_json_delta" => {
+                                    if let Some(pj) = delta["partial_json"].as_str() {
+                                        let idx = json["index"].as_u64().unwrap_or(0) as usize;
+                                        return Some((
+                                            Ok(StreamEvent::InputJsonDelta {
+                                                index: idx,
+                                                partial_json: pj.to_string(),
+                                            }),
+                                            (stream, buffer, block_index),
+                                        ));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        "message_delta" => {
+                            let stop_reason = json["delta"]["stop_reason"].as_str().unwrap_or("end_turn");
+                            let usage = if let Some(u) = json["usage"].as_object() {
+                                Usage {
+                                    input_tokens: 0, // Input tokens come from message_start, not delta
+                                    output_tokens: u.get("output_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0) as u32,
+                                    ..Default::default()
+                                }
+                            } else {
+                                Usage::default()
+                            };
+                            // Emit Usage then Done
+                            // We buffer the Done event in the buffer to emit after Usage
+                            let done_frame = format!(
+                                "event: _done\ndata: {{\"finish_reason\":\"{}\"}}\n\n",
+                                stop_reason
+                            );
+                            buffer = done_frame + &buffer;
+                            return Some((
+                                Ok(StreamEvent::Usage(usage)),
+                                (stream, buffer, block_index),
+                            ));
+                        }
+                        "_done" => {
+                            // Synthetic event we injected after message_delta
+                            let stop_reason = json["finish_reason"].as_str().unwrap_or("end_turn");
+                            let finish_reason = match stop_reason {
+                                "end_turn" => FinishReason::Stop,
+                                "tool_use" => FinishReason::ToolUse,
+                                "max_tokens" => FinishReason::MaxTokens,
+                                _ => FinishReason::Stop,
+                            };
+                            return Some((
+                                Ok(StreamEvent::Done { finish_reason }),
+                                (stream, buffer, block_index),
+                            ));
+                        }
+                        "message_start" => {
+                            // Extract input token usage from the initial message
+                            if let Some(usage) = json["message"]["usage"].as_object() {
+                                let input_tokens = usage.get("input_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0) as u32;
+                                let cache_creation = usage.get("cache_creation_input_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0) as u32;
+                                let cache_read = usage.get("cache_read_input_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0) as u32;
+                                if input_tokens > 0 || cache_creation > 0 || cache_read > 0 {
+                                    return Some((
+                                        Ok(StreamEvent::Usage(Usage {
+                                            input_tokens: input_tokens + cache_creation + cache_read,
+                                            output_tokens: 0,
+                                            cache_creation_input_tokens: cache_creation,
+                                            cache_read_input_tokens: cache_read,
+                                        })),
+                                        (stream, buffer, block_index),
+                                    ));
+                                }
+                            }
+                        }
+                        "error" => {
+                            let message = json["error"]["message"]
+                                .as_str()
+                                .unwrap_or("Unknown streaming error")
+                                .to_string();
+                            return Some((
+                                Ok(StreamEvent::Error { message }),
+                                (stream, buffer, block_index),
+                            ));
+                        }
+                        // ping, content_block_stop, etc. — ignore
+                        _ => {}
+                    }
+                }
+
+                // Need more data from the byte stream
+                match stream.next().await {
+                    Some(Ok(bytes)) => {
+                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    }
+                    Some(Err(e)) => {
+                        return Some((
+                            Err(LlmError::Stream(e.to_string())),
+                            (stream, buffer, block_index),
+                        ));
+                    }
+                    None => {
+                        // Stream ended — nothing more to yield
+                        return None;
+                    }
+                }
+            }
+        },
+    )
 }
 
 #[async_trait]
@@ -359,6 +625,8 @@ impl LlmProvider for AnthropicProvider {
         let body = self.build_request_body(&request);
         let model_id = request.model.as_deref().unwrap_or(&self.model);
 
+        // Prompt caching is GA as of 2024-10. No beta header required.
+        // If needed for older API versions: .header("anthropic-beta", "prompt-caching-2024-07-31")
         let response = self
             .client
             .post(API_URL)
@@ -415,6 +683,67 @@ impl LlmProvider for AnthropicProvider {
         }
 
         self.parse_response(response_body)
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn chat_streaming_with_key(
+        &self,
+        key: &str,
+        request: ChatRequest,
+    ) -> Result<ChatStream, LlmError> {
+        let mut body = self.build_request_body(&request);
+        body["stream"] = serde_json::json!(true);
+        let model_id = request.model.as_deref().unwrap_or(&self.model);
+
+        let response = self
+            .client
+            .post(API_URL)
+            .header("x-api-key", key)
+            .header("anthropic-version", API_VERSION)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+
+        let status = response.status().as_u16();
+
+        if status == 429 {
+            let retry_after_ms = parse_retry_after_ms(response.headers()).unwrap_or(1_000);
+            return Err(LlmError::RateLimited { retry_after_ms });
+        }
+
+        if status == 529 {
+            let retry_after_ms = parse_retry_after_ms(response.headers());
+            return Err(LlmError::Overloaded {
+                status,
+                retry_after_ms,
+            });
+        }
+
+        if status >= 400 {
+            let error_body: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| LlmError::Serialization(e.to_string()))?;
+            let message = error_body["error"]["message"]
+                .as_str()
+                .unwrap_or("Unknown error")
+                .to_string();
+            return Err(LlmError::Api { status, message });
+        }
+
+        tracing::debug!(
+            provider = "anthropic",
+            model = model_id,
+            "Streaming response started"
+        );
+
+        let byte_stream = response.bytes_stream();
+        Ok(Box::pin(parse_anthropic_sse(byte_stream)))
     }
 }
 

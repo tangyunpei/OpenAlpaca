@@ -5,6 +5,7 @@ pub mod error;
 pub mod keys;
 pub mod providers;
 pub mod routing;
+pub mod streaming;
 pub mod types;
 
 // TODO: Remove backward-compat re-exports once all consumers use canonical paths
@@ -58,6 +59,7 @@ pub use routing::rate_limiter::{
 pub use routing::router::{
     LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RequestContext, RouterRequest,
 };
+pub use streaming::collect_stream;
 pub use types::*;
 
 use async_trait::async_trait;
@@ -83,6 +85,59 @@ pub trait LlmProvider: Send + Sync {
     async fn list_models_with_key(&self, _key: &str) -> Result<Vec<String>, LlmError> {
         Ok(vec![])
     }
+
+    /// Whether this provider supports streaming responses.
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
+    /// Streaming chat completion. Default falls back to non-streaming.
+    async fn chat_streaming(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
+        let response = self.chat(request).await?;
+        Ok(Box::pin(futures_util::stream::iter(
+            response_to_events(response).into_iter().map(Ok),
+        )))
+    }
+
+    /// Streaming chat with specific key. Default delegates to `chat_streaming`.
+    async fn chat_streaming_with_key(
+        &self,
+        _key: &str,
+        request: ChatRequest,
+    ) -> Result<ChatStream, LlmError> {
+        self.chat_streaming(request).await
+    }
+}
+
+/// Convert a complete ChatResponse into a StreamEvent sequence (for fallback).
+pub fn response_to_events(response: ChatResponse) -> Vec<StreamEvent> {
+    let mut events = Vec::new();
+    if let Some(ref thinking) = response.thinking {
+        events.push(StreamEvent::ThinkingDelta {
+            thinking: thinking.clone(),
+        });
+    }
+    if !response.content.is_empty() {
+        events.push(StreamEvent::TextDelta {
+            text: response.content,
+        });
+    }
+    for (i, tc) in response.tool_calls.iter().enumerate() {
+        events.push(StreamEvent::ToolUseStart {
+            index: i,
+            id: tc.id.clone(),
+            name: tc.name.clone(),
+        });
+        events.push(StreamEvent::InputJsonDelta {
+            index: i,
+            partial_json: tc.arguments.to_string(),
+        });
+    }
+    events.push(StreamEvent::Usage(response.usage));
+    events.push(StreamEvent::Done {
+        finish_reason: response.finish_reason,
+    });
+    events
 }
 
 #[cfg(test)]
@@ -141,5 +196,78 @@ mod tests {
         assert_eq!(FinishReason::Stop, FinishReason::Stop);
         assert_ne!(FinishReason::Stop, FinishReason::ToolUse);
         assert_eq!(FinishReason::MaxTokens, FinishReason::MaxTokens);
+    }
+
+    #[test]
+    fn test_tool_definition_backward_compat_deserialization() {
+        // Old JSON without strict/input_examples → fields are None
+        let json = r#"{"name":"search","description":"Search","parameters":{}}"#;
+        let td: ToolDefinition = serde_json::from_str(json).unwrap();
+        assert_eq!(td.name, "search");
+        assert!(td.strict.is_none());
+        assert!(td.input_examples.is_none());
+    }
+
+    #[test]
+    fn test_llm_error_stream_is_transient() {
+        assert!(LlmError::Stream("broken pipe".to_string()).is_transient());
+    }
+
+    #[tokio::test]
+    async fn test_response_to_events_roundtrip() {
+        let original = ChatResponse {
+            content: "Hello world".to_string(),
+            tool_calls: vec![ToolCall {
+                id: "tc1".to_string(),
+                name: "search".to_string(),
+                arguments: serde_json::json!({"query": "rust"}),
+            }],
+            model: "test-model".to_string(),
+            usage: Usage {
+                input_tokens: 100,
+                output_tokens: 50,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::ToolUse,
+            thinking: Some("Let me think...".to_string()),
+        };
+
+        let events = response_to_events(original.clone());
+        let stream = Box::pin(futures_util::stream::iter(events.into_iter().map(Ok)));
+        let collected = collect_stream(stream, "test-model".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(collected.content, original.content);
+        assert_eq!(collected.tool_calls.len(), original.tool_calls.len());
+        assert_eq!(collected.tool_calls[0].name, "search");
+        assert_eq!(collected.tool_calls[0].arguments["query"], "rust");
+        assert_eq!(collected.thinking.as_deref(), Some("Let me think..."));
+        assert_eq!(collected.usage.input_tokens, 100);
+        assert_eq!(collected.usage.output_tokens, 50);
+        assert_eq!(collected.finish_reason, FinishReason::ToolUse);
+    }
+
+    #[test]
+    fn test_response_to_events_text_only() {
+        let response = ChatResponse {
+            content: "Hello".to_string(),
+            tool_calls: vec![],
+            model: "m".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+        };
+        let events = response_to_events(response);
+        // TextDelta + Usage + Done = 3 events
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], StreamEvent::TextDelta { text } if text == "Hello"));
+        assert!(matches!(&events[1], StreamEvent::Usage(_)));
+        assert!(matches!(
+            &events[2],
+            StreamEvent::Done {
+                finish_reason: FinishReason::Stop
+            }
+        ));
     }
 }

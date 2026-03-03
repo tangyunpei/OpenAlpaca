@@ -117,6 +117,8 @@ pub(super) fn web_search_tool(config: Arc<ArcSwap<WebSearchConfig>>) -> Register
                 },
                 "required": ["query"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(WebSearchTool { config })),
     }

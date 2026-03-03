@@ -118,6 +118,8 @@ openalpaca_llm = { path = "crates/openalpaca_llm" }
 arc-swap = "1"
 signal-hook = "0.4.3"
 aes-gcm = "0.10"
+bytes = "1"
+pin-project-lite = "0.2"
 sha2 = "0.10"
 infer = "0.16"
 pdf-extract = "0.8"

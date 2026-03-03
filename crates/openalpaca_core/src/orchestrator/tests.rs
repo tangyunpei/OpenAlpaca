@@ -103,6 +103,7 @@ fn make_orchestrator_with_fixed_llm_response(response: &str) -> Orchestrator {
                     ..Default::default()
                 },
                 finish_reason: FinishReason::Stop,
+                thinking: None,
             })
         }
     }
@@ -151,6 +152,7 @@ fn make_orchestrator_with_capturing_llm(
                     ..Default::default()
                 },
                 finish_reason: FinishReason::Stop,
+                thinking: None,
             })
         }
     }
@@ -362,6 +364,7 @@ async fn test_simple_query_with_mock_llm() {
                     ..Default::default()
                 },
                 finish_reason: FinishReason::Stop,
+                thinking: None,
             })
         }
     }
@@ -483,6 +486,7 @@ fn make_planning_mock_llm(response: &str) -> Arc<LlmRouter> {
                     ..Default::default()
                 },
                 finish_reason: FinishReason::Stop,
+                thinking: None,
             })
         }
     }
@@ -685,6 +689,8 @@ fn make_mock_tool(name: &str) -> RegisteredTool {
             name: name.to_string(),
             description: format!("{} tool", name),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltInTool)),
     }
@@ -750,6 +756,7 @@ async fn test_tool_intent_detected_and_executes() {
                     model: "mock-model".to_string(),
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::Stop,
+                    thinking: None,
                 }),
                 // Call 1: agentic loop — return tool use
                 1 => Ok(ChatResponse {
@@ -762,6 +769,7 @@ async fn test_tool_intent_detected_and_executes() {
                     model: "mock-model".to_string(),
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::ToolUse,
+                    thinking: None,
                 }),
                 // Call 2+: return final answer with Stop
                 _ => Ok(ChatResponse {
@@ -770,6 +778,7 @@ async fn test_tool_intent_detected_and_executes() {
                     model: "mock-model".to_string(),
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::Stop,
+                    thinking: None,
                 }),
             }
         }
@@ -832,6 +841,7 @@ async fn test_tool_max_rounds_enforcement() {
                     model: "mock-model".to_string(),
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::Stop,
+                    thinking: None,
                 });
             }
             // Always return ToolUse
@@ -849,6 +859,7 @@ async fn test_tool_max_rounds_enforcement() {
                     ..Default::default()
                 },
                 finish_reason: FinishReason::ToolUse,
+                thinking: None,
             })
         }
     }
@@ -1230,6 +1241,7 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
                     ..Default::default()
                 },
                 finish_reason: FinishReason::Stop,
+                thinking: None,
             })
         }
     }

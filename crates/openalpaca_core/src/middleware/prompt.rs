@@ -216,6 +216,8 @@ mod tests {
             name: "web_fetch".to_string(),
             description: "Fetch a URL".to_string(),
             parameters: serde_json::json!({}),
+            strict: None,
+            input_examples: None,
         }];
         let result = format_tool_guidance(&tools);
         assert!(result.contains("web_fetch"));
@@ -229,11 +231,15 @@ mod tests {
                 name: "web_fetch".to_string(),
                 description: "Fetch a URL".to_string(),
                 parameters: serde_json::json!({}),
+                strict: None,
+                input_examples: None,
             },
             openalpaca_llm::ToolDefinition {
                 name: "file_read".to_string(),
                 description: "Read a file".to_string(),
                 parameters: serde_json::json!({}),
+                strict: None,
+                input_examples: None,
             },
         ];
         let result = format_tool_guidance(&tools);

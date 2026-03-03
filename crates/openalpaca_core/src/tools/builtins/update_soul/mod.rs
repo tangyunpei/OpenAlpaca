@@ -330,6 +330,8 @@ pub(super) fn update_soul_tool(ctx: SoulToolContext) -> RegisteredTool {
                 },
                 "required": ["mode"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(SoulUpdateTool { ctx })),
     }

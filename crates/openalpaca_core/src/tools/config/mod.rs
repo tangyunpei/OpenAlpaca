@@ -106,6 +106,8 @@ pub fn load_tools_from_file(path: &Path) -> Result<Vec<RegisteredTool>, String> 
                 name: tc.name,
                 description: tc.description,
                 parameters: tc.parameters,
+                strict: None,
+                input_examples: None,
             },
             backend,
         });

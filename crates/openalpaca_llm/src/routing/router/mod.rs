@@ -39,6 +39,10 @@ pub struct RouterRequest {
     /// Pre-computed token estimate for tool definitions.
     /// When `Some`, `estimate_request_tokens` skips JSON re-serialization of tools.
     pub tools_token_estimate: Option<u32>,
+    /// Enable Anthropic prompt caching.
+    pub enable_caching: bool,
+    /// Extended thinking config (Anthropic only).
+    pub thinking: Option<ThinkingConfig>,
 }
 
 /// Errors from the LLM router.
@@ -451,6 +455,57 @@ impl LlmRouter {
         }
     }
 
+    /// Streaming completion: resolve provider, acquire key, start streaming.
+    ///
+    /// Unlike `complete()`, streaming does NOT retry on failure. The caller
+    /// (agentic loop) falls back to non-streaming `complete()` on error.
+    pub async fn complete_streaming(
+        &self,
+        request: RouterRequest,
+    ) -> Result<ChatStream, LlmRouterError> {
+        let _permit = self
+            .concurrency_limiter
+            .acquire()
+            .await
+            .map_err(|_| LlmRouterError::MaxRetriesExceeded)?;
+
+        let default = self.default_model();
+        let model = request.model.as_deref().unwrap_or(&default);
+
+        let provider_type = self
+            .model_registry
+            .resolve_provider(model)
+            .ok_or_else(|| LlmRouterError::UnknownModel(model.to_string()))?;
+
+        let entry = self
+            .providers
+            .get(&provider_type)
+            .ok_or_else(|| LlmRouterError::ProviderNotConfigured(provider_type.to_string()))?;
+
+        let pool = entry.key_pool.load();
+        let key_guard = pool
+            .acquire()
+            .await
+            .map_err(|_| LlmRouterError::AllKeysRateLimited)?;
+
+        let chat_request = ChatRequest {
+            messages: request.messages,
+            tools: request.tools,
+            model: Some(model.to_string()),
+            temperature: request.temperature,
+            max_tokens: request.max_tokens,
+            tool_choice: request.tool_choice,
+            enable_caching: request.enable_caching,
+            thinking: request.thinking,
+        };
+
+        entry
+            .provider
+            .chat_streaming_with_key(&key_guard.secret, chat_request)
+            .await
+            .map_err(LlmRouterError::Llm)
+    }
+
     /// Complete a request: resolve provider, acquire key, call, handle retries/fallbacks.
     pub async fn complete(&self, request: RouterRequest) -> Result<ChatResponse, LlmRouterError> {
         let default = self.default_model();
@@ -574,6 +629,8 @@ impl LlmRouter {
                     temperature: request.temperature,
                     max_tokens: request.max_tokens,
                     tool_choice: request.tool_choice.clone(),
+                    enable_caching: request.enable_caching,
+                    thinking: request.thinking.clone(),
                 };
 
                 match entry
@@ -761,6 +818,8 @@ impl LlmRouter {
                 temperature: request.temperature,
                 max_tokens: request.max_tokens,
                 tool_choice: None,
+                enable_caching: false,
+                thinking: None,
             };
             match cli_backend.chat(cli_request).await {
                 Ok(response) => {
@@ -811,7 +870,13 @@ fn estimate_request_tokens(request: &RouterRequest) -> u32 {
         let tool_bytes: usize = request
             .tools
             .iter()
-            .map(|t| t.description.len() + t.parameters.to_string().len())
+            .map(|t| {
+                let base = t.description.len() + t.parameters.to_string().len();
+                let examples = t.input_examples.as_ref().map_or(0, |ex| {
+                    ex.iter().map(|e| e.to_string().len()).sum()
+                });
+                base + examples
+            })
             .sum();
         (tool_bytes / 4) as u32
     });

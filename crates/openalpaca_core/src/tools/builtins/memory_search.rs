@@ -121,6 +121,8 @@ pub(super) fn memory_search_tool(
                 },
                 "required": ["query"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(MemorySearchTool { db, embedder, daemon_config })),
     }
