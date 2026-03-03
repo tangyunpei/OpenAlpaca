@@ -104,6 +104,9 @@ pub(super) async fn extract_user_traits_background(
         user_trunc, asst_trunc
     );
 
+    if let Some(ref m) = dcfg.orchestrator.costs.extraction_model {
+        tracing::debug!(model = %m, "extraction using configured model");
+    }
     let request = RouterRequest {
         model: dcfg.orchestrator.costs.extraction_model.clone(),
         messages: vec![

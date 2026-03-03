@@ -61,6 +61,9 @@ pub(super) async fn update_summary_background(
         dcfg.orchestrator.memory.summary_max_chars
     ));
 
+    if let Some(ref m) = dcfg.orchestrator.costs.summary_model {
+        tracing::debug!(model = %m, "summary using configured model");
+    }
     let request = RouterRequest {
         model: dcfg.orchestrator.costs.summary_model.clone(),
         messages: vec![

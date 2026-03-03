@@ -20,6 +20,55 @@ use super::intent::Intent;
 use super::task_planner::{PlannerLimits, TaskPlanner};
 
 impl Orchestrator {
+    /// Build a formatted block of active tasks for planner context injection.
+    fn build_active_tasks_block(&self, owner_id: &str) -> Option<String> {
+        let db = self.db.as_ref()?;
+        let task_repo = TaskRepository::new(db);
+        match task_repo.list_active_by_creator(owner_id, 10) {
+            Ok(tasks) if !tasks.is_empty() => {
+                let mut block = String::from("### ACTIVE TASKS ###\n");
+                for t in &tasks {
+                    let progress = match (t.progress_current, t.progress_total) {
+                        (Some(c), Some(total)) => format!(" [{}/{}]", c, total),
+                        _ => String::new(),
+                    };
+                    block.push_str(&format!(
+                        "- [{}] {} ({}{})\n",
+                        &t.id[..8.min(t.id.len())],
+                        t.title,
+                        t.status.as_str(),
+                        progress
+                    ));
+                }
+                Some(block)
+            }
+            _ => None,
+        }
+    }
+
+    /// Build the idle agents list and planner limits from current config.
+    fn build_planner_inputs(&self) -> (Vec<crate::agent::SubAgent>, PlannerLimits, bool) {
+        let templates = self.shared_context.agent_registry.list_templates();
+        let idle_agents: Vec<crate::agent::SubAgent> = templates
+            .iter()
+            .map(|t| {
+                let mut agent = t.to_subagent(&t.frontmatter.id, "");
+                agent.status = crate::agent::AgentStatus::Idle;
+                agent.current_task = None;
+                agent
+            })
+            .collect();
+        let planner_cfg = &self.daemon_config.load().execution.planner;
+        let limits = PlannerLimits {
+            timeout_secs: planner_cfg.planning_timeout_secs,
+            max_retries: planner_cfg.max_retries,
+            max_tokens: planner_cfg.max_tokens,
+            plan_protocol_v2_enabled: planner_cfg.plan_protocol_v2_enabled,
+        };
+        let dag_prefer = planner_cfg.dag_prefer_predictable_enabled;
+        (idle_agents, limits, dag_prefer)
+    }
+
     /// Handle a user message through the full pipeline:
     /// 1. SecurityGate permission check (wraps TrustGate)
     /// 2. Input sanitization
@@ -284,52 +333,8 @@ impl Orchestrator {
                     // Fall through to full planner — re-enter via heuristic dispatcher
                     // which handles all remaining intent types including ComplexTask
                     mode = "two_phase_complex".to_string();
-                    let templates = self.shared_context.agent_registry.list_templates();
-                    let idle_agents: Vec<crate::agent::SubAgent> = templates
-                        .iter()
-                        .map(|t| {
-                            let mut agent = t.to_subagent(&t.frontmatter.id, "");
-                            agent.status = crate::agent::AgentStatus::Idle;
-                            agent.current_task = None;
-                            agent
-                        })
-                        .collect();
-                    let planner_cfg2 = &self.daemon_config.load().execution.planner;
-                    let limits = PlannerLimits {
-                        timeout_secs: planner_cfg2.planning_timeout_secs,
-                        max_retries: planner_cfg2.max_retries,
-                        max_tokens: planner_cfg2.max_tokens,
-                        plan_protocol_v2_enabled: planner_cfg2.plan_protocol_v2_enabled,
-                    };
-
-                    let active_tasks_block = if let Some(ref db) = self.db {
-                        let task_repo = TaskRepository::new(db);
-                        match task_repo.list_active_by_creator(&owner_id_str, 10) {
-                            Ok(tasks) if !tasks.is_empty() => {
-                                let mut block = String::from("### ACTIVE TASKS ###\n");
-                                for t in &tasks {
-                                    let progress =
-                                        match (t.progress_current, t.progress_total) {
-                                            (Some(c), Some(total)) => {
-                                                format!(" [{}/{}]", c, total)
-                                            }
-                                            _ => String::new(),
-                                        };
-                                    block.push_str(&format!(
-                                        "- [{}] {} ({}{})\n",
-                                        &t.id[..8.min(t.id.len())],
-                                        t.title,
-                                        t.status.as_str(),
-                                        progress
-                                    ));
-                                }
-                                Some(block)
-                            }
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
+                    let (idle_agents, limits, dag_prefer) = self.build_planner_inputs();
+                    let active_tasks_block = owner_id.and_then(|id| self.build_active_tasks_block(id));
 
                     let planner_start = Instant::now();
                     let plan_result = TaskPlanner::plan_hierarchical(
@@ -340,7 +345,7 @@ impl Orchestrator {
                         ctx.summary.as_deref(),
                         active_tasks_block.as_deref(),
                         limits,
-                        planner_cfg2.dag_prefer_predictable_enabled,
+                        dag_prefer,
                     )
                     .await;
                     planner_ms = planner_start.elapsed().as_millis() as u64;
@@ -439,50 +444,8 @@ impl Orchestrator {
                 }
             }
         } else if let Some(ref router) = self.llm_router {
-            let templates = self.shared_context.agent_registry.list_templates();
-            let idle_agents: Vec<crate::agent::SubAgent> = templates
-                .iter()
-                .map(|t| {
-                    let mut agent = t.to_subagent(&t.frontmatter.id, "");
-                    agent.status = crate::agent::AgentStatus::Idle;
-                    agent.current_task = None;
-                    agent
-                })
-                .collect();
-            let planner_cfg = &self.daemon_config.load().execution.planner;
-            let limits = PlannerLimits {
-                timeout_secs: planner_cfg.planning_timeout_secs,
-                max_retries: planner_cfg.max_retries,
-                max_tokens: planner_cfg.max_tokens,
-                plan_protocol_v2_enabled: planner_cfg.plan_protocol_v2_enabled,
-            };
-
-            // Build active tasks block — only needed for planner path (Opt-5)
-            let active_tasks_block = if let Some(ref db) = self.db {
-                let task_repo = TaskRepository::new(db);
-                match task_repo.list_active_by_creator(&owner_id_str, 10) {
-                    Ok(tasks) if !tasks.is_empty() => {
-                        let mut block = String::from("### ACTIVE TASKS ###\n");
-                        for t in &tasks {
-                            let progress = match (t.progress_current, t.progress_total) {
-                                (Some(c), Some(total)) => format!(" [{}/{}]", c, total),
-                                _ => String::new(),
-                            };
-                            block.push_str(&format!(
-                                "- [{}] {} ({}{})\n",
-                                &t.id[..8.min(t.id.len())],
-                                t.title,
-                                t.status.as_str(),
-                                progress
-                            ));
-                        }
-                        Some(block)
-                    }
-                    _ => None,
-                }
-            } else {
-                None
-            };
+            let (idle_agents, limits, dag_prefer) = self.build_planner_inputs();
+            let active_tasks_block = owner_id.and_then(|id| self.build_active_tasks_block(id));
 
             let planner_start = Instant::now();
             let plan_result = TaskPlanner::plan_hierarchical(
@@ -493,7 +456,7 @@ impl Orchestrator {
                 ctx.summary.as_deref(),
                 active_tasks_block.as_deref(),
                 limits,
-                planner_cfg.dag_prefer_predictable_enabled,
+                dag_prefer,
             )
             .await;
             planner_ms = planner_start.elapsed().as_millis() as u64;
@@ -684,7 +647,8 @@ impl Orchestrator {
             let bg_owner = owner_id.map(|s| s.to_string());
             let bg_response = result.as_ref().ok().cloned();
 
-            drop(tokio::spawn(async move {
+            // NOTE: ctx is intentionally moved into this spawn — do not reference it after this block
+            tokio::spawn(async move {
                 // Clone shared fields for summary (extraction consumes the originals)
                 let sum_db = bg_db.clone();
                 let sum_router = bg_router.clone();
@@ -713,7 +677,7 @@ impl Orchestrator {
                 };
 
                 tokio::join!(summary_fut, extract_fut);
-            }));
+            });
         }
 
         // 8. Check if bootstrap onboarding is complete

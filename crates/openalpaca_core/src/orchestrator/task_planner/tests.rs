@@ -1139,7 +1139,11 @@ fn test_dag_validation_salvage_to_pipeline() {
     assert_eq!(topo[0], "n1");
 }
 
-// ── Phase P4: Opt-12 classify_lightweight tests ──
+// ── Phase P4: Opt-12 classify_lightweight JSON parsing tests ──
+// These tests verify the JSON parsing sub-step only (extracting the
+// "classification" field from a JSON string). Testing the full
+// `classify_lightweight` method requires a live LLM router and is
+// covered by integration tests.
 
 #[test]
 fn test_classify_lightweight_parse_simple_query() {
