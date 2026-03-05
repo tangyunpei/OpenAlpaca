@@ -13,7 +13,7 @@ denied_skills:
 temperature: 0.2
 verbosity: "concise"
 model: "claude-haiku-4-5-20251001"
-fallback_models:
+fallback_models: []
 max_tool_calls: 30
 timeout_seconds: 600
 require_confirmation_for:

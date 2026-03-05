@@ -93,24 +93,29 @@ impl super::PersonaHandler for IdentityHandler {
 
         let mut modified = Vec::new();
 
-        if let Some(v) = obj.get("name").and_then(|v| v.as_str()) {
-            doc.name = v.to_string();
+        if let Some(v) = obj.get("name") {
+            let s = v.as_str().ok_or_else(|| "sections.name must be a string".to_string())?;
+            doc.name = s.to_string();
             modified.push("name".to_string());
         }
-        if let Some(v) = obj.get("creature").and_then(|v| v.as_str()) {
-            doc.creature = v.to_string();
+        if let Some(v) = obj.get("creature") {
+            let s = v.as_str().ok_or_else(|| "sections.creature must be a string".to_string())?;
+            doc.creature = s.to_string();
             modified.push("creature".to_string());
         }
-        if let Some(v) = obj.get("vibe").and_then(|v| v.as_str()) {
-            doc.vibe = v.to_string();
+        if let Some(v) = obj.get("vibe") {
+            let s = v.as_str().ok_or_else(|| "sections.vibe must be a string".to_string())?;
+            doc.vibe = s.to_string();
             modified.push("vibe".to_string());
         }
-        if let Some(v) = obj.get("emoji").and_then(|v| v.as_str()) {
-            doc.emoji = v.to_string();
+        if let Some(v) = obj.get("emoji") {
+            let s = v.as_str().ok_or_else(|| "sections.emoji must be a string".to_string())?;
+            doc.emoji = s.to_string();
             modified.push("emoji".to_string());
         }
-        if let Some(v) = obj.get("avatar").and_then(|v| v.as_str()) {
-            doc.avatar = v.to_string();
+        if let Some(v) = obj.get("avatar") {
+            let s = v.as_str().ok_or_else(|| "sections.avatar must be a string".to_string())?;
+            doc.avatar = s.to_string();
             modified.push("avatar".to_string());
         }
 
