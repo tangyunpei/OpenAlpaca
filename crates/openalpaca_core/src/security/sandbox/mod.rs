@@ -16,6 +16,9 @@ use openalpaca_llm::ToolCall;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Tools that manage their own timeouts and must bypass the per-tool sandbox timeout.
+const COORDINATION_TOOLS: &[&str] = &["wait_for_subagents", "check_subagent_status"];
+
 /// Policy governing what a sandboxed agent can do.
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
@@ -196,8 +199,7 @@ impl SandboxManager {
         // own internal timeouts and must not be subject to the per-tool sandbox
         // timeout, which is typically much shorter than the time subagents need to
         // complete their work.
-        let is_coordination_tool =
-            tool_call.name == "wait_for_subagents" || tool_call.name == "check_subagent_status";
+        let is_coordination_tool = COORDINATION_TOOLS.contains(&tool_call.name.as_str());
 
         let executor = self.executor.clone();
         let tool_name = tool_call.name.clone();

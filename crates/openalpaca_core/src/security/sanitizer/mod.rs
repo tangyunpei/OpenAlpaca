@@ -309,31 +309,63 @@ impl InputSanitizer {
         false
     }
 
-    /// Estimate the compression ratio from a ZIP local file header.
+    /// Estimate the compression ratio from ZIP local file headers.
     ///
-    /// Reads the first local file header (PK\x03\x04) and compares
-    /// compressed size (offset 18, 4 bytes LE) vs uncompressed size (offset 22, 4 bytes LE).
+    /// Walks all local file headers (PK\x03\x04) and sums compressed/uncompressed
+    /// sizes to detect multi-entry archive bombs where each individual entry has
+    /// a modest ratio but the aggregate is extreme.
     fn estimate_zip_ratio(data: &[u8]) -> Option<f64> {
-        // ZIP local file header: PK\x03\x04 at offset 0, minimum 30 bytes
-        if data.len() < 30 {
-            return None;
-        }
-        if &data[0..4] != b"PK\x03\x04" {
-            return None;
+        let mut offset = 0usize;
+        let mut total_compressed: f64 = 0.0;
+        let mut total_uncompressed: f64 = 0.0;
+        let mut found_any = false;
+
+        loop {
+            if offset + 30 > data.len() {
+                break;
+            }
+            if &data[offset..offset + 4] != b"PK\x03\x04" {
+                break;
+            }
+
+            let compressed = u32::from_le_bytes([
+                data[offset + 18],
+                data[offset + 19],
+                data[offset + 20],
+                data[offset + 21],
+            ]) as f64;
+            let uncompressed = u32::from_le_bytes([
+                data[offset + 22],
+                data[offset + 23],
+                data[offset + 24],
+                data[offset + 25],
+            ]) as f64;
+
+            if compressed == 0.0 && uncompressed > 0.0 {
+                return Some(f64::INFINITY);
+            }
+
+            total_compressed += compressed;
+            total_uncompressed += uncompressed;
+            found_any = true;
+
+            let filename_len =
+                u16::from_le_bytes([data[offset + 26], data[offset + 27]]) as usize;
+            let extra_len = u16::from_le_bytes([data[offset + 28], data[offset + 29]]) as usize;
+            offset += 30 + filename_len + extra_len + compressed as usize;
         }
 
-        let compressed = u32::from_le_bytes([data[18], data[19], data[20], data[21]]) as f64;
-        let uncompressed = u32::from_le_bytes([data[22], data[23], data[24], data[25]]) as f64;
-
-        if compressed == 0.0 {
-            return if uncompressed > 0.0 {
-                Some(f64::INFINITY)
+        if !found_any {
+            return None;
+        }
+        if total_compressed == 0.0 {
+            return Some(if total_uncompressed > 0.0 {
+                f64::INFINITY
             } else {
-                Some(1.0)
-            };
+                1.0
+            });
         }
-
-        Some(uncompressed / compressed)
+        Some(total_uncompressed / total_compressed)
     }
 }
 
@@ -382,8 +414,13 @@ fn read_image_dimensions(data: &[u8]) -> Option<(u32, u32)> {
                 continue;
             }
             let marker = data[pos + 1];
-            // SOF0, SOF1, SOF2, SOF3
-            if matches!(marker, 0xC0..=0xC3) && pos + 9 < data.len() {
+            // SOF markers: 0xC0-0xCF except 0xC4 (DHT), 0xC8 (JPG), 0xCC (DAC)
+            if (0xC0..=0xCF).contains(&marker)
+                && marker != 0xC4
+                && marker != 0xC8
+                && marker != 0xCC
+                && pos + 9 < data.len()
+            {
                 let h = u16::from_be_bytes([data[pos + 5], data[pos + 6]]) as u32;
                 let w = u16::from_be_bytes([data[pos + 7], data[pos + 8]]) as u32;
                 return Some((w, h));

@@ -6,6 +6,7 @@ use openalpaca_core::{
     context::SharedContext,
     tools::builtins::{ConnectorSendLock, PersonaToolContext},
 };
+use openalpaca_llm::CostSnapshot;
 use openalpaca_storage::Database;
 use std::path::Path;
 use std::sync::Arc;
@@ -644,4 +645,53 @@ fn build_tool_registry(
     }
 
     (Arc::new(tool_registry), connector_send_lock)
+}
+
+/// Restore CostTracker state from today's persisted `llm_usage_daily` rows.
+///
+/// Called at daemon startup so budget enforcement is accurate across restarts.
+pub async fn restore_cost_tracker(
+    router: &openalpaca_llm::LlmRouter,
+    db: &Database,
+) {
+    let repo = openalpaca_storage::LlmUsageRepository::new(db);
+    let rows = match repo.get_today_usage() {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Failed to load today's LLM usage from DB: {e}");
+            return;
+        }
+    };
+    if rows.is_empty() {
+        return;
+    }
+
+    let mut snapshot = CostSnapshot::default();
+    for row in &rows {
+        let stats = snapshot
+            .agent_usage
+            .entry(row.agent_id.clone())
+            .or_default();
+        stats.total_requests += row.total_requests as u64;
+        stats.total_input_tokens += row.total_input_tokens as u64;
+        stats.total_output_tokens += row.total_output_tokens as u64;
+        stats.total_cost_usd += row.total_cost_usd;
+
+        let model_stats = stats
+            .by_model
+            .entry(row.model.clone())
+            .or_default();
+        model_stats.requests += row.total_requests as u64;
+        model_stats.input_tokens += row.total_input_tokens as u64;
+        model_stats.output_tokens += row.total_output_tokens as u64;
+        model_stats.cost_usd += row.total_cost_usd;
+    }
+
+    let total_cost: f64 = rows.iter().map(|r| r.total_cost_usd).sum();
+    router.cost_tracker.load_snapshot(snapshot).await;
+    info!(
+        "Restored CostTracker from DB: {} row(s), ${:.4} total",
+        rows.len(),
+        total_cost
+    );
 }

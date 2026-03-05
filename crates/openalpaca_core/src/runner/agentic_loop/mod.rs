@@ -281,12 +281,6 @@ pub struct LoopConfig {
     pub fallback_models: Vec<String>,
     /// Agent model constraints for access control enforcement.
     pub agent_constraints: Option<AgentConstraints>,
-    /// Input token rate ($ per 1M tokens) for cost estimation fallback.
-    /// Set from model registry pricing when available.
-    pub fallback_input_rate: f64,
-    /// Output token rate ($ per 1M tokens) for cost estimation fallback.
-    /// Set from model registry pricing when available.
-    pub fallback_output_rate: f64,
     /// Maximum estimated input tokens before triggering context compression.
     /// When `> 0` and estimated tokens exceed this, older rounds are compressed
     /// into a summary, preserving the system prompt + initial query + recent rounds.
@@ -312,6 +306,10 @@ pub struct LoopConfig {
     /// streaming first, forwarding each event to this callback, then falls
     /// back to non-streaming on failure.
     pub stream_callback: Option<StreamCallback>,
+    /// Maximum wall-clock duration for streaming collection.
+    /// If `collect_stream()` exceeds this, it is cancelled and the loop
+    /// falls back to non-streaming. Default: 10 minutes.
+    pub max_stream_duration: Duration,
 }
 
 impl Clone for LoopConfig {
@@ -324,8 +322,6 @@ impl Clone for LoopConfig {
             model: self.model.clone(),
             fallback_models: self.fallback_models.clone(),
             agent_constraints: self.agent_constraints.clone(),
-            fallback_input_rate: self.fallback_input_rate,
-            fallback_output_rate: self.fallback_output_rate,
             max_context_tokens: self.max_context_tokens,
             context_tail_keep: self.context_tail_keep,
             context_threshold: self.context_threshold,
@@ -333,6 +329,7 @@ impl Clone for LoopConfig {
             enable_caching: self.enable_caching,
             thinking: self.thinking.clone(),
             stream_callback: self.stream_callback.clone(),
+            max_stream_duration: self.max_stream_duration,
         }
     }
 }
@@ -350,6 +347,7 @@ impl std::fmt::Debug for LoopConfig {
             .field("enable_caching", &self.enable_caching)
             .field("thinking", &self.thinking)
             .field("stream_callback", &self.stream_callback.is_some())
+            .field("max_stream_duration", &self.max_stream_duration)
             .finish()
     }
 }
@@ -364,8 +362,6 @@ impl Default for LoopConfig {
             model: None,
             fallback_models: Vec::new(),
             agent_constraints: None,
-            fallback_input_rate: FALLBACK_INPUT_RATE,
-            fallback_output_rate: FALLBACK_OUTPUT_RATE,
             max_context_tokens: 0,
             context_tail_keep: 4,
             context_threshold: DEFAULT_CONTEXT_THRESHOLD,
@@ -373,6 +369,7 @@ impl Default for LoopConfig {
             enable_caching: true,
             thinking: None,
             stream_callback: None,
+            max_stream_duration: Duration::from_secs(600),
         }
     }
 }
@@ -422,8 +419,6 @@ impl LoopConfig {
             model,
             fallback_models: agent.llm_config.fallback_models.clone(),
             agent_constraints: Some(agent.constraints.clone()),
-            fallback_input_rate: FALLBACK_INPUT_RATE,
-            fallback_output_rate: FALLBACK_OUTPUT_RATE,
             max_context_tokens: 0,
             context_tail_keep: 4,
             context_threshold: DEFAULT_CONTEXT_THRESHOLD,
@@ -431,24 +426,8 @@ impl LoopConfig {
             enable_caching: true,
             thinking: None,
             stream_callback: None,
+            max_stream_duration: Duration::from_secs(600),
         }
-    }
-
-    /// Set cost estimation rates from model registry pricing.
-    /// If the model is found in the registry, uses its actual pricing.
-    /// Otherwise keeps the default fallback rates (Sonnet-like).
-    pub fn with_model_pricing(
-        mut self,
-        registry: &openalpaca_llm::ModelRegistry,
-        model_id: Option<&str>,
-    ) -> Self {
-        if let Some(model) = model_id
-            && let Some(pricing) = registry.get_pricing(model)
-        {
-            self.fallback_input_rate = pricing.input_price_per_million;
-            self.fallback_output_rate = pricing.output_price_per_million;
-        }
-        self
     }
 
     /// Set context compression budget from model registry.
@@ -510,6 +489,8 @@ pub struct LoopResult {
     pub model_used: Option<String>,
     /// Wall-clock time for the entire loop execution.
     pub elapsed: Duration,
+    /// Accumulated cost for this loop invocation (from CostTracker for Router, local estimate for Direct).
+    pub estimated_cost: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -535,6 +516,7 @@ struct LoopState {
     last_model: Option<String>,
     cost_warning_emitted: bool,
     max_tokens_retries: usize,
+    last_cost: f64,
 }
 
 impl LoopState {
@@ -549,6 +531,7 @@ impl LoopState {
             last_model: None,
             cost_warning_emitted: false,
             max_tokens_retries: 0,
+            last_cost: 0.0,
         }
     }
 
@@ -563,6 +546,7 @@ impl LoopState {
             finish_reason,
             model_used: self.last_model.clone(),
             elapsed: self.start.elapsed(),
+            estimated_cost: self.last_cost,
         }
     }
 
@@ -581,6 +565,7 @@ impl LoopState {
             finish_reason,
             model_used: self.last_model.clone(),
             elapsed: self.start.elapsed(),
+            estimated_cost: self.last_cost,
         }
     }
 }
@@ -613,6 +598,7 @@ impl<'a> LlmBackend<'a> {
         enable_caching: bool,
         thinking: Option<ThinkingConfig>,
         stream_callback: Option<&StreamCallback>,
+        max_stream_duration: Duration,
     ) -> Result<ChatResponse, LlmRouterError> {
         match self {
             LlmBackend::Direct { provider } => {
@@ -655,17 +641,35 @@ impl<'a> LlmBackend<'a> {
                                 event
                             });
                             let model_str = model.clone().unwrap_or_else(|| router.default_model());
-                            match openalpaca_llm::collect_stream(
-                                Box::pin(forwarding_stream),
-                                model_str,
+                            match tokio::time::timeout(
+                                max_stream_duration,
+                                openalpaca_llm::collect_stream(
+                                    Box::pin(forwarding_stream),
+                                    model_str,
+                                ),
                             )
                             .await
                             {
-                                Ok(response) => return Ok(response),
-                                Err(e) => {
+                                Ok(Ok(response)) => {
+                                    // Record streaming cost in CostTracker (H1 fix)
+                                    router.cost_tracker.record_usage(
+                                        context.agent_id.as_deref().unwrap_or("unknown"),
+                                        context.task_id.as_deref(),
+                                        &response.model,
+                                        &response.usage,
+                                    ).await;
+                                    return Ok(response);
+                                }
+                                Ok(Err(e)) => {
                                     tracing::warn!(
                                         error = %e,
                                         "Streaming collection failed, falling back to non-streaming"
+                                    );
+                                }
+                                Err(_elapsed) => {
+                                    tracing::warn!(
+                                        max_stream_duration_secs = max_stream_duration.as_secs(),
+                                        "Stream wall-clock deadline exceeded, falling back to non-streaming"
                                     );
                                 }
                             }
@@ -700,6 +704,32 @@ impl<'a> LlmBackend<'a> {
     /// Whether this backend supports transient-error retry with backoff.
     fn supports_retry(&self) -> bool {
         matches!(self, LlmBackend::Router { .. })
+    }
+
+    /// Get the current accumulated cost for this task/agent.
+    /// For the Direct backend (tests), falls back to local token-based estimate.
+    /// For the Router backend, reads from the global CostTracker.
+    async fn task_cost(&self, total_input: u32, total_output: u32) -> f64 {
+        match self {
+            LlmBackend::Direct { .. } => {
+                estimate_cost(total_input, total_output, FALLBACK_INPUT_RATE, FALLBACK_OUTPUT_RATE)
+            }
+            LlmBackend::Router { router, context } => {
+                if let Some(ref task_id) = context.task_id {
+                    router.cost_tracker
+                        .get_task_usage(task_id).await
+                        .map(|u| u.total_cost_usd)
+                        .unwrap_or(0.0)
+                } else if let Some(ref agent_id) = context.agent_id {
+                    router.cost_tracker
+                        .get_agent_usage(agent_id).await
+                        .map(|u| u.total_cost_usd)
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                }
+            }
+        }
     }
 }
 
@@ -832,40 +862,33 @@ async fn run_agentic_loop_inner(
             return state.result(LoopFinishReason::MaxRounds);
         }
 
-        // ── 3. Cost check ──────────────────────────────────────────
-        // Uses local token accumulation + model registry pricing.
-        // Equivalent to router.cost_tracker but avoids per-round async
-        // lock and is correctly scoped to this single invocation.
-        let estimated_cost = estimate_cost(
-            state.total_input,
-            state.total_output,
-            config.fallback_input_rate,
-            config.fallback_output_rate,
-        );
-        let cost_ratio = estimated_cost / config.max_cost;
+        // ── 3. Cost check (CostTracker for Router, local estimate for Direct) ──
+        let accumulated_cost = backend.task_cost(state.total_input, state.total_output).await;
+        state.last_cost = accumulated_cost;
+        let cost_ratio = accumulated_cost / config.max_cost;
         if cost_ratio >= 0.8 && !state.cost_warning_emitted {
             state.cost_warning_emitted = true;
             let warning = format!(
                 "[system] Budget {:.0}% consumed (${:.4}/{:.2}). \
                  Prioritize completing the current task efficiently.",
                 cost_ratio * 100.0,
-                estimated_cost,
+                accumulated_cost,
                 config.max_cost,
             );
             Arc::make_mut(&mut messages).push(ChatMessage::user(&warning));
             tracing::info!(
                 agent_id,
                 cost_ratio,
-                estimated_cost,
+                accumulated_cost,
                 "Cost warning emitted at {:.0}%",
                 cost_ratio * 100.0,
             );
         }
-        if estimated_cost > config.max_cost {
+        if accumulated_cost > config.max_cost {
             tracing::info!(
                 agent_id = agent_id,
                 rounds = state.rounds,
-                estimated_cost,
+                accumulated_cost,
                 "Agentic loop exiting: cost limit exceeded"
             );
             return state.result(LoopFinishReason::CostExceeded);
@@ -917,6 +940,7 @@ async fn run_agentic_loop_inner(
                     config.enable_caching,
                     config.thinking.clone(),
                     config.stream_callback.as_ref(),
+                    config.max_stream_duration,
                 ) => result,
                 _ = token.cancelled() => {
                     tracing::info!(agent_id = agent_id, round = state.rounds + 1, "LLM call interrupted by cancellation");
@@ -934,6 +958,7 @@ async fn run_agentic_loop_inner(
                     config.enable_caching,
                     config.thinking.clone(),
                     config.stream_callback.as_ref(),
+                    config.max_stream_duration,
                 )
                 .await
         };

@@ -142,6 +142,29 @@ impl CostTracker {
         }
     }
 
+    /// Convenience method to record usage from a ChatResponse's Usage struct.
+    /// Calculates cost automatically using the model registry.
+    pub async fn record_usage(
+        &self,
+        agent_id: &str,
+        task_id: Option<&str>,
+        model: &str,
+        usage: &crate::types::Usage,
+    ) {
+        let cost = self.calculate_cost(model, usage.input_tokens, usage.output_tokens);
+        let record = CallRecord {
+            agent_id: agent_id.to_string(),
+            task_id: task_id.map(|s| s.to_string()),
+            model: model.to_string(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cost_usd: cost,
+            cache_creation_tokens: usage.cache_creation_input_tokens,
+            cache_read_tokens: usage.cache_read_input_tokens,
+        };
+        self.record(&record).await;
+    }
+
     /// Check if a task is still within budget.
     pub async fn check_task_budget(&self, task_id: &str, max_cost: f64) -> bool {
         let usage = self.task_usage.read().await;

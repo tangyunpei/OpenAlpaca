@@ -61,7 +61,7 @@ pub(super) struct ActiveSendHints {
 /// - **Tier 1**: Literal tool name (`send(`, `send tool`, `"send"`, `` `send` ``, `call send`, `use send`) — highest confidence.
 /// - **Tier 2**: Channel + recipient-solicitation keywords — defaults to send active.
 pub(super) fn detect_active_send_hints(recent_messages: &[ChatMessage]) -> ActiveSendHints {
-    const CHANNEL_KW: &[&str] = &["telegram", "imessage"];
+    const CHANNEL_KW: &[&str] = &["telegram", "imessage", "slack", "discord", "whatsapp", "wechat", "signal"];
     const SEND_KW: &[&str] = &["send(", "send tool", "\"send\"", "`send`", "call send", "use send"];
     const RECIPIENT_KW: &[&str] = &[
         "recipient", "chat_id", "收件人", "发给谁", "发送给",
@@ -300,7 +300,7 @@ impl Orchestrator {
         if let Some(result) = self.try_direct_send(tool_suggestion_query, owner_id).await {
             let response = match result {
                 Ok(summary) => summary,
-                Err(e) => format!("⚠️ 发送失败: {e}"),
+                Err(e) => format!("⚠️ Send failed / 发送失败: {e}"),
             };
             self.bus.publish(SystemEvent::AgentResponse {
                 request_id,

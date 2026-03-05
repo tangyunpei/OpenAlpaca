@@ -27,3 +27,4 @@ pub use repository::{
     FileAssetRepository, IdentityRepository, LlmUsageRepository, MemoryRepository,
     OrchestratorLatencyRepository, PreferenceRepository, SubAgentRepository, TaskRepository,
 };
+pub use repository::llm_usage::LlmUsageDaily;
