@@ -58,11 +58,11 @@ pub(super) struct ActiveSendHints {
 /// Analyze recent conversation to determine whether the send tool should be kept alive.
 ///
 /// Uses a tiered priority system per assistant message (last 2 within 6-message window):
-/// - **Tier 1**: Literal tool name (`send_message`, `send_file`, `send(`, `send tool`) — highest confidence.
+/// - **Tier 1**: Literal tool name (`send(`, `send tool`, `"send"`, `` `send` ``, `call send`, `use send`) — highest confidence.
 /// - **Tier 2**: Channel + recipient-solicitation keywords — defaults to send active.
 pub(super) fn detect_active_send_hints(recent_messages: &[ChatMessage]) -> ActiveSendHints {
     const CHANNEL_KW: &[&str] = &["telegram", "imessage"];
-    const SEND_KW: &[&str] = &["send_file", "send_message", "send(", "send tool"];
+    const SEND_KW: &[&str] = &["send(", "send tool", "\"send\"", "`send`", "call send", "use send"];
     const RECIPIENT_KW: &[&str] = &[
         "recipient", "chat_id", "收件人", "发给谁", "发送给",
         "send to whom", "send it to",
@@ -966,7 +966,7 @@ mod tests {
     #[test]
     fn detect_send_flow_chinese_context_with_tool_name() {
         let messages = vec![ChatMessage::assistant(
-            "好的，我将通过Telegram使用send_message工具发送消息。",
+            "好的，我将通过Telegram使用`send`工具发送消息。",
         )];
         let hints = detect_active_send_hints(&messages);
         assert!(hints.send);
@@ -976,7 +976,7 @@ mod tests {
     fn detect_send_flow_only_recent_messages() {
         let mut messages = Vec::new();
         messages.push(ChatMessage::assistant(
-            "I'll send via Telegram using send_message.",
+            "I'll send via Telegram using `send`.",
         ));
         for _ in 0..2 {
             messages.push(ChatMessage::assistant("Here is some other info."));
@@ -1033,9 +1033,9 @@ mod tests {
     }
 
     #[test]
-    fn detect_send_flow_with_send_file_tool_name() {
+    fn detect_send_flow_with_quoted_send_tool_name() {
         let messages = vec![ChatMessage::assistant(
-            "I'll use the send_file tool to send your photo via Telegram.",
+            "I'll use the \"send\" tool to send your photo via Telegram.",
         )];
         let hints = detect_active_send_hints(&messages);
         assert!(hints.send);
@@ -1051,27 +1051,27 @@ mod tests {
     }
 
     #[test]
-    fn keepalive_recipient_followup_with_send_file() {
+    fn keepalive_recipient_followup_with_send_tool() {
         let messages = vec![ChatMessage::assistant(
-            "I'll use the send_file tool to send your photo via Telegram. What's the recipient?",
+            "I'll use the \"send\" tool to send your photo via Telegram. What's the recipient?",
         )];
         let hints = detect_active_send_hints(&messages);
         assert!(hints.send);
     }
 
     #[test]
-    fn keepalive_recipient_followup_with_send_message() {
+    fn keepalive_recipient_followup_with_call_send() {
         let messages = vec![ChatMessage::assistant(
-            "I'll use send_message to send your text via Telegram. Who should I send it to?",
+            "I'll call send to send your text via Telegram. Who should I send it to?",
         )];
         let hints = detect_active_send_hints(&messages);
         assert!(hints.send);
     }
 
     #[test]
-    fn keepalive_both_tools_mentioned() {
+    fn keepalive_send_tool_mentioned_twice() {
         let messages = vec![ChatMessage::assistant(
-            "I can use send_message for text or send_file for attachments via Telegram.",
+            "I can use send for text or call send for attachments via Telegram.",
         )];
         let hints = detect_active_send_hints(&messages);
         assert!(hints.send);
@@ -1090,7 +1090,7 @@ mod tests {
     fn keepalive_tier2_cross_message_backtrack() {
         let messages = vec![
             ChatMessage::assistant(
-                "I'll use the send_file tool to send your photo via Telegram.",
+                "I'll use the \"send\" tool to send your photo via Telegram.",
             ),
             ChatMessage::user("等一下"),
             ChatMessage::assistant(
@@ -1106,7 +1106,7 @@ mod tests {
         // Both turns mention send-related content → send should be active
         let messages = vec![
             ChatMessage::assistant(
-                "I'll use the send_file tool to send your photo via iMessage.",
+                "I'll use the \"send\" tool to send your photo via iMessage.",
             ),
             ChatMessage::user("等一下"),
             ChatMessage::assistant(
@@ -1114,7 +1114,7 @@ mod tests {
             ),
         ];
         let hints = detect_active_send_hints(&messages);
-        // Turn N-1 has send_file (Tier 1), Turn N has Tier 2 → both set send=true
+        // Turn N-1 has "send" (Tier 1), Turn N has Tier 2 → both set send=true
         assert!(hints.send);
     }
 
@@ -1142,7 +1142,7 @@ mod tests {
     #[test]
     fn apply_keepalive_injects_send() {
         let messages = vec![ChatMessage::assistant(
-            "I'll use the send_file tool via Telegram.",
+            "I'll use the \"send\" tool via Telegram.",
         )];
         let mut tool_names = vec!["web_fetch".to_string()];
         let intent_send = apply_send_keepalive(&mut tool_names, &messages);
@@ -1168,7 +1168,7 @@ mod tests {
     #[test]
     fn apply_keepalive_injects_send_when_hinted() {
         let messages = vec![ChatMessage::assistant(
-            "I can use send_message for text or send_file for attachments via Telegram.",
+            "I can use send for text or call send for attachments via Telegram.",
         )];
         let mut tool_names = vec![];
         let intent_send = apply_send_keepalive(&mut tool_names, &messages);
@@ -1181,7 +1181,7 @@ mod tests {
     #[test]
     fn keepalive_plain_text_continuation_resolves_to_send() {
         let messages = vec![ChatMessage::assistant(
-            "I'll use the send_file tool via Telegram.",
+            "I'll use the \"send\" tool via Telegram.",
         )];
         let parser = crate::orchestrator::intent::IntentParser;
         let mut tool_names = parser.suggest_tools("好的，发吧");
@@ -1195,7 +1195,7 @@ mod tests {
     #[test]
     fn keepalive_text_send_continuation_resolves_to_send() {
         let messages = vec![ChatMessage::assistant(
-            "好的，我将通过Telegram使用send_message工具发送消息。",
+            "好的，我将通过Telegram使用`send`工具发送消息。",
         )];
         let parser = crate::orchestrator::intent::IntentParser;
         let mut tool_names = parser.suggest_tools("发消息给他");
@@ -1210,7 +1210,7 @@ mod tests {
     fn apply_keepalive_cross_channel_injects_send() {
         let messages = vec![
             ChatMessage::assistant(
-                "I'll use the send_file tool to send your photo via iMessage.",
+                "I'll use the \"send\" tool to send your photo via iMessage.",
             ),
             ChatMessage::user("等一下"),
             ChatMessage::assistant(

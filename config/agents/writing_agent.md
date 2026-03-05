@@ -12,7 +12,7 @@ denied_skills:
 temperature: 0.7
 verbosity: "detailed"
 model: "claude-sonnet-4-6"
-fallback_models:
+fallback_models: []
 max_tool_calls: 10
 timeout_seconds: 180
 ---
