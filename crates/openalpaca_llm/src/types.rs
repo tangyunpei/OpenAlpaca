@@ -239,6 +239,7 @@ impl CacheControl {
     }
 
     /// Ephemeral cache with 1-hour TTL.
+    // Forward-looking: Anthropic does not yet accept TTL hints.
     pub fn ephemeral_1h() -> Self {
         Self {
             type_: "ephemeral".to_string(),
@@ -329,3 +330,23 @@ pub enum StreamEvent {
 pub type ChatStream = Pin<
     Box<dyn futures_util::Stream<Item = Result<StreamEvent, crate::error::LlmError>> + Send>,
 >;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_control_serialization() {
+        // ephemeral() — no TTL
+        let cc = CacheControl::ephemeral();
+        let v = serde_json::to_value(&cc).unwrap();
+        assert_eq!(v["type"], "ephemeral");
+        assert!(v.get("ttl").is_none());
+
+        // ephemeral_1h() — TTL = 3600
+        let cc_1h = CacheControl::ephemeral_1h();
+        let v_1h = serde_json::to_value(&cc_1h).unwrap();
+        assert_eq!(v_1h["type"], "ephemeral");
+        assert_eq!(v_1h["ttl"], 3600);
+    }
+}

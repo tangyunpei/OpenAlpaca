@@ -533,6 +533,7 @@ impl BuiltInTool for SpawnSubagentTool {
                 &result.finish_reason,
                 crate::runner::LoopFinishReason::Complete
                     | crate::runner::LoopFinishReason::MaxRounds
+                    | crate::runner::LoopFinishReason::Truncated
             );
 
             // Destroy instance (explicit restore; guard is backup for panics)
@@ -1389,7 +1390,9 @@ pub async fn run_lead_agent(
 
     let success = matches!(
         &result.finish_reason,
-        crate::runner::LoopFinishReason::Complete | crate::runner::LoopFinishReason::MaxRounds
+        crate::runner::LoopFinishReason::Complete
+            | crate::runner::LoopFinishReason::MaxRounds
+            | crate::runner::LoopFinishReason::Truncated
     );
 
     let subagents_spawned = spawn_tool.spawn_count();

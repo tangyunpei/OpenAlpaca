@@ -522,3 +522,256 @@ async fn test_cancellation_during_tool_execution() {
     assert_eq!(result.finish_reason, LoopFinishReason::Cancelled);
     assert_eq!(result.rounds_used, 1); // LLM call completed, then cancelled during tools
 }
+
+// ─── context_threshold tests ──────────────────────────────────────────
+
+#[test]
+fn test_context_threshold_custom() {
+    use openalpaca_llm::{ModelInfo, ModelRegistry, ProviderType};
+    use std::collections::HashMap;
+
+    let mut models = HashMap::new();
+    models.insert(
+        "test-model".to_string(),
+        ModelInfo {
+            provider: ProviderType::Anthropic,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            context_window: 100_000,
+            discovered: false,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
+        },
+    );
+    let registry = ModelRegistry::new(models);
+
+    // Custom threshold of 0.8 → expect 100_000 * 0.8 = 80_000
+    let config = LoopConfig {
+        context_threshold: 0.8,
+        ..Default::default()
+    };
+    let config = config.with_context_window(&registry, Some("test-model"));
+    assert_eq!(config.max_context_tokens, 80_000);
+
+    // Default threshold of 0.6 → expect 100_000 * 0.6 = 60_000
+    let config = LoopConfig::default().with_context_window(&registry, Some("test-model"));
+    assert_eq!(config.max_context_tokens, 60_000);
+}
+
+// ─── max_tokens recovery tests ────────────────────────────────────────
+
+#[tokio::test]
+async fn test_max_tokens_triggers_continuation() {
+    // Round 1: MaxTokens → should inject continuation and retry
+    // Round 2: Complete → done
+    let truncated = ChatResponse {
+        content: "Partial output...".to_string(),
+        tool_calls: vec![],
+        model: "mock-model".to_string(),
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 10,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::MaxTokens,
+        thinking: None,
+    };
+    let provider = MockProvider::new(vec![
+        Ok(truncated),
+        Ok(MockProvider::simple_response("Completed.")),
+    ]);
+    let config = LoopConfig {
+        enable_caching: false,
+        ..Default::default()
+    };
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("test")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert_eq!(result.rounds_used, 2); // 1 retry + 1 completion
+}
+
+#[tokio::test]
+async fn test_max_tokens_retries_exhausted_returns_truncated() {
+    // All 3 rounds return MaxTokens → exhausted after 2 retries
+    let make_truncated = || ChatResponse {
+        content: "Partial...".to_string(),
+        tool_calls: vec![],
+        model: "mock-model".to_string(),
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 10,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::MaxTokens,
+        thinking: None,
+    };
+    let provider = MockProvider::new(vec![
+        Ok(make_truncated()),
+        Ok(make_truncated()),
+        Ok(make_truncated()),
+    ]);
+    let config = LoopConfig {
+        enable_caching: false,
+        ..Default::default()
+    };
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("test")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Truncated);
+    assert_eq!(result.rounds_used, 3);
+}
+
+// ─── tool error hint tests ────────────────────────────────────────────
+
+#[test]
+fn test_tool_error_hint_file_read() {
+    let result = format_tool_error_with_hint("file_read", "not found: /foo/bar.txt");
+    assert!(result.starts_with("[tool_error] not found:"));
+    assert!(result.contains("Hint: verify the path exists"));
+}
+
+#[test]
+fn test_tool_error_hint_no_match_returns_plain() {
+    let result = format_tool_error_with_hint("unknown_tool", "something broke");
+    assert_eq!(result, "[tool_error] something broke");
+    assert!(!result.contains("Hint:"));
+}
+
+// ─── cost warning tests ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_cost_warning_at_80_percent() {
+    // Round 1: tool_use response with enough tokens to hit ~90% of budget.
+    // At fallback rates (input=$3/M, output=$15/M):
+    //   100_000 input → $0.30, 40_000 output → $0.60, total = $0.90 = 90%
+    let round1 = ChatResponse {
+        content: "Using tool.".to_string(),
+        tool_calls: vec![openalpaca_llm::ToolCall {
+            id: "tc_1".to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({"q": "test"}),
+        }],
+        model: "mock-model".to_string(),
+        usage: Usage {
+            input_tokens: 100_000,
+            output_tokens: 40_000,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::ToolUse,
+        thinking: None,
+    };
+    // Round 2: simple text response to complete
+    let provider = MockProvider::new(vec![
+        Ok(round1),
+        Ok(MockProvider::simple_response("Done.")),
+    ]);
+    let messages = vec![ChatMessage::user("test")];
+    let config = LoopConfig {
+        max_cost: 1.00,
+        enable_caching: false,
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider, messages, vec![], &config,
+        None, "test", None, None,
+    )
+    .await;
+
+    // Loop should complete (warning emitted at 90% but not stopped)
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert_eq!(result.rounds_used, 2);
+}
+
+// ─── truncate_tool_result tests ───────────────────────────────────────
+
+#[test]
+fn test_truncate_at_sentence_boundary() {
+    // Build a string > 32KB where a sentence ends in the last 25%
+    let limit = MAX_TOOL_RESULT_SIZE; // 32768
+    // Fill most of the string, then place a sentence boundary in the last 25%
+    let prefix_len = limit - 200; // well within the last 25%
+    let mut text = "x".repeat(prefix_len);
+    text.push_str(". "); // sentence boundary at prefix_len
+    text.push_str(&"y".repeat(500)); // push over the limit
+
+    let result = truncate_tool_result(text.clone());
+    // Should cut right after the ". " punctuation (at prefix_len + 1)
+    assert!(result.contains("[... truncated:"));
+    let truncated_content = result.split("\n\n[... truncated:").next().unwrap();
+    assert!(truncated_content.ends_with('.'));
+    assert_eq!(truncated_content.len(), prefix_len + 1); // includes the '.'
+}
+
+#[test]
+fn test_truncate_falls_back_to_line_boundary() {
+    // String > 32KB with no sentence-ending punctuation, but with newlines
+    let limit = MAX_TOOL_RESULT_SIZE;
+    let line_pos = limit - 100; // newline in the last 25%
+    let mut text = "x".repeat(line_pos);
+    text.push('\n');
+    text.push_str(&"x".repeat(500)); // push over the limit
+
+    let result = truncate_tool_result(text);
+    assert!(result.contains("[... truncated:"));
+    let truncated_content = result.split("\n\n[... truncated:").next().unwrap();
+    // Should cut at the newline
+    assert_eq!(truncated_content.len(), line_pos);
+}
+
+#[test]
+fn test_truncate_falls_back_to_word_boundary() {
+    // String > 32KB with no newlines and no sentence punctuation, but with spaces
+    let limit = MAX_TOOL_RESULT_SIZE;
+    let space_pos = limit - 50; // space in the last 25%
+    let mut text = "x".repeat(space_pos);
+    text.push(' ');
+    text.push_str(&"x".repeat(500)); // push over the limit
+
+    let result = truncate_tool_result(text);
+    assert!(result.contains("[... truncated:"));
+    let truncated_content = result.split("\n\n[... truncated:").next().unwrap();
+    // Should cut at the space
+    assert_eq!(truncated_content.len(), space_pos);
+}
+
+#[test]
+fn test_truncate_min_cut_guard_skips_distant_sentence() {
+    // Sentence boundary exists but is below the 75% threshold — should fall through
+    let limit = MAX_TOOL_RESULT_SIZE;
+    let min_cut = limit * 3 / 4; // 24576
+    // Place sentence boundary well below min_cut
+    let sentence_pos = min_cut - 1000;
+    let mut text = "x".repeat(sentence_pos);
+    text.push_str(". "); // sentence boundary below threshold
+    // Fill the rest with 'y' (no sentence/line/word boundaries after this)
+    // But add a newline near the end so line fallback kicks in
+    let newline_pos = limit - 100;
+    text.push_str(&"y".repeat(newline_pos - sentence_pos - 2));
+    text.push('\n');
+    text.push_str(&"y".repeat(500)); // push over the limit
+
+    let result = truncate_tool_result(text);
+    assert!(result.contains("[... truncated:"));
+    let truncated_content = result.split("\n\n[... truncated:").next().unwrap();
+    // Should NOT cut at the distant sentence boundary — should use line boundary instead
+    assert_eq!(truncated_content.len(), newline_pos);
+}
