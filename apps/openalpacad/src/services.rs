@@ -685,6 +685,27 @@ pub async fn restore_cost_tracker(
         model_stats.input_tokens += row.total_input_tokens as u64;
         model_stats.output_tokens += row.total_output_tokens as u64;
         model_stats.cost_usd += row.total_cost_usd;
+
+        // Resolve model → provider for provider_usage
+        let provider_name = router
+            .model_registry()
+            .resolve_provider_name(&row.model)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let pstats = snapshot
+            .provider_usage
+            .entry(provider_name)
+            .or_default();
+        pstats.total_requests += row.total_requests as u64;
+        pstats.total_input_tokens += row.total_input_tokens as u64;
+        pstats.total_output_tokens += row.total_output_tokens as u64;
+        pstats.total_cost_usd += row.total_cost_usd;
+
+        let pmodel_stats = pstats.by_model.entry(row.model.clone()).or_default();
+        pmodel_stats.requests += row.total_requests as u64;
+        pmodel_stats.input_tokens += row.total_input_tokens as u64;
+        pmodel_stats.output_tokens += row.total_output_tokens as u64;
+        pmodel_stats.cost_usd += row.total_cost_usd;
     }
 
     let total_cost: f64 = rows.iter().map(|r| r.total_cost_usd).sum();
@@ -694,4 +715,48 @@ pub async fn restore_cost_tracker(
         rows.len(),
         total_cost
     );
+}
+
+/// Flush CostTracker state to DB on shutdown (defense-in-depth).
+///
+/// Uses REPLACE semantics since CostTracker holds cumulative totals
+/// that include data already persisted by per-call `record_and_log()`.
+/// Skips flush if the date has changed since startup (midnight crossing)
+/// to avoid corrupting the new day's per-call data with stale cumulative totals.
+pub async fn flush_cost_tracker(
+    router: &openalpaca_llm::LlmRouter,
+    db: &Database,
+    startup_date: &str,
+) {
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    if today != startup_date {
+        info!(
+            "Skipping CostTracker flush: date changed ({startup_date} → {today})"
+        );
+        return;
+    }
+
+    let snapshot = router.cost_tracker.snapshot_for_flush().await;
+    let repo = openalpaca_storage::LlmUsageRepository::new(db);
+
+    let mut flushed = 0usize;
+    for (agent_id, stats) in &snapshot.agent_usage {
+        for (model, model_stats) in &stats.by_model {
+            let daily = openalpaca_storage::LlmUsageDaily {
+                date: today.clone(),
+                agent_id: agent_id.clone(),
+                model: model.clone(),
+                total_requests: model_stats.requests as i32,
+                total_input_tokens: model_stats.input_tokens as i64,
+                total_output_tokens: model_stats.output_tokens as i64,
+                total_cost_usd: model_stats.cost_usd,
+            };
+            if let Err(e) = repo.replace_daily_usage(&daily) {
+                warn!("Failed to flush usage for {agent_id}/{model}: {e}");
+            } else {
+                flushed += 1;
+            }
+        }
+    }
+    info!("Flushed CostTracker to DB: {flushed} row(s)");
 }

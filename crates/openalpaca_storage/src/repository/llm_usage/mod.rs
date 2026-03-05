@@ -135,6 +135,33 @@ impl<'a> LlmUsageRepository<'a> {
         })
     }
 
+    /// Replace (overwrite) a daily usage row. Used for shutdown flush where the
+    /// CostTracker holds cumulative totals that already include previously-persisted data.
+    pub fn replace_daily_usage(&self, usage: &LlmUsageDaily) -> Result<()> {
+        self.db.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO llm_usage_daily (date, agent_id, model, total_requests, total_input_tokens, total_output_tokens, total_cost_usd)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(date, agent_id, model) DO UPDATE SET
+                   total_requests = excluded.total_requests,
+                   total_input_tokens = excluded.total_input_tokens,
+                   total_output_tokens = excluded.total_output_tokens,
+                   total_cost_usd = excluded.total_cost_usd",
+                rusqlite::params![
+                    usage.date,
+                    usage.agent_id,
+                    usage.model,
+                    usage.total_requests,
+                    usage.total_input_tokens,
+                    usage.total_output_tokens,
+                    usage.total_cost_usd,
+                ],
+            )
+            .context("Failed to replace daily usage")?;
+            Ok(())
+        })
+    }
+
     /// Get all usage (no agent filter).
     pub fn get_all_usage(&self, limit: usize) -> Result<Vec<LlmCallLog>> {
         self.db.with_connection(|conn| {

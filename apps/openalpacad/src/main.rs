@@ -304,9 +304,11 @@ async fn async_main(
     if let Some(ref router) = svcs.llm_router {
         services::restore_cost_tracker(router, &db).await;
     }
+    let cost_tracker_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
     // Step 10: Construct Orchestrator
     let llm_router_for_reload = svcs.llm_router.clone();
+    let llm_router_for_shutdown = svcs.llm_router.clone();
     let web_search_config_for_reload = svcs.web_search_config.clone();
     let lane_manager = Arc::new(LaneManager::new());
 
@@ -502,6 +504,7 @@ async fn async_main(
     background::spawn_asset_cleanup(db.clone(), daemon_config.clone(), cancel_token.clone());
 
     // Step 14: Build AppState and HTTP router
+    let db_for_shutdown = db.clone();
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
 
     let state = Arc::new(AppState {
@@ -564,6 +567,11 @@ async fn async_main(
 
     if let Err(e) = server.await {
         error!("Server error: {e}");
+    }
+
+    // Flush CostTracker to DB (defense-in-depth)
+    if let Some(ref router) = llm_router_for_shutdown {
+        services::flush_cost_tracker(router, &db_for_shutdown, &cost_tracker_date).await;
     }
 
     // Shutdown connectors

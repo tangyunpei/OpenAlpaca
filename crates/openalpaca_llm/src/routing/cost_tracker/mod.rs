@@ -207,20 +207,12 @@ impl CostTracker {
             .sum()
     }
 
-    /// Flush in-memory cost data to the database for persistence across restarts.
+    /// Produce a point-in-time snapshot of all cost tracking data.
     ///
-    /// TODO: The daemon should call this periodically (e.g., every 60s) and on
-    /// graceful shutdown to persist accumulated cost data to the `llm_usage_daily`
-    /// table. This method is a stub because `openalpaca_llm` does not depend on
-    /// `openalpaca_storage` — the actual DB writes should be performed by the
-    /// daemon layer (e.g., in `openalpacad`) which has access to both crates.
-    ///
-    /// Suggested integration pattern:
-    /// 1. Daemon reads agent/task/provider usage snapshots via the existing
-    ///    `get_agent_usage()` / `get_task_usage()` / `all_provider_usage()` methods.
-    /// 2. Daemon writes rows to `llm_usage_daily` via `openalpaca_storage`.
-    /// 3. After successful flush, daemon calls `reset_flushed()` (not yet implemented)
-    ///    or tracks high-water marks to avoid double-counting.
+    /// Per-call persistence is already handled by `record_and_log()` in the
+    /// storage layer, so periodic flushing is unnecessary. The daemon calls
+    /// this on graceful shutdown as defense-in-depth, writing the cumulative
+    /// totals via `replace_daily_usage()` (overwrite, not additive).
     pub async fn snapshot_for_flush(&self) -> CostSnapshot {
         CostSnapshot {
             agent_usage: self.agent_usage.read().await.clone(),
@@ -231,14 +223,9 @@ impl CostTracker {
 
     /// Load persisted cost data from the database on daemon startup.
     ///
-    /// TODO: The daemon should call this at startup to restore cost data from the
-    /// `llm_usage_daily` table so that budget enforcement is accurate across
-    /// restarts. Similar to `snapshot_for_flush`, the actual DB reads should be
-    /// performed by the daemon layer which has access to `openalpaca_storage`.
-    ///
-    /// Suggested integration pattern:
-    /// 1. Daemon reads today's rows from `llm_usage_daily` via `openalpaca_storage`.
-    /// 2. Daemon calls this method with the loaded data to seed the in-memory tracker.
+    /// Called by `restore_cost_tracker()` in the daemon to seed the in-memory
+    /// tracker from today's `llm_usage_daily` rows, ensuring budget enforcement
+    /// is accurate across restarts.
     pub async fn load_snapshot(&self, snapshot: CostSnapshot) {
         *self.agent_usage.write().await = snapshot.agent_usage;
         *self.task_usage.write().await = snapshot.task_usage;
