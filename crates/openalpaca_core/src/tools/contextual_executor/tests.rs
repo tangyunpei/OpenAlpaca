@@ -167,8 +167,8 @@ async fn test_workspace_read_without_task_context_errors() {
 }
 
 #[tokio::test]
-async fn test_update_user_not_injected_workspace_id() {
-    let registry = make_registry_with_tools(&["update_user"]);
+async fn test_update_persona_not_injected_workspace_id() {
+    let registry = make_registry_with_tools(&["update_persona"]);
     let executor = ContextualToolExecutor::new(
         registry,
         ToolExecutionContext {
@@ -181,14 +181,14 @@ async fn test_update_user_not_injected_workspace_id() {
     );
 
     let result = executor
-        .execute("update_user", &serde_json::json!({"mode": "replace"}))
+        .execute("update_persona", &serde_json::json!({"target": "user", "mode": "replace"}))
         .await
         .unwrap();
 
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     // owner_id should be injected
     assert_eq!(parsed["owner_id"], "user-42");
-    // workspace_id should NOT be injected for update_user
+    // workspace_id should NOT be injected for update_persona
     assert!(parsed.get("workspace_id").is_none());
 }
 

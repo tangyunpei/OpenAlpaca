@@ -67,18 +67,23 @@ pub(super) fn shell_execute_tool() -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "shell_execute".to_string(),
-            description: "Run a shell command. Note: command chaining (;, &&, ||) and command substitution (backticks, $()) are blocked by security filters.".to_string(),
+            description: "Execute a single shell command and return its output. Command \
+                chaining (;, &&, ||) and subshells ($()) are blocked for security. \
+                Timeout: 300 seconds. Output is truncated to 512KB. Use for system \
+                operations, package management, git commands, build tools, and any \
+                operations not covered by other tools."
+                .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "The shell command to execute"
+                        "description": "The shell command to execute (single command only, no chaining)"
                     }
                 },
                 "required": ["command"]
             }),
-            strict: None,
+            strict: Some(true),
             input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(ShellExecuteTool)),

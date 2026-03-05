@@ -49,18 +49,23 @@ pub(super) fn file_read_tool(workspace_root: PathBuf) -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "file_read".to_string(),
-            description: "Read a file from the workspace".to_string(),
+            description: "Read a file's full contents from the workspace directory. \
+                Returns the file content as a UTF-8 string. Files larger than 10MB are \
+                rejected. Use this to inspect configuration files, source code, or data \
+                before processing. For binary files, use shell_execute with appropriate \
+                commands instead."
+                .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative path to the file within the workspace"
+                        "description": "Relative path to the file within the workspace (e.g., 'src/main.rs', 'config/settings.toml'). Absolute paths and '..' traversal are rejected."
                     }
                 },
                 "required": ["path"]
             }),
-            strict: None,
+            strict: Some(true),
             input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(FileReadTool { workspace_root })),
@@ -98,27 +103,27 @@ impl BuiltInTool for FileWriteTool {
         // Security: reject absolute paths and .. components
         validate_workspace_path(path)?;
 
-        // Safety: block writes to SOUL.md — use update_soul tool instead
+        // Safety: block writes to SOUL.md — use update_persona tool instead
         if is_soul_path(path) {
             return Err("Writing to SOUL.md via file_write is blocked. \
-                 Use the update_soul tool instead, which provides validation, \
-                 backup, and safe atomic writes."
+                 Use the update_persona tool with target=\"soul\" instead, \
+                 which provides validation, backup, and safe atomic writes."
                 .to_string());
         }
 
-        // Safety: block writes to USER.md — use update_user tool instead
+        // Safety: block writes to USER.md — use update_persona tool instead
         if is_user_path(path) {
             return Err("Writing to USER.md via file_write is blocked. \
-                 Use the update_user tool instead, which provides validation, \
-                 backup, and safe atomic writes."
+                 Use the update_persona tool with target=\"user\" instead, \
+                 which provides validation, backup, and safe atomic writes."
                 .to_string());
         }
 
-        // Safety: block writes to IDENTITY.md — use update_identity tool instead
+        // Safety: block writes to IDENTITY.md — use update_persona tool instead
         if is_identity_path(path) {
             return Err("Writing to IDENTITY.md via file_write is blocked. \
-                 Use the update_identity tool instead, which provides validation, \
-                 backup, and safe atomic writes."
+                 Use the update_persona tool with target=\"identity\" instead, \
+                 which provides validation, backup, and safe atomic writes."
                 .to_string());
         }
 
@@ -149,22 +154,27 @@ pub(super) fn file_write_tool(workspace_root: PathBuf) -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "file_write".to_string(),
-            description: "Write content to a file in the workspace".to_string(),
+            description: "Write or overwrite a file in the workspace directory. Creates \
+                parent directories automatically if they don't exist. Content is limited \
+                to 10MB. Writing to persona files (SOUL.md, USER.md, IDENTITY.md) is \
+                blocked — use update_persona instead. Returns a confirmation with the \
+                byte count written."
+                .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative path to the file within the workspace"
+                        "description": "Relative path to the file within the workspace (e.g., 'src/main.rs', 'output/report.txt'). Absolute paths and '..' traversal are rejected."
                     },
                     "content": {
                         "type": "string",
-                        "description": "The content to write"
+                        "description": "The content to write to the file as a UTF-8 string"
                     }
                 },
                 "required": ["path", "content"]
             }),
-            strict: None,
+            strict: Some(true),
             input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(FileWriteTool { workspace_root })),
@@ -188,7 +198,7 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("update_soul"));
+        assert!(result.unwrap_err().contains("update_persona"));
     }
 
     #[tokio::test]
@@ -255,6 +265,6 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("update_soul"));
+        assert!(result.unwrap_err().contains("update_persona"));
     }
 }

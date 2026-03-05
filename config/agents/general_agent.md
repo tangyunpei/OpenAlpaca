@@ -12,12 +12,9 @@ skills:
   - "memory_search"
   - "workspace_read"
   - "workspace_write"
-  - "send_message"
-  - "send_file"
+  - "send"
 denied_skills:
-  - "update_soul"
-  - "update_user"
-  - "update_identity"
+  - "update_persona"
 temperature: 0.4
 verbosity: "detailed"
 model: "claude-sonnet-4-6"

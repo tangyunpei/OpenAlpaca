@@ -95,10 +95,8 @@ struct ToolFlags {
     file_read: bool,
     file_write: bool,
     shell_execute: bool,
-    update_soul: bool,
-    update_user: bool,
-    send_message: bool,
-    send_file: bool,
+    update_persona: bool,
+    send: bool,
 }
 
 impl ToolFlags {
@@ -113,23 +111,17 @@ impl ToolFlags {
         if self.file_read {
             out.push("file_read".to_string());
         }
-        // Precedence: update_soul/update_user suppress file_write for their targets
-        if self.update_soul {
-            out.push("update_soul".to_string());
-        } else if self.update_user {
-            out.push("update_user".to_string());
+        // update_persona suppresses file_write for persona document targets
+        if self.update_persona {
+            out.push("update_persona".to_string());
         } else if self.file_write {
             out.push("file_write".to_string());
         }
         if self.shell_execute {
             out.push("shell_execute".to_string());
         }
-        // Precedence: send_file suppresses send_message (send_file has caption param)
-        if self.send_message && !self.send_file {
-            out.push("send_message".to_string());
-        }
-        if self.send_file {
-            out.push("send_file".to_string());
+        if self.send {
+            out.push("send".to_string());
         }
         out
     }
@@ -437,9 +429,9 @@ impl IntentParser {
         let flags = ToolFlags {
             file_write: Self::has_write_verb(&lower) && Self::mentions_filename(content),
 
-            update_soul: Self::has_soul_target(&lower),
-
-            update_user: Self::has_user_target(&lower),
+            update_persona: Self::has_soul_target(&lower)
+                || Self::has_user_target(&lower)
+                || Self::has_identity_target(&lower),
 
             web_fetch: content.contains("http://")
                 || content.contains("https://")
@@ -463,7 +455,7 @@ impl IntentParser {
                 || lower.contains("bash")
                 || lower.contains("zsh"),
 
-            send_message: lower.contains("send message")
+            send: lower.contains("send message")
                 || lower.contains("send to")
                 || lower.contains("发消息")
                 || lower.contains("发到")
@@ -476,14 +468,7 @@ impl IntentParser {
                 || lower.contains("msg to")
                 || lower.contains("reply via")
                 || lower.contains("forward to")
-                || (lower.contains("send") && (lower.contains("imessage") || lower.contains("telegram")))
-                || (lower.contains("发") && (lower.contains("imessage") || lower.contains("telegram")))
-                || ((lower.contains("消息") || lower.contains("短信")) && (lower.contains("telegram") || lower.contains("imessage")))
-                || (lower.contains("给") && (lower.contains("发") || lower.contains("消息") || lower.contains("短信"))
-                    && (lower.contains("telegram") || lower.contains("imessage")))
-                || (lower.contains("via ") && (lower.contains("telegram") || lower.contains("imessage"))),
-
-            send_file: lower.contains("send file")
+                || lower.contains("send file")
                 || lower.contains("send photo")
                 || lower.contains("send image")
                 || lower.contains("send document")
@@ -496,6 +481,12 @@ impl IntentParser {
                 || lower.contains("发视频")
                 || lower.contains("发附件")
                 || lower.contains("发文档")
+                || (lower.contains("send") && (lower.contains("imessage") || lower.contains("telegram")))
+                || (lower.contains("发") && (lower.contains("imessage") || lower.contains("telegram")))
+                || ((lower.contains("消息") || lower.contains("短信")) && (lower.contains("telegram") || lower.contains("imessage")))
+                || (lower.contains("给") && (lower.contains("发") || lower.contains("消息") || lower.contains("短信"))
+                    && (lower.contains("telegram") || lower.contains("imessage")))
+                || (lower.contains("via ") && (lower.contains("telegram") || lower.contains("imessage")))
                 || (lower.contains("file") && lower.contains("send") && (lower.contains("imessage") || lower.contains("telegram")))
                 || (lower.contains("photo") && lower.contains("send") && (lower.contains("imessage") || lower.contains("telegram")))
                 || (lower.contains("image") && lower.contains("send") && (lower.contains("imessage") || lower.contains("telegram"))),
@@ -533,6 +524,22 @@ impl IntentParser {
         // Noun + verb combination
         let has_noun = USER_NOUNS.iter().any(|n| lower.contains(n));
         let has_verb = USER_VERBS.iter().any(|v| lower.contains(v));
+        has_noun && has_verb
+    }
+
+    /// Detect if the user is targeting the IDENTITY document.
+    fn has_identity_target(lower: &str) -> bool {
+        const IDENTITY_NOUNS: &[&str] = &["identity", "identity.md"];
+        const IDENTITY_VERBS: &[&str] = &["update", "change", "edit", "modify", "set"];
+
+        // Direct file mention
+        if lower.contains("identity.md") {
+            return true;
+        }
+
+        // Noun + verb combination
+        let has_noun = IDENTITY_NOUNS.iter().any(|n| lower.contains(n));
+        let has_verb = IDENTITY_VERBS.iter().any(|v| lower.contains(v));
         has_noun && has_verb
     }
 

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 /// Tools that need owner_id injection only.
-const OWNER_ONLY_TOOLS: &[&str] = &["update_user", "update_soul", "update_identity"];
+const OWNER_ONLY_TOOLS: &[&str] = &["update_persona"];
 
 /// Tools that need both owner_id and workspace_id injection.
 const OWNER_AND_WORKSPACE_TOOLS: &[&str] = &["memory_search"];

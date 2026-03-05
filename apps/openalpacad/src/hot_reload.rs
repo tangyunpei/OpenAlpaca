@@ -361,7 +361,7 @@ async fn handle_skills_change(ctx: &FileWatcherContext, changed_path: &Path) {
 
 /// Spawn soul hot-reload subscriber via EventBus (agent-initiated updates).
 ///
-/// When the update_soul tool writes a new SOUL file, it publishes SoulUpdated.
+/// When the update_persona tool writes a new SOUL file, it publishes SoulUpdated.
 /// This subscriber reloads the persona immediately without waiting for the
 /// file watcher, providing a more reliable activation path.
 pub fn spawn_soul_reload_subscriber(
