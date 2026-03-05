@@ -344,3 +344,67 @@ fn test_audio_mime_rejects_unrelated() {
         "audio/m4a"
     ));
 }
+
+// ── Boundary edge-case tests ───────────────────────────────────────
+
+#[test]
+fn test_empty_input_passes() {
+    let result = InputSanitizer::sanitize_user_input("", None);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), "");
+}
+
+#[test]
+fn test_input_at_exact_max_length_passes() {
+    let exact = "x".repeat(MAX_INPUT_LENGTH);
+    let result = InputSanitizer::sanitize_user_input(&exact, None);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().len(), MAX_INPUT_LENGTH);
+}
+
+#[test]
+fn test_input_one_byte_over_max_length_blocked() {
+    let over = "x".repeat(MAX_INPUT_LENGTH + 1);
+    let result = InputSanitizer::sanitize_user_input(&over, None);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_null_byte_at_various_positions_blocked() {
+    // Leading null
+    let result = InputSanitizer::sanitize_user_input("\0hello", None);
+    assert!(result.is_err());
+    // Trailing null
+    let result = InputSanitizer::sanitize_user_input("hello\0", None);
+    assert!(result.is_err());
+    // Only null
+    let result = InputSanitizer::sanitize_user_input("\0", None);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_double_encoded_traversal_passes_sanitizer() {
+    // "%2F" is a literal string, not a decoded slash — sanitizer checks
+    // literal "../" patterns, not URL-decoded forms. This is correct behavior
+    // because the sanitizer operates on raw strings, not URLs.
+    let input = "..%2F..%2Fetc/passwd";
+    let result = InputSanitizer::sanitize_user_input(input, None);
+    assert!(result.is_ok(), "Double-encoded traversal should pass user input sanitizer (not URL-decoded)");
+}
+
+#[test]
+fn test_double_encoded_traversal_in_tool_args_passes_sanitizer() {
+    // "%2F" is a literal string, not a decoded slash — sanitize_tool_args checks
+    // literal "../" patterns, not URL-decoded forms. This should pass.
+    let args = serde_json::json!({"path": "..%2F..%2Fetc/passwd"});
+    let result = InputSanitizer::sanitize_tool_args("file_read", &args, &[], &[]);
+    assert!(result.is_ok(), "Double-encoded traversal should pass tool args sanitizer (not URL-decoded)");
+}
+
+#[test]
+fn test_null_byte_in_tool_args_path_blocked() {
+    // Null byte combined with a path — both checks should catch this
+    let args = serde_json::json!({"path": "/etc/pass\u{0000}wd"});
+    let result = InputSanitizer::sanitize_tool_args("file_read", &args, &[], &[]);
+    assert!(result.is_err());
+}

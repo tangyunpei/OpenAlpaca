@@ -39,6 +39,8 @@ pub struct ModelInfo {
     pub supports_audio: bool,
     /// Whether this model accepts document (PDF) content parts natively.
     pub supports_document: bool,
+    /// Whether this model supports reasoning (OpenAI o-series).
+    pub supports_reasoning: bool,
 }
 
 /// Registry mapping model IDs to their provider and pricing metadata.
@@ -71,6 +73,7 @@ impl ModelRegistry {
                     supports_image: true,
                     supports_audio: false,
                     supports_document: true,
+                    supports_reasoning: false,
                 },
             );
         }
@@ -86,6 +89,7 @@ impl ModelRegistry {
                     supports_image: true,
                     supports_audio: false,
                     supports_document: true,
+                    supports_reasoning: false,
                 },
             );
         }
@@ -100,6 +104,7 @@ impl ModelRegistry {
                 supports_image: true,
                 supports_audio: false,
                 supports_document: true,
+                supports_reasoning: false,
             },
         );
 
@@ -115,6 +120,7 @@ impl ModelRegistry {
                 supports_image: true,
                 supports_audio: true,
                 supports_document: false,
+                supports_reasoning: false,
             },
         );
         models.insert(
@@ -128,6 +134,7 @@ impl ModelRegistry {
                 supports_image: true,
                 supports_audio: true,
                 supports_document: false,
+                supports_reasoning: false,
             },
         );
         models.insert(
@@ -141,8 +148,39 @@ impl ModelRegistry {
                 supports_image: true,
                 supports_audio: true,
                 supports_document: false,
+                supports_reasoning: false,
             },
         );
+
+        // OpenAI o-series reasoning models
+        for id in &["o3", "o3-mini", "o1", "o1-mini"] {
+            models.insert(
+                id.to_string(),
+                ModelInfo {
+                    provider: ProviderType::OpenAI,
+                    input_price_per_million: match *id {
+                        "o3" => 10.0,
+                        "o3-mini" => 1.10,
+                        "o1" => 15.0,
+                        "o1-mini" => 1.10,
+                        _ => 0.0,
+                    },
+                    output_price_per_million: match *id {
+                        "o3" => 40.0,
+                        "o3-mini" => 4.40,
+                        "o1" => 60.0,
+                        "o1-mini" => 4.40,
+                        _ => 0.0,
+                    },
+                    context_window: 200_000,
+                    discovered: false,
+                    supports_image: matches!(*id, "o1" | "o3"),
+                    supports_audio: false,
+                    supports_document: false,
+                    supports_reasoning: true,
+                },
+            );
+        }
 
         Self {
             models: RwLock::new(models),
@@ -168,6 +206,7 @@ impl ModelRegistry {
                         supports_image: entry.supports_image.unwrap_or(false),
                         supports_audio: entry.supports_audio.unwrap_or(false),
                         supports_document: entry.supports_document.unwrap_or(false),
+                        supports_reasoning: entry.supports_reasoning.unwrap_or(false),
                     },
                 );
             }
@@ -194,6 +233,7 @@ impl ModelRegistry {
                         supports_image: entry.supports_image.unwrap_or(false),
                         supports_audio: entry.supports_audio.unwrap_or(false),
                         supports_document: entry.supports_document.unwrap_or(false),
+                        supports_reasoning: entry.supports_reasoning.unwrap_or(false),
                     },
                 );
             }
@@ -258,6 +298,16 @@ impl ModelRegistry {
             .unwrap()
             .get(model_id)
             .map(|info| info.supports_document)
+            .unwrap_or(false)
+    }
+
+    /// Check if a model supports reasoning (OpenAI o-series).
+    pub fn supports_reasoning(&self, model_id: &str) -> bool {
+        self.models
+            .read()
+            .unwrap()
+            .get(model_id)
+            .map(|info| info.supports_reasoning)
             .unwrap_or(false)
     }
 

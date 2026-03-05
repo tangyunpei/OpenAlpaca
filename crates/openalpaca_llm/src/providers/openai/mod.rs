@@ -224,6 +224,25 @@ impl OpenAiProvider {
             body["temperature"] = serde_json::json!(temp);
         }
 
+        // OpenAI reasoning models (o-series): map ThinkingConfig → reasoning_effort.
+        // When reasoning is active, temperature must be omitted (top_p is not currently
+        // a ChatRequest field, so no stripping needed).
+        if let Some(ref thinking) = request.thinking {
+            match thinking {
+                ThinkingConfig::Enabled { .. } => {
+                    body["reasoning_effort"] = serde_json::json!("high");
+                    body.as_object_mut().unwrap().remove("temperature");
+                }
+                ThinkingConfig::Adaptive => {
+                    body["reasoning_effort"] = serde_json::json!("medium");
+                    body.as_object_mut().unwrap().remove("temperature");
+                }
+                ThinkingConfig::Disabled => {
+                    // Omit reasoning_effort — default behavior
+                }
+            }
+        }
+
         if !request.tools.is_empty() {
             let tools: Vec<serde_json::Value> = request
                 .tools
@@ -237,7 +256,9 @@ impl OpenAiProvider {
                     if let Some(true) = t.strict {
                         function["strict"] = serde_json::json!(true);
                     }
-                    // OpenAI has no input_examples equivalent — skip silently
+                    // OpenAI has no `input_examples` equivalent (Anthropic-only feature for
+                    // demonstrating expected tool usage patterns). The field is intentionally
+                    // skipped — there is no OpenAI API parameter to map it to.
                     serde_json::json!({
                         "type": "function",
                         "function": function,
@@ -267,6 +288,12 @@ impl OpenAiProvider {
         let usage = Usage {
             input_tokens: body["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
             output_tokens: body["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
+            // OpenAI returns cached token count in prompt_tokens_details.cached_tokens
+            // when automatic prompt caching is active. No cache_creation equivalent
+            // (OpenAI caching is server-side and automatic, no write cost).
+            cache_read_input_tokens: body["usage"]["prompt_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .unwrap_or(0) as u32,
             ..Default::default()
         };
 
@@ -308,7 +335,11 @@ impl OpenAiProvider {
             model,
             usage,
             finish_reason,
-            thinking: None,
+            // OpenAI o-series models return reasoning in message.reasoning_content
+            thinking: message["reasoning_content"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
         })
     }
 }
@@ -366,6 +397,18 @@ fn parse_openai_sse(
                         ));
                     }
 
+                    // Reasoning content delta (OpenAI o-series streaming)
+                    if let Some(reasoning) = delta["reasoning_content"].as_str()
+                        && !reasoning.is_empty()
+                    {
+                        return Some((
+                            Ok(StreamEvent::ThinkingDelta {
+                                thinking: reasoning.to_string(),
+                            }),
+                            (stream, buffer),
+                        ));
+                    }
+
                     // Tool calls delta
                     if let Some(tool_calls) = delta["tool_calls"].as_array() {
                         for tc in tool_calls {
@@ -415,6 +458,11 @@ fn parse_openai_sse(
                                     .get("completion_tokens")
                                     .and_then(|v| v.as_u64())
                                     .unwrap_or(0) as u32,
+                                cache_read_input_tokens: u
+                                    .get("prompt_tokens_details")
+                                    .and_then(|d| d.get("cached_tokens"))
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0) as u32,
                                 ..Default::default()
                             }
                         } else {
@@ -423,8 +471,8 @@ fn parse_openai_sse(
 
                         // Inject synthetic Done event after Usage
                         let done_line = format!(
-                            "data: {{\"_done\":\"{}\"}}\n",
-                            finish_reason_str
+                            "data: {}\n",
+                            serde_json::json!({"_done": finish_reason_str})
                         );
                         buffer = done_line + &buffer;
 
