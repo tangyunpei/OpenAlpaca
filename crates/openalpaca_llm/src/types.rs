@@ -259,6 +259,15 @@ pub enum ThinkingConfig {
     Disabled,
 }
 
+impl ThinkingConfig {
+    /// Create an Enabled config, clamping budget_tokens to at least 1024.
+    pub fn enabled(budget_tokens: u32) -> Self {
+        Self::Enabled {
+            budget_tokens: budget_tokens.max(1024),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub messages: Arc<Vec<ChatMessage>>,

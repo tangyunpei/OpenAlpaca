@@ -178,11 +178,7 @@ impl OpenAiProvider {
                     Role::Tool => "tool",
                 };
 
-                let content = if matches!(msg.role, Role::User) {
-                    Self::build_message_content(msg)
-                } else {
-                    serde_json::Value::String(msg.content.clone())
-                };
+                let content = Self::build_message_content(msg);
 
                 let mut obj = serde_json::json!({
                     "role": role,
@@ -652,8 +648,11 @@ impl LlmProvider for OpenAiProvider {
     ) -> Result<ChatStream, LlmError> {
         let mut body = self.build_request_body(&request);
         body["stream"] = serde_json::json!(true);
-        // Request usage in stream chunks (OpenAI stream_options)
-        body["stream_options"] = serde_json::json!({"include_usage": true});
+        // Request usage in stream chunks (OpenAI stream_options).
+        // Only send for official OpenAI API — compatible endpoints may not support it.
+        if self.base_url == DEFAULT_BASE_URL {
+            body["stream_options"] = serde_json::json!({"include_usage": true});
+        }
         let url = format!("{}/chat/completions", self.base_url);
 
         let mut req_builder = self

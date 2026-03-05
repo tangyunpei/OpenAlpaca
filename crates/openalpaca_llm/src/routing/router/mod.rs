@@ -466,9 +466,8 @@ impl LlmRouter {
         &self,
         request: RouterRequest,
     ) -> Result<ChatStream, LlmRouterError> {
-        let _permit = self
-            .concurrency_limiter
-            .acquire()
+        let permit = Arc::clone(&self.concurrency_limiter)
+            .acquire_owned()
             .await
             .map_err(|_| LlmRouterError::MaxRetriesExceeded)?;
 
@@ -515,7 +514,7 @@ impl LlmRouter {
                 .chat_streaming_with_key(&key_guard.secret, chat_request)
                 .await
             {
-                Ok(stream) => return Ok(stream),
+                Ok(stream) => return Ok(Box::pin(crate::streaming::PermitStream::new(stream, permit))),
                 Err(LlmError::RateLimited { retry_after_ms }) => {
                     tracing::warn!(
                         model = model,
@@ -692,7 +691,7 @@ impl LlmRouter {
 
                         // Record cost
                         let cost = self.cost_tracker.calculate_cost(
-                            model,
+                            &response.model,
                             response.usage.input_tokens,
                             response.usage.output_tokens,
                         );
@@ -703,7 +702,7 @@ impl LlmRouter {
                                 .clone()
                                 .unwrap_or_else(|| "unknown".to_string()),
                             task_id: request.context.task_id.clone(),
-                            model: model.to_string(),
+                            model: response.model.clone(),
                             input_tokens: response.usage.input_tokens,
                             output_tokens: response.usage.output_tokens,
                             cost_usd: cost,

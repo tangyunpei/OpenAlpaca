@@ -4,8 +4,40 @@ use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use tokio::sync::OwnedSemaphorePermit;
+
 /// Maximum time to wait between SSE chunks before treating the stream as stalled.
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Wraps a `ChatStream` and holds a concurrency semaphore permit.
+/// The permit is released when the stream is fully consumed or dropped,
+/// ensuring the concurrency limiter accurately tracks in-flight API calls.
+pub(crate) struct PermitStream {
+    inner: ChatStream,
+    _permit: OwnedSemaphorePermit,
+}
+
+// SAFETY: PermitStream's fields are both Unpin (ChatStream is Box<Pin<…>>,
+// OwnedSemaphorePermit is Unpin). Explicit impl guards against future field
+// additions that might not be Unpin, since poll_next uses get_mut().
+impl Unpin for PermitStream {}
+
+impl futures_util::Stream for PermitStream {
+    type Item = Result<StreamEvent, LlmError>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.get_mut().inner.as_mut().poll_next(cx)
+    }
+}
+
+impl PermitStream {
+    pub(crate) fn new(inner: ChatStream, permit: OwnedSemaphorePermit) -> Self {
+        Self { inner, _permit: permit }
+    }
+}
 
 /// Collect a streaming response into a complete ChatResponse.
 pub async fn collect_stream(
@@ -190,6 +222,68 @@ mod tests {
         let result = collect_stream(stream, "mock".into()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("idle timeout"));
+    }
+
+    /// M3 test: A slow stream that sends chunks within the idle timeout (90s)
+    /// but exceeds a wall-clock deadline should be cancelled by the outer timeout.
+    /// This mirrors the `tokio::time::timeout(max_stream_duration, collect_stream(...))`
+    /// pattern used in `LlmBackend::complete()`.
+    #[tokio::test(start_paused = true)]
+    async fn test_wall_clock_timeout_cancels_slow_stream() {
+        use std::time::Duration;
+
+        // Stream that emits a TextDelta every 30s — well within the 90s idle
+        // timeout, so collect_stream itself would never time out.
+        let slow_stream: ChatStream = Box::pin(futures_util::stream::unfold(0u32, |count| async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Some((
+                Ok(StreamEvent::TextDelta { text: ".".to_string() }),
+                count + 1,
+            ))
+        }));
+
+        // Apply a wall-clock deadline of 2 minutes (shorter than "infinite" but
+        // longer than idle timeout). The stream keeps sending so idle timeout
+        // never fires, but the wall-clock timeout should cancel it.
+        let wall_clock = Duration::from_secs(120);
+        let result =
+            tokio::time::timeout(wall_clock, collect_stream(slow_stream, "m".into())).await;
+
+        // The outer timeout should fire (Err = elapsed), proving wall-clock
+        // cancellation works even when the stream is actively producing chunks.
+        assert!(result.is_err(), "Expected wall-clock timeout to fire");
+    }
+
+    /// M4 test: PermitStream holds the semaphore permit during stream collection
+    /// and releases it when the stream is dropped/consumed.
+    #[tokio::test]
+    async fn test_permit_stream_holds_and_releases_permit() {
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+
+        // Acquire an owned permit and wrap a stream with it.
+        let permit = sem.clone().acquire_owned().await.unwrap();
+        assert_eq!(sem.available_permits(), 0, "permit should be held");
+
+        let events: Vec<Result<StreamEvent, LlmError>> = vec![
+            Ok(StreamEvent::TextDelta {
+                text: "hi".to_string(),
+            }),
+            Ok(StreamEvent::Usage(Usage::default())),
+            Ok(StreamEvent::Done {
+                finish_reason: FinishReason::Stop,
+            }),
+        ];
+        let inner: ChatStream = Box::pin(futures_util::stream::iter(events));
+        let permit_stream: ChatStream = Box::pin(PermitStream::new(inner, permit));
+
+        // Permit is still held during collection.
+        assert_eq!(sem.available_permits(), 0);
+
+        let response = collect_stream(permit_stream, "m".into()).await.unwrap();
+        assert_eq!(response.content, "hi");
+
+        // After the stream is fully consumed and dropped, the permit is released.
+        assert_eq!(sem.available_permits(), 1, "permit should be released after drop");
     }
 
     #[tokio::test]

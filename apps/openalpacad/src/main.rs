@@ -299,6 +299,12 @@ async fn async_main(
         anyhow::bail!("update_persona tool failed to register — persona updates will not work");
     }
 
+    // Restore CostTracker from today's persisted usage so budget enforcement
+    // is accurate across daemon restarts.
+    if let Some(ref router) = svcs.llm_router {
+        services::restore_cost_tracker(router, &db).await;
+    }
+
     // Step 10: Construct Orchestrator
     let llm_router_for_reload = svcs.llm_router.clone();
     let web_search_config_for_reload = svcs.web_search_config.clone();

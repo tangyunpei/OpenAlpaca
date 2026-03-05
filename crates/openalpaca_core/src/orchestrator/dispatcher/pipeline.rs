@@ -218,10 +218,6 @@ impl TaskDispatcher {
                 // Build LoopConfig — agent constraints override daemon defaults
                 let loop_config =
                     LoopConfig::from_agent(&daemon_config.load().execution.agent_defaults, agent)
-                        .with_model_pricing(
-                            router.model_registry(),
-                            agent.llm_config.model.as_deref(),
-                        )
                         .with_context_window(
                             router.model_registry(),
                             agent.llm_config.model.as_deref(),

@@ -43,11 +43,25 @@ pub enum LlmError {
     Stream(String),
 }
 
+/// Check if an HTTP-level error message indicates a transient network issue.
+/// Only timeout, connection reset, broken pipe, and premature close are transient.
+/// DNS failures, TLS errors, and connection refused are NOT transient.
+fn is_transient_http_error(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("reset by peer")
+        || lower.contains("connection reset")
+        || lower.contains("broken pipe")
+        || lower.contains("connection closed")
+        || lower.contains("incomplete message")
+}
+
 impl LlmError {
     /// Whether this error is transient and worth retrying with the same key.
     pub fn is_transient(&self) -> bool {
         match self {
-            Self::Http(_) => true,
+            Self::Http(msg) => is_transient_http_error(msg),
             Self::RateLimited { .. } => true,
             Self::Overloaded { .. } => true,
             Self::Stream(_) => true,

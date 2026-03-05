@@ -213,6 +213,46 @@ mod tests {
         assert!(LlmError::Stream("broken pipe".to_string()).is_transient());
     }
 
+    #[test]
+    fn test_http_timeout_is_transient() {
+        assert!(LlmError::Http("error sending request: operation timed out".into()).is_transient());
+    }
+
+    #[test]
+    fn test_http_connection_reset_is_transient() {
+        assert!(LlmError::Http("connection reset by peer".into()).is_transient());
+    }
+
+    #[test]
+    fn test_http_broken_pipe_is_transient() {
+        assert!(LlmError::Http("error sending request: broken pipe".into()).is_transient());
+    }
+
+    #[test]
+    fn test_http_dns_error_not_transient() {
+        assert!(!LlmError::Http("dns error: failed to lookup address".into()).is_transient());
+    }
+
+    #[test]
+    fn test_http_tls_error_not_transient() {
+        assert!(!LlmError::Http("error trying to connect: ssl connect error: certificate verify failed".into()).is_transient());
+    }
+
+    #[test]
+    fn test_http_connection_refused_not_transient() {
+        assert!(!LlmError::Http("tcp connect error: Connection refused (os error 61)".into()).is_transient());
+    }
+
+    #[test]
+    fn test_http_connection_closed_is_transient() {
+        assert!(LlmError::Http("connection closed before message completed".into()).is_transient());
+    }
+
+    #[test]
+    fn test_http_incomplete_message_is_transient() {
+        assert!(LlmError::Http("error reading response: incomplete message".into()).is_transient());
+    }
+
     #[tokio::test]
     async fn test_response_to_events_roundtrip() {
         let original = ChatResponse {

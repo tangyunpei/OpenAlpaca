@@ -115,7 +115,7 @@ impl EventBroadcaster {
                         "connector_id": id,
                         "status": status
                     });
-                    repo.log("agent_status", None, Some(&detail), None)
+                    repo.log("connector_status", None, Some(&detail), None)
                 }
                 // Log agent status changes
                 ServerEvent::AgentStatus {

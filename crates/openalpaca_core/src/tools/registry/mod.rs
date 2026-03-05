@@ -37,6 +37,7 @@ pub struct RegisteredTool {
 /// All read methods are `&self` — no locking needed after init.
 pub struct ToolRegistry {
     tools: HashMap<String, RegisteredTool>,
+    http_client: reqwest::Client,
 }
 
 impl Default for ToolRegistry {
@@ -47,8 +48,25 @@ impl Default for ToolRegistry {
 
 impl ToolRegistry {
     pub fn new() -> Self {
+        let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                attempt.error("too many redirects")
+            } else if let Err(e) =
+                crate::tools::url_validation::validate_url(attempt.url().as_str())
+            {
+                attempt.error(format!("redirect blocked by SSRF policy: {}", e))
+            } else {
+                attempt.follow()
+            }
+        });
+        let http_client = reqwest::Client::builder()
+            .redirect(redirect_policy)
+            .build()
+            .expect("Failed to create shared HTTP client");
+
         Self {
             tools: HashMap::new(),
+            http_client,
         }
     }
 
@@ -124,7 +142,10 @@ impl ToolRegistry {
                 url,
                 headers,
                 timeout_secs,
-            } => execute_http(method, url, headers, *timeout_secs, arguments).await,
+            } => {
+                execute_http(&self.http_client, method, url, headers, *timeout_secs, arguments)
+                    .await
+            }
             ToolBackend::Command {
                 command,
                 args_template,
@@ -156,8 +177,9 @@ impl ToolRegistry {
     }
 }
 
-/// Execute an HTTP backend tool call.
+/// Execute an HTTP backend tool call using the shared HTTP client.
 async fn execute_http(
+    client: &reqwest::Client,
     method: &str,
     url_template: &str,
     headers: &HashMap<String, String>,
@@ -195,23 +217,6 @@ async fn execute_http(
     // redirect requests to internal/private endpoints.
     crate::tools::url_validation::validate_url(&url)?;
 
-    // Custom redirect policy: validate each redirect target via SSRF checks.
-    // reqwest::Client::new() uses the default policy which follows redirects
-    // blindly, allowing a malicious external server to redirect to internal/
-    // private endpoints (e.g., http://169.254.169.254/ or http://127.0.0.1/).
-    let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
-        if attempt.previous().len() >= 10 {
-            attempt.error("too many redirects")
-        } else if let Err(e) = crate::tools::url_validation::validate_url(attempt.url().as_str()) {
-            attempt.error(format!("redirect blocked by SSRF policy: {}", e))
-        } else {
-            attempt.follow()
-        }
-    });
-    let client = reqwest::Client::builder()
-        .redirect(redirect_policy)
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     let timeout = std::time::Duration::from_secs(timeout_secs);
 
     let mut request = match method.to_uppercase().as_str() {

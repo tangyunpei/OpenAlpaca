@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::header::HeaderMap;
 
-const DEFAULT_MODEL: &str = "claude-sonnet-4-5-20250929";
+const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
@@ -238,9 +238,6 @@ impl AnthropicProvider {
                         "description": t.description,
                         "input_schema": t.parameters,
                     });
-                    if let Some(true) = t.strict {
-                        tool["strict"] = serde_json::json!(true);
-                    }
                     if let Some(ref examples) = t.input_examples {
                         tool["input_examples"] = serde_json::json!(examples);
                     }

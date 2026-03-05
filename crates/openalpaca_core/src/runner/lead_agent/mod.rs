@@ -465,10 +465,6 @@ impl BuiltInTool for SpawnSubagentTool {
         // 8. Build LoopConfig from daemon defaults + agent constraints
         let loop_config =
             LoopConfig::from_agent(&self.daemon_config.load().execution.agent_defaults, &agent)
-                .with_model_pricing(
-                    self.router.model_registry(),
-                    agent.llm_config.model.as_deref(),
-                )
                 .with_context_window(
                     self.router.model_registry(),
                     agent.llm_config.model.as_deref(),
@@ -1355,10 +1351,6 @@ pub async fn run_lead_agent(
     let loop_config = LoopConfig::from_lead_agent(
         &daemon_config.load().execution.lead_agent_defaults,
         lead_agent,
-    )
-    .with_model_pricing(
-        router.model_registry(),
-        lead_agent.llm_config.model.as_deref(),
     )
     .with_context_window(
         router.model_registry(),

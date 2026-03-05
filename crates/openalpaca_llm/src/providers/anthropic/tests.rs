@@ -263,7 +263,8 @@ fn test_tool_with_strict_and_examples() {
     };
     let body = provider.build_request_body(&request);
     let tools = body["tools"].as_array().unwrap();
-    assert_eq!(tools[0]["strict"], true);
+    // strict is not serialized for Anthropic (Anthropic API does not support it)
+    assert!(tools[0].get("strict").is_none() || tools[0]["strict"].is_null());
     assert!(tools[0]["input_examples"].as_array().unwrap().len() == 1);
 }
 

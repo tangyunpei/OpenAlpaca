@@ -77,7 +77,7 @@ impl ModelRegistry {
                 },
             );
         }
-        for id in &["claude-sonnet-4-5-20250929", "claude-sonnet-4-20250514"] {
+        for id in &["claude-sonnet-4-6", "claude-sonnet-4-5-20250929", "claude-sonnet-4-20250514"] {
             models.insert(
                 id.to_string(),
                 ModelInfo {
@@ -244,7 +244,7 @@ impl ModelRegistry {
     pub fn resolve_provider(&self, model_id: &str) -> Option<ProviderType> {
         self.models
             .read()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
             .map(|info| info.provider)
     }
@@ -258,7 +258,7 @@ impl ModelRegistry {
     pub fn get_pricing(&self, model_id: &str) -> Option<PricingInfo> {
         self.models
             .read()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
             .map(|info| PricingInfo {
                 input_price_per_million: info.input_price_per_million,
@@ -268,14 +268,14 @@ impl ModelRegistry {
 
     /// Get full model info (cloned).
     pub fn get_model_info(&self, model_id: &str) -> Option<ModelInfo> {
-        self.models.read().unwrap().get(model_id).cloned()
+        self.models.read().unwrap_or_else(|p| p.into_inner()).get(model_id).cloned()
     }
 
     /// Check if a model supports image input.
     pub fn supports_image(&self, model_id: &str) -> bool {
         self.models
             .read()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
             .map(|info| info.supports_image)
             .unwrap_or(false)
@@ -285,7 +285,7 @@ impl ModelRegistry {
     pub fn supports_audio(&self, model_id: &str) -> bool {
         self.models
             .read()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
             .map(|info| info.supports_audio)
             .unwrap_or(false)
@@ -295,7 +295,7 @@ impl ModelRegistry {
     pub fn supports_document(&self, model_id: &str) -> bool {
         self.models
             .read()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
             .map(|info| info.supports_document)
             .unwrap_or(false)
@@ -305,7 +305,7 @@ impl ModelRegistry {
     pub fn supports_reasoning(&self, model_id: &str) -> bool {
         self.models
             .read()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
             .map(|info| info.supports_reasoning)
             .unwrap_or(false)
@@ -313,12 +313,12 @@ impl ModelRegistry {
 
     /// Register or update a model entry.
     pub fn register(&self, model_id: String, info: ModelInfo) {
-        self.models.write().unwrap().insert(model_id, info);
+        self.models.write().unwrap_or_else(|p| p.into_inner()).insert(model_id, info);
     }
 
     /// Register a model only if it's not already present.
     pub fn register_if_absent(&self, model_id: String, info: ModelInfo) {
-        let mut models = self.models.write().unwrap();
+        let mut models = self.models.write().unwrap_or_else(|p| p.into_inner());
         models.entry(model_id).or_insert(info);
     }
 
@@ -326,7 +326,7 @@ impl ModelRegistry {
     /// (e.g. from defaults), mark it as discovered but preserve its
     /// pricing/context metadata. If new, insert with discovered=true.
     pub fn register_discovered(&self, model_id: String, info: ModelInfo) {
-        let mut models = self.models.write().unwrap();
+        let mut models = self.models.write().unwrap_or_else(|p| p.into_inner());
         match models.get_mut(&model_id) {
             Some(existing) => {
                 existing.discovered = true;
@@ -342,7 +342,7 @@ impl ModelRegistry {
     /// Mark all default models for a provider as discovered.
     /// Fallback for providers with only managed keys.
     pub fn mark_defaults_discovered_for_provider(&self, provider: ProviderType) -> usize {
-        let mut models = self.models.write().unwrap();
+        let mut models = self.models.write().unwrap_or_else(|p| p.into_inner());
         let mut count = 0;
         for info in models.values_mut() {
             if info.provider == provider && !info.discovered {
@@ -355,12 +355,12 @@ impl ModelRegistry {
 
     /// List all registered model IDs.
     pub fn model_ids(&self) -> Vec<String> {
-        self.models.read().unwrap().keys().cloned().collect()
+        self.models.read().unwrap_or_else(|p| p.into_inner()).keys().cloned().collect()
     }
 
     /// List all models with full metadata, sorted by provider then name.
     pub fn list_models(&self) -> Vec<ModelEntry> {
-        let models = self.models.read().unwrap();
+        let models = self.models.read().unwrap_or_else(|p| p.into_inner());
         let mut entries: Vec<ModelEntry> = models
             .iter()
             .map(|(id, info)| ModelEntry {
@@ -379,7 +379,7 @@ impl ModelRegistry {
     /// Returns an empty vec if no models have been discovered yet
     /// (the caller can decide whether to fall back to defaults).
     pub fn list_discovered_models(&self) -> Vec<ModelEntry> {
-        let models = self.models.read().unwrap();
+        let models = self.models.read().unwrap_or_else(|p| p.into_inner());
         let mut entries: Vec<ModelEntry> = models
             .iter()
             .filter(|(_, info)| info.discovered)
