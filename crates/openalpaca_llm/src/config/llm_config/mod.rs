@@ -229,6 +229,8 @@ pub struct ModelConfigEntry {
     pub supports_audio: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_document: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_reasoning: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

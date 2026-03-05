@@ -297,3 +297,229 @@ async fn test_openai_sse_parser_tool_call_event() {
     assert!(!json_parts.is_empty());
     assert!(got_done);
 }
+
+#[test]
+fn test_openai_cached_tokens_parsing() {
+    let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
+    let response_json = serde_json::json!({
+        "id": "chatcmpl-789",
+        "model": "gpt-4o",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "Cached response"
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 1000,
+            "completion_tokens": 200,
+            "total_tokens": 1200,
+            "prompt_tokens_details": {
+                "cached_tokens": 800
+            }
+        }
+    });
+
+    let response = provider.parse_response(response_json).unwrap();
+    assert_eq!(response.usage.input_tokens, 1000);
+    assert_eq!(response.usage.output_tokens, 200);
+    assert_eq!(response.usage.cache_read_input_tokens, 800);
+    assert_eq!(response.usage.cache_creation_input_tokens, 0);
+}
+
+#[test]
+fn test_openai_no_cached_tokens_defaults_to_zero() {
+    let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
+    let response_json = serde_json::json!({
+        "id": "chatcmpl-790",
+        "model": "gpt-4o",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "Non-cached response"
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 500,
+            "completion_tokens": 100,
+            "total_tokens": 600
+        }
+    });
+
+    let response = provider.parse_response(response_json).unwrap();
+    assert_eq!(response.usage.cache_read_input_tokens, 0);
+    assert_eq!(response.usage.cache_creation_input_tokens, 0);
+}
+
+#[tokio::test]
+async fn test_openai_sse_cached_tokens_in_usage() {
+    use futures_util::StreamExt;
+
+    let raw = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":50,\"prompt_tokens_details\":{\"cached_tokens\":800}}}\n",
+        "\n",
+        "data: [DONE]\n",
+        "\n",
+    );
+
+    let byte_stream = futures_util::stream::iter(vec![Ok(bytes::Bytes::from(raw))]);
+    let events: Vec<_> = parse_openai_sse(byte_stream).collect().await;
+
+    for event in &events {
+        if let Ok(StreamEvent::Usage(u)) = event {
+            assert_eq!(u.input_tokens, 1000);
+            assert_eq!(u.output_tokens, 50);
+            assert_eq!(u.cache_read_input_tokens, 800);
+            assert_eq!(u.cache_creation_input_tokens, 0);
+            return;
+        }
+    }
+    panic!("Expected a Usage event with cached_tokens");
+}
+
+#[test]
+fn test_openai_reasoning_effort_mapping() {
+    let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
+
+    // Enabled → reasoning_effort: "high", temperature stripped
+    let request = ChatRequest {
+        messages: Arc::new(vec![ChatMessage::user("Think about this")]),
+        tools: Arc::new(vec![]),
+        model: Some("o3".to_string()),
+        temperature: Some(0.7),
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: Some(ThinkingConfig::Enabled { budget_tokens: 4096 }),
+    };
+    let body = provider.build_request_body(&request);
+    assert_eq!(body["reasoning_effort"], "high");
+    assert!(body.get("temperature").is_none() || body["temperature"].is_null());
+
+    // Adaptive → reasoning_effort: "medium"
+    let request2 = ChatRequest {
+        messages: Arc::new(vec![ChatMessage::user("Think about this")]),
+        tools: Arc::new(vec![]),
+        model: Some("o3".to_string()),
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: Some(ThinkingConfig::Adaptive),
+    };
+    let body2 = provider.build_request_body(&request2);
+    assert_eq!(body2["reasoning_effort"], "medium");
+
+    // Disabled → no reasoning_effort
+    let request3 = ChatRequest {
+        messages: Arc::new(vec![ChatMessage::user("Think about this")]),
+        tools: Arc::new(vec![]),
+        model: Some("o3".to_string()),
+        temperature: Some(0.5),
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: Some(ThinkingConfig::Disabled),
+    };
+    let body3 = provider.build_request_body(&request3);
+    assert!(body3.get("reasoning_effort").is_none() || body3["reasoning_effort"].is_null());
+    assert_eq!(body3["temperature"], 0.5); // temperature preserved
+}
+
+#[test]
+fn test_openai_reasoning_response_parsing() {
+    let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
+    let response_json = serde_json::json!({
+        "id": "chatcmpl-reasoning",
+        "model": "o3",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "The answer is 42.",
+                "reasoning_content": "Let me think step by step about this problem..."
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 500,
+            "total_tokens": 600,
+            "completion_tokens_details": {
+                "reasoning_tokens": 400
+            }
+        }
+    });
+
+    let response = provider.parse_response(response_json).unwrap();
+    assert_eq!(response.content, "The answer is 42.");
+    assert_eq!(
+        response.thinking.as_deref(),
+        Some("Let me think step by step about this problem...")
+    );
+    assert_eq!(response.model, "o3");
+}
+
+#[test]
+fn test_openai_no_reasoning_content_is_none() {
+    let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
+    let response_json = serde_json::json!({
+        "id": "chatcmpl-normal",
+        "model": "gpt-5.2",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "Just a normal response"
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 50,
+            "completion_tokens": 10,
+            "total_tokens": 60
+        }
+    });
+
+    let response = provider.parse_response(response_json).unwrap();
+    assert!(response.thinking.is_none());
+}
+
+#[tokio::test]
+async fn test_openai_sse_reasoning_delta() {
+    use futures_util::StreamExt;
+
+    let raw = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Let me\"}}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\" think...\"}}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"The answer is 42.\"}}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":500}}\n",
+        "\n",
+        "data: [DONE]\n",
+        "\n",
+    );
+
+    let byte_stream = futures_util::stream::iter(vec![Ok(bytes::Bytes::from(raw))]);
+    let events: Vec<_> = parse_openai_sse(byte_stream).collect().await;
+
+    let mut thinking_parts = Vec::new();
+    let mut text_parts = Vec::new();
+    for event in &events {
+        match event.as_ref().unwrap() {
+            StreamEvent::ThinkingDelta { thinking } => thinking_parts.push(thinking.clone()),
+            StreamEvent::TextDelta { text } => text_parts.push(text.clone()),
+            _ => {}
+        }
+    }
+    assert_eq!(thinking_parts.join(""), "Let me think...");
+    assert_eq!(text_parts.join(""), "The answer is 42.");
+}

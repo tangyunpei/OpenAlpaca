@@ -13,6 +13,8 @@ pub struct CallRecord {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cost_usd: f64,
+    pub cache_creation_tokens: u32,
+    pub cache_read_tokens: u32,
 }
 
 /// Aggregated usage statistics for a single entity (agent or task).
@@ -23,6 +25,8 @@ pub struct UsageStats {
     pub total_output_tokens: u64,
     pub total_cost_usd: f64,
     pub by_model: HashMap<String, ModelUsageStats>,
+    pub total_cache_creation_tokens: u64,
+    pub total_cache_read_tokens: u64,
 }
 
 /// Per-model usage statistics.
@@ -32,6 +36,8 @@ pub struct ModelUsageStats {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cost_usd: f64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
 }
 
 /// Tracks costs across agents, tasks, and providers.
@@ -78,12 +84,16 @@ impl CostTracker {
             stats.total_input_tokens += record.input_tokens as u64;
             stats.total_output_tokens += record.output_tokens as u64;
             stats.total_cost_usd += record.cost_usd;
+            stats.total_cache_creation_tokens += record.cache_creation_tokens as u64;
+            stats.total_cache_read_tokens += record.cache_read_tokens as u64;
 
             let model_stats = stats.by_model.entry(record.model.clone()).or_default();
             model_stats.requests += 1;
             model_stats.input_tokens += record.input_tokens as u64;
             model_stats.output_tokens += record.output_tokens as u64;
             model_stats.cost_usd += record.cost_usd;
+            model_stats.cache_creation_tokens += record.cache_creation_tokens as u64;
+            model_stats.cache_read_tokens += record.cache_read_tokens as u64;
         }
 
         // Update task usage if task_id is present
@@ -94,12 +104,16 @@ impl CostTracker {
             stats.total_input_tokens += record.input_tokens as u64;
             stats.total_output_tokens += record.output_tokens as u64;
             stats.total_cost_usd += record.cost_usd;
+            stats.total_cache_creation_tokens += record.cache_creation_tokens as u64;
+            stats.total_cache_read_tokens += record.cache_read_tokens as u64;
 
             let model_stats = stats.by_model.entry(record.model.clone()).or_default();
             model_stats.requests += 1;
             model_stats.input_tokens += record.input_tokens as u64;
             model_stats.output_tokens += record.output_tokens as u64;
             model_stats.cost_usd += record.cost_usd;
+            model_stats.cache_creation_tokens += record.cache_creation_tokens as u64;
+            model_stats.cache_read_tokens += record.cache_read_tokens as u64;
         }
 
         // Update provider usage (resolve model → provider)
@@ -115,12 +129,16 @@ impl CostTracker {
             stats.total_input_tokens += record.input_tokens as u64;
             stats.total_output_tokens += record.output_tokens as u64;
             stats.total_cost_usd += record.cost_usd;
+            stats.total_cache_creation_tokens += record.cache_creation_tokens as u64;
+            stats.total_cache_read_tokens += record.cache_read_tokens as u64;
 
             let model_stats = stats.by_model.entry(record.model.clone()).or_default();
             model_stats.requests += 1;
             model_stats.input_tokens += record.input_tokens as u64;
             model_stats.output_tokens += record.output_tokens as u64;
             model_stats.cost_usd += record.cost_usd;
+            model_stats.cache_creation_tokens += record.cache_creation_tokens as u64;
+            model_stats.cache_read_tokens += record.cache_read_tokens as u64;
         }
     }
 
@@ -203,6 +221,38 @@ impl CostTracker {
         *self.task_usage.write().await = snapshot.task_usage;
         *self.provider_usage.write().await = snapshot.provider_usage;
     }
+
+    /// Cache hit ratio across all agents: cache_read_tokens / total_input_tokens.
+    /// Returns 0.0 if no input tokens have been recorded.
+    pub async fn cache_hit_ratio(&self) -> f64 {
+        let usage = self.agent_usage.read().await;
+        let total_input: u64 = usage.values().map(|s| s.total_input_tokens).sum();
+        let total_cache_read: u64 = usage.values().map(|s| s.total_cache_read_tokens).sum();
+        if total_input == 0 {
+            0.0
+        } else {
+            total_cache_read as f64 / total_input as f64
+        }
+    }
+
+    /// Aggregated cache statistics across all agents.
+    pub async fn cache_stats(&self) -> CacheStats {
+        let usage = self.agent_usage.read().await;
+        let total_input: u64 = usage.values().map(|s| s.total_input_tokens).sum();
+        let total_cache_read: u64 = usage.values().map(|s| s.total_cache_read_tokens).sum();
+        let total_cache_creation: u64 =
+            usage.values().map(|s| s.total_cache_creation_tokens).sum();
+        CacheStats {
+            total_cache_read_tokens: total_cache_read,
+            total_cache_creation_tokens: total_cache_creation,
+            total_input_tokens: total_input,
+            hit_ratio: if total_input == 0 {
+                0.0
+            } else {
+                total_cache_read as f64 / total_input as f64
+            },
+        }
+    }
 }
 
 /// A point-in-time snapshot of all cost tracking data, suitable for
@@ -212,6 +262,15 @@ pub struct CostSnapshot {
     pub agent_usage: HashMap<String, UsageStats>,
     pub task_usage: HashMap<String, UsageStats>,
     pub provider_usage: HashMap<String, UsageStats>,
+}
+
+/// Aggregated cache performance statistics.
+#[derive(Debug, Clone)]
+pub struct CacheStats {
+    pub total_cache_read_tokens: u64,
+    pub total_cache_creation_tokens: u64,
+    pub total_input_tokens: u64,
+    pub hit_ratio: f64,
 }
 
 #[cfg(test)]

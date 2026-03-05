@@ -417,6 +417,7 @@ impl LlmRouter {
                                 supports_image: false,
                                 supports_audio: false,
                                 supports_document: false,
+                                supports_reasoning: false,
                             },
                         );
                     }
@@ -457,8 +458,10 @@ impl LlmRouter {
 
     /// Streaming completion: resolve provider, acquire key, start streaming.
     ///
-    /// Unlike `complete()`, streaming does NOT retry on failure. The caller
-    /// (agentic loop) falls back to non-streaming `complete()` on error.
+    /// Retries on rate-limit or auth errors by rotating to the next key
+    /// (up to `pool.len().min(3)` attempts). Does NOT fall back to other
+    /// models — the caller (agentic loop) handles streaming→non-streaming
+    /// fallback on final failure.
     pub async fn complete_streaming(
         &self,
         request: RouterRequest,
@@ -483,27 +486,72 @@ impl LlmRouter {
             .ok_or_else(|| LlmRouterError::ProviderNotConfigured(provider_type.to_string()))?;
 
         let pool = entry.key_pool.load();
-        let key_guard = pool
-            .acquire()
-            .await
-            .map_err(|_| LlmRouterError::AllKeysRateLimited)?;
+        let max_attempts = pool.len().min(3);
 
-        let chat_request = ChatRequest {
-            messages: request.messages,
-            tools: request.tools,
-            model: Some(model.to_string()),
-            temperature: request.temperature,
-            max_tokens: request.max_tokens,
-            tool_choice: request.tool_choice,
-            enable_caching: request.enable_caching,
-            thinking: request.thinking,
-        };
+        for attempt in 0..max_attempts {
+            let key_guard = match pool.acquire().await {
+                Ok(guard) => guard,
+                Err(KeyPoolError::NoApiCompatibleKeys) => {
+                    return Err(LlmRouterError::NoApiCompatibleKeys);
+                }
+                Err(_) => {
+                    return Err(LlmRouterError::AllKeysRateLimited);
+                }
+            };
 
-        entry
-            .provider
-            .chat_streaming_with_key(&key_guard.secret, chat_request)
-            .await
-            .map_err(LlmRouterError::Llm)
+            let chat_request = ChatRequest {
+                messages: Arc::clone(&request.messages),
+                tools: Arc::clone(&request.tools),
+                model: Some(model.to_string()),
+                temperature: request.temperature,
+                max_tokens: request.max_tokens,
+                tool_choice: request.tool_choice.clone(),
+                enable_caching: request.enable_caching,
+                thinking: request.thinking.clone(),
+            };
+
+            match entry
+                .provider
+                .chat_streaming_with_key(&key_guard.secret, chat_request)
+                .await
+            {
+                Ok(stream) => return Ok(stream),
+                Err(LlmError::RateLimited { retry_after_ms }) => {
+                    tracing::warn!(
+                        model = model,
+                        key_id = %key_guard.id,
+                        retry_after_ms,
+                        attempt = attempt + 1,
+                        max_attempts,
+                        "Streaming key rate-limited, rotating"
+                    );
+                    pool.report_result(
+                        &key_guard.id,
+                        CallResult::RateLimited { retry_after_ms },
+                    )
+                    .await;
+                    continue;
+                }
+                Err(e) if e.is_auth_error() => {
+                    tracing::warn!(
+                        model = model,
+                        key_id = %key_guard.id,
+                        attempt = attempt + 1,
+                        max_attempts,
+                        "Streaming key auth error, rotating"
+                    );
+                    pool.report_result(
+                        &key_guard.id,
+                        CallResult::Error(e.to_string()),
+                    )
+                    .await;
+                    continue;
+                }
+                Err(e) => return Err(LlmRouterError::Llm(e)),
+            }
+        }
+
+        Err(LlmRouterError::AllKeysRateLimited)
     }
 
     /// Complete a request: resolve provider, acquire key, call, handle retries/fallbacks.
@@ -659,6 +707,8 @@ impl LlmRouter {
                             input_tokens: response.usage.input_tokens,
                             output_tokens: response.usage.output_tokens,
                             cost_usd: cost,
+                            cache_creation_tokens: response.usage.cache_creation_input_tokens,
+                            cache_read_tokens: response.usage.cache_read_input_tokens,
                         };
                         self.cost_tracker.record(&record).await;
 
@@ -835,6 +885,8 @@ impl LlmRouter {
                         input_tokens: 0,
                         output_tokens: 0,
                         cost_usd: 0.0,
+                        cache_creation_tokens: 0,
+                        cache_read_tokens: 0,
                     };
                     self.cost_tracker.record(&record).await;
                     return Ok(response);

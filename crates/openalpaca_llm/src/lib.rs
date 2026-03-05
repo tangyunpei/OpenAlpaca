@@ -49,7 +49,7 @@ pub use keys::secret_store::{
     CachingSecretStore, KeyringSecretStore, MemorySecretStore, SecretStore,
 };
 pub use routing::cost_tracker::{
-    CallRecord, CostSnapshot, CostTracker, ModelUsageStats, UsageStats,
+    CacheStats, CallRecord, CostSnapshot, CostTracker, ModelUsageStats, UsageStats,
 };
 pub use routing::model_registry::{ModelEntry, ModelInfo, ModelRegistry, PricingInfo};
 pub use routing::provider_usage::{ExternalUsage, ProviderUsageSummary, ProviderUsageTracker};
