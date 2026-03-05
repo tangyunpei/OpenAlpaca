@@ -92,6 +92,43 @@ fn test_daily_usage_upsert() {
 }
 
 #[test]
+fn test_daily_usage_replace() {
+    let db = setup_db();
+    let repo = LlmUsageRepository::new(&db);
+
+    let usage = LlmUsageDaily {
+        date: "2025-01-15".to_string(),
+        agent_id: "agent1".to_string(),
+        model: "claude-sonnet-4-5-20250929".to_string(),
+        total_requests: 5,
+        total_input_tokens: 1000,
+        total_output_tokens: 500,
+        total_cost_usd: 0.01,
+    };
+
+    // Upsert twice — additive: 5+5=10
+    repo.upsert_daily_usage(&usage).unwrap();
+    repo.upsert_daily_usage(&usage).unwrap();
+
+    // Replace with 3 — should overwrite, not accumulate
+    let replacement = LlmUsageDaily {
+        total_requests: 3,
+        total_input_tokens: 600,
+        total_output_tokens: 300,
+        total_cost_usd: 0.006,
+        ..usage
+    };
+    repo.replace_daily_usage(&replacement).unwrap();
+
+    let daily = repo.get_daily_usage("agent1", 10).unwrap();
+    assert_eq!(daily.len(), 1);
+    assert_eq!(daily[0].total_requests, 3);
+    assert_eq!(daily[0].total_input_tokens, 600);
+    assert_eq!(daily[0].total_output_tokens, 300);
+    assert!((daily[0].total_cost_usd - 0.006).abs() < 1e-9);
+}
+
+#[test]
 fn test_empty_results() {
     let db = setup_db();
     let repo = LlmUsageRepository::new(&db);
