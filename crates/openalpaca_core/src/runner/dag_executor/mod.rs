@@ -799,7 +799,7 @@ async fn execute_single_node(
 
     let success = matches!(
         &result.finish_reason,
-        LoopFinishReason::Complete | LoopFinishReason::MaxRounds
+        LoopFinishReason::Complete | LoopFinishReason::MaxRounds | LoopFinishReason::Truncated
     );
 
     // Record LLM usage

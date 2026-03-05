@@ -216,7 +216,7 @@ impl AnthropicProvider {
                 body["system"] = serde_json::json!([{
                     "type": "text",
                     "text": system_text,
-                    "cache_control": { "type": "ephemeral" }
+                    "cache_control": CacheControl::ephemeral()
                 }]);
             } else {
                 body["system"] = serde_json::Value::String(system_text);
@@ -246,7 +246,7 @@ impl AnthropicProvider {
                     }
                     // Cache breakpoint on the last tool
                     if request.enable_caching && i == request.tools.len() - 1 {
-                        tool["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                        tool["cache_control"] = serde_json::json!(CacheControl::ephemeral());
                     }
                     tool
                 })

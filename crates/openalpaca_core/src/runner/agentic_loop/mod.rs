@@ -12,21 +12,57 @@ use tokio_util::sync::CancellationToken;
 /// Maximum tool result size before truncation (32 KB).
 const MAX_TOOL_RESULT_SIZE: usize = 32 * 1024;
 
+/// Maximum retries when LLM response is truncated due to max_tokens.
+const MAX_TOKENS_RETRIES: usize = 2;
+
+/// Default context compression threshold (fraction of max_context_tokens).
+const DEFAULT_CONTEXT_THRESHOLD: f64 = 0.6;
+
 /// Truncate tool result text if it exceeds the byte limit to prevent blowing
 /// up the LLM context window. Uses byte-aware truncation at char boundaries.
 fn truncate_tool_result(text: String) -> String {
     if text.len() <= MAX_TOOL_RESULT_SIZE {
         return text;
     }
-    // Find the nearest char boundary at or before MAX_TOOL_RESULT_SIZE bytes
+
+    // Find the nearest char boundary at or before the byte limit
     let mut end = MAX_TOOL_RESULT_SIZE;
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
+
+    let slice = &text[..end];
+
+    // Try sentence boundary (last ". " or ".\n" or "! " or "!\n" or "? " or "?\n")
+    let sentence_end = slice.rfind(". ")
+        .or_else(|| slice.rfind(".\n"))
+        .or_else(|| slice.rfind("! "))
+        .or_else(|| slice.rfind("!\n"))
+        .or_else(|| slice.rfind("? "))
+        .or_else(|| slice.rfind("?\n"))
+        .map(|pos| pos + 1); // Include the punctuation char
+
+    // Try line boundary
+    let line_end = slice.rfind('\n');
+
+    // Try word boundary
+    let word_end = slice.rfind(' ');
+
+    // Don't cut more than 25% short — avoid distant sentence boundaries
+    // discarding most of the content
+    let min_cut = end * 3 / 4;
+
+    // Pick best boundary: sentence (if recent enough) > line > word > char
+    let cut = sentence_end
+        .filter(|&p| p >= min_cut)
+        .or_else(|| line_end.filter(|&p| p >= min_cut))
+        .or_else(|| word_end.filter(|&p| p >= min_cut))
+        .unwrap_or(end);
+
     format!(
         "{}\n\n[... truncated: showing first {} of {} bytes]",
-        &text[..end],
-        end,
+        &text[..cut],
+        cut,
         text.len()
     )
 }
@@ -35,6 +71,41 @@ fn truncate_tool_result(text: String) -> String {
 /// Centralizes the error format so the LLM always sees a consistent pattern.
 fn format_tool_error(msg: &str) -> String {
     format!("[tool_error] {}", msg)
+}
+
+/// Tool-specific recovery suggestions for common error patterns.
+fn tool_recovery_hint(tool_name: &str, error: &str) -> Option<&'static str> {
+    if tool_name == "file_read" && (error.contains("not found") || error.contains("No such file")) {
+        return Some("Hint: verify the path exists using shell_execute with `ls`.");
+    }
+    if tool_name == "file_write" && error.contains("Permission denied") {
+        return Some("Hint: check file permissions or try a different output path.");
+    }
+    if tool_name == "web_fetch" && (error.contains("404") || error.contains("not found")) {
+        return Some("Hint: use web_search to find the correct URL first.");
+    }
+    if tool_name == "web_fetch" && error.contains("timeout") {
+        return Some("Hint: the URL may be unreachable. Try a different source.");
+    }
+    if tool_name == "shell_execute" && error.contains("timed out") {
+        return Some("Hint: break the command into smaller steps or increase timeout.");
+    }
+    if tool_name == "shell_execute" && error.contains("not found") {
+        return Some("Hint: check if the command is installed or use the full path.");
+    }
+    if tool_name == "memory_search" && error.contains("no results") {
+        return Some("Hint: try broader search terms or check workspace_read for shared context.");
+    }
+    None
+}
+
+/// Format a tool error with an optional recovery hint appended.
+fn format_tool_error_with_hint(tool_name: &str, msg: &str) -> String {
+    let base = format_tool_error(msg);
+    match tool_recovery_hint(tool_name, msg) {
+        Some(hint) => format!("{}\n{}", base, hint),
+        None => base,
+    }
 }
 
 /// Estimate tokens for a single content part.
@@ -219,13 +290,16 @@ pub struct LoopConfig {
     /// Maximum estimated input tokens before triggering context compression.
     /// When `> 0` and estimated tokens exceed this, older rounds are compressed
     /// into a summary, preserving the system prompt + initial query + recent rounds.
-    /// Default: `0` (disabled — auto-set from model context window × 0.6 via
+    /// Default: `0` (disabled — auto-set from model context window × `context_threshold` via
     /// `with_context_window()`).
     pub max_context_tokens: u32,
     /// Number of most recent conversation rounds to always preserve during
     /// context compression. Each "round" is roughly 3 messages (assistant +
     /// tool results). Default: `4`.
     pub context_tail_keep: usize,
+    /// Fraction of model context window to use as compression trigger (0.0–1.0).
+    /// Only used by `with_context_window()`. Default: `0.6`.
+    pub context_threshold: f64,
     /// Tool choice to force on the first round only (`rounds == 0`).
     /// After the first round, reverts to `None` (auto).
     pub initial_tool_choice: Option<ToolChoice>,
@@ -254,6 +328,7 @@ impl Clone for LoopConfig {
             fallback_output_rate: self.fallback_output_rate,
             max_context_tokens: self.max_context_tokens,
             context_tail_keep: self.context_tail_keep,
+            context_threshold: self.context_threshold,
             initial_tool_choice: self.initial_tool_choice.clone(),
             enable_caching: self.enable_caching,
             thinking: self.thinking.clone(),
@@ -269,6 +344,9 @@ impl std::fmt::Debug for LoopConfig {
             .field("max_tools_per_round", &self.max_tools_per_round)
             .field("max_cost", &self.max_cost)
             .field("model", &self.model)
+            .field("max_context_tokens", &self.max_context_tokens)
+            .field("context_threshold", &self.context_threshold)
+            .field("context_tail_keep", &self.context_tail_keep)
             .field("enable_caching", &self.enable_caching)
             .field("thinking", &self.thinking)
             .field("stream_callback", &self.stream_callback.is_some())
@@ -290,8 +368,9 @@ impl Default for LoopConfig {
             fallback_output_rate: FALLBACK_OUTPUT_RATE,
             max_context_tokens: 0,
             context_tail_keep: 4,
+            context_threshold: DEFAULT_CONTEXT_THRESHOLD,
             initial_tool_choice: None,
-            enable_caching: false,
+            enable_caching: true,
             thinking: None,
             stream_callback: None,
         }
@@ -347,8 +426,9 @@ impl LoopConfig {
             fallback_output_rate: FALLBACK_OUTPUT_RATE,
             max_context_tokens: 0,
             context_tail_keep: 4,
+            context_threshold: DEFAULT_CONTEXT_THRESHOLD,
             initial_tool_choice: None,
-            enable_caching: false,
+            enable_caching: true,
             thinking: None,
             stream_callback: None,
         }
@@ -372,7 +452,7 @@ impl LoopConfig {
     }
 
     /// Set context compression budget from model registry.
-    /// Uses 60% of the model's context window as the compression trigger threshold.
+    /// Uses `context_threshold` fraction of the model's context window as the compression trigger.
     /// Only sets the budget if `max_context_tokens` is still 0 (not explicitly configured).
     pub fn with_context_window(
         mut self,
@@ -384,7 +464,7 @@ impl LoopConfig {
             && let Some(info) = registry.get_model_info(model)
             && info.context_window > 0
         {
-            self.max_context_tokens = (info.context_window as f64 * 0.6) as u32;
+            self.max_context_tokens = (info.context_window as f64 * self.context_threshold) as u32;
         }
         self
     }
@@ -437,6 +517,7 @@ pub enum LoopFinishReason {
     Complete,
     MaxRounds,
     CostExceeded,
+    Truncated,
     Cancelled,
     Error(String),
 }
@@ -452,6 +533,8 @@ struct LoopState {
     tool_calls_made: usize,
     last_assistant_content: String,
     last_model: Option<String>,
+    cost_warning_emitted: bool,
+    max_tokens_retries: usize,
 }
 
 impl LoopState {
@@ -464,6 +547,8 @@ impl LoopState {
             tool_calls_made: 0,
             last_assistant_content: String::new(),
             last_model: None,
+            cost_warning_emitted: false,
+            max_tokens_retries: 0,
         }
     }
 
@@ -757,6 +842,25 @@ async fn run_agentic_loop_inner(
             config.fallback_input_rate,
             config.fallback_output_rate,
         );
+        let cost_ratio = estimated_cost / config.max_cost;
+        if cost_ratio >= 0.8 && !state.cost_warning_emitted {
+            state.cost_warning_emitted = true;
+            let warning = format!(
+                "[system] Budget {:.0}% consumed (${:.4}/{:.2}). \
+                 Prioritize completing the current task efficiently.",
+                cost_ratio * 100.0,
+                estimated_cost,
+                config.max_cost,
+            );
+            Arc::make_mut(&mut messages).push(ChatMessage::user(&warning));
+            tracing::info!(
+                agent_id,
+                cost_ratio,
+                estimated_cost,
+                "Cost warning emitted at {:.0}%",
+                cost_ratio * 100.0,
+            );
+        }
         if estimated_cost > config.max_cost {
             tracing::info!(
                 agent_id = agent_id,
@@ -958,7 +1062,7 @@ async fn run_agentic_loop_inner(
                             match sbx.execute_tool(agent_id, tc, policy).await {
                                 Ok(output) => truncate_tool_result(output),
                                 Err(err) => {
-                                    truncate_tool_result(format_tool_error(&err.to_string()))
+                                    truncate_tool_result(format_tool_error_with_hint(&tc.name, &err.to_string()))
                                 }
                             }
                         } else {
@@ -1025,6 +1129,31 @@ async fn run_agentic_loop_inner(
                     }
 
                     continue;
+                }
+
+                // MaxTokens — retry with continuation prompt
+                if response.finish_reason == FinishReason::MaxTokens {
+                    state.max_tokens_retries += 1;
+                    if state.max_tokens_retries <= MAX_TOKENS_RETRIES {
+                        Arc::make_mut(&mut messages)
+                            .push(ChatMessage::assistant(&response.content));
+                        Arc::make_mut(&mut messages).push(ChatMessage::user(
+                            "Your previous response was truncated due to length limits. \
+                             Continue from where you left off.",
+                        ));
+                        tracing::warn!(
+                            agent_id,
+                            round = state.rounds,
+                            retry = state.max_tokens_retries,
+                            "MaxTokens hit — injecting continuation prompt"
+                        );
+                        continue;
+                    }
+                    tracing::warn!(agent_id, "MaxTokens retries exhausted, returning partial");
+                    return state.result_with_content(
+                        response.content,
+                        LoopFinishReason::Truncated,
+                    );
                 }
 
                 // No tool calls → done

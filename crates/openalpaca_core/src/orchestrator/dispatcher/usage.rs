@@ -38,7 +38,7 @@ pub(crate) fn record_llm_usage(
     );
 
     let call_status = match &loop_result.finish_reason {
-        LoopFinishReason::Complete | LoopFinishReason::MaxRounds => "success",
+        LoopFinishReason::Complete | LoopFinishReason::MaxRounds | LoopFinishReason::Truncated => "success",
         LoopFinishReason::CostExceeded => "cost_exceeded",
         LoopFinishReason::Cancelled => "cancelled",
         LoopFinishReason::Error(_) => "error",
