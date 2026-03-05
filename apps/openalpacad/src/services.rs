@@ -4,7 +4,7 @@ use openalpaca_core::{
     agent::AgentConfigService,
     bus::EventBus,
     context::SharedContext,
-    tools::builtins::{ConnectorSendLock, IdentityToolContext, SoulToolContext, UserToolContext},
+    tools::builtins::{ConnectorSendLock, PersonaToolContext},
 };
 use openalpaca_storage::Database;
 use std::path::Path;
@@ -27,7 +27,7 @@ pub struct InitializedServices {
     pub skill_router: Arc<openalpaca_core::orchestrator::skill_router::SkillRouter>,
     pub secret_store: Arc<dyn openalpaca_llm::SecretStore>,
     pub web_search_config: Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
-    /// Shared lock for the `send_message` tool's connector send provider.
+    /// Shared lock for the `send` tool's connector send provider.
     /// Populated post-construction in main.rs after the ConnectorSendBridge is created.
     pub connector_send_lock: ConnectorSendLock,
 }
@@ -568,20 +568,10 @@ fn build_tool_registry(
 ) -> (Arc<openalpaca_core::tools::ToolRegistry>, ConnectorSendLock) {
     let mut tool_registry = openalpaca_core::tools::ToolRegistry::new();
 
-    // Register built-in tools (including update_soul and update_user)
-    let soul_tool_ctx = SoulToolContext {
+    // Register built-in tools (including update_persona)
+    let persona_ctx = PersonaToolContext {
         soul_path: soul_path.to_path_buf(),
-        backup_dir: config_base_dir.join("orchestrator").join("backups"),
-        bus: bus.clone(),
-        max_backups: Some(10),
-    };
-    let user_tool_ctx = UserToolContext {
         user_path: user_path.to_path_buf(),
-        backup_dir: config_base_dir.join("orchestrator").join("backups"),
-        bus: bus.clone(),
-        max_backups: Some(10),
-    };
-    let identity_tool_ctx = IdentityToolContext {
         identity_path: identity_path.to_path_buf(),
         backup_dir: config_base_dir.join("orchestrator").join("backups"),
         bus: bus.clone(),
@@ -590,15 +580,13 @@ fn build_tool_registry(
     // Capture workspace root once at startup for file tools, avoiding
     // reliance on the process-global current_dir() at tool execution time.
     let workspace_root = std::env::current_dir().ok();
-    // Create the shared lock for the send_message tool's connector send provider.
+    // Create the shared lock for the send tool's connector send provider.
     // The actual provider is set post-construction in main.rs after ConnectorSendBridge is created.
     let connector_send_lock: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
     for tool in openalpaca_core::tools::builtins::builtin_tools_with_persona_context(
         Some(db.clone()),
         embedder.clone(),
-        soul_tool_ctx,
-        user_tool_ctx,
-        identity_tool_ctx,
+        persona_ctx,
         Some(daemon_config.clone()),
         Some(web_search_config.clone()),
         workspace_root,
@@ -616,9 +604,7 @@ fn build_tool_registry(
     // TOML name collisions).
     let protected_builtins: &[&str] = &[
         // Registry built-ins
-        "update_soul",
-        "update_user",
-        "update_identity",
+        "update_persona",
         "shell_execute",
         "file_read",
         "file_write",
@@ -632,8 +618,7 @@ fn build_tool_registry(
         "check_subagent_status",
         "wait_for_subagents",
         // Connector tools
-        "send_message",
-        "send_file",
+        "send",
     ];
     for tool in openalpaca_core::tools::config::load_tools_from_dir(&tools_config_dir) {
         if protected_builtins.contains(&tool.definition.name.as_str()) {
@@ -654,11 +639,8 @@ fn build_tool_registry(
     }
     info!("Tool registry: {} tools loaded", tool_registry.count());
 
-    if tool_registry.get("update_soul").is_none() {
-        // This is a fatal error in the original code (anyhow::bail!)
-        // but since we return the registry, we'll log an error.
-        // The caller should check for this condition.
-        tracing::error!("update_soul tool failed to register — SOUL.md updates will not work");
+    if tool_registry.get("update_persona").is_none() {
+        tracing::error!("update_persona tool failed to register — persona updates will not work");
     }
 
     (Arc::new(tool_registry), connector_send_lock)

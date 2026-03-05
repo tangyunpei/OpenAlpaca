@@ -56,7 +56,7 @@ static EN_CHANNEL_FIRST: LazyLock<Regex> = LazyLock::new(|| {
 ///
 /// Direct send only fires when the user marks the content with quotes.
 /// All other cases fall through to the LLM path so it can compose or
-/// clarify the message before calling `send_message`.
+/// clarify the message before calling `send`.
 /// Strip surrounding quote marks from a string, if present.
 /// The regex `.+` captures quotes as part of the content group;
 /// this recovers the inner text so `is_explicitly_quoted` can match.
@@ -136,7 +136,7 @@ pub(super) fn extract_send_params(text: &str) -> Option<DirectSendParams> {
             };
             // Only direct-send when the user explicitly quoted the content.
             // Unquoted content falls through to the LLM path so it can
-            // compose or refine the message before calling send_message.
+            // compose or refine the message before calling send.
             if !is_explicitly_quoted(text, &content) {
                 return None;
             }
@@ -161,7 +161,7 @@ impl Orchestrator {
     ) -> Option<Result<String, String>> {
         // 1. Quick reject: intent parser must think this is a send
         let suggestions = self.intent_parser.suggest_tools(query);
-        if !suggestions.iter().any(|s| s == "send_message") {
+        if !suggestions.iter().any(|s| s == "send") {
             return None;
         }
 

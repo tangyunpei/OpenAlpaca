@@ -295,8 +295,8 @@ async fn async_main(
     .await?;
 
     // Verify critical tool registered
-    if svcs.tool_registry.get("update_soul").is_none() {
-        anyhow::bail!("update_soul tool failed to register — SOUL.md updates will not work");
+    if svcs.tool_registry.get("update_persona").is_none() {
+        anyhow::bail!("update_persona tool failed to register — persona updates will not work");
     }
 
     // Step 10: Construct Orchestrator
@@ -427,7 +427,7 @@ async fn async_main(
 
         // 2. Wire send bridge into orchestrator and shared lock
         orchestrator.set_connector_send_provider(send_bridge.clone());
-        // Populate the shared lock so the send_message tool can access it
+        // Populate the shared lock so the send tool can access it
         if let Ok(mut guard) = svcs.connector_send_lock.write() {
             *guard = Some(send_bridge.clone());
         }

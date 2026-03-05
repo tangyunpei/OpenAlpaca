@@ -49,25 +49,20 @@ fn sanitize_parts_for_dispatch(parts: Vec<ContentPart>) -> Vec<ContentPart> {
         .collect()
 }
 
-/// Fine-grained hints for which send tools to keep alive across turns.
+/// Hints for whether the send tool should be kept alive across turns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) struct ActiveSendHints {
-    send_message: bool,
-    send_file: bool,
+    send: bool,
 }
 
-/// Analyze recent conversation to determine which send tools should be kept alive.
-///
-/// Returns per-tool hints so the caller injects only the relevant tool(s).
+/// Analyze recent conversation to determine whether the send tool should be kept alive.
 ///
 /// Uses a tiered priority system per assistant message (last 2 within 6-message window):
-/// - **Tier 1**: Literal tool name (`send_message`, `send_file`) — highest confidence.
-/// - **Tier 2**: Channel + recipient-solicitation keywords — cross-message backtrack
-///   for Tier 1 clues, defaulting to `send_message` when no clue is found.
+/// - **Tier 1**: Literal tool name (`send_message`, `send_file`, `send(`, `send tool`) — highest confidence.
+/// - **Tier 2**: Channel + recipient-solicitation keywords — defaults to send active.
 pub(super) fn detect_active_send_hints(recent_messages: &[ChatMessage]) -> ActiveSendHints {
     const CHANNEL_KW: &[&str] = &["telegram", "imessage"];
-    const FILE_KW: &[&str] = &["send_file", "send_file("];
-    const MSG_KW: &[&str] = &["send_message", "send_message("];
+    const SEND_KW: &[&str] = &["send_file", "send_message", "send(", "send tool"];
     const RECIPIENT_KW: &[&str] = &[
         "recipient", "chat_id", "收件人", "发给谁", "发送给",
         "send to whom", "send it to",
@@ -85,33 +80,10 @@ pub(super) fn detect_active_send_hints(recent_messages: &[ChatMessage]) -> Activ
         .map(|m| m.content.to_lowercase())
         .collect();
 
-    // Determine current channel context from most recent assistant message
-    let current_turn_channels: Vec<&str> = lowered.first()
-        .map(|first| CHANNEL_KW.iter().filter(|k| first.contains(*k)).copied().collect())
-        .unwrap_or_default();
-
-    for (i, lower) in lowered.iter().enumerate() {
+    for lower in &lowered {
         // Tier 1: tool name match (highest priority)
-        let has_file = FILE_KW.iter().any(|k| lower.contains(k));
-        let has_msg = MSG_KW.iter().any(|k| lower.contains(k));
-
-        if has_file || has_msg {
-            // Channel scoping for non-current messages:
-            // If an older message explicitly mentions a channel that differs from
-            // the current turn's channel, don't let its tool hints leak through.
-            if i > 0 && !current_turn_channels.is_empty() {
-                let msg_channels: Vec<&str> = CHANNEL_KW.iter()
-                    .filter(|k| lower.contains(*k))
-                    .copied()
-                    .collect();
-                if !msg_channels.is_empty()
-                    && !msg_channels.iter().any(|c| current_turn_channels.contains(c))
-                {
-                    continue;
-                }
-            }
-            hints.send_file |= has_file;
-            hints.send_message |= has_msg;
+        if SEND_KW.iter().any(|k| lower.contains(k)) {
+            hints.send = true;
             continue;
         }
 
@@ -121,68 +93,18 @@ pub(super) fn detect_active_send_hints(recent_messages: &[ChatMessage]) -> Activ
             continue;
         }
         let has_recipient = RECIPIENT_KW.iter().any(|k| lower.contains(k));
-        if !has_recipient {
-            continue;
-        }
-
-        // Channel binding: collect which channels the current message mentions
-        let current_channels: Vec<&&str> = CHANNEL_KW.iter()
-            .filter(|k| lower.contains(*k))
-            .collect();
-
-        // Cross-message backtrack: search OTHER assistant messages for Tier 1 clues
-        // Only backtrack to messages that share at least one channel keyword.
-        let mut found_clue = false;
-        for (j, other_lower) in lowered.iter().enumerate() {
-            if j == i {
-                continue;
-            }
-            let shares_channel = current_channels.iter().any(|ch| other_lower.contains(**ch));
-            if !shares_channel {
-                continue;
-            }
-            let other_file = FILE_KW.iter().any(|k| other_lower.contains(k));
-            let other_msg = MSG_KW.iter().any(|k| other_lower.contains(k));
-            if other_file || other_msg {
-                hints.send_file |= other_file;
-                hints.send_message |= other_msg;
-                found_clue = true;
-            }
-        }
-
-        // GAP 2: no Tier 1 clue across other messages → default to send_message
-        if !found_clue {
-            hints.send_message = true;
+        if has_recipient {
+            hints.send = true;
         }
     }
 
     hints
 }
 
-/// Resolve `initial_tool_choice` for send tools based on intent-level flags.
-///
-/// When both `send_message` and `send_file` are in the resolved tool list,
-/// uses the *current message's* intent flags to decide which tool to pin.
-/// If neither was suggested by intent (e.g. both injected via multi-turn
-/// keep-alive), returns `Any` so the LLM picks the right one.
-fn resolve_send_tool_choice(
-    intent_has_send_msg: bool,
-    intent_has_send_file: bool,
-    has_send_msg: bool,
-    has_send_file: bool,
-) -> Option<ToolChoice> {
-    if has_send_msg && has_send_file {
-        if intent_has_send_file {
-            Some(ToolChoice::Tool("send_file".to_string()))
-        } else if intent_has_send_msg {
-            Some(ToolChoice::Tool("send_message".to_string()))
-        } else {
-            Some(ToolChoice::Any)
-        }
-    } else if has_send_msg {
-        Some(ToolChoice::Tool("send_message".to_string()))
-    } else if has_send_file {
-        Some(ToolChoice::Tool("send_file".to_string()))
+/// Resolve `initial_tool_choice` for the send tool.
+fn resolve_send_tool_choice(has_send: bool) -> Option<ToolChoice> {
+    if has_send {
+        Some(ToolChoice::Tool("send".to_string()))
     } else {
         None
     }
@@ -190,27 +112,22 @@ fn resolve_send_tool_choice(
 
 /// Apply send-tool keep-alive injection to the tool list.
 ///
-/// Snapshots intent-level flags before injection, then appends tools
-/// indicated by `detect_active_send_hints()` that aren't already present.
+/// Snapshots intent-level flag before injection, then appends the send tool
+/// if indicated by `detect_active_send_hints()` and not already present.
 ///
-/// Returns `(intent_has_send_msg, intent_has_send_file)` for downstream
-/// `resolve_send_tool_choice()`.
+/// Returns whether the intent originally suggested send.
 fn apply_send_keepalive(
     tool_names: &mut Vec<String>,
     recent_messages: &[ChatMessage],
-) -> (bool, bool) {
-    let intent_has_send_msg = tool_names.contains(&"send_message".to_string());
-    let intent_has_send_file = tool_names.contains(&"send_file".to_string());
+) -> bool {
+    let intent_has_send = tool_names.contains(&"send".to_string());
 
     let keepalive = detect_active_send_hints(recent_messages);
-    if !intent_has_send_msg && keepalive.send_message {
-        tool_names.push("send_message".to_string());
-    }
-    if !intent_has_send_file && keepalive.send_file {
-        tool_names.push("send_file".to_string());
+    if !intent_has_send && keepalive.send {
+        tool_names.push("send".to_string());
     }
 
-    (intent_has_send_msg, intent_has_send_file)
+    intent_has_send
 }
 
 const BASE_PROMPT_TTL: Duration = Duration::from_secs(30);
@@ -436,12 +353,12 @@ impl Orchestrator {
         // Resolve tools based on intent analysis
         // Tool suggestion should be based on raw user intent text, not attachment-injected context.
         let mut tool_names = self.intent_parser.suggest_tools(tool_suggestion_query);
-        let (intent_has_send_msg, intent_has_send_file) =
+        let _intent_has_send =
             apply_send_keepalive(&mut tool_names, &ctx.recent_messages);
 
         // Force-include persona tools during bootstrap mode
         if self.is_bootstrapping() {
-            for name in &["update_identity", "update_user", "update_soul"] {
+            for name in &["update_persona"] {
                 if !tool_names.contains(&name.to_string()) {
                     tool_names.push(name.to_string());
                 }
@@ -461,28 +378,21 @@ impl Orchestrator {
             );
             system_prompt.push_str(&format_tool_guidance(&tool_defs));
 
-            // Deterministic send_context: when send_message or send_file is in the tool list,
+            // Deterministic send_context: when send is in the tool list,
             // inject factual recipient info so the LLM doesn't guess or ask unnecessarily.
-            if tool_defs.iter().any(|d| d.name == "send_message" || d.name == "send_file") {
+            if tool_defs.iter().any(|d| d.name == "send") {
                 let send_ctx = self.build_send_context(owner_id);
                 if !send_ctx.is_empty() {
                     system_prompt.push('\n');
                     system_prompt.push_str(&send_ctx);
                 }
                 let mut send_rules = String::from("\n<send_rules>\n");
-                if tool_defs.iter().any(|d| d.name == "send_message") {
-                    send_rules.push_str(
-                        "- If the user asks to send a message but did NOT provide specific text, \
-                         compose a brief, natural message based on context, then call send_message.\n\
-                         - NEVER claim a message was sent without calling the send_message tool.\n"
-                    );
-                }
-                if tool_defs.iter().any(|d| d.name == "send_file") {
-                    send_rules.push_str(
-                        "- If the user asks to send a file, image, photo, or document, use send_file.\n\
-                         - NEVER claim a file was sent without calling the send_file tool.\n"
-                    );
-                }
+                send_rules.push_str(
+                    "- If the user asks to send a message but did NOT provide specific text, \
+                     compose a brief, natural message based on context, then call send (action: \"message\").\n\
+                     - If the user asks to send a file, image, photo, or document, call send (action: \"file\").\n\
+                     - NEVER claim a message or file was sent without calling the send tool.\n"
+                );
                 send_rules.push_str("- Only report success/failure based on the tool's actual return value.\n</send_rules>");
                 system_prompt.push_str(&send_rules);
             }
@@ -500,10 +410,7 @@ impl Orchestrator {
                 max_rounds: 4,
                 max_tools_per_round: 2,
                 initial_tool_choice: resolve_send_tool_choice(
-                    intent_has_send_msg,
-                    intent_has_send_file,
-                    tool_defs.iter().any(|d| d.name == "send_message"),
-                    tool_defs.iter().any(|d| d.name == "send_file"),
+                    tool_defs.iter().any(|d| d.name == "send"),
                 ),
                 enable_caching: false,
                 thinking: None,
@@ -959,7 +866,7 @@ impl Orchestrator {
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_active_send_hints, ActiveSendHints, sanitize_parts_for_dispatch};
+    use super::{detect_active_send_hints, sanitize_parts_for_dispatch};
     use openalpaca_llm::{ChatMessage, ContentPart, ImageSource};
 
     #[test]
@@ -1009,11 +916,10 @@ mod tests {
     #[test]
     fn detect_send_flow_with_telegram_and_send_keyword() {
         let messages = vec![ChatMessage::assistant(
-            "I can help you send a message via Telegram using the send_message tool.",
+            "I can help you send a message via Telegram using the send tool.",
         )];
         let hints = detect_active_send_hints(&messages);
-        assert!(hints.send_message);
-        assert!(!hints.send_file);
+        assert!(hints.send);
     }
 
     #[test]
@@ -1022,13 +928,12 @@ mod tests {
             "Sure, I'll help you with that task.",
         )];
         let hints = detect_active_send_hints(&messages);
-        assert!(!hints.send_message);
-        assert!(!hints.send_file);
+        assert!(!hints.send);
     }
 
     #[test]
     fn detect_send_flow_empty_messages() {
-        assert_eq!(detect_active_send_hints(&[]), ActiveSendHints::default());
+        assert!(!detect_active_send_hints(&[]).send);
     }
 
     #[test]
@@ -1037,8 +942,7 @@ mod tests {
             "send message to telegram",
         )];
         let hints = detect_active_send_hints(&messages);
-        assert!(!hints.send_message);
-        assert!(!hints.send_file);
+        assert!(!hints.send);
     }
 
     #[test]
@@ -1047,109 +951,86 @@ mod tests {
             "Telegram is a messaging platform.",
         )];
         let hints = detect_active_send_hints(&messages);
-        assert!(!hints.send_message);
-        assert!(!hints.send_file);
+        assert!(!hints.send);
     }
 
     #[test]
     fn detect_send_flow_chinese_context_without_tool_name() {
-        // Chinese text mentioning "发送消息" but NOT the literal tool name "send_message"
-        // should NOT trigger — tightened heuristic requires literal tool name.
         let messages = vec![ChatMessage::assistant(
             "好的，我将通过Telegram发送消息给您的联系人。",
         )];
         let hints = detect_active_send_hints(&messages);
-        assert!(!hints.send_message);
-        assert!(!hints.send_file);
+        assert!(!hints.send);
     }
 
     #[test]
     fn detect_send_flow_chinese_context_with_tool_name() {
-        // Chinese context that ALSO mentions the tool name should trigger.
         let messages = vec![ChatMessage::assistant(
             "好的，我将通过Telegram使用send_message工具发送消息。",
         )];
         let hints = detect_active_send_hints(&messages);
-        assert!(hints.send_message);
-        assert!(!hints.send_file);
+        assert!(hints.send);
     }
 
     #[test]
     fn detect_send_flow_only_recent_messages() {
-        // Last 2 assistant messages (within 6-message raw window) are checked;
-        // put the relevant one at position 3+ among assistants to exceed that.
         let mut messages = Vec::new();
         messages.push(ChatMessage::assistant(
             "I'll send via Telegram using send_message.",
         ));
-        // Pad with 2 more assistant messages without send context
         for _ in 0..2 {
             messages.push(ChatMessage::assistant("Here is some other info."));
         }
-        // The send flow message is now beyond the 2-assistant-message lookback
         let hints = detect_active_send_hints(&messages);
-        assert!(!hints.send_message);
-        assert!(!hints.send_file);
+        assert!(!hints.send);
     }
 
     #[test]
     fn detect_send_flow_survives_bursty_user_messages() {
-        // Tier 2: "收件人" + "Telegram" → cross-message backtrack: no clue → default send_message
         let messages = vec![
             ChatMessage::assistant("你的 Telegram 收件人是？"),
             ChatMessage::user("等一下"),
             ChatMessage::user("用 default"),
         ];
         let hints = detect_active_send_hints(&messages);
-        assert!(hints.send_message);
-        assert!(!hints.send_file);
+        assert!(hints.send);
     }
 
     #[test]
     fn detect_send_flow_discussion_about_telegram_no_tool() {
-        // Talking about Telegram features without tool reference → no leak
         let messages = vec![ChatMessage::assistant(
             "Telegram is great for groups and channels.",
         )];
         let hints = detect_active_send_hints(&messages);
-        assert!(!hints.send_message);
-        assert!(!hints.send_file);
+        assert!(!hints.send);
     }
 
     #[test]
     fn detect_send_flow_tier2_chinese_recipient_solicitation() {
-        // Tier 2 → "收件人" + "Telegram" → no clue → default send_message
         let messages = vec![ChatMessage::assistant(
             "你的 Telegram 收件人是？",
         )];
         let hints = detect_active_send_hints(&messages);
-        assert!(hints.send_message);
-        assert!(!hints.send_file);
+        assert!(hints.send);
     }
 
     #[test]
     fn detect_send_flow_tier2_english_recipient_solicitation() {
-        // Tier 2 → "send it to" + "Telegram" → no clue → default send_message
         let messages = vec![ChatMessage::assistant(
             "Who should I send it to on Telegram?",
         )];
         let hints = detect_active_send_hints(&messages);
-        assert!(hints.send_message);
-        assert!(!hints.send_file);
+        assert!(hints.send);
     }
 
     #[test]
     fn detect_send_flow_tier2_no_match_without_recipient_keyword() {
-        // Chinese text with channel + generic send words but NO recipient keyword → false
         let messages = vec![ChatMessage::assistant(
             "好的，我将通过Telegram发送消息给您的联系人。",
         )];
         let hints = detect_active_send_hints(&messages);
-        assert!(!hints.send_message);
-        assert!(!hints.send_file);
+        assert!(!hints.send);
     }
-
-    // --- send_file flow detection tests ---
 
     #[test]
     fn detect_send_flow_with_send_file_tool_name() {
@@ -1157,42 +1038,34 @@ mod tests {
             "I'll use the send_file tool to send your photo via Telegram.",
         )];
         let hints = detect_active_send_hints(&messages);
-        assert!(!hints.send_message);
-        assert!(hints.send_file);
+        assert!(hints.send);
     }
 
     #[test]
-    fn detect_send_flow_send_file_parens() {
+    fn detect_send_flow_send_parens() {
         let messages = vec![ChatMessage::assistant(
-            "Let me call send_file( for your iMessage attachment.",
+            "Let me call send( for your iMessage attachment.",
         )];
         let hints = detect_active_send_hints(&messages);
-        assert!(!hints.send_message);
-        assert!(hints.send_file);
+        assert!(hints.send);
     }
 
-    // --- new regression tests ---
-
     #[test]
-    fn keepalive_recipient_followup_injects_only_send_file() {
-        // Scenario: previous assistant turn mentioned send_file tool + Telegram,
-        // user replies with just a recipient. Only send_file should be injected.
+    fn keepalive_recipient_followup_with_send_file() {
         let messages = vec![ChatMessage::assistant(
             "I'll use the send_file tool to send your photo via Telegram. What's the recipient?",
         )];
         let hints = detect_active_send_hints(&messages);
-        assert!(hints.send_file, "send_file should be true (tool name in context)");
-        assert!(!hints.send_message, "send_message should NOT be injected");
+        assert!(hints.send);
     }
 
     #[test]
-    fn keepalive_recipient_followup_injects_only_send_message() {
+    fn keepalive_recipient_followup_with_send_message() {
         let messages = vec![ChatMessage::assistant(
             "I'll use send_message to send your text via Telegram. Who should I send it to?",
         )];
         let hints = detect_active_send_hints(&messages);
-        assert!(hints.send_message, "send_message should be true");
-        assert!(!hints.send_file, "send_file should NOT be injected");
+        assert!(hints.send);
     }
 
     #[test]
@@ -1201,28 +1074,20 @@ mod tests {
             "I can use send_message for text or send_file for attachments via Telegram.",
         )];
         let hints = detect_active_send_hints(&messages);
-        assert!(hints.send_message);
-        assert!(hints.send_file);
+        assert!(hints.send);
     }
 
     #[test]
-    fn keepalive_recipient_only_defaults_to_send_message() {
-        // Tier 2 recipient solicitation without file/message clue →
-        // defaults to send_message (GAP 2)
+    fn keepalive_recipient_only_defaults_to_send() {
         let messages = vec![ChatMessage::assistant(
             "你的 Telegram 收件人是？",
         )];
         let hints = detect_active_send_hints(&messages);
-        assert!(hints.send_message, "recipient-only defaults to send_message");
-        assert!(!hints.send_file, "send_file needs positive evidence");
+        assert!(hints.send);
     }
 
     #[test]
     fn keepalive_tier2_cross_message_backtrack() {
-        // GAP 1: Turn N-1 mentions send_file tool, Turn N asks for recipient.
-        // Turn N-1 Tier 1: "send_file" → send_file=true (accumulated)
-        // Turn N Tier 2: channel+recipient → backtracks to Turn N-1 →
-        //   finds "send_file" → send_file=true (no default fallback)
         let messages = vec![
             ChatMessage::assistant(
                 "I'll use the send_file tool to send your photo via Telegram.",
@@ -1233,16 +1098,12 @@ mod tests {
             ),
         ];
         let hints = detect_active_send_hints(&messages);
-        assert!(hints.send_file, "send_file from Turn N-1 Tier 1 should propagate");
-        assert!(!hints.send_message, "no send_message evidence; backtrack found send_file so no default");
+        assert!(hints.send);
     }
 
     #[test]
-    fn tier2_cross_channel_backtrack_does_not_leak() {
-        // Turn N-1: send_file for iMessage
-        // Turn N: Telegram recipient follow-up
-        // Backtrack should NOT pick up send_file (different channel)
-        // → defaults to send_message (GAP 2 fallback)
+    fn tier2_cross_channel_still_detects_send() {
+        // Both turns mention send-related content → send should be active
         let messages = vec![
             ChatMessage::assistant(
                 "I'll use the send_file tool to send your photo via iMessage.",
@@ -1253,10 +1114,8 @@ mod tests {
             ),
         ];
         let hints = detect_active_send_hints(&messages);
-        // Turn N-1 Tier 1 send_file is now blocked: iMessage ≠ Telegram
-        assert!(!hints.send_file, "cross-channel Tier 1 should not leak");
-        // Turn N Tier 2 backtracks but finds no shared-channel clue → default send_message
-        assert!(hints.send_message, "Tier 2 defaults to send_message when no channel-matching clue");
+        // Turn N-1 has send_file (Tier 1), Turn N has Tier 2 → both set send=true
+        assert!(hints.send);
     }
 
     // --- resolve_send_tool_choice unit tests ---
@@ -1265,53 +1124,14 @@ mod tests {
     use openalpaca_llm::ToolChoice;
 
     #[test]
-    fn tool_choice_both_from_keepalive_returns_any() {
-        // Neither tool suggested by intent (both injected via keep-alive)
-        let choice = resolve_send_tool_choice(false, false, true, true);
-        assert_eq!(choice, Some(ToolChoice::Any));
+    fn tool_choice_send_present_pins_send() {
+        let choice = resolve_send_tool_choice(true);
+        assert_eq!(choice, Some(ToolChoice::Tool("send".to_string())));
     }
 
     #[test]
-    fn tool_choice_intent_send_file_pins_send_file() {
-        // Intent detected send_file, keep-alive added send_message
-        let choice = resolve_send_tool_choice(false, true, true, true);
-        assert_eq!(
-            choice,
-            Some(ToolChoice::Tool("send_file".to_string()))
-        );
-    }
-
-    #[test]
-    fn tool_choice_intent_send_msg_pins_send_message() {
-        // Intent detected send_message, keep-alive added send_file
-        let choice = resolve_send_tool_choice(true, false, true, true);
-        assert_eq!(
-            choice,
-            Some(ToolChoice::Tool("send_message".to_string()))
-        );
-    }
-
-    #[test]
-    fn tool_choice_only_send_message_pins_it() {
-        let choice = resolve_send_tool_choice(true, false, true, false);
-        assert_eq!(
-            choice,
-            Some(ToolChoice::Tool("send_message".to_string()))
-        );
-    }
-
-    #[test]
-    fn tool_choice_only_send_file_pins_it() {
-        let choice = resolve_send_tool_choice(false, true, false, true);
-        assert_eq!(
-            choice,
-            Some(ToolChoice::Tool("send_file".to_string()))
-        );
-    }
-
-    #[test]
-    fn tool_choice_no_send_tools_returns_none() {
-        let choice = resolve_send_tool_choice(false, false, false, false);
+    fn tool_choice_no_send_returns_none() {
+        let choice = resolve_send_tool_choice(false);
         assert_eq!(choice, None);
     }
 
@@ -1320,90 +1140,74 @@ mod tests {
     use super::apply_send_keepalive;
 
     #[test]
-    fn apply_keepalive_injects_send_file_only() {
+    fn apply_keepalive_injects_send() {
         let messages = vec![ChatMessage::assistant(
             "I'll use the send_file tool via Telegram.",
         )];
         let mut tool_names = vec!["web_fetch".to_string()];
-        let (intent_msg, intent_file) = apply_send_keepalive(&mut tool_names, &messages);
-        assert!(!intent_msg);
-        assert!(!intent_file);
-        assert!(tool_names.contains(&"send_file".to_string()));
-        assert!(!tool_names.contains(&"send_message".to_string()));
+        let intent_send = apply_send_keepalive(&mut tool_names, &messages);
+        assert!(!intent_send);
+        assert!(tool_names.contains(&"send".to_string()));
     }
 
     #[test]
-    fn apply_keepalive_skips_when_intent_has_tool() {
+    fn apply_keepalive_skips_when_intent_has_send() {
         let messages = vec![ChatMessage::assistant(
-            "I'll use the send_message tool via Telegram.",
+            "I'll use the send tool via Telegram.",
         )];
-        let mut tool_names = vec!["send_message".to_string()];
-        let (intent_msg, intent_file) = apply_send_keepalive(&mut tool_names, &messages);
-        assert!(intent_msg);
-        assert!(!intent_file);
-        // No duplicate — still just one send_message
+        let mut tool_names = vec!["send".to_string()];
+        let intent_send = apply_send_keepalive(&mut tool_names, &messages);
+        assert!(intent_send);
+        // No duplicate
         assert_eq!(
-            tool_names.iter().filter(|t| *t == "send_message").count(),
+            tool_names.iter().filter(|t| *t == "send").count(),
             1
         );
     }
 
     #[test]
-    fn apply_keepalive_injects_both_when_both_hinted() {
+    fn apply_keepalive_injects_send_when_hinted() {
         let messages = vec![ChatMessage::assistant(
             "I can use send_message for text or send_file for attachments via Telegram.",
         )];
         let mut tool_names = vec![];
-        let (intent_msg, intent_file) = apply_send_keepalive(&mut tool_names, &messages);
-        assert!(!intent_msg);
-        assert!(!intent_file);
-        assert!(tool_names.contains(&"send_message".to_string()));
-        assert!(tool_names.contains(&"send_file".to_string()));
+        let intent_send = apply_send_keepalive(&mut tool_names, &messages);
+        assert!(!intent_send);
+        assert!(tool_names.contains(&"send".to_string()));
     }
 
     // --- end-to-end conflict path: intent + keep-alive → tool_choice ---
 
     #[test]
-    fn keepalive_plain_text_continuation_resolves_to_send_file() {
-        // Scenario: previous turn used send_file, user replies "好的，发吧".
-        // Precise keep-alive: only send_file injected, intent has neither → Tool("send_file")
+    fn keepalive_plain_text_continuation_resolves_to_send() {
         let messages = vec![ChatMessage::assistant(
             "I'll use the send_file tool via Telegram.",
         )];
         let parser = crate::orchestrator::intent::IntentParser;
         let mut tool_names = parser.suggest_tools("好的，发吧");
-        let (intent_msg, intent_file) = apply_send_keepalive(&mut tool_names, &messages);
+        let _intent_send = apply_send_keepalive(&mut tool_names, &messages);
 
-        let has_msg = tool_names.contains(&"send_message".to_string());
-        let has_file = tool_names.contains(&"send_file".to_string());
-        let choice = resolve_send_tool_choice(intent_msg, intent_file, has_msg, has_file);
-        assert_eq!(choice, Some(ToolChoice::Tool("send_file".to_string())));
+        let has_send = tool_names.contains(&"send".to_string());
+        let choice = resolve_send_tool_choice(has_send);
+        assert_eq!(choice, Some(ToolChoice::Tool("send".to_string())));
     }
 
     #[test]
-    fn keepalive_text_send_continuation_resolves_to_send_message() {
-        // Scenario: previous turn used send_message, user replies "发消息给他".
-        // Precise keep-alive: only send_message injected, intent also has send_message → pin
+    fn keepalive_text_send_continuation_resolves_to_send() {
         let messages = vec![ChatMessage::assistant(
             "好的，我将通过Telegram使用send_message工具发送消息。",
         )];
         let parser = crate::orchestrator::intent::IntentParser;
         let mut tool_names = parser.suggest_tools("发消息给他");
-        let (intent_msg, intent_file) = apply_send_keepalive(&mut tool_names, &messages);
+        let _intent_send = apply_send_keepalive(&mut tool_names, &messages);
 
-        let has_msg = tool_names.contains(&"send_message".to_string());
-        let has_file = tool_names.contains(&"send_file".to_string());
-        let choice = resolve_send_tool_choice(intent_msg, intent_file, has_msg, has_file);
-        assert_eq!(
-            choice,
-            Some(ToolChoice::Tool("send_message".to_string()))
-        );
+        let has_send = tool_names.contains(&"send".to_string());
+        let choice = resolve_send_tool_choice(has_send);
+        assert_eq!(choice, Some(ToolChoice::Tool("send".to_string())));
     }
 
     #[test]
-    fn apply_keepalive_cross_channel_injects_only_send_message() {
-        // iMessage send_file in Turn N-1, Telegram recipient follow-up in Turn N
-        // → only send_message should be injected (from Tier 2 GAP 2 fallback)
+    fn apply_keepalive_cross_channel_injects_send() {
         let messages = vec![
             ChatMessage::assistant(
                 "I'll use the send_file tool to send your photo via iMessage.",
@@ -1414,11 +1218,9 @@ mod tests {
             ),
         ];
         let mut tool_names = vec!["web_fetch".to_string()];
-        let (intent_msg, intent_file) = apply_send_keepalive(&mut tool_names, &messages);
-        assert!(!intent_msg);
-        assert!(!intent_file);
-        assert!(tool_names.contains(&"send_message".to_string()), "Tier 2 GAP 2 fallback");
-        assert!(!tool_names.contains(&"send_file".to_string()), "cross-channel send_file must not leak");
-        assert_eq!(tool_names.len(), 2); // web_fetch + send_message only
+        let intent_send = apply_send_keepalive(&mut tool_names, &messages);
+        assert!(!intent_send);
+        assert!(tool_names.contains(&"send".to_string()));
+        assert_eq!(tool_names.len(), 2); // web_fetch + send
     }
 }

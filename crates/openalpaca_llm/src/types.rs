@@ -224,9 +224,9 @@ pub enum ToolChoice {
 pub struct CacheControl {
     #[serde(rename = "type")]
     pub type_: String,
-    /// Optional TTL for cache entries. Default: provider-determined (Anthropic = 5 min).
+    /// Optional TTL in seconds. Default: provider-determined (Anthropic = 5 min).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ttl: Option<String>,
+    pub ttl: Option<u32>,
 }
 
 impl CacheControl {
@@ -242,7 +242,7 @@ impl CacheControl {
     pub fn ephemeral_1h() -> Self {
         Self {
             type_: "ephemeral".to_string(),
-            ttl: Some("3600".to_string()),
+            ttl: Some(3600),
         }
     }
 }

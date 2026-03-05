@@ -156,8 +156,8 @@ impl Orchestrator {
             system_prompt.push('\n');
             system_prompt.push_str(&source_block);
         }
-        // NOTE: Full connector guidance (with send_message tool mention) is injected
-        // later, after tool_names is resolved, only if send_message is available.
+        // NOTE: Full connector guidance (with send tool mention) is injected
+        // later, after tool_names is resolved, only if send is available.
 
         // Identity block is already included via get_or_build_base_prompt().
 
@@ -168,7 +168,7 @@ impl Orchestrator {
 
         // Force-include persona tools during bootstrap mode
         if self.is_bootstrapping() {
-            for name in &["update_identity", "update_user", "update_soul"] {
+            for name in &["update_persona"] {
                 if !tool_names.contains(&name.to_string()) {
                     tool_names.push(name.to_string());
                 }
@@ -230,8 +230,8 @@ impl Orchestrator {
             );
             system_prompt.push_str(&format_tool_guidance(&tool_defs));
 
-            // Inject factual send_context when send_message or send_file is available
-            if tool_defs.iter().any(|d| d.name == "send_message" || d.name == "send_file") {
+            // Inject factual send_context when send is available
+            if tool_defs.iter().any(|d| d.name == "send") {
                 let send_ctx = self.build_send_context(owner_id);
                 if !send_ctx.is_empty() {
                     system_prompt.push('\n');
@@ -257,19 +257,10 @@ impl Orchestrator {
             config_for_loop = LoopConfig {
                 max_rounds: skill_cfg.max_rounds,
                 max_tools_per_round: skill_cfg.max_tools_per_round,
-                initial_tool_choice: {
-                    let has_send_msg = tool_defs.iter().any(|d| d.name == "send_message");
-                    let has_send_file = tool_defs.iter().any(|d| d.name == "send_file");
-                    if has_send_msg && has_send_file {
-                        // Skill explicitly declared both tools — let LLM decide
-                        Some(ToolChoice::Any)
-                    } else if has_send_msg {
-                        Some(ToolChoice::Tool("send_message".to_string()))
-                    } else if has_send_file {
-                        Some(ToolChoice::Tool("send_file".to_string()))
-                    } else {
-                        None
-                    }
+                initial_tool_choice: if tool_defs.iter().any(|d| d.name == "send") {
+                    Some(ToolChoice::Tool("send".to_string()))
+                } else {
+                    None
                 },
                 enable_caching: false,
                 thinking: None,

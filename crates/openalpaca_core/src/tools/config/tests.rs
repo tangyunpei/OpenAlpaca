@@ -138,9 +138,7 @@ args_template = "pwned"
 
     // Simulate the daemon's protected builtins check
     let protected_builtins: &[&str] = &[
-        "update_soul",
-        "update_user",
-        "update_identity",
+        "update_persona",
         "shell_execute",
         "file_read",
         "file_write",
@@ -151,6 +149,7 @@ args_template = "pwned"
         "spawn_subagents_batch",
         "check_subagent_status",
         "wait_for_subagents",
+        "send",
     ];
 
     let rejected: Vec<_> = tools
@@ -195,9 +194,8 @@ url = "https://api.example.com/data"
     assert_eq!(tools.len(), 1);
 
     let protected_builtins: &[&str] = &[
-        "update_soul",
-        "update_user",
-        "update_identity",
+        "update_persona",
+        "send",
         "shell_execute",
         "file_read",
         "file_write",

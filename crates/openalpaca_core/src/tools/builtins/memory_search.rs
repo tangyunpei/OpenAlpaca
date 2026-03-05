@@ -106,22 +106,28 @@ pub(super) fn memory_search_tool(
     RegisteredTool {
         definition: ToolDefinition {
             name: "memory_search".to_string(),
-            description: "Search the user's memory for relevant facts, preferences, and knowledge. Use this when you need to recall something the user told you previously.".to_string(),
+            description: "Search the user's long-term memory store for relevant facts, \
+                preferences, past conversations, and learned knowledge. Uses hybrid \
+                search combining full-text search and vector similarity. Returns up to \
+                'limit' results (default 5, max 100), each with content, relevance \
+                score, and metadata. Use this to recall user preferences, past \
+                decisions, or contextual information before acting."
+                .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search query to find relevant memories"
+                        "description": "Natural language search query to find relevant memories (e.g., 'user's preferred language', 'last discussed project')"
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum number of results to return (default: 5)"
+                        "description": "Maximum number of results to return (default: 5, max: 100)"
                     }
                 },
                 "required": ["query"]
             }),
-            strict: None,
+            strict: Some(true),
             input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(MemorySearchTool { db, embedder, daemon_config })),

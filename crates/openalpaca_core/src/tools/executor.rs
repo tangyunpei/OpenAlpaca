@@ -9,9 +9,7 @@ use std::sync::Arc;
 /// are stripped to prevent spoofing.
 const OWNER_SCOPED_TOOLS: &[&str] = &[
     "memory_search",
-    "update_user",
-    "update_soul",
-    "update_identity",
+    "update_persona",
 ];
 
 /// Tool executor backed by a ToolRegistry.
