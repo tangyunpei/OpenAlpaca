@@ -101,10 +101,25 @@ impl super::PersonaHandler for UserHandler {
         let mut modified = Vec::new();
 
         if let Some(v) = obj.get("identity") {
-            let identity_obj = v
-                .as_object()
-                .ok_or_else(|| "sections.identity must be a JSON object".to_string())?;
-            for (key, val) in identity_obj {
+            // Accept either a JSON object or a JSON-encoded string (for OpenAI strict mode
+            // compatibility, where free-form objects can't be expressed in the schema).
+            let identity_obj = if let Some(s) = v.as_str() {
+                let parsed: serde_json::Value = serde_json::from_str(s)
+                    .map_err(|e| format!("sections.identity string is not valid JSON: {}", e))?;
+                parsed
+                    .as_object()
+                    .cloned()
+                    .ok_or_else(|| {
+                        "sections.identity must be a JSON object (or a JSON-encoded string of an object)".to_string()
+                    })?
+            } else {
+                v.as_object()
+                    .cloned()
+                    .ok_or_else(|| {
+                        "sections.identity must be a JSON object or JSON-encoded string".to_string()
+                    })?
+            };
+            for (key, val) in &identity_obj {
                 let s = val
                     .as_str()
                     .ok_or_else(|| format!("identity.{} must be a string", key))?;

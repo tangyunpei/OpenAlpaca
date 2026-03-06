@@ -296,6 +296,47 @@ impl EventBroadcaster {
                     });
                     repo.log("skill_catalog_updated", None, Some(&detail), None)
                 }
+                ServerEvent::SkillInvocationStarted {
+                    request_id,
+                    skill_id,
+                    query_preview,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "request_id": request_id,
+                        "skill_id": skill_id,
+                        "query_preview": query_preview,
+                    });
+                    repo.log("skill_invocation_started", None, Some(&detail), None)
+                }
+                ServerEvent::SkillCompleted {
+                    request_id,
+                    skill_id,
+                    duration_ms,
+                    output_preview,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "request_id": request_id,
+                        "skill_id": skill_id,
+                        "duration_ms": duration_ms,
+                        "output_preview": output_preview,
+                    });
+                    repo.log("skill_completed", None, Some(&detail), None)
+                }
+                ServerEvent::SkillFailed {
+                    request_id,
+                    skill_id,
+                    error,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "request_id": request_id,
+                        "skill_id": skill_id,
+                        "error": error,
+                    });
+                    repo.log("skill_failed", None, Some(&detail), None)
+                }
                 ServerEvent::TaskReplanned {
                     task_id,
                     replan_number,
@@ -608,6 +649,60 @@ impl EventBroadcaster {
         let event = ServerEvent::SkillCatalogUpdated {
             skill_name: skill_name.to_string(),
             action: action.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a skill invocation started event and persist it
+    pub fn skill_invocation_started(
+        &self,
+        request_id: &str,
+        skill_id: &str,
+        query_preview: &str,
+    ) {
+        let event = ServerEvent::SkillInvocationStarted {
+            request_id: request_id.to_string(),
+            skill_id: skill_id.to_string(),
+            query_preview: query_preview.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a skill completed event and persist it
+    pub fn skill_completed(
+        &self,
+        request_id: &str,
+        skill_id: &str,
+        duration_ms: u64,
+        output_preview: &str,
+    ) {
+        let event = ServerEvent::SkillCompleted {
+            request_id: request_id.to_string(),
+            skill_id: skill_id.to_string(),
+            duration_ms,
+            output_preview: output_preview.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a skill failed event and persist it
+    pub fn skill_failed(&self, request_id: &str, skill_id: &str, error: &str) {
+        let event = ServerEvent::SkillFailed {
+            request_id: request_id.to_string(),
+            skill_id: skill_id.to_string(),
+            error: error.to_string(),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };

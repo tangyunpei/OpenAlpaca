@@ -168,6 +168,30 @@ impl SkillCatalog {
         let frontmatter =
             parse_skill_frontmatter(&content).map_err(|e| format!("parse error: {}", e))?;
 
+        // Deprecation warnings for parsed-but-dead fields
+        if frontmatter.context.summarize.enabled {
+            let msg = format!(
+                "Skill '{}': 'context.summarize.enabled' is deprecated and has no effect. \
+                 Use 'context.budget_tokens' for context size control.",
+                frontmatter.name
+            );
+            tracing::warn!("SkillCatalog: {}", msg);
+            if let Ok(mut errors) = self.validation_errors.write() {
+                errors.push(msg);
+            }
+        }
+        if !frontmatter.tools.defaults.is_empty() {
+            let msg = format!(
+                "Skill '{}': 'tools.defaults' is deprecated and has no effect. \
+                 Tool default arguments are not injected at runtime.",
+                frontmatter.name
+            );
+            tracing::warn!("SkillCatalog: {}", msg);
+            if let Ok(mut errors) = self.validation_errors.write() {
+                errors.push(msg);
+            }
+        }
+
         // Validation: invoke.mode == "disabled" => skip
         if frontmatter.invoke.mode == "disabled" {
             tracing::info!(

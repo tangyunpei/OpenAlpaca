@@ -128,7 +128,10 @@ pub(super) fn memory_search_tool(
                 "required": ["query"]
             }),
             strict: Some(true),
-            input_examples: None,
+            input_examples: Some(vec![
+                serde_json::json!({"query": "user preferences for code style"}),
+                serde_json::json!({"query": "previous conversation about authentication", "limit": 10}),
+            ]),
         },
         backend: ToolBackend::BuiltIn(Arc::new(MemorySearchTool { db, embedder, daemon_config })),
     }

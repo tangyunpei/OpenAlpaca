@@ -1,5 +1,5 @@
 use super::context::inject_skill_context;
-use super::output::validate_skill_output;
+use super::output::{deterministic_repair, validate_skill_output};
 use crate::events::SystemEvent;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::guard::{OutputGuard, detect_hallucinated_send};
@@ -41,6 +41,22 @@ fn preflight_permissions(frontmatter: &SkillFrontmatter) -> Result<(), String> {
     }
 }
 
+/// Result of a skill invocation, carrying LLM metadata alongside the output content.
+#[allow(dead_code)]
+pub(crate) struct SkillInvocationResult {
+    pub content: String,
+    pub finish_reason: LoopFinishReason,
+    pub rounds_used: usize,
+    pub tool_calls_made: usize,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cost_usd: f64,
+    pub model_used: Option<String>,
+    pub repair_attempted: bool,
+    pub repair_succeeded: bool,
+    pub validation_failures: Vec<String>,
+}
+
 impl Orchestrator {
     /// Handle a skill invocation: load full SKILL.md, inject as context, run agentic loop.
     ///
@@ -75,12 +91,12 @@ impl Orchestrator {
 
         // Emit SkillCompleted or SkillFailed based on result
         match &result {
-            Ok(validated) => {
+            Ok(invocation_result) => {
                 self.bus.publish(SystemEvent::SkillCompleted {
                     request_id,
                     skill_id: skill_name.to_string(),
                     duration_ms: invocation_start.elapsed().as_millis() as u64,
-                    output_preview: validated.chars().take(200).collect(),
+                    output_preview: invocation_result.content.chars().take(200).collect(),
                     timestamp: Utc::now(),
                 });
             }
@@ -94,7 +110,7 @@ impl Orchestrator {
             }
         }
 
-        result
+        result.map(|r| r.content)
     }
 
     /// Inner implementation of skill invocation (separated for lifecycle event wrapping).
@@ -108,7 +124,7 @@ impl Orchestrator {
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
-    ) -> Result<String, String> {
+    ) -> Result<SkillInvocationResult, String> {
         // Look up the catalog entry (for skill_dir) and load full skill (Level 2)
         let entry = self
             .skill_catalog
@@ -250,7 +266,7 @@ impl Orchestrator {
                 allowed_capabilities: resolved,
                 denied_capabilities: denied_caps,
                 require_confirmation_for: skill_doc.frontmatter.permissions.confirm.tools.clone(),
-                max_tool_calls: None,
+                max_tool_calls: skill_doc.frontmatter.tools.rate_limit.max_calls.map(|n| n as u32),
                 max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
             });
             let skill_cfg = &self.daemon_config.load().execution.skill_defaults;
@@ -262,7 +278,7 @@ impl Orchestrator {
                 } else {
                     None
                 },
-                enable_caching: false,
+                enable_caching: true,
                 thinking: None,
                 ..self.loop_config.clone()
             };
@@ -272,6 +288,15 @@ impl Orchestrator {
             policy_opt = None;
             config_for_loop = self.loop_config.clone();
         }
+
+        // Metadata accumulators for SkillInvocationResult
+        let mut inv_finish_reason = LoopFinishReason::Complete;
+        let mut inv_rounds_used = 0usize;
+        let mut inv_tool_calls_made = 0usize;
+        let mut inv_input_tokens = 0u32;
+        let mut inv_output_tokens = 0u32;
+        let mut inv_cost_usd = 0.0f64;
+        let mut inv_model_used: Option<String> = None;
 
         let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
             let mut messages = Vec::with_capacity(4 + ctx.recent_messages.len());
@@ -468,6 +493,15 @@ impl Orchestrator {
                 },
             );
 
+            // Capture loop metadata for SkillInvocationResult
+            inv_finish_reason = result.finish_reason.clone();
+            inv_rounds_used = result.rounds_used;
+            inv_tool_calls_made = result.tool_calls_made;
+            inv_input_tokens = result.total_input_tokens;
+            inv_output_tokens = result.total_output_tokens;
+            inv_cost_usd = call_cost;
+            inv_model_used = result.model_used.clone();
+
             if let LoopFinishReason::Error(ref err) = result.finish_reason
                 && result.final_content.trim().is_empty()
             {
@@ -510,19 +544,59 @@ impl Orchestrator {
         };
 
         // Skill output validation (required_sections, format checks)
+        let mut repair_attempted = false;
+        let mut repair_succeeded = false;
+        let mut validation_failures: Vec<String> = Vec::new();
         let validated = match validate_skill_output(&guarded, &skill_doc.frontmatter.output) {
             Ok(v) => v,
             Err(validation_err) => {
-                // Attempt one self-repair: log the error and return original output
-                // with a warning. A full re-run would require re-entering the agentic
-                // loop which is expensive; instead we log and pass through.
-                tracing::warn!(
-                    "Skill '{}' output validation failed: {}. Passing through as-is.",
-                    skill_name,
-                    validation_err
-                );
-                guarded
+                validation_failures.push(validation_err.to_string());
+                if skill_doc.frontmatter.output.auto_repair {
+                    repair_attempted = true;
+                    if let Some((repaired, ok)) =
+                        deterministic_repair(&guarded, &validation_err)
+                    {
+                        repair_succeeded = ok;
+                        tracing::info!(
+                            "Skill '{}': deterministic repair {}",
+                            skill_name,
+                            if ok { "succeeded" } else { "failed" }
+                        );
+                        repaired
+                    } else {
+                        tracing::warn!(
+                            "Skill '{}' output validation failed: {}. No deterministic fix available.",
+                            skill_name,
+                            validation_err
+                        );
+                        guarded
+                    }
+                } else {
+                    tracing::warn!(
+                        "Skill '{}' output validation failed: {}. Passing through as-is.",
+                        skill_name,
+                        validation_err
+                    );
+                    guarded
+                }
             }
+        };
+
+        // Enforce max_length hard truncation
+        let validated = if let Some(max_len) = skill_doc.frontmatter.output.max_length {
+            if validated.chars().count() > max_len {
+                tracing::info!(
+                    "Skill '{}': output truncated from {} to {} chars (max_length)",
+                    skill_name,
+                    validated.chars().count(),
+                    max_len
+                );
+                validated.chars().take(max_len).collect()
+            } else {
+                validated
+            }
+        } else {
+            validated
         };
 
         // Emit AgentResponse event
@@ -533,7 +607,19 @@ impl Orchestrator {
             timestamp: Utc::now(),
         });
 
-        Ok(validated)
+        Ok(SkillInvocationResult {
+            content: validated,
+            finish_reason: inv_finish_reason,
+            rounds_used: inv_rounds_used,
+            tool_calls_made: inv_tool_calls_made,
+            input_tokens: inv_input_tokens,
+            output_tokens: inv_output_tokens,
+            cost_usd: inv_cost_usd,
+            model_used: inv_model_used,
+            repair_attempted,
+            repair_succeeded,
+            validation_failures,
+        })
     }
 }
 

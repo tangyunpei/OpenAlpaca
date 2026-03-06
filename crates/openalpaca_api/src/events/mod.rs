@@ -173,6 +173,31 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// A skill invocation started
+    SkillInvocationStarted {
+        request_id: String,
+        skill_id: String,
+        query_preview: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// A skill invocation completed successfully
+    SkillCompleted {
+        request_id: String,
+        skill_id: String,
+        duration_ms: u64,
+        output_preview: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// A skill invocation failed
+    SkillFailed {
+        request_id: String,
+        skill_id: String,
+        error: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
     /// A task DAG was replanned during execution
     TaskReplanned {
         task_id: String,

@@ -396,10 +396,16 @@ pub fn spawn_event_bridge(eb: EventBroadcaster, bus: &EventBus, cancel: Cancella
                 openalpaca_core::events::SystemEvent::SkillInvocationStarted {
                     request_id,
                     skill_id,
+                    query_preview,
                     ..
                 } => {
                     tracing::debug!(
                         "Skill invocation started: request={request_id}, skill={skill_id}"
+                    );
+                    eb.skill_invocation_started(
+                        &request_id.to_string(),
+                        &skill_id,
+                        &query_preview,
                     );
                 }
                 openalpaca_core::events::SystemEvent::SkillContextInjected {
@@ -416,10 +422,17 @@ pub fn spawn_event_bridge(eb: EventBroadcaster, bus: &EventBus, cancel: Cancella
                     request_id,
                     skill_id,
                     duration_ms,
+                    output_preview,
                     ..
                 } => {
                     tracing::info!(
                         "Skill completed: request={request_id}, skill={skill_id}, duration={duration_ms}ms"
+                    );
+                    eb.skill_completed(
+                        &request_id.to_string(),
+                        &skill_id,
+                        duration_ms,
+                        &output_preview,
                     );
                 }
                 openalpaca_core::events::SystemEvent::SkillFailed {
@@ -431,6 +444,7 @@ pub fn spawn_event_bridge(eb: EventBroadcaster, bus: &EventBus, cancel: Cancella
                     tracing::warn!(
                         "Skill failed: request={request_id}, skill={skill_id}, error={error}"
                     );
+                    eb.skill_failed(&request_id.to_string(), &skill_id, &error);
                 } // NO catch-all: compiler will flag any missing SystemEvent variant
             }
         }
