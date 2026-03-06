@@ -84,7 +84,10 @@ pub(super) fn shell_execute_tool() -> RegisteredTool {
                 "required": ["command"]
             }),
             strict: Some(true),
-            input_examples: None,
+            input_examples: Some(vec![
+                serde_json::json!({"command": "ls -la /tmp"}),
+                serde_json::json!({"command": "grep -rn 'TODO' src/"}),
+            ]),
         },
         backend: ToolBackend::BuiltIn(Arc::new(ShellExecuteTool)),
     }

@@ -336,3 +336,101 @@ async fn test_sections_rejects_wrong_type_array_fields() {
         "core_truths=string should report type error"
     );
 }
+
+// --- User identity as JSON string (OpenAI strict mode compatibility) ---
+
+/// Helper: write a minimal valid USER.md to the tool's user_path.
+fn write_valid_user_md(tool: &PersonaUpdateTool) {
+    let valid_user = r#"---
+title: "Test User"
+summary: "A test user profile"
+read_when:
+  - always
+---
+
+## Identity
+
+* Name: Test
+* Timezone: UTC
+
+## Communication Style
+
+Concise.
+
+## Expertise & Background
+
+Rust.
+
+## Projects & Context
+
+OpenAlpaca.
+
+## Preferences
+
+None.
+
+## Notes
+
+None.
+"#;
+    std::fs::write(&tool.user.user_path, valid_user).unwrap();
+}
+
+#[tokio::test]
+async fn test_user_sections_identity_as_json_string() {
+    let (tool, _dir) = make_persona_tool();
+    write_valid_user_md(&tool);
+
+    let result = tool
+        .execute(&serde_json::json!({
+            "target": "user",
+            "mode": "sections",
+            "sections": { "identity": "{\"Name\": \"Alice\", \"role\": \"engineer\"}" }
+        }))
+        .await;
+    assert!(
+        result.is_ok(),
+        "JSON-encoded identity string should be accepted: {:?}",
+        result
+    );
+    let json: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert_eq!(json["status"], "applied");
+}
+
+#[tokio::test]
+async fn test_user_sections_identity_as_object() {
+    let (tool, _dir) = make_persona_tool();
+    write_valid_user_md(&tool);
+
+    let result = tool
+        .execute(&serde_json::json!({
+            "target": "user",
+            "mode": "sections",
+            "sections": { "identity": {"Name": "Bob"} }
+        }))
+        .await;
+    assert!(
+        result.is_ok(),
+        "Object identity should still be accepted: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn test_user_sections_identity_invalid_json_string() {
+    let (tool, _dir) = make_persona_tool();
+    write_valid_user_md(&tool);
+
+    let result = tool
+        .execute(&serde_json::json!({
+            "target": "user",
+            "mode": "sections",
+            "sections": { "identity": "not valid json" }
+        }))
+        .await;
+    assert!(result.is_err());
+    assert!(
+        result.unwrap_err().contains("not valid JSON"),
+        "Invalid JSON string should be rejected"
+    );
+}

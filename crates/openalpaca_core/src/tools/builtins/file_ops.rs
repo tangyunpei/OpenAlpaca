@@ -66,7 +66,9 @@ pub(super) fn file_read_tool(workspace_root: PathBuf) -> RegisteredTool {
                 "required": ["path"]
             }),
             strict: Some(true),
-            input_examples: None,
+            input_examples: Some(vec![
+                serde_json::json!({"path": "src/main.rs"}),
+            ]),
         },
         backend: ToolBackend::BuiltIn(Arc::new(FileReadTool { workspace_root })),
     }
@@ -175,7 +177,9 @@ pub(super) fn file_write_tool(workspace_root: PathBuf) -> RegisteredTool {
                 "required": ["path", "content"]
             }),
             strict: Some(true),
-            input_examples: None,
+            input_examples: Some(vec![
+                serde_json::json!({"path": "output/result.txt", "content": "Hello, world!"}),
+            ]),
         },
         backend: ToolBackend::BuiltIn(Arc::new(FileWriteTool { workspace_root })),
     }

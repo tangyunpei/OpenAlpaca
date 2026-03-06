@@ -163,8 +163,9 @@ fn test_render_minimal_roundtrip() {
 fn test_skill_to_prompt_block_nonempty() {
     let doc = parse_skill_markdown(VALID_SKILL).expect("should parse");
     let block = skill_to_prompt_block(&doc);
-    assert!(block.starts_with("### SKILL CONTEXT: Code Review ###"));
+    assert!(block.starts_with("<skill_context name=\"Code Review\""));
     assert!(block.contains("When performing a code review"));
+    assert!(block.ends_with("</skill_context>"));
 }
 
 #[test]

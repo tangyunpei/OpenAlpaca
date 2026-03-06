@@ -118,7 +118,9 @@ pub(super) fn web_fetch_tool() -> RegisteredTool {
                 "required": ["url"]
             }),
             strict: Some(true),
-            input_examples: None,
+            input_examples: Some(vec![
+                serde_json::json!({"url": "https://api.example.com/data"}),
+            ]),
         },
         backend: ToolBackend::BuiltIn(Arc::new(WebFetchTool)),
     }

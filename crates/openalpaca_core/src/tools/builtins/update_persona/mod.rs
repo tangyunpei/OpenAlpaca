@@ -207,7 +207,25 @@ pub(super) fn update_persona_tool(ctx: PersonaToolContext) -> RegisteredTool {
                     },
                     "sections": {
                         "type": "object",
-                        "description": "Section patches as a JSON object (required for 'sections' mode). Valid fields depend on target: soul has title/summary/core_truths/boundaries/vibe/continuity; user has identity/communication_style/expertise/projects/preferences/notes; identity has name/creature/vibe/emoji/avatar."
+                        "description": "Section patches (required for 'sections' mode). Valid fields depend on target. soul: title, summary, core_truths, boundaries, vibe, continuity. user: identity, communication_style, expertise, projects, preferences, notes. identity: name, creature, vibe, emoji, avatar.",
+                        "properties": {
+                            "title":               {"type": "string", "description": "Document title (soul)"},
+                            "summary":             {"type": "string", "description": "Brief summary (soul)"},
+                            "core_truths":         {"type": "array", "items": {"type": "string"}, "description": "Core truth statements (soul)"},
+                            "boundaries":          {"type": "array", "items": {"type": "string"}, "description": "Boundary rules (soul)"},
+                            "vibe":                {"type": "string", "description": "Personality vibe (soul, identity)"},
+                            "continuity":          {"type": "array", "items": {"type": "string"}, "description": "Continuity notes (soul)"},
+                            "identity":            {"type": "string", "description": "JSON-encoded key-value pairs for user identity fields. Example: {\"name\": \"Alice\", \"role\": \"engineer\"}"},
+                            "communication_style": {"type": "string", "description": "Communication style description (user)"},
+                            "expertise":           {"type": "string", "description": "Areas of expertise (user)"},
+                            "projects":            {"type": "string", "description": "Active projects (user)"},
+                            "preferences":         {"type": "string", "description": "User preferences (user)"},
+                            "notes":               {"type": "string", "description": "Freeform notes (user)"},
+                            "name":                {"type": "string", "description": "Agent name (identity)"},
+                            "creature":            {"type": "string", "description": "Creature/avatar type (identity)"},
+                            "emoji":               {"type": "string", "description": "Representative emoji (identity)"},
+                            "avatar":              {"type": "string", "description": "Avatar description (identity)"}
+                        }
                     }
                 },
                 "required": ["target", "mode"]

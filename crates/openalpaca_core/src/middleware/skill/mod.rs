@@ -153,9 +153,9 @@ pub enum ContextSource {
     },
 }
 
-// TODO(P2-3): SummarizeConfig is parsed but not yet enforced at runtime.
-// When enabled, context injection should summarize large context blocks
-// before injecting them into the prompt.
+/// DEPRECATED: `context.summarize` is parsed for backward compatibility but has
+/// no runtime effect. Use `context.budget_tokens` for context size control.
+/// Kept with `#[serde(default)]` to prevent YAML deserialization breakage.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SummarizeConfig {
@@ -218,9 +218,8 @@ impl Default for PermissionsConfig {
     }
 }
 
-// TODO(P2-3): RateLimitConfig is parsed but not yet enforced at runtime.
-// When implemented, tool calls within a skill invocation should be rate-limited
-// according to these settings.
+/// Rate limiting for tool calls within a skill invocation.
+/// `max_calls` is propagated to `SandboxPolicy.max_tool_calls` in the handler.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RateLimitConfig {
@@ -235,8 +234,8 @@ pub struct ToolsConfig {
     pub allow: Vec<String>,
     /// Denied tools (blacklist)
     pub deny: Vec<String>,
-    /// Per-tool default parameters
-    /// TODO(P2-3): defaults are parsed but not yet injected into tool calls at runtime.
+    /// DEPRECATED: `tools.defaults` is parsed for backward compatibility but has
+    /// no runtime effect. Tool default arguments are not injected at runtime.
     #[serde(default)]
     pub defaults: HashMap<String, serde_json::Value>,
     /// Rate limiting for tool calls
@@ -255,13 +254,15 @@ pub struct ExpectConfig {
 pub struct OutputConfig {
     /// Output format hint ("text" | "json" | "markdown")
     pub format: Option<String>,
-    /// Max output length in characters
-    /// TODO(P2-3): max_length is parsed but not yet enforced at runtime.
+    /// Max output length in characters. Enforced as hard truncation in handler.
     pub max_length: Option<usize>,
     /// Required H2 section headings in the output (for markdown format).
     pub required_sections: Vec<String>,
     /// Max output tokens (estimated as chars/4).
     pub max_tokens: Option<usize>,
+    /// When true, attempt deterministic repair of validation failures.
+    #[serde(default)]
+    pub auto_repair: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -546,16 +547,26 @@ pub fn render_skill_markdown(doc: &SkillDocument) -> String {
 
 /// Render a skill's instructions into a prompt block for LLM context injection.
 ///
-/// Budget: 4000 characters. Returns empty string if body is empty.
+/// Wraps `doc.body` in `<skill_context>` XML tags with name/description attributes.
+/// Budget respects `context.budget_tokens` (default 4000 tokens ≈ 16000 chars).
+/// Returns empty string if body is empty (no empty XML tags).
 pub fn skill_to_prompt_block(doc: &SkillDocument) -> String {
     if doc.body.trim().is_empty() {
         return String::new();
     }
 
-    let mut block = format!("### SKILL CONTEXT: {} ###\n", doc.frontmatter.name);
-    let truncated: String = doc.body.chars().take(4000).collect();
-    block.push_str(&truncated);
-    block
+    let budget_chars = if doc.frontmatter.context.budget_tokens > 0 {
+        doc.frontmatter.context.budget_tokens * 4
+    } else {
+        4000 * 4 // default: 4000 tokens ≈ 16000 chars
+    };
+    let truncated: String = doc.body.chars().take(budget_chars).collect();
+    format!(
+        "<skill_context name=\"{}\" description=\"{}\">\n{}\n</skill_context>",
+        doc.frontmatter.name,
+        doc.frontmatter.description,
+        truncated,
+    )
 }
 
 /// Check whether a skill document has meaningful content (non-empty body).
