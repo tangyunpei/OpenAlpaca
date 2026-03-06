@@ -165,14 +165,18 @@ impl AnthropicProvider {
                 }
                 Role::Assistant => {
                     if let Some(ref tool_calls) = msg.tool_calls {
-                        // Assistant message with tool use
-                        let mut content = Vec::new();
-                        if !msg.content.is_empty() {
-                            content.push(serde_json::json!({
-                                "type": "text",
-                                "text": msg.content,
-                            }));
-                        }
+                        let mut content: Vec<serde_json::Value> = match &msg.parts {
+                            Some(parts) if !parts.is_empty() => {
+                                match Self::build_message_content(msg) {
+                                    serde_json::Value::Array(blocks) => blocks,
+                                    val => vec![val],
+                                }
+                            }
+                            _ if !msg.content.is_empty() => {
+                                vec![serde_json::json!({"type": "text", "text": msg.content})]
+                            }
+                            _ => vec![],
+                        };
                         for tc in tool_calls {
                             content.push(serde_json::json!({
                                 "type": "tool_use",
@@ -188,17 +192,18 @@ impl AnthropicProvider {
                     } else {
                         messages.push(serde_json::json!({
                             "role": "assistant",
-                            "content": msg.content,
+                            "content": Self::build_message_content(msg),
                         }));
                     }
                 }
                 Role::Tool => {
+                    let tool_content = Self::build_message_content(msg);
                     messages.push(serde_json::json!({
                         "role": "user",
                         "content": [{
                             "type": "tool_result",
                             "tool_use_id": msg.tool_call_id,
-                            "content": msg.content,
+                            "content": tool_content,
                         }],
                     }));
                 }
@@ -318,6 +323,7 @@ impl AnthropicProvider {
         let mut content = String::new();
         let mut tool_calls = Vec::new();
         let mut thinking = None;
+        let mut parts_vec: Vec<ContentPart> = Vec::new();
 
         if let Some(content_blocks) = body["content"].as_array() {
             for block in content_blocks {
@@ -337,6 +343,7 @@ impl AnthropicProvider {
                                 content.push('\n');
                             }
                             content.push_str(text);
+                            parts_vec.push(ContentPart::Text { text: text.to_string() });
                         }
                     }
                     Some("tool_use") => {
@@ -358,6 +365,7 @@ impl AnthropicProvider {
             usage,
             finish_reason,
             thinking,
+            parts: if parts_vec.is_empty() { None } else { Some(parts_vec) },
         })
     }
 }

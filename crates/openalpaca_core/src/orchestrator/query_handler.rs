@@ -60,8 +60,11 @@ pub(super) struct ActiveSendHints {
 /// Uses a tiered priority system per assistant message (last 2 within 6-message window):
 /// - **Tier 1**: Literal tool name (`send(`, `send tool`, `"send"`, `` `send` ``, `call send`, `use send`) — highest confidence.
 /// - **Tier 2**: Channel + recipient-solicitation keywords — defaults to send active.
-pub(super) fn detect_active_send_hints(recent_messages: &[ChatMessage]) -> ActiveSendHints {
-    const CHANNEL_KW: &[&str] = &["telegram", "imessage", "slack", "discord", "whatsapp", "wechat", "signal"];
+pub(super) fn detect_active_send_hints(
+    recent_messages: &[ChatMessage],
+    active_channels: &[String],
+) -> ActiveSendHints {
+    const FALLBACK_CHANNEL_KW: &[&str] = &["telegram", "imessage", "slack", "discord", "whatsapp", "wechat", "signal"];
     const SEND_KW: &[&str] = &["send(", "send tool", "\"send\"", "`send`", "call send", "use send"];
     const RECIPIENT_KW: &[&str] = &[
         "recipient", "chat_id", "收件人", "发给谁", "发送给",
@@ -88,7 +91,8 @@ pub(super) fn detect_active_send_hints(recent_messages: &[ChatMessage]) -> Activ
         }
 
         // Tier 2: channel + recipient-solicitation
-        let has_channel = CHANNEL_KW.iter().any(|k| lower.contains(k));
+        let has_channel = active_channels.iter().any(|k| lower.contains(&k.to_lowercase()))
+            || FALLBACK_CHANNEL_KW.iter().any(|k| lower.contains(k));
         if !has_channel {
             continue;
         }
@@ -119,10 +123,11 @@ fn resolve_send_tool_choice(has_send: bool) -> Option<ToolChoice> {
 fn apply_send_keepalive(
     tool_names: &mut Vec<String>,
     recent_messages: &[ChatMessage],
+    active_channels: &[String],
 ) -> bool {
     let intent_has_send = tool_names.contains(&"send".to_string());
 
-    let keepalive = detect_active_send_hints(recent_messages);
+    let keepalive = detect_active_send_hints(recent_messages, active_channels);
     if !intent_has_send && keepalive.send {
         tool_names.push("send".to_string());
     }
@@ -354,7 +359,7 @@ impl Orchestrator {
         // Tool suggestion should be based on raw user intent text, not attachment-injected context.
         let mut tool_names = self.intent_parser.suggest_tools(tool_suggestion_query);
         let _intent_has_send =
-            apply_send_keepalive(&mut tool_names, &ctx.recent_messages);
+            apply_send_keepalive(&mut tool_names, &ctx.recent_messages, &sendable_channels);
 
         // Force-include persona tools during bootstrap mode
         if self.is_bootstrapping() {
@@ -918,7 +923,7 @@ mod tests {
         let messages = vec![ChatMessage::assistant(
             "I can help you send a message via Telegram using the send tool.",
         )];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(hints.send);
     }
 
@@ -927,13 +932,13 @@ mod tests {
         let messages = vec![ChatMessage::assistant(
             "Sure, I'll help you with that task.",
         )];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(!hints.send);
     }
 
     #[test]
     fn detect_send_flow_empty_messages() {
-        assert!(!detect_active_send_hints(&[]).send);
+        assert!(!detect_active_send_hints(&[], &[]).send);
     }
 
     #[test]
@@ -941,7 +946,7 @@ mod tests {
         let messages = vec![ChatMessage::user(
             "send message to telegram",
         )];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(!hints.send);
     }
 
@@ -950,7 +955,7 @@ mod tests {
         let messages = vec![ChatMessage::assistant(
             "Telegram is a messaging platform.",
         )];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(!hints.send);
     }
 
@@ -959,7 +964,7 @@ mod tests {
         let messages = vec![ChatMessage::assistant(
             "好的，我将通过Telegram发送消息给您的联系人。",
         )];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(!hints.send);
     }
 
@@ -968,7 +973,7 @@ mod tests {
         let messages = vec![ChatMessage::assistant(
             "好的，我将通过Telegram使用`send`工具发送消息。",
         )];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(hints.send);
     }
 
@@ -981,7 +986,7 @@ mod tests {
         for _ in 0..2 {
             messages.push(ChatMessage::assistant("Here is some other info."));
         }
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(!hints.send);
     }
 
@@ -992,7 +997,7 @@ mod tests {
             ChatMessage::user("等一下"),
             ChatMessage::user("用 default"),
         ];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(hints.send);
     }
 
@@ -1001,7 +1006,7 @@ mod tests {
         let messages = vec![ChatMessage::assistant(
             "Telegram is great for groups and channels.",
         )];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(!hints.send);
     }
 
@@ -1010,7 +1015,7 @@ mod tests {
         let messages = vec![ChatMessage::assistant(
             "你的 Telegram 收件人是？",
         )];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(hints.send);
     }
 
@@ -1019,7 +1024,7 @@ mod tests {
         let messages = vec![ChatMessage::assistant(
             "Who should I send it to on Telegram?",
         )];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(hints.send);
     }
 
@@ -1028,7 +1033,7 @@ mod tests {
         let messages = vec![ChatMessage::assistant(
             "好的，我将通过Telegram发送消息给您的联系人。",
         )];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(!hints.send);
     }
 
@@ -1037,7 +1042,7 @@ mod tests {
         let messages = vec![ChatMessage::assistant(
             "I'll use the \"send\" tool to send your photo via Telegram.",
         )];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(hints.send);
     }
 
@@ -1046,7 +1051,7 @@ mod tests {
         let messages = vec![ChatMessage::assistant(
             "Let me call send( for your iMessage attachment.",
         )];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(hints.send);
     }
 
@@ -1055,7 +1060,7 @@ mod tests {
         let messages = vec![ChatMessage::assistant(
             "I'll use the \"send\" tool to send your photo via Telegram. What's the recipient?",
         )];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(hints.send);
     }
 
@@ -1064,7 +1069,7 @@ mod tests {
         let messages = vec![ChatMessage::assistant(
             "I'll call send to send your text via Telegram. Who should I send it to?",
         )];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(hints.send);
     }
 
@@ -1073,7 +1078,7 @@ mod tests {
         let messages = vec![ChatMessage::assistant(
             "I can use send for text or call send for attachments via Telegram.",
         )];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(hints.send);
     }
 
@@ -1082,7 +1087,7 @@ mod tests {
         let messages = vec![ChatMessage::assistant(
             "你的 Telegram 收件人是？",
         )];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(hints.send);
     }
 
@@ -1097,7 +1102,7 @@ mod tests {
                 "好的，你的 Telegram 收件人是？",
             ),
         ];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         assert!(hints.send);
     }
 
@@ -1113,7 +1118,7 @@ mod tests {
                 "好的，你的 Telegram 收件人是？",
             ),
         ];
-        let hints = detect_active_send_hints(&messages);
+        let hints = detect_active_send_hints(&messages, &[]);
         // Turn N-1 has "send" (Tier 1), Turn N has Tier 2 → both set send=true
         assert!(hints.send);
     }
@@ -1140,12 +1145,27 @@ mod tests {
     use super::apply_send_keepalive;
 
     #[test]
+    fn detect_send_hints_custom_channel_via_active_channels() {
+        // "matrix" is NOT in FALLBACK_CHANNEL_KW
+        let messages = vec![ChatMessage::assistant(
+            "Your Matrix recipient is?",
+        )];
+        // With active_channels containing "matrix": should detect Tier 2 hit
+        let active = vec!["matrix".to_string()];
+        let hints = detect_active_send_hints(&messages, &active);
+        assert!(hints.send);
+        // Without: should NOT detect (proves dynamic path works)
+        let hints_empty = detect_active_send_hints(&messages, &[]);
+        assert!(!hints_empty.send);
+    }
+
+    #[test]
     fn apply_keepalive_injects_send() {
         let messages = vec![ChatMessage::assistant(
             "I'll use the \"send\" tool via Telegram.",
         )];
         let mut tool_names = vec!["web_fetch".to_string()];
-        let intent_send = apply_send_keepalive(&mut tool_names, &messages);
+        let intent_send = apply_send_keepalive(&mut tool_names, &messages, &[]);
         assert!(!intent_send);
         assert!(tool_names.contains(&"send".to_string()));
     }
@@ -1156,7 +1176,7 @@ mod tests {
             "I'll use the send tool via Telegram.",
         )];
         let mut tool_names = vec!["send".to_string()];
-        let intent_send = apply_send_keepalive(&mut tool_names, &messages);
+        let intent_send = apply_send_keepalive(&mut tool_names, &messages, &[]);
         assert!(intent_send);
         // No duplicate
         assert_eq!(
@@ -1171,7 +1191,7 @@ mod tests {
             "I can use send for text or call send for attachments via Telegram.",
         )];
         let mut tool_names = vec![];
-        let intent_send = apply_send_keepalive(&mut tool_names, &messages);
+        let intent_send = apply_send_keepalive(&mut tool_names, &messages, &[]);
         assert!(!intent_send);
         assert!(tool_names.contains(&"send".to_string()));
     }
@@ -1185,7 +1205,7 @@ mod tests {
         )];
         let parser = crate::orchestrator::intent::IntentParser;
         let mut tool_names = parser.suggest_tools("好的，发吧");
-        let _intent_send = apply_send_keepalive(&mut tool_names, &messages);
+        let _intent_send = apply_send_keepalive(&mut tool_names, &messages, &[]);
 
         let has_send = tool_names.contains(&"send".to_string());
         let choice = resolve_send_tool_choice(has_send);
@@ -1199,7 +1219,7 @@ mod tests {
         )];
         let parser = crate::orchestrator::intent::IntentParser;
         let mut tool_names = parser.suggest_tools("发消息给他");
-        let _intent_send = apply_send_keepalive(&mut tool_names, &messages);
+        let _intent_send = apply_send_keepalive(&mut tool_names, &messages, &[]);
 
         let has_send = tool_names.contains(&"send".to_string());
         let choice = resolve_send_tool_choice(has_send);
@@ -1218,7 +1238,7 @@ mod tests {
             ),
         ];
         let mut tool_names = vec!["web_fetch".to_string()];
-        let intent_send = apply_send_keepalive(&mut tool_names, &messages);
+        let intent_send = apply_send_keepalive(&mut tool_names, &messages, &[]);
         assert!(!intent_send);
         assert!(tool_names.contains(&"send".to_string()));
         assert_eq!(tool_names.len(), 2); // web_fetch + send

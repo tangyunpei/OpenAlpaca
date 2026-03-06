@@ -29,6 +29,7 @@ impl MockProvider {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            parts: None,
         }
     }
 
@@ -48,6 +49,7 @@ impl MockProvider {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            parts: None,
         }
     }
 
@@ -67,6 +69,7 @@ impl MockProvider {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            parts: None,
         }
     }
 }
@@ -399,6 +402,7 @@ async fn test_max_tools_per_round_enforced() {
         },
         finish_reason: FinishReason::ToolUse,
         thinking: None,
+        parts: None,
     };
 
     let provider = MockProvider::new(vec![
@@ -577,6 +581,7 @@ async fn test_max_tokens_triggers_continuation() {
         },
         finish_reason: FinishReason::MaxTokens,
         thinking: None,
+        parts: None,
     };
     let provider = MockProvider::new(vec![
         Ok(truncated),
@@ -615,6 +620,7 @@ async fn test_max_tokens_retries_exhausted_returns_truncated() {
         },
         finish_reason: FinishReason::MaxTokens,
         thinking: None,
+        parts: None,
     };
     let provider = MockProvider::new(vec![
         Ok(make_truncated()),
@@ -678,6 +684,7 @@ async fn test_cost_warning_at_80_percent() {
         },
         finish_reason: FinishReason::ToolUse,
         thinking: None,
+        parts: None,
     };
     // Round 2: simple text response to complete
     let provider = MockProvider::new(vec![

@@ -525,6 +525,7 @@ async fn test_pipeline_non_singleton_workspace_artifact_count() {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            parts: None,
         },
         // Round 2: agent returns final text
         ChatResponse {
@@ -538,6 +539,7 @@ async fn test_pipeline_non_singleton_workspace_artifact_count() {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            parts: None,
         },
     ]));
 
@@ -963,6 +965,7 @@ async fn test_pipeline_text_only_no_artifacts_e2e() {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            parts: None,
         },
     ]));
 

@@ -30,6 +30,7 @@ impl MockProvider {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            parts: None,
         }
     }
 }

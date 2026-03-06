@@ -107,6 +107,7 @@ pub async fn collect_stream(
         usage,
         finish_reason,
         thinking,
+        parts: None,
     })
 }
 

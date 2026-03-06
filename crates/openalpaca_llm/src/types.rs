@@ -156,7 +156,7 @@ impl ChatMessage {
         Self {
             role: Role::Assistant,
             content: response.content.clone(),
-            parts: None,
+            parts: response.parts.clone(),
             tool_calls: if response.tool_calls.is_empty() {
                 None
             } else {
@@ -171,6 +171,17 @@ impl ChatMessage {
             role: Role::Tool,
             content: content.to_string(),
             parts: None,
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.to_string()),
+        }
+    }
+
+    /// Create a tool-result message with multimodal content parts.
+    pub fn tool_result_with_parts(tool_call_id: &str, content: &str, parts: Vec<ContentPart>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.to_string(),
+            parts: Some(parts),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.to_string()),
         }
@@ -291,6 +302,9 @@ pub struct ChatResponse {
     pub finish_reason: FinishReason,
     /// Extended thinking output (Anthropic only).
     pub thinking: Option<String>,
+    /// Multimodal content parts from the response. When present,
+    /// `assistant_with_tools()` propagates these to the ChatMessage.
+    pub parts: Option<Vec<ContentPart>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -343,6 +357,47 @@ pub type ChatStream = Pin<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assistant_with_tools_propagates_parts() {
+        let response = ChatResponse {
+            content: "Here's the image".to_string(),
+            parts: Some(vec![
+                ContentPart::Text { text: "Here's the image".to_string() },
+                ContentPart::Image {
+                    source: ImageSource::Base64 {
+                        media_type: "image/png".to_string(),
+                        data: Arc::new("base64data".to_string()),
+                    },
+                    detail: None,
+                },
+            ]),
+            tool_calls: vec![],
+            model: "test".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+        };
+        let msg = ChatMessage::assistant_with_tools(&response);
+        assert_eq!(msg.parts.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn tool_result_with_parts_sets_fields() {
+        let parts = vec![ContentPart::Text { text: "result".to_string() }];
+        let msg = ChatMessage::tool_result_with_parts("call_1", "summary", parts);
+        assert_eq!(msg.role, Role::Tool);
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
+        assert!(msg.parts.is_some());
+    }
+
+    #[test]
+    fn effective_parts_fallback_to_content() {
+        let msg = ChatMessage::assistant("plain text");
+        let parts = msg.effective_parts();
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0], ContentPart::Text { text } if text == "plain text"));
+    }
 
     #[test]
     fn test_cache_control_serialization() {

@@ -178,7 +178,12 @@ impl OpenAiProvider {
                     Role::Tool => "tool",
                 };
 
-                let content = Self::build_message_content(msg);
+                let content = match msg.role {
+                    // OpenAI assistant content must be a string (not array)
+                    Role::Assistant => serde_json::Value::String(msg.content.clone()),
+                    // Tool results support array content for multimodal parts
+                    _ => Self::build_message_content(msg),
+                };
 
                 let mut obj = serde_json::json!({
                     "role": role,
@@ -325,6 +330,12 @@ impl OpenAiProvider {
             }
         }
 
+        let parts = if content.is_empty() {
+            None
+        } else {
+            Some(vec![ContentPart::Text { text: content.clone() }])
+        };
+
         Ok(ChatResponse {
             content,
             tool_calls,
@@ -336,6 +347,7 @@ impl OpenAiProvider {
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string()),
+            parts,
         })
     }
 }

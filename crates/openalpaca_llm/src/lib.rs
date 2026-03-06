@@ -270,6 +270,7 @@ mod tests {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: Some("Let me think...".to_string()),
+            parts: None,
         };
 
         let events = response_to_events(original.clone());
@@ -297,6 +298,7 @@ mod tests {
             usage: Usage::default(),
             finish_reason: FinishReason::Stop,
             thinking: None,
+            parts: None,
         };
         let events = response_to_events(response);
         // TextDelta + Usage + Done = 3 events
