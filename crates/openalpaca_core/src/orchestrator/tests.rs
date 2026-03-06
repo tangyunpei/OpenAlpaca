@@ -104,6 +104,7 @@ fn make_orchestrator_with_fixed_llm_response(response: &str) -> Orchestrator {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                parts: None,
             })
         }
     }
@@ -153,6 +154,7 @@ fn make_orchestrator_with_capturing_llm(
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                parts: None,
             })
         }
     }
@@ -365,6 +367,7 @@ async fn test_simple_query_with_mock_llm() {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                parts: None,
             })
         }
     }
@@ -487,6 +490,7 @@ fn make_planning_mock_llm(response: &str) -> Arc<LlmRouter> {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                parts: None,
             })
         }
     }
@@ -757,6 +761,7 @@ async fn test_tool_intent_detected_and_executes() {
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::Stop,
                     thinking: None,
+                    parts: None,
                 }),
                 // Call 1: agentic loop — return tool use
                 1 => Ok(ChatResponse {
@@ -770,6 +775,7 @@ async fn test_tool_intent_detected_and_executes() {
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::ToolUse,
                     thinking: None,
+                    parts: None,
                 }),
                 // Call 2+: return final answer with Stop
                 _ => Ok(ChatResponse {
@@ -779,6 +785,7 @@ async fn test_tool_intent_detected_and_executes() {
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::Stop,
                     thinking: None,
+                    parts: None,
                 }),
             }
         }
@@ -842,6 +849,7 @@ async fn test_tool_max_rounds_enforcement() {
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::Stop,
                     thinking: None,
+                    parts: None,
                 });
             }
             // Always return ToolUse
@@ -860,6 +868,7 @@ async fn test_tool_max_rounds_enforcement() {
                 },
                 finish_reason: FinishReason::ToolUse,
                 thinking: None,
+                parts: None,
             })
         }
     }
@@ -1229,6 +1238,7 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                parts: None,
             })
         }
     }

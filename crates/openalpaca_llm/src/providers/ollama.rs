@@ -167,6 +167,7 @@ impl LlmProvider for OllamaProvider {
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                parts: None,
             })
         }
     }

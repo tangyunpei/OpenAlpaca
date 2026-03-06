@@ -226,8 +226,16 @@ impl Orchestrator {
         } else if self.llm_router.is_some()
             && matches!(intent, Intent::SimpleQuery { .. })
             && self.intent_parser.is_social_message(&intent_source_content)
-            && super::query_handler::detect_active_send_hints(&ctx.recent_messages)
-                == super::query_handler::ActiveSendHints::default()
+            && {
+                let sendable_for_guard: Vec<String> = self
+                    .connector_sender
+                    .read()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|p| p.sendable_channels()))
+                    .unwrap_or_default();
+                super::query_handler::detect_active_send_hints(&ctx.recent_messages, &sendable_for_guard)
+                    == super::query_handler::ActiveSendHints::default()
+            }
         {
             // Social fast path: ultra-light prompt for "ok", "thanks", "好的" etc.
             mode = "social_fast_path".to_string();
