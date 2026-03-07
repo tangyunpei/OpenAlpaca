@@ -12,10 +12,11 @@ use crate::orchestrator::{ConversationContext, Orchestrator};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
-use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
+use crate::tools::{ContextualToolExecutor, ScriptExecutionContext, ToolExecutionContext};
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, ToolChoice};
-use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
+use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository, SkillExecutionRepository};
+use openalpaca_storage::SkillExecutionEntry;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -72,6 +73,8 @@ impl Orchestrator {
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
+        route_score: Option<f64>,
+        was_auto_selected: bool,
     ) -> Result<String, String> {
         let invocation_start = std::time::Instant::now();
 
@@ -89,13 +92,15 @@ impl Orchestrator {
             )
             .await;
 
+        let duration_ms = invocation_start.elapsed().as_millis() as u64;
+
         // Emit SkillCompleted or SkillFailed based on result
         match &result {
             Ok(invocation_result) => {
                 self.bus.publish(SystemEvent::SkillCompleted {
                     request_id,
                     skill_id: skill_name.to_string(),
-                    duration_ms: invocation_start.elapsed().as_millis() as u64,
+                    duration_ms,
                     output_preview: invocation_result.content.chars().take(200).collect(),
                     timestamp: Utc::now(),
                 });
@@ -107,6 +112,53 @@ impl Orchestrator {
                     error: error.clone(),
                     timestamp: Utc::now(),
                 });
+            }
+        }
+
+        // Persist telemetry (Phase 3)
+        if let Some(ref db) = self.db {
+            let store_preview = self.daemon_config.load().telemetry.store_query_preview;
+            let entry = SkillExecutionEntry {
+                id: None,
+                request_id: request_id.to_string(),
+                skill_id: skill_name.to_string(),
+                agent_id: "orchestrator".to_string(),
+                status: match &result {
+                    Ok(_) => "success".to_string(),
+                    Err(_) => "error".to_string(),
+                },
+                finish_reason: result
+                    .as_ref()
+                    .ok()
+                    .map(|r| finish_reason_to_string(&r.finish_reason).to_string()),
+                error_message: result.as_ref().err().cloned(),
+                validation_failures: result.as_ref().ok().and_then(|r| {
+                    if r.validation_failures.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&r.validation_failures).ok()
+                    }
+                }),
+                duration_ms: duration_ms as i64,
+                rounds_used: result.as_ref().ok().map(|r| r.rounds_used as i32),
+                tool_calls_made: result.as_ref().ok().map(|r| r.tool_calls_made as i32),
+                input_tokens: result.as_ref().ok().map(|r| r.input_tokens as i32).unwrap_or(0),
+                output_tokens: result.as_ref().ok().map(|r| r.output_tokens as i32).unwrap_or(0),
+                cost_usd: result.as_ref().ok().map(|r| r.cost_usd).unwrap_or(0.0),
+                model_used: result.as_ref().ok().and_then(|r| r.model_used.clone()),
+                query_preview: if store_preview {
+                    Some(query.chars().take(200).collect())
+                } else {
+                    None
+                },
+                route_score,
+                was_auto_selected,
+                repair_attempted: result.as_ref().ok().map(|r| r.repair_attempted).unwrap_or(false),
+                repair_succeeded: result.as_ref().ok().map(|r| r.repair_succeeded).unwrap_or(false),
+                timestamp: None,
+            };
+            if let Err(e) = SkillExecutionRepository::new(db).record(&entry) {
+                tracing::warn!("Failed to persist skill telemetry: {e}");
             }
         }
 
@@ -203,7 +255,7 @@ impl Orchestrator {
         // Remove any denied tools (skill-level + global)
         tool_names.retain(|t| !skill_deny.contains(t) && !global_deny.contains(t));
 
-        let tool_defs: Vec<_> = tool_names
+        let mut tool_defs: Vec<_> = tool_names
             .iter()
             .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
             .collect();
@@ -220,6 +272,25 @@ impl Orchestrator {
                 skill_name,
                 missing
             );
+        }
+
+        // Resolve script tools from skill's scripts/ directory
+        let script_tool_defs: Vec<openalpaca_llm::ToolDefinition> = skill_doc
+            .frontmatter
+            .scripts
+            .iter()
+            .map(|s| s.to_tool_definition())
+            .collect();
+        let script_tool_names: Vec<String> =
+            script_tool_defs.iter().map(|d| d.name.clone()).collect();
+        if !script_tool_defs.is_empty() {
+            tracing::info!(
+                "Skill '{}' has {} script tools: {:?}",
+                skill_name,
+                script_tool_defs.len(),
+                script_tool_names
+            );
+            tool_defs.extend(script_tool_defs);
         }
 
         // Connector guidance: inject channel awareness unconditionally.
@@ -405,10 +476,21 @@ impl Orchestrator {
                 db: self.db.clone(),
                 workspace_id: scope_ctx.workspace_id.clone(),
             };
-            let contextual_executor = Arc::new(ContextualToolExecutor::new(
-                self.tool_registry.clone(),
-                ctx_exec,
-            ));
+            let contextual_executor = Arc::new(
+                if !skill_doc.frontmatter.scripts.is_empty() {
+                    let script_ctx = ScriptExecutionContext::new(
+                        &entry.skill_dir,
+                        &skill_doc.frontmatter.scripts,
+                    )?;
+                    ContextualToolExecutor::with_scripts(
+                        self.tool_registry.clone(),
+                        ctx_exec,
+                        script_ctx,
+                    )
+                } else {
+                    ContextualToolExecutor::new(self.tool_registry.clone(), ctx_exec)
+                },
+            );
             let per_request_sandbox =
                 SandboxManager::with_defaults(contextual_executor, self.bus.clone());
 
@@ -620,6 +702,17 @@ impl Orchestrator {
             repair_succeeded,
             validation_failures,
         })
+    }
+}
+
+fn finish_reason_to_string(reason: &LoopFinishReason) -> &'static str {
+    match reason {
+        LoopFinishReason::Complete => "complete",
+        LoopFinishReason::MaxRounds => "max_rounds",
+        LoopFinishReason::CostExceeded => "cost_exceeded",
+        LoopFinishReason::Truncated => "truncated",
+        LoopFinishReason::Cancelled => "cancelled",
+        LoopFinishReason::Error(_) => "error",
     }
 }
 

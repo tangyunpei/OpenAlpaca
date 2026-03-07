@@ -2,22 +2,15 @@
  * REST API client for file upload/download endpoints.
  */
 
-import { get } from "svelte/store";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
-import { connectionInfo, type ConnectionInfo } from "../daemon";
+import { ensureConnection } from "./connection";
 import type { FileUploadResponse, FileAsset, FileOpenResponse } from "../types";
 
 let systemOpenEndpointUnavailable = false;
 let systemOpenEndpointInstanceId: string | null = null;
 
 export type SaveFileWithDialogResult = "saved" | "cancelled" | "unavailable";
-
-async function ensureConnection(): Promise<ConnectionInfo> {
-  const conn = get(connectionInfo);
-  if (!conn) throw new Error("Not connected to daemon");
-  return conn;
-}
 
 /** POST /v1/files/upload — Upload a file via multipart form data. */
 export async function uploadFile(

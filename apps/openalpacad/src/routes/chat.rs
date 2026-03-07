@@ -442,6 +442,101 @@ pub async fn get_conversation_messages_handler(
     }
 }
 
+// ── Feedback types ─────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct FeedbackRequest {
+    pub feedback: String, // "positive" | "negative"
+    pub comment: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct FeedbackResponse {
+    pub message_id: i64,
+    pub feedback: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct FeedbackDeleteResponse {
+    pub deleted: bool,
+}
+
+// ── PUT /v1/chat/messages/:message_id/feedback ────────────────────
+
+pub async fn upsert_feedback_handler(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<i64>,
+    Json(body): Json<FeedbackRequest>,
+) -> impl IntoResponse {
+    if body.feedback != "positive" && body.feedback != "negative" {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "INVALID_FEEDBACK",
+            "feedback must be 'positive' or 'negative'",
+        )
+        .into_response();
+    }
+
+    let repo = openalpaca_storage::MessageFeedbackRepository::new(&state.db);
+    match repo.upsert(message_id, &body.feedback, body.comment.as_deref()) {
+        Ok(()) => Json(FeedbackResponse {
+            message_id,
+            feedback: body.feedback,
+            comment: body.comment,
+        })
+        .into_response(),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            &e.to_string(),
+        )
+        .into_response(),
+    }
+}
+
+// ── GET /v1/chat/messages/:message_id/feedback ────────────────────
+
+pub async fn get_feedback_handler(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<i64>,
+) -> impl IntoResponse {
+    let repo = openalpaca_storage::MessageFeedbackRepository::new(&state.db);
+    match repo.get_by_message(message_id) {
+        Ok(Some(fb)) => Json(FeedbackResponse {
+            message_id: fb.message_id,
+            feedback: fb.feedback,
+            comment: fb.comment,
+        })
+        .into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            &e.to_string(),
+        )
+        .into_response(),
+    }
+}
+
+// ── DELETE /v1/chat/messages/:message_id/feedback ─────────────────
+
+pub async fn delete_feedback_handler(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<i64>,
+) -> impl IntoResponse {
+    let repo = openalpaca_storage::MessageFeedbackRepository::new(&state.db);
+    match repo.delete(message_id) {
+        Ok(deleted) => Json(FeedbackDeleteResponse { deleted }).into_response(),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            &e.to_string(),
+        )
+        .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

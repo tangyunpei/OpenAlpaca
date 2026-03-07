@@ -6,7 +6,7 @@ pub mod platform;
 pub mod registry;
 pub mod url_validation;
 
-pub use contextual_executor::{ContextualToolExecutor, ToolExecutionContext};
+pub use contextual_executor::{ContextualToolExecutor, ScriptExecutionContext, ToolExecutionContext};
 pub use executor::RegistryToolExecutor;
 pub use registry::ToolRegistry;
 

@@ -18,6 +18,7 @@ pub struct DaemonConfig {
     pub security: SecurityConfig,
     pub server: ServerConfig,
     pub upload: UploadConfig,
+    pub telemetry: TelemetryConfig,
 }
 
 // ── Orchestrator ─────────────────────────────────────────────────────
@@ -468,6 +469,25 @@ impl Default for EmbeddingIndexerConfig {
         Self {
             poll_interval_secs: 30,
             batch_size: 50,
+        }
+    }
+}
+
+// ── Telemetry ────────────────────────────────────────────────────────
+
+/// Configuration for execution telemetry persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TelemetryConfig {
+    /// Whether to store a preview of the user query in the telemetry log.
+    #[serde(default = "default_true")]
+    pub store_query_preview: bool,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            store_query_preview: true,
         }
     }
 }

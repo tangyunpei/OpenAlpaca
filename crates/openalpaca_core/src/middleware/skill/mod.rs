@@ -85,6 +85,8 @@ pub struct ScoreWeights {
     pub keyword_weight: f64,
     #[serde(default = "default_recency_weight")]
     pub recency_weight: f64,
+    #[serde(default)]
+    pub health_weight: f64,
 }
 
 impl Default for ScoreWeights {
@@ -94,6 +96,7 @@ impl Default for ScoreWeights {
             intent_weight: default_intent_weight(),
             keyword_weight: default_keyword_weight(),
             recency_weight: default_recency_weight(),
+            health_weight: 0.0,
         }
     }
 }
@@ -242,6 +245,46 @@ pub struct ToolsConfig {
     pub rate_limit: RateLimitConfig,
 }
 
+/// A script bundled with a skill that becomes a callable tool during invocation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptConfig {
+    /// Script filename relative to the skill's `scripts/` directory.
+    pub file: String,
+    /// Tool name exposed to the LLM (will be prefixed with `skill_script:`).
+    pub name: String,
+    /// Human-readable description for the LLM tool definition.
+    pub description: String,
+    /// JSON Schema for the tool's parameters (passed to LLM).
+    #[serde(default = "default_empty_object")]
+    pub parameters: serde_json::Value,
+    /// Optional interpreter override (e.g. "python3", "node"). Auto-detected from shebang/extension if omitted.
+    pub interpreter: Option<String>,
+    /// Execution timeout in seconds. Default: 30.
+    #[serde(default = "default_script_timeout")]
+    pub timeout_secs: u64,
+}
+
+impl ScriptConfig {
+    /// Convert to an LLM ToolDefinition with the `skill_script:` namespace prefix.
+    pub fn to_tool_definition(&self) -> openalpaca_llm::ToolDefinition {
+        openalpaca_llm::ToolDefinition {
+            name: format!("skill_script:{}", self.name),
+            description: self.description.clone(),
+            parameters: self.parameters.clone(),
+            strict: None,
+            input_examples: None,
+        }
+    }
+}
+
+fn default_empty_object() -> serde_json::Value {
+    serde_json::json!({"type": "object", "properties": {}})
+}
+
+fn default_script_timeout() -> u64 {
+    30
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExpectConfig {
@@ -300,6 +343,10 @@ pub struct SkillFrontmatter {
     pub tools: ToolsConfig,
     pub output: OutputConfig,
     pub tests: TestsConfig,
+
+    /// Executable scripts bundled with this skill, exposed as callable tools.
+    #[serde(default)]
+    pub scripts: Vec<ScriptConfig>,
 
     // Legacy compat (deserialized but not serialized)
     /// Slash command that invokes this skill (e.g. "review"). Legacy field.

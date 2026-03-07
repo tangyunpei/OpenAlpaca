@@ -2,15 +2,8 @@
  * REST API client for agent instance endpoints.
  */
 
-import { get } from "svelte/store";
-import { connectionInfo, type ConnectionInfo } from "../daemon";
+import { ensureConnection } from "./connection";
 import type { AgentInstance } from "../types";
-
-async function ensureConnection(): Promise<ConnectionInfo> {
-  const conn = get(connectionInfo);
-  if (!conn) throw new Error("Not connected to daemon");
-  return conn;
-}
 
 /** GET /v1/agent-instances */
 export async function getInstances(): Promise<AgentInstance[]> {

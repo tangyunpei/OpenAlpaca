@@ -2,15 +2,8 @@
  * REST API client for LLM usage endpoints.
  */
 
-import { get } from "svelte/store";
-import { connectionInfo, type ConnectionInfo } from "../daemon";
+import { ensureConnection } from "./connection";
 import type { LlmCallLog, LlmUsageDaily } from "../types";
-
-async function ensureConnection(): Promise<ConnectionInfo> {
-  const conn = get(connectionInfo);
-  if (!conn) throw new Error("Not connected to daemon");
-  return conn;
-}
 
 /** GET /v1/llm/usage — query LLM call logs */
 export async function getLlmUsage(

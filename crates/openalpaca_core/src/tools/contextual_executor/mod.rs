@@ -2,12 +2,18 @@
 //! into owner-scoped tools (e.g. memory_search) and handles workspace-scoped
 //! tools (workspace_read, workspace_write) before delegating to the
 //! underlying ToolRegistry.
+//!
+//! Also handles skill-bundled script tools (`skill_script:*` prefix) when
+//! a `ScriptExecutionContext` is attached via `with_scripts()`.
 
 use crate::orchestrator::task_state::{TaskState, WorkspaceEntryType};
 use crate::security::sandbox::ToolExecutor;
 use crate::tools::ToolRegistry;
 use async_trait::async_trait;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::process::Command;
 
 /// Tools that need owner_id injection only.
 const OWNER_ONLY_TOOLS: &[&str] = &["update_persona"];
@@ -27,17 +33,138 @@ pub struct ToolExecutionContext {
     pub workspace_id: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// ScriptExecutionContext: skill-bundled script tools
+// ---------------------------------------------------------------------------
+
+/// Runtime context for skill-bundled script tools.
+///
+/// Created per skill invocation from the skill's `scripts` frontmatter config.
+/// Maps prefixed tool names (`skill_script:X`) to resolved script paths.
+pub struct ScriptExecutionContext {
+    /// Map from prefixed tool name ("skill_script:X") to (resolved_path, interpreter, timeout).
+    pub(crate) scripts: HashMap<String, (PathBuf, Option<String>, u64)>,
+    /// The skill directory (used as working directory for script execution).
+    skill_dir: PathBuf,
+}
+
+impl ScriptExecutionContext {
+    pub fn new(
+        skill_dir: &std::path::Path,
+        configs: &[crate::middleware::skill::ScriptConfig],
+    ) -> Result<Self, String> {
+        let mut scripts = HashMap::new();
+        for cfg in configs {
+            let script_path = skill_dir.join("scripts").join(&cfg.file);
+            // Security: ensure resolved path stays within skill_dir/scripts/
+            let canonical = script_path.canonicalize().map_err(|e| {
+                format!("Script '{}' not found: {}", cfg.file, e)
+            })?;
+            let scripts_dir = skill_dir.join("scripts").canonicalize().map_err(|e| {
+                format!("Scripts directory not found: {}", e)
+            })?;
+            if !canonical.starts_with(&scripts_dir) {
+                return Err(format!(
+                    "Script '{}' resolves outside scripts/ directory (path traversal blocked)",
+                    cfg.file
+                ));
+            }
+            let tool_name = format!("skill_script:{}", cfg.name);
+            scripts.insert(tool_name, (canonical, cfg.interpreter.clone(), cfg.timeout_secs));
+        }
+        Ok(Self {
+            scripts,
+            skill_dir: skill_dir.to_path_buf(),
+        })
+    }
+
+    fn has_script(&self, tool_name: &str) -> bool {
+        self.scripts.contains_key(tool_name)
+    }
+
+    async fn execute_script(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<String, String> {
+        let (path, interpreter, timeout_secs) = self.scripts.get(tool_name)
+            .ok_or_else(|| format!("Unknown script tool: {}", tool_name))?;
+
+        let args = json_to_cli_args(arguments);
+
+        let mut cmd = if let Some(interp) = interpreter {
+            let mut c = Command::new(interp);
+            c.arg(path);
+            c
+        } else {
+            Command::new(path)
+        };
+        cmd.args(&args);
+        cmd.current_dir(&self.skill_dir);
+
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(*timeout_secs),
+            cmd.output(),
+        )
+        .await
+        .map_err(|_| format!("Script '{}' timed out after {}s", tool_name, timeout_secs))?
+        .map_err(|e| format!("Failed to execute script '{}': {}", tool_name, e))?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!(
+                "Script '{}' failed (exit {}): {}",
+                tool_name,
+                output.status.code().unwrap_or(-1),
+                stderr.chars().take(500).collect::<String>()
+            ))
+        }
+    }
+}
+
+/// Convert JSON object to `--key=value` CLI arguments.
+fn json_to_cli_args(value: &serde_json::Value) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(obj) = value.as_object() {
+        for (key, val) in obj {
+            let str_val = match val {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
+                other => other.to_string(),
+            };
+            args.push(format!("--{}={}", key, str_val));
+        }
+    }
+    args
+}
+
+// ---------------------------------------------------------------------------
+// ContextualToolExecutor
+// ---------------------------------------------------------------------------
+
 /// A ToolExecutor that injects contextual data (owner_id) into
-/// owner-scoped tools, handles workspace tools directly, and
-/// delegates the rest to the inner ToolRegistry.
+/// owner-scoped tools, handles workspace tools directly, handles
+/// skill-bundled script tools, and delegates the rest to the inner ToolRegistry.
 pub struct ContextualToolExecutor {
     registry: Arc<ToolRegistry>,
     context: ToolExecutionContext,
+    scripts: Option<ScriptExecutionContext>,
 }
 
 impl ContextualToolExecutor {
     pub fn new(registry: Arc<ToolRegistry>, context: ToolExecutionContext) -> Self {
-        Self { registry, context }
+        Self { registry, context, scripts: None }
+    }
+
+    pub fn with_scripts(
+        registry: Arc<ToolRegistry>,
+        context: ToolExecutionContext,
+        scripts: ScriptExecutionContext,
+    ) -> Self {
+        Self { registry, context, scripts: Some(scripts) }
     }
 
     /// Handle workspace_read: returns matching entries as JSON.
@@ -192,6 +319,16 @@ impl ToolExecutor for ContextualToolExecutor {
         tool_name: &str,
         arguments: &serde_json::Value,
     ) -> Result<String, String> {
+        // Handle skill script tools (skill_script:* prefix)
+        if tool_name.starts_with("skill_script:") {
+            if let Some(ref scripts) = self.scripts
+                && scripts.has_script(tool_name)
+            {
+                return scripts.execute_script(tool_name, arguments).await;
+            }
+            return Err(format!("Unknown script tool: {}", tool_name));
+        }
+
         // Handle workspace tools directly (no registry delegation)
         if WORKSPACE_SCOPED_TOOLS.contains(&tool_name) {
             let agent_id = self.context.agent_id.as_deref().unwrap_or("unknown");
@@ -257,6 +394,14 @@ impl ToolExecutor for ContextualToolExecutor {
         for name in WORKSPACE_SCOPED_TOOLS {
             if !tools.iter().any(|t| t == name) {
                 tools.push((*name).to_string());
+            }
+        }
+        // Advertise skill-bundled script tools when attached
+        if let Some(ref scripts) = self.scripts {
+            for name in scripts.scripts.keys() {
+                if !tools.iter().any(|t| t == name) {
+                    tools.push(name.clone());
+                }
             }
         }
         tools

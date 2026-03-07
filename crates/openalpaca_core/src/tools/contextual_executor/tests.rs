@@ -215,3 +215,75 @@ async fn test_memory_search_gets_both_owner_and_workspace() {
     assert_eq!(parsed["owner_id"], "user-42");
     assert_eq!(parsed["workspace_id"], "ws-abc");
 }
+
+#[test]
+fn test_json_to_cli_args_strings() {
+    let value = serde_json::json!({"path": "/src/main.rs", "fix": true, "count": 5});
+    let args = super::json_to_cli_args(&value);
+    assert!(args.contains(&"--path=/src/main.rs".to_string()));
+    assert!(args.contains(&"--fix=true".to_string()));
+    assert!(args.contains(&"--count=5".to_string()));
+}
+
+#[test]
+fn test_json_to_cli_args_empty() {
+    let args = super::json_to_cli_args(&serde_json::json!({}));
+    assert!(args.is_empty());
+}
+
+#[test]
+fn test_json_to_cli_args_non_object() {
+    let args = super::json_to_cli_args(&serde_json::json!("just a string"));
+    assert!(args.is_empty());
+}
+
+#[tokio::test]
+async fn test_script_tool_without_context_errors() {
+    let registry = make_registry_with_tools(&[]);
+    let executor = ContextualToolExecutor::new(
+        registry,
+        ToolExecutionContext {
+            owner_id: None,
+            task_id: None,
+            agent_id: None,
+            db: None,
+            workspace_id: None,
+        },
+    );
+    let result = executor
+        .execute("skill_script:test_tool", &serde_json::json!({}))
+        .await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("Unknown script tool"));
+}
+
+#[test]
+fn test_script_tools_listed_when_attached() {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let registry = make_registry_with_tools(&["web_search"]);
+    let mut scripts = HashMap::new();
+    scripts.insert(
+        "skill_script:my_tool".to_string(),
+        (PathBuf::from("/tmp/test.sh"), None, 30u64),
+    );
+    let script_ctx = super::ScriptExecutionContext {
+        scripts,
+        skill_dir: PathBuf::from("/tmp"),
+    };
+    let executor = ContextualToolExecutor::with_scripts(
+        registry,
+        ToolExecutionContext {
+            owner_id: None,
+            task_id: None,
+            agent_id: None,
+            db: None,
+            workspace_id: None,
+        },
+        script_ctx,
+    );
+    let tools = executor.registered_tools();
+    assert!(tools.contains(&"skill_script:my_tool".to_string()));
+    assert!(tools.contains(&"web_search".to_string()));
+}

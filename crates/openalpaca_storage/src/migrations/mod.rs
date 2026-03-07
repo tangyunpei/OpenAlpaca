@@ -156,4 +156,14 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "task_outcome",
         sql: include_str!("029_task_outcome.sql"),
     },
+    Migration {
+        version: 30,
+        name: "skill_tool_execution_log",
+        sql: include_str!("030_skill_tool_execution_log.sql"),
+    },
+    Migration {
+        version: 31,
+        name: "message_feedback",
+        sql: include_str!("031_message_feedback.sql"),
+    },
 ];

@@ -935,6 +935,16 @@ impl Orchestrator {
                 self.handle_forget_command(&content, owner_id).await
             }
             Intent::SkillInvocation { skill_name, query } => {
+                // Capture route metadata for telemetry (re-route is cheap, no side effects)
+                let route_result = self.skill_router.route(&query, &self.skill_catalog);
+                let was_auto_selected =
+                    route_result.selected.as_ref() == Some(&skill_name);
+                let route_score = route_result
+                    .scores
+                    .iter()
+                    .find(|s| s.skill_id == skill_name)
+                    .map(|s| s.score);
+
                 self.handle_skill_invocation(
                     request_id,
                     source,
@@ -944,6 +954,8 @@ impl Orchestrator {
                     ctx,
                     owner_id,
                     scope_ctx,
+                    route_score,
+                    was_auto_selected,
                 )
                 .await
             }

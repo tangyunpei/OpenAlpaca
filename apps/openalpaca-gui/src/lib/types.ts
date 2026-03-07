@@ -543,6 +543,36 @@ export interface DispatchDecisionRecord {
   timestamp: string;
 }
 
+// ── Message Feedback types ──────────────────────────────────────
+
+export interface MessageFeedback {
+  id: number;
+  message_id: number;
+  feedback: "positive" | "negative";
+  comment: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ── Skill Health types ──────────────────────────────────────────
+
+export interface SkillHealthMetrics {
+  skill_id: string;
+  total_invocations: number;
+  clean_success_rate: number;
+  clean_success_rate_7d: number;
+  repair_rate: number;
+  repair_effectiveness: number;
+  degraded_rate: number;
+  avg_duration_ms: number;
+  avg_cost_usd: number;
+  avg_rounds: number;
+  last_invoked_at: string | null;
+  user_satisfaction_rate: number | null;
+  feedback_count: number;
+  feedback_coverage: number;
+}
+
 // ── Shared utilities ────────────────────────────────────────────
 
 /** Format a byte count as a human-readable string (e.g., "1.2 MB"). */

@@ -78,6 +78,9 @@ stream_chunk_words = 3
 batch_size = 50
 poll_interval_secs = 30
 
+[telemetry]
+store_query_preview = true
+
 [upload]
 allowed_mime_prefixes = [
     "image/",

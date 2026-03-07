@@ -21,6 +21,11 @@ impl GatewayPersistence {
         Self { db }
     }
 
+    /// Access the underlying database (for cross-repository operations).
+    pub fn db(&self) -> &Database {
+        &self.db
+    }
+
     /// Persist a user message, ensuring the conversation master record exists.
     pub fn persist_user_message(&self, lane_key: &str, content: &str, source: &str) -> Result<i64> {
         let repo = ConversationRepository::new(&self.db);
