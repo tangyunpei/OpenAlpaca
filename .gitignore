@@ -96,6 +96,7 @@ apps/openalpaca-gui/src-tauri/gen/
 !docs/Installation_Manual.md
 !docs/QuickStart_Manual.md
 !docs/Skill_Template_Reference.md
+!docs/tools/*.md
 !docs/api/*
 !docs/plans/Unified_Memory_System.md
 !config/agents/*.md

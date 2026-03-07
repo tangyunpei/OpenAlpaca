@@ -1,4 +1,7 @@
 use super::*;
+use super::persona::{ensure_soul_file, ensure_soul_template_file};
+use openalpaca_core::middleware::prompt::SystemPersona;
+use std::path::PathBuf;
 
 fn make_temp_dir(prefix: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("{}-{}", prefix, uuid::Uuid::new_v4()));

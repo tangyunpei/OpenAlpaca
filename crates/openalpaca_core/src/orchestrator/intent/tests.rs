@@ -1,4 +1,6 @@
 use super::*;
+use crate::orchestrator::skill_catalog::SkillCatalog;
+use crate::orchestrator::skill_router::SkillRouter;
 
 fn parser() -> IntentParser {
     IntentParser

@@ -548,7 +548,7 @@ async fn test_anthropic_sse_parser_text_event() {
         match event.as_ref().unwrap() {
             StreamEvent::TextDelta { text } => texts.push(text.clone()),
             StreamEvent::Done { finish_reason } => {
-                assert_eq!(*finish_reason, FinishReason::Stop);
+                assert_eq!(finish_reason, &FinishReason::Stop);
                 got_done = true;
             }
             _ => {}
@@ -599,7 +599,7 @@ async fn test_anthropic_sse_parser_tool_use_event() {
                 json_parts.push(partial_json.clone());
             }
             StreamEvent::Done { finish_reason } => {
-                assert_eq!(*finish_reason, FinishReason::ToolUse);
+                assert_eq!(finish_reason, &FinishReason::ToolUse);
                 got_done = true;
             }
             _ => {}

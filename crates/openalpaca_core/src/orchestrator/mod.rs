@@ -14,6 +14,8 @@ mod bootstrap;
 mod context_builder;
 mod direct_send;
 mod extraction;
+mod handler_attachments;
+mod handler_helpers;
 mod handlers;
 mod memory_ops;
 mod query_handler;

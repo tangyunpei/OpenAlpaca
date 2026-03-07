@@ -11,21 +11,9 @@ use openalpaca_llm::config::settings_service::{
     AddKeyRequest, OrchestratorConfigResponse, ReorderKeysRequest, SetKeyPriorityRequest,
     UpdateOrchestratorRequest, ValidateKeyRequest,
 };
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-fn settings_error(status: StatusCode, code: &str, message: &str) -> impl IntoResponse {
-    (
-        status,
-        Json(serde_json::json!({
-            "error": {
-                "code": code,
-                "status": status.as_u16(),
-                "message": message
-            }
-        })),
-    )
-}
+use super::settings_types::*;
 
 /// GET /v1/settings/llm — returns masked config
 pub async fn get_llm_settings(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -375,21 +363,6 @@ pub async fn update_orchestrator_config(
 
 // ── LLM Usage endpoints ──────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-pub struct LlmUsageQuery {
-    pub agent_id: Option<String>,
-    pub key_id: Option<String>,
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct LlmUsageDailyQuery {
-    pub agent_id: Option<String>,
-    pub date: Option<String>,
-    pub limit: Option<usize>,
-}
-
 /// GET /v1/llm/usage — query LLM call logs
 pub async fn get_llm_usage(
     State(state): State<Arc<AppState>>,
@@ -500,19 +473,6 @@ pub async fn get_cli_backends(State(state): State<Arc<AppState>>) -> impl IntoRe
         .into_response()
 }
 
-fn load_cli_backends_config(
-    llm_config_path: &std::path::Path,
-) -> openalpaca_llm::CliBackendsConfig {
-    if llm_config_path.exists() {
-        openalpaca_llm::read_config(llm_config_path)
-            .ok()
-            .and_then(|cfg| cfg.cli_backends)
-            .unwrap_or_default()
-    } else {
-        openalpaca_llm::CliBackendsConfig::default()
-    }
-}
-
 /// GET /v1/settings/llm/providers/usage — provider-level usage summaries
 pub async fn get_provider_usage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let service = match &state.llm_settings_service {
@@ -584,13 +544,6 @@ pub async fn get_llm_pricing(State(state): State<Arc<AppState>>) -> impl IntoRes
     (StatusCode::OK, Json(serde_json::to_value(models).unwrap())).into_response()
 }
 
-#[derive(Debug, Deserialize)]
-pub struct CostEstimateQuery {
-    pub model: String,
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-}
-
 /// GET /v1/llm/pricing/estimate — estimate cost for given model and token counts
 pub async fn estimate_cost(
     State(state): State<Arc<AppState>>,
@@ -623,18 +576,6 @@ pub async fn estimate_cost(
 
 // ── Daemon config (providers) endpoints ─────────────────────────────
 
-#[derive(Serialize)]
-struct DaemonProvidersResponse {
-    web_search: WebSearchConfigResponse,
-}
-
-#[derive(Serialize)]
-struct WebSearchConfigResponse {
-    api_key_configured: bool,
-    api_key_hint: String,
-    timeout_secs: u64,
-}
-
 /// GET /v1/daemon/config/providers — read web search provider configuration (from llm.toml)
 pub async fn get_daemon_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let ws = state.web_search_config.load();
@@ -656,12 +597,6 @@ pub async fn get_daemon_providers(State(state): State<Arc<AppState>>) -> impl In
     };
 
     (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response()
-}
-
-#[derive(Deserialize)]
-pub struct UpdateWebSearchRequest {
-    pub api_key: Option<String>,
-    pub timeout_secs: Option<u64>,
 }
 
 /// PUT /v1/daemon/config/providers/web-search — update web search provider config (writes to llm.toml)
