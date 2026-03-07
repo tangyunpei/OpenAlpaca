@@ -188,6 +188,13 @@ pub struct AgentDefaults {
     pub max_tools_per_round: usize,
     pub max_tool_runtime_secs: u64,
     pub max_cost: f64,
+    /// Timeout for interactive tool confirmation prompts (seconds).
+    #[serde(default = "default_confirmation_timeout")]
+    pub confirmation_timeout_secs: u64,
+}
+
+fn default_confirmation_timeout() -> u64 {
+    300
 }
 
 impl Default for AgentDefaults {
@@ -197,6 +204,7 @@ impl Default for AgentDefaults {
             max_tools_per_round: 5,
             max_tool_runtime_secs: 60,
             max_cost: 1.00,
+            confirmation_timeout_secs: default_confirmation_timeout(),
         }
     }
 }
@@ -360,6 +368,9 @@ pub struct SecurityConfig {
     pub max_input_length: usize,
     /// Circuit breaker settings for repeated tool failures.
     pub circuit_breaker: CircuitBreakerConfig,
+    /// When true, skip all interactive tool confirmations (dev/testing use).
+    #[serde(default)]
+    pub auto_approve_confirmations: bool,
 }
 
 impl Default for SecurityConfig {
@@ -367,6 +378,7 @@ impl Default for SecurityConfig {
         Self {
             max_input_length: 32 * 1024,
             circuit_breaker: CircuitBreakerConfig::default(),
+            auto_approve_confirmations: false,
         }
     }
 }

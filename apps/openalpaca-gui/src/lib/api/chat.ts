@@ -67,6 +67,27 @@ export async function clearChatHistory(): Promise<ChatDeleteResponse> {
   return await response.json();
 }
 
+/** POST /v1/chat/confirmations/:requestId — respond to a tool confirmation */
+export async function respondToConfirmation(requestId: string, approved: boolean): Promise<void> {
+  const conn = await ensureConnection();
+  const response = await fetch(
+    `${conn.baseUrl}/v1/chat/confirmations/${encodeURIComponent(requestId)}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${conn.token}`,
+      },
+      body: JSON.stringify({ approved }),
+    },
+  );
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error?.message || `Failed to respond to confirmation: ${response.statusText}`);
+  }
+}
+
 /** Create an EventSource for SSE chat streaming */
 export function createChatStream(streamId: string): EventSource | null {
   const conn = get(connectionInfo);

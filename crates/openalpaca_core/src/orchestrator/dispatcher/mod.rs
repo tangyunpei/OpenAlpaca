@@ -195,6 +195,8 @@ pub struct TaskDispatcher {
     connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
     /// Cached connector guidance with 10s TTL (Opt-8b).
     cached_connector_guidance: std::sync::Mutex<(String, Instant)>,
+    /// Optional confirmation broker for interactive tool approval in agent pipelines.
+    pub(crate) confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
 }
 
 impl TaskDispatcher {
@@ -224,6 +226,7 @@ impl TaskDispatcher {
             daemon_config,
             connector_status,
             cached_connector_guidance: std::sync::Mutex::new((String::new(), Instant::now())),
+            confirmation_broker: Arc::new(RwLock::new(None)),
         }
     }
 

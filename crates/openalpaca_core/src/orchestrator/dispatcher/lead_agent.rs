@@ -185,6 +185,7 @@ impl TaskDispatcher {
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
         let connector_block = self.connector_guidance_block();
+        let broker = self.confirmation_broker.read().ok().and_then(|g| g.clone());
 
         // Create cancellation token for this task
         let cancel_token = CancellationToken::new();
@@ -245,6 +246,7 @@ impl TaskDispatcher {
                 workspace_id.clone(),
                 Some(cancel_token),
                 &connector_block,
+                broker,
             )
             .await;
 

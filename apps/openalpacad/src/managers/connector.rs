@@ -4,6 +4,7 @@ use openalpaca_connectors::startup::ConnectorHandle;
 use openalpaca_core::bus::EventBus;
 use openalpaca_core::daemon_config::DaemonConfig;
 use openalpaca_core::gateway::Gateway;
+use openalpaca_core::security::confirmation::ConfirmationBroker;
 use openalpaca_storage::{ConfigRepository, Database};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ pub struct ConnectorManager {
     gateway: Arc<Gateway>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     handles: Arc<Mutex<HashMap<String, ConnectorHandle>>>,
+    confirmation_broker: Option<Arc<ConfirmationBroker>>,
 }
 
 impl ConnectorManager {
@@ -33,7 +35,13 @@ impl ConnectorManager {
             gateway,
             daemon_config,
             handles: Arc::new(Mutex::new(HashMap::new())),
+            confirmation_broker: None,
         }
+    }
+
+    /// Set the confirmation broker for interactive tool approval.
+    pub fn set_confirmation_broker(&mut self, broker: Arc<ConfirmationBroker>) {
+        self.confirmation_broker = Some(broker);
     }
 
     /// Start all enabled connectors based on configuration
@@ -69,6 +77,7 @@ impl ConnectorManager {
                     self.bus.clone(),
                     self.gateway.clone(),
                     self.daemon_config.clone(),
+                    self.confirmation_broker.clone(),
                 ) {
                     Ok(handle) => {
                         handles.insert(name.to_string(), handle);
@@ -247,6 +256,7 @@ impl ConnectorManager {
                     self.bus.clone(),
                     self.gateway.clone(),
                     self.daemon_config.clone(),
+                    self.confirmation_broker.clone(),
                 )
                 .map_err(|e| anyhow::anyhow!("Failed to spawn {}: {}", name, e))?;
 

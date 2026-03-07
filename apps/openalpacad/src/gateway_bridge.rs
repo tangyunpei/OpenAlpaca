@@ -53,6 +53,7 @@ impl MessageHandler for OrchestratorHandler {
         scope: Scope,
         lane_key: String,
         workspace_path: Option<String>,
+        stream_id: Option<String>,
     ) -> Result<HandleResult, String> {
         let result = self
             .orchestrator
@@ -64,6 +65,7 @@ impl MessageHandler for OrchestratorHandler {
                 scope,
                 lane_key,
                 workspace_path,
+                stream_id,
             )
             .await;
 
@@ -80,6 +82,7 @@ impl MessageHandler for OrchestratorHandler {
         scope: Scope,
         lane_key: String,
         workspace_path: Option<String>,
+        stream_id: Option<String>,
     ) -> Result<HandleResult, String> {
         let attachment_ids: Vec<String> = attachments.iter().map(|a| a.file_id.clone()).collect();
 
@@ -94,6 +97,7 @@ impl MessageHandler for OrchestratorHandler {
                 scope,
                 lane_key,
                 workspace_path,
+                stream_id,
             )
             .await;
 

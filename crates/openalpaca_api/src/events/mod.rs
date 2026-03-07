@@ -209,6 +209,17 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// A tool requires interactive human confirmation before execution
+    ToolConfirmationRequested {
+        request_id: String,
+        agent_id: String,
+        tool_name: String,
+        tool_arguments: serde_json::Value,
+        stream_id: Option<String>,
+        lane_key: Option<String>,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
     /// Event triggered when SOUL.md personality is updated
     SoulUpdated {
         /// Who initiated: "agent" or "user"

@@ -1,5 +1,7 @@
 use crate::events::EventBroadcaster;
 use openalpaca_core::bus::EventBus;
+use openalpaca_core::chat::ChatStreamManager;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -7,7 +9,13 @@ use tokio_util::sync::CancellationToken;
 ///
 /// Listens on the core `EventBus` and forwards relevant events to the
 /// `EventBroadcaster` for WebSocket/SSE delivery to API clients.
-pub fn spawn_event_bridge(eb: EventBroadcaster, bus: &EventBus, cancel: CancellationToken) {
+/// Optionally forwards confirmation events to the chat stream manager for SSE delivery.
+pub fn spawn_event_bridge(
+    eb: EventBroadcaster,
+    bus: &EventBus,
+    chat_streams: Option<Arc<ChatStreamManager>>,
+    cancel: CancellationToken,
+) {
     let mut system_rx = bus.subscribe();
     tokio::spawn(async move {
         loop {
@@ -445,6 +453,41 @@ pub fn spawn_event_bridge(eb: EventBroadcaster, bus: &EventBus, cancel: Cancella
                         "Skill failed: request={request_id}, skill={skill_id}, error={error}"
                     );
                     eb.skill_failed(&request_id.to_string(), &skill_id, &error);
+                }
+
+                // ── Tool confirmation (interactive approval) ──────────────
+                openalpaca_core::events::SystemEvent::ToolConfirmationRequested {
+                    request_id,
+                    agent_id,
+                    tool_name,
+                    ref tool_arguments,
+                    ref stream_id,
+                    ref lane_key,
+                    ..
+                } => {
+                    tracing::info!(
+                        "Tool confirmation requested: tool={tool_name}, agent={agent_id}, request={request_id}"
+                    );
+                    // 1. Forward to WebSocket (GUI + connectors)
+                    eb.tool_confirmation_requested(
+                        &request_id,
+                        &agent_id,
+                        &tool_name,
+                        tool_arguments,
+                        stream_id.as_deref(),
+                        lane_key.as_deref(),
+                    );
+                    // 2. Forward to SSE chat stream (CLI + GUI active chat)
+                    if let (Some(csm), Some(sid)) = (&chat_streams, &stream_id) {
+                        let _ = csm.send(
+                            sid,
+                            openalpaca_core::chat::ChatStreamEvent::ConfirmationRequested {
+                                request_id,
+                                tool_name,
+                                tool_arguments: tool_arguments.clone(),
+                            },
+                        );
+                    }
                 } // NO catch-all: compiler will flag any missing SystemEvent variant
             }
         }

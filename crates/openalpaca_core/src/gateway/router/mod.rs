@@ -63,6 +63,7 @@ pub trait MessageHandler: Send + Sync {
         scope: Scope,
         lane_key: String,
         workspace_path: Option<String>,
+        stream_id: Option<String>,
     ) -> Result<HandleResult, String>;
 
     /// Handle a message with attachments. Default delegates to `handle()`.
@@ -76,6 +77,7 @@ pub trait MessageHandler: Send + Sync {
         scope: Scope,
         lane_key: String,
         workspace_path: Option<String>,
+        stream_id: Option<String>,
     ) -> Result<HandleResult, String> {
         let _ = attachments; // default: ignore attachments
         self.handle(
@@ -86,6 +88,7 @@ pub trait MessageHandler: Send + Sync {
             scope,
             lane_key,
             workspace_path,
+            stream_id,
         )
         .await
     }
@@ -102,6 +105,9 @@ pub struct GatewayRequest {
     /// Optional workspace path provided by the client (GUI project dir, CLI cwd).
     /// Used for memory scoping instead of the daemon's CWD.
     pub workspace_path: Option<String>,
+    /// SSE stream ID for routing tool confirmation prompts to the active chat stream.
+    /// Set by `ChatService::send_message()`, `None` for connector/API requests.
+    pub stream_id: Option<String>,
 }
 
 /// Response from the gateway after handling a message.
@@ -204,6 +210,7 @@ impl Gateway {
                     req.scope,
                     lane_key_str.clone(),
                     req.workspace_path,
+                    req.stream_id,
                 )
                 .await
         } else {
@@ -217,6 +224,7 @@ impl Gateway {
                     req.scope,
                     lane_key_str.clone(),
                     req.workspace_path,
+                    req.stream_id,
                 )
                 .await
         };
@@ -281,6 +289,7 @@ impl Gateway {
             principal: Principal::System,
             scope: Scope::Global,
             workspace_path: None,
+            stream_id: None,
         })
         .await
     }

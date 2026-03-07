@@ -267,6 +267,17 @@ fn make_sse_stream(
                 openalpaca_core::chat::ChatStreamEvent::Error { message } => Event::default()
                     .event("error")
                     .data(serde_json::json!({"message": message}).to_string()),
+                openalpaca_core::chat::ChatStreamEvent::ConfirmationRequested {
+                    request_id,
+                    tool_name,
+                    tool_arguments,
+                } => Event::default()
+                    .event("confirmation_requested")
+                    .data(serde_json::json!({
+                        "request_id": request_id,
+                        "tool_name": tool_name,
+                        "tool_arguments": tool_arguments,
+                    }).to_string()),
             };
             Some(Ok(sse_event))
         }
@@ -534,6 +545,41 @@ pub async fn delete_feedback_handler(
             &e.to_string(),
         )
         .into_response(),
+    }
+}
+
+// ── POST /v1/chat/confirmations/:request_id ──────────────────────
+
+#[derive(Deserialize)]
+pub struct ConfirmationBody {
+    pub approved: bool,
+}
+
+pub async fn confirm_tool(
+    State(state): State<Arc<AppState>>,
+    Path(request_id): Path<String>,
+    Json(body): Json<ConfirmationBody>,
+) -> impl IntoResponse {
+    let broker = match &state.confirmation_broker {
+        Some(b) => b,
+        None => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "CONFIRMATION_NOT_CONFIGURED",
+                "Confirmation broker is not configured",
+            )
+            .into_response();
+        }
+    };
+
+    match broker.respond(
+        &request_id,
+        openalpaca_core::security::confirmation::ConfirmationResponse {
+            approved: body.approved,
+        },
+    ) {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(e) => error_response(StatusCode::NOT_FOUND, "NOT_FOUND", &e).into_response(),
     }
 }
 

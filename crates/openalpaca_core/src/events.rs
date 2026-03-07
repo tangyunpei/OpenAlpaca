@@ -365,4 +365,16 @@ pub enum SystemEvent {
         error: String,
         timestamp: DateTime<Utc>,
     },
+    /// A tool requires interactive human confirmation before execution
+    ToolConfirmationRequested {
+        request_id: String,
+        agent_id: String,
+        tool_name: String,
+        tool_arguments: serde_json::Value,
+        /// SSE stream ID for routing to the active chat stream
+        stream_id: Option<String>,
+        /// Lane key for routing to connectors (e.g. "telegram:12345")
+        lane_key: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
 }

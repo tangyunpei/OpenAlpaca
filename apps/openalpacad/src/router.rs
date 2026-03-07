@@ -276,6 +276,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/skills/health",
             get(crate::routes::skill_health_handler),
         )
+        // Tool confirmation route
+        .route(
+            "/v1/chat/confirmations/{request_id}",
+            post(crate::routes::confirm_tool),
+        )
         // Memory routes
         .route("/v1/memory", get(crate::routes::list_memories_handler))
         .route("/v1/memory/reindex", post(crate::routes::reindex_handler))

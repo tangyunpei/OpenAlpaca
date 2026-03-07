@@ -289,6 +289,10 @@ async fn test_sandbox_execution() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: false,
     };
 
     let provider = MockProvider::new(vec![
@@ -345,6 +349,10 @@ async fn test_sandbox_denied_tool() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: false,
     };
 
     let provider = MockProvider::new(vec![
@@ -502,6 +510,10 @@ async fn test_cancellation_during_tool_execution() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: false,
     };
 
     let provider = MockProvider::new(vec![

@@ -119,6 +119,9 @@ pub struct AgentConstraints {
     pub allowed_models: Vec<String>,
     #[serde(default)]
     pub denied_models: Vec<String>,
+    /// When true, skip interactive confirmations for this agent.
+    #[serde(default)]
+    pub auto_approve: bool,
 }
 
 impl AgentConstraints {

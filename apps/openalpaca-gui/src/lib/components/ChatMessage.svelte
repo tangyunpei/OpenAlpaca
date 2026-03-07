@@ -2,6 +2,8 @@
   import { onDestroy } from "svelte";
   import type { ChatMessage, AttachmentDisplay, Citation, Artifact } from "$lib/types";
   import { formatFileSize } from "$lib/types";
+  import { respondToConfirmation } from "$lib/api/chat";
+  import { updateConfirmationStatus } from "$lib/stores/chat";
   import { renderMarkdown } from "$lib/markdown";
   import {
     downloadFile,
@@ -238,6 +240,34 @@
 
   let renderedContent = $derived(renderMarkdown(message.content));
   let isThinking = $derived(message.content === "Thinking...");
+
+  // Tool confirmation state
+  let confirmationLoading = $state(false);
+
+  async function handleConfirmation(approved: boolean) {
+    if (!message.confirmation || confirmationLoading) return;
+    confirmationLoading = true;
+    try {
+      await respondToConfirmation(message.confirmation.request_id, approved);
+      updateConfirmationStatus(
+        message.confirmation.request_id,
+        approved ? "approved" : "denied",
+      );
+    } catch (e) {
+      console.error("[ChatMessage] confirmation response failed:", e);
+    } finally {
+      confirmationLoading = false;
+    }
+  }
+
+  function formatToolArguments(args: unknown): string {
+    try {
+      if (typeof args === "string") return args;
+      return JSON.stringify(args, null, 2);
+    } catch {
+      return String(args);
+    }
+  }
 </script>
 
 {#if message.role === "system"}
@@ -248,6 +278,66 @@
       <div class="oa-markdown">
         {@html renderedContent}
       </div>
+
+      {#if message.confirmation}
+        <!-- Tool confirmation UI -->
+        <div class="mt-3 pt-3 border-t border-white/[0.06] not-italic text-left">
+          <!-- Tool arguments preview -->
+          <div class="mb-2.5">
+            <span class="text-[0.65rem] text-muted-foreground/50 uppercase tracking-wider font-medium">Arguments</span>
+            <pre class="mt-1 px-3 py-2 rounded-lg text-xs text-foreground/80 font-mono whitespace-pre-wrap break-words overflow-x-auto max-h-[120px] border border-white/[0.04]"
+                 style="background: rgba(0,0,0,0.2);">{formatToolArguments(message.confirmation.tool_arguments)}</pre>
+          </div>
+
+          {#if message.confirmation.status === "pending"}
+            <!-- Pending: show Confirm / Deny buttons -->
+            <div class="flex items-center justify-center gap-2">
+              <button
+                class="px-4 py-1.5 text-xs font-semibold rounded-lg border cursor-pointer transition-all duration-200
+                       bg-emerald-500/15 text-emerald-400 border-emerald-400/30
+                       hover:bg-emerald-500/25 hover:border-emerald-400/50
+                       disabled:opacity-40 disabled:cursor-not-allowed"
+                type="button"
+                disabled={confirmationLoading}
+                onclick={() => handleConfirmation(true)}
+              >
+                {#if confirmationLoading}
+                  <span class="flex items-center gap-1.5">
+                    <span class="w-1.5 h-1.5 rounded-full bg-current animate-pulse"></span>
+                    Sending...
+                  </span>
+                {:else}
+                  Confirm
+                {/if}
+              </button>
+              <button
+                class="px-4 py-1.5 text-xs font-semibold rounded-lg border cursor-pointer transition-all duration-200
+                       bg-red-500/15 text-red-400 border-red-400/30
+                       hover:bg-red-500/25 hover:border-red-400/50
+                       disabled:opacity-40 disabled:cursor-not-allowed"
+                type="button"
+                disabled={confirmationLoading}
+                onclick={() => handleConfirmation(false)}
+              >
+                Deny
+              </button>
+            </div>
+          {:else}
+            <!-- Resolved: show dimmed status label -->
+            <div class="flex items-center justify-center gap-1.5 text-xs font-medium
+                        {message.confirmation.status === 'approved' ? 'text-emerald-400/50' : 'text-red-400/50'}">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                {#if message.confirmation.status === "approved"}
+                  <polyline points="20 6 9 17 4 12"/>
+                {:else}
+                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                {/if}
+              </svg>
+              {message.confirmation.status === "approved" ? "Approved" : message.confirmation.status === "denied" ? "Denied" : "Expired"}
+            </div>
+          {/if}
+        </div>
+      {/if}
     </div>
   </div>
 {:else}

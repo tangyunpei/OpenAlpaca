@@ -185,10 +185,10 @@ Controls what the skill is allowed to do.
 
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
-| `permissions.confirm.tools` | `Vec<String>` | `[]` | ENFORCED | Tool names that require confirmation. Passed to `SandboxPolicy.require_confirmation_for`. **Warning:** Currently fail-closed — see note below. |
+| `permissions.confirm.tools` | `Vec<String>` | `[]` | ENFORCED | Tool names that require confirmation. Passed to `SandboxPolicy.require_confirmation_for`. Prompts the user for approval before execution. |
 | `permissions.confirm.message` | `Option<String>` | `None` | PARSED | Custom confirmation prompt. Not yet displayed to users. |
 
-> **Fail-Closed Confirmation Gate**: The confirmation mechanism is currently **fail-closed**. Tools listed in `confirm.tools` will be **blocked** during autonomous skill invocation because no interactive confirmation mechanism exists in the agentic loop. Only use `confirm.tools` if you intentionally want to prevent a tool from being called autonomously. A future interactive execution mode (CLI chat, GUI approval dialogs) will provide a confirmation callback.
+> **Interactive Confirmation**: When a tool listed in `confirm.tools` is invoked, execution pauses and the user is prompted for approval via their active interface (CLI Y/N prompt, GUI Confirm/Deny buttons, Telegram `/yes`/`/no`). The tool executes only if the user approves within the configured timeout (default 300s, configurable via `confirmation_timeout_secs` in `daemon.toml`). If no interactive context is available (e.g., headless/background agents), the mechanism is **fail-closed** — the tool is blocked immediately.
 
 **`permissions.sandbox` sub-fields:**
 
@@ -311,7 +311,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 - **Sandbox integration**: Script tool names are added to `SandboxPolicy.allowed_capabilities` and pass through the full sandbox pipeline (capability check → input sanitization → circuit breaker → timeout).
 - **No shell injection**: Arguments are passed directly via `execve` (not through a shell), so shell metacharacters in argument values are inert.
 
-> **Important**: Do NOT list script tools in `permissions.confirm.tools`. The confirmation gate is fail-closed in autonomous mode — confirmed tools are **blocked**, not prompted. See the [Permissions Model](#7-permissions-model) section.
+> **Note**: Listing script tools in `permissions.confirm.tools` will prompt the user for approval each time the script tool is invoked. In non-interactive contexts (no broker available), the tool is blocked (fail-closed). See the [Permissions Model](#7-permissions-model) section.
 
 **Example:**
 
@@ -517,11 +517,14 @@ The handler builds the tool set as follows:
 
 Tools listed in `permissions.confirm.tools` are passed to the `SandboxPolicy.require_confirmation_for` field. The sandbox manager checks this list before executing those tools.
 
-> **Warning: Fail-Closed Behavior.** The current implementation has no interactive confirmation mechanism. Tools in `require_confirmation_for` are **blocked** during autonomous agentic loop execution with:
->
-> *"Tool 'X' requires human confirmation... but no interactive confirmation mechanism is available in this execution context. This is a fail-closed safety default."*
->
-> This means `confirm.tools` currently acts as a **deny list**. Only use it to intentionally prevent a tool from running autonomously. A future interactive mode will provide a confirmation callback that enables actual prompting.
+When a confirmation-required tool is invoked, the `ConfirmationBroker` pauses execution and prompts the user:
+- **CLI**: Y/N prompt in the terminal via SSE `confirmation_requested` event
+- **GUI**: Confirm/Deny buttons rendered inline in the chat
+- **Telegram**: Bot sends a message with instructions to reply `/yes` or `/no`
+
+The user must respond within the configured timeout (default 300s). If approved, execution proceeds normally. If denied or timed out, the tool call returns an error.
+
+> **Fail-Closed Fallback**: When no interactive context is available (e.g., background/headless agents without a `ConfirmationBroker`), tools in `require_confirmation_for` are **blocked** immediately. This preserves safety for autonomous execution.
 
 ---
 
@@ -830,7 +833,7 @@ Use plain language. Avoid jargon. Use analogies where helpful.
 
 7. **Set `budget_tokens` for context-heavy skills.** Without it, context defaults to ~4000 tokens, which may be too much or too little for your use case.
 
-8. **Understand `permissions.confirm.tools` is fail-closed.** Currently, tools in `confirm.tools` are **blocked** in autonomous mode (no interactive confirmation exists). Only use this to intentionally prevent autonomous execution of a tool.
+8. **Use `permissions.confirm.tools` for destructive operations.** Tools listed here will prompt the user for approval before execution (CLI, GUI, or Telegram). In non-interactive contexts, these tools are blocked (fail-closed safety default).
 
 9. **Enable `sandbox.net: true` when using `web_fetch`.** The preflight check rejects `web_fetch` with `net: false` for non-readonly skills.
 

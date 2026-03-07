@@ -75,6 +75,7 @@ impl Orchestrator {
         scope_ctx: &MemoryScopeContext,
         route_score: Option<f64>,
         was_auto_selected: bool,
+        stream_id: Option<&str>,
     ) -> Result<String, String> {
         let invocation_start = std::time::Instant::now();
 
@@ -88,7 +89,7 @@ impl Orchestrator {
 
         let result = self
             .handle_skill_invocation_inner(
-                request_id, source, skill_name, query, ctx, owner_id, scope_ctx,
+                request_id, source, skill_name, query, ctx, owner_id, scope_ctx, stream_id,
             )
             .await;
 
@@ -176,6 +177,7 @@ impl Orchestrator {
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
+        stream_id: Option<&str>,
     ) -> Result<SkillInvocationResult, String> {
         // Look up the catalog entry (for skill_dir) and load full skill (Level 2)
         let entry = self
@@ -339,6 +341,10 @@ impl Orchestrator {
                 require_confirmation_for: skill_doc.frontmatter.permissions.confirm.tools.clone(),
                 max_tool_calls: skill_doc.frontmatter.tools.rate_limit.max_calls.map(|n| n as u32),
                 max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
+                stream_id: stream_id.map(|s| s.to_string()),
+                lane_key: None,
+                confirmation_timeout_secs: None,
+                auto_approve: self.daemon_config.load().security.auto_approve_confirmations,
             });
             let skill_cfg = &self.daemon_config.load().execution.skill_defaults;
             config_for_loop = LoopConfig {
@@ -491,8 +497,13 @@ impl Orchestrator {
                     ContextualToolExecutor::new(self.tool_registry.clone(), ctx_exec)
                 },
             );
-            let per_request_sandbox =
+            let mut per_request_sandbox =
                 SandboxManager::with_defaults(contextual_executor, self.bus.clone());
+            if let Ok(guard) = self.confirmation_broker.read() {
+                if let Some(broker) = guard.as_ref() {
+                    per_request_sandbox.set_confirmation_broker(broker.clone());
+                }
+            }
 
             let call_start = std::time::Instant::now();
             let result = run_agentic_loop_routed(

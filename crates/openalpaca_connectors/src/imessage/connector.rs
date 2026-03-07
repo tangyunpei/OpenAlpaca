@@ -555,6 +555,7 @@ impl IMessageConnector {
                     id: msg.chat_id.clone(),
                 },
                 workspace_path: None,
+                stream_id: None,
             })
             .await;
 
