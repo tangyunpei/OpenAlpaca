@@ -224,16 +224,24 @@ impl Gateway {
         match handler_result {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
-                // Persist assistant message
-                if let Some(ref p) = self.persistence
-                    && let Err(e) = p.persist_assistant_message(
+                // Persist assistant message and link to skill execution log
+                if let Some(ref p) = self.persistence {
+                    match p.persist_assistant_message(
                         &lane_key_str,
                         &result.content,
                         Some(duration_ms),
                         &source_name,
-                    )
-                {
-                    tracing::warn!("Failed to persist assistant message: {e}");
+                    ) {
+                        Ok(message_id) if message_id > 0 => {
+                            if let Err(e) = openalpaca_storage::SkillExecutionRepository::new(p.db())
+                                .link_response(&request_id.to_string(), message_id)
+                            {
+                                tracing::debug!("No skill execution to link for request {request_id}: {e}");
+                            }
+                        }
+                        Err(e) => tracing::warn!("Failed to persist assistant message: {e}"),
+                        _ => {}
+                    }
                 }
                 GatewayResponse {
                     lane_key: key,

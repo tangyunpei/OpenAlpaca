@@ -6,7 +6,7 @@ use chrono::Utc;
 use tokio::sync::broadcast;
 
 use openalpaca_api::events::ServerEvent;
-use openalpaca_storage::{Database, repository::EventLogRepository};
+use openalpaca_storage::{Database, ToolExecutionEntry, SkillExecutionRepository, repository::EventLogRepository};
 
 /// Event broadcaster for pushing events to all connected clients and persisting to DB
 #[derive(Clone)]
@@ -618,6 +618,21 @@ impl EventBroadcaster {
         };
 
         self.persist(&event);
+        if let Some(ref db) = self.db {
+            let entry = ToolExecutionEntry {
+                id: None,
+                request_id: None,
+                agent_id: agent_id.to_string(),
+                tool_name: tool_name.to_string(),
+                success,
+                duration_ms: duration_ms as i64,
+                error_message: None,
+                timestamp: None,
+            };
+            if let Err(e) = SkillExecutionRepository::new(db).record_tool(&entry) {
+                tracing::warn!("Failed to persist tool execution log: {e}");
+            }
+        }
         let _ = self.tx.send(event);
     }
 

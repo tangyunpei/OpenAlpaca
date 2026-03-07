@@ -13,6 +13,7 @@
   import AppHeader from "$lib/components/AppHeader.svelte";
   import TaskPanel from "$lib/components/TaskPanel.svelte";
   import AgentStatusPanel from "$lib/components/AgentStatusPanel.svelte";
+  import SkillHealthPanel from "$lib/components/SkillHealthPanel.svelte";
   import ChatPanel from "$lib/components/ChatPanel.svelte";
   import SettingsDrawer from "$lib/components/SettingsDrawer.svelte";
 
@@ -22,6 +23,7 @@
   import { loadInstances, subscribeToInstanceEvents, instanceList } from "$lib/stores/instances";
   import { subscribeToKeyEvents } from "$lib/stores/settings";
   import { subscribeToChatEvents } from "$lib/stores/chat";
+  import { loadSkillHealth } from "$lib/stores/skills";
 
   // Reactive state from stores
   let statusState = $state("disconnected");
@@ -29,7 +31,7 @@
   let eventList = $state<ServerEvent[]>([]);
   let error = $state<string | null>(null);
 
-  let rightTab = $state<"tasks" | "agents">("tasks");
+  let rightTab = $state<"tasks" | "agents" | "skills">("tasks");
   let drawerOpen = $state(false);
 
   // Counts for tab badges
@@ -86,13 +88,14 @@
     drawerOpen = !drawerOpen;
   }
 
-  function handleRightTabChange(tab: "tasks" | "agents") {
+  function handleRightTabChange(tab: "tasks" | "agents" | "skills") {
     rightTab = tab;
     if (tab === "tasks") loadTasks();
     if (tab === "agents") {
       loadTemplates();
       loadInstances();
     }
+    if (tab === "skills") loadSkillHealth();
   }
 </script>
 
@@ -151,14 +154,23 @@
               <span class="oa-count-badge">{instanceCount}</span>
             {/if}
           </button>
+          <button
+            class="oa-tab-item"
+            data-active={rightTab === 'skills'}
+            onclick={() => handleRightTabChange('skills')}
+          >
+            Skills
+          </button>
         </div>
       </div>
 
       <div>
         {#if rightTab === "tasks"}
           <TaskPanel />
-        {:else}
+        {:else if rightTab === "agents"}
           <AgentStatusPanel />
+        {:else}
+          <SkillHealthPanel />
         {/if}
       </div>
     </div>

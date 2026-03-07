@@ -4,18 +4,13 @@
 
 import { get } from "svelte/store";
 import { connectionInfo, type ConnectionInfo } from "../daemon";
+import { ensureConnection } from "./connection";
 import type {
   ChatSendRequest,
   ChatSendResponse,
   ChatHistoryResponse,
   ChatDeleteResponse,
 } from "../types";
-
-async function ensureConnection(): Promise<ConnectionInfo> {
-  const conn = get(connectionInfo);
-  if (!conn) throw new Error("Not connected to daemon");
-  return conn;
-}
 
 /** POST /v1/chat — send a message */
 export async function sendMessage(req: ChatSendRequest): Promise<ChatSendResponse> {

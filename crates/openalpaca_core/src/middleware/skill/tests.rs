@@ -314,3 +314,60 @@ routing:
     assert!((fm.routing.weights.keyword_weight - 0.35).abs() < f64::EPSILON);
     assert!((fm.routing.weights.recency_weight - 0.2).abs() < f64::EPSILON);
 }
+
+#[test]
+fn test_script_config_deserialization() {
+    let input = r#"---
+name: "Script Skill"
+description: "A skill with scripts"
+scripts:
+  - file: lint.sh
+    name: lint_code
+    description: "Run linter"
+    parameters:
+      type: object
+      properties:
+        path:
+          type: string
+      required:
+        - path
+    timeout_secs: 60
+  - file: analyze.py
+    name: analyze
+    description: "Run analysis"
+    interpreter: python3
+---
+"#;
+    let fm = parse_skill_frontmatter(input).expect("scripts should parse");
+    assert_eq!(fm.scripts.len(), 2);
+    assert_eq!(fm.scripts[0].file, "lint.sh");
+    assert_eq!(fm.scripts[0].name, "lint_code");
+    assert_eq!(fm.scripts[0].timeout_secs, 60);
+    assert!(fm.scripts[0].interpreter.is_none());
+    assert_eq!(fm.scripts[1].file, "analyze.py");
+    assert_eq!(fm.scripts[1].interpreter.as_deref(), Some("python3"));
+    // Default timeout
+    assert_eq!(fm.scripts[1].timeout_secs, 30);
+}
+
+#[test]
+fn test_script_config_to_tool_definition() {
+    let cfg = ScriptConfig {
+        file: "lint.sh".to_string(),
+        name: "lint_code".to_string(),
+        description: "Run linter".to_string(),
+        parameters: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        interpreter: None,
+        timeout_secs: 30,
+    };
+    let def = cfg.to_tool_definition();
+    assert_eq!(def.name, "skill_script:lint_code");
+    assert_eq!(def.description, "Run linter");
+    assert_eq!(def.parameters["type"], "object");
+}
+
+#[test]
+fn test_skill_without_scripts_has_empty_vec() {
+    let fm = parse_skill_frontmatter(MINIMAL_SKILL).expect("minimal skill should parse");
+    assert!(fm.scripts.is_empty());
+}

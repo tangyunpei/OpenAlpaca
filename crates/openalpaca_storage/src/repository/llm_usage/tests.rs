@@ -143,5 +143,5 @@ fn test_empty_results() {
 #[test]
 fn test_schema_version() {
     let db = setup_db();
-    assert_eq!(db.schema_version().unwrap(), 29);
+    assert_eq!(db.schema_version().unwrap(), 31);
 }

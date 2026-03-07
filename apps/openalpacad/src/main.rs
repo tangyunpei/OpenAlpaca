@@ -502,6 +502,7 @@ async fn async_main(
         cancel_token.clone(),
     );
     background::spawn_asset_cleanup(db.clone(), daemon_config.clone(), cancel_token.clone());
+    background::spawn_telemetry_cleanup(db.clone(), cancel_token.clone());
 
     // Step 14: Build AppState and HTTP router
     let db_for_shutdown = db.clone();

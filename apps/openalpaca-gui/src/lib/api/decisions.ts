@@ -2,15 +2,8 @@
  * REST API client for dispatch decisions endpoint.
  */
 
-import { get } from "svelte/store";
-import { connectionInfo, type ConnectionInfo } from "../daemon";
+import { ensureConnection } from "./connection";
 import type { DispatchDecisionRecord } from "../types";
-
-async function ensureConnection(): Promise<ConnectionInfo> {
-  const conn = get(connectionInfo);
-  if (!conn) throw new Error("Not connected to daemon");
-  return conn;
-}
 
 /** GET /v1/orchestrator/decisions — query dispatch decision history */
 export async function getDispatchDecisions(

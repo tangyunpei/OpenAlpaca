@@ -2,15 +2,8 @@
  * REST API client for orchestrator latency endpoints.
  */
 
-import { get } from "svelte/store";
-import { connectionInfo, type ConnectionInfo } from "../daemon";
+import { ensureConnection } from "./connection";
 import type { OrchestratorLatencyRecord, LatencyAggregate } from "../types";
-
-async function ensureConnection(): Promise<ConnectionInfo> {
-  const conn = get(connectionInfo);
-  if (!conn) throw new Error("Not connected to daemon");
-  return conn;
-}
 
 /** GET /v1/orchestrator/latency — query latency records */
 export async function getLatencyRecords(

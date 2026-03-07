@@ -264,6 +264,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/daemon/config/providers/web-search",
             put(crate::routes::update_web_search_config),
         )
+        // Message feedback routes (Phase 4b)
+        .route(
+            "/v1/chat/messages/{message_id}/feedback",
+            put(crate::routes::upsert_feedback_handler)
+                .get(crate::routes::get_feedback_handler)
+                .delete(crate::routes::delete_feedback_handler),
+        )
+        // Skill health routes (Phase 4a)
+        .route(
+            "/v1/skills/health",
+            get(crate::routes::skill_health_handler),
+        )
         // Memory routes
         .route("/v1/memory", get(crate::routes::list_memories_handler))
         .route("/v1/memory/reindex", post(crate::routes::reindex_handler))

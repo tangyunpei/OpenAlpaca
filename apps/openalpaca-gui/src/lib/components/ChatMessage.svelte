@@ -8,6 +8,7 @@
     openFileWithSystemDefault,
     saveBlobWithDialog,
   } from "$lib/api/files";
+  import { submitFeedback, getFeedback, deleteFeedback } from "$lib/api/feedback";
 
   interface Props {
     message: ChatMessage;
@@ -16,6 +17,57 @@
   let { message }: Props = $props();
 
   let copied = $state(false);
+
+  // Feedback state
+  let feedbackState = $state<"positive" | "negative" | null>(null);
+  let showCommentInput = $state(false);
+  let feedbackComment = $state("");
+
+  // Load persisted feedback for assistant messages
+  $effect(() => {
+    if (message.role === "assistant" && message.id) {
+      getFeedback(message.id).then((fb) => {
+        if (fb) feedbackState = fb.feedback;
+      }).catch(() => {});
+    }
+  });
+
+  async function handleFeedback(type: "positive" | "negative") {
+    if (!message.id) return;
+    try {
+      if (feedbackState === type) {
+        await deleteFeedback(message.id);
+        feedbackState = null;
+        showCommentInput = false;
+        feedbackComment = "";
+      } else {
+        await submitFeedback(message.id, type);
+        feedbackState = type;
+        showCommentInput = type === "negative";
+        feedbackComment = "";
+      }
+    } catch {
+      // Silently fail — feedback is non-critical
+    }
+  }
+
+  async function submitComment() {
+    if (!message.id || !feedbackComment.trim()) {
+      showCommentInput = false;
+      feedbackComment = "";
+      return;
+    }
+    try {
+      await submitFeedback(message.id, "negative", feedbackComment.trim());
+    } catch { /* non-critical */ }
+    showCommentInput = false;
+    feedbackComment = "";
+  }
+
+  function handleCommentKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitComment(); }
+    else if (e.key === "Escape") { showCommentInput = false; feedbackComment = ""; }
+  }
 
   // Image preview state
   let imageUrls = $state<Record<string, string>>({});
@@ -344,31 +396,71 @@
           </div>
         {/if}
 
-        <!-- Copy button (appears on hover) -->
+        <!-- Action buttons (appear on hover) -->
         {#if !isThinking}
-          <button
-            class="absolute -bottom-2.5 {message.role === 'user' ? 'left-1' : 'right-1'} z-10 opacity-0 group-hover:opacity-100
-                   flex items-center gap-1 px-2 py-1 rounded-lg text-[0.6rem] font-medium
-                   bg-background/90 backdrop-blur-md border border-white/8 text-muted-foreground
-                   hover:text-foreground hover:border-white/15 transition-all duration-200 cursor-pointer
-                   shadow-sm"
-            type="button"
-            onclick={handleCopy}
-            aria-label="Copy message"
-          >
-            {#if copied}
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-success">
-                <polyline points="20 6 9 17 4 12"/>
-              </svg>
-              <span class="text-success">Copied</span>
-            {:else}
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect width="14" height="14" x="8" y="8" rx="2"/>
-                <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
-              </svg>
-              Copy
+          <div class="absolute -bottom-2.5 {message.role === 'user' ? 'left-1' : 'right-1'} z-10 opacity-0 group-hover:opacity-100
+                      flex items-center gap-1 transition-all duration-200">
+            <button
+              class="flex items-center gap-1 px-2 py-1 rounded-lg text-[0.6rem] font-medium
+                     bg-background/90 backdrop-blur-md border border-white/8 text-muted-foreground
+                     hover:text-foreground hover:border-white/15 transition-all duration-200 cursor-pointer
+                     shadow-sm"
+              type="button"
+              onclick={handleCopy}
+              aria-label="Copy message"
+            >
+              {#if copied}
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-success">
+                  <polyline points="20 6 9 17 4 12"/>
+                </svg>
+                <span class="text-success">Copied</span>
+              {:else}
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect width="14" height="14" x="8" y="8" rx="2"/>
+                  <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+                </svg>
+                Copy
+              {/if}
+            </button>
+            {#if message.role === "assistant"}
+              <button
+                class="flex items-center justify-center w-6 h-6 rounded-lg text-[0.6rem]
+                       bg-background/90 backdrop-blur-md border transition-all duration-200 cursor-pointer shadow-sm
+                       {feedbackState === 'positive' ? 'border-emerald-400/40 text-emerald-400' : 'border-white/8 text-muted-foreground hover:text-foreground hover:border-white/15'}"
+                type="button"
+                onclick={() => handleFeedback("positive")}
+                aria-label="Thumbs up"
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill={feedbackState === 'positive' ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"/>
+                </svg>
+              </button>
+              <button
+                class="flex items-center justify-center w-6 h-6 rounded-lg text-[0.6rem]
+                       bg-background/90 backdrop-blur-md border transition-all duration-200 cursor-pointer shadow-sm
+                       {feedbackState === 'negative' ? 'border-orange-400/40 text-orange-400' : 'border-white/8 text-muted-foreground hover:text-foreground hover:border-white/15'}"
+                type="button"
+                onclick={() => handleFeedback("negative")}
+                aria-label="Thumbs down"
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill={feedbackState === 'negative' ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h0a3.13 3.13 0 0 1-3-3.88Z"/>
+                </svg>
+              </button>
             {/if}
-          </button>
+            {#if showCommentInput}
+              <input
+                type="text"
+                class="px-2 py-1 text-xs rounded-lg border border-white/10 bg-background/95 backdrop-blur-md
+                       text-foreground placeholder:text-muted-foreground/40 outline-none focus:border-orange-400/30
+                       w-44 shadow-sm"
+                placeholder="What went wrong?"
+                bind:value={feedbackComment}
+                onkeydown={handleCommentKeydown}
+                onblur={submitComment}
+              />
+            {/if}
+          </div>
         {/if}
       </div>
 
