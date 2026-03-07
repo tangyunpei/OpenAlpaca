@@ -41,7 +41,7 @@ pub use agents::{
 };
 pub use auth::generate_link_token_handler;
 pub use chat::{
-    chat_stream_handler, delete_chat_history_handler, delete_feedback_handler,
+    chat_stream_handler, confirm_tool, delete_chat_history_handler, delete_feedback_handler,
     get_chat_history_handler, get_conversation_messages_handler, get_feedback_handler,
     list_conversations_handler, send_chat_handler, upsert_feedback_handler,
 };

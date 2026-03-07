@@ -372,6 +372,19 @@ impl EventBroadcaster {
                     });
                     repo.log("dag_node_status", Some(agent_id), Some(&detail), None)
                 }
+                ServerEvent::ToolConfirmationRequested {
+                    request_id,
+                    agent_id,
+                    tool_name,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "request_id": request_id,
+                        "agent_id": agent_id,
+                        "tool_name": tool_name
+                    });
+                    repo.log("tool_confirmation_requested", Some(agent_id), Some(&detail), None)
+                }
                 // Log SOUL.md personality updates with actor attribution
                 ServerEvent::SoulUpdated {
                     actor,
@@ -741,6 +754,32 @@ impl EventBroadcaster {
             decision: decision.to_string(),
             nodes_added,
             nodes_removed,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a tool confirmation requested event and persist it
+    #[allow(clippy::too_many_arguments)]
+    pub fn tool_confirmation_requested(
+        &self,
+        request_id: &str,
+        agent_id: &str,
+        tool_name: &str,
+        tool_arguments: &serde_json::Value,
+        stream_id: Option<&str>,
+        lane_key: Option<&str>,
+    ) {
+        let event = ServerEvent::ToolConfirmationRequested {
+            request_id: request_id.to_string(),
+            agent_id: agent_id.to_string(),
+            tool_name: tool_name.to_string(),
+            tool_arguments: tool_arguments.clone(),
+            stream_id: stream_id.map(|s| s.to_string()),
+            lane_key: lane_key.map(|s| s.to_string()),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };

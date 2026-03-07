@@ -283,6 +283,8 @@ pub struct SpawnSubagentTool {
     /// Pre-computed static part of the subagent system prompt (Opt-LA-3).
     /// Contains `{PERSONA}` and `{TOOL_GUIDANCE}` placeholders for substitution.
     prompt_template: String,
+    /// Optional confirmation broker for interactive tool approval.
+    confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
 }
 
 impl SpawnSubagentTool {
@@ -302,6 +304,7 @@ impl SpawnSubagentTool {
         depth: u32,
         max_concurrent_subagents: usize,
         workspace_id: Option<String>,
+        confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
     ) -> Self {
         let prompt_template = "\
             <identity>\n{PERSONA}\n</identity>\n\n\
@@ -338,6 +341,7 @@ impl SpawnSubagentTool {
             concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent_subagents)),
             workspace_id,
             prompt_template,
+            confirmation_broker,
         }
     }
 
@@ -446,7 +450,10 @@ impl BuiltInTool for SpawnSubagentTool {
             self.tool_registry.clone(),
             ctx_exec,
         ));
-        let sandbox = SandboxManager::with_defaults(contextual_executor, self.bus.clone());
+        let mut sandbox = SandboxManager::with_defaults(contextual_executor, self.bus.clone());
+        if let Some(ref broker) = self.confirmation_broker {
+            sandbox.set_confirmation_broker(broker.clone());
+        }
 
         // 6. Resolve tools for subagent's skills
         let tools = crate::tools::resolve_agent_tools(&agent, &self.tool_registry);
@@ -470,7 +477,10 @@ impl BuiltInTool for SpawnSubagentTool {
                     agent.llm_config.model.as_deref(),
                 );
 
-        let sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
+        let mut sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
+        if self.daemon_config.load().security.auto_approve_confirmations {
+            sandbox_policy.auto_approve = true;
+        }
 
         // 9. Spawn subagent as a background task (non-blocking).
         //    This allows the lead agent to spawn multiple subagents in parallel.
@@ -1161,6 +1171,7 @@ pub async fn run_lead_agent(
     workspace_id: Option<String>,
     cancel_token: Option<CancellationToken>,
     connector_guidance: &str,
+    confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
 ) -> LeadAgentResult {
     tracing::info!(
         lead_agent = %lead_agent.id,
@@ -1225,6 +1236,7 @@ pub async fn run_lead_agent(
             .lead_agent_defaults
             .max_concurrent_subagents,
         workspace_id.clone(),
+        confirmation_broker.clone(),
     ));
 
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
@@ -1259,8 +1271,14 @@ pub async fn run_lead_agent(
     ));
 
     // 5. Build SandboxManager with lead agent's policy
-    let sandbox = SandboxManager::with_defaults(lead_executor, bus.clone());
-    let sandbox_policy = SandboxPolicy::from_constraints(&lead_agent.id, &lead_agent.constraints);
+    let mut sandbox = SandboxManager::with_defaults(lead_executor, bus.clone());
+    if let Some(ref broker) = confirmation_broker {
+        sandbox.set_confirmation_broker(broker.clone());
+    }
+    let mut sandbox_policy = SandboxPolicy::from_constraints(&lead_agent.id, &lead_agent.constraints);
+    if daemon_config.load().security.auto_approve_confirmations {
+        sandbox_policy.auto_approve = true;
+    }
 
     // 6. Build system prompt from templates
     let system_prompt =

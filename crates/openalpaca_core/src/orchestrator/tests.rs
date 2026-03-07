@@ -195,6 +195,7 @@ async fn test_simple_query_echo() {
             Scope::Global,
             "test:cli".to_string(),
             None,
+            None,
         )
         .await;
     assert!(result.is_ok());
@@ -214,6 +215,7 @@ async fn test_task_query_empty() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
             None,
         )
         .await;
@@ -236,6 +238,7 @@ async fn test_complex_task_dispatch() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
             None,
         )
         .await;
@@ -262,6 +265,7 @@ async fn test_task_control_cancel() {
             Scope::Global,
             "test:cli".to_string(),
             None,
+            None,
         )
         .await;
     assert!(result.is_ok());
@@ -284,6 +288,7 @@ async fn test_permission_denied_external() {
             Scope::Global,
             "unknown:telegram".to_string(),
             None,
+            None,
         )
         .await;
     assert!(result.is_err());
@@ -304,6 +309,7 @@ async fn test_full_lifecycle_events() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
             None,
         )
         .await;
@@ -407,6 +413,7 @@ async fn test_simple_query_with_mock_llm() {
             Scope::Global,
             "test:cli".to_string(),
             None,
+            None,
         )
         .await;
     assert!(result.is_ok());
@@ -426,6 +433,7 @@ async fn test_input_sanitization_blocks_null_bytes() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
             None,
         )
         .await;
@@ -448,6 +456,7 @@ async fn test_security_gate_replaces_trust_gate() {
             },
             Scope::Global,
             "unknown:telegram".to_string(),
+            None,
             None,
         )
         .await;
@@ -553,6 +562,7 @@ async fn test_llm_planning_complex_task() {
             Scope::Global,
             "test:cli".to_string(),
             None,
+            None,
         )
         .await;
 
@@ -583,6 +593,7 @@ async fn test_llm_planning_simple_query() {
             Scope::Global,
             "test:cli".to_string(),
             None,
+            None,
         )
         .await;
 
@@ -606,6 +617,7 @@ async fn test_llm_planning_fallback_on_malformed() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
             None,
         )
         .await;
@@ -656,6 +668,7 @@ async fn test_slash_commands_bypass_llm() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
             None,
         )
         .await;
@@ -810,6 +823,7 @@ async fn test_tool_intent_detected_and_executes() {
             Scope::Global,
             "test:cli".to_string(),
             None,
+            None,
         )
         .await;
 
@@ -892,6 +906,7 @@ async fn test_tool_max_rounds_enforcement() {
             Scope::Global,
             "test:cli".to_string(),
             None,
+            None,
         )
         .await;
 
@@ -920,6 +935,7 @@ async fn test_tool_intent_but_not_in_registry() {
             Scope::Global,
             "test:cli".to_string(),
             None,
+            None,
         )
         .await;
 
@@ -943,6 +959,7 @@ async fn test_dispatch_error_falls_back_to_simple_query() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
             None,
         )
         .await;
@@ -987,6 +1004,7 @@ async fn test_attachment_text_does_not_change_intent_classification() {
             Scope::Global,
             "test:cli".to_string(),
             None,
+            None,
         )
         .await
         .expect("message should succeed");
@@ -1015,6 +1033,7 @@ async fn test_empty_content_with_attachments_forces_simple_query() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
             None,
         )
         .await
@@ -1083,6 +1102,7 @@ async fn test_attachment_image_is_converted_to_base64_part() {
             Scope::Global,
             "test:cli".to_string(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1138,6 +1158,7 @@ async fn test_attachment_image_read_failure_inserts_placeholder_text() {
             Scope::Global,
             "test:cli".to_string(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1183,6 +1204,7 @@ async fn test_attachment_document_pending_adds_pending_text_part() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
             None,
         )
         .await
@@ -1274,6 +1296,7 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
             Principal::System,
             Scope::Global,
             "test:cli".to_string(),
+            None,
             None,
         )
         .await

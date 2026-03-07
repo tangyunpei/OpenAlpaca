@@ -50,6 +50,16 @@ fn test_into_subagent() {
 }
 
 #[test]
+fn test_require_confirmation_for_roundtrip() {
+    let config: AgentConfigFile = toml::from_str(sample_toml()).unwrap();
+    let agent = config.into_subagent();
+    assert_eq!(
+        agent.constraints.require_confirmation_for,
+        vec!["file_delete"]
+    );
+}
+
+#[test]
 fn test_into_storage_config() {
     let config: AgentConfigFile = toml::from_str(sample_toml()).unwrap();
     let sc = config.into_storage_config();

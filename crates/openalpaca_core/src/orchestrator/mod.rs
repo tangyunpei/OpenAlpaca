@@ -165,6 +165,8 @@ pub struct Orchestrator {
     pub llm_metadata_map: DashMap<Uuid, LlmMetadata>,
     /// Cached base system prompt (persona + identity + bootstrap). TTL-based invalidation.
     cached_base_prompt: Arc<ArcSwap<Option<CachedBasePrompt>>>,
+    /// Optional broker for interactive tool confirmation (set post-construction via `set_confirmation_broker()`).
+    pub confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
 }
 
 /// Full conversation context for prompt building and summary update.
@@ -277,6 +279,18 @@ impl Orchestrator {
             connector_sender,
             llm_metadata_map: DashMap::new(),
             cached_base_prompt: Arc::new(ArcSwap::from_pointee(None)),
+            confirmation_broker: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Set the confirmation broker for interactive tool approval.
+    /// Also propagates to the TaskDispatcher for pipeline/DAG/lead-agent execution.
+    pub fn set_confirmation_broker(&self, broker: Arc<crate::security::confirmation::ConfirmationBroker>) {
+        if let Ok(mut guard) = self.confirmation_broker.write() {
+            *guard = Some(broker.clone());
+        }
+        if let Ok(mut guard) = self.task_dispatcher.confirmation_broker.write() {
+            *guard = Some(broker);
         }
     }
 

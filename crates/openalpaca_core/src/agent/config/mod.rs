@@ -50,6 +50,7 @@ pub struct AgentConstraintsConfig {
     pub denied_capabilities: Option<Vec<String>>,
     pub allowed_models: Option<Vec<String>>,
     pub denied_models: Option<Vec<String>>,
+    pub auto_approve: Option<bool>,
 }
 
 /// TOML structure for per-agent LLM config.
@@ -106,7 +107,8 @@ impl AgentConfigFile {
                 || !c.allowed_capabilities.is_empty()
                 || !c.denied_capabilities.is_empty()
                 || !c.allowed_models.is_empty()
-                || !c.denied_models.is_empty();
+                || !c.denied_models.is_empty()
+                || c.auto_approve;
 
             if has_values {
                 Some(AgentConstraintsConfig {
@@ -138,6 +140,7 @@ impl AgentConfigFile {
                     } else {
                         Some(c.denied_models.clone())
                     },
+                    auto_approve: if c.auto_approve { Some(true) } else { None },
                 })
             } else {
                 None
@@ -225,6 +228,7 @@ impl AgentConfigFile {
                     denied_capabilities: denied,
                     allowed_models: c.allowed_models.clone().unwrap_or_default(),
                     denied_models: c.denied_models.clone().unwrap_or_default(),
+                    auto_approve: c.auto_approve.unwrap_or(false),
                 };
                 constraints.normalize();
                 constraints
@@ -324,6 +328,7 @@ impl AgentConfigFile {
                     },
                     allowed_models: None,
                     denied_models: None,
+                    auto_approve: None,
                 })
             } else {
                 None
@@ -449,6 +454,7 @@ impl AgentConfigFile {
                 denied_capabilities: denied,
                 allowed_models: c.allowed_models.clone().unwrap_or_default(),
                 denied_models: c.denied_models.clone().unwrap_or_default(),
+                auto_approve: c.auto_approve.unwrap_or(false),
             };
             constraints.normalize();
             constraints

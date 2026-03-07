@@ -93,6 +93,7 @@ fn test_lead_agent_tool_executor_routes_correctly() {
             DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         )),
         prompt_template: String::new(),
+        confirmation_broker: None,
     });
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
@@ -414,6 +415,7 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         None, // workspace_id
+        None, // confirmation_broker
     ));
     let check_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
@@ -484,6 +486,7 @@ fn test_batch_spawn_tool_present_when_enabled() {
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         None, // workspace_id
+        None, // confirmation_broker
     ));
     let batch_tool = Some(Arc::new(SpawnSubagentsBatchTool::new(spawn_tool.clone())));
     let check_tool = Arc::new(CheckSubagentStatusTool {
@@ -533,6 +536,7 @@ async fn test_batch_spawn_empty_array_error() {
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         None, // workspace_id
+        None, // confirmation_broker
     ));
     let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
 
@@ -569,6 +573,7 @@ async fn test_batch_spawn_exceeds_max_error() {
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         None, // workspace_id
+        None, // confirmation_broker
     ));
     let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
 
@@ -653,6 +658,7 @@ fn test_lead_agent_executor_delegates_shell_like_tools() {
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         None,
+        None, // confirmation_broker
     ));
     let check_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),

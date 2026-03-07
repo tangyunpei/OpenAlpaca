@@ -300,6 +300,7 @@ impl Orchestrator {
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
         current_parts: Option<&[ContentPart]>,
+        stream_id: Option<&str>,
     ) -> Result<String, String> {
         // Layer 1: Deterministic direct send — bypass LLM entirely
         if let Some(result) = self.try_direct_send(tool_suggestion_query, owner_id).await {
@@ -410,6 +411,10 @@ impl Orchestrator {
                 require_confirmation_for: vec![],
                 max_tool_calls: None,
                 max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
+                stream_id: stream_id.map(|s| s.to_string()),
+                lane_key: Some(_lane_key.to_string()),
+                confirmation_timeout_secs: None,
+                auto_approve: self.daemon_config.load().security.auto_approve_confirmations,
             });
             config_for_loop = LoopConfig {
                 max_rounds: 4,
@@ -564,8 +569,13 @@ impl Orchestrator {
                 self.tool_registry.clone(),
                 ctx_exec,
             ));
-            let per_request_sandbox =
+            let mut per_request_sandbox =
                 SandboxManager::with_defaults(contextual_executor, self.bus.clone());
+            if let Ok(guard) = self.confirmation_broker.read() {
+                if let Some(broker) = guard.as_ref() {
+                    per_request_sandbox.set_confirmation_broker(broker.clone());
+                }
+            }
 
             let call_start = std::time::Instant::now();
             let result = run_agentic_loop_routed(

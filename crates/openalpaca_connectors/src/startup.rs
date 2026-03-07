@@ -211,8 +211,13 @@ pub fn spawn_telegram_connector(
     bus: EventBus,
     gateway: Arc<Gateway>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
+    confirmation_broker: Option<Arc<openalpaca_core::security::confirmation::ConfirmationBroker>>,
 ) -> ConnectorHandle {
-    let connector = ConnectorBuilder::new(db, bus, gateway, daemon_config).telegram(token);
+    let mut builder = ConnectorBuilder::new(db, bus, gateway, daemon_config);
+    if let Some(broker) = confirmation_broker {
+        builder = builder.with_confirmation_broker(broker);
+    }
+    let connector = builder.telegram(token);
     let (shutdown_token, running) = spawn_telegram(connector);
     ConnectorHandle::Telegram(shutdown_token, running)
 }

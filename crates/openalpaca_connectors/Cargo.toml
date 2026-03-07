@@ -40,6 +40,9 @@ serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 
+# Concurrent map (for pending confirmations)
+dashmap.workspace = true
+
 # Internal crates
 openalpaca_api.workspace = true
 openalpaca_core.workspace = true

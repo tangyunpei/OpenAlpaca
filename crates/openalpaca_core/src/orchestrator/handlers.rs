@@ -85,6 +85,7 @@ impl Orchestrator {
         scope: Scope,
         lane_key: String,
         workspace_path: Option<String>,
+        stream_id: Option<String>,
     ) -> Result<String, String> {
         let intent_source_content = content.clone();
         self.handle_message_internal(
@@ -98,6 +99,7 @@ impl Orchestrator {
             scope,
             lane_key,
             workspace_path,
+            stream_id,
         )
         .await
     }
@@ -119,6 +121,7 @@ impl Orchestrator {
         scope: Scope,
         lane_key: String,
         workspace_path: Option<String>,
+        stream_id: Option<String>,
     ) -> Result<String, String> {
         let ack_start = Instant::now();
 
@@ -207,6 +210,7 @@ impl Orchestrator {
                 owner_id,
                 &scope_ctx,
                 current_parts.as_deref(),
+                stream_id.as_deref(),
             )
             .await
         } else if force_simple_query {
@@ -221,6 +225,7 @@ impl Orchestrator {
                 owner_id,
                 &scope_ctx,
                 current_parts.as_deref(),
+                stream_id.as_deref(),
             )
             .await
         } else if self.llm_router.is_some()
@@ -269,6 +274,7 @@ impl Orchestrator {
                 owner_id,
                 &scope_ctx,
                 current_parts.as_deref(),
+                stream_id.as_deref(),
             )
             .await
         } else if self.llm_router.is_some()
@@ -300,6 +306,7 @@ impl Orchestrator {
                 owner_id,
                 &scope_ctx,
                 current_parts.as_deref(),
+                stream_id.as_deref(),
             )
             .await
         } else if let Some(ref router) = self.llm_router
@@ -334,6 +341,7 @@ impl Orchestrator {
                         owner_id,
                         &scope_ctx,
                         current_parts.as_deref(),
+                        stream_id.as_deref(),
                     )
                     .await
                 }
@@ -373,6 +381,7 @@ impl Orchestrator {
                                         owner_id,
                                         &scope_ctx,
                                         current_parts.as_deref(),
+                                        stream_id.as_deref(),
                                     )
                                     .await
                                 }
@@ -409,6 +418,7 @@ impl Orchestrator {
                                                 owner_id,
                                                 &scope_ctx,
                                                 current_parts.as_deref(),
+                                                stream_id.as_deref(),
                                             )
                                             .await
                                         }
@@ -427,6 +437,7 @@ impl Orchestrator {
                                         owner_id,
                                         &scope_ctx,
                                         current_parts.as_deref(),
+                                        stream_id.as_deref(),
                                     )
                                     .await
                                 }
@@ -445,6 +456,7 @@ impl Orchestrator {
                                 owner_id,
                                 &scope_ctx,
                                 current_parts.as_deref(),
+                                stream_id.as_deref(),
                             )
                             .await
                         }
@@ -490,6 +502,7 @@ impl Orchestrator {
                                 owner_id,
                                 &scope_ctx,
                                 current_parts.as_deref(),
+                                stream_id.as_deref(),
                             )
                             .await
                         }
@@ -532,6 +545,7 @@ impl Orchestrator {
                                         owner_id,
                                         &scope_ctx,
                                         current_parts.as_deref(),
+                                        stream_id.as_deref(),
                                     )
                                     .await
                                 }
@@ -556,6 +570,7 @@ impl Orchestrator {
                                 &scope_ctx,
                                 current_parts.as_deref(),
                                 None, // re-parse on rare fallback path
+                                stream_id.as_deref(),
                             )
                             .await
                         }
@@ -577,6 +592,7 @@ impl Orchestrator {
                         &scope_ctx,
                         current_parts.as_deref(),
                         None, // re-parse on rare fallback path
+                        stream_id.as_deref(),
                     )
                     .await
                 }
@@ -595,6 +611,7 @@ impl Orchestrator {
                 &scope_ctx,
                 current_parts.as_deref(),
                 Some(intent.clone()), // reuse cached intent (Opt-6)
+                stream_id.as_deref(),
             )
             .await
         };
@@ -709,6 +726,7 @@ impl Orchestrator {
         scope: Scope,
         lane_key: String,
         workspace_path: Option<String>,
+        stream_id: Option<String>,
     ) -> Result<String, String> {
         // 1. Build structured ContentParts from attachments
         let mut parts: Vec<ContentPart> = Vec::new();
@@ -795,6 +813,7 @@ impl Orchestrator {
             scope,
             lane_key,
             workspace_path,
+            stream_id,
         )
         .await
     }
@@ -845,6 +864,7 @@ impl Orchestrator {
         scope_ctx: &MemoryScopeContext,
         current_parts: Option<&[ContentPart]>,
         cached_intent: Option<Intent>,
+        stream_id: Option<&str>,
     ) -> Result<String, String> {
         let intent = cached_intent.unwrap_or_else(|| {
             self.intent_parser.parse_with_skills_and_router(
@@ -872,6 +892,7 @@ impl Orchestrator {
                     owner_id,
                     scope_ctx,
                     current_parts,
+                    stream_id,
                 )
                 .await
             }
@@ -919,6 +940,7 @@ impl Orchestrator {
                                     owner_id,
                                     scope_ctx,
                                     current_parts,
+                                    stream_id,
                                 )
                                 .await
                             }
@@ -956,6 +978,7 @@ impl Orchestrator {
                     scope_ctx,
                     route_score,
                     was_auto_selected,
+                    stream_id,
                 )
                 .await
             }

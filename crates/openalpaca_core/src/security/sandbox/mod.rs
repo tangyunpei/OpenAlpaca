@@ -9,6 +9,7 @@ use crate::daemon_config::CircuitBreakerConfig;
 use crate::events::SystemEvent;
 use crate::security::capabilities::CapabilityManager;
 use crate::security::circuit_breaker::{ToolCircuitBreaker, is_transient_tool_error};
+use crate::security::confirmation::{ConfirmationBroker, ConfirmationRequest};
 use crate::security::sanitizer::InputSanitizer;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -28,6 +29,14 @@ pub struct SandboxPolicy {
     pub require_confirmation_for: Vec<String>,
     pub max_tool_calls: Option<u32>,
     pub max_tool_runtime_secs: u64,
+    /// SSE stream ID for routing confirmation prompts to the active chat stream.
+    pub stream_id: Option<String>,
+    /// Lane key for routing confirmation prompts to connectors (e.g. Telegram).
+    pub lane_key: Option<String>,
+    /// Seconds to wait for user confirmation before timing out (default: 300).
+    pub confirmation_timeout_secs: Option<u64>,
+    /// When true, skip interactive confirmations (from global config or per-agent).
+    pub auto_approve: bool,
 }
 
 impl SandboxPolicy {
@@ -40,6 +49,10 @@ impl SandboxPolicy {
             require_confirmation_for: constraints.require_confirmation_for.clone(),
             max_tool_calls: constraints.max_tool_calls,
             max_tool_runtime_secs: constraints.timeout_seconds.unwrap_or(60),
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: constraints.auto_approve,
         }
     }
 }
@@ -72,6 +85,10 @@ pub struct SandboxManager {
     circuit_breaker: ToolCircuitBreaker,
     /// Optional database for persisting security violation audit logs.
     db: Option<openalpaca_storage::Database>,
+    /// Optional broker for interactive tool confirmation.
+    /// When present, tools in `require_confirmation_for` pause and await user approval.
+    /// When absent, those tools are fail-closed (blocked immediately).
+    confirmation_broker: Option<Arc<ConfirmationBroker>>,
 }
 
 impl SandboxManager {
@@ -87,6 +104,7 @@ impl SandboxManager {
             bus,
             circuit_breaker,
             db: None,
+            confirmation_broker: None,
         }
     }
 
@@ -103,6 +121,7 @@ impl SandboxManager {
             bus,
             circuit_breaker,
             db: Some(db),
+            confirmation_broker: None,
         }
     }
 
@@ -112,6 +131,11 @@ impl SandboxManager {
     /// DAG executor, lead agent) where no custom config is needed.
     pub fn with_defaults(executor: Arc<dyn ToolExecutor>, bus: EventBus) -> Self {
         Self::new(executor, bus, &CircuitBreakerConfig::default())
+    }
+
+    /// Set the confirmation broker for interactive tool approval.
+    pub fn set_confirmation_broker(&mut self, broker: Arc<ConfirmationBroker>) {
+        self.confirmation_broker = Some(broker);
     }
 
     /// Execute a tool call within the sandbox.
@@ -157,34 +181,107 @@ impl SandboxManager {
             return Err(violation.to_string());
         }
 
-        // 3. Confirmation check — fail-closed by design.
-        //
-        // When a tool is listed in `require_confirmation_for`, it is blocked
-        // because no interactive confirmation mechanism exists in the current
-        // agent execution context (all agent loops are autonomous/headless).
-        // This is intentional: the fail-closed default prevents dangerous tools
-        // from running without explicit human approval. A future interactive
-        // execution mode (e.g., CLI chat, GUI approval dialogs) can override
-        // this by providing a confirmation callback.
+        // 3. Confirmation check — auto-approved, interactive, or fail-closed.
         if policy
             .require_confirmation_for
             .iter()
             .any(|t| t == &tool_call.name)
         {
-            let reason = format!(
-                "Tool '{}' requires human confirmation (configured via \
-                 require_confirmation_for) but no interactive confirmation \
-                 mechanism is available in this execution context. This is a \
-                 fail-closed safety default.",
-                tool_call.name
-            );
-            tracing::info!(
-                agent_id = agent_id,
-                tool = %tool_call.name,
-                "Tool blocked: requires confirmation (fail-closed)"
-            );
-            self.emit_security_violation(agent_id, &tool_call.name, &reason);
-            return Err(reason);
+            if policy.auto_approve {
+                tracing::info!(
+                    agent_id,
+                    tool = %tool_call.name,
+                    "Tool auto-approved (policy bypass)"
+                );
+                // Audit: persist auto-approve decision to event_log
+                if let Some(ref db) = self.db {
+                    let detail = serde_json::json!({
+                        "tool_name": tool_call.name,
+                        "reason": "auto_approve policy bypass",
+                    });
+                    let result = serde_json::json!({ "outcome": "auto_approved" });
+                    let repo = openalpaca_storage::repository::EventLogRepository::new(db);
+                    if let Err(e) = repo.log(
+                        "tool_auto_approved",
+                        Some(agent_id),
+                        Some(&detail),
+                        Some(&result),
+                    ) {
+                        tracing::warn!("Failed to persist auto-approve audit log: {e}");
+                    }
+                }
+                // Fall through to circuit breaker + execution
+            } else if let Some(ref broker) = self.confirmation_broker {
+                let request_id = uuid::Uuid::new_v4().to_string();
+                let request = ConfirmationRequest {
+                    request_id: request_id.clone(),
+                    agent_id: agent_id.to_string(),
+                    tool_name: tool_call.name.clone(),
+                    tool_arguments: tool_call.arguments.clone(),
+                    stream_id: policy.stream_id.clone(),
+                    lane_key: policy.lane_key.clone(),
+                    timestamp: Utc::now(),
+                };
+
+                // Register with broker BEFORE publishing event to avoid race
+                // where a fast client responds before the oneshot is registered.
+                let rx = broker.request(&request);
+
+                // Publish event for WebSocket/SSE clients
+                self.bus.publish(SystemEvent::ToolConfirmationRequested {
+                    request_id: request_id.clone(),
+                    agent_id: agent_id.to_string(),
+                    tool_name: tool_call.name.clone(),
+                    tool_arguments: tool_call.arguments.clone(),
+                    stream_id: policy.stream_id.clone(),
+                    lane_key: policy.lane_key.clone(),
+                    timestamp: Utc::now(),
+                });
+                let timeout_secs = policy.confirmation_timeout_secs.unwrap_or(300);
+                let timeout = Duration::from_secs(timeout_secs);
+
+                tracing::info!(
+                    agent_id,
+                    tool = %tool_call.name,
+                    "Tool requires confirmation — awaiting user response (timeout: {timeout_secs}s)"
+                );
+
+                match tokio::time::timeout(timeout, rx).await {
+                    Ok(Ok(resp)) if resp.approved => {
+                        tracing::info!(agent_id, tool = %tool_call.name, "Tool approved by user");
+                        // Fall through to circuit breaker + execution
+                    }
+                    Ok(Ok(_)) => {
+                        let reason = format!("Tool '{}' denied by user", tool_call.name);
+                        tracing::info!(agent_id, tool = %tool_call.name, "Tool denied by user");
+                        return Err(reason);
+                    }
+                    Ok(Err(_)) => {
+                        return Err("Confirmation request cancelled".to_string());
+                    }
+                    Err(_) => {
+                        broker.cancel(&request_id);
+                        return Err(format!(
+                            "Tool '{}' confirmation timed out after {timeout_secs}s",
+                            tool_call.name
+                        ));
+                    }
+                }
+            } else {
+                // No broker — preserve original fail-closed behavior
+                let reason = format!(
+                    "Tool '{}' requires human confirmation but no interactive \
+                     confirmation mechanism is available. Fail-closed safety default.",
+                    tool_call.name
+                );
+                tracing::info!(
+                    agent_id,
+                    tool = %tool_call.name,
+                    "Tool blocked: fail-closed"
+                );
+                self.emit_security_violation(agent_id, &tool_call.name, &reason);
+                return Err(reason);
+            }
         }
 
         // 4. Circuit breaker check

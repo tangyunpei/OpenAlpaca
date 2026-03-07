@@ -52,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _scope: Scope,
             _lane_key: String,
             _workspace_path: Option<String>,
+            _stream_id: Option<String>,
         ) -> Result<HandleResult, String> {
             Ok(HandleResult::text(format!("Echo: {content}")))
         }

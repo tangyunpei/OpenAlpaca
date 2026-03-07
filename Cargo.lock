@@ -4121,6 +4121,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "chrono",
+ "dashmap",
  "openalpaca_api",
  "openalpaca_core",
  "openalpaca_storage",

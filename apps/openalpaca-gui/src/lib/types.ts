@@ -336,6 +336,15 @@ export interface UpdateOrchestratorRequest {
   fallback_models: string[];
 }
 
+// ── Tool Confirmation types ────────────────────────────────────────
+
+export interface ToolConfirmation {
+  request_id: string;
+  tool_name: string;
+  tool_arguments: unknown;
+  status: "pending" | "approved" | "denied" | "expired";
+}
+
 // ── Chat types ─────────────────────────────────────────────────────
 
 export interface ChatMessage {
@@ -356,6 +365,8 @@ export interface ChatMessage {
   content_json?: string | null;
   /** Backend-rendered fallback text for attachment-only user turns. */
   display_text?: string | null;
+  /** Tool confirmation request attached to this message. */
+  confirmation?: ToolConfirmation;
 }
 
 /** Lightweight attachment info for display in chat messages. */

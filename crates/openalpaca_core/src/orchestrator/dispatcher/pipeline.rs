@@ -63,6 +63,7 @@ impl TaskDispatcher {
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
         let connector_block = self.connector_guidance_block();
+        let broker = self.confirmation_broker.read().ok().and_then(|g| g.clone());
 
         // Create cancellation token for this task
         let cancel_token = CancellationToken::new();
@@ -136,8 +137,11 @@ impl TaskDispatcher {
                 };
                 let contextual_executor =
                     Arc::new(ContextualToolExecutor::new(tool_registry.clone(), ctx_exec));
-                let per_request_sandbox =
+                let mut per_request_sandbox =
                     SandboxManager::with_defaults(contextual_executor, bus.clone());
+                if let Some(ref broker) = broker {
+                    per_request_sandbox.set_confirmation_broker(broker.clone());
+                }
 
                 tracing::info!(
                     "Pipeline step {}/{}: agent '{}' starting on task '{}'",

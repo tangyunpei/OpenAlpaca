@@ -117,6 +117,7 @@ pub async fn execute_dag(
     cancel_token: Option<CancellationToken>,
     workspace_id: Option<String>,
     connector_guidance: &str,
+    confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
 ) -> DagExecutionResult {
     let start = Instant::now();
 
@@ -323,6 +324,7 @@ pub async fn execute_dag(
             let workspace_id_clone = workspace_id.clone();
             let connector_guidance_clone = connector_guidance.to_string();
             let ws_snapshot = workspace_snapshot.clone();
+            let broker_clone = confirmation_broker.clone();
             join_set.spawn(async move {
                 execute_single_node(
                     node_snapshot,
@@ -340,6 +342,7 @@ pub async fn execute_dag(
                     workspace_id_clone,
                     connector_guidance_clone,
                     ws_snapshot,
+                    broker_clone,
                 )
                 .await
             });
@@ -693,6 +696,7 @@ async fn execute_single_node(
     workspace_id: Option<String>,
     connector_guidance: String,
     workspace_snapshot: Arc<Option<TaskState>>,
+    confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
 ) -> NodeResult {
     let agent_id = agent.id.clone();
 
@@ -706,7 +710,10 @@ async fn execute_single_node(
     };
     let contextual_executor =
         Arc::new(ContextualToolExecutor::new(tool_registry.clone(), ctx_exec));
-    let per_request_sandbox = SandboxManager::with_defaults(contextual_executor, bus.clone());
+    let mut per_request_sandbox = SandboxManager::with_defaults(contextual_executor, bus.clone());
+    if let Some(broker) = confirmation_broker {
+        per_request_sandbox.set_confirmation_broker(broker);
+    }
 
     // Build LoopConfig — agent constraints override daemon defaults, cap at node timeout
     let mut loop_config =
@@ -714,7 +721,10 @@ async fn execute_single_node(
             .with_context_window(router.model_registry(), agent.llm_config.model.as_deref());
     loop_config.max_tool_runtime = std::cmp::min(node_timeout, loop_config.max_tool_runtime);
 
-    let sandbox_policy = SandboxPolicy::from_constraints(&agent_id, &agent.constraints);
+    let mut sandbox_policy = SandboxPolicy::from_constraints(&agent_id, &agent.constraints);
+    if daemon_config.load().security.auto_approve_confirmations {
+        sandbox_policy.auto_approve = true;
+    }
 
     // Resolve tools via shared helper
     let tools = crate::tools::resolve_agent_tools(&agent, &tool_registry);

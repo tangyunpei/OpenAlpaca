@@ -462,6 +462,7 @@ impl DiscordConnector {
                     id: channel_id.to_string(),
                 },
                 workspace_path: None,
+                stream_id: None,
             })
             .await;
 

@@ -34,6 +34,11 @@ pub enum ChatStreamEvent {
     Error {
         message: String,
     },
+    ConfirmationRequested {
+        request_id: String,
+        tool_name: String,
+        tool_arguments: serde_json::Value,
+    },
 }
 
 /// A citation reference linking a response passage to a source document.

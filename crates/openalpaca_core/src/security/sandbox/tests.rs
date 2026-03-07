@@ -1,5 +1,6 @@
 use super::*;
 use crate::bus::EventBus;
+use crate::security::confirmation::{ConfirmationBroker, ConfirmationResponse};
 
 struct MockExecutor;
 
@@ -41,6 +42,10 @@ fn make_policy(agent_id: &str) -> SandboxPolicy {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: false,
     }
 }
 
@@ -174,6 +179,98 @@ async fn test_require_confirmation_fails_closed() {
     assert!(
         err.contains("requires human confirmation"),
         "Should fail-closed with confirmation message, got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_confirmation_approved_allows_execution() {
+    let broker = Arc::new(ConfirmationBroker::new());
+    let mut sandbox = make_sandbox();
+    sandbox.set_confirmation_broker(broker.clone());
+
+    let mut policy = make_policy("agent1");
+    policy.require_confirmation_for = vec!["web_search".to_string()];
+    policy.confirmation_timeout_secs = Some(5);
+    let tc = make_tool_call("web_search");
+
+    // Spawn a task to approve the confirmation after a brief delay
+    let broker_clone = broker.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // The broker should have exactly 1 pending request
+        assert_eq!(broker_clone.pending_count(), 1);
+        // We need to find the request_id — iterate pending keys
+        let keys: Vec<String> = broker_clone.pending_keys();
+        assert_eq!(keys.len(), 1);
+        broker_clone
+            .respond(&keys[0], ConfirmationResponse { approved: true })
+            .unwrap();
+    });
+
+    let result = sandbox.execute_tool("agent1", &tc, &policy).await;
+    assert!(result.is_ok(), "Tool should execute after approval: {:?}", result);
+    assert_eq!(result.unwrap(), "search results");
+}
+
+#[tokio::test]
+async fn test_confirmation_denied_blocks_execution() {
+    let broker = Arc::new(ConfirmationBroker::new());
+    let mut sandbox = make_sandbox();
+    sandbox.set_confirmation_broker(broker.clone());
+
+    let mut policy = make_policy("agent1");
+    policy.require_confirmation_for = vec!["web_search".to_string()];
+    policy.confirmation_timeout_secs = Some(5);
+    let tc = make_tool_call("web_search");
+
+    let broker_clone = broker.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let keys: Vec<String> = broker_clone.pending_keys();
+        assert_eq!(keys.len(), 1);
+        broker_clone
+            .respond(&keys[0], ConfirmationResponse { approved: false })
+            .unwrap();
+    });
+
+    let result = sandbox.execute_tool("agent1", &tc, &policy).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("denied by user"));
+}
+
+#[tokio::test]
+async fn test_auto_approve_skips_confirmation() {
+    let sandbox = make_sandbox();
+    let mut policy = make_policy("agent1");
+    policy.require_confirmation_for = vec!["web_search".to_string()];
+    policy.auto_approve = true;
+    let tc = make_tool_call("web_search");
+
+    // Should succeed without broker, because auto_approve bypasses confirmation
+    let result = sandbox.execute_tool("agent1", &tc, &policy).await;
+    assert!(result.is_ok(), "Auto-approve should bypass confirmation: {:?}", result);
+    assert_eq!(result.unwrap(), "search results");
+}
+
+#[tokio::test]
+async fn test_confirmation_timeout() {
+    let broker = Arc::new(ConfirmationBroker::new());
+    let mut sandbox = make_sandbox();
+    sandbox.set_confirmation_broker(broker.clone());
+
+    let mut policy = make_policy("agent1");
+    policy.require_confirmation_for = vec!["web_search".to_string()];
+    policy.confirmation_timeout_secs = Some(1); // 1 second timeout
+    let tc = make_tool_call("web_search");
+
+    // Don't respond — let it time out
+    let result = sandbox.execute_tool("agent1", &tc, &policy).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("timed out"),
+        "Should timeout, got: {}",
         err
     );
 }
