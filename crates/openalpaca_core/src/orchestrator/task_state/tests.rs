@@ -1,4 +1,5 @@
 use super::*;
+use openalpaca_storage::OutcomeKind;
 
 fn make_assignments() -> Vec<(String, String, String)> {
     vec![
@@ -859,7 +860,7 @@ fn test_scan_workspace_artifacts_no_cross_template_match() {
 
 #[test]
 fn test_is_same_agent_helper() {
-    use super::is_same_agent;
+    use super::outcome::is_same_agent;
 
     // Exact match
     assert!(is_same_agent("a1", "a1"));

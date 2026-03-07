@@ -237,7 +237,7 @@ async fn test_openai_sse_parser_text_event() {
         match event.as_ref().unwrap() {
             StreamEvent::TextDelta { text } => texts.push(text.clone()),
             StreamEvent::Done { finish_reason } => {
-                assert_eq!(*finish_reason, FinishReason::Stop);
+                assert_eq!(finish_reason, &FinishReason::Stop);
                 got_done = true;
             }
             StreamEvent::Usage(u) => {
@@ -287,7 +287,7 @@ async fn test_openai_sse_parser_tool_call_event() {
                 json_parts.push(partial_json.clone());
             }
             StreamEvent::Done { finish_reason } => {
-                assert_eq!(*finish_reason, FinishReason::ToolUse);
+                assert_eq!(finish_reason, &FinishReason::ToolUse);
                 got_done = true;
             }
             _ => {}

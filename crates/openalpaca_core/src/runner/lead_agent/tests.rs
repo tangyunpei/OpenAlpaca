@@ -65,8 +65,8 @@ fn test_lead_agent_tool_executor_routes_correctly() {
     // Build a minimal SpawnSubagentTool — we won't call execute(), just need
     // it for the LeadAgentToolExecutor construction
     let tracker = Arc::new(SubagentTracker::new());
-    let spawn_tool = Arc::new(SpawnSubagentTool {
-        router: Arc::new(openalpaca_llm::LlmRouter::new(
+    let spawn_tool = Arc::new(SpawnSubagentTool::new(
+        Arc::new(openalpaca_llm::LlmRouter::new(
             std::collections::HashMap::new(),
             openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
             std::collections::HashMap::new(),
@@ -75,26 +75,21 @@ fn test_lead_agent_tool_executor_routes_correctly() {
             )),
             "test-model".to_string(),
         )),
-        tool_registry: registry,
-        shared_context: Arc::new(SharedContext::new()),
-        bus: EventBus::default(),
-        db: None,
-        task_id: "task-1".to_string(),
-        created_by: "user-1".to_string(),
-        lead_template_id: "test-lead".to_string(),
-        daemon_config: Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
-        spawn_count: AtomicUsize::new(0),
-        workspace_id: None,
-        cancel_token: None,
-        tracker: tracker.clone(),
-        depth: 0,
-        max_concurrent_subagents: DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(
-            DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        )),
-        prompt_template: String::new(),
-        confirmation_broker: None,
-    });
+        registry,
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        "task-1".to_string(),
+        "user-1".to_string(),
+        "test-lead".to_string(),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        None,
+        tracker.clone(),
+        0,
+        DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        None,
+        None,
+    ));
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
     });

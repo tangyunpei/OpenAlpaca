@@ -17,98 +17,12 @@ use axum::{
 use chrono::Utc;
 use futures_util::stream::Stream;
 use openalpaca_core::events::SystemEvent;
-use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, convert::Infallible, sync::Arc};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
+use super::chat_types::*;
 use crate::AppState;
-
-// ── Request / Response types ────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct ChatSendRequest {
-    pub content: String,
-    #[serde(default)]
-    pub attachments: Vec<openalpaca_storage::AttachmentRef>,
-}
-
-#[derive(Serialize)]
-pub struct ChatSendResponseBody {
-    pub stream_id: String,
-    pub lane_key: String,
-}
-
-#[derive(Deserialize)]
-pub struct HistoryQuery {
-    pub limit: Option<i64>,
-    pub offset: Option<i64>,
-    pub lane_key: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct ConversationsQuery {
-    pub source: Option<String>,
-    pub limit: Option<i64>,
-    pub offset: Option<i64>,
-}
-
-#[derive(Serialize)]
-pub struct ConversationsResponse {
-    pub conversations: Vec<openalpaca_storage::Conversation>,
-}
-
-#[derive(Serialize)]
-pub struct ConversationMessagesResponse {
-    pub messages: Vec<openalpaca_storage::ConversationMessage>,
-    pub total: i64,
-}
-
-#[derive(Serialize)]
-pub struct ChatHistoryResponse {
-    pub messages: Vec<openalpaca_storage::ConversationMessage>,
-    pub total: i64,
-    pub lane_key: String,
-}
-
-#[derive(Deserialize)]
-pub struct DeleteHistoryQuery {
-    pub lane_key: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct ChatDeleteResponse {
-    pub deleted: u64,
-}
-
-#[derive(Serialize)]
-struct ErrorResponse {
-    error: ErrorDetail,
-}
-
-#[derive(Serialize)]
-struct ErrorDetail {
-    code: String,
-    message: String,
-}
-
-/// Check if the given lane_key belongs to the specified user.
-/// Lane key format is "{user_id}:{source_name}".
-fn is_lane_owned_by(lane_key: &str, user_id: &str) -> bool {
-    lane_key.starts_with(&format!("{}:", user_id))
-}
-
-fn error_response(status: StatusCode, code: &str, message: &str) -> impl IntoResponse {
-    (
-        status,
-        Json(ErrorResponse {
-            error: ErrorDetail {
-                code: code.to_string(),
-                message: message.to_string(),
-            },
-        }),
-    )
-}
 
 // ── POST /v1/chat ───────────────────────────────────────────────────
 
@@ -453,26 +367,6 @@ pub async fn get_conversation_messages_handler(
     }
 }
 
-// ── Feedback types ─────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct FeedbackRequest {
-    pub feedback: String, // "positive" | "negative"
-    pub comment: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct FeedbackResponse {
-    pub message_id: i64,
-    pub feedback: String,
-    pub comment: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct FeedbackDeleteResponse {
-    pub deleted: bool,
-}
-
 // ── PUT /v1/chat/messages/:message_id/feedback ────────────────────
 
 pub async fn upsert_feedback_handler(
@@ -549,11 +443,6 @@ pub async fn delete_feedback_handler(
 }
 
 // ── POST /v1/chat/confirmations/:request_id ──────────────────────
-
-#[derive(Deserialize)]
-pub struct ConfirmationBody {
-    pub approved: bool,
-}
 
 pub async fn confirm_tool(
     State(state): State<Arc<AppState>>,

@@ -1,20 +1,25 @@
 //! Route handlers for daemon HTTP API
 
 pub mod agents;
+mod agents_types;
 pub mod auth;
 pub mod chat;
+mod chat_types;
 pub mod command;
 pub mod connectors;
 pub mod dispatch_decisions;
 pub mod events;
 pub mod events_history;
 pub mod files;
+mod files_types;
 pub mod memory;
 pub mod orchestrator_latency;
 pub mod preferences;
 pub mod settings;
+mod settings_types;
 pub mod skills;
 pub mod tasks;
+mod tasks_types;
 
 pub use agents::{
     agent_action_handler,

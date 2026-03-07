@@ -1,12 +1,17 @@
 pub mod agents;
 pub mod ai_config;
+mod ai_config_helpers;
 pub mod chat;
 pub mod config;
+mod config_handlers;
+mod config_tui;
 pub mod connector;
 pub mod daemon;
 pub mod daemon_config_cli;
 pub mod gui;
 pub mod llm;
+mod llm_keys;
+mod llm_status;
 pub mod status;
 pub mod tail;
 pub mod tasks;
