@@ -96,6 +96,15 @@ pub struct OutboundResult {
 /// All messaging channels implement this trait. Default methods return safe
 /// no-ops or `NotSupported` errors, so channels only override what they support.
 ///
+/// # Design Decision: Monolithic vs Split Traits
+///
+/// This trait is intentionally monolithic rather than split into sub-traits
+/// (MediaCapable, ThreadCapable, etc.). Rationale:
+/// - Default methods make optional capabilities zero-cost for channels that don't support them
+/// - Trait-object downcasting (`as_any().downcast_ref::<dyn MediaCapable>()`) is fragile in Rust
+/// - The `ChannelCapabilities` struct already declares what each channel supports
+/// - Adding a new optional method only requires a default impl here, not touching every channel
+///
 /// Uses `#[async_trait]` because `ChannelPlugin` is used as `dyn ChannelPlugin`
 /// (trait object dispatch requires it).
 #[async_trait]
