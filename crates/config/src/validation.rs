@@ -110,10 +110,7 @@ impl Validate for OpenAlpacaConfig {
                 if !binding.agent.is_empty() && !agent_ids.contains(binding.agent.as_str()) {
                     issues.push(ValidationIssue {
                         path: format!("bindings[{i}].agent"),
-                        message: format!(
-                            "agent \"{}\" not found in agents.list",
-                            binding.agent
-                        ),
+                        message: format!("agent \"{}\" not found in agents.list", binding.agent),
                         severity: Severity::Warning,
                     });
                 }
@@ -144,13 +141,23 @@ impl Validate for OpenAlpacaConfig {
             }
             if let Some(ref sl) = channels.slack
                 && sl.default.enabled == Some(true)
-                && sl.default.bot_token.is_none()
             {
-                issues.push(ValidationIssue {
-                    path: "channels.slack.bot_token".into(),
-                    message: "slack is enabled but bot_token is not set".into(),
-                    severity: Severity::Error,
-                });
+                if sl.default.bot_token.is_none() {
+                    issues.push(ValidationIssue {
+                        path: "channels.slack.bot_token".into(),
+                        message: "slack is enabled but bot_token is not set".into(),
+                        severity: Severity::Error,
+                    });
+                }
+                if sl.default.app_token.is_none() {
+                    issues.push(ValidationIssue {
+                        path: "channels.slack.app_token".into(),
+                        message:
+                            "slack is enabled but app_token is not set (required for Socket Mode)"
+                                .into(),
+                        severity: Severity::Warning,
+                    });
+                }
             }
         }
 
@@ -161,9 +168,7 @@ impl Validate for OpenAlpacaConfig {
         {
             issues.push(ValidationIssue {
                 path: "session.main_key".into(),
-                message: format!(
-                    "main_key is set to \"{key}\" instead of the default \"main\""
-                ),
+                message: format!("main_key is set to \"{key}\" instead of the default \"main\""),
                 severity: Severity::Warning,
             });
         }
@@ -297,6 +302,42 @@ session:
             .collect();
         assert_eq!(key_issues.len(), 1);
         assert_eq!(key_issues[0].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn test_slack_enabled_without_app_token() {
+        let yaml = r#"
+channels:
+  slack:
+    enabled: true
+    bot_token: "xoxb-test"
+"#;
+        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let issues = config.validate();
+        let app_token_issues: Vec<_> = issues
+            .iter()
+            .filter(|i| i.path.contains("channels.slack.app_token"))
+            .collect();
+        assert_eq!(app_token_issues.len(), 1);
+        assert_eq!(app_token_issues[0].severity, Severity::Warning);
+        assert!(app_token_issues[0].message.contains("Socket Mode"));
+    }
+
+    #[test]
+    fn test_slack_enabled_missing_both_tokens() {
+        let yaml = r#"
+channels:
+  slack:
+    enabled: true
+"#;
+        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let issues = config.validate();
+        let slack_issues: Vec<_> = issues
+            .iter()
+            .filter(|i| i.path.contains("channels.slack"))
+            .collect();
+        // Should have both bot_token (Error) and app_token (Warning)
+        assert_eq!(slack_issues.len(), 2);
     }
 
     #[test]

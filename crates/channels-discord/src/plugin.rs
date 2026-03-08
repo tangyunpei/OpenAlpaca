@@ -128,10 +128,7 @@ impl ChannelPlugin for DiscordChannel {
         self.cancel.cancel();
         let handle = self.task_handle.lock().unwrap().take();
         if let Some(handle) = handle {
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                handle,
-            ).await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await;
         }
         Ok(())
     }
@@ -176,10 +173,10 @@ impl ChannelPlugin for DiscordChannel {
             return Ok(false);
         }
         // Check if the spawned task is still alive
-        if let Some(handle) = self.task_handle.lock().unwrap().as_ref() {
-            if handle.is_finished() {
-                return Ok(false);
-            }
+        if let Some(handle) = self.task_handle.lock().unwrap().as_ref()
+            && handle.is_finished()
+        {
+            return Ok(false);
         }
         Ok(true)
     }

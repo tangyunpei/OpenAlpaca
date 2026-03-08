@@ -123,6 +123,20 @@ mod tests {
         assert_eq!(result.unwrap(), serde_json::json!({"hello": "world"}));
     }
 
+    #[tokio::test]
+    async fn test_default_registry_unknown_method() {
+        let registry = build_default_registry();
+        let state = crate::state::test_helpers::make_test_state().await;
+        let ctx = RpcContext { state };
+        let result = registry
+            .dispatch("nonexistent.method", serde_json::Value::Null, &ctx)
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, "METHOD_NOT_FOUND");
+        assert!(err.message.contains("nonexistent.method"));
+    }
+
     #[test]
     fn test_list_methods() {
         let registry = build_default_registry();

@@ -119,10 +119,7 @@ impl GatewayAuth {
 
     /// Spawn a background task that periodically prunes expired rate limit entries.
     /// Returns the JoinHandle so the caller can await it on shutdown.
-    pub fn start_cleanup_task(
-        &self,
-        cancel: CancellationToken,
-    ) -> tokio::task::JoinHandle<()> {
+    pub fn start_cleanup_task(&self, cancel: CancellationToken) -> tokio::task::JoinHandle<()> {
         let rate_limits = self.rate_limits.clone();
         let window_secs = self.window_secs;
         tokio::spawn(async move {
@@ -232,6 +229,30 @@ mod tests {
         auth.prune_expired().await;
 
         assert_eq!(auth.rate_limits.read().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_brute_force_rate_limit_many_ips() {
+        let mut auth = GatewayAuth::new(AuthMode::Token("secret".into()));
+        auth.max_failures = 3;
+
+        // 20 different IPs each fail 3 times
+        for i in 0..20u8 {
+            let ip: IpAddr = format!("10.0.0.{i}").parse().unwrap();
+            for _ in 0..3 {
+                let _ = auth.verify(Some("wrong"), ip).await;
+            }
+        }
+
+        // All 20 should be rate limited
+        for i in 0..20u8 {
+            let ip: IpAddr = format!("10.0.0.{i}").parse().unwrap();
+            let result = auth.verify(Some("secret"), ip).await;
+            assert_eq!(result.unwrap_err().code, "RATE_LIMITED");
+        }
+
+        // Verify map has 20 entries
+        assert_eq!(auth.rate_limits.read().await.len(), 20);
     }
 
     #[tokio::test]
