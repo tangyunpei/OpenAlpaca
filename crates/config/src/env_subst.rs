@@ -17,17 +17,17 @@ pub fn substitute_env_vars(input: &str) -> String {
 }
 
 /// Walk a YAML value tree and substitute env vars in all string values.
-pub fn substitute_env_vars_in_value(value: &mut serde_yml::Value) {
+pub fn substitute_env_vars_in_value(value: &mut serde_yaml::Value) {
     match value {
-        serde_yml::Value::String(s) => {
+        serde_yaml::Value::String(s) => {
             *s = substitute_env_vars(s);
         }
-        serde_yml::Value::Mapping(map) => {
+        serde_yaml::Value::Mapping(map) => {
             for (_, v) in map.iter_mut() {
                 substitute_env_vars_in_value(v);
             }
         }
-        serde_yml::Value::Sequence(seq) => {
+        serde_yaml::Value::Sequence(seq) => {
             for v in seq.iter_mut() {
                 substitute_env_vars_in_value(v);
             }
@@ -86,13 +86,13 @@ mod tests {
         // SAFETY: test-only env var manipulation
         unsafe { std::env::set_var("TEST_YAML_TOKEN", "secret123") };
         let mut value =
-            serde_yml::from_str::<serde_yml::Value>("token: \"${TEST_YAML_TOKEN}\"\nport: 3000")
+            serde_yaml::from_str::<serde_yaml::Value>("token: \"${TEST_YAML_TOKEN}\"\nport: 3000")
                 .unwrap();
         substitute_env_vars_in_value(&mut value);
 
         let mapping = value.as_mapping().unwrap();
         let token = mapping
-            .get(&serde_yml::Value::String("token".into()))
+            .get(&serde_yaml::Value::String("token".into()))
             .unwrap();
         assert_eq!(token.as_str().unwrap(), "secret123");
         unsafe { std::env::remove_var("TEST_YAML_TOKEN") };

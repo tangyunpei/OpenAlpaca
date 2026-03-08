@@ -15,9 +15,9 @@ pub fn list_account_ids(config: &OpenAlpacaConfig) -> Vec<AccountId> {
     };
 
     if let Some(accounts) = &tg.accounts {
-        accounts.keys().map(|k| AccountId(k.clone())).collect()
+        accounts.keys().map(AccountId::new_unchecked).collect()
     } else if tg.default.bot_token.is_some() {
-        vec![AccountId(DEFAULT_ACCOUNT_ID.into())]
+        vec![AccountId::new_unchecked(DEFAULT_ACCOUNT_ID)]
     } else {
         vec![]
     }
@@ -31,8 +31,8 @@ pub fn resolve_account_config<'a>(
     let tg = config.channels.as_ref()?.telegram.as_ref()?;
 
     if let Some(accounts) = &tg.accounts {
-        accounts.get(&account_id.0)
-    } else if account_id.0 == DEFAULT_ACCOUNT_ID {
+        accounts.get(account_id.as_str())
+    } else if account_id.as_str() == DEFAULT_ACCOUNT_ID {
         Some(&tg.default)
     } else {
         None
@@ -64,10 +64,10 @@ channels:
     bot_token: "123:ABC"
     enabled: true
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         let ids = list_account_ids(&config);
         assert_eq!(ids.len(), 1);
-        assert_eq!(ids[0].0, "default");
+        assert_eq!(ids[0].as_str(), "default");
     }
 
     #[test]
@@ -81,7 +81,7 @@ channels:
       personal:
         bot_token: "222:BBB"
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         let ids = list_account_ids(&config);
         assert_eq!(ids.len(), 2);
     }
@@ -93,8 +93,8 @@ channels:
   telegram:
     bot_token: "123:ABC"
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
-        let acc = resolve_account_config(&config, &AccountId(DEFAULT_ACCOUNT_ID.into()));
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
+        let acc = resolve_account_config(&config, &AccountId::new_unchecked(DEFAULT_ACCOUNT_ID));
         assert!(acc.is_some());
         assert_eq!(acc.unwrap().bot_token.as_deref(), Some("123:ABC"));
     }
@@ -107,10 +107,10 @@ channels:
     bot_token: "123:ABC"
     enabled: true
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(is_account_enabled(
             &config,
-            &AccountId(DEFAULT_ACCOUNT_ID.into())
+            &AccountId::new_unchecked(DEFAULT_ACCOUNT_ID)
         ));
     }
 
@@ -122,10 +122,10 @@ channels:
     bot_token: "123:ABC"
     enabled: false
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(!is_account_enabled(
             &config,
-            &AccountId(DEFAULT_ACCOUNT_ID.into())
+            &AccountId::new_unchecked(DEFAULT_ACCOUNT_ID)
         ));
     }
 }

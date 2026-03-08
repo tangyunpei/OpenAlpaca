@@ -108,7 +108,7 @@ fn handle_config(args: ConfigArgs) -> Result<()> {
                 Some(path) => {
                     match openalpaca_config::io::get_value_at_path(&snapshot.config, &path) {
                         Some(value) => {
-                            let yaml = serde_yml::to_string(&value)?;
+                            let yaml = serde_yaml::to_string(&value)?;
                             print!("{yaml}");
                         }
                         None => {
@@ -118,18 +118,18 @@ fn handle_config(args: ConfigArgs) -> Result<()> {
                     }
                 }
                 None => {
-                    let yaml = serde_yml::to_string(&snapshot.config)?;
+                    let yaml = serde_yaml::to_string(&snapshot.config)?;
                     print!("{yaml}");
                 }
             }
         }
         Some(ConfigCommands::Set { key, value }) => {
             let snapshot = openalpaca_config::load_config(&config_path)?;
-            let mut config_value = serde_yml::to_value(&snapshot.config)?;
+            let mut config_value = serde_yaml::to_value(&snapshot.config)?;
 
             set_value_at_path(&mut config_value, &key, &value)?;
 
-            let config: openalpaca_config::OpenAlpacaConfig = serde_yml::from_value(config_value)?;
+            let config: openalpaca_config::OpenAlpacaConfig = serde_yaml::from_value(config_value)?;
             openalpaca_config::save_config(&config_path, &config)?;
             eprintln!("set {key} = {value}");
         }
@@ -167,7 +167,7 @@ fn handle_config(args: ConfigArgs) -> Result<()> {
         None => {
             // Default: print full config (same as `config get`)
             let snapshot = openalpaca_config::load_config(&config_path)?;
-            let yaml = serde_yml::to_string(&snapshot.config)?;
+            let yaml = serde_yaml::to_string(&snapshot.config)?;
             print!("{yaml}");
         }
     }
@@ -175,26 +175,26 @@ fn handle_config(args: ConfigArgs) -> Result<()> {
     Ok(())
 }
 
-fn set_value_at_path(root: &mut serde_yml::Value, path: &str, value: &str) -> Result<()> {
+fn set_value_at_path(root: &mut serde_yaml::Value, path: &str, value: &str) -> Result<()> {
     let keys: Vec<&str> = path.split('.').collect();
     let mut current = root;
 
     for (i, key) in keys.iter().enumerate() {
         if i == keys.len() - 1 {
             // Last key — set the value
-            let parsed = serde_yml::from_str::<serde_yml::Value>(value)
-                .unwrap_or(serde_yml::Value::String(value.to_string()));
-            if let serde_yml::Value::Mapping(map) = current {
-                map.insert(serde_yml::Value::String(key.to_string()), parsed);
+            let parsed = serde_yaml::from_str::<serde_yaml::Value>(value)
+                .unwrap_or(serde_yaml::Value::String(value.to_string()));
+            if let serde_yaml::Value::Mapping(map) = current {
+                map.insert(serde_yaml::Value::String(key.to_string()), parsed);
             }
         } else {
             // Navigate or create intermediate mappings
-            if let serde_yml::Value::Mapping(map) = current {
-                let key_val = serde_yml::Value::String(key.to_string());
+            if let serde_yaml::Value::Mapping(map) = current {
+                let key_val = serde_yaml::Value::String(key.to_string());
                 if !map.contains_key(&key_val) {
                     map.insert(
                         key_val.clone(),
-                        serde_yml::Value::Mapping(Default::default()),
+                        serde_yaml::Value::Mapping(Default::default()),
                     );
                 }
                 current = map.get_mut(&key_val).unwrap();

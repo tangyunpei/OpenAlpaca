@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn test_channel_status_issue_construction() {
         let issue = ChannelStatusIssue {
-            channel_id: ChannelId("telegram".into()),
+            channel_id: ChannelId::new_unchecked("telegram"),
             account_id: "default".into(),
             kind: StatusIssueKind::Config,
             message: "missing bot token".into(),

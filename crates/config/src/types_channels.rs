@@ -11,11 +11,11 @@ pub struct ChannelsConfig {
     pub telegram: Option<TelegramConfig>,
     pub discord: Option<DiscordConfig>,
     pub slack: Option<SlackConfig>,
-    pub signal: Option<serde_yml::Value>,
-    pub imessage: Option<serde_yml::Value>,
-    pub whatsapp: Option<serde_yml::Value>,
+    pub signal: Option<serde_yaml::Value>,
+    pub imessage: Option<serde_yaml::Value>,
+    pub whatsapp: Option<serde_yaml::Value>,
     #[serde(flatten)]
-    pub extensions: HashMap<String, serde_yml::Value>,
+    pub extensions: HashMap<String, serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -24,7 +24,7 @@ pub struct ChannelDefaultsConfig {
     pub dm_policy: Option<String>,
     pub group_policy: Option<String>,
     #[serde(flatten)]
-    pub extra: HashMap<String, serde_yml::Value>,
+    pub extra: HashMap<String, serde_yaml::Value>,
 }
 
 // --- Telegram ---
@@ -46,14 +46,14 @@ pub struct TelegramAccountConfig {
     pub token_file: Option<String>,
     pub dm_policy: Option<String>,
     pub group_policy: Option<String>,
-    pub allow_from: Option<Vec<serde_yml::Value>>,
+    pub allow_from: Option<Vec<serde_yaml::Value>>,
     pub webhook_url: Option<String>,
-    pub streaming: Option<serde_yml::Value>,
+    pub streaming: Option<serde_yaml::Value>,
     pub text_chunk_limit: Option<u32>,
     pub reply_to_mode: Option<String>,
     pub retry: Option<OutboundRetryConfig>,
     #[serde(flatten)]
-    pub extra: HashMap<String, serde_yml::Value>,
+    pub extra: HashMap<String, serde_yaml::Value>,
 }
 
 // --- Discord ---
@@ -75,12 +75,12 @@ pub struct DiscordAccountConfig {
     pub application_id: Option<String>,
     pub dm_policy: Option<String>,
     pub group_policy: Option<String>,
-    pub allow_from: Option<Vec<serde_yml::Value>>,
-    pub streaming: Option<serde_yml::Value>,
+    pub allow_from: Option<Vec<serde_yaml::Value>>,
+    pub streaming: Option<serde_yaml::Value>,
     pub reply_to_mode: Option<String>,
     pub retry: Option<OutboundRetryConfig>,
     #[serde(flatten)]
-    pub extra: HashMap<String, serde_yml::Value>,
+    pub extra: HashMap<String, serde_yaml::Value>,
 }
 
 // --- Slack ---
@@ -103,10 +103,10 @@ pub struct SlackAccountConfig {
     pub signing_secret: Option<String>,
     pub dm_policy: Option<String>,
     pub group_policy: Option<String>,
-    pub allow_from: Option<Vec<serde_yml::Value>>,
-    pub streaming: Option<serde_yml::Value>,
+    pub allow_from: Option<Vec<serde_yaml::Value>>,
+    pub streaming: Option<serde_yaml::Value>,
     pub reply_to_mode: Option<String>,
     pub retry: Option<OutboundRetryConfig>,
     #[serde(flatten)]
-    pub extra: HashMap<String, serde_yml::Value>,
+    pub extra: HashMap<String, serde_yaml::Value>,
 }

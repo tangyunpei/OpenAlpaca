@@ -31,11 +31,20 @@ async fn handle_ws_connection(
     let (mut sender, mut receiver) = socket.split();
     let shutdown = state.app_ctx.shutdown.clone();
 
-    // Step 1: Wait for connect frame
-    let connect_params = match wait_for_connect(&mut receiver).await {
-        Some(params) => params,
-        None => {
+    // Step 1: Wait for connect frame (with timeout to prevent DoS)
+    let connect_params = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        wait_for_connect(&mut receiver),
+    )
+    .await
+    {
+        Ok(Some(params)) => params,
+        Ok(None) => {
             tracing::warn!("ws: client disconnected before connect frame");
+            return;
+        }
+        Err(_) => {
+            tracing::warn!("ws: connect timeout — closing connection");
             return;
         }
     };
@@ -191,7 +200,9 @@ async fn handle_text_message(
             Ok(payload) => GatewayFrame::ok_response(id, payload),
             Err(error) => GatewayFrame::err_response(id, error),
         };
-        let _ = send_frame(sender, &response).await;
+        if send_frame(sender, &response).await.is_err() {
+            tracing::debug!("ws: failed to send RPC response (client likely disconnected)");
+        }
     }
 }
 

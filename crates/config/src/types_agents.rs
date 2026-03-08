@@ -17,7 +17,7 @@ pub struct AgentDefaultsConfig {
     pub model: Option<String>,
     pub system_prompt: Option<String>,
     #[serde(flatten)]
-    pub extra: HashMap<String, serde_yml::Value>,
+    pub extra: HashMap<String, serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -28,7 +28,7 @@ pub struct AgentConfig {
     pub system_prompt: Option<String>,
     pub identity: Option<IdentityConfig>,
     #[serde(flatten)]
-    pub extra: HashMap<String, serde_yml::Value>,
+    pub extra: HashMap<String, serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

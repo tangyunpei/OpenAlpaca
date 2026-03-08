@@ -204,7 +204,7 @@ pub fn resolve_route(input: &ResolveRouteInput) -> Result<ResolvedRoute, CoreErr
         && let Some(list) = agents.list.as_ref()
         && let Some(first) = list.first()
     {
-        let agent_id = AgentId(first.id.to_lowercase());
+        let agent_id = AgentId::new_unchecked(first.id.to_lowercase());
         let main_session_key = build_main_session_key(&agent_id, main_key);
         let session_key = build_session_key(
             &agent_id,
@@ -236,14 +236,14 @@ fn find_peer_binding<'a>(
     peer_id: &str,
 ) -> Option<&'a EvaluatedBinding> {
     // Try exact match: channel:account:peer
-    let key = build_peer_key(Some(&channel.0), Some(&account_id.0), peer_id);
+    let key = build_peer_key(Some(channel.as_str()), Some(account_id.as_str()), peer_id);
     if let Some(bindings) = index.by_peer.get(&key)
         && let Some(b) = bindings.first()
     {
         return Some(b);
     }
     // Try channel:*:peer
-    let key = build_peer_key(Some(&channel.0), None, peer_id);
+    let key = build_peer_key(Some(channel.as_str()), None, peer_id);
     if let Some(bindings) = index.by_peer.get(&key)
         && let Some(b) = bindings.first()
     {
@@ -264,7 +264,7 @@ fn find_guild_roles_binding<'a>(
     role_ids: &[String],
 ) -> Option<&'a EvaluatedBinding> {
     // Check channel-specific guild+roles
-    let key = build_guild_key(Some(&channel.0), guild_id);
+    let key = build_guild_key(Some(channel.as_str()), guild_id);
     if let Some(bindings) = index.by_guild_roles.get(&key) {
         for binding in bindings {
             if let Some(ref required_roles) = binding.roles
@@ -297,7 +297,7 @@ fn find_guild_binding<'a>(
     channel: &ChannelId,
     guild_id: &str,
 ) -> Option<&'a EvaluatedBinding> {
-    let key = build_guild_key(Some(&channel.0), guild_id);
+    let key = build_guild_key(Some(channel.as_str()), guild_id);
     if let Some(bindings) = index.by_guild.get(&key) {
         return bindings.first();
     }
@@ -313,7 +313,7 @@ fn find_team_binding<'a>(
     channel: &ChannelId,
     team_id: &str,
 ) -> Option<&'a EvaluatedBinding> {
-    let key = build_team_key(Some(&channel.0), team_id);
+    let key = build_team_key(Some(channel.as_str()), team_id);
     if let Some(bindings) = index.by_team.get(&key) {
         return bindings.first();
     }
@@ -333,14 +333,15 @@ fn find_account_binding<'a>(
         .by_account
         .iter()
         .find(|b| {
-            b.channel.as_deref() == Some(&channel.0) && b.account.as_deref() == Some(&account_id.0)
+            b.channel.as_deref() == Some(channel.as_str())
+                && b.account.as_deref() == Some(account_id.as_str())
         })
         .or_else(|| {
             // Match any channel with this account
             index
                 .by_account
                 .iter()
-                .find(|b| b.channel.is_none() && b.account.as_deref() == Some(&account_id.0))
+                .find(|b| b.channel.is_none() && b.account.as_deref() == Some(account_id.as_str()))
         })
 }
 
@@ -351,7 +352,7 @@ fn find_channel_binding<'a>(
     index
         .by_channel
         .iter()
-        .find(|b| b.channel.as_deref() == Some(&channel.0))
+        .find(|b| b.channel.as_deref() == Some(channel.as_str()))
 }
 
 fn resolve_dm_scope(config: &OpenAlpacaConfig) -> DmScope {
@@ -425,7 +426,7 @@ mod tests {
     use openalpaca_config::types_agents::{AgentBinding, AgentConfig, AgentsConfig, PeerBinding};
 
     fn channel(s: &str) -> ChannelId {
-        ChannelId(s.to_string())
+        ChannelId::new_unchecked(s)
     }
 
     fn make_config(bindings: Vec<AgentBinding>, agents: Vec<AgentConfig>) -> OpenAlpacaConfig {
@@ -482,7 +483,7 @@ mod tests {
             member_role_ids: None,
         };
         let result = resolve_route(&input).unwrap();
-        assert_eq!(result.agent_id.0, "assistant");
+        assert_eq!(result.agent_id.as_str(), "assistant");
         assert_eq!(result.matched_by, MatchedBy::Default);
     }
 
@@ -520,7 +521,7 @@ mod tests {
             member_role_ids: None,
         };
         let result = resolve_route(&input).unwrap();
-        assert_eq!(result.agent_id.0, "tg-agent");
+        assert_eq!(result.agent_id.as_str(), "tg-agent");
         assert_eq!(result.matched_by, MatchedBy::BindingChannel);
     }
 
@@ -556,7 +557,7 @@ mod tests {
             member_role_ids: None,
         };
         let result = resolve_route(&input).unwrap();
-        assert_eq!(result.agent_id.0, "vip-agent");
+        assert_eq!(result.agent_id.as_str(), "vip-agent");
         assert_eq!(result.matched_by, MatchedBy::BindingPeer);
     }
 
@@ -590,7 +591,7 @@ mod tests {
             member_role_ids: None,
         };
         let result = resolve_route(&input).unwrap();
-        assert_eq!(result.agent_id.0, "thread-agent");
+        assert_eq!(result.agent_id.as_str(), "thread-agent");
         assert_eq!(result.matched_by, MatchedBy::BindingPeerParent);
     }
 
@@ -615,7 +616,7 @@ mod tests {
             member_role_ids: Some(&roles),
         };
         let result = resolve_route(&input).unwrap();
-        assert_eq!(result.agent_id.0, "admin-agent");
+        assert_eq!(result.agent_id.as_str(), "admin-agent");
         assert_eq!(result.matched_by, MatchedBy::BindingGuildRoles);
     }
 
@@ -638,7 +639,7 @@ mod tests {
             member_role_ids: None,
         };
         let result = resolve_route(&input).unwrap();
-        assert_eq!(result.agent_id.0, "guild-agent");
+        assert_eq!(result.agent_id.as_str(), "guild-agent");
         assert_eq!(result.matched_by, MatchedBy::BindingGuild);
     }
 
@@ -661,7 +662,7 @@ mod tests {
             member_role_ids: None,
         };
         let result = resolve_route(&input).unwrap();
-        assert_eq!(result.agent_id.0, "team-agent");
+        assert_eq!(result.agent_id.as_str(), "team-agent");
         assert_eq!(result.matched_by, MatchedBy::BindingTeam);
     }
 
@@ -684,7 +685,7 @@ mod tests {
             member_role_ids: None,
         };
         let result = resolve_route(&input).unwrap();
-        assert_eq!(result.agent_id.0, "work-agent");
+        assert_eq!(result.agent_id.as_str(), "work-agent");
         assert_eq!(result.matched_by, MatchedBy::BindingAccount);
     }
 
@@ -704,7 +705,7 @@ mod tests {
             member_role_ids: None,
         };
         let result = resolve_route(&input).unwrap();
-        assert_eq!(result.agent_id.0, "default-agent");
+        assert_eq!(result.agent_id.as_str(), "default-agent");
         assert_eq!(result.matched_by, MatchedBy::Default);
     }
 
@@ -735,7 +736,10 @@ mod tests {
             member_role_ids: None,
         };
         let result = resolve_route(&input).unwrap();
-        assert_eq!(result.session_key.0, "agent:bot:telegram:direct:user123");
+        assert_eq!(
+            result.session_key.as_str(),
+            "agent:bot:telegram:direct:user123"
+        );
     }
 
     #[test]
@@ -771,7 +775,7 @@ mod tests {
             member_role_ids: None,
         };
         let result = resolve_route(&input).unwrap();
-        assert_eq!(result.agent_id.0, "guild-agent");
+        assert_eq!(result.agent_id.as_str(), "guild-agent");
         assert_eq!(result.matched_by, MatchedBy::BindingGuild);
     }
 }

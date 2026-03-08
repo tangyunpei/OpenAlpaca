@@ -22,11 +22,22 @@ fn normalize_id(value: &str) -> Result<String, CoreError> {
 
 /// Channel identifier — built-in or extension.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ChannelId(pub String);
+pub struct ChannelId(String);
 
 impl ChannelId {
     pub fn normalize(value: &str) -> Result<Self, CoreError> {
         Ok(Self(normalize_id(value)?))
+    }
+
+    /// Create without validation. Use for deserialization or internal
+    /// construction where the value is known-valid.
+    pub fn new_unchecked(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Access the inner string value.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -76,11 +87,19 @@ impl FromStr for ChatType {
 
 /// Normalized agent identifier (lowercase, alphanumeric + underscore/hyphen, max 64 chars).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AgentId(pub String);
+pub struct AgentId(String);
 
 impl AgentId {
     pub fn normalize(value: &str) -> Result<Self, CoreError> {
         Ok(Self(normalize_id(value)?))
+    }
+
+    pub fn new_unchecked(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -99,11 +118,19 @@ impl FromStr for AgentId {
 
 /// Normalized account identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AccountId(pub String);
+pub struct AccountId(String);
 
 impl AccountId {
     pub fn normalize(value: &str) -> Result<Self, CoreError> {
         Ok(Self(normalize_id(value)?))
+    }
+
+    pub fn new_unchecked(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -122,11 +149,15 @@ impl FromStr for AccountId {
 
 /// Session key — hierarchical string for agent context isolation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SessionKey(pub String);
+pub struct SessionKey(String);
 
 impl SessionKey {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -142,6 +173,27 @@ impl FromStr for SessionKey {
         if s.is_empty() {
             return Err(CoreError::InvalidId("session key cannot be empty".into()));
         }
+        if s.len() > 256 {
+            return Err(CoreError::InvalidId(format!(
+                "session key too long ({} chars, max 256)",
+                s.len()
+            )));
+        }
+        if s.contains('\0') {
+            return Err(CoreError::InvalidId(
+                "session key contains null byte".into(),
+            ));
+        }
+        if s.contains("..") {
+            return Err(CoreError::InvalidId(
+                "session key contains '..' (path traversal)".into(),
+            ));
+        }
+        if s.contains('/') || s.contains('\\') {
+            return Err(CoreError::InvalidId(
+                "session key contains path separator".into(),
+            ));
+        }
         Ok(Self(s.to_string()))
     }
 }
@@ -155,13 +207,13 @@ mod tests {
     #[test]
     fn test_agent_id_normalize_valid() {
         let id = AgentId::normalize("MyAgent").unwrap();
-        assert_eq!(id.0, "myagent");
+        assert_eq!(id.as_str(), "myagent");
     }
 
     #[test]
     fn test_agent_id_normalize_with_hyphens_and_underscores() {
         let id = AgentId::normalize("my-agent_1").unwrap();
-        assert_eq!(id.0, "my-agent_1");
+        assert_eq!(id.as_str(), "my-agent_1");
     }
 
     #[test]
@@ -199,13 +251,13 @@ mod tests {
     #[test]
     fn test_account_id_normalize() {
         let id = AccountId::normalize("User123").unwrap();
-        assert_eq!(id.0, "user123");
+        assert_eq!(id.as_str(), "user123");
     }
 
     #[test]
     fn test_channel_id_normalize() {
         let id = ChannelId::normalize("Telegram").unwrap();
-        assert_eq!(id.0, "telegram");
+        assert_eq!(id.as_str(), "telegram");
     }
 
     #[test]
@@ -245,12 +297,46 @@ mod tests {
     #[test]
     fn test_session_key_from_str() {
         let key = SessionKey::from_str("agent:channel:account").unwrap();
-        assert_eq!(key.0, "agent:channel:account");
+        assert_eq!(key.as_str(), "agent:channel:account");
     }
 
     #[test]
     fn test_session_key_rejects_empty() {
         assert!(SessionKey::from_str("").is_err());
+    }
+
+    #[test]
+    fn test_session_key_rejects_too_long() {
+        let long = "a".repeat(257);
+        assert!(SessionKey::from_str(&long).is_err());
+    }
+
+    #[test]
+    fn test_session_key_max_length_ok() {
+        let max = "a".repeat(256);
+        assert!(SessionKey::from_str(&max).is_ok());
+    }
+
+    #[test]
+    fn test_session_key_rejects_path_traversal() {
+        assert!(SessionKey::from_str("../etc/passwd").is_err());
+        assert!(SessionKey::from_str("foo/../bar").is_err());
+    }
+
+    #[test]
+    fn test_session_key_rejects_path_separators() {
+        assert!(SessionKey::from_str("foo/bar").is_err());
+        assert!(SessionKey::from_str("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn test_session_key_rejects_null_byte() {
+        assert!(SessionKey::from_str("foo\0bar").is_err());
+    }
+
+    #[test]
+    fn test_session_key_allows_colons() {
+        assert!(SessionKey::from_str("agent:bot:direct:user123").is_ok());
     }
 
     #[test]
@@ -262,6 +348,6 @@ mod tests {
     #[test]
     fn test_normalize_trims_whitespace() {
         let id = AgentId::normalize("  myagent  ").unwrap();
-        assert_eq!(id.0, "myagent");
+        assert_eq!(id.as_str(), "myagent");
     }
 }

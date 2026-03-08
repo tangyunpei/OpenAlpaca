@@ -19,7 +19,7 @@ impl RpcHandler for ChannelsStatusHandler {
             .iter()
             .map(|plugin| {
                 serde_json::json!({
-                    "id": plugin.id().0,
+                    "id": plugin.id().as_str(),
                     "label": plugin.meta().label,
                     "capabilities": {
                         "chat_types": plugin.capabilities().chat_types.iter()

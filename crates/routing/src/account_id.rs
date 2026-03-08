@@ -13,11 +13,11 @@ static VALID_ID: LazyLock<Regex> =
 pub fn normalize_account_id(value: Option<&str>) -> AccountId {
     let raw = match value {
         Some(s) if !s.trim().is_empty() => s.trim().to_lowercase(),
-        _ => return AccountId(DEFAULT_ACCOUNT_ID.to_string()),
+        _ => return AccountId::new_unchecked(DEFAULT_ACCOUNT_ID),
     };
 
     if VALID_ID.is_match(&raw) {
-        AccountId(raw)
+        AccountId::new_unchecked(raw)
     } else {
         // Strip invalid chars, replace with hyphen, then validate
         let cleaned: String = raw
@@ -40,9 +40,9 @@ pub fn normalize_account_id(value: Option<&str>) -> AccountId {
         };
 
         if cleaned.is_empty() || !VALID_ID.is_match(cleaned) {
-            AccountId(DEFAULT_ACCOUNT_ID.to_string())
+            AccountId::new_unchecked(DEFAULT_ACCOUNT_ID)
         } else {
-            AccountId(cleaned.to_string())
+            AccountId::new_unchecked(cleaned)
         }
     }
 }
@@ -53,46 +53,58 @@ mod tests {
 
     #[test]
     fn test_none_returns_default() {
-        assert_eq!(normalize_account_id(None).0, DEFAULT_ACCOUNT_ID);
+        assert_eq!(normalize_account_id(None).as_str(), DEFAULT_ACCOUNT_ID);
     }
 
     #[test]
     fn test_empty_returns_default() {
-        assert_eq!(normalize_account_id(Some("")).0, DEFAULT_ACCOUNT_ID);
+        assert_eq!(normalize_account_id(Some("")).as_str(), DEFAULT_ACCOUNT_ID);
     }
 
     #[test]
     fn test_whitespace_returns_default() {
-        assert_eq!(normalize_account_id(Some("   ")).0, DEFAULT_ACCOUNT_ID);
+        assert_eq!(
+            normalize_account_id(Some("   ")).as_str(),
+            DEFAULT_ACCOUNT_ID
+        );
     }
 
     #[test]
     fn test_valid_id_preserved() {
-        assert_eq!(normalize_account_id(Some("my-account")).0, "my-account");
+        assert_eq!(
+            normalize_account_id(Some("my-account")).as_str(),
+            "my-account"
+        );
     }
 
     #[test]
     fn test_uppercase_normalized() {
-        assert_eq!(normalize_account_id(Some("FOO-Bar")).0, "foo-bar");
+        assert_eq!(normalize_account_id(Some("FOO-Bar")).as_str(), "foo-bar");
     }
 
     #[test]
     fn test_invalid_chars_cleaned() {
-        assert_eq!(normalize_account_id(Some("foo@bar!")).0, "foo-bar");
+        assert_eq!(normalize_account_id(Some("foo@bar!")).as_str(), "foo-bar");
     }
 
     #[test]
     fn test_leading_special_chars_stripped() {
-        assert_eq!(normalize_account_id(Some("--test")).0, "test");
+        assert_eq!(normalize_account_id(Some("--test")).as_str(), "test");
     }
 
     #[test]
     fn test_all_invalid_returns_default() {
-        assert_eq!(normalize_account_id(Some("@@@")).0, DEFAULT_ACCOUNT_ID);
+        assert_eq!(
+            normalize_account_id(Some("@@@")).as_str(),
+            DEFAULT_ACCOUNT_ID
+        );
     }
 
     #[test]
     fn test_trims_whitespace() {
-        assert_eq!(normalize_account_id(Some("  myaccount  ")).0, "myaccount");
+        assert_eq!(
+            normalize_account_id(Some("  myaccount  ")).as_str(),
+            "myaccount"
+        );
     }
 }

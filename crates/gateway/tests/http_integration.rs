@@ -33,7 +33,10 @@ async fn test_ready_with_registered_channel() {
 
     {
         let mut registry = state.channel_registry.write().await;
-        registry.register(AccountId("default".into()), Box::new(EchoChannel::new()));
+        registry.register(
+            AccountId::new_unchecked("default"),
+            Box::new(EchoChannel::new()),
+        );
     }
 
     let app = build_router(state);
@@ -61,8 +64,8 @@ async fn test_ready_channel_count_matches_registry() {
 
     {
         let mut registry = state.channel_registry.write().await;
-        registry.register(AccountId("a1".into()), Box::new(EchoChannel::new()));
-        registry.register(AccountId("a2".into()), Box::new(EchoChannel::new()));
+        registry.register(AccountId::new_unchecked("a1"), Box::new(EchoChannel::new()));
+        registry.register(AccountId::new_unchecked("a2"), Box::new(EchoChannel::new()));
     }
 
     let app = build_router(state);

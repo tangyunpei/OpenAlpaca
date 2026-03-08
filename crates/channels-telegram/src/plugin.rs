@@ -30,7 +30,7 @@ impl TelegramChannel {
         handler: Arc<dyn InboundHandler>,
         chunk_limit: Option<usize>,
     ) -> Self {
-        let id = ChannelId("telegram".into());
+        let id = ChannelId::new_unchecked("telegram");
         Self {
             meta: ChannelMeta {
                 id: id.clone(),
@@ -120,7 +120,7 @@ impl ChannelPlugin for TelegramChannel {
         account_id: Option<&AccountId>,
         _chat_type: Option<&ChatType>,
     ) -> ReplyToMode {
-        let default_id = AccountId("default".into());
+        let default_id = AccountId::new_unchecked("default");
         let aid = account_id.unwrap_or(&default_id);
         crate::config::resolve_account_config(config, aid)
             .and_then(|c| c.reply_to_mode.as_deref())
@@ -206,7 +206,7 @@ mod tests {
     async fn test_plugin_identity() {
         let server = MockServer::start().await;
         let channel = make_test_channel(&server).await;
-        assert_eq!(channel.id().0.as_str(), "telegram");
+        assert_eq!(channel.id().as_str(), "telegram");
         assert_eq!(channel.meta().label, "Telegram");
         assert!(channel.capabilities().edit);
         assert!(channel.capabilities().reply);
@@ -231,8 +231,8 @@ mod tests {
 
         let channel = make_test_channel(&server).await;
         let ctx = OutboundContext {
-            channel_id: ChannelId("telegram".into()),
-            account_id: AccountId("default".into()),
+            channel_id: ChannelId::new_unchecked("telegram"),
+            account_id: AccountId::new_unchecked("default"),
             target: "100".into(),
             text: "hello".into(),
             reply_to_id: None,
@@ -279,7 +279,7 @@ mod tests {
         let server = MockServer::start().await;
         let channel = make_test_channel(&server).await;
         let config = OpenAlpacaConfig::default();
-        let aid = AccountId("default".into());
+        let aid = AccountId::new_unchecked("default");
         assert!(channel.check_ready(&config, &aid).await.unwrap());
     }
 
@@ -293,8 +293,8 @@ channels:
     bot_token: "123:ABC"
     reply_to_mode: "first"
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
-        let aid = AccountId("default".into());
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
+        let aid = AccountId::new_unchecked("default");
         assert_eq!(
             channel.resolve_reply_to_mode(&config, Some(&aid), None),
             ReplyToMode::First
@@ -307,7 +307,7 @@ channels:
         let channel = make_test_channel(&server).await;
         let boxed: Box<dyn ChannelPlugin> = Box::new(channel);
         let config = OpenAlpacaConfig::default();
-        let aid = AccountId("default".into());
+        let aid = AccountId::new_unchecked("default");
 
         assert_eq!(boxed.text_chunk_limit(), Some(4000));
         assert_eq!(

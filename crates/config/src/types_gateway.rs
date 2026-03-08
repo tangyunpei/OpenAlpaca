@@ -12,8 +12,9 @@ pub struct GatewayConfig {
     pub auth: Option<GatewayAuthConfig>,
     pub tls: Option<GatewayTlsConfig>,
     pub reload: Option<GatewayReloadConfig>,
+    pub cors: Option<GatewayCorsConfig>,
     #[serde(flatten)]
-    pub extra: HashMap<String, serde_yml::Value>,
+    pub extra: HashMap<String, serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -44,13 +45,22 @@ pub struct GatewayReloadConfig {
     pub debounce_ms: Option<u64>,
 }
 
+/// CORS configuration for the gateway HTTP server.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GatewayCorsConfig {
+    /// Allowed origins for cross-origin requests.
+    /// Empty = deny all cross-origin (default, secure).
+    pub allowed_origins: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DiscoveryConfig {
     pub enabled: Option<bool>,
     pub service_name: Option<String>,
     #[serde(flatten)]
-    pub extra: HashMap<String, serde_yml::Value>,
+    pub extra: HashMap<String, serde_yaml::Value>,
 }
 
 #[cfg(test)]
@@ -63,7 +73,7 @@ mod tests {
 port: 3777
 host: "0.0.0.0"
 "#;
-        let config: GatewayConfig = serde_yml::from_str(yaml).unwrap();
+        let config: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.port, Some(3777));
         assert!(config.tls.is_none());
     }
@@ -76,7 +86,7 @@ tls:
   cert: "/path/to/cert.pem"
   key: "/path/to/key.pem"
 "#;
-        let config: GatewayConfig = serde_yml::from_str(yaml).unwrap();
+        let config: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
         let tls = config.tls.unwrap();
         assert_eq!(tls.cert.as_deref(), Some("/path/to/cert.pem"));
         assert_eq!(tls.key.as_deref(), Some("/path/to/key.pem"));
@@ -88,7 +98,7 @@ tls:
 tls:
   cert: "/path/to/cert.pem"
 "#;
-        let config: GatewayConfig = serde_yml::from_str(yaml).unwrap();
+        let config: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
         let tls = config.tls.unwrap();
         assert_eq!(tls.cert.as_deref(), Some("/path/to/cert.pem"));
         assert!(tls.key.is_none());
@@ -100,7 +110,7 @@ tls:
 port: 8080
 tls:
 "#;
-        let config: GatewayConfig = serde_yml::from_str(yaml).unwrap();
+        let config: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.port, Some(8080));
         // Empty tls section (null value) deserializes as None
         assert!(config.tls.is_none());
@@ -114,7 +124,7 @@ reload:
   mode: "hot"
   debounce_ms: 500
 "#;
-        let config: GatewayConfig = serde_yml::from_str(yaml).unwrap();
+        let config: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
         let reload = config.reload.unwrap();
         assert_eq!(reload.mode.as_deref(), Some("hot"));
         assert_eq!(reload.debounce_ms, Some(500));
@@ -123,7 +133,7 @@ reload:
     #[test]
     fn gateway_config_reload_defaults() {
         let yaml = "port: 3777";
-        let config: GatewayConfig = serde_yml::from_str(yaml).unwrap();
+        let config: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.reload.is_none());
     }
 }

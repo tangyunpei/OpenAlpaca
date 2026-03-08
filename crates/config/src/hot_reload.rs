@@ -30,13 +30,19 @@ impl ConfigWatcher {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, _>| {
-            if let Ok(event) = res
-                && matches!(
-                    event.kind,
-                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                )
-            {
-                let _ = event_tx.send(());
+            match res {
+                Ok(event)
+                    if matches!(
+                        event.kind,
+                        EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                    ) =>
+                {
+                    let _ = event_tx.send(());
+                }
+                Ok(_) => {} // other event kinds (access, etc.)
+                Err(e) => {
+                    tracing::warn!("config watcher error: {e}");
+                }
             }
         })
         .map_err(|e| CoreError::Io(std::io::Error::other(format!("watcher error: {e}"))))?;
@@ -124,8 +130,8 @@ async fn debounce_loop(
                 }
 
                 // Compute diff to determine what actually changed
-                let old_value = serde_yml::to_value(&**config.load()).unwrap_or_default();
-                let new_value = serde_yml::to_value(&snapshot.config).unwrap_or_default();
+                let old_value = serde_yaml::to_value(&**config.load()).unwrap_or_default();
+                let new_value = serde_yaml::to_value(&snapshot.config).unwrap_or_default();
                 let changed = crate::merge::diff_paths(&old_value, &new_value, "");
 
                 if changed.is_empty() {

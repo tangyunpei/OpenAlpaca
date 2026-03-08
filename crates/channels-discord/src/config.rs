@@ -13,9 +13,9 @@ pub fn list_account_ids(config: &OpenAlpacaConfig) -> Vec<AccountId> {
     };
 
     if let Some(accounts) = &dc.accounts {
-        accounts.keys().map(|k| AccountId(k.clone())).collect()
+        accounts.keys().map(AccountId::new_unchecked).collect()
     } else if dc.default.bot_token.is_some() {
-        vec![AccountId(DEFAULT_ACCOUNT_ID.into())]
+        vec![AccountId::new_unchecked(DEFAULT_ACCOUNT_ID)]
     } else {
         vec![]
     }
@@ -28,8 +28,8 @@ pub fn resolve_account_config<'a>(
     let dc = config.channels.as_ref()?.discord.as_ref()?;
 
     if let Some(accounts) = &dc.accounts {
-        accounts.get(&account_id.0)
-    } else if account_id.0 == DEFAULT_ACCOUNT_ID {
+        accounts.get(account_id.as_str())
+    } else if account_id.as_str() == DEFAULT_ACCOUNT_ID {
         Some(&dc.default)
     } else {
         None
@@ -60,10 +60,10 @@ channels:
     bot_token: "discord-token"
     enabled: true
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         let ids = list_account_ids(&config);
         assert_eq!(ids.len(), 1);
-        assert_eq!(ids[0].0, "default");
+        assert_eq!(ids[0].as_str(), "default");
         assert!(is_account_enabled(&config, &ids[0]));
     }
 
@@ -74,8 +74,9 @@ channels:
   discord:
     bot_token: "my-token"
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
-        let acc = resolve_account_config(&config, &AccountId(DEFAULT_ACCOUNT_ID.into())).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
+        let acc =
+            resolve_account_config(&config, &AccountId::new_unchecked(DEFAULT_ACCOUNT_ID)).unwrap();
         assert_eq!(acc.bot_token.as_deref(), Some("my-token"));
     }
 }

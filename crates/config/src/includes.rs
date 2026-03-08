@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use openalpaca_core::CoreError;
-use serde_yml::Value;
+use serde_yaml::Value;
 
 const INCLUDE_KEY: &str = "$include";
 const MAX_INCLUDE_DEPTH: usize = 10;
@@ -65,7 +65,7 @@ fn resolve_recursive(
                 };
 
                 // Start with an empty mapping as base, merge includes in order
-                let mut merged = Value::Mapping(serde_yml::Mapping::new());
+                let mut merged = Value::Mapping(serde_yaml::Mapping::new());
 
                 for rel_path in &paths {
                     let resolved = base_dir.join(rel_path);
@@ -119,7 +119,7 @@ fn resolve_recursive(
                             canonical.display()
                         ))
                     })?;
-                    let included_value: Value = serde_yml::from_str(&content).map_err(|e| {
+                    let included_value: Value = serde_yaml::from_str(&content).map_err(|e| {
                         CoreError::InvalidConfig(format!(
                             "YAML parse error in included file '{}': {e}",
                             canonical.display()
@@ -136,7 +136,7 @@ fn resolve_recursive(
 
                 // Remaining siblings override included content
                 // Recurse into sibling values first
-                let mut sibling_map = serde_yml::Mapping::new();
+                let mut sibling_map = serde_yaml::Mapping::new();
                 for (k, v) in map {
                     sibling_map.insert(k, resolve_recursive(v, base_dir, visited, depth)?);
                 }
@@ -148,7 +148,7 @@ fn resolve_recursive(
                 }
             } else {
                 // No $include — just recurse into all values
-                let mut new_map = serde_yml::Mapping::new();
+                let mut new_map = serde_yaml::Mapping::new();
                 for (k, v) in map {
                     new_map.insert(k, resolve_recursive(v, base_dir, visited, depth)?);
                 }
@@ -208,7 +208,7 @@ mod tests {
             "$include: base.yaml\nhost: localhost",
         );
 
-        let raw: Value = serde_yml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
+        let raw: Value = serde_yaml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
         let result = resolve_includes(raw, &main).unwrap();
 
         let map = result.as_mapping().unwrap();
@@ -242,7 +242,7 @@ mod tests {
         write_yaml(dir.path(), "b.yaml", "y: 2\nitems:\n  - b");
         let main = write_yaml(dir.path(), "main.yaml", "$include:\n  - a.yaml\n  - b.yaml");
 
-        let raw: Value = serde_yml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
+        let raw: Value = serde_yaml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
         let result = resolve_includes(raw, &main).unwrap();
 
         let map = result.as_mapping().unwrap();
@@ -281,7 +281,7 @@ mod tests {
             "$include: base.yaml\nhost: override",
         );
 
-        let raw: Value = serde_yml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
+        let raw: Value = serde_yaml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
         let result = resolve_includes(raw, &main).unwrap();
 
         let map = result.as_mapping().unwrap();
@@ -310,7 +310,7 @@ mod tests {
         write_yaml(dir.path(), "mid.yaml", "$include: leaf.yaml\nmid: true");
         let main = write_yaml(dir.path(), "main.yaml", "$include: mid.yaml\ntop: true");
 
-        let raw: Value = serde_yml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
+        let raw: Value = serde_yaml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
         let result = resolve_includes(raw, &main).unwrap();
 
         let map = result.as_mapping().unwrap();
@@ -344,7 +344,7 @@ mod tests {
         write_yaml(dir.path(), "b.yaml", "$include: a.yaml");
         let main = write_yaml(dir.path(), "main.yaml", "$include: a.yaml");
 
-        let raw: Value = serde_yml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
+        let raw: Value = serde_yaml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
         let result = resolve_includes(raw, &main);
 
         assert!(result.is_err());
@@ -367,7 +367,7 @@ mod tests {
         }
         let main = write_yaml(dir.path(), "main.yaml", "$include: f0.yaml");
 
-        let raw: Value = serde_yml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
+        let raw: Value = serde_yaml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
         let result = resolve_includes(raw, &main);
 
         assert!(result.is_err());
@@ -380,7 +380,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let main = write_yaml(dir.path(), "main.yaml", "$include: \"../../etc/passwd\"");
 
-        let raw: Value = serde_yml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
+        let raw: Value = serde_yaml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
         let result = resolve_includes(raw, &main);
 
         assert!(result.is_err());
@@ -396,7 +396,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let main = write_yaml(dir.path(), "main.yaml", "$include: nonexistent.yaml");
 
-        let raw: Value = serde_yml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
+        let raw: Value = serde_yaml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
         let result = resolve_includes(raw, &main);
 
         assert!(result.is_err());

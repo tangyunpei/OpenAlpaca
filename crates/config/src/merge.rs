@@ -1,4 +1,4 @@
-use serde_yml::Value;
+use serde_yaml::Value;
 
 /// Apply an RFC 7396-style merge patch to a base YAML value.
 pub fn apply_merge_patch(base: &Value, patch: &Value) -> Value {
@@ -8,7 +8,7 @@ pub fn apply_merge_patch(base: &Value, patch: &Value) -> Value {
 
     let mut result = match base.as_mapping() {
         Some(m) => m.clone(),
-        None => serde_yml::Mapping::new(),
+        None => serde_yaml::Mapping::new(),
     };
 
     for (key, value) in patch_map {
@@ -78,7 +78,7 @@ mod tests {
     use super::*;
 
     fn yaml(s: &str) -> Value {
-        serde_yml::from_str(s).unwrap()
+        serde_yaml::from_str(s).unwrap()
     }
 
     #[test]
@@ -116,7 +116,7 @@ mod tests {
         let patch_str = yaml("\"replaced\"");
         assert_eq!(apply_merge_patch(&base, &patch_str), patch_str);
 
-        let patch_seq: Value = serde_yml::from_str("[1, 2, 3]").unwrap();
+        let patch_seq: Value = serde_yaml::from_str("[1, 2, 3]").unwrap();
         assert_eq!(apply_merge_patch(&base, &patch_seq), patch_seq);
     }
 

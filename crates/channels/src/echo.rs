@@ -16,7 +16,7 @@ pub struct EchoChannel {
 
 impl EchoChannel {
     pub fn new() -> Self {
-        let id = ChannelId("echo".into());
+        let id = ChannelId::new_unchecked("echo");
         Self {
             meta: ChannelMeta {
                 id: id.clone(),
@@ -55,7 +55,7 @@ impl ChannelPlugin for EchoChannel {
     }
 
     fn list_account_ids(&self, _config: &OpenAlpacaConfig) -> Vec<AccountId> {
-        vec![AccountId("default".into())]
+        vec![AccountId::new_unchecked("default")]
     }
 
     fn is_account_enabled(&self, _config: &OpenAlpacaConfig, _account_id: &AccountId) -> bool {
@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn test_echo_channel_identity() {
         let echo = EchoChannel::new();
-        assert_eq!(echo.id().0, "echo");
+        assert_eq!(echo.id().as_str(), "echo");
         assert_eq!(echo.meta().label, "Echo");
         assert_eq!(echo.capabilities().chat_types, vec![ChatType::Direct]);
     }
@@ -92,16 +92,16 @@ mod tests {
         let config = OpenAlpacaConfig::default();
         let accounts = echo.list_account_ids(&config);
         assert_eq!(accounts.len(), 1);
-        assert_eq!(accounts[0].0, "default");
-        assert!(echo.is_account_enabled(&config, &AccountId("default".into())));
+        assert_eq!(accounts[0].as_str(), "default");
+        assert!(echo.is_account_enabled(&config, &AccountId::new_unchecked("default")));
     }
 
     #[tokio::test]
     async fn test_echo_channel_send() {
         let echo = EchoChannel::new();
         let ctx = OutboundContext {
-            channel_id: ChannelId("echo".into()),
-            account_id: AccountId("default".into()),
+            channel_id: ChannelId::new_unchecked("echo"),
+            account_id: AccountId::new_unchecked("default"),
             target: "user123".into(),
             text: "hello world".into(),
             reply_to_id: None,
@@ -136,8 +136,8 @@ mod tests {
         use crate::plugin::MediaOutboundContext;
         let echo = EchoChannel::new();
         let ctx = MediaOutboundContext {
-            channel_id: ChannelId("echo".into()),
-            account_id: AccountId("default".into()),
+            channel_id: ChannelId::new_unchecked("echo"),
+            account_id: AccountId::new_unchecked("default"),
             target: "user123".into(),
             media_url: "https://example.com/image.png".into(),
             caption: None,
@@ -186,7 +186,7 @@ mod tests {
         let echo = EchoChannel::new();
         let config = OpenAlpacaConfig::default();
         let result = echo
-            .check_ready(&config, &AccountId("default".into()))
+            .check_ready(&config, &AccountId::new_unchecked("default"))
             .await
             .unwrap();
         assert!(result);
@@ -203,7 +203,7 @@ mod tests {
         let echo = EchoChannel::new();
         let config = OpenAlpacaConfig::default();
         assert_eq!(
-            echo.resolve_default_to(&config, &AccountId("default".into())),
+            echo.resolve_default_to(&config, &AccountId::new_unchecked("default")),
             None
         );
     }
@@ -214,7 +214,7 @@ mod tests {
         let echo = EchoChannel::new();
         let boxed: Box<dyn ChannelPlugin> = Box::new(echo);
         let config = OpenAlpacaConfig::default();
-        let aid = AccountId("default".into());
+        let aid = AccountId::new_unchecked("default");
 
         assert_eq!(boxed.delivery_mode(), DeliveryMode::Direct);
         assert_eq!(boxed.text_chunk_limit(), None);
@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(boxed.resolve_default_to(&config, &aid), None);
 
         let media_ctx = MediaOutboundContext {
-            channel_id: ChannelId("echo".into()),
+            channel_id: ChannelId::new_unchecked("echo"),
             account_id: aid,
             target: "user".into(),
             media_url: "https://example.com/img.png".into(),

@@ -66,8 +66,8 @@ mod tests {
             reply_to_message_id: None,
             media_urls: vec![],
         };
-        let channel = ChannelId("test".into());
-        let account = AccountId("acc".into());
+        let channel = ChannelId::new_unchecked("test");
+        let account = AccountId::new_unchecked("acc");
         let reply = handler
             .handle_message(&channel, &account, &msg)
             .await

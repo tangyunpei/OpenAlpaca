@@ -54,6 +54,13 @@ impl AccountHealth {
 
 /// Periodic health monitor that probes channel accounts via `check_ready()`,
 /// auto-restarts after consecutive failures, and broadcasts status changes.
+///
+/// # Thread Safety
+///
+/// This struct is owned by a single spawned task (see `server.rs`).
+/// The `health` HashMap is accessed only via `&mut self` in `check_all()`
+/// and `&self` in `snapshot()`. Since both are called from the same task,
+/// no synchronization is needed for `health`.
 pub struct HealthMonitor {
     config: HealthMonitorConfig,
     state: Arc<GatewayState>,
@@ -97,36 +104,62 @@ impl HealthMonitor {
     }
 
     /// Probe all registered channel accounts and update health state.
+    ///
+    /// H3 fix: The registry read lock is acquired per-item and released between
+    /// items, preventing deadlock if plugin methods internally need the registry.
     async fn check_all(&mut self) {
         let config_guard = self.state.config.load();
-        let registry = self.state.channel_registry.read().await;
 
-        for (channel_id, account_id, plugin) in registry.entries() {
-            let ready = match tokio::time::timeout(
-                self.config.probe_timeout,
-                plugin.check_ready(&config_guard, account_id),
-            )
-            .await
-            {
-                Ok(Ok(ready)) => ready,
-                Ok(Err(e)) => {
-                    tracing::warn!(
-                        channel = %channel_id.0,
-                        account = %account_id.0,
-                        error = %e,
-                        "health monitor: check_ready failed"
-                    );
-                    false
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        channel = %channel_id.0,
-                        account = %account_id.0,
-                        "health monitor: check_ready timed out"
-                    );
-                    false
+        // Collect keys while holding the lock briefly, then release
+        let keys: Vec<(ChannelId, AccountId)> = {
+            let registry = self.state.channel_registry.read().await;
+            registry
+                .entries()
+                .iter()
+                .map(|(cid, aid, _)| ((*cid).clone(), (*aid).clone()))
+                .collect()
+        };
+
+        // H14: Prune health entries for channels no longer in the registry
+        self.health.retain(|(cid, aid), _| {
+            keys.iter()
+                .any(|(k_cid, k_aid)| k_cid == cid && k_aid == aid)
+        });
+
+        for (channel_id, account_id) in &keys {
+            // Acquire read lock per-item for check_ready, release after
+            let ready = {
+                let registry = self.state.channel_registry.read().await;
+                let Some(plugin) = registry.get(channel_id, account_id) else {
+                    continue;
+                };
+                match tokio::time::timeout(
+                    self.config.probe_timeout,
+                    plugin.check_ready(&config_guard, account_id),
+                )
+                .await
+                {
+                    Ok(Ok(ready)) => ready,
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            channel = %channel_id.as_str(),
+                            account = %account_id.as_str(),
+                            error = %e,
+                            "health monitor: check_ready failed"
+                        );
+                        false
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            channel = %channel_id.as_str(),
+                            account = %account_id.as_str(),
+                            "health monitor: check_ready timed out"
+                        );
+                        false
+                    }
                 }
             };
+            // Read lock released here
 
             let key = (channel_id.clone(), account_id.clone());
             let health = self.health.entry(key).or_insert_with(AccountHealth::new);
@@ -150,8 +183,8 @@ impl HealthMonitor {
 
                     if health.restart_count >= self.config.max_restarts_per_hour {
                         tracing::error!(
-                            channel = %channel_id.0,
-                            account = %account_id.0,
+                            channel = %channel_id.as_str(),
+                            account = %account_id.as_str(),
                             max = self.config.max_restarts_per_hour,
                             "health monitor: max restarts per hour exceeded, skipping"
                         );
@@ -159,8 +192,8 @@ impl HealthMonitor {
                     }
 
                     tracing::warn!(
-                        channel = %channel_id.0,
-                        account = %account_id.0,
+                        channel = %channel_id.as_str(),
+                        account = %account_id.as_str(),
                         failures = health.consecutive_failures,
                         "health monitor: restarting unhealthy channel account"
                     );
@@ -170,33 +203,49 @@ impl HealthMonitor {
                         config: Arc::clone(&*config_guard),
                     };
 
-                    if let Err(e) = plugin.stop_account(&ctx).await {
-                        tracing::error!(
-                            channel = %channel_id.0,
-                            account = %account_id.0,
-                            error = %e,
-                            "health monitor: stop_account failed"
-                        );
-                    }
+                    // Separate lock scope for stop/start
+                    let start_ok = {
+                        let registry = self.state.channel_registry.read().await;
+                        if let Some(plugin) = registry.get(channel_id, account_id) {
+                            if let Err(e) = plugin.stop_account(&ctx).await {
+                                tracing::error!(
+                                    channel = %channel_id.as_str(),
+                                    account = %account_id.as_str(),
+                                    error = %e,
+                                    "health monitor: stop_account failed"
+                                );
+                            }
 
-                    if let Err(e) = plugin.start_account(&ctx).await {
-                        tracing::error!(
-                            channel = %channel_id.0,
-                            account = %account_id.0,
-                            error = %e,
-                            "health monitor: start_account failed"
-                        );
-                    }
+                            match plugin.start_account(&ctx).await {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    tracing::error!(
+                                        channel = %channel_id.as_str(),
+                                        account = %account_id.as_str(),
+                                        error = %e,
+                                        "health monitor: start_account failed"
+                                    );
+                                    false
+                                }
+                            }
+                        } else {
+                            false
+                        }
+                    };
 
                     health.restart_count += 1;
                     health.last_restart = Some(Instant::now());
-                    health.consecutive_failures = 0;
+
+                    // H5 fix: Only reset failures on successful restart
+                    if start_ok {
+                        health.consecutive_failures = 0;
+                    }
 
                     let _ = self
                         .state
                         .broadcast_tx
                         .send(BroadcastEvent::ChannelStatusChanged {
-                            channel_id: channel_id.0.clone(),
+                            channel_id: channel_id.as_str().to_string(),
                         });
                 }
             }
@@ -209,8 +258,8 @@ impl HealthMonitor {
             .iter()
             .map(|((channel_id, account_id), h)| {
                 serde_json::json!({
-                    "channelId": channel_id.0,
-                    "accountId": account_id.0,
+                    "channelId": channel_id.as_str(),
+                    "accountId": account_id.as_str(),
                     "ready": h.ready,
                     "consecutiveFailures": h.consecutive_failures,
                     "restartCount": h.restart_count,
@@ -252,6 +301,7 @@ mod tests {
         capabilities: ChannelCapabilities,
         ready: Arc<StdMutex<bool>>,
         check_delay: Option<Duration>,
+        start_fails: Arc<StdMutex<bool>>,
         start_count: Arc<AtomicU32>,
         stop_count: Arc<AtomicU32>,
     }
@@ -262,7 +312,7 @@ mod tests {
             start_count: Arc<AtomicU32>,
             stop_count: Arc<AtomicU32>,
         ) -> Self {
-            let id = ChannelId("mock".into());
+            let id = ChannelId::new_unchecked("mock");
             Self {
                 meta: ChannelMeta {
                     id: id.clone(),
@@ -275,6 +325,7 @@ mod tests {
                 id,
                 ready,
                 check_delay: None,
+                start_fails: Arc::new(StdMutex::new(false)),
                 start_count,
                 stop_count,
             }
@@ -282,6 +333,11 @@ mod tests {
 
         fn with_delay(mut self, delay: Duration) -> Self {
             self.check_delay = Some(delay);
+            self
+        }
+
+        fn with_start_fails(mut self, start_fails: Arc<StdMutex<bool>>) -> Self {
+            self.start_fails = start_fails;
             self
         }
     }
@@ -301,7 +357,7 @@ mod tests {
         }
 
         fn list_account_ids(&self, _config: &OpenAlpacaConfig) -> Vec<AccountId> {
-            vec![AccountId("default".into())]
+            vec![AccountId::new_unchecked("default")]
         }
 
         fn is_account_enabled(&self, _config: &OpenAlpacaConfig, _account_id: &AccountId) -> bool {
@@ -321,6 +377,9 @@ mod tests {
 
         async fn start_account(&self, _ctx: &ChannelGatewayContext) -> Result<(), ChannelError> {
             self.start_count.fetch_add(1, Ordering::SeqCst);
+            if *self.start_fails.lock().unwrap() {
+                return Err(ChannelError::Other("mock start failure".into()));
+            }
             Ok(())
         }
 
@@ -355,7 +414,10 @@ mod tests {
     }
 
     fn mock_key() -> (ChannelId, AccountId) {
-        (ChannelId("mock".into()), AccountId("default".into()))
+        (
+            ChannelId::new_unchecked("mock"),
+            AccountId::new_unchecked("default"),
+        )
     }
 
     // -- Tests --
@@ -380,7 +442,7 @@ mod tests {
         let mock = MockChannel::new(ready, start_count, stop_count);
         {
             let mut registry = state.channel_registry.write().await;
-            registry.register(AccountId("default".into()), Box::new(mock));
+            registry.register(AccountId::new_unchecked("default"), Box::new(mock));
         }
 
         let mut monitor = HealthMonitor::new(state, HealthMonitorConfig::default());
@@ -417,7 +479,7 @@ mod tests {
         let mock = MockChannel::new(ready, start_count.clone(), stop_count.clone());
         {
             let mut registry = state.channel_registry.write().await;
-            registry.register(AccountId("default".into()), Box::new(mock));
+            registry.register(AccountId::new_unchecked("default"), Box::new(mock));
         }
 
         let config = HealthMonitorConfig {
@@ -450,7 +512,7 @@ mod tests {
         let mock = MockChannel::new(ready, start_count.clone(), stop_count.clone());
         {
             let mut registry = state.channel_registry.write().await;
-            registry.register(AccountId("default".into()), Box::new(mock));
+            registry.register(AccountId::new_unchecked("default"), Box::new(mock));
         }
 
         let config = HealthMonitorConfig {
@@ -494,7 +556,7 @@ mod tests {
         let mock = MockChannel::new(ready, start_count.clone(), stop_count.clone());
         {
             let mut registry = state.channel_registry.write().await;
-            registry.register(AccountId("default".into()), Box::new(mock));
+            registry.register(AccountId::new_unchecked("default"), Box::new(mock));
         }
 
         let config = HealthMonitorConfig {
@@ -544,7 +606,7 @@ mod tests {
         let mock = MockChannel::new(ready, start_count, stop_count);
         {
             let mut registry = state.channel_registry.write().await;
-            registry.register(AccountId("default".into()), Box::new(mock));
+            registry.register(AccountId::new_unchecked("default"), Box::new(mock));
         }
 
         let config = HealthMonitorConfig {
@@ -573,7 +635,7 @@ mod tests {
             MockChannel::new(ready, start_count, stop_count).with_delay(Duration::from_millis(500)); // exceeds probe_timeout
         {
             let mut registry = state.channel_registry.write().await;
-            registry.register(AccountId("default".into()), Box::new(mock));
+            registry.register(AccountId::new_unchecked("default"), Box::new(mock));
         }
 
         let config = HealthMonitorConfig {
@@ -589,6 +651,70 @@ mod tests {
         let health = monitor.health.get(&key).unwrap();
         assert!(!health.ready);
         assert_eq!(health.consecutive_failures, 1);
+    }
+
+    #[tokio::test]
+    async fn test_start_failure_keeps_consecutive_failures() {
+        let state = make_test_state();
+        let ready = Arc::new(StdMutex::new(false));
+        let start_fails = Arc::new(StdMutex::new(true));
+        let start_count = Arc::new(AtomicU32::new(0));
+        let stop_count = Arc::new(AtomicU32::new(0));
+
+        let mock = MockChannel::new(ready, start_count.clone(), stop_count.clone())
+            .with_start_fails(start_fails);
+        {
+            let mut registry = state.channel_registry.write().await;
+            registry.register(AccountId::new_unchecked("default"), Box::new(mock));
+        }
+
+        let config = HealthMonitorConfig {
+            max_failures_before_restart: 1,
+            ..Default::default()
+        };
+        let mut monitor = HealthMonitor::new(state, config);
+
+        // One failure triggers restart, but start_account fails
+        monitor.check_all().await;
+
+        assert_eq!(stop_count.load(Ordering::SeqCst), 1);
+        assert_eq!(start_count.load(Ordering::SeqCst), 1);
+
+        let key = mock_key();
+        let health = monitor.health.get(&key).unwrap();
+        // H5: consecutive_failures should NOT be reset when start_account fails
+        assert_eq!(health.consecutive_failures, 1);
+        assert_eq!(health.restart_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_dead_entries_cleaned_up() {
+        let state = make_test_state();
+        let ready = Arc::new(StdMutex::new(true));
+        let start_count = Arc::new(AtomicU32::new(0));
+        let stop_count = Arc::new(AtomicU32::new(0));
+
+        let mock = MockChannel::new(ready, start_count, stop_count);
+        {
+            let mut registry = state.channel_registry.write().await;
+            registry.register(AccountId::new_unchecked("default"), Box::new(mock));
+        }
+
+        let mut monitor = HealthMonitor::new(state.clone(), HealthMonitorConfig::default());
+
+        // Run check — should create health entry for "mock"
+        monitor.check_all().await;
+        assert_eq!(monitor.health.len(), 1);
+
+        // Remove channel from registry
+        {
+            let mut registry = state.channel_registry.write().await;
+            *registry = ChannelRegistry::new();
+        }
+
+        // Run check — should prune the stale entry
+        monitor.check_all().await;
+        assert_eq!(monitor.health.len(), 0);
     }
 
     #[tokio::test]

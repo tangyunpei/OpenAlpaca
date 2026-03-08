@@ -33,7 +33,7 @@ impl DiscordChannel {
         handler: Arc<dyn InboundHandler>,
         chunk_limit: Option<usize>,
     ) -> Self {
-        let id = ChannelId("discord".into());
+        let id = ChannelId::new_unchecked("discord");
         Self {
             meta: ChannelMeta {
                 id: id.clone(),
@@ -143,7 +143,7 @@ impl ChannelPlugin for DiscordChannel {
         account_id: Option<&AccountId>,
         _chat_type: Option<&ChatType>,
     ) -> ReplyToMode {
-        let default_id = AccountId("default".into());
+        let default_id = AccountId::new_unchecked("default");
         let aid = account_id.unwrap_or(&default_id);
         crate::config::resolve_account_config(config, aid)
             .and_then(|c| c.reply_to_mode.as_deref())
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn test_plugin_identity() {
         let channel = make_test_channel();
-        assert_eq!(channel.id().0.as_str(), "discord");
+        assert_eq!(channel.id().as_str(), "discord");
         assert_eq!(channel.meta().label, "Discord");
         assert!(channel.capabilities().reactions);
         assert!(channel.capabilities().threads);
@@ -276,7 +276,7 @@ mod tests {
     async fn test_check_ready() {
         let channel = make_test_channel();
         let config = OpenAlpacaConfig::default();
-        let aid = AccountId("default".into());
+        let aid = AccountId::new_unchecked("default");
         assert!(channel.check_ready(&config, &aid).await.unwrap());
     }
 
@@ -285,7 +285,7 @@ mod tests {
         let channel = make_test_channel();
         let boxed: Box<dyn ChannelPlugin> = Box::new(channel);
         let config = OpenAlpacaConfig::default();
-        let aid = AccountId("default".into());
+        let aid = AccountId::new_unchecked("default");
 
         assert_eq!(boxed.text_chunk_limit(), Some(2000));
         assert!(!boxed.mention_strip_patterns().is_empty());

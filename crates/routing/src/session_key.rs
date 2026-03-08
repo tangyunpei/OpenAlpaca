@@ -22,7 +22,13 @@ impl DmScope {
             "per_peer" | "perpeer" => DmScope::PerPeer,
             "per_channel_peer" | "perchannelpeer" => DmScope::PerChannelPeer,
             "per_account_channel_peer" | "peraccountchannelpeer" => DmScope::PerAccountChannelPeer,
-            _ => DmScope::PerPeer,
+            other => {
+                tracing::warn!(
+                    value = other,
+                    "unknown dm_scope variant, defaulting to per_peer"
+                );
+                DmScope::PerPeer
+            }
         }
     }
 }
@@ -42,7 +48,7 @@ pub struct PeerSessionParams {
 /// If `main_key` is None, uses "main".
 pub fn build_main_session_key(agent_id: &AgentId, main_key: Option<&str>) -> SessionKey {
     let key = main_key.unwrap_or("main");
-    SessionKey::new(format!("agent:{}:{}", agent_id.0, key))
+    SessionKey::new(format!("agent:{}:{}", agent_id.as_str(), key))
 }
 
 /// Build a peer session key with DM scope logic.
@@ -54,7 +60,7 @@ pub fn build_main_session_key(agent_id: &AgentId, main_key: Option<&str>) -> Ses
 /// - Group => `agent:{id}:{channel}:group:{peer_id}`
 /// - Channel => `agent:{id}:{channel}:channel:{peer_id}`
 pub fn build_peer_session_key(params: &PeerSessionParams) -> SessionKey {
-    let agent = &params.agent_id.0;
+    let agent = params.agent_id.as_str();
 
     match params.peer_kind {
         ChatType::Direct => {
@@ -62,22 +68,26 @@ pub fn build_peer_session_key(params: &PeerSessionParams) -> SessionKey {
             match params.dm_scope {
                 DmScope::Main => build_main_session_key(&params.agent_id, None),
                 DmScope::PerPeer => SessionKey::new(format!("agent:{agent}:direct:{peer}")),
-                DmScope::PerChannelPeer => {
-                    SessionKey::new(format!("agent:{agent}:{}:direct:{peer}", params.channel.0))
-                }
+                DmScope::PerChannelPeer => SessionKey::new(format!(
+                    "agent:{agent}:{}:direct:{peer}",
+                    params.channel.as_str()
+                )),
                 DmScope::PerAccountChannelPeer => SessionKey::new(format!(
                     "agent:{agent}:{}:{}:direct:{peer}",
-                    params.account_id.0, params.channel.0
+                    params.account_id.as_str(),
+                    params.channel.as_str()
                 )),
             }
         }
         ChatType::Group => SessionKey::new(format!(
             "agent:{agent}:{}:group:{}",
-            params.channel.0, &params.peer_id
+            params.channel.as_str(),
+            &params.peer_id
         )),
         ChatType::Channel => SessionKey::new(format!(
             "agent:{agent}:{}:channel:{}",
-            params.channel.0, &params.peer_id
+            params.channel.as_str(),
+            &params.peer_id
         )),
     }
 }
@@ -93,7 +103,7 @@ pub fn resolve_thread_session_keys(
 ) -> (SessionKey, Option<SessionKey>) {
     match thread_id {
         Some(tid) if !tid.is_empty() => {
-            let thread_key = SessionKey::new(format!("{}:thread:{tid}", base_key.0));
+            let thread_key = SessionKey::new(format!("{}:thread:{tid}", base_key.as_str()));
             (thread_key, Some(base_key.clone()))
         }
         _ => (base_key.clone(), None),
@@ -119,25 +129,25 @@ mod tests {
     use super::*;
 
     fn agent(s: &str) -> AgentId {
-        AgentId(s.to_string())
+        AgentId::new_unchecked(s)
     }
     fn channel(s: &str) -> ChannelId {
-        ChannelId(s.to_string())
+        ChannelId::new_unchecked(s)
     }
     fn account(s: &str) -> AccountId {
-        AccountId(s.to_string())
+        AccountId::new_unchecked(s)
     }
 
     #[test]
     fn test_build_main_session_key_default() {
         let key = build_main_session_key(&agent("assistant"), None);
-        assert_eq!(key.0, "agent:assistant:main");
+        assert_eq!(key.as_str(), "agent:assistant:main");
     }
 
     #[test]
     fn test_build_main_session_key_custom() {
         let key = build_main_session_key(&agent("assistant"), Some("workspace"));
-        assert_eq!(key.0, "agent:assistant:workspace");
+        assert_eq!(key.as_str(), "agent:assistant:workspace");
     }
 
     #[test]
@@ -152,7 +162,7 @@ mod tests {
             identity_links: None,
         };
         let key = build_peer_session_key(&params);
-        assert_eq!(key.0, "agent:bot:main");
+        assert_eq!(key.as_str(), "agent:bot:main");
     }
 
     #[test]
@@ -167,7 +177,7 @@ mod tests {
             identity_links: None,
         };
         let key = build_peer_session_key(&params);
-        assert_eq!(key.0, "agent:bot:direct:user123");
+        assert_eq!(key.as_str(), "agent:bot:direct:user123");
     }
 
     #[test]
@@ -182,7 +192,7 @@ mod tests {
             identity_links: None,
         };
         let key = build_peer_session_key(&params);
-        assert_eq!(key.0, "agent:bot:telegram:direct:user123");
+        assert_eq!(key.as_str(), "agent:bot:telegram:direct:user123");
     }
 
     #[test]
@@ -197,7 +207,7 @@ mod tests {
             identity_links: None,
         };
         let key = build_peer_session_key(&params);
-        assert_eq!(key.0, "agent:bot:work:telegram:direct:user123");
+        assert_eq!(key.as_str(), "agent:bot:work:telegram:direct:user123");
     }
 
     #[test]
@@ -212,7 +222,7 @@ mod tests {
             identity_links: None,
         };
         let key = build_peer_session_key(&params);
-        assert_eq!(key.0, "agent:bot:discord:group:guild-general");
+        assert_eq!(key.as_str(), "agent:bot:discord:group:guild-general");
     }
 
     #[test]
@@ -227,22 +237,25 @@ mod tests {
             identity_links: None,
         };
         let key = build_peer_session_key(&params);
-        assert_eq!(key.0, "agent:bot:slack:channel:C12345");
+        assert_eq!(key.as_str(), "agent:bot:slack:channel:C12345");
     }
 
     #[test]
     fn test_thread_session_keys_with_thread() {
         let base = SessionKey::new("agent:bot:direct:user123");
         let (thread_key, parent) = resolve_thread_session_keys(&base, Some("thread-456"));
-        assert_eq!(thread_key.0, "agent:bot:direct:user123:thread:thread-456");
-        assert_eq!(parent.unwrap().0, "agent:bot:direct:user123");
+        assert_eq!(
+            thread_key.as_str(),
+            "agent:bot:direct:user123:thread:thread-456"
+        );
+        assert_eq!(parent.unwrap().as_str(), "agent:bot:direct:user123");
     }
 
     #[test]
     fn test_thread_session_keys_without_thread() {
         let base = SessionKey::new("agent:bot:direct:user123");
         let (key, parent) = resolve_thread_session_keys(&base, None);
-        assert_eq!(key.0, "agent:bot:direct:user123");
+        assert_eq!(key.as_str(), "agent:bot:direct:user123");
         assert!(parent.is_none());
     }
 
@@ -281,6 +294,6 @@ mod tests {
         };
         let key = build_peer_session_key(&params);
         // Should use canonical ID "alice-tg" from identity links
-        assert_eq!(key.0, "agent:bot:direct:alice-tg");
+        assert_eq!(key.as_str(), "agent:bot:direct:alice-tg");
     }
 }

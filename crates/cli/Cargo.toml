@@ -29,6 +29,6 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
-serde_yml = { workspace = true }
+serde_yaml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

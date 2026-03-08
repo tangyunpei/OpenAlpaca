@@ -1,4 +1,4 @@
-use serde_yml::Value;
+use serde_yaml::Value;
 
 /// A config migration that transforms raw YAML values.
 pub struct Migration {
@@ -36,7 +36,7 @@ mod tests {
 
     #[test]
     fn test_apply_migrations_empty() {
-        let mut value = serde_yml::from_str::<Value>("gateway:\n  port: 3777").unwrap();
+        let mut value = serde_yaml::from_str::<Value>("gateway:\n  port: 3777").unwrap();
         let changes = apply_migrations(&mut value);
         assert!(changes.is_empty());
     }
@@ -59,7 +59,7 @@ mod tests {
         };
 
         let mut value =
-            serde_yml::from_str::<Value>("legacy_field: true\ngateway:\n  port: 3777").unwrap();
+            serde_yaml::from_str::<Value>("legacy_field: true\ngateway:\n  port: 3777").unwrap();
         let mut changes = Vec::new();
         (test_migration.apply)(&mut value, &mut changes);
 

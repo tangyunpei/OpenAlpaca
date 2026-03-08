@@ -51,7 +51,7 @@ impl InboundHandler for MessageBus {
         let input = ResolveRouteInput {
             config: &config_guard,
             channel,
-            account_id: Some(account_id.0.as_str()),
+            account_id: Some(account_id.as_str()),
             peer: None,
             parent_peer: None,
             guild_id: None,
@@ -63,9 +63,9 @@ impl InboundHandler for MessageBus {
             .map_err(|e| ChannelError::Other(format!("route resolution failed: {e}")))?;
 
         tracing::debug!(
-            channel = %channel.0,
-            agent = %route.agent_id.0,
-            session = %route.session_key.0,
+            channel = %channel.as_str(),
+            agent = %route.agent_id.as_str(),
+            session = %route.session_key.as_str(),
             "message-bus: resolved route"
         );
 
@@ -91,13 +91,13 @@ impl InboundHandler for MessageBus {
             match plugin.send_text(&ctx).await {
                 Ok(_) => {
                     tracing::debug!(
-                        channel = %result.channel_id.0,
+                        channel = %result.channel_id.as_str(),
                         "message-bus: delivered outbound"
                     );
                 }
                 Err(e) => {
                     tracing::warn!(
-                        channel = %result.channel_id.0,
+                        channel = %result.channel_id.as_str(),
                         error = %e,
                         "message-bus: outbound delivery failed"
                     );
@@ -105,8 +105,8 @@ impl InboundHandler for MessageBus {
             }
         } else {
             tracing::warn!(
-                channel = %result.channel_id.0,
-                account = %account_id.0,
+                channel = %result.channel_id.as_str(),
+                account = %account_id.as_str(),
                 "message-bus: no channel plugin found for outbound delivery"
             );
         }
@@ -159,8 +159,8 @@ mod tests {
         let config = make_test_config();
 
         let bus = MessageBus::new(dispatcher, channels, config);
-        let channel = ChannelId("test".into());
-        let account = AccountId("default".into());
+        let channel = ChannelId::new_unchecked("test");
+        let account = AccountId::new_unchecked("default");
         let msg = make_test_message();
 
         let reply = bus.handle_message(&channel, &account, &msg).await.unwrap();
@@ -175,8 +175,8 @@ mod tests {
         let config = Arc::new(ArcSwap::new(Arc::new(OpenAlpacaConfig::default())));
 
         let bus = MessageBus::new(dispatcher, channels, config);
-        let channel = ChannelId("test".into());
-        let account = AccountId("default".into());
+        let channel = ChannelId::new_unchecked("test");
+        let account = AccountId::new_unchecked("default");
         let msg = make_test_message();
 
         let result = bus.handle_message(&channel, &account, &msg).await;

@@ -110,17 +110,26 @@ async fn handle_socket_message(
     ws_sender: &mut (impl SinkExt<tokio_tungstenite::tungstenite::Message> + Unpin),
     params: &SocketModeParams,
 ) {
+    // Extract envelope_id from raw JSON for ack purposes (before full parse)
+    let envelope_id = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v.get("envelope_id")?.as_str().map(String::from));
+
+    // Always ack if we got an envelope_id, even if full parse fails
+    if let Some(ref eid) = envelope_id {
+        let ack = serde_json::json!({ "envelope_id": eid });
+        let _ = ws_sender
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                ack.to_string().into(),
+            ))
+            .await;
+    }
+
+    // Parse full envelope
     let Ok(envelope) = serde_json::from_str::<SocketModeEnvelope>(text) else {
+        tracing::warn!("slack: failed to parse socket mode envelope");
         return;
     };
-
-    // Acknowledge the envelope
-    let ack = serde_json::json!({ "envelope_id": envelope.envelope_id });
-    let _ = ws_sender
-        .send(tokio_tungstenite::tungstenite::Message::Text(
-            ack.to_string().into(),
-        ))
-        .await;
 
     // Process events_api events
     if envelope.envelope_type == "events_api"

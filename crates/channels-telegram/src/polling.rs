@@ -33,7 +33,7 @@ pub async fn run_polling_loop(
                 match result {
                     Ok(updates) => {
                         for update in &updates {
-                            offset = Some(update.update_id + 1);
+                            offset = Some(update.update_id.saturating_add(1));
 
                             if let Some(inbound) = parse_update(update) {
                                 handle_inbound(
@@ -77,8 +77,31 @@ async fn handle_inbound(
         .await
     {
         Ok(reply) => {
-            let reply_to = inbound.message_id.parse::<i64>().ok();
-            let thread_id = inbound.thread_id.as_deref().and_then(|t| t.parse().ok());
+            let reply_to = match inbound.message_id.parse::<i64>() {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    tracing::warn!(
+                        message_id = %inbound.message_id,
+                        error = %e,
+                        "telegram: failed to parse message_id as i64"
+                    );
+                    None
+                }
+            };
+            let thread_id = inbound
+                .thread_id
+                .as_deref()
+                .and_then(|t| match t.parse::<i64>() {
+                    Ok(id) => Some(id),
+                    Err(e) => {
+                        tracing::warn!(
+                            thread_id = t,
+                            error = %e,
+                            "telegram: failed to parse thread_id as i64"
+                        );
+                        None
+                    }
+                });
 
             if let Err(e) = send::send_reply(
                 api,

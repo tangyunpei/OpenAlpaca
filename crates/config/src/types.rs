@@ -8,20 +8,20 @@ use crate::types_channels::ChannelsConfig;
 use crate::types_gateway::{DiscoveryConfig, GatewayConfig};
 
 // Opaque stubs for config sections not yet needed (phases 6-7).
-pub type CliConfig = serde_yml::Value;
-pub type EnvConfig = serde_yml::Value;
-pub type ConfigMeta = serde_yml::Value;
-pub type ModelsConfig = serde_yml::Value;
-pub type ToolsConfig = serde_yml::Value;
-pub type SkillsConfig = serde_yml::Value;
-pub type SecretsConfig = serde_yml::Value;
-pub type PluginsConfig = serde_yml::Value;
-pub type HooksConfig = serde_yml::Value;
-pub type MemoryConfig = serde_yml::Value;
-pub type CronConfig = serde_yml::Value;
-pub type MessagesConfig = serde_yml::Value;
-pub type ApprovalsConfig = serde_yml::Value;
-pub type BrowserConfig = serde_yml::Value;
+pub type CliConfig = serde_yaml::Value;
+pub type EnvConfig = serde_yaml::Value;
+pub type ConfigMeta = serde_yaml::Value;
+pub type ModelsConfig = serde_yaml::Value;
+pub type ToolsConfig = serde_yaml::Value;
+pub type SkillsConfig = serde_yaml::Value;
+pub type SecretsConfig = serde_yaml::Value;
+pub type PluginsConfig = serde_yaml::Value;
+pub type HooksConfig = serde_yaml::Value;
+pub type MemoryConfig = serde_yaml::Value;
+pub type CronConfig = serde_yaml::Value;
+pub type MessagesConfig = serde_yaml::Value;
+pub type ApprovalsConfig = serde_yaml::Value;
+pub type BrowserConfig = serde_yaml::Value;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -49,7 +49,7 @@ pub struct OpenAlpacaConfig {
     pub approvals: Option<ApprovalsConfig>,
     pub browser: Option<BrowserConfig>,
     #[serde(flatten)]
-    pub extra: HashMap<String, serde_yml::Value>,
+    pub extra: HashMap<String, serde_yaml::Value>,
 }
 
 #[cfg(test)]
@@ -59,8 +59,8 @@ mod tests {
     #[test]
     fn test_empty_config_roundtrip() {
         let config = OpenAlpacaConfig::default();
-        let yaml = serde_yml::to_string(&config).unwrap();
-        let loaded: OpenAlpacaConfig = serde_yml::from_str(&yaml).unwrap();
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let loaded: OpenAlpacaConfig = serde_yaml::from_str(&yaml).unwrap();
         // Default config round-trips without error
         assert!(loaded.channels.is_none());
         assert!(loaded.gateway.is_none());
@@ -73,7 +73,7 @@ gateway:
   port: 3777
   host: "0.0.0.0"
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         let gw = config.gateway.unwrap();
         assert_eq!(gw.port, Some(3777));
         assert_eq!(gw.host.as_deref(), Some("0.0.0.0"));
@@ -87,7 +87,7 @@ channels:
     bot_token: "test-token"
     enabled: true
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         let tg = config.channels.unwrap().telegram.unwrap();
         assert_eq!(tg.default.bot_token.as_deref(), Some("test-token"));
         assert_eq!(tg.default.enabled, Some(true));
@@ -104,7 +104,7 @@ bindings:
   - agent: "assistant"
     channel: "telegram"
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         let agents = config.agents.unwrap();
         assert_eq!(agents.list.as_ref().unwrap().len(), 1);
         assert_eq!(agents.list.as_ref().unwrap()[0].id, "assistant");
@@ -121,7 +121,7 @@ gateway:
   port: 3000
   custom_gw_field: 42
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.extra.contains_key("custom_field"));
         let gw = config.gateway.unwrap();
         assert!(gw.extra.contains_key("custom_gw_field"));
@@ -153,9 +153,9 @@ logging:
 session:
   dm_scope: "per-peer"
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
-        let yaml_out = serde_yml::to_string(&config).unwrap();
-        let reloaded: OpenAlpacaConfig = serde_yml::from_str(&yaml_out).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
+        let yaml_out = serde_yaml::to_string(&config).unwrap();
+        let reloaded: OpenAlpacaConfig = serde_yaml::from_str(&yaml_out).unwrap();
 
         assert_eq!(
             reloaded.gateway.as_ref().unwrap().port,
@@ -170,7 +170,7 @@ session:
     #[test]
     fn test_malformed_yaml_returns_error() {
         let bad = "{{not: valid: yaml:";
-        let result = serde_yml::from_str::<OpenAlpacaConfig>(bad);
+        let result = serde_yaml::from_str::<OpenAlpacaConfig>(bad);
         assert!(result.is_err());
     }
 }

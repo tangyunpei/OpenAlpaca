@@ -34,7 +34,7 @@ impl SlackChannel {
         app_token: String,
         chunk_limit: Option<usize>,
     ) -> Self {
-        let id = ChannelId("slack".into());
+        let id = ChannelId::new_unchecked("slack");
         Self {
             meta: ChannelMeta {
                 id: id.clone(),
@@ -118,7 +118,7 @@ impl ChannelPlugin for SlackChannel {
         account_id: Option<&AccountId>,
         chat_type: Option<&ChatType>,
     ) -> ReplyToMode {
-        let default_id = AccountId("default".into());
+        let default_id = AccountId::new_unchecked("default");
         let aid = account_id.unwrap_or(&default_id);
         if let Some(mode) = crate::config::resolve_account_config(config, aid)
             .and_then(|c| c.reply_to_mode.as_deref())
@@ -210,7 +210,7 @@ mod tests {
     async fn test_plugin_identity() {
         let server = MockServer::start().await;
         let channel = make_test_channel(&server).await;
-        assert_eq!(channel.id().0.as_str(), "slack");
+        assert_eq!(channel.id().as_str(), "slack");
         assert_eq!(channel.meta().label, "Slack");
         assert!(channel.capabilities().threads);
         assert!(channel.capabilities().edit);
@@ -231,8 +231,8 @@ mod tests {
 
         let channel = make_test_channel(&server).await;
         let ctx = OutboundContext {
-            channel_id: ChannelId("slack".into()),
-            account_id: AccountId("default".into()),
+            channel_id: ChannelId::new_unchecked("slack"),
+            account_id: AccountId::new_unchecked("default"),
             target: "C123".into(),
             text: "hello slack".into(),
             reply_to_id: None,
@@ -288,8 +288,8 @@ channels:
     bot_token: "xoxb-test"
     reply_to_mode: "first"
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
-        let aid = AccountId("default".into());
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
+        let aid = AccountId::new_unchecked("default");
         // Config override should take priority over chat_type default
         assert_eq!(
             channel.resolve_reply_to_mode(&config, Some(&aid), Some(&ChatType::Group)),
@@ -313,7 +313,7 @@ channels:
         let server = MockServer::start().await;
         let channel = make_test_channel(&server).await;
         let config = OpenAlpacaConfig::default();
-        let aid = AccountId("default".into());
+        let aid = AccountId::new_unchecked("default");
         assert!(channel.check_ready(&config, &aid).await.unwrap());
     }
 
@@ -323,7 +323,7 @@ channels:
         let channel = make_test_channel(&server).await;
         let boxed: Box<dyn ChannelPlugin> = Box::new(channel);
         let config = OpenAlpacaConfig::default();
-        let aid = AccountId("default".into());
+        let aid = AccountId::new_unchecked("default");
 
         assert_eq!(boxed.text_chunk_limit(), Some(3000));
         assert_eq!(

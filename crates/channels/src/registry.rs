@@ -86,7 +86,7 @@ mod tests {
         let mut registry = ChannelRegistry::new();
         let echo = EchoChannel::new();
         let channel_id = echo.id().clone();
-        let account_id = AccountId("default".into());
+        let account_id = AccountId::new_unchecked("default");
 
         registry.register(account_id.clone(), Box::new(echo));
 
@@ -94,24 +94,24 @@ mod tests {
         assert!(!registry.is_empty());
 
         let plugin = registry.get(&channel_id, &account_id).unwrap();
-        assert_eq!(plugin.id().0, "echo");
+        assert_eq!(plugin.id().as_str(), "echo");
     }
 
     #[test]
     fn test_get_nonexistent() {
         let registry = ChannelRegistry::new();
-        let channel_id = ChannelId("telegram".into());
-        let account_id = AccountId("default".into());
+        let channel_id = ChannelId::new_unchecked("telegram");
+        let account_id = AccountId::new_unchecked("default");
         assert!(registry.get(&channel_id, &account_id).is_none());
     }
 
     #[test]
     fn test_get_by_channel() {
         let mut registry = ChannelRegistry::new();
-        registry.register(AccountId("a1".into()), Box::new(EchoChannel::new()));
-        registry.register(AccountId("a2".into()), Box::new(EchoChannel::new()));
+        registry.register(AccountId::new_unchecked("a1"), Box::new(EchoChannel::new()));
+        registry.register(AccountId::new_unchecked("a2"), Box::new(EchoChannel::new()));
 
-        let channel_id = ChannelId("echo".into());
+        let channel_id = ChannelId::new_unchecked("echo");
         let plugins = registry.get_by_channel(&channel_id);
         assert_eq!(plugins.len(), 2);
     }
@@ -119,7 +119,10 @@ mod tests {
     #[test]
     fn test_list_all() {
         let mut registry = ChannelRegistry::new();
-        registry.register(AccountId("default".into()), Box::new(EchoChannel::new()));
+        registry.register(
+            AccountId::new_unchecked("default"),
+            Box::new(EchoChannel::new()),
+        );
         assert_eq!(registry.list().len(), 1);
     }
 }

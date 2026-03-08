@@ -34,7 +34,7 @@ pub async fn send_reply(
             parse_mode: None,
         };
 
-        let msg = api.send_message(&params).await?;
+        let msg = api.send_message_with_retry(&params).await?;
         message_ids.push(msg.message_id);
     }
 

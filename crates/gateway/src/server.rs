@@ -186,7 +186,7 @@ pub async fn run_gateway(
 /// the hash is an opaque change identifier, not used for equality comparison.
 fn compute_config_hash(config: &Arc<ArcSwap<OpenAlpacaConfig>>) -> String {
     let guard = config.load();
-    let yaml = serde_yml::to_string(&**guard).unwrap_or_default();
+    let yaml = serde_yaml::to_string(&**guard).unwrap_or_default();
     format!("{:x}", sha2::Sha256::digest(yaml.as_bytes()))
 }
 

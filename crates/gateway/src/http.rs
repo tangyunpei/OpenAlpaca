@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -14,6 +14,8 @@ use crate::ws::ws_upgrade_handler;
 
 /// Build the axum router with all HTTP routes.
 pub fn build_router(state: Arc<GatewayState>) -> Router {
+    let cors = build_cors_layer(&state);
+
     Router::new()
         .route("/health", get(health_handler))
         .route("/healthz", get(health_handler))
@@ -21,8 +23,29 @@ pub fn build_router(state: Arc<GatewayState>) -> Router {
         .route("/v1/chat/completions", post(openai_chat_completions))
         .route("/ws", get(ws_upgrade_handler))
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .with_state(state)
+}
+
+fn build_cors_layer(state: &GatewayState) -> CorsLayer {
+    let config = state.config.load();
+    let origins = config
+        .gateway
+        .as_ref()
+        .and_then(|g| g.cors.as_ref())
+        .map(|c| &c.allowed_origins[..])
+        .unwrap_or(&[]);
+
+    if origins.is_empty() {
+        // Deny all cross-origin by default (secure)
+        CorsLayer::new()
+    } else {
+        let parsed: Vec<HeaderValue> = origins.iter().filter_map(|o| o.parse().ok()).collect();
+        CorsLayer::new()
+            .allow_origin(parsed)
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+    }
 }
 
 async fn health_handler() -> impl IntoResponse {
@@ -129,6 +152,27 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["object"], "chat.completion");
         assert_eq!(json["model"], "test-model");
+    }
+
+    #[tokio::test]
+    async fn test_cors_rejects_cross_origin_by_default() {
+        let state = make_test_state().await;
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri("/health")
+            .header("Origin", "https://evil.example.com")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        // No Access-Control-Allow-Origin header should be present (deny all)
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none()
+        );
     }
 
     #[tokio::test]

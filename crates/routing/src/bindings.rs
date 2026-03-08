@@ -34,7 +34,7 @@ impl BindingIndex {
         let mut index = BindingIndex::default();
 
         for binding in bindings {
-            let agent_id = AgentId(binding.agent.to_lowercase());
+            let agent_id = AgentId::new_unchecked(binding.agent.to_lowercase());
             let eval = EvaluatedBinding {
                 agent_id,
                 channel: binding.channel.clone(),
@@ -119,7 +119,7 @@ mod tests {
         let bindings = vec![make_binding("fallback")];
         let index = BindingIndex::build(&bindings);
         assert!(index.default.is_some());
-        assert_eq!(index.default.unwrap().agent_id.0, "fallback");
+        assert_eq!(index.default.unwrap().agent_id.as_str(), "fallback");
     }
 
     #[test]
@@ -128,7 +128,7 @@ mod tests {
         b.channel = Some("telegram".into());
         let index = BindingIndex::build(&[b]);
         assert_eq!(index.by_channel.len(), 1);
-        assert_eq!(index.by_channel[0].agent_id.0, "tg-agent");
+        assert_eq!(index.by_channel[0].agent_id.as_str(), "tg-agent");
     }
 
     #[test]

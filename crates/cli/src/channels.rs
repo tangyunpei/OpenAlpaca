@@ -52,7 +52,10 @@ fn register_telegram(
         let chunk_limit = acc.text_chunk_limit.map(|v| v as usize);
         let channel = TelegramChannel::new(api, handler.clone(), chunk_limit);
         registry.register(account_id.clone(), Box::new(channel));
-        tracing::info!("registered telegram channel for account {}", account_id.0);
+        tracing::info!(
+            "registered telegram channel for account {}",
+            account_id.as_str()
+        );
     }
 }
 
@@ -77,7 +80,10 @@ fn register_discord(
 
         let channel = DiscordChannel::new(bot_token.clone(), handler.clone(), None);
         registry.register(account_id.clone(), Box::new(channel));
-        tracing::info!("registered discord channel for account {}", account_id.0);
+        tracing::info!(
+            "registered discord channel for account {}",
+            account_id.as_str()
+        );
     }
 }
 
@@ -101,7 +107,10 @@ fn register_slack(
             continue;
         };
         let Some(app_token) = &acc.app_token else {
-            tracing::warn!("slack account {} missing app_token, skipping", account_id.0);
+            tracing::warn!(
+                "slack account {} missing app_token, skipping",
+                account_id.as_str()
+            );
             continue;
         };
 
@@ -117,6 +126,9 @@ fn register_slack(
             None,
         );
         registry.register(account_id.clone(), Box::new(channel));
-        tracing::info!("registered slack channel for account {}", account_id.0);
+        tracing::info!(
+            "registered slack channel for account {}",
+            account_id.as_str()
+        );
     }
 }

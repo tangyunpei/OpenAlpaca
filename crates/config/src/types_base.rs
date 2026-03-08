@@ -40,9 +40,9 @@ pub struct OutboundRetryConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
-    pub profiles: Option<HashMap<String, serde_yml::Value>>,
+    pub profiles: Option<HashMap<String, serde_yaml::Value>>,
     #[serde(flatten)]
-    pub extra: HashMap<String, serde_yml::Value>,
+    pub extra: HashMap<String, serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

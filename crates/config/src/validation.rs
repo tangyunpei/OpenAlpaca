@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn test_invalid_gateway_port() {
         let yaml = "gateway:\n  port: 0";
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         let issues = config.validate();
         assert_eq!(issues.len(), 1);
         assert!(issues[0].path.contains("gateway.port"));
@@ -206,7 +206,7 @@ agents:
     - id: ""
       model: "gpt-4"
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         let issues = config.validate();
         assert_eq!(issues.len(), 1);
         assert!(issues[0].path.contains("agents.list[0].id"));
@@ -220,7 +220,7 @@ bindings:
   - agent: ""
     channel: "telegram"
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         let issues = config.validate();
         assert_eq!(issues.len(), 1);
         assert!(issues[0].path.contains("bindings[0].agent"));
@@ -237,7 +237,7 @@ agents:
     - id: "assistant"
       model: "gpt-3.5"
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         let issues = config.validate();
         let dup: Vec<_> = issues
             .iter()
@@ -255,7 +255,7 @@ channels:
   telegram:
     enabled: true
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         let issues = config.validate();
         let token_issues: Vec<_> = issues
             .iter()
@@ -277,7 +277,7 @@ bindings:
   - agent: "nonexistent"
     channel: "telegram"
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         let issues = config.validate();
         let unknown: Vec<_> = issues
             .iter()
@@ -294,7 +294,7 @@ bindings:
 session:
   main_key: "custom"
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         let issues = config.validate();
         let key_issues: Vec<_> = issues
             .iter()
@@ -312,7 +312,7 @@ channels:
     enabled: true
     bot_token: "xoxb-test"
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         let issues = config.validate();
         let app_token_issues: Vec<_> = issues
             .iter()
@@ -330,7 +330,7 @@ channels:
   slack:
     enabled: true
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         let issues = config.validate();
         let slack_issues: Vec<_> = issues
             .iter()
@@ -343,7 +343,7 @@ channels:
     #[test]
     fn test_privileged_port_warning() {
         let yaml = "gateway:\n  port: 80";
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
         let issues = config.validate();
         let port_issues: Vec<_> = issues
             .iter()

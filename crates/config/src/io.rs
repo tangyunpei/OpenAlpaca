@@ -30,7 +30,7 @@ pub fn load_config(path: &Path) -> Result<ConfigSnapshot, CoreError> {
     let raw = std::fs::read_to_string(path)?;
     let hash = compute_hash(raw.as_bytes());
 
-    let value: serde_yml::Value = serde_yml::from_str(&raw)
+    let value: serde_yaml::Value = serde_yaml::from_str(&raw)
         .map_err(|e| CoreError::InvalidConfig(format!("YAML parse error: {e}")))?;
 
     let mut value = crate::includes::resolve_includes(value, path)?;
@@ -42,7 +42,7 @@ pub fn load_config(path: &Path) -> Result<ConfigSnapshot, CoreError> {
 
     substitute_env_vars_in_value(&mut value);
 
-    let config: OpenAlpacaConfig = serde_yml::from_value(value)
+    let config: OpenAlpacaConfig = serde_yaml::from_value(value)
         .map_err(|e| CoreError::InvalidConfig(format!("config deserialization error: {e}")))?;
 
     let issues = config.validate();
@@ -58,7 +58,7 @@ pub fn load_config(path: &Path) -> Result<ConfigSnapshot, CoreError> {
 
 /// Write config back to YAML file.
 pub fn save_config(path: &Path, config: &OpenAlpacaConfig) -> Result<(), CoreError> {
-    let yaml = serde_yml::to_string(config)
+    let yaml = serde_yaml::to_string(config)
         .map_err(|e| CoreError::InvalidConfig(format!("config serialization error: {e}")))?;
 
     if let Some(parent) = path.parent() {
@@ -78,14 +78,14 @@ fn compute_hash(data: &[u8]) -> String {
 }
 
 /// Navigate a YAML value by a dot-separated key path.
-pub fn get_value_at_path(config: &OpenAlpacaConfig, path: &str) -> Option<serde_yml::Value> {
-    let value = serde_yml::to_value(config).ok()?;
+pub fn get_value_at_path(config: &OpenAlpacaConfig, path: &str) -> Option<serde_yaml::Value> {
+    let value = serde_yaml::to_value(config).ok()?;
     let mut current = &value;
 
     for key in path.split('.') {
         match current {
-            serde_yml::Value::Mapping(map) => {
-                current = map.get(serde_yml::Value::String(key.to_string()))?;
+            serde_yaml::Value::Mapping(map) => {
+                current = map.get(serde_yaml::Value::String(key.to_string()))?;
             }
             _ => return None,
         }
@@ -175,7 +175,7 @@ channels:
   telegram:
     enabled: true
 "#;
-        let config: OpenAlpacaConfig = serde_yml::from_str(yaml).unwrap();
+        let config: OpenAlpacaConfig = serde_yaml::from_str(yaml).unwrap();
 
         let port = get_value_at_path(&config, "gateway.port").unwrap();
         assert_eq!(port.as_u64(), Some(3777));

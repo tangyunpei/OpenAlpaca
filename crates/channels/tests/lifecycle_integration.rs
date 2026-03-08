@@ -8,10 +8,10 @@ use openalpaca_core::types::{AccountId, ChannelId};
 #[tokio::test]
 async fn test_register_start_check_stop() {
     let mut registry = ChannelRegistry::new();
-    let account_id = AccountId("default".into());
+    let account_id = AccountId::new_unchecked("default");
     registry.register(account_id.clone(), Box::new(EchoChannel::new()));
 
-    let channel_id = ChannelId("echo".into());
+    let channel_id = ChannelId::new_unchecked("echo");
     let plugin = registry.get(&channel_id, &account_id).unwrap();
 
     let config = Arc::new(OpenAlpacaConfig::default());
@@ -32,10 +32,10 @@ async fn test_register_start_check_stop() {
 #[tokio::test]
 async fn test_send_text_via_registry() {
     let mut registry = ChannelRegistry::new();
-    let account_id = AccountId("default".into());
+    let account_id = AccountId::new_unchecked("default");
     registry.register(account_id.clone(), Box::new(EchoChannel::new()));
 
-    let channel_id = ChannelId("echo".into());
+    let channel_id = ChannelId::new_unchecked("echo");
     let plugin = registry.get(&channel_id, &account_id).unwrap();
 
     let ctx = OutboundContext {
@@ -55,13 +55,13 @@ async fn test_send_text_via_registry() {
 #[tokio::test]
 async fn test_multiple_accounts_independent() {
     let mut registry = ChannelRegistry::new();
-    let a1 = AccountId("a1".into());
-    let a2 = AccountId("a2".into());
+    let a1 = AccountId::new_unchecked("a1");
+    let a2 = AccountId::new_unchecked("a2");
 
     registry.register(a1.clone(), Box::new(EchoChannel::new()));
     registry.register(a2.clone(), Box::new(EchoChannel::new()));
 
-    let channel_id = ChannelId("echo".into());
+    let channel_id = ChannelId::new_unchecked("echo");
 
     // Both accounts accessible independently
     let p1 = registry.get(&channel_id, &a1);
@@ -70,8 +70,8 @@ async fn test_multiple_accounts_independent() {
     assert!(p2.is_some());
 
     // Both are echo channels
-    assert_eq!(p1.unwrap().id().0, "echo");
-    assert_eq!(p2.unwrap().id().0, "echo");
+    assert_eq!(p1.unwrap().id().as_str(), "echo");
+    assert_eq!(p2.unwrap().id().as_str(), "echo");
 
     assert_eq!(registry.len(), 2);
 }
