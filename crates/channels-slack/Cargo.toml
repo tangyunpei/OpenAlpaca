@@ -1,0 +1,25 @@
+[package]
+name = "openalpaca-channels-slack"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+openalpaca-core = { path = "../core" }
+openalpaca-config = { path = "../config" }
+openalpaca-channels = { path = "../channels" }
+openalpaca-delivery = { path = "../delivery" }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+serde_yml = { workspace = true }

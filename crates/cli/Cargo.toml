@@ -1,0 +1,34 @@
+[package]
+name = "openalpaca"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "openalpaca"
+path = "src/main.rs"
+
+[features]
+default = ["telegram", "discord", "slack"]
+telegram = ["dep:openalpaca-channels-telegram"]
+discord = ["dep:openalpaca-channels-discord"]
+slack = ["dep:openalpaca-channels-slack"]
+
+[dependencies]
+openalpaca-core = { path = "../core" }
+openalpaca-infra = { path = "../infra" }
+openalpaca-config = { path = "../config" }
+openalpaca-logging = { path = "../logging" }
+openalpaca-gateway = { path = "../gateway" }
+openalpaca-channels = { path = "../channels" }
+openalpaca-channels-telegram = { path = "../channels-telegram", optional = true }
+openalpaca-channels-discord = { path = "../channels-discord", optional = true }
+openalpaca-channels-slack = { path = "../channels-slack", optional = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde_yml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

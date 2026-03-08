@@ -1,0 +1,33 @@
+[package]
+name = "openalpaca-gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+openalpaca-core = { path = "../core" }
+openalpaca-config = { path = "../config" }
+openalpaca-routing = { path = "../routing" }
+openalpaca-channels = { path = "../channels" }
+openalpaca-sessions = { path = "../sessions" }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+axum-server = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+futures-util = { workspace = true }
+sha2 = { workspace = true }
+serde_yml = { workspace = true }
+subtle = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tempfile = "3"

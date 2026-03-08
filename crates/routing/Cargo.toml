@@ -1,0 +1,16 @@
+[package]
+name = "openalpaca-routing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+openalpaca-core = { path = "../core" }
+openalpaca-config = { path = "../config" }
+thiserror = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_yml = { workspace = true }
