@@ -27,6 +27,8 @@ pub struct SocketModeParams {
 /// dispatches to the InboundHandler, and reconnects on disconnect.
 pub async fn run_socket_mode(params: SocketModeParams, cancel: CancellationToken) {
     let base_url = "https://slack.com/api";
+    let mut backoff_secs: u64 = 1;
+    const MAX_BACKOFF_SECS: u64 = 30;
 
     loop {
         if cancel.is_cancelled() {
@@ -41,7 +43,10 @@ pub async fn run_socket_mode(params: SocketModeParams, cancel: CancellationToken
                     tracing::warn!("slack: failed to open connection: {e}");
                     tokio::select! {
                         () = cancel.cancelled() => break,
-                        () = tokio::time::sleep(std::time::Duration::from_secs(5)) => continue,
+                        () = tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)) => {
+                            backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
+                            continue;
+                        },
                     }
                 }
             };
@@ -50,6 +55,8 @@ pub async fn run_socket_mode(params: SocketModeParams, cancel: CancellationToken
 
         match tokio_tungstenite::connect_async(&ws_url).await {
             Ok((ws_stream, _)) => {
+                // Reset backoff on successful connection
+                backoff_secs = 1;
                 let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
                 loop {
@@ -88,9 +95,12 @@ pub async fn run_socket_mode(params: SocketModeParams, cancel: CancellationToken
         }
 
         // Backoff before reconnect
+        tracing::info!(backoff_secs, "slack: reconnecting after backoff");
         tokio::select! {
             () = cancel.cancelled() => break,
-            () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+            () = tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)) => {
+                backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
+            }
         }
     }
 }
