@@ -24,6 +24,7 @@ pub struct DiscordChannel {
     chunk_limit: usize,
     mention_patterns: Vec<String>,
     cancel: CancellationToken,
+    task_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl DiscordChannel {
@@ -56,6 +57,7 @@ impl DiscordChannel {
             chunk_limit: chunk_limit.unwrap_or(send::DEFAULT_CHUNK_LIMIT),
             mention_patterns: vec![r"<@!?\d+>".into()],
             cancel: CancellationToken::new(),
+            task_handle: std::sync::Mutex::new(None),
         }
     }
 }
@@ -102,11 +104,11 @@ impl ChannelPlugin for DiscordChannel {
             .map_err(|e| ChannelError::Other(format!("failed to create Discord client: {e}")))?;
 
         let cancel = self.cancel.child_token();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             tokio::select! {
                 result = client.start() => {
                     if let Err(e) = result {
-                        tracing::warn!("discord: client error: {e}");
+                        tracing::error!("discord: client exited with error: {e}");
                     }
                 }
                 () = cancel.cancelled() => {
@@ -116,12 +118,21 @@ impl ChannelPlugin for DiscordChannel {
             }
         });
 
+        *self.task_handle.lock().unwrap() = Some(handle);
+
         tracing::info!("discord: started for account {}", ctx.account_id);
         Ok(())
     }
 
     async fn stop_account(&self, _ctx: &ChannelGatewayContext) -> Result<(), ChannelError> {
         self.cancel.cancel();
+        let handle = self.task_handle.lock().unwrap().take();
+        if let Some(handle) = handle {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                handle,
+            ).await;
+        }
         Ok(())
     }
 
@@ -161,7 +172,16 @@ impl ChannelPlugin for DiscordChannel {
         _config: &OpenAlpacaConfig,
         _account_id: &AccountId,
     ) -> Result<bool, ChannelError> {
-        Ok(!self.cancel.is_cancelled())
+        if self.cancel.is_cancelled() {
+            return Ok(false);
+        }
+        // Check if the spawned task is still alive
+        if let Some(handle) = self.task_handle.lock().unwrap().as_ref() {
+            if handle.is_finished() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     async fn send_text(&self, _ctx: &OutboundContext) -> Result<OutboundResult, ChannelError> {
