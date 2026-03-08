@@ -68,10 +68,10 @@ pub enum StatusIssueKind {
 }
 
 /// Context provided to channel gateway operations (start/stop).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ChannelGatewayContext {
     pub account_id: AccountId,
-    pub config: OpenAlpacaConfig,
+    pub config: std::sync::Arc<OpenAlpacaConfig>,
 }
 
 /// Context for outbound message delivery.

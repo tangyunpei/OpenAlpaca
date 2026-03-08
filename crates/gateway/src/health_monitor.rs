@@ -167,7 +167,7 @@ impl HealthMonitor {
 
                     let ctx = ChannelGatewayContext {
                         account_id: account_id.clone(),
-                        config: (**config_guard).clone(),
+                        config: Arc::clone(&*config_guard),
                     };
 
                     if let Err(e) = plugin.stop_account(&ctx).await {

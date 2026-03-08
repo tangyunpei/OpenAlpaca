@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use openalpaca_channels::plugin::{ChannelGatewayContext, OutboundContext};
 use openalpaca_channels::{ChannelRegistry, EchoChannel};
 use openalpaca_config::OpenAlpacaConfig;
@@ -12,7 +14,7 @@ async fn test_register_start_check_stop() {
     let channel_id = ChannelId("echo".into());
     let plugin = registry.get(&channel_id, &account_id).unwrap();
 
-    let config = OpenAlpacaConfig::default();
+    let config = Arc::new(OpenAlpacaConfig::default());
     let ctx = ChannelGatewayContext {
         account_id: account_id.clone(),
         config: config.clone(),
