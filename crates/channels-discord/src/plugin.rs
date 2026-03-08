@@ -47,7 +47,7 @@ impl DiscordChannel {
                 reactions: true,
                 edit: true,
                 threads: true,
-                media: true,
+                media: false, // send_media() not implemented yet (Phase 17)
                 reply: true,
             },
             id,
