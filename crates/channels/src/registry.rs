@@ -31,6 +31,8 @@ impl ChannelRegistry {
         channel_id: &ChannelId,
         account_id: &AccountId,
     ) -> Option<&dyn ChannelPlugin> {
+        // PERF: cloning short strings for HashMap lookup. Acceptable at current scale
+        // (~100-1000 msg/s, ~10ns per clone). Optimize with raw_entry API if profiling shows need.
         let key = (channel_id.clone(), account_id.clone());
         self.channels.get(&key).map(|b| b.as_ref())
     }
