@@ -110,3 +110,4 @@ config/llm.toml
 # Embedding Model
 # ============================================
 .fastembed_cache
+.worktrees/
