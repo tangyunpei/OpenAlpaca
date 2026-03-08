@@ -40,6 +40,28 @@ async fn handle_ws_connection(
         }
     };
 
+    // Step 1.5: Negotiate protocol version
+    let negotiated_version = match crate::protocol::connect::negotiate_version(
+        connect_params.min_protocol,
+        connect_params.max_protocol,
+    ) {
+        Some(v) => v,
+        None => {
+            let err = crate::protocol::error::ErrorShape::new(
+                "PROTOCOL_MISMATCH",
+                format!(
+                    "incompatible protocol: client [{}, {}], server {}",
+                    connect_params.min_protocol,
+                    connect_params.max_protocol,
+                    PROTOCOL_VERSION
+                ),
+            );
+            let frame = GatewayFrame::err_response("connect".into(), err);
+            let _ = send_frame(&mut sender, &frame).await;
+            return;
+        }
+    };
+
     // Step 2: Authenticate
     let auth_result = if let Some(ref auth_params) = connect_params.auth {
         match state
@@ -72,7 +94,7 @@ async fn handle_ws_connection(
     // Step 3: Send hello-ok
     let rpc_methods = state.rpc_registry.list_methods();
     let hello = HelloOk {
-        protocol: PROTOCOL_VERSION,
+        protocol: negotiated_version,
         server: ServerInfo {
             name: "openalpaca".into(),
             version: env!("CARGO_PKG_VERSION").into(),

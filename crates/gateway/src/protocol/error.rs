@@ -11,6 +11,15 @@ pub struct ErrorShape {
 }
 
 impl ErrorShape {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            retryable: None,
+            retry_after_ms: None,
+        }
+    }
+
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self {
             code: "NOT_FOUND".into(),
