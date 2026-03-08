@@ -85,6 +85,9 @@ pub async fn run_gateway(
         broadcast_tx: broadcast_tx.clone(),
     });
 
+    // Start rate limit cleanup task
+    state.auth.start_cleanup_task(app_ctx.shutdown.clone());
+
     // Spawn health monitor
     let monitor = HealthMonitor::new(state.clone(), HealthMonitorConfig::default());
     let monitor_shutdown = app_ctx.shutdown.clone();

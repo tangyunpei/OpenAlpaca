@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use crate::protocol::error::ErrorShape;
 
@@ -89,7 +90,7 @@ impl GatewayAuth {
         false
     }
 
-    async fn record_failure(&self, ip: IpAddr) {
+    pub(crate) async fn record_failure(&self, ip: IpAddr) {
         let mut limits = self.rate_limits.write().await;
         let bucket = limits.entry(ip).or_insert(RateBucket {
             failures: 0,
@@ -107,6 +108,41 @@ impl GatewayAuth {
     async fn reset_failures(&self, ip: IpAddr) {
         let mut limits = self.rate_limits.write().await;
         limits.remove(&ip);
+    }
+
+    /// Remove rate limit entries whose window has expired.
+    pub async fn prune_expired(&self) {
+        let mut limits = self.rate_limits.write().await;
+        let window = self.window_secs;
+        limits.retain(|_, bucket| bucket.window_start.elapsed().as_secs() < window);
+    }
+
+    /// Spawn a background task that periodically prunes expired rate limit entries.
+    /// Returns the JoinHandle so the caller can await it on shutdown.
+    pub fn start_cleanup_task(
+        &self,
+        cancel: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        let rate_limits = self.rate_limits.clone();
+        let window_secs = self.window_secs;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let mut map = rate_limits.write().await;
+                        map.retain(|_, bucket| {
+                            bucket.window_start.elapsed().as_secs() < window_secs
+                        });
+                        let remaining = map.len();
+                        if remaining > 0 {
+                            tracing::debug!(remaining, "rate limit: pruned expired entries");
+                        }
+                    }
+                    () = cancel.cancelled() => break,
+                }
+            }
+        })
     }
 }
 
@@ -174,5 +210,41 @@ mod tests {
         // Even correct token should be rate limited
         let result = auth.verify(Some("secret"), ip).await;
         assert_eq!(result.unwrap_err().code, "RATE_LIMITED");
+    }
+
+    #[tokio::test]
+    async fn test_expired_entries_pruned() {
+        let mut auth = GatewayAuth::new(AuthMode::Token("secret".into()));
+        auth.max_failures = 100;
+        auth.window_secs = 1;
+
+        // Record failures from 5 different IPs
+        for i in 0..5u8 {
+            let ip: IpAddr = format!("10.0.0.{i}").parse().unwrap();
+            auth.record_failure(ip).await;
+        }
+
+        assert_eq!(auth.rate_limits.read().await.len(), 5);
+
+        // Wait for window to expire
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        auth.prune_expired().await;
+
+        assert_eq!(auth.rate_limits.read().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_prune_keeps_active_entries() {
+        let mut auth = GatewayAuth::new(AuthMode::Token("secret".into()));
+        auth.max_failures = 100;
+        auth.window_secs = 60;
+
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        auth.record_failure(ip).await;
+
+        auth.prune_expired().await;
+
+        assert_eq!(auth.rate_limits.read().await.len(), 1);
     }
 }
