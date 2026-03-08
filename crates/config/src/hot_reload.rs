@@ -54,7 +54,14 @@ impl ConfigWatcher {
         let config_clone = config.clone();
         let path_clone = path.clone();
         tokio::spawn(async move {
-            debounce_loop(&mut event_rx, &config_clone, &change_tx, &path_clone, debounce).await;
+            debounce_loop(
+                &mut event_rx,
+                &config_clone,
+                &change_tx,
+                &path_clone,
+                debounce,
+            )
+            .await;
         });
 
         Ok(Self {
@@ -88,7 +95,6 @@ async fn debounce_loop(
     path: &Path,
     debounce: Duration,
 ) {
-
     loop {
         // Wait for first event
         if rx.recv().await.is_none() {
@@ -118,10 +124,8 @@ async fn debounce_loop(
                 }
 
                 // Compute diff to determine what actually changed
-                let old_value = serde_yml::to_value(&**config.load())
-                    .unwrap_or_default();
-                let new_value = serde_yml::to_value(&snapshot.config)
-                    .unwrap_or_default();
+                let old_value = serde_yml::to_value(&**config.load()).unwrap_or_default();
+                let new_value = serde_yml::to_value(&snapshot.config).unwrap_or_default();
                 let changed = crate::merge::diff_paths(&old_value, &new_value, "");
 
                 if changed.is_empty() {
@@ -129,10 +133,7 @@ async fn debounce_loop(
                         "config file changed on disk but no config values differ, skipping reload"
                     );
                 } else {
-                    tracing::info!(
-                        "config reloaded, changed paths: {}",
-                        changed.join(", ")
-                    );
+                    tracing::info!("config reloaded, changed paths: {}", changed.join(", "));
                     config.store(Arc::new(snapshot.config));
                     let _ = change_tx.send(());
                 }
@@ -179,7 +180,10 @@ mod tests {
         // The watcher should NOT send a change notification for identical content
         let result = tokio::time::timeout(Duration::from_secs(1), change_rx.changed()).await;
         // Timeout is expected — no change should be notified
-        assert!(result.is_err(), "should not receive change notification for identical config");
+        assert!(
+            result.is_err(),
+            "should not receive change notification for identical config"
+        );
 
         // Verify config is unchanged
         let config = watcher.load();

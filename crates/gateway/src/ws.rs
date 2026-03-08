@@ -51,9 +51,7 @@ async fn handle_ws_connection(
                 "PROTOCOL_MISMATCH",
                 format!(
                     "incompatible protocol: client [{}, {}], server {}",
-                    connect_params.min_protocol,
-                    connect_params.max_protocol,
-                    PROTOCOL_VERSION
+                    connect_params.min_protocol, connect_params.max_protocol, PROTOCOL_VERSION
                 ),
             );
             let frame = GatewayFrame::err_response("connect".into(), err);

@@ -16,7 +16,10 @@ pub fn resolve_includes(value: Value, config_path: &Path) -> Result<Value, CoreE
         .parent()
         .ok_or_else(|| CoreError::InvalidConfig("config path has no parent directory".into()))?;
     let canonical_base = base_dir.canonicalize().map_err(|e| {
-        CoreError::InvalidConfig(format!("cannot canonicalize base dir {}: {e}", base_dir.display()))
+        CoreError::InvalidConfig(format!(
+            "cannot canonicalize base dir {}: {e}",
+            base_dir.display()
+        ))
     })?;
 
     let mut visited = HashSet::new();
@@ -48,7 +51,7 @@ fn resolve_recursive(
                                 None => {
                                     return Err(CoreError::InvalidConfig(
                                         "$include array items must be strings".into(),
-                                    ))
+                                    ));
                                 }
                             }
                         }
@@ -57,7 +60,7 @@ fn resolve_recursive(
                     _ => {
                         return Err(CoreError::InvalidConfig(
                             "$include value must be a string or array of strings".into(),
-                        ))
+                        ));
                     }
                 };
 
@@ -237,11 +240,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_yaml(dir.path(), "a.yaml", "x: 1\nitems:\n  - a");
         write_yaml(dir.path(), "b.yaml", "y: 2\nitems:\n  - b");
-        let main = write_yaml(
-            dir.path(),
-            "main.yaml",
-            "$include:\n  - a.yaml\n  - b.yaml",
-        );
+        let main = write_yaml(dir.path(), "main.yaml", "$include:\n  - a.yaml\n  - b.yaml");
 
         let raw: Value = serde_yml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
         let result = resolve_includes(raw, &main).unwrap();
@@ -379,11 +378,7 @@ mod tests {
     #[test]
     fn test_path_traversal_rejected() {
         let dir = TempDir::new().unwrap();
-        let main = write_yaml(
-            dir.path(),
-            "main.yaml",
-            "$include: \"../../etc/passwd\"",
-        );
+        let main = write_yaml(dir.path(), "main.yaml", "$include: \"../../etc/passwd\"");
 
         let raw: Value = serde_yml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
         let result = resolve_includes(raw, &main);
@@ -399,11 +394,7 @@ mod tests {
     #[test]
     fn test_missing_include_file() {
         let dir = TempDir::new().unwrap();
-        let main = write_yaml(
-            dir.path(),
-            "main.yaml",
-            "$include: nonexistent.yaml",
-        );
+        let main = write_yaml(dir.path(), "main.yaml", "$include: nonexistent.yaml");
 
         let raw: Value = serde_yml::from_str(&std::fs::read_to_string(&main).unwrap()).unwrap();
         let result = resolve_includes(raw, &main);

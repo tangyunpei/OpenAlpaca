@@ -1540,6 +1540,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "openalpaca-message-bus"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "openalpaca-channels",
+ "openalpaca-config",
+ "openalpaca-core",
+ "openalpaca-routing",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "openalpaca-routing"
 version = "0.1.0"
 dependencies = [

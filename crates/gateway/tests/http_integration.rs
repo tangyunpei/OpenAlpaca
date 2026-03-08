@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::Request;
-use tower::ServiceExt;
 use tokio_util::sync::CancellationToken;
+use tower::ServiceExt;
 
 use openalpaca_channels::EchoChannel;
 use openalpaca_config::OpenAlpacaConfig;

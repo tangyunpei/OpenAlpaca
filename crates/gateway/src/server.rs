@@ -67,8 +67,7 @@ pub async fn run_gateway(
         let arc = Arc::new(ArcSwap::new(Arc::new(config)));
         (arc, None)
     } else {
-        let watcher =
-            ConfigWatcher::new(app_ctx.config_path.clone(), config, debounce_ms)?;
+        let watcher = ConfigWatcher::new(app_ctx.config_path.clone(), config, debounce_ms)?;
         let arc = watcher.config_arc();
         (arc, Some(watcher))
     };

@@ -30,7 +30,9 @@ pub fn apply_defaults(config: &mut OpenAlpacaConfig) {
     }
 
     let channels = config.channels.get_or_insert_with(ChannelsConfig::default);
-    let ch_defaults = channels.defaults.get_or_insert_with(ChannelDefaultsConfig::default);
+    let ch_defaults = channels
+        .defaults
+        .get_or_insert_with(ChannelDefaultsConfig::default);
     if ch_defaults.dm_policy.is_none() {
         ch_defaults.dm_policy = Some("allow".into());
     }

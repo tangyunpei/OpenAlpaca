@@ -38,7 +38,11 @@ impl Drop for LockHandle {
 }
 
 /// Acquire a lock file at `path`. Retries until `timeout` expires, checking for stale locks.
-pub async fn acquire_lock(path: &Path, config_path: &Path, timeout: Duration) -> Result<LockHandle, CoreError> {
+pub async fn acquire_lock(
+    path: &Path,
+    config_path: &Path,
+    timeout: Duration,
+) -> Result<LockHandle, CoreError> {
     let deadline = tokio::time::Instant::now() + timeout;
 
     loop {
@@ -133,9 +137,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let lock_path = dir.path().join("test.lock");
 
-        let handle = acquire_lock(&lock_path, Path::new("/tmp/test-config.yaml"), Duration::from_secs(1))
-            .await
-            .unwrap();
+        let handle = acquire_lock(
+            &lock_path,
+            Path::new("/tmp/test-config.yaml"),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
         assert!(lock_path.exists());
 
         handle.release().await.unwrap();
@@ -147,11 +155,20 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let lock_path = dir.path().join("test.lock");
 
-        let handle = acquire_lock(&lock_path, Path::new("/tmp/test-config.yaml"), Duration::from_secs(1))
-            .await
-            .unwrap();
+        let handle = acquire_lock(
+            &lock_path,
+            Path::new("/tmp/test-config.yaml"),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
 
-        let result = acquire_lock(&lock_path, Path::new("/tmp/test-config.yaml"), Duration::from_millis(200)).await;
+        let result = acquire_lock(
+            &lock_path,
+            Path::new("/tmp/test-config.yaml"),
+            Duration::from_millis(200),
+        )
+        .await;
         assert!(result.is_err());
 
         handle.release().await.unwrap();
@@ -163,9 +180,13 @@ mod tests {
         let lock_path = dir.path().join("test.lock");
 
         {
-            let _handle = acquire_lock(&lock_path, Path::new("/tmp/test-config.yaml"), Duration::from_secs(1))
-                .await
-                .unwrap();
+            let _handle = acquire_lock(
+                &lock_path,
+                Path::new("/tmp/test-config.yaml"),
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
             assert!(lock_path.exists());
         }
         assert!(!lock_path.exists());
@@ -196,9 +217,13 @@ mod tests {
         std::fs::write(&lock_path, &data).unwrap();
 
         // Should succeed because the stale lock gets cleaned up
-        let handle = acquire_lock(&lock_path, Path::new("/tmp/test-config.yaml"), Duration::from_secs(1))
-            .await
-            .unwrap();
+        let handle = acquire_lock(
+            &lock_path,
+            Path::new("/tmp/test-config.yaml"),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
         handle.release().await.unwrap();
     }
 }

@@ -91,9 +91,8 @@ mod tests {
 
     #[test]
     fn test_merge_recursive_objects() {
-        let base = yaml(
-            "gateway:\n  host: localhost\n  port: 8080\ndb:\n  url: postgres://localhost",
-        );
+        let base =
+            yaml("gateway:\n  host: localhost\n  port: 8080\ndb:\n  url: postgres://localhost");
         let patch = yaml("gateway:\n  port: 9090\n  tls: true");
         let result = apply_merge_patch(&base, &patch);
         let expected = yaml(

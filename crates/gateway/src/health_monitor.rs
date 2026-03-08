@@ -192,11 +192,12 @@ impl HealthMonitor {
                     health.last_restart = Some(Instant::now());
                     health.consecutive_failures = 0;
 
-                    let _ = self.state.broadcast_tx.send(
-                        BroadcastEvent::ChannelStatusChanged {
+                    let _ = self
+                        .state
+                        .broadcast_tx
+                        .send(BroadcastEvent::ChannelStatusChanged {
                             channel_id: channel_id.0.clone(),
-                        },
-                    );
+                        });
                 }
             }
         }
@@ -224,8 +225,8 @@ impl HealthMonitor {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     use arc_swap::ArcSwap;
     use async_trait::async_trait;
@@ -303,11 +304,7 @@ mod tests {
             vec![AccountId("default".into())]
         }
 
-        fn is_account_enabled(
-            &self,
-            _config: &OpenAlpacaConfig,
-            _account_id: &AccountId,
-        ) -> bool {
+        fn is_account_enabled(&self, _config: &OpenAlpacaConfig, _account_id: &AccountId) -> bool {
             true
         }
 
@@ -350,9 +347,7 @@ mod tests {
             app_ctx,
             config: Arc::new(ArcSwap::new(Arc::new(OpenAlpacaConfig::default()))),
             channel_registry: Arc::new(RwLock::new(ChannelRegistry::new())),
-            session_store: Arc::new(SessionStore::new(PathBuf::from(
-                "/tmp/test-sessions.jsonl",
-            ))),
+            session_store: Arc::new(SessionStore::new(PathBuf::from("/tmp/test-sessions.jsonl"))),
             auth: Arc::new(GatewayAuth::new(AuthMode::None)),
             rpc_registry: Arc::new(build_default_registry()),
             broadcast_tx,
@@ -574,8 +569,8 @@ mod tests {
         let start_count = Arc::new(AtomicU32::new(0));
         let stop_count = Arc::new(AtomicU32::new(0));
 
-        let mock = MockChannel::new(ready, start_count, stop_count)
-            .with_delay(Duration::from_millis(500)); // exceeds probe_timeout
+        let mock =
+            MockChannel::new(ready, start_count, stop_count).with_delay(Duration::from_millis(500)); // exceeds probe_timeout
         {
             let mut registry = state.channel_registry.write().await;
             registry.register(AccountId("default".into()), Box::new(mock));
