@@ -251,7 +251,7 @@ async fn async_main(
     let mut watch_paths = Vec::new();
     let agents_dir = config_base_dir.join("agents");
     if agents_dir.exists() {
-        watch_paths.push(agents_dir);
+        watch_paths.push(agents_dir.clone());
     }
     let llm_config_path = config_base_dir.join("llm.toml");
     if llm_config_path.exists() {
@@ -369,7 +369,9 @@ async fn async_main(
             llm_config_path: llm_config_path.clone(),
             daemon_config_path: daemon_config_path.clone(),
             skills_dir,
+            agents_dir,
             orchestrator: orchestrator.clone(),
+            agent_registry: svcs.shared_context.agent_registry.clone(),
             llm_router: llm_router_for_reload,
             secret_store: svcs.secret_store,
             skill_catalog: svcs.skill_catalog,
