@@ -28,8 +28,10 @@ pub struct FileWatcherContext {
     pub llm_config_path: PathBuf,
     pub daemon_config_path: PathBuf,
     pub skills_dir: PathBuf,
+    pub agents_dir: PathBuf,
 
     pub orchestrator: Arc<Orchestrator>,
+    pub agent_registry: Arc<openalpaca_core::agent::registry::AgentRegistry>,
     pub llm_router: Option<Arc<openalpaca_llm::LlmRouter>>,
     pub secret_store: Arc<dyn openalpaca_llm::SecretStore>,
     pub skill_catalog: Arc<openalpaca_core::orchestrator::skill_catalog::SkillCatalog>,
@@ -103,6 +105,11 @@ pub fn spawn_file_watcher(
                 // Skills directory hot-reload
                 if changed_path.starts_with(&ctx.skills_dir) {
                     handle_skills_change(&ctx, &changed_path).await;
+                }
+
+                // Agents directory hot-reload
+                if changed_path.starts_with(&ctx.agents_dir) {
+                    handle_agents_change(&ctx, &changed_path).await;
                 }
             }
 
@@ -355,6 +362,76 @@ async fn handle_skills_change(ctx: &FileWatcherContext, changed_path: &Path) {
             Err(e) => {
                 warn!("Skill reload failed for {}: {}", skill_dir.display(), e)
             }
+        }
+    }
+}
+
+async fn handle_agents_change(ctx: &FileWatcherContext, changed_path: &Path) {
+    // Only handle .md files (legacy .toml handled at startup only)
+    if changed_path.extension().and_then(|e| e.to_str()) != Some("md") {
+        return;
+    }
+    match std::fs::read_to_string(changed_path) {
+        Ok(content) => {
+            match openalpaca_core::agent::template::parse_agent_markdown(&content) {
+                Ok(template) => {
+                    let template_id = template.frontmatter.id.clone();
+
+                    // Upsert template: remove_template() first because register_template()
+                    // is insert-only and silently no-ops if the key already exists.
+                    ctx.agent_registry.remove_template(&template_id);
+                    ctx.agent_registry.register_template(template.clone());
+
+                    // Also upsert the singleton agent instance — but only if Idle.
+                    // If the agent is currently Busy running a task, leave it alone;
+                    // it will pick up the new template on its next spawn.
+                    //
+                    // We use get_with_version() + update_config() (optimistic locking)
+                    // to avoid a TOCTOU race where the dispatcher claims the agent
+                    // between our status check and the replacement.
+                    //
+                    // Note: to_subagent() always constructs with AgentStatus::Busy;
+                    // we override to Idle + clear current_task since this is a
+                    // config reload, not a task dispatch.
+                    if let Some((existing, version)) =
+                        ctx.agent_registry.get_with_version(&template_id)
+                    {
+                        if existing.status.is_available() {
+                            let mut fresh = template.to_subagent(&template_id, "");
+                            fresh.status = openalpaca_core::agent::AgentStatus::Idle;
+                            fresh.current_task = None;
+                            if let Err(e) =
+                                ctx.agent_registry
+                                    .update_config(&template_id, fresh, version)
+                            {
+                                warn!(
+                                    "Agent instance update skipped (concurrent claim): {e}"
+                                );
+                            }
+                        }
+                    } else {
+                        // No instance yet — safe to register a new one
+                        let mut idle_agent = template.to_subagent(&template_id, "");
+                        idle_agent.status = openalpaca_core::agent::AgentStatus::Idle;
+                        idle_agent.current_task = None;
+                        ctx.agent_registry.register(idle_agent);
+                    }
+
+                    info!("Agent template hot-reloaded: {}", changed_path.display());
+                }
+                Err(e) => {
+                    warn!(
+                        "Agent template reload failed for {}: {e}; keeping last active template",
+                        changed_path.display()
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            warn!(
+                "Failed to read agent template {}: {e}",
+                changed_path.display()
+            );
         }
     }
 }
