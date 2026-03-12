@@ -96,44 +96,6 @@ impl ToolRegistry {
         self.tools.get(name)
     }
 
-    /// Return tool definitions filtered by skill names.
-    /// If `skill_names` is empty, returns an empty list (least-privilege:
-    /// agents without explicit skills get no tools from the registry).
-    /// The caller (`resolve_agent_tools`) adds workspace tools separately.
-    /// If non-empty but no names match, also returns empty.
-    /// Logs warnings for skill names that don't match any registered tool.
-    pub fn definitions_for_skills(&self, skill_names: &[String]) -> Vec<ToolDefinition> {
-        if skill_names.is_empty() {
-            tracing::debug!(
-                "definitions_for_skills called with empty skills — returning empty (least-privilege)"
-            );
-            return Vec::new();
-        }
-
-        // Warn for each skill name that doesn't match a registered tool.
-        // This helps catch typos in agent config files and stale skill references.
-        // Skip runtime-contextual tools that are resolved outside the registry
-        // (workspace tools by ContextualToolExecutor, memory_search by resolve_agent_tools).
-        const RUNTIME_TOOLS: &[&str] = &["workspace_read", "workspace_write", "memory_search"];
-        for skill in skill_names {
-            if !self.tools.contains_key(skill) && !RUNTIME_TOOLS.contains(&skill.as_str()) {
-                tracing::warn!(
-                    skill = %skill,
-                    "Skill name '{}' does not match any registered tool — \
-                     the agent will not receive this tool. Check for typos in \
-                     the agent's skill configuration.",
-                    skill,
-                );
-            }
-        }
-
-        self.tools
-            .values()
-            .filter(|t| skill_names.contains(&t.definition.name))
-            .map(|t| t.definition.clone())
-            .collect()
-    }
-
     /// Execute a tool by name.
     ///
     /// Performs basic JSON Schema pre-validation (required fields and type check)
