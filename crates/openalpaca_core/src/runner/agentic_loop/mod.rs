@@ -109,6 +109,7 @@ pub async fn run_agentic_loop(
     sandbox: Option<&SandboxManager>,
     agent_id: &str,
     sandbox_policy: Option<&SandboxPolicy>,
+    context_budget: Option<&crate::context_budget::ContextBudgetManager>,
     cancel_token: Option<CancellationToken>,
 ) -> LoopResult {
     run_agentic_loop_inner(
@@ -119,6 +120,7 @@ pub async fn run_agentic_loop(
         sandbox,
         agent_id,
         sandbox_policy,
+        context_budget,
         cancel_token,
     )
     .await
@@ -135,6 +137,7 @@ pub async fn run_agentic_loop_routed(
     agent_id: &str,
     sandbox_policy: Option<&SandboxPolicy>,
     task_id: Option<&str>,
+    context_budget: Option<&crate::context_budget::ContextBudgetManager>,
     cancel_token: Option<CancellationToken>,
 ) -> LoopResult {
     let context = RequestContext {
@@ -149,6 +152,7 @@ pub async fn run_agentic_loop_routed(
         sandbox,
         agent_id,
         sandbox_policy,
+        context_budget,
         cancel_token,
     )
     .await
@@ -164,6 +168,7 @@ async fn run_agentic_loop_inner(
     sandbox: Option<&SandboxManager>,
     agent_id: &str,
     sandbox_policy: Option<&SandboxPolicy>,
+    context_budget: Option<&crate::context_budget::ContextBudgetManager>,
     cancel_token: Option<CancellationToken>,
 ) -> LoopResult {
     let mut state = LoopState::new();
@@ -256,23 +261,36 @@ async fn run_agentic_loop_inner(
             return state.result(LoopFinishReason::CostExceeded);
         }
 
-        // ── 4. Context compression ─────────────────────────────────
-        if config.max_context_tokens > 0 && known_token_count > config.max_context_tokens {
-            tracing::info!(
+        // ── 4. Context compression (budget-aware) ──────────────────
+        if let Some(budget) = context_budget {
+            let msg_tokens = estimate_messages_tokens(&messages) as usize;
+            if budget.should_compact(msg_tokens) {
+                tracing::info!(
+                    agent_id = agent_id,
+                    msg_tokens,
+                    trigger = budget.compaction_trigger(),
+                    messages_before = messages.len(),
+                    "Budget compaction triggered"
+                );
+                compress_context(Arc::make_mut(&mut messages), config.context_tail_keep);
+                known_token_count = estimate_messages_tokens(&messages);
+                tracing::info!(
+                    agent_id = agent_id,
+                    messages_after = messages.len(),
+                    estimated_tokens_after = known_token_count,
+                    "Context compressed (budget-aware)"
+                );
+            }
+        } else if config.max_context_tokens > 0 && known_token_count > config.max_context_tokens {
+            // Legacy fallback
+            tracing::debug!(
                 agent_id = agent_id,
-                estimated_tokens = known_token_count,
-                max_context_tokens = config.max_context_tokens,
-                messages_before = messages.len(),
-                "Compressing context: token budget exceeded"
+                tokens = known_token_count,
+                max = config.max_context_tokens,
+                "Legacy compression triggered"
             );
             compress_context(Arc::make_mut(&mut messages), config.context_tail_keep);
             known_token_count = estimate_messages_tokens(&messages);
-            tracing::info!(
-                agent_id = agent_id,
-                messages_after = messages.len(),
-                estimated_tokens_after = known_token_count,
-                "Context compressed"
-            );
         }
 
         let prev_msg_len = messages.len();

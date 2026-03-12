@@ -360,6 +360,16 @@ pub struct PlannedAssignment {
     pub matched_skills: Vec<String>,
 }
 
+/// Result of the lightweight triage classification (3-way).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriageResult {
+    /// One of: "simple_query", "deep_query", "complex_task"
+    pub classification: String,
+    /// Tool names suggested by the triage LLM. Empty for simple_query.
+    #[serde(default)]
+    pub suggested_tools: Vec<String>,
+}
+
 /// Errors from the task planner.
 #[derive(Debug)]
 pub enum PlanError {

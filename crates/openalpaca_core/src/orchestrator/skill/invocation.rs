@@ -374,6 +374,7 @@ impl Orchestrator {
                 "orchestrator",
                 policy_opt.as_ref(),
                 None,
+                None, // context_budget
                 None, // cancel_token — interactive skill calls are not cancellable
             )
             .await;

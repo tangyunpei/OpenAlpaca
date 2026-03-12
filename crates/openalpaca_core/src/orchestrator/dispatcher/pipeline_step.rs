@@ -306,6 +306,7 @@ pub(super) async fn execute_pipeline_step(
         agent_id,
         Some(&sandbox_policy),
         Some(&pctx.task_id),
+        None, // context_budget
         Some(pctx.cancel_token.clone()),
     )
     .await;

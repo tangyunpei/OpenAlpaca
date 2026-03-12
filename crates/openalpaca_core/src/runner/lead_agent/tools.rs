@@ -306,6 +306,7 @@ impl BuiltInTool for SpawnSubagentTool {
                 &instance_id,
                 Some(&sandbox_policy),
                 Some(&task_id),
+                None, // context_budget
                 child_token,
             )
             .await;

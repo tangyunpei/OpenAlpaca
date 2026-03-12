@@ -115,6 +115,7 @@ pub(super) async fn execute_single_node(
         &agent_id,
         Some(&sandbox_policy),
         Some(&task_id),
+        None, // context_budget
         cancel_token,
     )
     .await;

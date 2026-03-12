@@ -114,6 +114,7 @@ async fn test_completes_simple_query() {
         None,
         "test",
         None,
+        None, // context_budget
         None,
     )
     .await;
@@ -144,6 +145,7 @@ async fn test_respects_max_rounds() {
         None,
         "test",
         None,
+        None, // context_budget
         None,
     )
     .await;
@@ -173,6 +175,7 @@ async fn test_respects_cost_limit() {
         None,
         "test",
         None,
+        None, // context_budget
         None,
     )
     .await;
@@ -194,6 +197,7 @@ async fn test_handles_provider_error() {
         None,
         "test",
         None,
+        None, // context_budget
         None,
     )
     .await;
@@ -222,6 +226,7 @@ async fn test_tool_stub_returns_error() {
         None,
         "test",
         None,
+        None, // context_budget
         None,
     )
     .await;
@@ -249,6 +254,7 @@ async fn test_tracks_usage() {
         None,
         "test",
         None,
+        None, // context_budget
         None,
     )
     .await;
@@ -310,6 +316,7 @@ async fn test_sandbox_execution() {
         Some(&sandbox),
         "test_agent",
         Some(&policy),
+        None, // context_budget
         None,
     )
     .await;
@@ -370,6 +377,7 @@ async fn test_sandbox_denied_tool() {
         Some(&sandbox),
         "test_agent",
         Some(&policy),
+        None, // context_budget
         None,
     )
     .await;
@@ -433,6 +441,7 @@ async fn test_max_tools_per_round_enforced() {
         None,
         "test",
         None,
+        None, // context_budget
         None,
     )
     .await;
@@ -459,6 +468,7 @@ async fn test_cancellation_before_first_round() {
         None,
         "test",
         None,
+        None, // context_budget
         Some(token),
     )
     .await;
@@ -531,6 +541,7 @@ async fn test_cancellation_during_tool_execution() {
         Some(&sandbox),
         "test_agent",
         Some(&policy),
+        None, // context_budget
         Some(token),
     )
     .await;
@@ -611,6 +622,7 @@ async fn test_max_tokens_triggers_continuation() {
         None,
         "test",
         None,
+        None, // context_budget
         None,
     )
     .await;
@@ -651,6 +663,7 @@ async fn test_max_tokens_retries_exhausted_returns_truncated() {
         None,
         "test",
         None,
+        None, // context_budget
         None,
     )
     .await;
@@ -712,7 +725,7 @@ async fn test_cost_warning_at_80_percent() {
 
     let result = run_agentic_loop(
         &provider, messages, vec![], &config,
-        None, "test", None, None,
+        None, "test", None, None, None,
     )
     .await;
 

@@ -386,6 +386,7 @@ impl Orchestrator {
                 "orchestrator",
                 policy_opt.as_ref(),
                 None,
+                None, // context_budget
                 None, // cancel_token — interactive queries are not cancellable
             )
             .await;
@@ -560,6 +561,7 @@ impl Orchestrator {
             "orchestrator",
             None, // no policy
             None,
+            None, // context_budget
             None,
         )
         .await;
