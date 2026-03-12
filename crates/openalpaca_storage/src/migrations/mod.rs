@@ -166,4 +166,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "message_feedback",
         sql: include_str!("031_message_feedback.sql"),
     },
+    Migration {
+        version: 32,
+        name: "context_compaction_log",
+        sql: include_str!("032_context_compaction_log.sql"),
+    },
 ];

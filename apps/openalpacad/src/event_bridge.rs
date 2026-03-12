@@ -496,6 +496,22 @@ pub fn spawn_event_bridge(
                         %request_id, %model, window_size, fixed_zone_tokens, free_zone_tokens, buffer_size,
                         "Context budget computed"
                     );
+                }
+                openalpaca_core::events::SystemEvent::CompactionTriggered {
+                    request_id, messages_before, messages_after, memories_extracted, ..
+                } => {
+                    tracing::info!(
+                        %request_id, messages_before, messages_after, memories_extracted,
+                        "Context compaction triggered"
+                    );
+                }
+                openalpaca_core::events::SystemEvent::CompactionPhaseCompleted {
+                    request_id, ref phase, duration_ms, items_processed, ..
+                } => {
+                    tracing::debug!(
+                        %request_id, %phase, duration_ms, items_processed,
+                        "Compaction phase completed"
+                    );
                 } // NO catch-all: compiler will flag any missing SystemEvent variant
             }
         }

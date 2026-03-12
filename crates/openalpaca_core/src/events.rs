@@ -388,4 +388,23 @@ pub enum SystemEvent {
         section_breakdown: Vec<(String, usize)>,
         timestamp: DateTime<Utc>,
     },
+    /// Context compaction was triggered and completed
+    CompactionTriggered {
+        request_id: Uuid,
+        utilization_pct: f64,
+        messages_before: usize,
+        messages_after: usize,
+        memories_extracted: usize,
+        messages_discarded: usize,
+        summary_tokens: usize,
+        timestamp: DateTime<Utc>,
+    },
+    /// A single compaction phase completed
+    CompactionPhaseCompleted {
+        request_id: Uuid,
+        phase: String,
+        duration_ms: u64,
+        items_processed: usize,
+        timestamp: DateTime<Utc>,
+    },
 }
