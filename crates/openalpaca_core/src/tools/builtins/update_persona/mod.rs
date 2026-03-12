@@ -59,9 +59,6 @@ impl BuiltInTool for PersonaUpdateTool {
         // Reject unknown top-level fields
         if let Some(obj) = arguments.as_object() {
             for key in obj.keys() {
-                if key == "owner_id" {
-                    continue;
-                }
                 if !KNOWN_TOP_LEVEL_FIELDS.contains(&key.as_str()) {
                     return Err(format!(
                         "Unknown field '{}'. Allowed fields: {}",
