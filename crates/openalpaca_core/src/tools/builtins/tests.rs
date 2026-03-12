@@ -193,3 +193,24 @@ fn test_builtin_tools_falls_back_to_current_dir_when_none() {
     // 5 base tools + 2 workspace tools (workspace_read, workspace_write)
     assert_eq!(tools.len(), 7);
 }
+
+// --- json_to_cli_args ---
+
+#[test]
+fn test_json_to_cli_args_strings() {
+    let args = json_to_cli_args(&serde_json::json!({"name": "alice", "age": "30"}));
+    assert!(args.contains(&"--name=alice".to_string()));
+    assert!(args.contains(&"--age=30".to_string()));
+}
+
+#[test]
+fn test_json_to_cli_args_empty() {
+    let args = json_to_cli_args(&serde_json::json!({}));
+    assert!(args.is_empty());
+}
+
+#[test]
+fn test_json_to_cli_args_non_object() {
+    let args = json_to_cli_args(&serde_json::json!("not an object"));
+    assert!(args.is_empty());
+}
