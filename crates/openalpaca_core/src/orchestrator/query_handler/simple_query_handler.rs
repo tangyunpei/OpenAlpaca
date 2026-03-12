@@ -34,6 +34,7 @@ impl Orchestrator {
         scope_ctx: &MemoryScopeContext,
         current_parts: Option<&[ContentPart]>,
         stream_id: Option<&str>,
+        loop_overrides: Option<super::LoopOverrides>,
     ) -> Result<String, String> {
         // Layer 1: Deterministic direct send — bypass LLM entirely
         if let Some(result) = self.try_direct_send(tool_suggestion_query, owner_id).await {
@@ -108,6 +109,23 @@ impl Orchestrator {
             .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
             .collect();
 
+        // Apply loop overrides if provided (deep_query tier)
+        let (tool_defs, override_max_rounds, override_max_tools) =
+            if let Some(ref overrides) = loop_overrides {
+                let tools = if overrides.override_tools.is_empty() {
+                    tool_defs // fallback to keyword heuristic
+                } else {
+                    overrides.override_tools.clone()
+                };
+                (
+                    tools,
+                    Some(overrides.max_rounds),
+                    Some(overrides.max_tools_per_round),
+                )
+            } else {
+                (tool_defs, None, None)
+            };
+
         let (tools_for_loop, policy_opt, config_for_loop);
         if !tool_defs.is_empty() {
             tracing::info!(
@@ -150,8 +168,8 @@ impl Orchestrator {
                 auto_approve: self.daemon_config.load().security.auto_approve_confirmations,
             });
             config_for_loop = LoopConfig {
-                max_rounds: 4,
-                max_tools_per_round: 2,
+                max_rounds: override_max_rounds.unwrap_or(4),
+                max_tools_per_round: override_max_tools.unwrap_or(2),
                 initial_tool_choice: resolve_send_tool_choice(
                     tool_defs.iter().any(|d| d.name == "send"),
                 ),
@@ -288,6 +306,54 @@ impl Orchestrator {
                 messages.push(ChatMessage::user_with_parts(adapted));
             } else {
                 messages.push(ChatMessage::user(query));
+            }
+
+            // --- Context Budget Observation (Phase A) ---
+            {
+                let ctx_config = &self.daemon_config.load().execution.context;
+                let model_id = config_for_loop.model.as_deref();
+                let model_window = model_id
+                    .and_then(|m| router.model_registry().get_model_info(m))
+                    .map(|info| info.context_window as usize)
+                    .unwrap_or(200_000);
+
+                let mut budget =
+                    crate::context_budget::ContextBudgetManager::new(model_window, ctx_config);
+                budget.register_section("system_prompt", system_prompt.len() / 4);
+                budget.register_section("tools", tools_for_loop.len() * 200);
+
+                if budget.is_fixed_zone_oversized() {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        fixed_zone = budget.fixed_zone_tokens(),
+                        window = model_window,
+                        "Fixed zone exceeds 50% of context window"
+                    );
+                }
+
+                tracing::debug!(
+                    request_id = %request_id,
+                    model_window,
+                    fixed_zone = budget.fixed_zone_tokens(),
+                    free_zone = budget.free_zone_capacity(),
+                    buffer = budget.autocompact_buffer(),
+                    "Context budget computed"
+                );
+
+                self.bus.publish(SystemEvent::ContextBudgetComputed {
+                    request_id,
+                    model: model_id.unwrap_or("default").to_string(),
+                    window_size: model_window,
+                    fixed_zone_tokens: budget.fixed_zone_tokens(),
+                    free_zone_tokens: budget.free_zone_capacity(),
+                    buffer_size: budget.autocompact_buffer(),
+                    section_breakdown: budget
+                        .section_breakdown()
+                        .into_iter()
+                        .map(|(n, t)| (n.to_string(), t))
+                        .collect(),
+                    timestamp: Utc::now(),
+                });
             }
 
             // Per-request sandbox with ContextualToolExecutor for owner-scoped tools
