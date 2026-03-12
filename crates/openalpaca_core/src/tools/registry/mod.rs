@@ -3,6 +3,16 @@ use openalpaca_llm::ToolDefinition;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Per-invocation execution context passed to tools that need identity.
+/// Lightweight — no Arc deps, no DB handles. Just identity strings.
+#[derive(Debug, Clone, Default)]
+pub struct ToolContext {
+    pub agent_id: Option<String>,
+    pub task_id: Option<String>,
+    pub owner_id: Option<String>,
+    pub workspace_id: Option<String>,
+}
+
 /// Backend that executes a tool's logic.
 #[derive(Clone)]
 pub enum ToolBackend {
@@ -28,6 +38,16 @@ pub enum ToolBackend {
 #[async_trait]
 pub trait BuiltInTool: Send + Sync {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String>;
+
+    /// Execute with per-invocation context. Default delegates to execute().
+    /// Override for tools that need identity (owner_id, task_id, etc.).
+    async fn execute_with_context(
+        &self,
+        arguments: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<String, String> {
+        self.execute(arguments).await
+    }
 }
 
 /// A tool registered in the registry: its LLM-facing definition + execution backend.
