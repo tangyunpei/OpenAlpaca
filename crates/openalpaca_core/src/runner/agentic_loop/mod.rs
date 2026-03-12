@@ -275,24 +275,72 @@ async fn run_agentic_loop_inner(
         if let Some(budget) = context_budget {
             let msg_tokens = estimate_messages_tokens(&messages) as usize;
             if budget.should_compact(msg_tokens) {
-                tracing::info!(
-                    agent_id = agent_id,
-                    msg_tokens,
-                    trigger = budget.compaction_trigger(),
-                    messages_before = messages.len(),
-                    "Budget compaction triggered"
-                );
-                compress_context(Arc::make_mut(&mut messages), config.context_tail_keep, context_budget);
+                let messages_before = messages.len();
+
+                // Try LLM-based compaction if compaction model is available
+                let can_llm_compact = matches!(&backend, LlmBackend::Router { compaction_model: Some(_), .. });
+
+                if can_llm_compact {
+                    tracing::info!(
+                        agent_id = agent_id,
+                        msg_tokens,
+                        trigger = budget.compaction_trigger(),
+                        messages_before,
+                        "LLM compaction triggered"
+                    );
+
+                    // Extract messages from Arc for CompactionPipeline (takes Vec by value)
+                    let owned = Arc::try_unwrap(messages)
+                        .unwrap_or_else(|arc| (*arc).clone());
+
+                    let result = crate::context_budget::compaction::CompactionPipeline::compact(
+                        owned,
+                        budget.min_recent_messages(),
+                        &backend,
+                        &backend,
+                    )
+                    .await;
+
+                    // Log extracted memories (telemetry only — no DB storage)
+                    for mem in &result.extracted_memories {
+                        tracing::info!(
+                            kind = %mem.kind,
+                            preview = %crate::runner::agentic_loop::context::truncate_for_summary(&mem.content, 100),
+                            "Compaction: extracted memory"
+                        );
+                    }
+
+                    tracing::info!(
+                        agent_id = agent_id,
+                        messages_before,
+                        messages_after = result.compacted_messages.len(),
+                        memories_extracted = result.extracted_memories.len(),
+                        messages_discarded = result.messages_discarded,
+                        error = ?result.error,
+                        "LLM compaction completed"
+                    );
+
+                    messages = Arc::new(result.compacted_messages);
+                } else {
+                    // Heuristic fallback
+                    tracing::info!(
+                        agent_id = agent_id,
+                        msg_tokens,
+                        messages_before,
+                        "Heuristic compaction triggered (no compaction model)"
+                    );
+                    compress_context(Arc::make_mut(&mut messages), config.context_tail_keep, Some(budget));
+                    tracing::info!(
+                        agent_id = agent_id,
+                        messages_after = messages.len(),
+                        "Heuristic compaction completed"
+                    );
+                }
+
                 known_token_count = estimate_messages_tokens(&messages);
-                tracing::info!(
-                    agent_id = agent_id,
-                    messages_after = messages.len(),
-                    estimated_tokens_after = known_token_count,
-                    "Context compressed (budget-aware)"
-                );
             }
         } else if config.max_context_tokens > 0 && known_token_count > config.max_context_tokens {
-            // Legacy fallback
+            // Legacy fallback (no budget manager)
             tracing::debug!(
                 agent_id = agent_id,
                 tokens = known_token_count,
