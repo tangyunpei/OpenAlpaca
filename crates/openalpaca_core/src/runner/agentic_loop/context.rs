@@ -227,7 +227,7 @@ pub(crate) fn compress_context(
 }
 
 /// Truncate text for inclusion in a compressed summary.
-fn truncate_for_summary(text: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_for_summary(text: &str, max_chars: usize) -> String {
     if text.len() <= max_chars {
         text.to_string()
     } else {
