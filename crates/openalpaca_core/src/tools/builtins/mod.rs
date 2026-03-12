@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use openalpaca_llm::{ToolDefinition, WebSearchConfig};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use tokio::process::Command;
 
 /// Shared lock type for the connector send provider, set post-construction.
 pub type ConnectorSendLock = Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>>;
@@ -362,6 +363,113 @@ pub fn workspace_tool_definitions() -> Vec<ToolDefinition> {
             ]),
         },
     ]
+}
+
+// ---------------------------------------------------------------------------
+// ScriptToolBuiltIn
+// ---------------------------------------------------------------------------
+
+/// A skill-bundled script tool wrapped as a BuiltInTool.
+pub struct ScriptToolBuiltIn {
+    script_path: PathBuf,
+    interpreter: Option<String>,
+    timeout_secs: u64,
+    skill_dir: PathBuf,
+}
+
+impl ScriptToolBuiltIn {
+    /// Create with path-traversal validation.
+    pub fn new(
+        skill_dir: &std::path::Path,
+        cfg: &crate::middleware::skill::ScriptConfig,
+    ) -> Result<Self, String> {
+        let script_path = skill_dir.join("scripts").join(&cfg.file);
+        let canonical = script_path.canonicalize().map_err(|e| {
+            format!("Script '{}' not found: {}", cfg.file, e)
+        })?;
+        let scripts_dir = skill_dir.join("scripts").canonicalize().map_err(|e| {
+            format!("Scripts directory not found: {}", e)
+        })?;
+        if !canonical.starts_with(&scripts_dir) {
+            return Err(format!(
+                "Script '{}' resolves outside scripts/ directory (path traversal blocked)",
+                cfg.file
+            ));
+        }
+        Ok(Self {
+            script_path: canonical,
+            interpreter: cfg.interpreter.clone(),
+            timeout_secs: cfg.timeout_secs,
+            skill_dir: skill_dir.to_path_buf(),
+        })
+    }
+
+    /// Generate a ToolDefinition for a script tool.
+    pub fn tool_definition(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: format!("skill_script:{}", name),
+            description: format!("Skill script: {}", name),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+            strict: None,
+            input_examples: None,
+        }
+    }
+}
+
+#[async_trait]
+impl BuiltInTool for ScriptToolBuiltIn {
+    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        let args = json_to_cli_args(arguments);
+        let mut cmd = if let Some(ref interp) = self.interpreter {
+            let mut c = Command::new(interp);
+            c.arg(&self.script_path);
+            c
+        } else {
+            Command::new(&self.script_path)
+        };
+        cmd.args(&args);
+        cmd.current_dir(&self.skill_dir);
+
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(self.timeout_secs),
+            cmd.output(),
+        )
+        .await
+        .map_err(|_| format!("Script timed out after {}s", self.timeout_secs))?
+        .map_err(|e| format!("Failed to execute script: {}", e))?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!(
+                "Script failed (exit {}): {}",
+                output.status.code().unwrap_or(-1),
+                stderr.chars().take(500).collect::<String>()
+            ))
+        }
+    }
+}
+
+/// Convert JSON object to `--key=value` CLI arguments.
+pub fn json_to_cli_args(value: &serde_json::Value) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(obj) = value.as_object() {
+        for (key, val) in obj {
+            let str_val = match val {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
+                other => other.to_string(),
+            };
+            args.push(format!("--{}={}", key, str_val));
+        }
+    }
+    args
 }
 
 #[cfg(test)]
