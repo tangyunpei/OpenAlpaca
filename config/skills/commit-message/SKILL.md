@@ -19,6 +19,8 @@ routing:
   negative_keywords:
     - "review"
     - "explain"
+requires_capabilities:
+  - shell_execute
 permissions:
   level: readwrite
 tools:

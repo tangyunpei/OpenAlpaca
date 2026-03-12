@@ -20,6 +20,8 @@ routing:
     - "write"
     - "create"
     - "review"
+requires_capabilities:
+  - file_read
 permissions:
   level: readonly
 tools:
