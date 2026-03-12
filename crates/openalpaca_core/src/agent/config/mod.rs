@@ -51,6 +51,8 @@ pub struct AgentConstraintsConfig {
     pub allowed_models: Option<Vec<String>>,
     pub denied_models: Option<Vec<String>>,
     pub auto_approve: Option<bool>,
+    pub denied_sections: Option<Vec<String>>,
+    pub max_context_tokens: Option<usize>,
 }
 
 /// TOML structure for per-agent LLM config.
@@ -141,6 +143,8 @@ impl AgentConfigFile {
                         Some(c.denied_models.clone())
                     },
                     auto_approve: if c.auto_approve { Some(true) } else { None },
+                    denied_sections: None,
+                    max_context_tokens: None,
                 })
             } else {
                 None
@@ -229,6 +233,8 @@ impl AgentConfigFile {
                     allowed_models: c.allowed_models.clone().unwrap_or_default(),
                     denied_models: c.denied_models.clone().unwrap_or_default(),
                     auto_approve: c.auto_approve.unwrap_or(false),
+                    denied_sections: c.denied_sections.clone().unwrap_or_default(),
+                    max_context_tokens: c.max_context_tokens,
                 };
                 constraints.normalize();
                 constraints
@@ -329,6 +335,8 @@ impl AgentConfigFile {
                     allowed_models: None,
                     denied_models: None,
                     auto_approve: None,
+                    denied_sections: None,
+                    max_context_tokens: None,
                 })
             } else {
                 None
@@ -455,6 +463,8 @@ impl AgentConfigFile {
                 allowed_models: c.allowed_models.clone().unwrap_or_default(),
                 denied_models: c.denied_models.clone().unwrap_or_default(),
                 auto_approve: c.auto_approve.unwrap_or(false),
+                denied_sections: c.denied_sections.clone().unwrap_or_default(),
+                max_context_tokens: c.max_context_tokens,
             };
             constraints.normalize();
             constraints
