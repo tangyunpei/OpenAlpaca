@@ -56,6 +56,9 @@ pub struct RegisteredTool {
     pub definition: ToolDefinition,
     pub backend: ToolBackend,
     pub provides_capabilities: Vec<String>,
+    /// When true, SandboxManager skips the per-tool timeout for this tool.
+    /// Used for coordination tools that manage their own timeouts.
+    pub exempt_from_timeout: bool,
 }
 
 /// Central registry mapping tool names to definitions and execution backends.

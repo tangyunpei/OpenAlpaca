@@ -35,6 +35,7 @@ pub(super) fn text_generate_tool() -> RegisteredTool {
         },
         backend: ToolBackend::BuiltIn(Arc::new(TextGenerateTool)),
         provides_capabilities: vec![],
+        exempt_from_timeout: false,
     }
 }
 

@@ -32,6 +32,7 @@ pub(super) fn summarize_tool() -> RegisteredTool {
         },
         backend: ToolBackend::BuiltIn(Arc::new(SummarizeTool)),
         provides_capabilities: vec![],
+        exempt_from_timeout: false,
     }
 }
 

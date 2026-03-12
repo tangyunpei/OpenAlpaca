@@ -99,6 +99,7 @@ mod tests {
             },
             backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
             provides_capabilities: vec![],
+            exempt_from_timeout: false,
         });
 
         let executor = RegistryToolExecutor::new(Arc::new(registry));
@@ -123,6 +124,7 @@ mod tests {
             },
             backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
             provides_capabilities: vec![],
+            exempt_from_timeout: false,
         });
 
         let executor = RegistryToolExecutor::new(Arc::new(registry));
@@ -145,6 +147,7 @@ mod tests {
             },
             backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
             provides_capabilities: vec![],
+            exempt_from_timeout: false,
         });
 
         let executor = RegistryToolExecutor::new(Arc::new(registry));
@@ -187,6 +190,7 @@ mod tests {
             },
             backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
             provides_capabilities: vec![],
+            exempt_from_timeout: false,
         });
 
         let executor = RegistryToolExecutor::new(Arc::new(registry));
@@ -221,6 +225,7 @@ mod tests {
             },
             backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
             provides_capabilities: vec![],
+            exempt_from_timeout: false,
         });
 
         let executor = RegistryToolExecutor::new(Arc::new(registry));

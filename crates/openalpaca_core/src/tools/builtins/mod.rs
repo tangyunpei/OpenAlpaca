@@ -78,6 +78,7 @@ pub fn builtin_tools(
             definition: def,
             backend: ToolBackend::Contextual,
             provides_capabilities: cap,
+            exempt_from_timeout: false,
         });
     }
 
