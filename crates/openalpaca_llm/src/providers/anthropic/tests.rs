@@ -17,6 +17,7 @@ fn test_request_serialization() {
         tool_choice: None,
         enable_caching: false,
         thinking: None,
+        context_management: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -185,6 +186,7 @@ fn test_request_serialization_filters_empty_text_parts() {
         tool_choice: None,
         enable_caching: false,
         thinking: None,
+        context_management: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -213,6 +215,7 @@ fn test_request_serialization_empty_parts_get_placeholder() {
         tool_choice: None,
         enable_caching: false,
         thinking: None,
+        context_management: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -260,6 +263,7 @@ fn test_tool_with_strict_and_examples() {
         tool_choice: None,
         enable_caching: false,
         thinking: None,
+        context_management: None,
     };
     let body = provider.build_request_body(&request);
     let tools = body["tools"].as_array().unwrap();
@@ -286,6 +290,7 @@ fn test_tool_without_strict_no_extra_fields() {
         tool_choice: None,
         enable_caching: false,
         thinking: None,
+        context_management: None,
     };
     let body = provider.build_request_body(&request);
     let tools = body["tools"].as_array().unwrap();
@@ -308,6 +313,7 @@ fn test_system_prompt_caching_enabled() {
         tool_choice: None,
         enable_caching: true,
         thinking: None,
+        context_management: None,
     };
     let body = provider.build_request_body(&request);
     // System should be array with cache_control
@@ -330,6 +336,7 @@ fn test_system_prompt_caching_disabled() {
         tool_choice: None,
         enable_caching: false,
         thinking: None,
+        context_management: None,
     };
     let body = provider.build_request_body(&request);
     // System should be plain string
@@ -363,6 +370,7 @@ fn test_tool_caching_breakpoint() {
         tool_choice: None,
         enable_caching: true,
         thinking: None,
+        context_management: None,
     };
     let body = provider.build_request_body(&request);
     let tools = body["tools"].as_array().unwrap();
@@ -386,6 +394,7 @@ fn test_caching_with_empty_tools() {
         tool_choice: None,
         enable_caching: true,
         thinking: None,
+        context_management: None,
     };
     let body = provider.build_request_body(&request);
     // System should still have cache_control
@@ -407,6 +416,7 @@ fn test_thinking_enabled_serialization() {
         tool_choice: None,
         enable_caching: false,
         thinking: Some(ThinkingConfig::Enabled { budget_tokens: 2048 }),
+        context_management: None,
     };
     let body = provider.build_request_body(&request);
     assert_eq!(body["thinking"]["type"], "enabled");
@@ -427,6 +437,7 @@ fn test_thinking_disabled_keeps_temperature() {
         tool_choice: None,
         enable_caching: false,
         thinking: Some(ThinkingConfig::Disabled),
+        context_management: None,
     };
     let body = provider.build_request_body(&request);
     assert_eq!(body["thinking"]["type"], "disabled");
@@ -482,6 +493,7 @@ fn test_thinking_adaptive_serialization() {
         tool_choice: None,
         enable_caching: false,
         thinking: Some(ThinkingConfig::Adaptive),
+        context_management: None,
     };
     let body = provider.build_request_body(&request);
     assert_eq!(body["thinking"]["type"], "adaptive");

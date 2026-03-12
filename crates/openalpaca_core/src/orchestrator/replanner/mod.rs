@@ -92,6 +92,7 @@ impl Replanner {
             tools_token_estimate: None,
             enable_caching: false,
             thinking: None,
+            context_management: None,
         };
 
         let response = router

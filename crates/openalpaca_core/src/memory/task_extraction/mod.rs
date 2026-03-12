@@ -136,6 +136,7 @@ pub async fn extract_task_memories(
         tools_token_estimate: None,
         enable_caching: false,
         thinking: None,
+        context_management: None,
     };
 
     // LLM call

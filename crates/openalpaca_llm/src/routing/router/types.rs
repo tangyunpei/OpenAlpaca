@@ -28,6 +28,8 @@ pub struct RouterRequest {
     pub enable_caching: bool,
     /// Extended thinking config (Anthropic only).
     pub thinking: Option<ThinkingConfig>,
+    /// Context management configuration (Anthropic only).
+    pub context_management: Option<crate::context_management::ContextManagement>,
 }
 
 /// Errors from the LLM router.
