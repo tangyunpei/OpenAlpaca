@@ -24,7 +24,7 @@ fn estimate_part_tokens(part: &ContentPart) -> u32 {
 /// Estimate tokens in a message list using the 1 token ≈ 4 bytes heuristic.
 /// When multimodal parts are present, estimates per-part tokens instead.
 /// Consistent with `estimate_request_tokens` in the LLM router.
-pub(super) fn estimate_messages_tokens(messages: &[ChatMessage]) -> u32 {
+pub(crate) fn estimate_messages_tokens(messages: &[ChatMessage]) -> u32 {
     let tokens: u32 = messages
         .iter()
         .map(|m| {
@@ -53,7 +53,7 @@ pub(super) fn estimate_messages_tokens(messages: &[ChatMessage]) -> u32 {
 ///
 /// Everything in between is replaced with a single user message summarizing
 /// what happened in those earlier rounds (tool calls made, brief results).
-pub(super) fn compress_context(messages: &mut Vec<ChatMessage>, tail_keep: usize) {
+pub(crate) fn compress_context(messages: &mut Vec<ChatMessage>, tail_keep: usize) {
     // Each "round" is roughly: 1 assistant message + N tool results ≈ 3 messages
     let keep_tail = tail_keep * 3;
     if messages.len() <= 2 + keep_tail {

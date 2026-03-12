@@ -8,7 +8,7 @@ pub use config::{LoopConfig, LoopFinishReason, LoopResult, StreamCallback};
 
 // Internal re-exports so the core loop and tests can access submodule items
 use backend::LlmBackend;
-use context::{compress_context, estimate_messages_tokens};
+pub(crate) use context::{compress_context, estimate_messages_tokens};
 use tool_helpers::{format_tool_error, format_tool_error_with_hint, truncate_tool_result};
 #[cfg(test)]
 use tool_helpers::MAX_TOOL_RESULT_SIZE;

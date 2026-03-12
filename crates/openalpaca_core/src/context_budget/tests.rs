@@ -239,3 +239,78 @@ async fn test_summarize_preserves_recent_when_nothing_to_summarize() {
         .unwrap();
     assert_eq!(result.len(), messages.len()); // no change
 }
+
+#[tokio::test]
+async fn test_compaction_full_pipeline() {
+    let messages = vec![
+        ChatMessage::system("system prompt"),
+        ChatMessage::user("initial query"),
+        ChatMessage::user("thanks"),
+        ChatMessage::assistant("You're welcome!"),
+        ChatMessage::user("Tell me about Rust"),
+        ChatMessage::assistant("Rust is a systems language..."),
+        ChatMessage::user("What about ownership?"),
+        ChatMessage::assistant("Ownership is the core..."),
+        ChatMessage::user("How do lifetimes work?"),
+        ChatMessage::assistant("Lifetimes ensure..."),
+    ];
+
+    let extractor = MockExtractor(vec![ExtractedMemory {
+        kind: "fact".to_string(),
+        content: "Discussed Rust ownership".to_string(),
+    }]);
+    let summarizer = MockSummarizer("[Summary: Rust discussion]".to_string());
+
+    let result = CompactionPipeline::compact(messages, 2, &extractor, &summarizer).await;
+    assert!(result.compacted_messages.len() < 10);
+    assert_eq!(result.extracted_memories.len(), 1);
+    assert!(result.messages_discarded > 0);
+    assert!(result.error.is_none());
+}
+
+#[tokio::test]
+async fn test_compaction_fallback_on_summarizer_failure() {
+    struct FailingSummarizer;
+
+    #[async_trait]
+    impl Summarizer for FailingSummarizer {
+        async fn summarize(&self, _: &[ChatMessage]) -> Result<String, String> {
+            Err("model unavailable".to_string())
+        }
+    }
+
+    let messages = vec![
+        ChatMessage::system("system prompt"),
+        ChatMessage::user("initial query"),
+        ChatMessage::user("message 1"),
+        ChatMessage::assistant("response 1"),
+        ChatMessage::user("message 2"),
+        ChatMessage::assistant("response 2"),
+        ChatMessage::user("message 3"),
+        ChatMessage::assistant("response 3"),
+        ChatMessage::user("recent"),
+        ChatMessage::assistant("recent response"),
+    ];
+
+    let result = CompactionPipeline::compact(messages, 2, &MockExtractor(vec![]), &FailingSummarizer).await;
+    assert!(result.compacted_messages.len() < 10);
+    assert!(result.error.is_some());
+    assert!(result.error.unwrap().contains("model unavailable"));
+}
+
+#[tokio::test]
+async fn test_compaction_preserves_recent() {
+    let messages = vec![
+        ChatMessage::system("sys"),
+        ChatMessage::user("init"),
+        ChatMessage::user("old1"),
+        ChatMessage::assistant("old_resp1"),
+        ChatMessage::user("recent_q"),
+        ChatMessage::assistant("recent_a"),
+    ];
+    let result = CompactionPipeline::compact(
+        messages, 2, &MockExtractor(vec![]), &MockSummarizer("summary".to_string()),
+    ).await;
+    let last = result.compacted_messages.last().unwrap();
+    assert_eq!(last.content, "recent_a");
+}
