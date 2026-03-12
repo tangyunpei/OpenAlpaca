@@ -3,7 +3,8 @@ use super::*;
 #[test]
 fn test_builtin_tools_count_without_db() {
     let tools = builtin_tools(None, None, None, None, None);
-    assert_eq!(tools.len(), 5);
+    // 5 base tools + 2 workspace tools (workspace_read, workspace_write)
+    assert_eq!(tools.len(), 7);
 }
 
 #[test]
@@ -12,7 +13,8 @@ fn test_builtin_tools_count_with_db() {
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let tools = builtin_tools(Some(db), None, Some(dc), None, None);
-    assert_eq!(tools.len(), 6);
+    // 6 base tools (with memory_search) + 2 workspace tools (workspace_read, workspace_write)
+    assert_eq!(tools.len(), 8);
 }
 
 #[test]
@@ -40,8 +42,8 @@ fn test_builtin_tools_with_persona_context_includes_update_persona() {
     };
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let tools = builtin_tools_with_persona_context(Some(db), None, ctx, Some(dc), None, None, None);
-    // 6 base + 1 update_persona = 7 (no send since connector_send_provider is None)
-    assert_eq!(tools.len(), 7, "Should have 7 tools (6 base + update_persona)");
+    // 8 base (6 + 2 workspace) + 1 update_persona = 9 (no send since connector_send_provider is None)
+    assert_eq!(tools.len(), 9, "Should have 9 tools (8 base + update_persona)");
     assert!(
         tools.iter().any(|t| t.definition.name == "update_persona"),
         "update_persona tool must be present"
@@ -173,7 +175,8 @@ fn test_builtin_tools_uses_explicit_workspace_root() {
 
     // Pass an explicit workspace root — should not fall back to current_dir()
     let tools = builtin_tools(None, None, None, None, Some(ws_root.clone()));
-    assert_eq!(tools.len(), 5);
+    // 5 base tools + 2 workspace tools (workspace_read, workspace_write)
+    assert_eq!(tools.len(), 7);
 
     // Verify tools were created (they compile and register without error
     // when given an explicit workspace root).
@@ -187,5 +190,6 @@ fn test_builtin_tools_falls_back_to_current_dir_when_none() {
     // When workspace_root is None, should fall back to current_dir()
     // This must not panic even if current_dir() is available.
     let tools = builtin_tools(None, None, None, None, None);
-    assert_eq!(tools.len(), 5);
+    // 5 base tools + 2 workspace tools (workspace_read, workspace_write)
+    assert_eq!(tools.len(), 7);
 }

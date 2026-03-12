@@ -30,7 +30,7 @@ use self::update_persona::update_persona_tool;
 use self::web_fetch::web_fetch_tool;
 use self::web_search::web_search_tool;
 
-use super::registry::RegisteredTool;
+use super::registry::{RegisteredTool, ToolBackend};
 
 /// Context required by the `update_persona` tool at runtime.
 /// Re-export from the update_persona module.
@@ -66,6 +66,21 @@ pub fn builtin_tools(
     if let (Some(db), Some(dc)) = (db, daemon_config) {
         tools.push(memory_search_tool(db, embedder, dc));
     }
+
+    // Register workspace tools (execution handled by ContextualToolExecutor)
+    for def in workspace_tool_definitions() {
+        let cap = if def.name == "workspace_read" {
+            vec!["workspace_read".to_string()]
+        } else {
+            vec!["workspace_write".to_string()]
+        };
+        tools.push(RegisteredTool {
+            definition: def,
+            backend: ToolBackend::Contextual,
+            provides_capabilities: cap,
+        });
+    }
+
     tools
 }
 
