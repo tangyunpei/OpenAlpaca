@@ -134,3 +134,108 @@ fn test_section_breakdown() {
     assert_eq!(breakdown[0], ("system_prompt", 5_000));
     assert_eq!(breakdown[1], ("tools", 3_000));
 }
+
+// ── Compaction tests ──────────────────────────────────────────────
+use super::compaction::{CompactionPipeline, ExtractedMemory, MemoryExtractor, Summarizer};
+use async_trait::async_trait;
+use openalpaca_llm::ChatMessage;
+
+#[test]
+fn test_discard_removes_social() {
+    let messages = vec![
+        ChatMessage::system("system prompt"),
+        ChatMessage::user("initial query"),
+        ChatMessage::user("thanks"),
+        ChatMessage::assistant("You're welcome!"),
+        ChatMessage::user("ok"),
+        ChatMessage::assistant("Anything else?"),
+        ChatMessage::user("What's the weather?"),
+        ChatMessage::assistant("It's sunny."),
+    ];
+    let result = CompactionPipeline::discard_social(&messages, 2);
+    assert!(result.len() < messages.len());
+    assert_eq!(result[0].role, openalpaca_llm::Role::System);
+    assert!(result.last().unwrap().content.contains("sunny"));
+}
+
+#[test]
+fn test_discard_preserves_substantive() {
+    let messages = vec![
+        ChatMessage::system("system prompt"),
+        ChatMessage::user("initial query"),
+        ChatMessage::user("Write a sort function"),
+        ChatMessage::assistant("Here's the implementation..."),
+    ];
+    let result = CompactionPipeline::discard_social(&messages, 2);
+    assert_eq!(result.len(), messages.len());
+}
+
+struct MockExtractor(Vec<ExtractedMemory>);
+
+#[async_trait]
+impl MemoryExtractor for MockExtractor {
+    async fn extract(&self, _messages: &[ChatMessage]) -> Result<Vec<ExtractedMemory>, String> {
+        Ok(self.0.clone())
+    }
+}
+
+struct MockSummarizer(String);
+
+#[async_trait]
+impl Summarizer for MockSummarizer {
+    async fn summarize(&self, _messages: &[ChatMessage]) -> Result<String, String> {
+        Ok(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn test_extraction_returns_memories() {
+    let messages = vec![
+        ChatMessage::user("I prefer TypeScript over JavaScript"),
+        ChatMessage::assistant("Noted, I'll use TypeScript."),
+    ];
+    let extractor = MockExtractor(vec![ExtractedMemory {
+        kind: "user_preference".to_string(),
+        content: "User prefers TypeScript".to_string(),
+    }]);
+    let extracted = extractor.extract(&messages).await.unwrap();
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(extracted[0].kind, "user_preference");
+}
+
+#[tokio::test]
+async fn test_summarize_replaces_older_messages() {
+    let messages = vec![
+        ChatMessage::system("system prompt"),
+        ChatMessage::user("initial query"),
+        ChatMessage::user("Tell me about Rust"),
+        ChatMessage::assistant("Rust is a systems language..."),
+        ChatMessage::user("What about ownership?"),
+        ChatMessage::assistant("Ownership is Rust's core..."),
+        ChatMessage::user("How do lifetimes work?"),
+        ChatMessage::assistant("Lifetimes ensure references are valid..."),
+    ];
+    let summarizer = MockSummarizer("[Summary: discussed Rust]".to_string());
+    let result = CompactionPipeline::summarize_older(messages.clone(), 2, &summarizer)
+        .await
+        .unwrap();
+    // System + initial + summary + last 2 messages
+    assert!(result.len() <= 5);
+    assert!(result.iter().any(|m| m.content.contains("[Summary:")));
+    assert_eq!(result.last().unwrap().content, "Lifetimes ensure references are valid...");
+}
+
+#[tokio::test]
+async fn test_summarize_preserves_recent_when_nothing_to_summarize() {
+    let messages = vec![
+        ChatMessage::system("sys"),
+        ChatMessage::user("init"),
+        ChatMessage::user("recent"),
+        ChatMessage::assistant("answer"),
+    ];
+    let summarizer = MockSummarizer("summary".to_string());
+    let result = CompactionPipeline::summarize_older(messages.clone(), 4, &summarizer)
+        .await
+        .unwrap();
+    assert_eq!(result.len(), messages.len()); // no change
+}

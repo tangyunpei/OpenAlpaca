@@ -1,4 +1,5 @@
 mod budget;
+pub(crate) mod compaction;
 
 #[cfg(test)]
 mod tests;
