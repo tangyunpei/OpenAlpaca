@@ -22,6 +22,10 @@ fn default_invoke_mode() -> String {
     "manual".to_string()
 }
 
+fn default_invoke_max_depth() -> usize {
+    2
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct InvokeConfig {
@@ -36,6 +40,9 @@ pub struct InvokeConfig {
     pub hotkey: Option<String>,
     /// Cron expression for scheduled mode
     pub cron: Option<String>,
+    /// Maximum skill nesting depth (default 2: root + 1 child).
+    #[serde(default = "default_invoke_max_depth")]
+    pub max_depth: usize,
 }
 
 impl Default for InvokeConfig {
@@ -46,6 +53,7 @@ impl Default for InvokeConfig {
             aliases: Vec::new(),
             hotkey: None,
             cron: None,
+            max_depth: default_invoke_max_depth(),
         }
     }
 }
@@ -336,6 +344,14 @@ pub struct SkillFrontmatter {
     /// Executable scripts bundled with this skill, exposed as callable tools.
     #[serde(default)]
     pub scripts: Vec<ScriptConfig>,
+
+    /// Capability identifiers required for this skill to execute.
+    #[serde(default)]
+    pub requires_capabilities: Vec<String>,
+
+    /// Skill IDs that must be loaded before this skill can be invoked.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
 
     // Legacy compat (deserialized but not serialized)
     /// Slash command that invokes this skill (e.g. "review"). Legacy field.
