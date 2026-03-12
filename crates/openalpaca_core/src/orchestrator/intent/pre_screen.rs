@@ -2,7 +2,7 @@
 //! and social message classification.
 
 use super::IntentParser;
-use crate::utils::social::{is_social_phrase, SOCIAL_PHRASES};
+use crate::utils::social::is_social_phrase;
 
 impl IntentParser {
     /// Check if a message is eligible for the fast path (skip LLM planner).
@@ -70,7 +70,7 @@ impl IntentParser {
 
         // Rule 2: Social/follow-up patterns (always simple)
         let trimmed_lower = lower.trim();
-        if SOCIAL_PHRASES.contains(&trimmed_lower) {
+        if is_social_phrase(content) {
             return true;
         }
 
