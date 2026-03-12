@@ -2,14 +2,7 @@
 //! and social message classification.
 
 use super::IntentParser;
-
-/// Short social/acknowledgement phrases that never require planning or tool use.
-/// Shared between `is_enhanced_simple_query` and `is_social_message`.
-pub(super) const SOCIAL_PHRASES: &[&str] = &[
-    "thanks", "thank you", "ok", "okay", "got it", "sounds good",
-    "yes", "no", "sure", "right",
-    "好的", "没问题", "谢谢", "嗯", "明白", "收到", "对", "是的", "不是", "不用",
-];
+use crate::utils::social::{is_social_phrase, SOCIAL_PHRASES};
 
 impl IntentParser {
     /// Check if a message is eligible for the fast path (skip LLM planner).
@@ -164,7 +157,6 @@ impl IntentParser {
     /// Used by the social fast path to skip heavy prompt assembly for
     /// trivial conversational replies like "ok", "thanks", "好的".
     pub fn is_social_message(&self, content: &str) -> bool {
-        let trimmed = content.trim().to_lowercase();
-        SOCIAL_PHRASES.contains(&trimmed.as_str())
+        is_social_phrase(content)
     }
 }
