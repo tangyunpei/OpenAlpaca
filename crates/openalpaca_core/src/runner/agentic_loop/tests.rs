@@ -116,6 +116,7 @@ async fn test_completes_simple_query() {
         None,
         None, // context_budget
         None,
+        None, // tool_context
     )
     .await;
 
@@ -147,6 +148,7 @@ async fn test_respects_max_rounds() {
         None,
         None, // context_budget
         None,
+        None, // tool_context
     )
     .await;
 
@@ -177,6 +179,7 @@ async fn test_respects_cost_limit() {
         None,
         None, // context_budget
         None,
+        None, // tool_context
     )
     .await;
 
@@ -199,6 +202,7 @@ async fn test_handles_provider_error() {
         None,
         None, // context_budget
         None,
+        None, // tool_context
     )
     .await;
 
@@ -228,6 +232,7 @@ async fn test_tool_stub_returns_error() {
         None,
         None, // context_budget
         None,
+        None, // tool_context
     )
     .await;
 
@@ -256,6 +261,7 @@ async fn test_tracks_usage() {
         None,
         None, // context_budget
         None,
+        None, // tool_context
     )
     .await;
 
@@ -268,26 +274,34 @@ async fn test_tracks_usage() {
 #[tokio::test]
 async fn test_sandbox_execution() {
     use crate::bus::EventBus;
-    use crate::security::sandbox::{SandboxManager, SandboxPolicy, ToolExecutor};
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+    use crate::tools::ToolRegistry;
 
-    struct TestExecutor;
+    struct TestTool;
 
     #[async_trait]
-    impl ToolExecutor for TestExecutor {
-        async fn execute(
-            &self,
-            _tool_name: &str,
-            _arguments: &serde_json::Value,
-        ) -> Result<String, String> {
+    impl BuiltInTool for TestTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Ok("sandbox result".to_string())
-        }
-        fn registered_tools(&self) -> Vec<String> {
-            vec!["search".to_string()]
         }
     }
 
+    let mut registry = ToolRegistry::new();
+    registry.register(RegisteredTool {
+        definition: openalpaca_llm::ToolDefinition {
+            name: "search".to_string(),
+            description: "Search".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
+        },
+        backend: ToolBackend::BuiltIn(std::sync::Arc::new(TestTool)),
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
+    });
     let sandbox =
-        SandboxManager::with_defaults(std::sync::Arc::new(TestExecutor), EventBus::default());
+        SandboxManager::with_defaults(std::sync::Arc::new(registry), EventBus::default());
     let policy = SandboxPolicy {
         agent_id: "test_agent".to_string(),
         allowed_capabilities: vec![],
@@ -318,6 +332,7 @@ async fn test_sandbox_execution() {
         Some(&policy),
         None, // context_budget
         None,
+        None, // tool_context
     )
     .await;
 
@@ -329,26 +344,34 @@ async fn test_sandbox_execution() {
 #[tokio::test]
 async fn test_sandbox_denied_tool() {
     use crate::bus::EventBus;
-    use crate::security::sandbox::{SandboxManager, SandboxPolicy, ToolExecutor};
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+    use crate::tools::ToolRegistry;
 
-    struct TestExecutor;
+    struct TestTool;
 
     #[async_trait]
-    impl ToolExecutor for TestExecutor {
-        async fn execute(
-            &self,
-            _tool_name: &str,
-            _arguments: &serde_json::Value,
-        ) -> Result<String, String> {
+    impl BuiltInTool for TestTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Ok("should not reach".to_string())
-        }
-        fn registered_tools(&self) -> Vec<String> {
-            vec!["search".to_string()]
         }
     }
 
+    let mut registry = ToolRegistry::new();
+    registry.register(RegisteredTool {
+        definition: openalpaca_llm::ToolDefinition {
+            name: "search".to_string(),
+            description: "Search".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
+        },
+        backend: ToolBackend::BuiltIn(std::sync::Arc::new(TestTool)),
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
+    });
     let sandbox =
-        SandboxManager::with_defaults(std::sync::Arc::new(TestExecutor), EventBus::default());
+        SandboxManager::with_defaults(std::sync::Arc::new(registry), EventBus::default());
     let policy = SandboxPolicy {
         agent_id: "test_agent".to_string(),
         allowed_capabilities: vec![],
@@ -379,6 +402,7 @@ async fn test_sandbox_denied_tool() {
         Some(&policy),
         None, // context_budget
         None,
+        None, // tool_context
     )
     .await;
 
@@ -443,6 +467,7 @@ async fn test_max_tools_per_round_enforced() {
         None,
         None, // context_budget
         None,
+        None, // tool_context
     )
     .await;
 
@@ -470,6 +495,7 @@ async fn test_cancellation_before_first_round() {
         None,
         None, // context_budget
         Some(token),
+        None, // tool_context
     )
     .await;
 
@@ -482,37 +508,45 @@ async fn test_cancellation_before_first_round() {
 #[tokio::test]
 async fn test_cancellation_during_tool_execution() {
     use crate::bus::EventBus;
-    use crate::security::sandbox::{SandboxManager, SandboxPolicy, ToolExecutor};
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+    use crate::tools::ToolRegistry;
 
-    /// Executor that cancels the token when a tool runs, simulating
+    /// Tool that cancels the token when executed, simulating
     /// cancellation arriving mid-parallel-execution.
-    struct CancellingExecutor {
+    struct CancellingTool {
         token: CancellationToken,
     }
 
     #[async_trait]
-    impl ToolExecutor for CancellingExecutor {
-        async fn execute(
-            &self,
-            _tool_name: &str,
-            _arguments: &serde_json::Value,
-        ) -> Result<String, String> {
+    impl BuiltInTool for CancellingTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             self.token.cancel();
             // Yield so tokio::select! can observe the cancellation
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             Ok("should be dropped".to_string())
         }
-        fn registered_tools(&self) -> Vec<String> {
-            vec!["search".to_string()]
-        }
     }
 
     let token = CancellationToken::new();
-    let executor = CancellingExecutor {
+    let cancelling_tool = CancellingTool {
         token: token.clone(),
     };
+    let mut registry = ToolRegistry::new();
+    registry.register(RegisteredTool {
+        definition: openalpaca_llm::ToolDefinition {
+            name: "search".to_string(),
+            description: "Search".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
+        },
+        backend: ToolBackend::BuiltIn(std::sync::Arc::new(cancelling_tool)),
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
+    });
     let sandbox =
-        SandboxManager::with_defaults(std::sync::Arc::new(executor), EventBus::default());
+        SandboxManager::with_defaults(std::sync::Arc::new(registry), EventBus::default());
     let policy = SandboxPolicy {
         agent_id: "test_agent".to_string(),
         allowed_capabilities: vec![],
@@ -543,6 +577,7 @@ async fn test_cancellation_during_tool_execution() {
         Some(&policy),
         None, // context_budget
         Some(token),
+        None, // tool_context
     )
     .await;
 
@@ -624,6 +659,7 @@ async fn test_max_tokens_triggers_continuation() {
         None,
         None, // context_budget
         None,
+        None, // tool_context
     )
     .await;
     assert_eq!(result.finish_reason, LoopFinishReason::Complete);
@@ -665,6 +701,7 @@ async fn test_max_tokens_retries_exhausted_returns_truncated() {
         None,
         None, // context_budget
         None,
+        None, // tool_context
     )
     .await;
     assert_eq!(result.finish_reason, LoopFinishReason::Truncated);
@@ -725,7 +762,7 @@ async fn test_cost_warning_at_80_percent() {
 
     let result = run_agentic_loop(
         &provider, messages, vec![], &config,
-        None, "test", None, None, None,
+        None, "test", None, None, None, None,
     )
     .await;
 

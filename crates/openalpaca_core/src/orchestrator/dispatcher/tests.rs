@@ -17,11 +17,8 @@ fn setup_with_config(agents: Vec<SubAgent>, config: DaemonConfig) -> TaskDispatc
     let lane_mgr = Arc::new(LaneManager::new());
     let bus = EventBus::default();
     let tool_registry = Arc::new(crate::tools::ToolRegistry::new());
-    let executor = Arc::new(crate::tools::RegistryToolExecutor::new(
-        tool_registry.clone(),
-    ));
     let sandbox = Arc::new(crate::security::sandbox::SandboxManager::with_defaults(
-        executor,
+        tool_registry.clone(),
         bus.clone(),
     ));
     let gate = Arc::new(crate::security::gate::SecurityGate::new(sandbox));
@@ -561,12 +558,17 @@ async fn test_pipeline_non_singleton_workspace_artifact_count() {
     let bus = crate::bus::EventBus::default();
     let mut rx = bus.subscribe();
 
-    let tool_registry = std::sync::Arc::new(crate::tools::ToolRegistry::new());
-    let executor = std::sync::Arc::new(crate::tools::RegistryToolExecutor::new(
-        tool_registry.clone(),
-    ));
+    // Build a registry with workspace tools so workspace_write is available
+    let mut registry = crate::tools::ToolRegistry::new();
+    let ws_tools = crate::tools::builtins::builtin_tools(
+        Some(db.clone()), None, None, None, None,
+    );
+    for t in ws_tools {
+        registry.register(t);
+    }
+    let tool_registry = std::sync::Arc::new(registry);
     let sandbox = std::sync::Arc::new(
-        crate::security::sandbox::SandboxManager::with_defaults(executor, bus.clone()),
+        crate::security::sandbox::SandboxManager::with_defaults(tool_registry.clone(), bus.clone()),
     );
     let gate = std::sync::Arc::new(crate::security::gate::SecurityGate::new(sandbox));
     let daemon_config =
@@ -986,11 +988,8 @@ async fn test_pipeline_text_only_no_artifacts_e2e() {
     let mut rx = bus.subscribe();
 
     let tool_registry = std::sync::Arc::new(crate::tools::ToolRegistry::new());
-    let executor = std::sync::Arc::new(crate::tools::RegistryToolExecutor::new(
-        tool_registry.clone(),
-    ));
     let sandbox = std::sync::Arc::new(
-        crate::security::sandbox::SandboxManager::with_defaults(executor, bus.clone()),
+        crate::security::sandbox::SandboxManager::with_defaults(tool_registry.clone(), bus.clone()),
     );
     let gate = std::sync::Arc::new(crate::security::gate::SecurityGate::new(sandbox));
     let daemon_config =

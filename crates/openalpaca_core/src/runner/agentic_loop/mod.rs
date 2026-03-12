@@ -15,6 +15,7 @@ use tool_helpers::MAX_TOOL_RESULT_SIZE;
 
 use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+use crate::tools::registry::ToolContext;
 use openalpaca_llm::{
     ChatMessage, FinishReason, LlmProvider, LlmRouter, LlmRouterError, RequestContext,
     ToolDefinition,
@@ -111,6 +112,7 @@ pub async fn run_agentic_loop(
     sandbox_policy: Option<&SandboxPolicy>,
     context_budget: Option<&crate::context_budget::ContextBudgetManager>,
     cancel_token: Option<CancellationToken>,
+    tool_context: Option<&ToolContext>,
 ) -> LoopResult {
     run_agentic_loop_inner(
         LlmBackend::Direct { provider },
@@ -122,6 +124,7 @@ pub async fn run_agentic_loop(
         sandbox_policy,
         context_budget,
         cancel_token,
+        tool_context,
     )
     .await
 }
@@ -139,6 +142,7 @@ pub async fn run_agentic_loop_routed(
     task_id: Option<&str>,
     context_budget: Option<&crate::context_budget::ContextBudgetManager>,
     cancel_token: Option<CancellationToken>,
+    tool_context: Option<&ToolContext>,
 ) -> LoopResult {
     let context = RequestContext {
         agent_id: Some(agent_id.to_string()),
@@ -154,6 +158,7 @@ pub async fn run_agentic_loop_routed(
         sandbox_policy,
         context_budget,
         cancel_token,
+        tool_context,
     )
     .await
 }
@@ -170,6 +175,7 @@ async fn run_agentic_loop_inner(
     sandbox_policy: Option<&SandboxPolicy>,
     context_budget: Option<&crate::context_budget::ContextBudgetManager>,
     cancel_token: Option<CancellationToken>,
+    tool_context: Option<&ToolContext>,
 ) -> LoopResult {
     let mut state = LoopState::new();
     let mut messages: Arc<Vec<ChatMessage>> = Arc::new(initial_messages);
@@ -522,19 +528,26 @@ async fn run_agentic_loop_inner(
                         "Executing tools in parallel"
                     );
 
-                    let tool_futures = executable.iter().map(|&tc| async move {
-                        if let (Some(sbx), Some(policy)) = (sandbox, sandbox_policy) {
-                            match sbx.execute_tool(agent_id, tc, policy).await {
-                                Ok(output) => truncate_tool_result(output),
-                                Err(err) => {
-                                    truncate_tool_result(format_tool_error_with_hint(&tc.name, &err.to_string()))
+                    let effective_ctx = tool_context.cloned().unwrap_or_else(|| ToolContext {
+                        agent_id: Some(agent_id.to_string()),
+                        ..Default::default()
+                    });
+                    let tool_futures = executable.iter().map(|&tc| {
+                        let ctx_ref = &effective_ctx;
+                        async move {
+                            if let (Some(sbx), Some(policy)) = (sandbox, sandbox_policy) {
+                                match sbx.execute_tool(tc, policy, ctx_ref).await {
+                                    Ok(output) => truncate_tool_result(output),
+                                    Err(err) => {
+                                        truncate_tool_result(format_tool_error_with_hint(&tc.name, &err.to_string()))
+                                    }
                                 }
+                            } else {
+                                format_tool_error(&format!(
+                                    "tool '{}' not available — sandbox not configured",
+                                    tc.name
+                                ))
                             }
-                        } else {
-                            format_tool_error(&format!(
-                                "tool '{}' not available — sandbox not configured",
-                                tc.name
-                            ))
                         }
                     });
 

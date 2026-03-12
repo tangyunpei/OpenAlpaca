@@ -17,7 +17,8 @@ use crate::orchestrator::{ConversationContext, Orchestrator};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
-use crate::tools::{ContextualToolExecutor, ScriptExecutionContext, ToolExecutionContext};
+use crate::tools::builtins::ScriptToolBuiltIn;
+use crate::tools::registry::{RegisteredTool, ToolBackend, ToolContext};
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, ToolChoice};
 use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
@@ -376,31 +377,30 @@ impl Orchestrator {
             messages.extend(ctx.recent_messages.clone());
             messages.push(ChatMessage::user(query));
 
-            // Per-request sandbox with ContextualToolExecutor
-            let ctx_exec = ToolExecutionContext {
-                owner_id: owner_id.map(|s| s.to_string()),
-                task_id: None,
+            // Per-request sandbox with ToolContext
+            let tool_ctx = ToolContext {
                 agent_id: None,
-                db: self.db.clone(),
+                task_id: None,
+                owner_id: owner_id.map(|s| s.to_string()),
                 workspace_id: scope_ctx.workspace_id.clone(),
             };
-            let contextual_executor = Arc::new(
-                if !skill_doc.frontmatter.scripts.is_empty() {
-                    let script_ctx = ScriptExecutionContext::new(
-                        &entry.skill_dir,
-                        &skill_doc.frontmatter.scripts,
-                    )?;
-                    ContextualToolExecutor::with_scripts(
-                        self.tool_registry.clone(),
-                        ctx_exec,
-                        script_ctx,
-                    )
-                } else {
-                    ContextualToolExecutor::new(self.tool_registry.clone(), ctx_exec)
-                },
-            );
+            let registry = if !skill_doc.frontmatter.scripts.is_empty() {
+                let mut cloned = (*self.tool_registry).clone();
+                for cfg in &skill_doc.frontmatter.scripts {
+                    let tool = ScriptToolBuiltIn::new(&entry.skill_dir, cfg)?;
+                    cloned.register(RegisteredTool {
+                        definition: ScriptToolBuiltIn::tool_definition(&cfg.name),
+                        backend: ToolBackend::BuiltIn(Arc::new(tool)),
+                        provides_capabilities: vec![],
+                        exempt_from_timeout: false,
+                    });
+                }
+                Arc::new(cloned)
+            } else {
+                self.tool_registry.clone()
+            };
             let mut per_request_sandbox =
-                SandboxManager::with_defaults(contextual_executor, self.bus.clone());
+                SandboxManager::with_defaults(registry, self.bus.clone());
             if let Ok(guard) = self.confirmation_broker.read() {
                 if let Some(broker) = guard.as_ref() {
                     per_request_sandbox.set_confirmation_broker(broker.clone());
@@ -423,6 +423,7 @@ impl Orchestrator {
                 None,
                 None, // context_budget
                 None, // cancel_token — interactive skill calls are not cancellable
+                Some(&tool_ctx),
             )
             .await;
             let latency_ms = call_start.elapsed().as_millis() as i64;

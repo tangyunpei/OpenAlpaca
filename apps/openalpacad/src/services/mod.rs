@@ -138,11 +138,8 @@ pub async fn initialize_services(
     );
 
     // Build security chain
-    let registry_executor = Arc::new(openalpaca_core::tools::RegistryToolExecutor::new(
-        tool_registry.clone(),
-    ));
     let sandbox_manager = Arc::new(openalpaca_core::security::sandbox::SandboxManager::new(
-        registry_executor,
+        tool_registry.clone(),
         bus.clone(),
         &daemon_config.load().security.circuit_breaker,
     ));

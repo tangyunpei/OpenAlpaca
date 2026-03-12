@@ -5,7 +5,7 @@ use crate::gateway::ResolvedAttachment;
 use crate::security::policy::{Principal, Scope};
 use crate::security::sandbox::SandboxManager;
 use crate::test_util::{make_agent, template_from_agent};
-use crate::tools::{RegistryToolExecutor, ToolRegistry};
+use crate::tools::ToolRegistry;
 use async_trait::async_trait;
 use base64::Engine as _;
 use openalpaca_llm::{ChatRequest, ContentPart, ImageSource};
@@ -18,8 +18,7 @@ fn make_tool_registry() -> Arc<ToolRegistry> {
 
 fn make_security_gate(bus: &EventBus) -> Arc<SecurityGate> {
     let registry = make_tool_registry();
-    let executor = Arc::new(RegistryToolExecutor::new(registry));
-    let sandbox = Arc::new(SandboxManager::with_defaults(executor, bus.clone()));
+    let sandbox = Arc::new(SandboxManager::with_defaults(registry, bus.clone()));
     Arc::new(SecurityGate::new(sandbox))
 }
 
@@ -686,8 +685,7 @@ fn make_security_gate_with_registry(
     bus: &EventBus,
     registry: Arc<ToolRegistry>,
 ) -> Arc<SecurityGate> {
-    let executor = Arc::new(RegistryToolExecutor::new(registry));
-    let sandbox = Arc::new(SandboxManager::with_defaults(executor, bus.clone()));
+    let sandbox = Arc::new(SandboxManager::with_defaults(registry, bus.clone()));
     Arc::new(SecurityGate::new(sandbox))
 }
 
