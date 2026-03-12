@@ -179,6 +179,7 @@ pub(super) fn send_tool(provider: ConnectorSendLock) -> RegisteredTool {
             ]),
         },
         backend: ToolBackend::BuiltIn(Arc::new(SendTool { provider })),
+        provides_capabilities: vec![],
     }
 }
 

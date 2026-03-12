@@ -124,6 +124,7 @@ pub(super) fn web_search_tool(config: Arc<ArcSwap<WebSearchConfig>>) -> Register
             input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(WebSearchTool { config })),
+        provides_capabilities: vec![],
     }
 }
 

@@ -134,5 +134,6 @@ pub(super) fn memory_search_tool(
             ]),
         },
         backend: ToolBackend::BuiltIn(Arc::new(MemorySearchTool { db, embedder, daemon_config })),
+        provides_capabilities: vec![],
     }
 }
