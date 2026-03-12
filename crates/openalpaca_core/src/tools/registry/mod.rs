@@ -183,6 +183,50 @@ impl ToolRegistry {
         self.tools.len()
     }
 
+    /// Returns tool definitions for all tools whose `provides_capabilities`
+    /// intersects with the requested capabilities. Empty capabilities returns empty.
+    pub fn tools_for_capabilities(&self, capabilities: &[String]) -> Vec<ToolDefinition> {
+        if capabilities.is_empty() {
+            return vec![];
+        }
+        self.tools
+            .values()
+            .filter(|tool| {
+                tool.provides_capabilities
+                    .iter()
+                    .any(|cap| capabilities.contains(cap))
+            })
+            .map(|tool| tool.definition.clone())
+            .collect()
+    }
+
+    /// Returns tool definitions for all tools whose `provides_capabilities`
+    /// intersects with the requested capabilities, excluding tools that provide
+    /// any denied capability.
+    pub fn tools_for_capabilities_with_deny(
+        &self,
+        capabilities: &[String],
+        denied: &[String],
+    ) -> Vec<ToolDefinition> {
+        if capabilities.is_empty() {
+            return vec![];
+        }
+        self.tools
+            .values()
+            .filter(|tool| {
+                tool.provides_capabilities
+                    .iter()
+                    .any(|cap| capabilities.contains(cap))
+            })
+            .filter(|tool| {
+                !tool.provides_capabilities
+                    .iter()
+                    .any(|cap| denied.contains(cap))
+            })
+            .map(|tool| tool.definition.clone())
+            .collect()
+    }
+
     /// Return the names of tools that use command backends (i.e., execute via shell).
     /// These should be treated like shell tools for injection sanitization.
     pub fn command_backend_tool_names(&self) -> Vec<String> {
