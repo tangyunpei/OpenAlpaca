@@ -710,6 +710,7 @@ fn make_mock_tool(name: &str) -> RegisteredTool {
             input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltInTool)),
+        provides_capabilities: vec![],
     }
 }
 

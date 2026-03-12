@@ -71,6 +71,7 @@ pub(super) fn file_read_tool(workspace_root: PathBuf) -> RegisteredTool {
             ]),
         },
         backend: ToolBackend::BuiltIn(Arc::new(FileReadTool { workspace_root })),
+        provides_capabilities: vec![],
     }
 }
 
@@ -182,6 +183,7 @@ pub(super) fn file_write_tool(workspace_root: PathBuf) -> RegisteredTool {
             ]),
         },
         backend: ToolBackend::BuiltIn(Arc::new(FileWriteTool { workspace_root })),
+        provides_capabilities: vec![],
     }
 }
 

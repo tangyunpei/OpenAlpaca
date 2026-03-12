@@ -23,6 +23,7 @@ fn make_tool(name: &str, response: &str) -> RegisteredTool {
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
             response: response.to_string(),
         })),
+        provides_capabilities: vec![],
     }
 }
 
@@ -142,6 +143,7 @@ fn test_command_backend_tool_names_returns_command_tools() {
             args_template: Some("log --oneline -n {count}".to_string()),
             timeout_secs: 15,
         },
+        provides_capabilities: vec![],
     });
 
     let cmd_tools = registry.command_backend_tool_names();
@@ -167,6 +169,7 @@ async fn test_execute_http_ssrf_blocks_private_ip() {
             headers: HashMap::new(),
             timeout_secs: 10,
         },
+        provides_capabilities: vec![],
     });
 
     let result = registry
@@ -196,6 +199,7 @@ async fn test_execute_http_ssrf_blocks_localhost() {
             headers: HashMap::new(),
             timeout_secs: 10,
         },
+        provides_capabilities: vec![],
     });
 
     let result = registry.execute("local_api", &serde_json::json!({})).await;
@@ -231,6 +235,7 @@ async fn test_http_unsubstituted_placeholder_detected() {
             headers: HashMap::new(),
             timeout_secs: 10,
         },
+        provides_capabilities: vec![],
     });
 
     // Only provide "city" but not "units" — {units} should be detected
@@ -274,6 +279,7 @@ async fn test_http_all_placeholders_substituted_passes() {
             headers: HashMap::new(),
             timeout_secs: 10,
         },
+        provides_capabilities: vec![],
     });
 
     // This will pass placeholder check but fail on the actual HTTP request
@@ -313,6 +319,7 @@ async fn test_schema_missing_required_field() {
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
             response: "ok".to_string(),
         })),
+        provides_capabilities: vec![],
     });
 
     let result = registry.execute("search", &serde_json::json!({})).await;
@@ -346,6 +353,7 @@ async fn test_schema_wrong_type() {
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
             response: "ok".to_string(),
         })),
+        provides_capabilities: vec![],
     });
 
     // limit should be integer, but we pass a string
@@ -385,6 +393,7 @@ async fn test_schema_valid_args_pass() {
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
             response: "ok".to_string(),
         })),
+        provides_capabilities: vec![],
     });
 
     let result = registry
@@ -408,6 +417,7 @@ async fn test_schema_non_object_args_rejected() {
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
             response: "ok".to_string(),
         })),
+        provides_capabilities: vec![],
     });
 
     let result = registry
@@ -442,6 +452,7 @@ async fn test_command_unsubstituted_placeholder_detected() {
             args_template: Some("log --oneline -n {count} {branch}".to_string()),
             timeout_secs: 15,
         },
+        provides_capabilities: vec![],
     });
 
     // Only provide "count" but not "branch" — {branch} should be detected
@@ -484,6 +495,7 @@ async fn test_command_all_placeholders_substituted_runs() {
             args_template: Some("{msg}".to_string()),
             timeout_secs: 5,
         },
+        provides_capabilities: vec![],
     });
 
     let result = registry

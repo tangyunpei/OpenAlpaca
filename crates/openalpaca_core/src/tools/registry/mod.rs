@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Backend that executes a tool's logic.
+#[derive(Clone)]
 pub enum ToolBackend {
     BuiltIn(Arc<dyn BuiltInTool>),
     Http {
@@ -17,6 +18,10 @@ pub enum ToolBackend {
         args_template: Option<String>,
         timeout_secs: u64,
     },
+    /// Tool whose execution is handled by ContextualToolExecutor at runtime.
+    /// Definition is registered for capability-based resolution, but execution
+    /// is delegated (e.g., workspace_read, workspace_write).
+    Contextual,
 }
 
 /// Trait for built-in tool implementations.
@@ -26,9 +31,11 @@ pub trait BuiltInTool: Send + Sync {
 }
 
 /// A tool registered in the registry: its LLM-facing definition + execution backend.
+#[derive(Clone)]
 pub struct RegisteredTool {
     pub definition: ToolDefinition,
     pub backend: ToolBackend,
+    pub provides_capabilities: Vec<String>,
 }
 
 /// Central registry mapping tool names to definitions and execution backends.
@@ -38,6 +45,15 @@ pub struct RegisteredTool {
 pub struct ToolRegistry {
     tools: HashMap<String, RegisteredTool>,
     http_client: reqwest::Client,
+}
+
+impl Clone for ToolRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            tools: self.tools.clone(),
+            http_client: self.http_client.clone(),
+        }
+    }
 }
 
 impl Default for ToolRegistry {
@@ -151,6 +167,9 @@ impl ToolRegistry {
                 args_template,
                 timeout_secs,
             } => execute_command(command, args_template.as_deref(), *timeout_secs, arguments).await,
+            ToolBackend::Contextual => {
+                Err(format!("[tool_error] Tool '{}' requires contextual execution — must be called through ContextualToolExecutor", tool_name))
+            }
         }
     }
 

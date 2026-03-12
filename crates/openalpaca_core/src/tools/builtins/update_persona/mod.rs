@@ -250,6 +250,7 @@ pub(super) fn update_persona_tool(ctx: PersonaToolContext) -> RegisteredTool {
             ]),
         },
         backend: ToolBackend::BuiltIn(Arc::new(tool)),
+        provides_capabilities: vec![],
     }
 }
 

@@ -90,5 +90,6 @@ pub(super) fn shell_execute_tool() -> RegisteredTool {
             ]),
         },
         backend: ToolBackend::BuiltIn(Arc::new(ShellExecuteTool)),
+        provides_capabilities: vec![],
     }
 }

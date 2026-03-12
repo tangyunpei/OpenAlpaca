@@ -49,6 +49,7 @@ fn test_lead_agent_tool_executor_routes_correctly() {
             input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(NoopTool)),
+        provides_capabilities: vec![],
     });
     let registry = Arc::new(registry);
 
@@ -383,6 +384,7 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
             input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(NoopTool)),
+        provides_capabilities: vec![],
     });
     let registry = Arc::new(registry);
 
@@ -454,6 +456,7 @@ fn test_batch_spawn_tool_present_when_enabled() {
             input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(NoopTool)),
+        provides_capabilities: vec![],
     });
     let registry = Arc::new(registry);
 
@@ -617,6 +620,7 @@ fn test_lead_agent_executor_delegates_shell_like_tools() {
             args_template: Some("hello".to_string()),
             timeout_secs: 10,
         },
+        provides_capabilities: vec![],
     });
     let registry = Arc::new(registry);
 

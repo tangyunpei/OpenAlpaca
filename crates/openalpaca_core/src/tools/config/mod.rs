@@ -110,6 +110,7 @@ pub fn load_tools_from_file(path: &Path) -> Result<Vec<RegisteredTool>, String> 
                 input_examples: None,
             },
             backend,
+            provides_capabilities: vec![],
         });
     }
 
