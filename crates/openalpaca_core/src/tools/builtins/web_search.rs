@@ -125,6 +125,7 @@ pub(super) fn web_search_tool(config: Arc<ArcSwap<WebSearchConfig>>) -> Register
         },
         backend: ToolBackend::BuiltIn(Arc::new(WebSearchTool { config })),
         provides_capabilities: vec!["web_access".into()],
+        exempt_from_timeout: false,
     }
 }
 

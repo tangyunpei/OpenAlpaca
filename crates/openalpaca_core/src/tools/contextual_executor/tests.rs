@@ -25,6 +25,7 @@ fn make_registry_with_tools(names: &[&str]) -> Arc<ToolRegistry> {
             },
             backend: ToolBackend::BuiltIn(Arc::new(CaptureTool)),
             provides_capabilities: vec![],
+            exempt_from_timeout: false,
         });
     }
     Arc::new(registry)
