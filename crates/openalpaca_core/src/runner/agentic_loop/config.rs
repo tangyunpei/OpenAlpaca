@@ -54,6 +54,9 @@ pub struct LoopConfig {
     /// If `collect_stream()` exceeds this, it is cancelled and the loop
     /// falls back to non-streaming. Default: 10 minutes.
     pub max_stream_duration: Duration,
+    /// Model to use for LLM-based context compaction (extraction + summarization).
+    /// When `None`, falls back to heuristic-only compaction.
+    pub compaction_model: Option<String>,
 }
 
 impl Clone for LoopConfig {
@@ -74,6 +77,7 @@ impl Clone for LoopConfig {
             thinking: self.thinking.clone(),
             stream_callback: self.stream_callback.clone(),
             max_stream_duration: self.max_stream_duration,
+            compaction_model: self.compaction_model.clone(),
         }
     }
 }
@@ -92,6 +96,7 @@ impl std::fmt::Debug for LoopConfig {
             .field("thinking", &self.thinking)
             .field("stream_callback", &self.stream_callback.is_some())
             .field("max_stream_duration", &self.max_stream_duration)
+            .field("compaction_model", &self.compaction_model)
             .finish()
     }
 }
@@ -114,6 +119,7 @@ impl Default for LoopConfig {
             thinking: None,
             stream_callback: None,
             max_stream_duration: Duration::from_secs(600),
+            compaction_model: None,
         }
     }
 }
@@ -171,6 +177,7 @@ impl LoopConfig {
             thinking: None,
             stream_callback: None,
             max_stream_duration: Duration::from_secs(600),
+            compaction_model: None,
         }
     }
 
