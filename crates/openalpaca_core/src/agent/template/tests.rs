@@ -6,11 +6,11 @@ name: "Code Agent"
 description: "Software development agent for coding tasks"
 icon: "code"
 singleton: false
-skills:
+capabilities:
   - "file_read"
   - "file_write"
   - "shell_execute"
-denied_skills:
+denied_capabilities:
   - "web_search"
   - "web_fetch"
 temperature: 0.3
@@ -51,7 +51,7 @@ name: "Lead Agent"
 description: "Orchestrates complex tasks"
 icon: "brain"
 singleton: true
-skills:
+capabilities:
   - "lead_orchestration"
 temperature: 0.3
 verbosity: "detailed"
@@ -75,8 +75,8 @@ fn test_parse_frontmatter_full() {
     );
     assert_eq!(fm.icon, Some("code".to_string()));
     assert!(!fm.singleton);
-    assert_eq!(fm.skills, vec!["file_read", "file_write", "shell_execute"]);
-    assert_eq!(fm.denied_skills, vec!["web_search", "web_fetch"]);
+    assert_eq!(fm.capabilities, vec!["file_read", "file_write", "shell_execute"]);
+    assert_eq!(fm.denied_capabilities, vec!["web_search", "web_fetch"]);
     assert_eq!(fm.temperature, 0.3);
     assert_eq!(fm.verbosity, "detailed");
     assert_eq!(fm.model, Some("claude-sonnet-4-5-20250929".to_string()));
@@ -107,8 +107,8 @@ fn test_parse_minimal() {
     assert_eq!(doc.frontmatter.description, "A minimal agent definition");
     assert_eq!(doc.frontmatter.icon, None);
     assert!(!doc.frontmatter.singleton);
-    assert!(doc.frontmatter.skills.is_empty());
-    assert!(doc.frontmatter.denied_skills.is_empty());
+    assert!(doc.frontmatter.capabilities.is_empty());
+    assert!(doc.frontmatter.denied_capabilities.is_empty());
     assert_eq!(doc.frontmatter.temperature, 0.5); // default
     assert_eq!(doc.frontmatter.verbosity, "normal"); // default
     assert_eq!(doc.frontmatter.model, None);
@@ -123,7 +123,7 @@ fn test_parse_singleton() {
     let fm = parse_agent_frontmatter(SINGLETON_AGENT).expect("should parse");
     assert_eq!(fm.id, "lead_agent");
     assert!(fm.singleton);
-    assert_eq!(fm.skills, vec!["lead_orchestration"]);
+    assert_eq!(fm.capabilities, vec!["lead_orchestration"]);
 }
 
 #[test]

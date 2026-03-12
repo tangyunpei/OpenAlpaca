@@ -217,7 +217,7 @@ pub(super) async fn execute_pipeline_step(
     // Resolve tools via shared helper
     let tools = crate::tools::resolve_agent_tools(agent, &pctx.tool_registry);
     tracing::info!(
-        "Agent '{}' loaded {} tool definitions for skills: {:?}",
+        "Agent '{}' loaded {} tool definitions for capabilities: {:?}",
         agent_id,
         tools.len(),
         agent.capabilities.iter().map(|s| &s.name).collect::<Vec<_>>()

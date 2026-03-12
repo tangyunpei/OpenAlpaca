@@ -28,10 +28,10 @@ pub struct AgentTemplateFrontmatter {
     pub icon: Option<String>,
     /// If true, only one instance can be active at a time.
     pub singleton: bool,
-    /// Tool/skill names this agent can use.
-    pub skills: Vec<String>,
-    /// Tool/skill names explicitly denied.
-    pub denied_skills: Vec<String>,
+    /// Tool/capability names this agent can use.
+    pub capabilities: Vec<String>,
+    /// Tool/capability names explicitly denied.
+    pub denied_capabilities: Vec<String>,
     /// LLM temperature (default 0.5).
     pub temperature: f32,
     /// Verbosity level: "concise", "normal", "detailed" (default "normal").
@@ -191,8 +191,8 @@ fn parse_agent_frontmatter_lines(
     let mut description: Option<String> = None;
     let mut icon: Option<String> = None;
     let mut singleton: bool = false;
-    let mut skills: Vec<String> = Vec::new();
-    let mut denied_skills: Vec<String> = Vec::new();
+    let mut capabilities: Vec<String> = Vec::new();
+    let mut denied_capabilities: Vec<String> = Vec::new();
     let mut temperature: f32 = 0.5;
     let mut verbosity: String = "normal".to_string();
     let mut model: Option<String> = None;
@@ -239,22 +239,22 @@ fn parse_agent_frontmatter_lines(
             idx += 1;
             continue;
         }
-        // "skills:" list (must come before "denied_skills:" check)
-        if trimmed == "skills:" {
-            skills = parse_yaml_list(lines, &mut idx);
+        // "capabilities:" list (must come before "denied_capabilities:" check)
+        if trimmed == "capabilities:" {
+            capabilities = parse_yaml_list(lines, &mut idx);
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("skills: ") {
-            skills = vec![strip_outer_quotes(rest)];
+        if let Some(rest) = trimmed.strip_prefix("capabilities: ") {
+            capabilities = vec![strip_outer_quotes(rest)];
             idx += 1;
             continue;
         }
-        if trimmed == "denied_skills:" {
-            denied_skills = parse_yaml_list(lines, &mut idx);
+        if trimmed == "denied_capabilities:" {
+            denied_capabilities = parse_yaml_list(lines, &mut idx);
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("denied_skills: ") {
-            denied_skills = vec![strip_outer_quotes(rest)];
+        if let Some(rest) = trimmed.strip_prefix("denied_capabilities: ") {
+            denied_capabilities = vec![strip_outer_quotes(rest)];
             idx += 1;
             continue;
         }
@@ -324,8 +324,8 @@ fn parse_agent_frontmatter_lines(
         description,
         icon,
         singleton,
-        skills,
-        denied_skills,
+        capabilities,
+        denied_capabilities,
         temperature,
         verbosity,
         model,
@@ -428,16 +428,16 @@ pub fn render_agent_markdown(template: &AgentTemplate) -> String {
     if fm.singleton {
         out.push_str("singleton: true\n");
     }
-    if !fm.skills.is_empty() {
-        out.push_str("skills:\n");
-        for skill in &fm.skills {
-            out.push_str(&format!("  - \"{}\"\n", skill));
+    if !fm.capabilities.is_empty() {
+        out.push_str("capabilities:\n");
+        for cap in &fm.capabilities {
+            out.push_str(&format!("  - \"{}\"\n", cap));
         }
     }
-    if !fm.denied_skills.is_empty() {
-        out.push_str("denied_skills:\n");
-        for skill in &fm.denied_skills {
-            out.push_str(&format!("  - \"{}\"\n", skill));
+    if !fm.denied_capabilities.is_empty() {
+        out.push_str("denied_capabilities:\n");
+        for cap in &fm.denied_capabilities {
+            out.push_str(&format!("  - \"{}\"\n", cap));
         }
     }
     out.push_str(&format!("temperature: {}\n", fm.temperature));
@@ -504,7 +504,7 @@ impl AgentTemplate {
         let persona = extract_persona(self);
 
         let mut capabilities: Vec<Capability> = fm
-            .skills
+            .capabilities
             .iter()
             .map(|name| Capability {
                 name: name.clone(),
@@ -525,17 +525,16 @@ impl AgentTemplate {
             }
         }
 
-        // Merge denied_skills into denied_capabilities.
         // Always include workspace tools — they are infrastructure tools
         // available to any agent executing in a task context (pipeline/DAG).
         // The ContextualToolExecutor already gates them on task_id presence.
-        let mut allowed_capabilities = fm.skills.clone();
+        let mut allowed_capabilities = fm.capabilities.clone();
         for ws_tool in ["workspace_read", "workspace_write"] {
             if !allowed_capabilities.iter().any(|c| c == ws_tool) {
                 allowed_capabilities.push(ws_tool.to_string());
             }
         }
-        let denied_capabilities = fm.denied_skills.clone();
+        let denied_capabilities = fm.denied_capabilities.clone();
 
         SubAgent {
             id: instance_id.to_string(),

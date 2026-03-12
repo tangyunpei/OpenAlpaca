@@ -489,10 +489,10 @@ pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> Too
         .iter()
         .map(|t| {
             let fm = &t.frontmatter;
-            let skills = fm.skills.join(", ");
+            let capabilities = fm.capabilities.join(", ");
             format!(
-                "- ID: \"{}\", Name: \"{}\", Skills: [{}]",
-                fm.id, fm.name, skills
+                "- ID: \"{}\", Name: \"{}\", Capabilities: [{}]",
+                fm.id, fm.name, capabilities
             )
         })
         .collect();
@@ -699,10 +699,10 @@ pub fn spawn_subagent_tool_definition_from_templates(
         .iter()
         .map(|t| {
             let fm = &t.frontmatter;
-            let skills = fm.skills.join(", ");
+            let capabilities = fm.capabilities.join(", ");
             format!(
-                "- ID: \"{}\", Name: \"{}\", Skills: [{}], Description: \"{}\"",
-                fm.id, fm.name, skills, fm.description
+                "- ID: \"{}\", Name: \"{}\", Capabilities: [{}], Description: \"{}\"",
+                fm.id, fm.name, capabilities, fm.description
             )
         })
         .collect();
