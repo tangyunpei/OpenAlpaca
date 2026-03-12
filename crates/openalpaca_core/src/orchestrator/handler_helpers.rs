@@ -139,6 +139,7 @@ impl Orchestrator {
                     scope_ctx,
                     current_parts,
                     stream_id,
+                    None,
                 )
                 .await
             }
@@ -187,6 +188,7 @@ impl Orchestrator {
                                     scope_ctx,
                                     current_parts,
                                     stream_id,
+                                    None,
                                 )
                                 .await
                             }

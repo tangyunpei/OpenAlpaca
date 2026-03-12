@@ -2,10 +2,19 @@ use super::Orchestrator;
 use crate::middleware::bootstrap::bootstrap_to_prompt_block;
 use crate::middleware::identity::identity_to_prompt_block;
 use crate::middleware::prompt::{AgentPersona, PromptAssembler};
-use openalpaca_llm::{ChatMessage, ContentPart, ImageSource, Role, ToolChoice};
+use openalpaca_llm::{ChatMessage, ContentPart, ImageSource, Role, ToolChoice, ToolDefinition};
 use openalpaca_storage::repository::PreferenceRepository;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Optional overrides for handle_simple_query loop configuration.
+/// Used by the deep_query triage tier to expand budget and provide LLM-suggested tools.
+pub(super) struct LoopOverrides {
+    pub max_rounds: usize,
+    pub max_tools_per_round: usize,
+    /// When non-empty, replaces the keyword-heuristic tool list.
+    pub override_tools: Vec<ToolDefinition>,
+}
 
 mod simple_query_handler;
 

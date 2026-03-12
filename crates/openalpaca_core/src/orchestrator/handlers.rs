@@ -152,6 +152,7 @@ impl Orchestrator {
                 &scope_ctx,
                 current_parts.as_deref(),
                 stream_id.as_deref(),
+                None,
             )
             .await
         } else if force_simple_query {
@@ -167,6 +168,7 @@ impl Orchestrator {
                 &scope_ctx,
                 current_parts.as_deref(),
                 stream_id.as_deref(),
+                None,
             )
             .await
         } else if self.llm_router.is_some()
@@ -216,177 +218,35 @@ impl Orchestrator {
                 &scope_ctx,
                 current_parts.as_deref(),
                 stream_id.as_deref(),
-            )
-            .await
-        } else if self.llm_router.is_some()
-            && matches!(intent, Intent::SimpleQuery { .. })
-            && self
-                .daemon_config
-                .load()
-                .execution
-                .planner
-                .enhanced_pre_screen_enabled
-            && self
-                .intent_parser
-                .is_enhanced_simple_query(&intent_source_content)
-        {
-            // Enhanced pre-screen: skip LLM planner for likely simple queries
-            mode = "pre_screen_simple".to_string();
-            self.bus.publish(SystemEvent::PlannerBypassed {
-                request_id,
-                reason: "enhanced_pre_screen".to_string(),
-                timestamp: Utc::now(),
-            });
-            self.handle_simple_query(
-                request_id,
-                &source,
-                &model_input_content,
-                &intent_source_content,
-                &lane_key,
-                &ctx,
-                owner_id,
-                &scope_ctx,
-                current_parts.as_deref(),
-                stream_id.as_deref(),
+                None,
             )
             .await
         } else if let Some(ref router) = self.llm_router
             && matches!(intent, Intent::SimpleQuery { .. })
             && self.daemon_config.load().execution.planner.two_phase_enabled
         {
-            // Two-phase: lightweight LLM classification before full planner
+            // Two-phase: 3-way LLM triage (simple_query / deep_query / complex_task)
             let planner_cfg = self.daemon_config.load();
             let triage_model = planner_cfg.execution.planner.triage_model.as_deref();
+            let available_tool_names = self.tool_registry.registered_tool_names();
             match TaskPlanner::classify_lightweight(
                 router,
                 triage_model,
                 &intent_source_content,
                 10,
+                &available_tool_names,
             )
             .await
             {
-                Ok(ref c) if c == "simple_query" => {
-                    mode = "two_phase_simple".to_string();
-                    self.bus.publish(SystemEvent::PlannerBypassed {
-                        request_id,
-                        reason: "two_phase_lightweight".to_string(),
-                        timestamp: Utc::now(),
-                    });
-                    self.handle_simple_query(
-                        request_id,
-                        &source,
-                        &model_input_content,
-                        &intent_source_content,
-                        &lane_key,
-                        &ctx,
-                        owner_id,
-                        &scope_ctx,
-                        current_parts.as_deref(),
-                        stream_id.as_deref(),
-                    )
-                    .await
-                }
-                _ => {
-                    // Fall through to full planner — re-enter via heuristic dispatcher
-                    // which handles all remaining intent types including ComplexTask
-                    mode = "two_phase_complex".to_string();
-                    let (idle_agents, limits, dag_prefer) = self.build_planner_inputs();
-                    let active_tasks_block = owner_id.and_then(|id| self.build_active_tasks_block(id));
-
-                    let planner_start = Instant::now();
-                    let plan_result = TaskPlanner::plan_hierarchical(
-                        router,
-                        &model_input_content,
-                        &idle_agents,
-                        &ctx.recent_messages,
-                        ctx.summary.as_deref(),
-                        active_tasks_block.as_deref(),
-                        limits,
-                        dag_prefer,
-                    )
-                    .await;
-                    planner_ms = planner_start.elapsed().as_millis() as u64;
-
-                    match plan_result {
-                        Ok(plan) => {
-                            auto_promotion_reason = plan.auto_promotion_reason.clone();
-                            match plan.classification.as_str() {
-                                "simple_query" => {
-                                    self.handle_simple_query(
-                                        request_id,
-                                        &source,
-                                        &model_input_content,
-                                        &intent_source_content,
-                                        &lane_key,
-                                        &ctx,
-                                        owner_id,
-                                        &scope_ctx,
-                                        current_parts.as_deref(),
-                                        stream_id.as_deref(),
-                                    )
-                                    .await
-                                }
-                                "complex_task" => {
-                                    let description = &model_input_content;
-                                    let augmented =
-                                        self.augment_with_context(description, &ctx);
-                                    let dispatch_start = Instant::now();
-                                    let dispatch_result =
-                                        self.task_dispatcher.dispatch_planned(
-                                            request_id,
-                                            &augmented,
-                                            plan,
-                                            &principal_id(&principal),
-                                            &lane_key,
-                                            &source,
-                                            scope_ctx.workspace_id.clone(),
-                                        );
-                                    dispatch_ms =
-                                        dispatch_start.elapsed().as_millis() as u64;
-                                    match dispatch_result {
-                                        Ok(response) => Ok(response),
-                                        Err(e) => {
-                                            fallback_reason = Some(format!(
-                                                "two_phase_dispatch_failed: {e}"
-                                            ));
-                                            self.handle_simple_query(
-                                                request_id,
-                                                &source,
-                                                &model_input_content,
-                                                &intent_source_content,
-                                                &lane_key,
-                                                &ctx,
-                                                owner_id,
-                                                &scope_ctx,
-                                                current_parts.as_deref(),
-                                                stream_id.as_deref(),
-                                            )
-                                            .await
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    fallback_reason =
-                                        Some("two_phase_unknown_classification".to_string());
-                                    self.handle_simple_query(
-                                        request_id,
-                                        &source,
-                                        &model_input_content,
-                                        &intent_source_content,
-                                        &lane_key,
-                                        &ctx,
-                                        owner_id,
-                                        &scope_ctx,
-                                        current_parts.as_deref(),
-                                        stream_id.as_deref(),
-                                    )
-                                    .await
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            fallback_reason =
-                                Some(format!("two_phase_planner_failed: {e}"));
+                Ok(triage) => {
+                    match triage.classification.as_str() {
+                        "simple_query" => {
+                            mode = "two_phase_simple".to_string();
+                            self.bus.publish(SystemEvent::PlannerBypassed {
+                                request_id,
+                                reason: "two_phase_lightweight".to_string(),
+                                timestamp: Utc::now(),
+                            });
                             self.handle_simple_query(
                                 request_id,
                                 &source,
@@ -398,10 +258,181 @@ impl Orchestrator {
                                 &scope_ctx,
                                 current_parts.as_deref(),
                                 stream_id.as_deref(),
+                                None,
+                            )
+                            .await
+                        }
+                        "complex_task" => {
+                            // Fall through to full planner for multi-agent tasks
+                            mode = "two_phase_complex".to_string();
+                            let (idle_agents, limits, dag_prefer) = self.build_planner_inputs();
+                            let active_tasks_block = owner_id.and_then(|id| self.build_active_tasks_block(id));
+
+                            let planner_start = Instant::now();
+                            let plan_result = TaskPlanner::plan_hierarchical(
+                                router,
+                                &model_input_content,
+                                &idle_agents,
+                                &ctx.recent_messages,
+                                ctx.summary.as_deref(),
+                                active_tasks_block.as_deref(),
+                                limits,
+                                dag_prefer,
+                            )
+                            .await;
+                            planner_ms = planner_start.elapsed().as_millis() as u64;
+
+                            match plan_result {
+                                Ok(plan) => {
+                                    auto_promotion_reason = plan.auto_promotion_reason.clone();
+                                    match plan.classification.as_str() {
+                                        "simple_query" => {
+                                            self.handle_simple_query(
+                                                request_id,
+                                                &source,
+                                                &model_input_content,
+                                                &intent_source_content,
+                                                &lane_key,
+                                                &ctx,
+                                                owner_id,
+                                                &scope_ctx,
+                                                current_parts.as_deref(),
+                                                stream_id.as_deref(),
+                                                None,
+                                            )
+                                            .await
+                                        }
+                                        "complex_task" => {
+                                            let description = &model_input_content;
+                                            let augmented =
+                                                self.augment_with_context(description, &ctx);
+                                            let dispatch_start = Instant::now();
+                                            let dispatch_result =
+                                                self.task_dispatcher.dispatch_planned(
+                                                    request_id,
+                                                    &augmented,
+                                                    plan,
+                                                    &principal_id(&principal),
+                                                    &lane_key,
+                                                    &source,
+                                                    scope_ctx.workspace_id.clone(),
+                                                );
+                                            dispatch_ms =
+                                                dispatch_start.elapsed().as_millis() as u64;
+                                            match dispatch_result {
+                                                Ok(response) => Ok(response),
+                                                Err(e) => {
+                                                    fallback_reason = Some(format!(
+                                                        "two_phase_dispatch_failed: {e}"
+                                                    ));
+                                                    self.handle_simple_query(
+                                                        request_id,
+                                                        &source,
+                                                        &model_input_content,
+                                                        &intent_source_content,
+                                                        &lane_key,
+                                                        &ctx,
+                                                        owner_id,
+                                                        &scope_ctx,
+                                                        current_parts.as_deref(),
+                                                        stream_id.as_deref(),
+                                                        None,
+                                                    )
+                                                    .await
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            fallback_reason =
+                                                Some("two_phase_unknown_classification".to_string());
+                                            self.handle_simple_query(
+                                                request_id,
+                                                &source,
+                                                &model_input_content,
+                                                &intent_source_content,
+                                                &lane_key,
+                                                &ctx,
+                                                owner_id,
+                                                &scope_ctx,
+                                                current_parts.as_deref(),
+                                                stream_id.as_deref(),
+                                                None,
+                                            )
+                                            .await
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    fallback_reason =
+                                        Some(format!("two_phase_planner_failed: {e}"));
+                                    self.handle_simple_query(
+                                        request_id,
+                                        &source,
+                                        &model_input_content,
+                                        &intent_source_content,
+                                        &lane_key,
+                                        &ctx,
+                                        owner_id,
+                                        &scope_ctx,
+                                        current_parts.as_deref(),
+                                        stream_id.as_deref(),
+                                        None,
+                                    )
+                                    .await
+                                }
+                            }
+                        }
+                        _ => {
+                            // deep_query (or unknown tier): expanded agentic loop with LLM-suggested tools
+                            mode = "two_phase_deep_query".to_string();
+                            let deep_cfg = &planner_cfg.execution.planner;
+                            let override_tools: Vec<openalpaca_llm::ToolDefinition> = triage
+                                .suggested_tools
+                                .iter()
+                                .filter_map(|name| self.tool_registry.get(name))
+                                .map(|t| t.definition.clone())
+                                .collect();
+                            let overrides = super::query_handler::LoopOverrides {
+                                max_rounds: deep_cfg.deep_query_max_rounds,
+                                max_tools_per_round: deep_cfg.deep_query_max_tools_per_round,
+                                override_tools,
+                            };
+                            self.handle_simple_query(
+                                request_id,
+                                &source,
+                                &model_input_content,
+                                &intent_source_content,
+                                &lane_key,
+                                &ctx,
+                                owner_id,
+                                &scope_ctx,
+                                current_parts.as_deref(),
+                                stream_id.as_deref(),
+                                Some(overrides),
                             )
                             .await
                         }
                     }
+                }
+                Err(e) => {
+                    // Triage failed: fall back to simple query
+                    tracing::warn!("Lightweight triage failed: {e}, falling back to simple_query");
+                    mode = "two_phase_triage_failed".to_string();
+                    fallback_reason = Some(format!("triage_failed: {e}"));
+                    self.handle_simple_query(
+                        request_id,
+                        &source,
+                        &model_input_content,
+                        &intent_source_content,
+                        &lane_key,
+                        &ctx,
+                        owner_id,
+                        &scope_ctx,
+                        current_parts.as_deref(),
+                        stream_id.as_deref(),
+                        None,
+                    )
+                    .await
                 }
             }
         } else if let Some(ref router) = self.llm_router {
@@ -444,6 +475,7 @@ impl Orchestrator {
                                 &scope_ctx,
                                 current_parts.as_deref(),
                                 stream_id.as_deref(),
+                                None,
                             )
                             .await
                         }
@@ -487,6 +519,7 @@ impl Orchestrator {
                                         &scope_ctx,
                                         current_parts.as_deref(),
                                         stream_id.as_deref(),
+                                        None,
                                     )
                                     .await
                                 }

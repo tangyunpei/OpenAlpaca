@@ -362,21 +362,40 @@ pub(super) async fn plan_inner(
 // ── Lightweight classification ──────────────────────────────────────
 
 impl TaskPlanner {
-    /// Lightweight LLM classification: uses a minimal prompt (~200 tokens) to determine
-    /// if a message is simple_query or complex_task.
+    /// Lightweight LLM classification: uses a minimal prompt to determine
+    /// if a message is simple_query, deep_query, or complex_task.
+    /// Returns a `TriageResult` with classification and suggested tools.
     pub async fn classify_lightweight(
         router: &LlmRouter,
         triage_model: Option<&str>,
         user_message: &str,
         timeout_secs: u64,
-    ) -> Result<String, PlanError> {
+        available_tool_names: &[String],
+    ) -> Result<super::types::TriageResult, PlanError> {
+        let tool_list = if available_tool_names.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nAvailable tools: {}\n",
+                available_tool_names.join(", ")
+            )
+        };
+        let system_prompt = format!(
+            "Classify the user message. Respond ONLY with a JSON object.\n\
+             {tool_list}\
+             Output format:\n\
+             {{\"classification\": \"<class>\", \"suggested_tools\": [\"tool1\", ...]}}\n\n\
+             Classifications:\n\
+             - simple_query: greetings, factual Q&A, opinions, conversation. No tools needed.\n\
+             - deep_query: needs tool access (search, file ops, analysis) or multi-step reasoning, \
+               but a single agent can handle it. Include relevant tool names in suggested_tools.\n\
+             - complex_task: needs multiple specialized agents, coordination, or multi-step workflows.\n\n\
+             For simple_query, set suggested_tools to [].\n\
+             For complex_task, set suggested_tools to []."
+        );
+
         let messages = vec![
-            ChatMessage::system(
-                "Classify the user message. Respond ONLY with a JSON object:\n\
-                 {\"classification\": \"simple_query\"} or {\"classification\": \"complex_task\"}\n\
-                 simple_query = greetings, questions, conversation.\n\
-                 complex_task = multi-step tasks needing agent work.",
-            ),
+            ChatMessage::system(&system_prompt),
             ChatMessage::user(user_message),
         ];
         let request = RouterRequest {
@@ -384,7 +403,7 @@ impl TaskPlanner {
             messages: Arc::new(messages),
             tools: Arc::new(vec![]),
             temperature: Some(0.0),
-            max_tokens: Some(50),
+            max_tokens: Some(150),
             context: RequestContext::default(),
             tool_choice: None,
             tools_token_estimate: None,
@@ -398,11 +417,31 @@ impl TaskPlanner {
             .map_err(|e| PlanError::LlmError(e.to_string()))?;
 
         let json_str = extract_json_block(&response.content);
+
+        // Try structured parse first
+        if let Ok(triage) = serde_json::from_str::<super::types::TriageResult>(json_str) {
+            return Ok(triage);
+        }
+
+        // Legacy fallback: try extracting just the classification field
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str)
             && let Some(c) = val.get("classification").and_then(|v| v.as_str())
         {
-            return Ok(c.to_string());
+            return Ok(super::types::TriageResult {
+                classification: c.to_string(),
+                suggested_tools: vec![],
+            });
         }
+
+        // Last resort: raw string matching
+        let content = response.content.to_lowercase();
+        if content.contains("simple") {
+            return Ok(super::types::TriageResult {
+                classification: "simple_query".to_string(),
+                suggested_tools: vec![],
+            });
+        }
+
         Err(PlanError::MalformedResponse(
             "lightweight classification failed".into(),
         ))

@@ -308,6 +308,7 @@ pub async fn run_lead_agent(
         &lead_agent.id,
         Some(&sandbox_policy),
         Some(task_id),
+        None, // context_budget
         cancel_token,
     )
     .await;
