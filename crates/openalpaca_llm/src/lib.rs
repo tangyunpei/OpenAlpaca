@@ -1,5 +1,6 @@
 pub mod cli_backend;
 pub mod config;
+pub mod context_management;
 pub mod embedder;
 pub mod error;
 pub mod keys;
