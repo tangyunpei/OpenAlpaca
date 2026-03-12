@@ -14,6 +14,7 @@ pub mod runner;
 pub mod security;
 pub mod tools;
 pub mod types;
+pub mod utils;
 
 #[cfg(test)]
 pub(crate) mod test_util;
