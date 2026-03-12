@@ -15,15 +15,14 @@ mod tracker;
 pub(crate) use guard::AgentBusyGuard;
 pub use prompt::build_lead_agent_prompt_from_templates;
 pub use tools::{
-    check_subagent_status_tool_definition, spawn_subagent_tool_definition_from_templates,
+    check_subagent_status_tool_definition, register_coordination_tools,
+    spawn_subagent_tool_definition_from_templates,
     spawn_subagents_batch_tool_definition, wait_for_subagents_tool_definition,
     CheckSubagentStatusTool, LeadAgentToolExecutor, SpawnSubagentTool,
     SpawnSubagentsBatchTool, WaitForSubagentsTool,
 };
 pub use tracker::{SubagentStatus, SubagentTracker};
 
-#[cfg(test)]
-use crate::agent::subagent::AgentStatus;
 use crate::agent::subagent::SubAgent;
 use crate::agent::template::AgentTemplate;
 use crate::bus::EventBus;
@@ -32,7 +31,8 @@ use crate::daemon_config::DaemonConfig;
 use crate::middleware::prompt::format_tool_guidance;
 use crate::runner::{LoopConfig, LoopResult, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
-use crate::tools::{ContextualToolExecutor, ToolExecutionContext, ToolRegistry};
+use crate::tools::ToolRegistry;
+use crate::tools::registry::ToolContext;
 use arc_swap::ArcSwap;
 use openalpaca_llm::{ChatMessage, LlmRouter};
 use openalpaca_storage::Database;
@@ -44,8 +44,6 @@ use tokio_util::sync::CancellationToken;
 use async_trait::async_trait;
 #[cfg(test)]
 use crate::tools::registry::BuiltInTool;
-#[cfg(test)]
-use crate::security::sandbox::ToolExecutor;
 #[cfg(test)]
 use openalpaca_llm::ToolDefinition;
 #[cfg(test)]
@@ -160,32 +158,41 @@ pub async fn run_lead_agent(
         tracker: tracker.clone(),
     });
 
-    let ctx_exec = ToolExecutionContext {
-        owner_id: Some(created_by.to_string()),
-        task_id: Some(task_id.to_string()),
+    let tool_ctx = ToolContext {
         agent_id: Some(lead_agent.id.clone()),
-        db: db.clone(),
+        task_id: Some(task_id.to_string()),
+        owner_id: Some(created_by.to_string()),
         workspace_id: workspace_id.clone(),
     };
-    let contextual_executor =
-        Arc::new(ContextualToolExecutor::new(tool_registry.clone(), ctx_exec));
 
-    let batch_spawn_tool = if batch_spawn_enabled {
+    // Build a per-request ToolRegistry containing the base tools plus
+    // lead agent coordination tools (spawn, check_status, wait, batch_spawn).
+    let mut lead_registry = (*tool_registry).clone();
+    let batch_tool = if batch_spawn_enabled {
         Some(Arc::new(SpawnSubagentsBatchTool::new(spawn_tool.clone())))
     } else {
         None
     };
-
-    let lead_executor = Arc::new(LeadAgentToolExecutor::new(
+    let batch_def = if batch_spawn_enabled {
+        Some(spawn_subagents_batch_tool_definition(&worker_templates))
+    } else {
+        None
+    };
+    register_coordination_tools(
+        &mut lead_registry,
         spawn_tool.clone(),
-        batch_spawn_tool,
+        batch_tool,
         check_status_tool,
         wait_tool,
-        contextual_executor,
-    ));
+        spawn_subagent_tool_definition_from_templates(&worker_templates),
+        batch_def,
+        check_subagent_status_tool_definition(),
+        wait_for_subagents_tool_definition(),
+    );
+    let lead_registry = Arc::new(lead_registry);
 
     // 5. Build SandboxManager with lead agent's policy
-    let mut sandbox = SandboxManager::with_defaults(lead_executor, bus.clone());
+    let mut sandbox = SandboxManager::with_defaults(lead_registry, bus.clone());
     if let Some(ref broker) = confirmation_broker {
         sandbox.set_confirmation_broker(broker.clone());
     }
@@ -329,6 +336,7 @@ pub async fn run_lead_agent(
         Some(task_id),
         Some(&context_budget),
         cancel_token,
+        Some(&tool_ctx),
     )
     .await;
 
