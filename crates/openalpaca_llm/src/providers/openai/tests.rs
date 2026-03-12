@@ -17,6 +17,7 @@ fn test_request_format() {
         tool_choice: None,
         enable_caching: false,
         thinking: None,
+        context_management: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -133,6 +134,7 @@ fn test_request_serialization_filters_empty_text_parts() {
         tool_choice: None,
         enable_caching: false,
         thinking: None,
+        context_management: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -161,6 +163,7 @@ fn test_request_serialization_empty_parts_get_placeholder() {
         tool_choice: None,
         enable_caching: false,
         thinking: None,
+        context_management: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -202,6 +205,7 @@ fn test_openai_tool_strict_mode() {
         tool_choice: None,
         enable_caching: false,
         thinking: None,
+        context_management: None,
     };
     let body = provider.build_request_body(&request);
     let tools = body["tools"].as_array().unwrap();
@@ -397,6 +401,7 @@ fn test_openai_reasoning_effort_mapping() {
         tool_choice: None,
         enable_caching: false,
         thinking: Some(ThinkingConfig::Enabled { budget_tokens: 4096 }),
+        context_management: None,
     };
     let body = provider.build_request_body(&request);
     assert_eq!(body["reasoning_effort"], "high");
@@ -412,6 +417,7 @@ fn test_openai_reasoning_effort_mapping() {
         tool_choice: None,
         enable_caching: false,
         thinking: Some(ThinkingConfig::Adaptive),
+        context_management: None,
     };
     let body2 = provider.build_request_body(&request2);
     assert_eq!(body2["reasoning_effort"], "medium");
@@ -426,6 +432,7 @@ fn test_openai_reasoning_effort_mapping() {
         tool_choice: None,
         enable_caching: false,
         thinking: Some(ThinkingConfig::Disabled),
+        context_management: None,
     };
     let body3 = provider.build_request_body(&request3);
     assert!(body3.get("reasoning_effort").is_none() || body3["reasoning_effort"].is_null());

@@ -36,6 +36,7 @@ impl LlmRouter {
                 tool_choice: None,
                 enable_caching: false,
                 thinking: None,
+                context_management: None,
             };
             match cli_backend.chat(cli_request).await {
                 Ok(response) => {

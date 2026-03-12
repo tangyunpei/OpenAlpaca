@@ -256,6 +256,7 @@ pub(super) async fn plan_inner(
             tools_token_estimate: None,
             enable_caching: false,
             thinking: None,
+            context_management: None,
         };
 
         let response = tokio::time::timeout(deadline, router.complete(request))
@@ -409,6 +410,7 @@ impl TaskPlanner {
             tools_token_estimate: None,
             enable_caching: false,
             thinking: None,
+            context_management: None,
         };
         let deadline = Duration::from_secs(timeout_secs);
         let response = tokio::time::timeout(deadline, router.complete(request))

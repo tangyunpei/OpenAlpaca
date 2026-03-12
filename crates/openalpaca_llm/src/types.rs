@@ -291,6 +291,8 @@ pub struct ChatRequest {
     pub enable_caching: bool,
     /// Extended thinking config (Anthropic only). Non-Anthropic providers ignore this.
     pub thinking: Option<ThinkingConfig>,
+    /// Context management configuration (Anthropic only). Other providers ignore this.
+    pub context_management: Option<crate::context_management::ContextManagement>,
 }
 
 #[derive(Debug, Clone)]

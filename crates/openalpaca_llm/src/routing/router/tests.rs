@@ -75,6 +75,7 @@ fn make_request(model: Option<&str>) -> RouterRequest {
         tools_token_estimate: None,
         enable_caching: false,
         thinking: None,
+        context_management: None,
     }
 }
 

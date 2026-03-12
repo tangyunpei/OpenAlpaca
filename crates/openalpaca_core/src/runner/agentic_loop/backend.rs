@@ -47,6 +47,7 @@ impl<'a> LlmBackend<'a> {
                     tool_choice,
                     enable_caching,
                     thinking,
+                    context_management: None,
                 };
                 provider.chat(request).await.map_err(LlmRouterError::Llm)
             }
@@ -64,6 +65,7 @@ impl<'a> LlmBackend<'a> {
                         tools_token_estimate,
                         enable_caching,
                         thinking: thinking.clone(),
+                        context_management: None,
                     };
                     match router.complete_streaming(stream_request).await {
                         Ok(stream) => {
@@ -131,6 +133,7 @@ impl<'a> LlmBackend<'a> {
                     tools_token_estimate,
                     enable_caching,
                     thinking,
+                    context_management: None,
                 };
                 router.complete(request).await
             }
