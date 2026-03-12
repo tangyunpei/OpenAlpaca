@@ -13,6 +13,20 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
 
+/// Build the `anthropic-beta` header value by collecting all active beta features.
+///
+/// Returns an empty string when no beta features are needed; the caller should
+/// skip setting the header in that case.
+fn build_beta_header(request: &ChatRequest) -> String {
+    let mut flags: Vec<&str> = Vec::new();
+
+    if request.context_management.is_some() {
+        flags.push("context-management-2025-01-15");
+    }
+
+    flags.join(",")
+}
+
 fn parse_retry_after_ms(headers: &HeaderMap) -> Option<u64> {
     headers
         .get("retry-after")
@@ -116,12 +130,20 @@ impl LlmProvider for AnthropicProvider {
         let body = request::build_request_body(&self.model, self.max_tokens, &request);
         let model_id = request.model.as_deref().unwrap_or(&self.model);
 
-        let response = self
+        let mut req_builder = self
             .client
             .post(API_URL)
             .header("x-api-key", key)
             .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+
+        // Add anthropic-beta header when beta features are in use
+        let beta_flags = build_beta_header(&request);
+        if !beta_flags.is_empty() {
+            req_builder = req_builder.header("anthropic-beta", beta_flags);
+        }
+
+        let response = req_builder
             .json(&body)
             .send()
             .await
@@ -187,12 +209,20 @@ impl LlmProvider for AnthropicProvider {
         body["stream"] = serde_json::json!(true);
         let model_id = request.model.as_deref().unwrap_or(&self.model);
 
-        let response = self
+        let mut req_builder = self
             .client
             .post(API_URL)
             .header("x-api-key", key)
             .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+
+        // Add anthropic-beta header when beta features are in use
+        let beta_flags = build_beta_header(&request);
+        if !beta_flags.is_empty() {
+            req_builder = req_builder.header("anthropic-beta", beta_flags);
+        }
+
+        let response = req_builder
             .json(&body)
             .send()
             .await
