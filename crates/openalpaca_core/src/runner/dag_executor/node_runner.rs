@@ -61,7 +61,7 @@ pub(super) async fn execute_single_node(
     } else {
         String::new()
     };
-    let system_prompt = format!(
+    let mut system_prompt = format!(
         "<identity>\n{}\n</identity>\n\n\
          <assignment>\n\
          Sub-task: {}\n\
@@ -78,6 +78,72 @@ pub(super) async fn execute_single_node(
          </output-format>{}{}",
         agent.preset.persona, node.title, node.description, tool_guidance, connector_suffix
     );
+
+    // --- Context Package (Phase C) ---
+    {
+        let denied_sections = agent.constraints.denied_sections.clone();
+
+        let mut pkg_builder = crate::context_budget::ContextPackageBuilder::new(
+            node.description.clone(),
+        );
+
+        // Workspace context will be loaded after this block, so we check workspace_snapshot
+        // to pre-populate artifacts. The actual workspace injection into messages happens later.
+        if let Some(ref state) = *workspace_snapshot {
+            let ws_ctx = state.workspace.format_for_prompt(&node.workspace_keys);
+            if !ws_ctx.is_empty() {
+                pkg_builder = pkg_builder.workspace_artifact(ws_ctx);
+            }
+        }
+
+        if !denied_sections.is_empty() {
+            pkg_builder = pkg_builder.denied_sections(&denied_sections);
+        }
+
+        let context_package = pkg_builder.build();
+
+        // Emit telemetry
+        let injected_sections_tokens = {
+            let mut t = 0usize;
+            if let Some(ref s) = context_package.conversation_summary { t += s.len() / 4 + 20; }
+            for m in &context_package.relevant_memories { t += m.len() / 4 + 10; }
+            if let Some(ref s) = context_package.user_context { t += s.len() / 4 + 20; }
+            for a in &context_package.workspace_artifacts { t += a.len() / 4 + 20; }
+            t
+        };
+        bus.publish(crate::events::SystemEvent::ContextPackageBuilt {
+            request_id: uuid::Uuid::new_v4(),
+            agent_id: agent.id.clone(),
+            sections_included: context_package.sections_included()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect(),
+            total_tokens: injected_sections_tokens,
+            memories_count: context_package.relevant_memories.len(),
+            timestamp: chrono::Utc::now(),
+        });
+
+        // Append context package optional sections to system_prompt
+        if let Some(ref summary) = context_package.conversation_summary {
+            system_prompt.push_str(&format!(
+                "\n\n<conversation-context>\n{}\n</conversation-context>",
+                summary
+            ));
+        }
+        if !context_package.relevant_memories.is_empty() {
+            let mem_block = context_package.relevant_memories.join("\n- ");
+            system_prompt.push_str(&format!(
+                "\n\n<relevant-memories>\n- {}\n</relevant-memories>",
+                mem_block
+            ));
+        }
+        if let Some(ref ctx) = context_package.user_context {
+            system_prompt.push_str(&format!(
+                "\n\n<user-context>\n{}\n</user-context>",
+                ctx
+            ));
+        }
+    }
 
     // Build messages: system + task + workspace context for this node
     let mut messages = vec![
