@@ -25,6 +25,8 @@ routing:
     intent_weight: 0.45
     keyword_weight: 0.35
     recency_weight: 0.2
+requires_capabilities:
+  - file_read
 permissions:
   level: readonly
 tools:
