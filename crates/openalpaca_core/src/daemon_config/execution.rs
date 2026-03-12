@@ -9,6 +9,7 @@ pub struct ExecutionConfig {
     pub skill_defaults: SkillDefaults,
     pub planner: PlannerConfig,
     pub dag: DagConfig,
+    pub context: ContextBudgetConfig,
 }
 
 /// Fallback defaults for regular agents (when agent TOML `[constraints]` are absent).
@@ -104,6 +105,12 @@ impl Default for SkillDefaults {
 fn default_true() -> bool {
     true
 }
+fn default_deep_query_max_rounds() -> usize {
+    10
+}
+fn default_deep_query_max_tools_per_round() -> usize {
+    4
+}
 
 /// LLM planner configuration (classification + hierarchical planning).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +147,13 @@ pub struct PlannerConfig {
     /// If None, falls back to the router's default model.
     #[serde(default)]
     pub triage_model: Option<String>,
+    /// Maximum rounds for `deep_query` tier (single-agent, expanded budget).
+    /// Default: 10.
+    #[serde(default = "default_deep_query_max_rounds")]
+    pub deep_query_max_rounds: usize,
+    /// Maximum tool calls per round for `deep_query` tier. Default: 4.
+    #[serde(default = "default_deep_query_max_tools_per_round")]
+    pub deep_query_max_tools_per_round: usize,
 }
 
 impl Default for PlannerConfig {
@@ -152,8 +166,10 @@ impl Default for PlannerConfig {
             dispatch_analysis_enabled: true,
             plan_protocol_v2_enabled: true,
             enhanced_pre_screen_enabled: true,
-            two_phase_enabled: false,
+            two_phase_enabled: true,
             triage_model: None,
+            deep_query_max_rounds: 10,
+            deep_query_max_tools_per_round: 4,
         }
     }
 }
@@ -186,6 +202,32 @@ impl Default for DagConfig {
             max_replans: 3,
             replan_enabled: false,
             critical_path_scheduling_enabled: true,
+        }
+    }
+}
+
+/// Context budget and compaction configuration.
+///
+/// Controls autocompact buffer sizing, compaction target, and extraction limits.
+/// Deserialized from `[execution.context]` in daemon.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextBudgetConfig {
+    pub autocompact_buffer_ratio: f64,
+    pub compaction_target_ratio: f64,
+    pub compaction_model: Option<String>,
+    pub max_extractions_per_compaction: usize,
+    pub min_recent_messages: usize,
+}
+
+impl Default for ContextBudgetConfig {
+    fn default() -> Self {
+        Self {
+            autocompact_buffer_ratio: 0.165,
+            compaction_target_ratio: 0.50,
+            compaction_model: None,
+            max_extractions_per_compaction: 10,
+            min_recent_messages: 4,
         }
     }
 }

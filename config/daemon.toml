@@ -23,13 +23,23 @@ max_rounds = 18
 max_tool_runtime_secs = 300
 max_tools_per_round = 3
 
+[execution.context]
+autocompact_buffer_ratio = 0.165
+compaction_target_ratio = 0.50
+# compaction_model = "claude-haiku-4-5-20251001"
+max_extractions_per_compaction = 10
+min_recent_messages = 4
+
 [execution.planner]
 dag_prefer_predictable_enabled = false
+deep_query_max_rounds = 10
+deep_query_max_tools_per_round = 4
 dispatch_analysis_enabled = false
 max_retries = 0
 max_tokens = 1024
 plan_protocol_v2_enabled = false
 planning_timeout_secs = 15
+two_phase_enabled = true
 
 [orchestrator.costs]
 extract_every_n_turns = 5
