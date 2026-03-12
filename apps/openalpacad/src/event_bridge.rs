@@ -512,6 +512,14 @@ pub fn spawn_event_bridge(
                         %request_id, %phase, duration_ms, items_processed,
                         "Compaction phase completed"
                     );
+                }
+                openalpaca_core::events::SystemEvent::ContextPackageBuilt {
+                    request_id, ref agent_id, ref sections_included, total_tokens, memories_count, ..
+                } => {
+                    tracing::debug!(
+                        %request_id, %agent_id, ?sections_included, total_tokens, memories_count,
+                        "Context package built for sub-agent"
+                    );
                 } // NO catch-all: compiler will flag any missing SystemEvent variant
             }
         }

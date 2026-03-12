@@ -407,4 +407,13 @@ pub enum SystemEvent {
         items_processed: usize,
         timestamp: DateTime<Utc>,
     },
+    /// Context package built for sub-agent dispatch
+    ContextPackageBuilt {
+        request_id: Uuid,
+        agent_id: String,
+        sections_included: Vec<String>,
+        total_tokens: usize,
+        memories_count: usize,
+        timestamp: DateTime<Utc>,
+    },
 }
