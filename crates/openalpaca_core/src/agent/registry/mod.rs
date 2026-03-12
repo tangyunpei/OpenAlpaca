@@ -94,11 +94,11 @@ impl AgentRegistry {
         self.lock_templates().values().cloned().collect()
     }
 
-    /// Find templates that have a given skill.
-    pub fn find_templates_by_skill(&self, skill_name: &str) -> Vec<AgentTemplate> {
+    /// Find templates that have a given capability.
+    pub fn find_templates_by_capability(&self, capability_name: &str) -> Vec<AgentTemplate> {
         self.lock_templates()
             .values()
-            .filter(|t| t.frontmatter.skills.iter().any(|s| s == skill_name))
+            .filter(|t| t.frontmatter.capabilities.iter().any(|s| s == capability_name))
             .cloned()
             .collect()
     }
@@ -353,11 +353,11 @@ impl AgentRegistry {
             .collect()
     }
 
-    /// Find instances that have a given skill (backward compat).
-    pub fn find_by_skill(&self, skill_name: &str) -> Vec<SubAgent> {
+    /// Find instances that have a given capability.
+    pub fn find_by_capability(&self, capability_name: &str) -> Vec<SubAgent> {
         self.lock_instances()
             .values()
-            .filter(|r| r.agent.capabilities.iter().any(|s| s.name == skill_name))
+            .filter(|r| r.agent.capabilities.iter().any(|s| s.name == capability_name))
             .map(|r| r.agent.clone())
             .collect()
     }

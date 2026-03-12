@@ -33,8 +33,8 @@ fn make_template(id: &str, skills: Vec<&str>, singleton: bool) -> AgentTemplate 
             description: format!("{} template", id),
             icon: None,
             singleton,
-            skills: skills.into_iter().map(|s| s.to_string()).collect(),
-            denied_skills: vec![],
+            capabilities: skills.into_iter().map(|s| s.to_string()).collect(),
+            denied_capabilities: vec![],
             temperature: 0.5,
             verbosity: "normal".to_string(),
             model: None,
@@ -130,19 +130,19 @@ fn test_list_idle() {
 }
 
 #[test]
-fn test_find_by_skill() {
+fn test_find_by_capability() {
     let reg = AgentRegistry::new();
     reg.register(make_agent("a1", vec!["search", "summarize"]));
     reg.register(make_agent("a2", vec!["write"]));
     reg.register(make_agent("a3", vec!["search"]));
 
-    let searchers = reg.find_by_skill("search");
+    let searchers = reg.find_by_capability("search");
     assert_eq!(searchers.len(), 2);
 
-    let writers = reg.find_by_skill("write");
+    let writers = reg.find_by_capability("write");
     assert_eq!(writers.len(), 1);
 
-    let none = reg.find_by_skill("nonexistent");
+    let none = reg.find_by_capability("nonexistent");
     assert!(none.is_empty());
 }
 
@@ -307,19 +307,19 @@ fn test_list_templates() {
 }
 
 #[test]
-fn test_find_templates_by_skill() {
+fn test_find_templates_by_capability() {
     let reg = AgentRegistry::new();
     reg.register_template(make_template("a", vec!["search"], false));
     reg.register_template(make_template("b", vec!["write"], false));
     reg.register_template(make_template("c", vec!["search", "write"], false));
 
-    let searchers = reg.find_templates_by_skill("search");
+    let searchers = reg.find_templates_by_capability("search");
     assert_eq!(searchers.len(), 2);
 
-    let writers = reg.find_templates_by_skill("write");
+    let writers = reg.find_templates_by_capability("write");
     assert_eq!(writers.len(), 2);
 
-    let none = reg.find_templates_by_skill("nonexistent");
+    let none = reg.find_templates_by_capability("nonexistent");
     assert!(none.is_empty());
 }
 
@@ -473,7 +473,7 @@ id: "test_agent"
 name: "Test Agent"
 description: "A test agent"
 singleton: false
-skills:
+capabilities:
   - "file_read"
 temperature: 0.3
 ---

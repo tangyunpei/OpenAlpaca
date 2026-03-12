@@ -31,14 +31,14 @@ pub fn build_lead_agent_prompt_from_templates(
     } else {
         for t in templates {
             let fm = &t.frontmatter;
-            let skills_str = if fm.skills.is_empty() {
+            let capabilities_str = if fm.capabilities.is_empty() {
                 "none".to_string()
             } else {
-                fm.skills.join(", ")
+                fm.capabilities.join(", ")
             };
             prompt.push_str(&format!(
-                "- id=\"{}\" name=\"{}\" skills=[{}]: {}\n",
-                fm.id, fm.name, skills_str, fm.description
+                "- id=\"{}\" name=\"{}\" capabilities=[{}]: {}\n",
+                fm.id, fm.name, capabilities_str, fm.description
             ));
         }
     }

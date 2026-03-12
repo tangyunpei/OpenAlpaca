@@ -14,20 +14,20 @@ pub(super) fn format_agent_list(out: &mut String, agents: &[SubAgent]) {
     } else {
         for agent in agents {
             let desc = agent.description.as_deref().unwrap_or("No description");
-            let skills_str: Vec<String> = agent
+            let capabilities_str: Vec<String> = agent
                 .capabilities
                 .iter()
                 .map(|s| format!("{} ({:.1})", s.name, s.proficiency))
                 .collect();
             out.push_str(&format!(
-                "<agent id=\"{}\" name=\"{}\">\n{}\nSkills: {}\n</agent>\n",
+                "<agent id=\"{}\" name=\"{}\">\n{}\nCapabilities: {}\n</agent>\n",
                 agent.id,
                 agent.name,
                 desc,
-                if skills_str.is_empty() {
+                if capabilities_str.is_empty() {
                     "none".to_string()
                 } else {
-                    skills_str.join(", ")
+                    capabilities_str.join(", ")
                 }
             ));
         }

@@ -4,7 +4,7 @@ use crate::agent::subagent::{
 use crate::agent::template::{AgentTemplate, AgentTemplateFrontmatter};
 use std::collections::HashMap;
 
-pub(crate) fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
+pub(crate) fn make_agent(id: &str, capabilities: Vec<&str>) -> SubAgent {
     SubAgent {
         id: id.to_string(),
         template_id: id.to_string(),
@@ -13,7 +13,7 @@ pub(crate) fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
         icon: None,
         status: AgentStatus::Idle,
         current_task: None,
-        capabilities: skills
+        capabilities: capabilities
             .into_iter()
             .map(|s| Capability {
                 name: s.to_string(),
@@ -39,8 +39,8 @@ pub(crate) fn template_from_agent(agent: &SubAgent) -> AgentTemplate {
             description: agent.description.clone().unwrap_or_default(),
             icon: agent.icon.clone(),
             singleton: is_lead,
-            skills: agent.capabilities.iter().map(|s| s.name.clone()).collect(),
-            denied_skills: vec![],
+            capabilities: agent.capabilities.iter().map(|s| s.name.clone()).collect(),
+            denied_capabilities: vec![],
             temperature: agent.preset.temperature,
             verbosity: agent.preset.verbosity.clone(),
             model: agent.llm_config.model.clone(),

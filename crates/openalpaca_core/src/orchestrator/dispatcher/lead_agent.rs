@@ -36,7 +36,7 @@ impl TaskDispatcher {
             let templates = self
                 .shared_context
                 .agent_registry
-                .find_templates_by_skill("lead_orchestration");
+                .find_templates_by_capability("lead_orchestration");
             let mut spawned = None;
             for t in &templates {
                 if let Ok(agent) = self

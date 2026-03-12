@@ -13,7 +13,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfigFile {
     pub agent: AgentMeta,
-    pub skills: AgentSkillsConfig,
+    pub capabilities: AgentCapabilitiesConfig,
     pub preset: AgentPresetConfig,
     pub constraints: Option<AgentConstraintsConfig>,
     pub llm: Option<AgentLlmConfigFile>,
@@ -28,7 +28,7 @@ pub struct AgentMeta {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentSkillsConfig {
+pub struct AgentCapabilitiesConfig {
     pub assigned: Vec<String>,
     pub denied: Option<Vec<String>>,
 }
@@ -85,7 +85,7 @@ impl AgentConfigFile {
             icon: agent.icon.clone(),
         };
 
-        let skills = AgentSkillsConfig {
+        let capabilities = AgentCapabilitiesConfig {
             assigned,
             denied: if denied.is_empty() {
                 None
@@ -176,7 +176,7 @@ impl AgentConfigFile {
 
         Self {
             agent: meta,
-            skills,
+            capabilities,
             preset,
             constraints,
             llm,
@@ -186,7 +186,7 @@ impl AgentConfigFile {
     /// Convert TOML config to in-memory SubAgent.
     pub fn into_subagent(self) -> SubAgent {
         let capabilities: Vec<Capability> = self
-            .skills
+            .capabilities
             .assigned
             .iter()
             .map(|name| Capability {
@@ -206,8 +206,8 @@ impl AgentConfigFile {
                 .unwrap_or_else(|| "normal".to_string()),
         };
 
-        // Merge skills.denied into denied_capabilities
-        let skills_denied = self.skills.denied.clone().unwrap_or_default();
+        // Merge capabilities.denied into denied_capabilities
+        let skills_denied = self.capabilities.denied.clone().unwrap_or_default();
 
         let constraints = self
             .constraints
@@ -289,12 +289,12 @@ impl AgentConfigFile {
             icon: fm.icon.clone(),
         };
 
-        let skills = AgentSkillsConfig {
-            assigned: fm.skills.clone(),
-            denied: if fm.denied_skills.is_empty() {
+        let capabilities = AgentCapabilitiesConfig {
+            assigned: fm.capabilities.clone(),
+            denied: if fm.denied_capabilities.is_empty() {
                 None
             } else {
-                Some(fm.denied_skills.clone())
+                Some(fm.denied_capabilities.clone())
             },
         };
 
@@ -309,8 +309,8 @@ impl AgentConfigFile {
                 || fm.timeout_seconds.is_some()
                 || fm.max_cost_per_task.is_some()
                 || !fm.require_confirmation_for.is_empty()
-                || !fm.skills.is_empty()
-                || !fm.denied_skills.is_empty();
+                || !fm.capabilities.is_empty()
+                || !fm.denied_capabilities.is_empty();
 
             if has_values {
                 Some(AgentConstraintsConfig {
@@ -322,15 +322,15 @@ impl AgentConfigFile {
                     } else {
                         Some(fm.require_confirmation_for.clone())
                     },
-                    allowed_capabilities: if fm.skills.is_empty() {
+                    allowed_capabilities: if fm.capabilities.is_empty() {
                         None
                     } else {
-                        Some(fm.skills.clone())
+                        Some(fm.capabilities.clone())
                     },
-                    denied_capabilities: if fm.denied_skills.is_empty() {
+                    denied_capabilities: if fm.denied_capabilities.is_empty() {
                         None
                     } else {
-                        Some(fm.denied_skills.clone())
+                        Some(fm.denied_capabilities.clone())
                     },
                     allowed_models: None,
                     denied_models: None,
@@ -362,7 +362,7 @@ impl AgentConfigFile {
 
         Self {
             agent: meta,
-            skills,
+            capabilities,
             preset,
             constraints,
             llm,
@@ -375,7 +375,7 @@ impl AgentConfigFile {
     /// TOML→Markdown migration or when the REST API creates a template
     /// from a TOML-format POST body.
     pub fn into_template(self) -> AgentTemplate {
-        let skills_denied = self.skills.denied.clone().unwrap_or_default();
+        let capabilities_denied = self.capabilities.denied.clone().unwrap_or_default();
 
         let frontmatter = AgentTemplateFrontmatter {
             id: self.agent.id.clone(),
@@ -383,8 +383,8 @@ impl AgentConfigFile {
             description: self.agent.description.clone(),
             icon: self.agent.icon.clone(),
             singleton: false, // default — only lead_agent overrides
-            skills: self.skills.assigned.clone(),
-            denied_skills: skills_denied,
+            capabilities: self.capabilities.assigned.clone(),
+            denied_capabilities: capabilities_denied,
             temperature: self.preset.temperature.unwrap_or(0.5),
             verbosity: self
                 .preset
@@ -423,7 +423,7 @@ impl AgentConfigFile {
     /// Convert TOML config to storage SubAgentConfig.
     pub fn into_storage_config(self) -> SubAgentConfig {
         let skills_json: Vec<Capability> = self
-            .skills
+            .capabilities
             .assigned
             .iter()
             .map(|name| Capability {
@@ -443,7 +443,7 @@ impl AgentConfigFile {
                 .unwrap_or_else(|| "normal".to_string()),
         };
 
-        let skills_denied2 = self.skills.denied.clone().unwrap_or_default();
+        let skills_denied2 = self.capabilities.denied.clone().unwrap_or_default();
 
         let constraints = self.constraints.as_ref().map(|c| {
             let mut denied = c.denied_capabilities.clone().unwrap_or_default();
