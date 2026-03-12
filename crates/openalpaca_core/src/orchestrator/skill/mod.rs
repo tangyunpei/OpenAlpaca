@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod invoke_executor;
 pub mod matcher;
 pub mod router;
 pub mod smoke;
