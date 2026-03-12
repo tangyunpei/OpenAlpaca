@@ -87,17 +87,26 @@ These tools are pure functions of their arguments. No changes needed.
 | `web_search` | Same | Same |
 | `web_fetch` | Same | Same |
 
+#### Category A+ — Context Injected But Unused
+
+These tools receive `owner_id` via argument injection in `ContextualToolExecutor` but do not actually use it. The injection path is removed; no `execute_with_context()` override needed.
+
+| Tool | Current | After |
+|------|---------|-------|
+| `update_persona` | In `OWNER_ONLY_TOOLS` → `owner_id` injected into args, but `PersonaUpdateTool::execute()` silently skips it (`if key == "owner_id" { continue; }`) | Category A — default `execute_with_context` delegates to `execute()`. Remove the `owner_id` skip guard. |
+| `send` | Not in any const array — no injection happens today despite spec claims. `SendTool` reads `action`, `channel`, `recipient`, `content` only. | Category A — no changes needed. |
+
 #### Category B — Need Per-Invocation Identity (ToolContext)
 
 These tools currently get identity via argument mutation in `ContextualToolExecutor`. After: they override `execute_with_context()` and read identity from `ToolContext`.
 
 | Tool | Current Context Source | After |
 |------|----------------------|-------|
-| `memory_search` | `owner_id` + `workspace_id` injected into JSON args | Reads `ctx.owner_id`, `ctx.workspace_id` |
-| `update_persona` | `owner_id` injected into JSON args | Reads `ctx.owner_id` |
-| `send` | `owner_id` injected into JSON args | Reads `ctx.owner_id` |
-| `workspace_read` | Handled directly by `ContextualToolExecutor` | Holds `Arc<Database>`, reads `ctx.task_id` |
-| `workspace_write` | Handled directly by `ContextualToolExecutor` | Holds `Arc<Database>`, reads `ctx.task_id`, `ctx.agent_id` |
+| `memory_search` | `owner_id` + `workspace_id` injected into JSON args by `OWNER_AND_WORKSPACE_TOOLS` routing | Override `execute_with_context()`, read `ctx.owner_id` + `ctx.workspace_id`. When `ctx.owner_id` is `None` (e.g. simple query path), return same error as today: `"Missing owner_id"`. |
+| `workspace_read` | Handled directly by `ContextualToolExecutor::handle_workspace_read()` | Standalone `WorkspaceReadTool` struct holding `Arc<Database>`. Override `execute_with_context()`, read `ctx.task_id`. |
+| `workspace_write` | Handled directly by `ContextualToolExecutor::handle_workspace_write()` | Standalone `WorkspaceWriteTool` struct holding `Arc<Database>`. Override `execute_with_context()`, read `ctx.task_id`, `ctx.agent_id`. |
+
+**Error behavior when context is missing:** Tools must return the same errors as today when required context is absent. For `memory_search`, when `ctx.owner_id` is `None`, return `Err("Tool 'memory_search' requires owner_id but none provided in execution context")`. For workspace tools, when `ctx.task_id` is `None`, return `Err("workspace_read requires a task context")`.
 
 **workspace_read/workspace_write migration:** Currently implemented as methods on `ContextualToolExecutor` with access to `ToolExecutionContext.db`. After normalization, they become standalone `BuiltInTool` implementations that hold `Arc<Database>` (injected at construction) and read task identity from `ToolContext`. The `ToolBackend::Contextual` variant is eliminated — they use `ToolBackend::BuiltIn` like all other tools.
 
@@ -107,8 +116,8 @@ Lead agent coordination tools that currently live in `LeadAgentToolExecutor` wit
 
 | Tool | Arc Dependencies |
 |------|-----------------|
-| `spawn_subagent` | `SubagentTracker`, `AgentRegistry`, `LlmRouter`, `EventBus`, `Database`, `SandboxManager` |
-| `spawn_subagents_batch` | Same as `spawn_subagent` |
+| `spawn_subagent` | `SubagentTracker`, `AgentRegistry`, `LlmRouter`, `EventBus`, `Database`, `ToolRegistry`, `ConfirmationBroker` |
+| `spawn_subagents_batch` | Same as `spawn_subagent` (wraps `SpawnSubagentTool`) |
 | `check_subagent_status` | `SubagentTracker` |
 | `wait_for_subagents` | `SubagentTracker` |
 
@@ -116,6 +125,8 @@ These tools already exist as structs (`SpawnSubagentTool`, `CheckSubagentStatusT
 1. Move them to implement `BuiltInTool` instead of using the custom `LeadAgentToolExecutor` dispatch
 2. Hold all dependencies as `Arc` fields (most already do)
 3. Register them in `ToolRegistry` when lead agent mode is active
+
+**Recursive subagent spawning:** `SpawnSubagentTool::execute()` itself spawns child agents, each needing their own `SandboxManager`. Currently it constructs a `ContextualToolExecutor` internally (lines 219-231 of `tools.rs`). After normalization, it constructs a child `ToolContext` and passes `self.tool_registry.clone()` directly to a child `SandboxManager::with_defaults(registry, bus)`. The child `ToolContext` uses the spawned subagent's `agent_id`, not the lead agent's.
 
 ### 3.4 Architecture Changes
 
@@ -137,7 +148,7 @@ These tools already exist as structs (`SpawnSubagentTool`, `CheckSubagentStatusT
 
 | Component | Change |
 |-----------|--------|
-| `SandboxManager` | Replace `executor: Arc<dyn ToolExecutor>` with `registry: Arc<ToolRegistry>`. Call `registry.execute_with_context(name, args, ctx)` instead of `executor.execute(name, args)`. |
+| `SandboxManager` | Replace `executor: Arc<dyn ToolExecutor>` with `registry: Arc<ToolRegistry>`. Replace `execute_tool(&self, agent_id, tool_call, policy)` signature with `execute_tool(&self, tool_call, policy, ctx: &ToolContext)` — `agent_id` is now `ctx.agent_id` (already in `SandboxPolicy.agent_id` for logging; `ToolContext` is for tool execution identity). Call `registry.execute_with_context(name, args, ctx)`. |
 | `ToolRegistry` | Add `execute_with_context()` method that resolves tool and calls `BuiltInTool::execute_with_context()`. Remove `ToolBackend::Contextual` variant. |
 | `RegisteredTool` | Add `exempt_from_timeout: bool` field (default `false`). Set `true` for `wait_for_subagents` and `check_subagent_status`. |
 | `BuiltInTool` trait | Add `execute_with_context()` method with default delegation to `execute()`. |
@@ -145,7 +156,7 @@ These tools already exist as structs (`SpawnSubagentTool`, `CheckSubagentStatusT
 #### New Execution Flow
 
 ```
-SandboxManager::execute_tool(tool_call, policy)
+SandboxManager::execute_tool(tool_call, policy, &tool_context)
   │
   ├── 1. Capability check (unchanged)
   ├── 2. Input sanitization (unchanged)
@@ -175,16 +186,39 @@ Skill scripts (`skill_script:*`) are currently handled by `ScriptExecutionContex
 ```rust
 /// BuiltInTool implementation for skill-bundled scripts.
 struct ScriptToolBuiltIn {
+    /// Canonicalized, path-traversal-validated script path.
     path: PathBuf,
     interpreter: Option<String>,
     timeout_secs: u64,
     skill_dir: PathBuf,
 }
 
+impl ScriptToolBuiltIn {
+    /// Construct with path-traversal validation (same security check as
+    /// current ScriptExecutionContext::new()). Returns Err if the resolved
+    /// path escapes skill_dir/scripts/.
+    fn new(skill_dir: &Path, cfg: &ScriptConfig) -> Result<Self, String> {
+        let script_path = skill_dir.join("scripts").join(&cfg.file);
+        let canonical = script_path.canonicalize()
+            .map_err(|e| format!("Script '{}' not found: {}", cfg.file, e))?;
+        let scripts_dir = skill_dir.join("scripts").canonicalize()
+            .map_err(|e| format!("Scripts directory not found: {}", e))?;
+        if !canonical.starts_with(&scripts_dir) {
+            return Err(format!(
+                "Script '{}' resolves outside scripts/ directory (path traversal blocked)",
+                cfg.file
+            ));
+        }
+        Ok(Self { path: canonical, interpreter: cfg.interpreter.clone(),
+                  timeout_secs: cfg.timeout_secs, skill_dir: skill_dir.to_path_buf() })
+    }
+}
+
 #[async_trait]
 impl BuiltInTool for ScriptToolBuiltIn {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
-        // Same logic as ScriptExecutionContext::execute_script()
+        // Same logic as ScriptExecutionContext::execute_script():
+        // build Command, set current_dir, timeout, capture output
     }
 }
 ```
@@ -223,25 +257,31 @@ let sandbox = SandboxManager::with_defaults(registry.clone(), bus);
 // tool_ctx passed per-call to sandbox.execute_tool()
 ```
 
-### 4.2 Lead Agent Path (lead_agent.rs)
+### 4.2 Lead Agent Path (runner/lead_agent/mod.rs)
+
+The `run_lead_agent()` function in `runner/lead_agent/mod.rs` (lines 163-184) is the actual runtime call site — it constructs `ToolExecutionContext`, `ContextualToolExecutor`, and `LeadAgentToolExecutor`.
 
 **Before:**
 ```rust
-let ctx = ToolExecutionContext { owner_id, task_id, agent_id, db, workspace_id };
-let base_executor = ContextualToolExecutor::new(registry.clone(), ctx);
-let lead_executor = LeadAgentToolExecutor::new(base_executor, tracker, ...);
-let sandbox = SandboxManager::with_defaults(Arc::new(lead_executor), bus);
+let ctx_exec = ToolExecutionContext { owner_id, task_id, agent_id, db, workspace_id };
+let contextual_executor = Arc::new(ContextualToolExecutor::new(tool_registry.clone(), ctx_exec));
+let lead_executor = Arc::new(LeadAgentToolExecutor::new(
+    spawn_tool, batch_spawn_tool, check_status_tool, wait_tool, contextual_executor,
+));
+let sandbox = SandboxManager::with_defaults(lead_executor, bus);
 ```
 
 **After:**
 ```rust
-// Coordination tools registered in registry before loop starts
-let mut registry = (*shared_registry).clone();
+// Clone registry and register coordination tools for this lead agent session
+let mut registry = (*tool_registry).clone();
 registry.register_coordination_tools(tracker.clone(), agent_registry.clone(), ...);
 let registry = Arc::new(registry);
 let tool_ctx = ToolContext { agent_id, task_id, owner_id, workspace_id };
 let sandbox = SandboxManager::with_defaults(registry, bus);
 ```
+
+Note: The dispatcher file `orchestrator/dispatcher/lead_agent.rs` calls `run_lead_agent()` — it does not construct executors itself. Only `runner/lead_agent/mod.rs` needs updating.
 
 ### 4.3 Skill Invocation Path
 
@@ -255,8 +295,13 @@ let executor = ContextualToolExecutor::with_scripts(registry.clone(), ctx, scrip
 ```rust
 let mut registry = (*shared_registry).clone();
 for cfg in &configs {
-    let tool = ScriptToolBuiltIn { path, interpreter, timeout_secs, skill_dir };
-    registry.register(format!("skill_script:{}", cfg.name), tool, caps);
+    let tool = ScriptToolBuiltIn::new(skill_dir, cfg)?; // validates path traversal
+    registry.register(RegisteredTool {
+        definition: script_tool_definition(&cfg.name),
+        backend: ToolBackend::BuiltIn(Arc::new(tool)),
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
+    });
 }
 let registry = Arc::new(registry);
 ```
@@ -295,18 +340,17 @@ The migration is staged to keep the codebase compiling at each step:
 | File | Changes |
 |------|---------|
 | `tools/registry/mod.rs` | Add `ToolContext`, extend `BuiltInTool` trait, add `execute_with_context()` on `ToolRegistry`, add `exempt_from_timeout` to `RegisteredTool`, remove `ToolBackend::Contextual` |
-| `tools/builtins/memory_search.rs` | Override `execute_with_context()`, read `ctx.owner_id` + `ctx.workspace_id` |
-| `tools/builtins/update_persona.rs` | Override `execute_with_context()`, read `ctx.owner_id` |
-| `tools/builtins/send.rs` | Override `execute_with_context()`, read `ctx.owner_id` |
-| `tools/builtins/mod.rs` | Register workspace_read/workspace_write as `BuiltInTool` (new structs), remove `ToolBackend::Contextual` registrations |
-| `security/sandbox/mod.rs` | Replace `executor: Arc<dyn ToolExecutor>` with `registry: Arc<ToolRegistry>`. Remove `ToolExecutor` trait. Remove `COORDINATION_TOOLS` const. Use `exempt_from_timeout` field. Add `ToolContext` parameter to `execute_tool()`. |
-| `runner/lead_agent/tools.rs` | Implement `BuiltInTool` on `SpawnSubagentTool`, `CheckSubagentStatusTool`, `WaitForSubagentsTool`, `SpawnSubagentsBatchTool`. Remove `LeadAgentToolExecutor`. Add `register_coordination_tools()` helper. |
+| `tools/builtins/memory_search.rs` | Override `execute_with_context()`, read `ctx.owner_id` + `ctx.workspace_id` instead of from args |
+| `tools/builtins/update_persona/mod.rs` | Remove `owner_id` skip guard (line 62-63). No `execute_with_context()` override needed — becomes Category A. |
+| `tools/builtins/mod.rs` | Register `WorkspaceReadTool` and `WorkspaceWriteTool` as `BuiltInTool` (new structs holding `Arc<Database>`), remove `ToolBackend::Contextual` registrations |
+| `security/sandbox/mod.rs` | Replace `executor: Arc<dyn ToolExecutor>` with `registry: Arc<ToolRegistry>`. Remove `ToolExecutor` trait. Remove `COORDINATION_TOOLS` const. Use `exempt_from_timeout` field. Change `execute_tool()` signature to take `&ToolContext` instead of `agent_id: &str`. |
+| `runner/lead_agent/tools.rs` | Implement `BuiltInTool` on `SpawnSubagentTool`, `CheckSubagentStatusTool`, `WaitForSubagentsTool`, `SpawnSubagentsBatchTool`. Remove `LeadAgentToolExecutor`. Add `register_coordination_tools()` helper. Update `SpawnSubagentTool`'s internal subagent spawn to use `ToolContext` + `Arc<ToolRegistry>` instead of `ContextualToolExecutor`. |
+| `runner/lead_agent/mod.rs` | Replace `ToolExecutionContext` + `ContextualToolExecutor` + `LeadAgentToolExecutor` construction with registry clone + `register_coordination_tools()` + `ToolContext` |
 | `orchestrator/dispatcher/pipeline_step.rs` | Construct `ToolContext` instead of `ToolExecutionContext` + `ContextualToolExecutor` |
-| `orchestrator/dispatcher/lead_agent.rs` | Clone registry, register coordination tools, construct `ToolContext` |
 | `dag_executor/node_runner.rs` | Same as pipeline_step.rs |
 | `orchestrator/query_handler/simple_query_handler.rs` | Construct empty `ToolContext` instead of empty `ContextualToolExecutor` |
-| `orchestrator/skill/invocation.rs` | Clone registry, register `ScriptToolBuiltIn` tools, remove `ScriptExecutionContext` usage |
-| `tools/contextual_executor/mod.rs` | **Deleted** (all logic absorbed into individual tools) |
+| `orchestrator/skill/invocation.rs` | Clone registry, register `ScriptToolBuiltIn` tools (with path-traversal validation), construct `ToolContext` |
+| `tools/contextual_executor/mod.rs` | **Deleted** (all logic absorbed into individual tools + `ScriptToolBuiltIn`) |
 
 ## 7. Invariants
 
