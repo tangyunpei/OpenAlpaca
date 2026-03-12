@@ -34,6 +34,8 @@ Falls back to the default model if `compaction_model` is `None`.
 
 **No signature change** to `run_agentic_loop_routed` — `LlmBackend` is constructed inside the function from existing parameters.
 
+**Send + Sync bounds:** `LlmBackend<'a>` must satisfy `Send + Sync` for the `async_trait` impls to work with `&dyn MemoryExtractor` / `&dyn Summarizer`. This holds because `&'a LlmRouter` and `&'a dyn LlmProvider` are both `Send + Sync` (the traits require it). If the compiler rejects this, add explicit `unsafe impl Send/Sync` or restructure to use `Arc<LlmRouter>` instead of references.
+
 ### 2.3 Extracted Memories: Log-Only
 
 Extracted memories are emitted via `tracing::info!` (kind + first 100 chars of content). The count is reported in the `CompactionTriggered` event's `memories_extracted` field.
@@ -136,6 +138,6 @@ No new files. All changes are to existing modules:
 | `agentic_loop/config.rs` | Add `compaction_model: Option<String>` to `LoopConfig`. Update manual `Clone` and `Debug` impls. |
 | `agentic_loop/mod.rs` | Replace `compress_context()` call site with `CompactionPipeline::compact()` when compaction model is available. Handle `Arc` ownership for messages. Emit `CompactionTriggered` and `CompactionPhaseCompleted` events. Log extracted memories. Fall back to improved heuristic otherwise. |
 | `context_budget/compaction.rs` | Types now used in production (dead code resolved). Update Phase 3 fallback call to pass `None` for `budget` parameter on `compress_context()`. |
-| `dispatcher/pipeline_step.rs` | Instantiate `ContextBudgetManager` from model registry + `DaemonConfig`, pass to `run_agentic_loop_routed()`. |
-| `dag_executor/node_runner.rs` | Same as `pipeline_step.rs`. |
+| `dispatcher/pipeline_step.rs` | Instantiate `ContextBudgetManager` from model registry + `DaemonConfig`, pass to `run_agentic_loop_routed()`. Set `loop_config.compaction_model = daemon_config.execution.context_budget.compaction_model.clone()` after `LoopConfig::from_agent()`. |
+| `dag_executor/node_runner.rs` | Same as `pipeline_step.rs`: instantiate `ContextBudgetManager`, pass to loop, set `loop_config.compaction_model`. |
 | `daemon_config/execution.rs` | No changes needed — config fields already exist. |
