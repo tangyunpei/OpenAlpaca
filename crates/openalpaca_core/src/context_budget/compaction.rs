@@ -1,6 +1,7 @@
 use crate::utils::social::is_social_phrase;
 use async_trait::async_trait;
 use openalpaca_llm::{ChatMessage, Role};
+use tracing;
 
 /// A memory entry extracted during compaction Phase 1.
 #[derive(Debug, Clone)]
@@ -24,7 +25,85 @@ pub trait Summarizer: Send + Sync {
 /// 3-phase compaction pipeline for context window management.
 pub struct CompactionPipeline;
 
+/// Result of a full compaction pipeline run.
+#[derive(Debug)]
+pub struct CompactionResult {
+    pub compacted_messages: Vec<ChatMessage>,
+    pub extracted_memories: Vec<ExtractedMemory>,
+    pub messages_discarded: usize,
+    pub messages_before: usize,
+    pub messages_after: usize,
+    pub error: Option<String>,
+}
+
 impl CompactionPipeline {
+    /// Run the full 3-phase compaction pipeline.
+    ///
+    /// Phase 1: Extract memories (LLM). On error: skip, log.
+    /// Phase 2: Discard social messages (heuristic). Always succeeds.
+    /// Phase 3: Summarize older messages (LLM). On error: fall back to
+    ///          existing `compress_context()` heuristic.
+    pub async fn compact(
+        messages: Vec<ChatMessage>,
+        min_recent: usize,
+        extractor: &dyn MemoryExtractor,
+        summarizer: &dyn Summarizer,
+    ) -> CompactionResult {
+        let messages_before = messages.len();
+
+        // Phase 1: Memory extraction (best-effort)
+        let boundary = messages.len().saturating_sub(min_recent).max(2);
+        let older = if boundary > 2 { &messages[2..boundary] } else { &[] as &[ChatMessage] };
+
+        let extracted_memories = match extractor.extract(older).await {
+            Ok(memories) => {
+                tracing::info!(count = memories.len(), "Compaction Phase 1: extracted memories");
+                memories
+            }
+            Err(e) => {
+                tracing::warn!("Compaction Phase 1 (extraction) failed, skipping: {e}");
+                vec![]
+            }
+        };
+
+        // Phase 2: Discard social messages (always succeeds)
+        let after_discard = Self::discard_social(&messages, min_recent);
+        let messages_discarded = messages_before - after_discard.len();
+        tracing::info!(discarded = messages_discarded, "Compaction Phase 2: social discard");
+
+        // Phase 3: Summarize older messages (with fallback)
+        match Self::summarize_older(after_discard.clone(), min_recent, summarizer).await {
+            Ok(compacted) => {
+                let messages_after = compacted.len();
+                CompactionResult {
+                    compacted_messages: compacted,
+                    extracted_memories,
+                    messages_discarded,
+                    messages_before,
+                    messages_after,
+                    error: None,
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Compaction Phase 3 (summarize) failed, heuristic fallback: {e}");
+                let mut fallback = after_discard;
+                // compress_context expects tail_keep in "rounds" (×3 internally)
+                // Convert min_recent (message count) to rounds via ceiling division
+                let tail_keep = ((min_recent + 2) / 3).max(1);
+                crate::runner::compress_context(&mut fallback, tail_keep);
+                let messages_after = fallback.len();
+                CompactionResult {
+                    compacted_messages: fallback,
+                    extracted_memories,
+                    messages_discarded,
+                    messages_before,
+                    messages_after,
+                    error: Some(format!("Phase 3 failed: {e}")),
+                }
+            }
+        }
+    }
+
     /// Phase 2: Discard social/low-value message pairs.
     ///
     /// Preserves: message 0 (system), message 1 (initial query),
