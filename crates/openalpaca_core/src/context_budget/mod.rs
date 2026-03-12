@@ -3,4 +3,4 @@ mod budget;
 #[cfg(test)]
 mod tests;
 
-pub use budget::RenderedSection;
+pub use budget::{ContextBudgetManager, RenderedSection};
