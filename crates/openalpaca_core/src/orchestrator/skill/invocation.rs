@@ -90,21 +90,52 @@ impl Orchestrator {
 
         // Identity block is already included via get_or_build_base_prompt().
 
-        // Resolve tools: use ONLY the skill's declared tool allowlist.
+        // Resolve tools via capability model, falling back to legacy name-based matching.
         // Intent-suggested tools are intentionally NOT merged here to maintain
         // skill-level tool isolation (P1-1 security fix).
-        let mut tool_names: Vec<String> = skill_doc.frontmatter.tools.allow.clone();
+        let mut tool_defs: Vec<openalpaca_llm::ToolDefinition> =
+            if !skill_doc.frontmatter.requires_capabilities.is_empty() {
+                // New path: capability-based resolution
+                self.tool_registry
+                    .tools_for_capabilities(&skill_doc.frontmatter.requires_capabilities)
+            } else if !skill_doc.frontmatter.tools.allow.is_empty() {
+                // Legacy fallback: direct tool name matching
+                let names = &skill_doc.frontmatter.tools.allow;
+                let resolved: Vec<openalpaca_llm::ToolDefinition> = names
+                    .iter()
+                    .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
+                    .collect();
+                if resolved.len() < names.len() {
+                    let resolved_names: Vec<&str> =
+                        resolved.iter().map(|d| d.name.as_str()).collect();
+                    let missing: Vec<&str> = names
+                        .iter()
+                        .filter(|n| !resolved_names.contains(&n.as_str()))
+                        .map(|n| n.as_str())
+                        .collect();
+                    tracing::warn!(
+                        "Skill '{}' references unknown tools: {:?}",
+                        skill_name,
+                        missing
+                    );
+                }
+                resolved
+            } else {
+                vec![]
+            };
 
         // Force-include persona tools during bootstrap mode
         if self.is_bootstrapping() {
             for name in &["update_persona"] {
-                if !tool_names.contains(&name.to_string()) {
-                    tool_names.push(name.to_string());
+                if !tool_defs.iter().any(|d| &d.name == name) {
+                    if let Some(t) = self.tool_registry.get(name) {
+                        tool_defs.push(t.definition.clone());
+                    }
                 }
             }
         }
 
-        // Tool allow/deny enforcement
+        // Apply deny list (both paths)
         let skill_deny = &skill_doc.frontmatter.tools.deny;
         let global_deny = &self
             .daemon_config
@@ -113,27 +144,7 @@ impl Orchestrator {
             .skill_defaults
             .global_tool_deny;
 
-        // Remove any denied tools (skill-level + global)
-        tool_names.retain(|t| !skill_deny.contains(t) && !global_deny.contains(t));
-
-        let mut tool_defs: Vec<_> = tool_names
-            .iter()
-            .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
-            .collect();
-
-        if tool_defs.len() < tool_names.len() {
-            let resolved_names: Vec<&str> = tool_defs.iter().map(|d| d.name.as_str()).collect();
-            let missing: Vec<&str> = tool_names
-                .iter()
-                .filter(|n| !resolved_names.contains(&n.as_str()))
-                .map(|n| n.as_str())
-                .collect();
-            tracing::warn!(
-                "Skill '{}' references unknown tools: {:?}",
-                skill_name,
-                missing
-            );
-        }
+        tool_defs.retain(|t| !skill_deny.contains(&t.name) && !global_deny.contains(&t.name));
 
         // Resolve script tools from skill's scripts/ directory
         let script_tool_defs: Vec<openalpaca_llm::ToolDefinition> = skill_doc
@@ -154,6 +165,37 @@ impl Orchestrator {
             tool_defs.extend(script_tool_defs);
         }
 
+        // Add invoke_skill:* synthetic tools (from depends_on)
+        for dep_id in &skill_doc.frontmatter.depends_on {
+            if let Some(dep_entry) = self.skill_catalog.get(dep_id) {
+                tool_defs.push(openalpaca_llm::ToolDefinition {
+                    name: format!("invoke_skill:{}", dep_id),
+                    description: format!(
+                        "Invoke the '{}' skill: {}",
+                        dep_entry.frontmatter.name, dep_entry.frontmatter.description
+                    ),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The input/query to pass to the skill"
+                            }
+                        },
+                        "required": ["query"]
+                    }),
+                    strict: None,
+                    input_examples: None,
+                });
+            } else {
+                tracing::warn!(
+                    "Skill '{}' depends on '{}' which is not in catalog",
+                    skill_doc.frontmatter.name,
+                    dep_id
+                );
+            }
+        }
+
         // Connector guidance: inject channel awareness unconditionally.
         // The block is purely informational (no tool mentions), so it's safe
         // regardless of which tools are resolved.
@@ -170,11 +212,12 @@ impl Orchestrator {
 
         let (tools_for_loop, policy_opt, config_for_loop);
         if !tool_defs.is_empty() {
+            let tool_names_log: Vec<&str> = tool_defs.iter().map(|d| d.name.as_str()).collect();
             tracing::info!(
                 "Skill invocation '{}' with {} tools: {:?}",
                 skill_name,
                 tool_defs.len(),
-                tool_names
+                tool_names_log
             );
             system_prompt.push_str(&format_tool_guidance(&tool_defs));
 
@@ -364,6 +407,10 @@ impl Orchestrator {
                 }
             }
 
+            // Capture tool names before move (used for post-hoc hallucination guard)
+            let resolved_tool_names: Vec<String> =
+                tools_for_loop.iter().map(|d| d.name.clone()).collect();
+
             let call_start = std::time::Instant::now();
             let result = run_agentic_loop_routed(
                 router.as_ref(),
@@ -462,7 +509,8 @@ impl Orchestrator {
             }
 
             // Post-hoc guard: detect hallucinated send confirmations
-            let tool_name_refs: Vec<&str> = tool_names.iter().map(|s| s.as_str()).collect();
+            let tool_name_refs: Vec<&str> =
+                resolved_tool_names.iter().map(|s| s.as_str()).collect();
             if detect_hallucinated_send(&tool_name_refs, result.tool_calls_made, &result.final_content) {
                 tracing::warn!(
                     tool_calls = result.tool_calls_made,
