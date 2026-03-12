@@ -147,6 +147,7 @@ impl SkillCatalog {
         {
             total += self.scan_directory(dir, SkillScope::Project);
         }
+        self.validate_dependencies();
         total
     }
 
@@ -575,6 +576,106 @@ impl SkillCatalog {
             Ok(guard) => guard.clone(),
             Err(_) => Vec::new(),
         }
+    }
+
+    /// Validate that all `depends_on` references exist and contain no cycles.
+    /// Call after `scan_directory()` or `scan_multi_scope()`.
+    pub fn validate_dependencies(&self) -> Vec<String> {
+        use std::collections::HashSet;
+
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut errors = Vec::new();
+
+        // Phase 1: Check existence of all dependency references
+        for (id, entry) in entries.iter() {
+            for dep_id in &entry.frontmatter.depends_on {
+                if !entries.contains_key(dep_id) {
+                    errors.push(format!(
+                        "Skill '{}' depends on '{}' which does not exist",
+                        id, dep_id
+                    ));
+                }
+            }
+        }
+
+        // Phase 2: Three-color DFS cycle detection
+        // White = not visited, Gray = in current path, Black = fully explored
+        #[derive(Clone, Copy, PartialEq)]
+        enum Color {
+            White,
+            Gray,
+            Black,
+        }
+
+        let mut color: HashMap<&str, Color> =
+            entries.keys().map(|k| (k.as_str(), Color::White)).collect();
+        let mut reported_cycles: HashSet<String> = HashSet::new();
+
+        // Use iterative DFS to avoid lifetime issues with recursive functions
+        for start_id in entries.keys() {
+            if color.get(start_id.as_str()) != Some(&Color::White) {
+                continue;
+            }
+
+            // Stack holds (node, iterator index into depends_on)
+            let mut stack: Vec<(&str, usize)> = vec![(start_id.as_str(), 0)];
+            color.insert(start_id.as_str(), Color::Gray);
+
+            while let Some((node, idx)) = stack.last_mut() {
+                let deps = entries
+                    .get(*node)
+                    .map(|e| &e.frontmatter.depends_on)
+                    .cloned()
+                    .unwrap_or_default();
+
+                if *idx >= deps.len() {
+                    // All neighbors explored — mark black
+                    color.insert(*node, Color::Black);
+                    stack.pop();
+                    continue;
+                }
+
+                let dep = deps[*idx].clone();
+                *idx += 1;
+
+                // Resolve to the key stored in entries (stable &str lifetime)
+                let dep_key = match entries.get_key_value(dep.as_str()) {
+                    Some((k, _)) => k.as_str(),
+                    None => continue, // Already reported in Phase 1
+                };
+
+                match color.get(dep_key) {
+                    Some(Color::Gray) => {
+                        // Back edge — cycle found
+                        let msg = format!("Cycle detected: '{}' -> '{}'", node, dep);
+                        if reported_cycles.insert(msg.clone()) {
+                            errors.push(msg);
+                        }
+                    }
+                    Some(Color::White) | None => {
+                        color.insert(dep_key, Color::Gray);
+                        stack.push((dep_key, 0));
+                    }
+                    Some(Color::Black) => {} // Already fully explored
+                }
+            }
+        }
+
+        if !errors.is_empty() {
+            for err in &errors {
+                tracing::warn!("{}", err);
+            }
+            let mut validation_errors = self
+                .validation_errors
+                .write()
+                .unwrap_or_else(|p| p.into_inner());
+            validation_errors.extend(errors.clone());
+        }
+
+        errors
     }
 }
 
