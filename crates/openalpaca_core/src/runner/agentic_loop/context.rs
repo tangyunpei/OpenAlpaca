@@ -46,26 +46,83 @@ pub(crate) fn estimate_messages_tokens(messages: &[ChatMessage]) -> u32 {
 
 /// Compress context by replacing older rounds with a compact summary.
 ///
-/// Preserves:
-/// - Message 0 (system prompt)
-/// - Message 1 (initial user query)
-/// - The last `tail_keep × 3` messages (most recent rounds)
+/// When `budget` is provided:
+///   1. Discard social message pairs first (may be sufficient alone)
+///   2. Use token-aware boundary to determine what to compress
+///   3. Include user messages in summary (fixes previous omission)
+///   4. Group summary by conversation rounds
 ///
-/// Everything in between is replaced with a single user message summarizing
-/// what happened in those earlier rounds (tool calls made, brief results).
-pub(crate) fn compress_context(messages: &mut Vec<ChatMessage>, tail_keep: usize) {
-    // Each "round" is roughly: 1 assistant message + N tool results ≈ 3 messages
-    let keep_tail = tail_keep * 3;
+/// When `budget` is `None`, uses legacy `tail_keep × 3` boundary.
+pub(crate) fn compress_context(
+    messages: &mut Vec<ChatMessage>,
+    tail_keep: usize,
+    budget: Option<&crate::context_budget::ContextBudgetManager>,
+) {
+    let min_recent = budget
+        .map(|b| b.min_recent_messages())
+        .unwrap_or(tail_keep * 3);
+
+    // Phase 1: Social discard (always applied when budget is present)
+    if budget.is_some() && messages.len() > 2 + min_recent {
+        let cleaned =
+            crate::context_budget::compaction::CompactionPipeline::discard_social(messages, min_recent);
+        if cleaned.len() < messages.len() {
+            tracing::debug!(
+                discarded = messages.len() - cleaned.len(),
+                "Heuristic: social messages discarded"
+            );
+            *messages = cleaned;
+        }
+
+        // Check if social discard alone was sufficient
+        if let Some(b) = budget {
+            let tokens_after = estimate_messages_tokens(messages) as usize;
+            if !b.should_compact(tokens_after) {
+                return; // Social discard was enough
+            }
+        }
+    }
+
+    // Phase 2: Determine compression boundary
+    let keep_tail = if let Some(b) = budget {
+        // Token-aware: walk backwards counting tokens until we hit the target
+        let target = b.compaction_target_tokens();
+        let mut tail_tokens = 0usize;
+        let mut boundary = messages.len();
+        for (i, msg) in messages.iter().enumerate().rev() {
+            if i <= 1 {
+                break; // Never compress system + initial query
+            }
+            let msg_tokens = if let Some(ref parts) = msg.parts {
+                parts.iter().map(|p| estimate_part_tokens(p) as usize).sum()
+            } else {
+                msg.content.len() / 4
+            };
+            if tail_tokens + msg_tokens > target && boundary < messages.len() {
+                break;
+            }
+            tail_tokens += msg_tokens;
+            boundary = i;
+        }
+        messages.len() - boundary
+    } else {
+        // Legacy: fixed tail_keep × 3
+        tail_keep * 3
+    };
+
     if messages.len() <= 2 + keep_tail {
         return; // Nothing to compress
     }
 
     let compress_end = messages.len() - keep_tail;
 
-    // Build summary from messages[2..compress_end]
+    // Phase 3: Build round-grouped summary from messages[2..compress_end]
     let mut summary_parts = Vec::new();
+    let mut round = 1u32;
+    let mut current_round_parts: Vec<String> = Vec::new();
+
     for msg in &messages[2..compress_end] {
-        // Summarize multimodal parts when present
+        // Handle multimodal parts
         if let Some(ref parts) = msg.parts {
             let role_label = match msg.role {
                 Role::User => "User",
@@ -74,71 +131,95 @@ pub(crate) fn compress_context(messages: &mut Vec<ChatMessage>, tail_keep: usize
                 Role::Tool => "Tool",
             };
             for part in parts {
-                match part {
-                    ContentPart::Image { .. } => {
-                        summary_parts.push(format!("- {role_label}: [sent an image]"));
-                    }
-                    ContentPart::Audio { .. } => {
-                        summary_parts.push(format!("- {role_label}: [sent audio]"));
-                    }
-                    ContentPart::Document {
-                        filename,
-                        extracted_text,
-                        ..
-                    } => {
+                let desc = match part {
+                    ContentPart::Image { .. } => format!("{role_label}: [sent an image]"),
+                    ContentPart::Audio { .. } => format!("{role_label}: [sent audio]"),
+                    ContentPart::Document { filename, extracted_text, .. } => {
                         let excerpt = extracted_text
                             .as_ref()
-                            .map(|t| truncate_for_summary(t, 200))
+                            .map(|t| truncate_for_summary(t, 150))
                             .unwrap_or_default();
-                        summary_parts
-                            .push(format!("- {role_label}: [attached: {filename}] {excerpt}"));
+                        format!("{role_label}: [attached: {filename}] {excerpt}")
                     }
                     ContentPart::FileRef { filename, .. } => {
-                        summary_parts.push(format!("- {role_label}: [attached: {filename}]"));
+                        format!("{role_label}: [attached: {filename}]")
                     }
                     ContentPart::Text { text } if !text.is_empty() => {
-                        summary_parts.push(format!(
-                            "- {role_label}: {}",
-                            truncate_for_summary(text, 200)
-                        ));
+                        format!("{role_label}: {}", truncate_for_summary(text, 150))
                     }
-                    _ => {}
-                }
+                    _ => continue,
+                };
+                current_round_parts.push(format!("  {desc}"));
             }
             continue;
         }
 
         match msg.role {
+            Role::User => {
+                // Start a new round when we see a user message (except the first)
+                if !current_round_parts.is_empty() {
+                    summary_parts.push(format!("Round {round}:"));
+                    summary_parts.extend(current_round_parts.drain(..));
+                    round += 1;
+                }
+                current_round_parts.push(format!(
+                    "  User: {}",
+                    truncate_for_summary(&msg.content, 150)
+                ));
+            }
             Role::Assistant => {
                 if !msg.content.is_empty() {
-                    summary_parts.push(format!(
-                        "- Agent: {}",
-                        truncate_for_summary(&msg.content, 200)
+                    current_round_parts.push(format!(
+                        "  Assistant: {}",
+                        truncate_for_summary(&msg.content, 150)
                     ));
                 }
                 if let Some(ref tcs) = msg.tool_calls {
                     for tc in tcs {
-                        summary_parts.push(format!("- Called: {}", tc.name));
+                        current_round_parts.push(format!("  Called: {}", tc.name));
                     }
                 }
             }
             Role::Tool => {
-                summary_parts.push(format!(
-                    "- Result: {}",
-                    truncate_for_summary(&msg.content, 300)
+                current_round_parts.push(format!(
+                    "  Result: {}",
+                    truncate_for_summary(&msg.content, 100)
                 ));
             }
-            _ => {}
+            Role::System => {
+                // Include system messages in summary (previously dropped)
+                current_round_parts.push(format!(
+                    "  System: {}",
+                    truncate_for_summary(&msg.content, 100)
+                ));
+            }
         }
     }
 
-    let summary = format!(
-        "[Context compressed: {} earlier messages summarized]\n{}",
+    // Flush last round
+    if !current_round_parts.is_empty() {
+        summary_parts.push(format!("Round {round}:"));
+        summary_parts.extend(current_round_parts);
+    }
+
+    let mut summary = format!(
+        "[Context compressed: {} earlier messages in {} rounds]\n{}",
         compress_end - 2,
+        round,
         summary_parts.join("\n")
     );
 
-    // Replace messages[2..compress_end] with a single user message
+    // Cap summary size if budget is available
+    if let Some(b) = budget {
+        let max_summary_chars = b.compaction_target_tokens() * 4; // rough chars estimate
+        if summary.len() > max_summary_chars {
+            let end = summary.floor_char_boundary(max_summary_chars);
+            summary.truncate(end);
+            summary.push_str("\n[...summary truncated]");
+        }
+    }
+
+    // Replace messages[2..compress_end] with the summary
     messages.splice(
         2..compress_end,
         std::iter::once(ChatMessage::user(&summary)),
