@@ -2,6 +2,7 @@ use super::StreamCallback;
 use openalpaca_llm::{
     ChatMessage, ChatRequest, ChatResponse, LlmProvider, LlmRouter, LlmRouterError,
     RequestContext, RouterRequest, ThinkingConfig, ToolChoice, ToolDefinition,
+    context_management::ContextManagement,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +36,7 @@ impl<'a> LlmBackend<'a> {
         thinking: Option<ThinkingConfig>,
         stream_callback: Option<&StreamCallback>,
         max_stream_duration: Duration,
+        context_management: Option<ContextManagement>,
     ) -> Result<ChatResponse, LlmRouterError> {
         match self {
             LlmBackend::Direct { provider } => {
@@ -47,7 +49,7 @@ impl<'a> LlmBackend<'a> {
                     tool_choice,
                     enable_caching,
                     thinking,
-                    context_management: None,
+                    context_management,
                 };
                 provider.chat(request).await.map_err(LlmRouterError::Llm)
             }
@@ -65,7 +67,7 @@ impl<'a> LlmBackend<'a> {
                         tools_token_estimate,
                         enable_caching,
                         thinking: thinking.clone(),
-                        context_management: None,
+                        context_management: context_management.clone(),
                     };
                     match router.complete_streaming(stream_request).await {
                         Ok(stream) => {
@@ -133,7 +135,7 @@ impl<'a> LlmBackend<'a> {
                     tools_token_estimate,
                     enable_caching,
                     thinking,
-                    context_management: None,
+                    context_management,
                 };
                 router.complete(request).await
             }
