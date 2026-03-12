@@ -3,18 +3,17 @@ id: "general_agent"
 name: "General Purpose Agent"
 description: "Versatile agent with broad tool access for complex multi-step tasks that span multiple domains. Can read and write files, execute commands, search the web, and fetch pages. Use when a task requires capabilities from multiple specialized agents or does not fit any single specialist."
 icon: "swiss_knife"
-skills:
+capabilities:
   - "file_read"
   - "file_write"
   - "shell_execute"
-  - "web_search"
-  - "web_fetch"
-  - "memory_search"
+  - "web_access"
+  - "memory_read"
   - "workspace_read"
   - "workspace_write"
-  - "send"
-denied_skills:
-  - "update_persona"
+  - "messaging"
+denied_capabilities:
+  - "persona_write"
 temperature: 0.4
 verbosity: "detailed"
 model: "claude-sonnet-4-6"

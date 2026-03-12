@@ -2,13 +2,13 @@
 id: "writing_agent"
 name: "Writing Agent"
 description: "Focused on content writing, document generation, and text refinement"
-skills:
+capabilities:
   - "file_write"
   - "workspace_read"
   - "workspace_write"
-denied_skills:
+denied_capabilities:
   - "shell_execute"
-  - "web_search"
+  - "web_access"
 temperature: 0.7
 verbosity: "detailed"
 model: "claude-sonnet-4-6"

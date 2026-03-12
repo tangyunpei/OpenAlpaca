@@ -3,15 +3,14 @@ id: "explore_agent"
 name: "Explore Agent"
 description: "Fast read-only codebase exploration: reads files, searches content, and summarizes findings. Cannot modify files, execute commands, or access the web. Use for understanding code structure, finding patterns, reading configs, and gathering context before implementation."
 icon: "eye"
-skills:
+capabilities:
   - "file_read"
-  - "memory_search"
+  - "memory_read"
   - "workspace_read"
-denied_skills:
+denied_capabilities:
   - "file_write"
   - "shell_execute"
-  - "web_search"
-  - "web_fetch"
+  - "web_access"
 temperature: 0.2
 verbosity: "concise"
 model: "claude-haiku-4-5-20251001"

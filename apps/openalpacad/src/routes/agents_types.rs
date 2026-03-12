@@ -54,8 +54,8 @@ pub struct TemplateResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     pub singleton: bool,
-    pub skills: Vec<String>,
-    pub denied_skills: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub denied_capabilities: Vec<String>,
     pub temperature: f32,
     pub verbosity: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -82,8 +82,8 @@ impl TemplateResponse {
             description: fm.description.clone(),
             icon: fm.icon.clone(),
             singleton: fm.singleton,
-            skills: fm.skills.clone(),
-            denied_skills: fm.denied_skills.clone(),
+            capabilities: fm.capabilities.clone(),
+            denied_capabilities: fm.denied_capabilities.clone(),
             temperature: fm.temperature,
             verbosity: fm.verbosity.clone(),
             model: fm.model.clone(),

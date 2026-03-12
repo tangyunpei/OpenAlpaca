@@ -50,13 +50,13 @@ pub async fn list_agents_handler(
     let repo = SubAgentRepository::new(&state.db);
     let limit = query.limit.unwrap_or(50);
 
-    // If filtering by skill, use in-memory registry
+    // If filtering by skill/capability, use in-memory registry
     if let Some(ref skill) = query.skill {
         let agents = state
             .gateway
             .shared_context
             .agent_registry
-            .find_by_skill(skill);
+            .find_by_capability(skill);
         let ids: Vec<String> = agents.iter().map(|a| a.id.clone()).collect();
 
         // Fetch full configs from DB for the matched IDs

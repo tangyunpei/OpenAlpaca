@@ -3,16 +3,15 @@ id: "code_agent"
 name: "Code Agent"
 description: "Software development agent for coding tasks: reads, writes, and edits code files, runs tests and build commands via shell. No web access. Use for implementing features, fixing bugs, refactoring code, running tests, and any task that requires writing or modifying source code."
 icon: "code"
-skills:
+capabilities:
   - "file_read"
   - "file_write"
   - "shell_execute"
-  - "memory_search"
+  - "memory_read"
   - "workspace_read"
   - "workspace_write"
-denied_skills:
-  - "web_search"
-  - "web_fetch"
+denied_capabilities:
+  - "web_access"
 temperature: 0.3
 verbosity: "detailed"
 model: "claude-sonnet-4-6"
