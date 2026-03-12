@@ -480,6 +480,25 @@ async fn test_command_all_placeholders_substituted_runs() {
     assert!(result.unwrap().contains("hello"));
 }
 
+// --- ToolContext and execute_with_context ---
+
+#[tokio::test]
+async fn test_execute_with_context_defaults_to_execute() {
+    // A tool that only implements execute() should work via execute_with_context()
+    let tool = MockBuiltIn {
+        response: "mock".to_string(),
+    };
+    let ctx = super::ToolContext {
+        agent_id: Some("test-agent".to_string()),
+        task_id: None,
+        owner_id: None,
+        workspace_id: None,
+    };
+    let args = serde_json::json!({"key": "value"});
+    let result = tool.execute_with_context(&args, &ctx).await.unwrap();
+    assert_eq!(result, "mock");
+}
+
 // --- tools_for_capabilities ---
 
 #[test]
