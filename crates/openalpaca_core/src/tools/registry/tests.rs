@@ -551,6 +551,51 @@ async fn test_execute_with_context_defaults_to_execute() {
     assert_eq!(result, "mock");
 }
 
+// --- memory_search reads from ToolContext ---
+
+#[tokio::test]
+async fn test_memory_search_reads_context_not_args() {
+    use super::ToolContext;
+
+    struct ContextCaptureTool;
+
+    #[async_trait]
+    impl super::BuiltInTool for ContextCaptureTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Err("should not be called directly".to_string())
+        }
+        async fn execute_with_context(
+            &self,
+            arguments: &serde_json::Value,
+            ctx: &ToolContext,
+        ) -> Result<String, String> {
+            Ok(serde_json::json!({
+                "ctx_owner": ctx.owner_id,
+                "ctx_workspace": ctx.workspace_id,
+                "args": arguments,
+            })
+            .to_string())
+        }
+    }
+
+    let tool = ContextCaptureTool;
+    let ctx = ToolContext {
+        owner_id: Some("real-owner".to_string()),
+        workspace_id: Some("ws-1".to_string()),
+        ..Default::default()
+    };
+    let result = tool
+        .execute_with_context(
+            &serde_json::json!({"query": "test", "owner_id": "spoofed"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["ctx_owner"], "real-owner");
+    assert_eq!(parsed["ctx_workspace"], "ws-1");
+}
+
 // --- tools_for_capabilities ---
 
 #[test]

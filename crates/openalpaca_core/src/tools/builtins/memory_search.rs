@@ -1,5 +1,5 @@
 use crate::daemon_config::DaemonConfig;
-use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
@@ -13,6 +13,33 @@ struct MemorySearchTool {
 
 #[async_trait]
 impl BuiltInTool for MemorySearchTool {
+    async fn execute_with_context(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
+        // Read identity from context, not from arguments (anti-spoofing)
+        let owner_id = ctx.owner_id.as_deref().ok_or_else(|| {
+            "Tool 'memory_search' requires owner_id but none provided in execution context"
+                .to_string()
+        })?;
+
+        let mut args = arguments.clone();
+        if let Some(obj) = args.as_object_mut() {
+            obj.insert(
+                "owner_id".to_string(),
+                serde_json::Value::String(owner_id.to_string()),
+            );
+            if let Some(ref ws_id) = ctx.workspace_id {
+                obj.insert(
+                    "workspace_id".to_string(),
+                    serde_json::Value::String(ws_id.clone()),
+                );
+            }
+        }
+        self.execute(&args).await
+    }
+
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         let query = arguments
             .get("query")
