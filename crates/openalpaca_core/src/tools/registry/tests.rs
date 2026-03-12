@@ -480,6 +480,44 @@ async fn test_command_all_placeholders_substituted_runs() {
     assert!(result.unwrap().contains("hello"));
 }
 
+// --- registry::execute_with_context ---
+
+#[tokio::test]
+async fn test_registry_execute_with_context_routes_to_builtin() {
+    let mut registry = ToolRegistry::new();
+    registry.register(RegisteredTool {
+        definition: ToolDefinition {
+            name: "test_tool".to_string(),
+            description: "Test".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
+        },
+        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+            response: "mock".to_string(),
+        })),
+        provides_capabilities: vec![],
+    });
+
+    let ctx = super::ToolContext::default();
+    let result = registry
+        .execute_with_context("test_tool", &serde_json::json!({}), &ctx)
+        .await;
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), "mock");
+}
+
+#[tokio::test]
+async fn test_registry_execute_with_context_unknown_tool() {
+    let registry = ToolRegistry::new();
+    let ctx = super::ToolContext::default();
+    let result = registry
+        .execute_with_context("no_such_tool", &serde_json::json!({}), &ctx)
+        .await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("not found"));
+}
+
 // --- ToolContext and execute_with_context ---
 
 #[tokio::test]

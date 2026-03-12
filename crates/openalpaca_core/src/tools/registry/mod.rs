@@ -155,6 +155,36 @@ impl ToolRegistry {
         }
     }
 
+    /// Execute a tool by name with per-invocation context.
+    /// Routes to BuiltInTool::execute_with_context() for BuiltIn backends.
+    /// For Http/Command backends, context is ignored (they don't need identity).
+    pub async fn execute_with_context(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
+        let tool = self
+            .tools
+            .get(tool_name)
+            .ok_or_else(|| format!("Tool '{}' not found in registry", tool_name))?;
+
+        // Pre-validate arguments (same validation as execute())
+        validate_tool_arguments(&tool.definition, arguments)?;
+
+        match &tool.backend {
+            ToolBackend::BuiltIn(implementation) => {
+                implementation.execute_with_context(arguments, ctx).await
+            }
+            ToolBackend::Http { .. } => self.execute(tool_name, arguments).await,
+            ToolBackend::Command { .. } => self.execute(tool_name, arguments).await,
+            ToolBackend::Contextual => Err(format!(
+                "Tool '{}' has Contextual backend — must be executed via ContextualToolExecutor",
+                tool_name
+            )),
+        }
+    }
+
     /// List registered tool names (used by InputSanitizer via ToolExecutor trait).
     pub fn registered_tool_names(&self) -> Vec<String> {
         self.tools.keys().cloned().collect()
