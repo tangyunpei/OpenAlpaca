@@ -596,6 +596,81 @@ async fn test_memory_search_reads_context_not_args() {
     assert_eq!(parsed["ctx_workspace"], "ws-1");
 }
 
+// --- missing owner_id returns error ---
+
+#[tokio::test]
+async fn test_missing_owner_id_returns_error() {
+    // A mock tool that mimics MemorySearchTool's execute_with_context:
+    // requires ctx.owner_id and returns an error when it is None.
+    struct OwnerRequiringTool;
+
+    #[async_trait]
+    impl super::BuiltInTool for OwnerRequiringTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Err("direct execute not supported".to_string())
+        }
+
+        async fn execute_with_context(
+            &self,
+            _arguments: &serde_json::Value,
+            ctx: &super::ToolContext,
+        ) -> Result<String, String> {
+            let _owner_id = ctx.owner_id.as_deref().ok_or_else(|| {
+                "Tool requires owner_id but none provided in execution context".to_string()
+            })?;
+            Ok("ok".to_string())
+        }
+    }
+
+    let ctx = super::ToolContext {
+        owner_id: None,
+        ..Default::default()
+    };
+    let tool = OwnerRequiringTool;
+    let result = tool
+        .execute_with_context(&serde_json::json!({"query": "test"}), &ctx)
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("owner_id"),
+        "Error should mention owner_id, got: {}",
+        err
+    );
+}
+
+// --- workspace tool requires task_id ---
+
+#[tokio::test]
+async fn test_workspace_read_requires_task_id() {
+    // WorkspaceReadTool is private; test through the registry's execute_with_context.
+    // When ctx.task_id is None the tool must return an error.
+    use crate::tools::builtins::builtin_tools;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+
+    let mut registry = ToolRegistry::new();
+    for tool in builtin_tools(Some(db), None, None, None, None) {
+        registry.register(tool);
+    }
+
+    let ctx = super::ToolContext {
+        task_id: None,
+        ..Default::default()
+    };
+    let result = registry
+        .execute_with_context("workspace_read", &serde_json::json!({}), &ctx)
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("task") || err.contains("context"),
+        "Error should mention missing task context, got: {}",
+        err
+    );
+}
+
 // --- tools_for_capabilities ---
 
 #[test]
