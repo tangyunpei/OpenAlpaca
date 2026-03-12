@@ -7,9 +7,9 @@ use crate::daemon_config::DaemonConfig;
 use crate::events::SystemEvent;
 use crate::middleware::prompt::format_tool_guidance;
 use crate::runner::{LoopConfig, run_agentic_loop_routed};
-use crate::security::sandbox::{SandboxManager, SandboxPolicy, ToolExecutor};
+use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
-use crate::tools::{ContextualToolExecutor, ToolRegistry};
+use crate::tools::ToolRegistry;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -785,71 +785,3 @@ pub fn register_coordination_tools(
     });
 }
 
-// ── LeadAgentToolExecutor ────────────────────────────────────────────
-
-/// A ToolExecutor that routes `spawn_subagent`, `check_subagent_status`,
-/// and `wait_for_subagents` to their respective tool implementations,
-/// and all other tools to the ContextualToolExecutor.
-pub struct LeadAgentToolExecutor {
-    spawn_tool: Arc<SpawnSubagentTool>,
-    batch_spawn_tool: Option<Arc<SpawnSubagentsBatchTool>>,
-    check_status_tool: Arc<CheckSubagentStatusTool>,
-    wait_tool: Arc<WaitForSubagentsTool>,
-    contextual_executor: Arc<ContextualToolExecutor>,
-}
-
-impl LeadAgentToolExecutor {
-    pub fn new(
-        spawn_tool: Arc<SpawnSubagentTool>,
-        batch_spawn_tool: Option<Arc<SpawnSubagentsBatchTool>>,
-        check_status_tool: Arc<CheckSubagentStatusTool>,
-        wait_tool: Arc<WaitForSubagentsTool>,
-        contextual_executor: Arc<ContextualToolExecutor>,
-    ) -> Self {
-        Self {
-            spawn_tool,
-            batch_spawn_tool,
-            check_status_tool,
-            wait_tool,
-            contextual_executor,
-        }
-    }
-}
-
-#[async_trait]
-impl ToolExecutor for LeadAgentToolExecutor {
-    async fn execute(
-        &self,
-        tool_name: &str,
-        arguments: &serde_json::Value,
-    ) -> Result<String, String> {
-        match tool_name {
-            "spawn_subagent" => self.spawn_tool.execute(arguments).await,
-            "spawn_subagents_batch" => match &self.batch_spawn_tool {
-                Some(tool) => tool.execute(arguments).await,
-                None => Err("spawn_subagents_batch tool is not enabled".to_string()),
-            },
-            "check_subagent_status" => self.check_status_tool.execute(arguments).await,
-            "wait_for_subagents" => self.wait_tool.execute(arguments).await,
-            _ => self.contextual_executor.execute(tool_name, arguments).await,
-        }
-    }
-
-    fn registered_tools(&self) -> Vec<String> {
-        let mut tools = self.contextual_executor.registered_tools();
-        tools.push("spawn_subagent".to_string());
-        if self.batch_spawn_tool.is_some() {
-            tools.push("spawn_subagents_batch".to_string());
-        }
-        tools.push("check_subagent_status".to_string());
-        tools.push("wait_for_subagents".to_string());
-        tools
-    }
-
-    /// Delegate shell-like tool detection to the underlying contextual executor
-    /// so that command-backend tools routed through the lead agent path still
-    /// receive shell-injection sanitization from the SandboxManager.
-    fn shell_like_tools(&self) -> Vec<String> {
-        self.contextual_executor.shell_like_tools()
-    }
-}

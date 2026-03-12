@@ -18,7 +18,7 @@ pub use tools::{
     check_subagent_status_tool_definition, register_coordination_tools,
     spawn_subagent_tool_definition_from_templates,
     spawn_subagents_batch_tool_definition, wait_for_subagents_tool_definition,
-    CheckSubagentStatusTool, LeadAgentToolExecutor, SpawnSubagentTool,
+    CheckSubagentStatusTool, SpawnSubagentTool,
     SpawnSubagentsBatchTool, WaitForSubagentsTool,
 };
 pub use tracker::{SubagentStatus, SubagentTracker};
@@ -126,7 +126,7 @@ pub async fn run_lead_agent(
         tools.push(mem_tool.definition.clone());
     }
 
-    // 4. Build LeadAgentToolExecutor with shared SubagentTracker
+    // 4. Build coordination tools with shared SubagentTracker
     let tracker = Arc::new(SubagentTracker::new());
 
     let spawn_tool = Arc::new(SpawnSubagentTool::new(

@@ -1,13 +1,10 @@
 pub mod builtins;
 pub mod config;
-pub mod contextual_executor;
-pub mod executor;
 pub mod platform;
 pub mod registry;
 pub mod url_validation;
 
-pub use contextual_executor::{ContextualToolExecutor, ScriptExecutionContext, ToolExecutionContext};
-pub use executor::RegistryToolExecutor;
+pub use registry::ToolContext;
 pub use registry::ToolRegistry;
 
 use crate::agent::SubAgent;

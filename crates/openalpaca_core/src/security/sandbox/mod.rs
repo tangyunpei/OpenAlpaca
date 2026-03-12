@@ -11,14 +11,12 @@ use crate::security::capabilities::CapabilityManager;
 use crate::security::circuit_breaker::{ToolCircuitBreaker, is_transient_tool_error};
 use crate::security::confirmation::{ConfirmationBroker, ConfirmationRequest};
 use crate::security::sanitizer::InputSanitizer;
-use async_trait::async_trait;
+use crate::tools::registry::ToolContext;
+use crate::tools::ToolRegistry;
 use chrono::Utc;
 use openalpaca_llm::ToolCall;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// Tools that manage their own timeouts and must bypass the per-tool sandbox timeout.
-const COORDINATION_TOOLS: &[&str] = &["wait_for_subagents", "check_subagent_status"];
 
 /// Policy governing what a sandboxed agent can do.
 #[derive(Debug, Clone)]
@@ -57,30 +55,9 @@ impl SandboxPolicy {
     }
 }
 
-/// Trait for executing tools. Implementations provide the actual tool logic.
-#[async_trait]
-pub trait ToolExecutor: Send + Sync {
-    /// Execute a tool by name with the given arguments. Returns the tool output or an error.
-    async fn execute(
-        &self,
-        tool_name: &str,
-        arguments: &serde_json::Value,
-    ) -> Result<String, String>;
-
-    /// List all tools this executor can handle.
-    fn registered_tools(&self) -> Vec<String>;
-
-    /// Return the names of tools that execute via shell (command backends).
-    /// Used by the sanitizer to apply shell injection checks to these tools
-    /// in addition to the hardcoded `shell_execute`.
-    fn shell_like_tools(&self) -> Vec<String> {
-        Vec::new()
-    }
-}
-
 /// Manages sandboxed tool execution with security checks.
 pub struct SandboxManager {
-    executor: Arc<dyn ToolExecutor>,
+    registry: Arc<ToolRegistry>,
     bus: EventBus,
     circuit_breaker: ToolCircuitBreaker,
     /// Optional database for persisting security violation audit logs.
@@ -94,13 +71,13 @@ pub struct SandboxManager {
 impl SandboxManager {
     /// Create a new SandboxManager with a specific circuit breaker configuration.
     pub fn new(
-        executor: Arc<dyn ToolExecutor>,
+        registry: Arc<ToolRegistry>,
         bus: EventBus,
         circuit_breaker_config: &CircuitBreakerConfig,
     ) -> Self {
         let circuit_breaker = ToolCircuitBreaker::new(circuit_breaker_config, bus.clone());
         Self {
-            executor,
+            registry,
             bus,
             circuit_breaker,
             db: None,
@@ -110,14 +87,14 @@ impl SandboxManager {
 
     /// Create a new SandboxManager with a database for audit logging.
     pub fn with_db(
-        executor: Arc<dyn ToolExecutor>,
+        registry: Arc<ToolRegistry>,
         bus: EventBus,
         circuit_breaker_config: &CircuitBreakerConfig,
         db: openalpaca_storage::Database,
     ) -> Self {
         let circuit_breaker = ToolCircuitBreaker::new(circuit_breaker_config, bus.clone());
         Self {
-            executor,
+            registry,
             bus,
             circuit_breaker,
             db: Some(db),
@@ -129,8 +106,8 @@ impl SandboxManager {
     ///
     /// Used by internal per-request sandbox instances (query handler, skill handler,
     /// DAG executor, lead agent) where no custom config is needed.
-    pub fn with_defaults(executor: Arc<dyn ToolExecutor>, bus: EventBus) -> Self {
-        Self::new(executor, bus, &CircuitBreakerConfig::default())
+    pub fn with_defaults(registry: Arc<ToolRegistry>, bus: EventBus) -> Self {
+        Self::new(registry, bus, &CircuitBreakerConfig::default())
     }
 
     /// Set the confirmation broker for interactive tool approval.
@@ -150,10 +127,12 @@ impl SandboxManager {
     /// 7. Event emission (ToolExecuted or SecurityViolation)
     pub async fn execute_tool(
         &self,
-        agent_id: &str,
         tool_call: &ToolCall,
         policy: &SandboxPolicy,
+        ctx: &ToolContext,
     ) -> Result<String, String> {
+        let agent_id = ctx.agent_id.as_deref().unwrap_or("unknown");
+
         // 1. Capability check
         let constraints = AgentConstraints {
             allowed_capabilities: policy.allowed_capabilities.clone(),
@@ -169,8 +148,8 @@ impl SandboxManager {
         }
 
         // 2. Input sanitization
-        let registered = self.executor.registered_tools();
-        let shell_like = self.executor.shell_like_tools();
+        let registered = self.registry.registered_tool_names();
+        let shell_like = self.registry.command_backend_tool_names();
         if let Err(violation) = InputSanitizer::sanitize_tool_args(
             &tool_call.name,
             &tool_call.arguments,
@@ -292,30 +271,30 @@ impl SandboxManager {
 
         // 5. Timeout-wrapped execution
         //
-        // Coordination tools (wait_for_subagents, check_subagent_status) have their
-        // own internal timeouts and must not be subject to the per-tool sandbox
-        // timeout, which is typically much shorter than the time subagents need to
-        // complete their work.
-        let is_coordination_tool = COORDINATION_TOOLS.contains(&tool_call.name.as_str());
+        // Tools flagged as exempt_from_timeout (e.g., coordination tools like
+        // wait_for_subagents) manage their own timeouts and must not be subject
+        // to the per-tool sandbox timeout.
+        let is_exempt = self.registry.is_exempt_from_timeout(&tool_call.name);
 
-        let executor = self.executor.clone();
+        let registry = self.registry.clone();
         let tool_name = tool_call.name.clone();
         let arguments = tool_call.arguments.clone();
+        let ctx_owned = ctx.clone();
 
         let start = std::time::Instant::now();
-        let result = if is_coordination_tool {
-            Ok(executor.execute(&tool_name, &arguments).await)
+        let result = if is_exempt {
+            Ok(registry.execute_with_context(&tool_name, &arguments, &ctx_owned).await)
         } else {
             let timeout = Duration::from_secs(policy.max_tool_runtime_secs);
             tokio::time::timeout(timeout, async move {
-                executor.execute(&tool_name, &arguments).await
+                registry.execute_with_context(&tool_name, &arguments, &ctx_owned).await
             })
             .await
         };
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        // 5. Process result and record for circuit breaker
+        // 6. Process result and record for circuit breaker
 
         match result {
             Ok(Ok(output)) => {

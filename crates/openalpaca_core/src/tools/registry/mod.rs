@@ -28,10 +28,6 @@ pub enum ToolBackend {
         args_template: Option<String>,
         timeout_secs: u64,
     },
-    /// Tool whose execution is handled by ContextualToolExecutor at runtime.
-    /// Definition is registered for capability-based resolution, but execution
-    /// is delegated (e.g., workspace_read, workspace_write).
-    Contextual,
 }
 
 /// Trait for built-in tool implementations.
@@ -152,9 +148,6 @@ impl ToolRegistry {
                 args_template,
                 timeout_secs,
             } => execute_command(command, args_template.as_deref(), *timeout_secs, arguments).await,
-            ToolBackend::Contextual => {
-                Err(format!("[tool_error] Tool '{}' requires contextual execution — must be called through ContextualToolExecutor", tool_name))
-            }
         }
     }
 
@@ -181,14 +174,10 @@ impl ToolRegistry {
             }
             ToolBackend::Http { .. } => self.execute(tool_name, arguments).await,
             ToolBackend::Command { .. } => self.execute(tool_name, arguments).await,
-            ToolBackend::Contextual => Err(format!(
-                "Tool '{}' has Contextual backend — must be executed via ContextualToolExecutor",
-                tool_name
-            )),
         }
     }
 
-    /// List registered tool names (used by InputSanitizer via ToolExecutor trait).
+    /// List registered tool names.
     pub fn registered_tool_names(&self) -> Vec<String> {
         self.tools.keys().cloned().collect()
     }

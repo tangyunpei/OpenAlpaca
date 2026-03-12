@@ -1,34 +1,56 @@
 use super::*;
+use async_trait::async_trait;
 use crate::bus::EventBus;
 use crate::security::confirmation::{ConfirmationBroker, ConfirmationResponse};
+use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
+use crate::tools::ToolRegistry;
 
-struct MockExecutor;
+struct MockTool;
 
 #[async_trait]
-impl ToolExecutor for MockExecutor {
-    async fn execute(
-        &self,
-        tool_name: &str,
-        _arguments: &serde_json::Value,
-    ) -> Result<String, String> {
-        match tool_name {
-            "web_search" => Ok("search results".to_string()),
-            "slow_tool" => {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                Ok("done".to_string())
-            }
-            _ => Err(format!("Unknown tool: {}", tool_name)),
+impl BuiltInTool for MockTool {
+    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        // Check for the slow_tool marker in arguments
+        if arguments.get("__slow").is_some() {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            return Ok("done".to_string());
         }
+        Ok("search results".to_string())
     }
+}
 
-    fn registered_tools(&self) -> Vec<String> {
-        vec!["web_search".to_string(), "slow_tool".to_string()]
-    }
+fn make_registry() -> Arc<ToolRegistry> {
+    let mut registry = ToolRegistry::new();
+    registry.register(RegisteredTool {
+        definition: openalpaca_llm::ToolDefinition {
+            name: "web_search".to_string(),
+            description: "Web search".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
+        },
+        backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
+    });
+    registry.register(RegisteredTool {
+        definition: openalpaca_llm::ToolDefinition {
+            name: "slow_tool".to_string(),
+            description: "Slow tool".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
+        },
+        backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
+    });
+    Arc::new(registry)
 }
 
 fn make_sandbox() -> SandboxManager {
     SandboxManager::new(
-        Arc::new(MockExecutor),
+        make_registry(),
         EventBus::default(),
         &CircuitBreakerConfig::default(),
     )
@@ -57,13 +79,21 @@ fn make_tool_call(name: &str) -> ToolCall {
     }
 }
 
+fn make_ctx(agent_id: &str) -> ToolContext {
+    ToolContext {
+        agent_id: Some(agent_id.to_string()),
+        ..Default::default()
+    }
+}
+
 #[tokio::test]
 async fn test_happy_path() {
     let sandbox = make_sandbox();
     let policy = make_policy("agent1");
     let tc = make_tool_call("web_search");
+    let ctx = make_ctx("agent1");
 
-    let result = sandbox.execute_tool("agent1", &tc, &policy).await;
+    let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), "search results");
 }
@@ -74,8 +104,9 @@ async fn test_denied_capability() {
     let mut policy = make_policy("agent1");
     policy.denied_capabilities = vec!["web_search".to_string()];
     let tc = make_tool_call("web_search");
+    let ctx = make_ctx("agent1");
 
-    let result = sandbox.execute_tool("agent1", &tc, &policy).await;
+    let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("denied"));
 }
@@ -85,9 +116,14 @@ async fn test_timeout() {
     let sandbox = make_sandbox();
     let mut policy = make_policy("agent1");
     policy.max_tool_runtime_secs = 1; // 1 second timeout
-    let tc = make_tool_call("slow_tool");
+    let tc = ToolCall {
+        id: "tc_1".to_string(),
+        name: "slow_tool".to_string(),
+        arguments: serde_json::json!({"query": "test", "__slow": true}),
+    };
+    let ctx = make_ctx("agent1");
 
-    let result = sandbox.execute_tool("agent1", &tc, &policy).await;
+    let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("timed out"));
 }
@@ -97,15 +133,16 @@ async fn test_security_event_emitted() {
     let bus = EventBus::default();
     let mut rx = bus.subscribe();
     let sandbox = SandboxManager::new(
-        Arc::new(MockExecutor),
+        make_registry(),
         bus,
         &CircuitBreakerConfig::default(),
     );
     let mut policy = make_policy("agent1");
     policy.denied_capabilities = vec!["web_search".to_string()];
     let tc = make_tool_call("web_search");
+    let ctx = make_ctx("agent1");
 
-    let _ = sandbox.execute_tool("agent1", &tc, &policy).await;
+    let _ = sandbox.execute_tool(&tc, &policy, &ctx).await;
 
     let event = rx.try_recv().unwrap();
     match event {
@@ -126,14 +163,15 @@ async fn test_tool_event_emitted() {
     let bus = EventBus::default();
     let mut rx = bus.subscribe();
     let sandbox = SandboxManager::new(
-        Arc::new(MockExecutor),
+        make_registry(),
         bus,
         &CircuitBreakerConfig::default(),
     );
     let policy = make_policy("agent1");
     let tc = make_tool_call("web_search");
+    let ctx = make_ctx("agent1");
 
-    let _ = sandbox.execute_tool("agent1", &tc, &policy).await;
+    let _ = sandbox.execute_tool(&tc, &policy, &ctx).await;
 
     let event = rx.try_recv().unwrap();
     match event {
@@ -156,8 +194,9 @@ async fn test_unregistered_tool() {
     let sandbox = make_sandbox();
     let policy = make_policy("agent1");
     let tc = make_tool_call("unknown_tool");
+    let ctx = make_ctx("agent1");
 
-    let result = sandbox.execute_tool("agent1", &tc, &policy).await;
+    let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
     assert!(result.is_err());
     assert!(
         result
@@ -172,8 +211,9 @@ async fn test_require_confirmation_fails_closed() {
     let mut policy = make_policy("agent1");
     policy.require_confirmation_for = vec!["web_search".to_string()];
     let tc = make_tool_call("web_search");
+    let ctx = make_ctx("agent1");
 
-    let result = sandbox.execute_tool("agent1", &tc, &policy).await;
+    let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -193,6 +233,7 @@ async fn test_confirmation_approved_allows_execution() {
     policy.require_confirmation_for = vec!["web_search".to_string()];
     policy.confirmation_timeout_secs = Some(5);
     let tc = make_tool_call("web_search");
+    let ctx = make_ctx("agent1");
 
     // Spawn a task to approve the confirmation after a brief delay
     let broker_clone = broker.clone();
@@ -208,7 +249,7 @@ async fn test_confirmation_approved_allows_execution() {
             .unwrap();
     });
 
-    let result = sandbox.execute_tool("agent1", &tc, &policy).await;
+    let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
     assert!(result.is_ok(), "Tool should execute after approval: {:?}", result);
     assert_eq!(result.unwrap(), "search results");
 }
@@ -223,6 +264,7 @@ async fn test_confirmation_denied_blocks_execution() {
     policy.require_confirmation_for = vec!["web_search".to_string()];
     policy.confirmation_timeout_secs = Some(5);
     let tc = make_tool_call("web_search");
+    let ctx = make_ctx("agent1");
 
     let broker_clone = broker.clone();
     tokio::spawn(async move {
@@ -234,7 +276,7 @@ async fn test_confirmation_denied_blocks_execution() {
             .unwrap();
     });
 
-    let result = sandbox.execute_tool("agent1", &tc, &policy).await;
+    let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("denied by user"));
 }
@@ -246,9 +288,10 @@ async fn test_auto_approve_skips_confirmation() {
     policy.require_confirmation_for = vec!["web_search".to_string()];
     policy.auto_approve = true;
     let tc = make_tool_call("web_search");
+    let ctx = make_ctx("agent1");
 
     // Should succeed without broker, because auto_approve bypasses confirmation
-    let result = sandbox.execute_tool("agent1", &tc, &policy).await;
+    let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
     assert!(result.is_ok(), "Auto-approve should bypass confirmation: {:?}", result);
     assert_eq!(result.unwrap(), "search results");
 }
@@ -263,9 +306,10 @@ async fn test_confirmation_timeout() {
     policy.require_confirmation_for = vec!["web_search".to_string()];
     policy.confirmation_timeout_secs = Some(1); // 1 second timeout
     let tc = make_tool_call("web_search");
+    let ctx = make_ctx("agent1");
 
     // Don't respond — let it time out
-    let result = sandbox.execute_tool("agent1", &tc, &policy).await;
+    let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
