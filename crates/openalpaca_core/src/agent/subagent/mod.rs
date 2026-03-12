@@ -122,6 +122,12 @@ pub struct AgentConstraints {
     /// When true, skip interactive confirmations for this agent.
     #[serde(default)]
     pub auto_approve: bool,
+    /// Sections to exclude from ContextPackage (e.g. ["conversation_summary", "user_context"]).
+    #[serde(default)]
+    pub denied_sections: Vec<String>,
+    /// Maximum total context tokens for this agent. Overrides model default if set.
+    #[serde(default)]
+    pub max_context_tokens: Option<usize>,
 }
 
 impl AgentConstraints {
@@ -138,6 +144,9 @@ impl AgentConstraints {
             *s = s.to_lowercase();
         }
         for s in &mut self.denied_models {
+            *s = s.to_lowercase();
+        }
+        for s in &mut self.denied_sections {
             *s = s.to_lowercase();
         }
     }
