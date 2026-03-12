@@ -198,6 +198,14 @@ impl ToolRegistry {
         self.tools.len()
     }
 
+    /// Check if a tool is exempt from the per-tool sandbox timeout.
+    pub fn is_exempt_from_timeout(&self, tool_name: &str) -> bool {
+        self.tools
+            .get(tool_name)
+            .map(|t| t.exempt_from_timeout)
+            .unwrap_or(false)
+    }
+
     /// Returns tool definitions for all tools whose `provides_capabilities`
     /// intersects with the requested capabilities. Empty capabilities returns empty.
     pub fn tools_for_capabilities(&self, capabilities: &[String]) -> Vec<ToolDefinition> {
