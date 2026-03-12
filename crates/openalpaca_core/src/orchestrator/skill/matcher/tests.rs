@@ -1,6 +1,6 @@
 use super::*;
 use crate::agent::subagent::{
-    AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent,
+    AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Capability, SubAgent,
 };
 
 fn make_agent(id: &str, name: &str, skills: Vec<&str>) -> SubAgent {
@@ -12,9 +12,9 @@ fn make_agent(id: &str, name: &str, skills: Vec<&str>) -> SubAgent {
         icon: None,
         status: AgentStatus::Idle,
         current_task: None,
-        skills: skills
+        capabilities: skills
             .into_iter()
-            .map(|s| Skill {
+            .map(|s| Capability {
                 name: s.to_string(),
                 category: "test".to_string(),
                 proficiency: 1.0,

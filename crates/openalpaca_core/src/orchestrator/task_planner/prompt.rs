@@ -15,7 +15,7 @@ pub(super) fn format_agent_list(out: &mut String, agents: &[SubAgent]) {
         for agent in agents {
             let desc = agent.description.as_deref().unwrap_or("No description");
             let skills_str: Vec<String> = agent
-                .skills
+                .capabilities
                 .iter()
                 .map(|s| format!("{} ({:.1})", s.name, s.proficiency))
                 .collect();

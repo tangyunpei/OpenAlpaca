@@ -27,7 +27,7 @@ pub fn resolve_agent_tools(
     agent: &SubAgent,
     tool_registry: &Arc<ToolRegistry>,
 ) -> Vec<ToolDefinition> {
-    let skill_names: Vec<String> = agent.skills.iter().map(|s| s.name.clone()).collect();
+    let skill_names: Vec<String> = agent.capabilities.iter().map(|s| s.name.clone()).collect();
     let mut tools = tool_registry.definitions_for_skills(&skill_names);
 
     // Add workspace tools when the agent has them as skills. Template-based agents

@@ -1,5 +1,5 @@
 use crate::agent::subagent::{
-    AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent,
+    AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Capability, SubAgent,
 };
 use crate::agent::template::{AgentTemplate, AgentTemplateFrontmatter};
 use std::collections::HashMap;
@@ -13,9 +13,9 @@ pub(crate) fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
         icon: None,
         status: AgentStatus::Idle,
         current_task: None,
-        skills: skills
+        capabilities: skills
             .into_iter()
-            .map(|s| Skill {
+            .map(|s| Capability {
                 name: s.to_string(),
                 category: "test".to_string(),
                 proficiency: 1.0,
@@ -31,7 +31,7 @@ pub(crate) fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
 /// Templates with "lead_orchestration" skill are marked singleton
 /// (matching production behavior where the lead agent is the singleton).
 pub(crate) fn template_from_agent(agent: &SubAgent) -> AgentTemplate {
-    let is_lead = agent.skills.iter().any(|s| s.name == "lead_orchestration");
+    let is_lead = agent.capabilities.iter().any(|s| s.name == "lead_orchestration");
     AgentTemplate {
         frontmatter: AgentTemplateFrontmatter {
             id: agent.template_id.clone(),
@@ -39,7 +39,7 @@ pub(crate) fn template_from_agent(agent: &SubAgent) -> AgentTemplate {
             description: agent.description.clone().unwrap_or_default(),
             icon: agent.icon.clone(),
             singleton: is_lead,
-            skills: agent.skills.iter().map(|s| s.name.clone()).collect(),
+            skills: agent.capabilities.iter().map(|s| s.name.clone()).collect(),
             denied_skills: vec![],
             temperature: agent.preset.temperature,
             verbosity: agent.preset.verbosity.clone(),

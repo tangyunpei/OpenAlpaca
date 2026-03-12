@@ -503,21 +503,21 @@ impl AgentTemplate {
         let fm = &self.frontmatter;
         let persona = extract_persona(self);
 
-        let mut skills: Vec<Skill> = fm
+        let mut capabilities: Vec<Capability> = fm
             .skills
             .iter()
-            .map(|name| Skill {
+            .map(|name| Capability {
                 name: name.clone(),
                 category: "assigned".to_string(),
                 proficiency: 1.0,
             })
             .collect();
 
-        // Inject workspace tools into skills so they appear in tool resolution
-        // (resolve_agent_tools uses agent.skills to look up definitions).
+        // Inject workspace tools into capabilities so they appear in tool resolution
+        // (resolve_agent_tools uses agent.capabilities to look up definitions).
         for ws_tool in ["workspace_read", "workspace_write"] {
-            if !skills.iter().any(|s| s.name == ws_tool) {
-                skills.push(Skill {
+            if !capabilities.iter().any(|s| s.name == ws_tool) {
+                capabilities.push(Capability {
                     name: ws_tool.to_string(),
                     category: "infrastructure".to_string(),
                     proficiency: 1.0,
@@ -547,7 +547,7 @@ impl AgentTemplate {
                 task_id: task_id.to_string(),
             },
             current_task: Some(task_id.to_string()),
-            skills,
+            capabilities,
             preset: AgentPreset {
                 persona,
                 temperature: fm.temperature,
