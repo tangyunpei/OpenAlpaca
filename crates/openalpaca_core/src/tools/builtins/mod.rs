@@ -14,8 +14,11 @@ mod web_fetch;
 mod web_search;
 
 use crate::daemon_config::DaemonConfig;
+use crate::orchestrator::task_state::{TaskState, WorkspaceEntryType};
 use crate::orchestrator::ConnectorSendProvider;
+use crate::tools::registry::{BuiltInTool, ToolContext};
 use arc_swap::ArcSwap;
+use async_trait::async_trait;
 use openalpaca_llm::{ToolDefinition, WebSearchConfig};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -35,6 +38,180 @@ use super::registry::{RegisteredTool, ToolBackend};
 /// Context required by the `update_persona` tool at runtime.
 /// Re-export from the update_persona module.
 pub use update_persona::PersonaToolContext;
+
+// ---------------------------------------------------------------------------
+// WorkspaceReadTool
+// ---------------------------------------------------------------------------
+
+struct WorkspaceReadTool {
+    db: Option<openalpaca_storage::Database>,
+}
+
+#[async_trait]
+impl BuiltInTool for WorkspaceReadTool {
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Err("workspace_read requires execution context — use execute_with_context".to_string())
+    }
+
+    async fn execute_with_context(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "workspace_read requires database context".to_string())?;
+        let task_id = ctx
+            .task_id
+            .as_deref()
+            .ok_or_else(|| "workspace_read requires a task context".to_string())?;
+
+        let repo = openalpaca_storage::repository::TaskRepository::new(db);
+        let task = repo
+            .get(task_id)
+            .map_err(|e| format!("Failed to load task: {e}"))?
+            .ok_or_else(|| format!("Task '{}' not found", task_id))?;
+
+        let state: TaskState = match task.state_json.as_deref() {
+            Some(json) => serde_json::from_str(json)
+                .map_err(|e| format!("Failed to parse task state: {e}"))?,
+            None => return Ok("[]".to_string()),
+        };
+
+        let key = arguments
+            .get("key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let entries = state.workspace.read(key);
+        let result: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "key": e.key,
+                    "content": e.content,
+                    "author": e.author_agent_id,
+                    "type": e.entry_type,
+                })
+            })
+            .collect();
+
+        serde_json::to_string(&result).map_err(|e| format!("Serialization error: {e}"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WorkspaceWriteTool
+// ---------------------------------------------------------------------------
+
+struct WorkspaceWriteTool {
+    db: Option<openalpaca_storage::Database>,
+}
+
+#[async_trait]
+impl BuiltInTool for WorkspaceWriteTool {
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Err("workspace_write requires execution context — use execute_with_context".to_string())
+    }
+
+    async fn execute_with_context(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "workspace_write requires database context".to_string())?;
+        let task_id = ctx
+            .task_id
+            .as_deref()
+            .ok_or_else(|| "workspace_write requires a task context".to_string())?;
+        let agent_id = ctx.agent_id.as_deref().unwrap_or("unknown");
+
+        let key = arguments
+            .get("key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Missing required parameter: key".to_string())?;
+        let content = arguments
+            .get("content")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Missing required parameter: content".to_string())?;
+
+        // Enforce the documented 32KB content size limit
+        const MAX_WORKSPACE_CONTENT_SIZE: usize = 32768;
+        if content.len() > MAX_WORKSPACE_CONTENT_SIZE {
+            return Err(format!(
+                "Content size {} bytes exceeds the {} byte limit. \
+                 Condense or summarize your content to fit within the limit, then retry.",
+                content.len(),
+                MAX_WORKSPACE_CONTENT_SIZE
+            ));
+        }
+
+        let entry_type_str = arguments
+            .get("entry_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("text");
+        let entry_type = match entry_type_str {
+            "artifact" => WorkspaceEntryType::Artifact,
+            "summary" => WorkspaceEntryType::Summary,
+            "context" => WorkspaceEntryType::Context,
+            _ => WorkspaceEntryType::Text,
+        };
+
+        const MAX_RETRIES: usize = 5;
+        for attempt in 0..MAX_RETRIES {
+            let repo = openalpaca_storage::repository::TaskRepository::new(db);
+            let task = repo
+                .get(task_id)
+                .map_err(|e| format!("Failed to load task: {e}"))?
+                .ok_or_else(|| format!("Task '{}' not found", task_id))?;
+
+            let mut state: TaskState = match task.state_json.as_deref() {
+                Some(json) => serde_json::from_str(json)
+                    .map_err(|e| format!("Failed to parse task state: {e}"))?,
+                None => return Err("Task has no state".to_string()),
+            };
+
+            state
+                .workspace
+                .write(key, content, agent_id, entry_type.clone(), &[])?;
+
+            // Set file_asset_id in the same state mutation (before persisting)
+            if let Some(fid) = arguments.get("file_asset_id").and_then(|v| v.as_str()) {
+                state.workspace.set_file_asset_id(key, fid);
+            }
+
+            let new_json = state.to_json();
+            let updated = repo
+                .update_state(task_id, &new_json, task.state_version)
+                .map_err(|e| format!("Failed to persist workspace: {e}"))?;
+
+            if updated {
+                return Ok(format!("Workspace entry '{}' written successfully", key));
+            }
+
+            // Version conflict — retry with fresh state
+            if attempt < MAX_RETRIES - 1 {
+                tracing::debug!(
+                    "Workspace write version conflict for key '{}' (attempt {}/{}), retrying",
+                    key,
+                    attempt + 1,
+                    MAX_RETRIES
+                );
+                // Brief async backoff to reduce collision probability
+                tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
+            }
+        }
+
+        Err(format!(
+            "Workspace write for key '{}' failed after {} retries due to concurrent modifications",
+            key, MAX_RETRIES
+        ))
+    }
+}
 
 /// Return all built-in tool definitions and implementations.
 /// When `db` is provided, memory-backed tools (memory_search) are included.
@@ -56,6 +233,9 @@ pub fn builtin_tools(
     let ws_root = workspace_root
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
+    // Clone db before memory_search consumes it — workspace tools need it too.
+    let ws_db = db.clone();
+
     let mut tools = vec![
         web_search_tool(ws_cfg),
         web_fetch_tool(),
@@ -67,16 +247,21 @@ pub fn builtin_tools(
         tools.push(memory_search_tool(db, embedder, dc));
     }
 
-    // Register workspace tools (execution handled by ContextualToolExecutor)
+    // Always register workspace tools — definitions needed for capability resolution.
     for def in workspace_tool_definitions() {
         let cap = if def.name == "workspace_read" {
             vec!["workspace_read".to_string()]
         } else {
             vec!["workspace_write".to_string()]
         };
+        let backend = if def.name == "workspace_read" {
+            ToolBackend::BuiltIn(Arc::new(WorkspaceReadTool { db: ws_db.clone() }))
+        } else {
+            ToolBackend::BuiltIn(Arc::new(WorkspaceWriteTool { db: ws_db.clone() }))
+        };
         tools.push(RegisteredTool {
             definition: def,
-            backend: ToolBackend::Contextual,
+            backend,
             provides_capabilities: cap,
             exempt_from_timeout: false,
         });
@@ -105,8 +290,8 @@ pub fn builtin_tools_with_persona_context(
 }
 
 /// Return ToolDefinition entries for workspace tools.
-/// These tools are handled by ContextualToolExecutor (not the registry),
-/// so they only have definitions (no BuiltInTool backend).
+/// Used by `builtin_tools()` to register workspace tools with BuiltIn backends,
+/// and available externally for tests and capability checks.
 pub fn workspace_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
