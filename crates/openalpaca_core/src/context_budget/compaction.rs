@@ -31,7 +31,9 @@ pub struct CompactionResult {
     pub compacted_messages: Vec<ChatMessage>,
     pub extracted_memories: Vec<ExtractedMemory>,
     pub messages_discarded: usize,
+    #[allow(dead_code)]
     pub messages_before: usize,
+    #[allow(dead_code)]
     pub messages_after: usize,
     pub error: Option<String>,
 }
@@ -89,7 +91,7 @@ impl CompactionPipeline {
                 let mut fallback = after_discard;
                 // compress_context expects tail_keep in "rounds" (×3 internally)
                 // Convert min_recent (message count) to rounds via ceiling division
-                let tail_keep = ((min_recent + 2) / 3).max(1);
+                let tail_keep = min_recent.div_ceil(3).max(1);
                 crate::runner::compress_context(&mut fallback, tail_keep, None);
                 let messages_after = fallback.len();
                 CompactionResult {
