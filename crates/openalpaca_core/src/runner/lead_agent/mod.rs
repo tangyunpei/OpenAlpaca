@@ -280,7 +280,7 @@ pub async fn run_lead_agent(
     messages.push(ChatMessage::user(task_description));
 
     // 8. Build LoopConfig from lead agent defaults + agent constraint overrides
-    let loop_config = LoopConfig::from_lead_agent(
+    let mut loop_config = LoopConfig::from_lead_agent(
         &daemon_config.load().execution.lead_agent_defaults,
         lead_agent,
     )
@@ -288,6 +288,25 @@ pub async fn run_lead_agent(
         router.model_registry(),
         lead_agent.llm_config.model.as_deref(),
     );
+
+    // Set compaction model from daemon config
+    loop_config.compaction_model = daemon_config.load()
+        .execution.context.compaction_model.clone();
+
+    // Instantiate ContextBudgetManager for budget-aware compaction
+    let context_budget = {
+        let default_model = router.default_model();
+        let model_id = lead_agent.llm_config.model.as_deref()
+            .unwrap_or(&default_model);
+        let context_window = router.model_registry()
+            .get_model_info(model_id)
+            .map(|info| info.context_window as usize)
+            .unwrap_or(200_000);
+        crate::context_budget::ContextBudgetManager::new(
+            context_window,
+            &daemon_config.load().execution.context,
+        )
+    };
 
     // 9. Run the agentic loop
     tracing::info!(
@@ -308,7 +327,7 @@ pub async fn run_lead_agent(
         &lead_agent.id,
         Some(&sandbox_policy),
         Some(task_id),
-        None, // context_budget
+        Some(&context_budget),
         cancel_token,
     )
     .await;

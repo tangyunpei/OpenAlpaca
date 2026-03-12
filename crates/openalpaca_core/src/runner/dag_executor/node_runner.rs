@@ -46,6 +46,25 @@ pub(super) async fn execute_single_node(
             .with_context_window(router.model_registry(), agent.llm_config.model.as_deref());
     loop_config.max_tool_runtime = std::cmp::min(node_timeout, loop_config.max_tool_runtime);
 
+    // Set compaction model from daemon config
+    loop_config.compaction_model = daemon_config.load()
+        .execution.context.compaction_model.clone();
+
+    // Instantiate ContextBudgetManager for budget-aware compaction
+    let context_budget = {
+        let default_model = router.default_model();
+        let model_id = agent.llm_config.model.as_deref()
+            .unwrap_or(&default_model);
+        let context_window = router.model_registry()
+            .get_model_info(model_id)
+            .map(|info| info.context_window as usize)
+            .unwrap_or(200_000);
+        crate::context_budget::ContextBudgetManager::new(
+            context_window,
+            &daemon_config.load().execution.context,
+        )
+    };
+
     let mut sandbox_policy = SandboxPolicy::from_constraints(&agent_id, &agent.constraints);
     if daemon_config.load().security.auto_approve_confirmations {
         sandbox_policy.auto_approve = true;
@@ -181,7 +200,7 @@ pub(super) async fn execute_single_node(
         &agent_id,
         Some(&sandbox_policy),
         Some(&task_id),
-        None, // context_budget
+        Some(&context_budget),
         cancel_token,
     )
     .await;

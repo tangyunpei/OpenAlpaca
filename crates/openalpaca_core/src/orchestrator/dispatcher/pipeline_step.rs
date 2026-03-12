@@ -184,7 +184,7 @@ pub(super) async fn execute_pipeline_step(
     }
 
     // Build LoopConfig — agent constraints override daemon defaults
-    let loop_config = LoopConfig::from_agent(
+    let mut loop_config = LoopConfig::from_agent(
         &pctx.daemon_config.load().execution.agent_defaults,
         agent,
     )
@@ -192,6 +192,25 @@ pub(super) async fn execute_pipeline_step(
         pctx.router.model_registry(),
         agent.llm_config.model.as_deref(),
     );
+
+    // Set compaction model from daemon config
+    loop_config.compaction_model = pctx.daemon_config.load()
+        .execution.context.compaction_model.clone();
+
+    // Instantiate ContextBudgetManager for budget-aware compaction
+    let context_budget = {
+        let default_model = pctx.router.default_model();
+        let model_id = agent.llm_config.model.as_deref()
+            .unwrap_or(&default_model);
+        let context_window = pctx.router.model_registry()
+            .get_model_info(model_id)
+            .map(|info| info.context_window as usize)
+            .unwrap_or(200_000);
+        crate::context_budget::ContextBudgetManager::new(
+            context_window,
+            &pctx.daemon_config.load().execution.context,
+        )
+    };
 
     let sandbox_policy = SandboxPolicy::from_constraints(agent_id, &agent.constraints);
 
@@ -374,7 +393,7 @@ pub(super) async fn execute_pipeline_step(
         agent_id,
         Some(&sandbox_policy),
         Some(&pctx.task_id),
-        None, // context_budget
+        Some(&context_budget),
         Some(pctx.cancel_token.clone()),
     )
     .await;
