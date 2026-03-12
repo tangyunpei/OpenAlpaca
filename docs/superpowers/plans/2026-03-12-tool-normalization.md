@@ -34,6 +34,11 @@
 | `crates/openalpaca_core/src/orchestrator/query_handler/simple_query_handler.rs` | Replace `ContextualToolExecutor` with `ToolContext` |
 | `crates/openalpaca_core/src/orchestrator/skill/invocation.rs` | Replace `ScriptExecutionContext` with `ScriptToolBuiltIn` in cloned registry |
 | `crates/openalpaca_core/src/tools/mod.rs` | Update re-exports |
+| `crates/openalpaca_core/src/security/gate.rs` | Update test `NoopExecutor` → `ToolRegistry` |
+| `crates/openalpaca_core/src/security/sandbox/tests.rs` | Update `MockExecutor` → `ToolRegistry` with mock tools |
+| `crates/openalpaca_core/src/orchestrator/tests.rs` | Update `make_security_gate()` helpers |
+| `crates/openalpaca_core/src/orchestrator/dispatcher/tests.rs` | Remove `RegistryToolExecutor` usage |
+| `crates/openalpaca_core/src/runner/agentic_loop/tests.rs` | Replace `TestExecutor`/`CancellingExecutor` with mock `BuiltInTool` |
 
 ### Deleted files
 
@@ -201,6 +206,9 @@ In `crates/openalpaca_core/src/tools/registry/mod.rs`, add method to `impl ToolR
             .tools
             .get(tool_name)
             .ok_or_else(|| format!("Tool '{}' not found in registry", tool_name))?;
+
+        // Pre-validate arguments (same validation as execute())
+        validate_tool_arguments(&tool.definition, arguments)?;
 
         match &tool.backend {
             ToolBackend::BuiltIn(implementation) => {
@@ -624,29 +632,45 @@ impl BuiltInTool for WorkspaceWriteTool {
 
 - [ ] **Step 2: Update workspace tool registration**
 
-In the same file, update the workspace tool registration in `builtin_tools()` (or `builtin_tools_with_persona_context()`) to use `ToolBackend::BuiltIn` instead of `ToolBackend::Contextual`. The workspace tools need a `db` parameter, so update the function signature to accept `Option<Database>`.
+In the same file, update the workspace tool registration in `builtin_tools()` to use `ToolBackend::BuiltIn` instead of `ToolBackend::Contextual`. **Important:** The current code registers workspace tools unconditionally (definitions are always advertised for capability resolution). Preserve this behavior — always register, but use `Option<Database>` in the struct. The `execute_with_context()` method returns an error when `db` is `None`.
 
-Find the existing workspace tool registrations (which use `ToolBackend::Contextual`) and replace with:
-
+Update the `WorkspaceReadTool` and `WorkspaceWriteTool` structs to hold `Option<Database>`:
 ```rust
-// Register workspace tools when database is available
-if let Some(ref db) = db {
+struct WorkspaceReadTool {
+    db: Option<openalpaca_storage::Database>,
+}
+```
+
+And add a check at the top of `execute_with_context()`:
+```rust
+let db = self.db.as_ref()
+    .ok_or_else(|| "workspace_read requires database context".to_string())?;
+```
+
+Replace the existing workspace tool registrations (lines ~70-82 which use `ToolBackend::Contextual`) with:
+```rust
+// Always register workspace tools — definitions needed for capability resolution.
+// execute_with_context() returns an error if db is None at runtime.
+let ws_db = db.clone(); // db is already Option<Database> from the function signature
+for def in workspace_tool_definitions() {
+    let cap = if def.name == "workspace_read" {
+        vec!["workspace_read".to_string()]
+    } else {
+        vec!["workspace_write".to_string()]
+    };
+    let backend = if def.name == "workspace_read" {
+        ToolBackend::BuiltIn(Arc::new(WorkspaceReadTool { db: ws_db.clone() }))
+    } else {
+        ToolBackend::BuiltIn(Arc::new(WorkspaceWriteTool { db: ws_db.clone() }))
+    };
     tools.push(RegisteredTool {
-        definition: workspace_read_definition(),
-        backend: ToolBackend::BuiltIn(Arc::new(WorkspaceReadTool { db: db.clone() })),
-        provides_capabilities: vec!["workspace_read".to_string()],
-        exempt_from_timeout: false,
-    });
-    tools.push(RegisteredTool {
-        definition: workspace_write_definition(),
-        backend: ToolBackend::BuiltIn(Arc::new(WorkspaceWriteTool { db: db.clone() })),
-        provides_capabilities: vec!["workspace_write".to_string()],
+        definition: def,
+        backend,
+        provides_capabilities: cap,
         exempt_from_timeout: false,
     });
 }
 ```
-
-Note: The existing `workspace_tool_definitions()` function is used to get the `ToolDefinition` objects — extract the definition creation into helper functions (`workspace_read_definition()`, `workspace_write_definition()`) or inline them.
 
 - [ ] **Step 3: Update all callers of builtin_tools to pass db**
 
@@ -746,6 +770,8 @@ impl ScriptToolBuiltIn {
                 "properties": {},
                 "required": []
             }),
+            strict: None,
+            input_examples: None,
         }
     }
 }
@@ -830,10 +856,15 @@ git commit -m "feat: add ScriptToolBuiltIn implementation for skill-bundled scri
 - Modify: `crates/openalpaca_core/src/orchestrator/dispatcher/pipeline_step.rs`
 - Modify: `crates/openalpaca_core/src/runner/dag_executor/node_runner.rs`
 - Modify: `crates/openalpaca_core/src/runner/dag_executor/mod.rs` (imports)
-- Modify: `crates/openalpaca_core/src/orchestrator/query_handler/simple_query_handler.rs`
+- Modify: `crates/openalpaca_core/src/orchestrator/query_handler/simple_query_handler.rs` (both `handle_simple_query` and `handle_social_query`)
 - Modify: `crates/openalpaca_core/src/orchestrator/skill/invocation.rs`
+- Modify: `crates/openalpaca_core/src/security/gate.rs` (test `NoopExecutor` → `ToolRegistry`)
+- Modify: `crates/openalpaca_core/src/security/sandbox/tests.rs` (`MockExecutor` → `ToolRegistry`)
+- Modify: `crates/openalpaca_core/src/orchestrator/tests.rs` (`make_security_gate()` → `Arc<ToolRegistry>`)
+- Modify: `crates/openalpaca_core/src/orchestrator/dispatcher/tests.rs` (`RegistryToolExecutor` → `Arc<ToolRegistry>`)
+- Modify: `crates/openalpaca_core/src/runner/agentic_loop/tests.rs` (`TestExecutor`/`CancellingExecutor` → `ToolRegistry` with mock tools)
 
-**Context:** This is the core migration. All changes must compile together — there is no intermediate state where `SandboxManager` takes `Arc<ToolRegistry>` but call sites still pass `Arc<dyn ToolExecutor>`.
+**Context:** This is the core migration. All changes must compile together — there is no intermediate state where `SandboxManager` takes `Arc<ToolRegistry>` but call sites still pass `Arc<dyn ToolExecutor>`. This includes ALL test code that constructs `SandboxManager`, since test mocks implement `ToolExecutor` which is being replaced.
 
 **Part A: Update SandboxManager**
 
@@ -918,9 +949,9 @@ Pass `Some(&tool_ctx)` to `run_agentic_loop_routed`.
 
 Same pattern as pipeline_step.rs. Also update `dag_executor/mod.rs` imports to remove `ContextualToolExecutor`/`ToolExecutionContext`.
 
-- [ ] **Step 6: Update simple_query_handler.rs**
+- [ ] **Step 6: Update simple_query_handler.rs (both call sites)**
 
-Replace executor construction with:
+In `handle_simple_query`: replace executor construction with:
 ```rust
 let tool_ctx = ToolContext {
     agent_id: None,
@@ -933,6 +964,10 @@ let mut per_request_sandbox =
 ```
 
 Pass `Some(&tool_ctx)` to `run_agentic_loop_routed`.
+
+In `handle_social_query` (~line 555): this call site has no sandbox or tools (`sandbox: None`), but the `run_agentic_loop_routed` signature now includes `tool_context`. Pass `None` for `tool_context` — no behavioral change needed since this path uses `max_tools_per_round: 0`.
+
+Also update the file's imports: replace `use crate::tools::{ContextualToolExecutor, ToolExecutionContext};` with `use crate::tools::registry::ToolContext;`.
 
 - [ ] **Step 7: Update skill invocation.rs (ScriptToolBuiltIn + registry clone)**
 
@@ -965,19 +1000,75 @@ let mut per_request_sandbox = SandboxManager::with_defaults(registry, self.bus.c
 
 Pass `Some(&tool_ctx)` to `run_agentic_loop_routed`.
 
-**Part D: Verification**
+**Part D: Update test files that construct SandboxManager**
 
-- [ ] **Step 8: Verify compilation**
+- [ ] **Step 8: Update security/gate.rs tests**
+
+Replace `NoopExecutor: ToolExecutor` with a `ToolRegistry::new()`:
+```rust
+// Before:
+struct NoopExecutor;
+impl ToolExecutor for NoopExecutor { ... }
+let sandbox = Arc::new(SandboxManager::with_defaults(Arc::new(NoopExecutor), bus.clone()));
+
+// After:
+let registry = Arc::new(ToolRegistry::new());
+let sandbox = Arc::new(SandboxManager::with_defaults(registry, bus.clone()));
+```
+
+- [ ] **Step 9: Update security/sandbox/tests.rs**
+
+Replace `MockExecutor: ToolExecutor` with a `ToolRegistry` containing a registered mock `BuiltInTool`:
+```rust
+struct MockTool;
+#[async_trait]
+impl BuiltInTool for MockTool {
+    async fn execute(&self, _args: &serde_json::Value) -> Result<String, String> {
+        Ok("mock result".to_string())
+    }
+}
+
+let mut registry = ToolRegistry::new();
+registry.register(RegisteredTool { /* ... mock tool definition ... */ });
+let sandbox = SandboxManager::with_defaults(Arc::new(registry), bus.clone());
+```
+
+Update `sandbox.execute_tool()` calls to pass `&ToolContext::default()` as the third argument.
+
+- [ ] **Step 10: Update orchestrator/tests.rs**
+
+Replace `make_security_gate()` helper — `RegistryToolExecutor::new(registry)` becomes just `registry`:
+```rust
+fn make_security_gate(bus: &EventBus) -> Arc<SecurityGate> {
+    let registry = make_tool_registry();
+    let sandbox = Arc::new(SandboxManager::with_defaults(registry, bus.clone()));
+    Arc::new(SecurityGate::new(sandbox))
+}
+```
+
+Also update the second helper (~line 688) that takes a custom registry.
+
+- [ ] **Step 11: Update orchestrator/dispatcher/tests.rs**
+
+Same pattern: replace `RegistryToolExecutor::new(tool_registry.clone())` with `tool_registry.clone()` in all 3 `SandboxManager::with_defaults` call sites.
+
+- [ ] **Step 12: Update runner/agentic_loop/tests.rs**
+
+Replace `TestExecutor: ToolExecutor` and `CancellingExecutor: ToolExecutor` with `ToolRegistry` instances containing registered mock `BuiltInTool` implementations. Update `sandbox.execute_tool()` calls to pass `&ToolContext::default()`.
+
+**Part E: Verification**
+
+- [ ] **Step 13: Verify compilation**
 
 Run: `cargo check -p openalpaca_core --all-targets`
 Expected: compiles
 
-- [ ] **Step 9: Run full test suite**
+- [ ] **Step 14: Run full test suite**
 
 Run: `cargo test -p openalpaca_core`
 Expected: all tests pass
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 15: Commit**
 
 ```bash
 git add -A crates/openalpaca_core/src/
@@ -1165,6 +1256,8 @@ git commit -m "refactor: run_lead_agent uses registry clone + ToolContext instea
 
 **Context:** All call sites now use `Arc<ToolRegistry>` + `ToolContext`. The executor wrappers are dead code.
 
+**Anti-spoofing note:** `RegistryToolExecutor` stripped LLM-supplied `owner_id`/`workspace_id` from args for owner-scoped tools. After migration, this is no longer needed because: (1) `memory_search.execute_with_context()` reads `owner_id` from `ToolContext`, ignoring args; (2) `SandboxManager` always calls `execute_with_context()`, so the old `execute()` path (which reads args) is never reached in production. The `ToolRegistry::execute()` method (without context) is only used internally by `execute_with_context()` for Http/Command backends, which don't have identity concerns.
+
 - [ ] **Step 1: Remove ToolExecutor trait from sandbox/mod.rs**
 
 Delete the `ToolExecutor` trait definition and the `COORDINATION_TOOLS` const from `crates/openalpaca_core/src/security/sandbox/mod.rs`.
@@ -1193,9 +1286,11 @@ With:
 pub use registry::ToolContext;
 ```
 
-- [ ] **Step 5: Remove LeadAgentToolExecutor from tools.rs**
+- [ ] **Step 5: Remove LeadAgentToolExecutor from tools.rs and update re-exports**
 
 In `crates/openalpaca_core/src/runner/lead_agent/tools.rs`, remove the `LeadAgentToolExecutor` struct and its `impl ToolExecutor` block. Also remove the import of `ToolExecutor`.
+
+In `crates/openalpaca_core/src/runner/lead_agent/mod.rs`, remove `LeadAgentToolExecutor` from the `pub use tools::{...}` re-export block. Also remove `#[cfg(test)] use crate::security::sandbox::ToolExecutor;` (the `ToolExecutor` trait is being deleted).
 
 - [ ] **Step 6: Remove ToolBackend::Contextual variant**
 
