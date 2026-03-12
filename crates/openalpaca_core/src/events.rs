@@ -377,4 +377,15 @@ pub enum SystemEvent {
         lane_key: Option<String>,
         timestamp: DateTime<Utc>,
     },
+    /// Context budget was computed for a request (Phase A observability)
+    ContextBudgetComputed {
+        request_id: Uuid,
+        model: String,
+        window_size: usize,
+        fixed_zone_tokens: usize,
+        free_zone_tokens: usize,
+        buffer_size: usize,
+        section_breakdown: Vec<(String, usize)>,
+        timestamp: DateTime<Utc>,
+    },
 }
