@@ -488,6 +488,14 @@ pub fn spawn_event_bridge(
                             },
                         );
                     }
+                }
+                openalpaca_core::events::SystemEvent::ContextBudgetComputed {
+                    request_id, model, window_size, fixed_zone_tokens, free_zone_tokens, buffer_size, ..
+                } => {
+                    tracing::debug!(
+                        %request_id, %model, window_size, fixed_zone_tokens, free_zone_tokens, buffer_size,
+                        "Context budget computed"
+                    );
                 } // NO catch-all: compiler will flag any missing SystemEvent variant
             }
         }
