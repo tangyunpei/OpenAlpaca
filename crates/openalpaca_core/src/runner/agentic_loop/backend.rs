@@ -16,6 +16,8 @@ pub(super) enum LlmBackend<'a> {
     Router {
         router: &'a LlmRouter,
         context: RequestContext,
+        /// Dedicated model for LLM-based context compaction (extraction + summarization).
+        compaction_model: Option<String>,
     },
 }
 
@@ -53,7 +55,7 @@ impl<'a> LlmBackend<'a> {
                 };
                 provider.chat(request).await.map_err(LlmRouterError::Llm)
             }
-            LlmBackend::Router { router, context } => {
+            LlmBackend::Router { router, context, .. } => {
                 // Try streaming if callback is set
                 if let Some(callback) = stream_callback {
                     let stream_request = RouterRequest {
@@ -155,7 +157,7 @@ impl<'a> LlmBackend<'a> {
             LlmBackend::Direct { .. } => {
                 estimate_cost(total_input, total_output, FALLBACK_INPUT_RATE, FALLBACK_OUTPUT_RATE)
             }
-            LlmBackend::Router { router, context } => {
+            LlmBackend::Router { router, context, .. } => {
                 if let Some(ref task_id) = context.task_id {
                     router.cost_tracker
                         .get_task_usage(task_id).await
@@ -182,4 +184,147 @@ const FALLBACK_OUTPUT_RATE: f64 = 15.0; // $ per 1M tokens
 fn estimate_cost(input_tokens: u32, output_tokens: u32, input_rate: f64, output_rate: f64) -> f64 {
     (input_tokens as f64 * input_rate / 1_000_000.0)
         + (output_tokens as f64 * output_rate / 1_000_000.0)
+}
+
+// ── MemoryExtractor impl ─────────────────────────────────────────────
+
+#[async_trait::async_trait]
+impl<'a> crate::context_budget::compaction::MemoryExtractor for LlmBackend<'a> {
+    async fn extract(
+        &self,
+        messages: &[ChatMessage],
+    ) -> Result<Vec<crate::context_budget::compaction::ExtractedMemory>, String> {
+        let (router, compaction_model, req_context) = match self {
+            Self::Router {
+                router,
+                compaction_model,
+                context,
+            } => (*router, compaction_model.clone(), context.clone()),
+            Self::Direct { .. } => {
+                return Err("No router available for LLM extraction".into());
+            }
+        };
+
+        let mut extract_messages = Vec::with_capacity(messages.len() + 1);
+        extract_messages.push(ChatMessage::system(
+            "You are a memory extraction assistant. Extract key facts, decisions, and important \
+             information from the following conversation messages. Return each memory as a line \
+             in the format:\n\
+             KIND: content\n\n\
+             Valid KINDs: fact, decision, preference, instruction, context\n\n\
+             Only extract genuinely important information. Be concise. Maximum 10 entries.",
+        ));
+        let combined: String = messages
+            .iter()
+            .map(|m| {
+                let role = match m.role {
+                    openalpaca_llm::Role::User => "User",
+                    openalpaca_llm::Role::Assistant => "Assistant",
+                    openalpaca_llm::Role::System => "System",
+                    openalpaca_llm::Role::Tool => "Tool",
+                };
+                format!("[{role}]: {}", m.content)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        extract_messages.push(ChatMessage::user(&combined));
+
+        let request = RouterRequest {
+            messages: Arc::new(extract_messages),
+            tools: Arc::new(vec![]),
+            model: compaction_model,
+            temperature: Some(0.0),
+            max_tokens: Some(1024),
+            context: req_context,
+            tool_choice: None,
+            tools_token_estimate: None,
+            enable_caching: false,
+            thinking: None,
+            context_management: None,
+        };
+
+        let response = router.complete(request).await.map_err(|e| e.to_string())?;
+
+        let memories = response
+            .content
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if line.is_empty() {
+                    return None;
+                }
+                if let Some((kind, content)) = line.split_once(':') {
+                    let kind = kind.trim().to_lowercase();
+                    let content = content.trim().to_string();
+                    if !content.is_empty() {
+                        return Some(crate::context_budget::compaction::ExtractedMemory {
+                            kind,
+                            content,
+                        });
+                    }
+                }
+                None
+            })
+            .take(10)
+            .collect();
+
+        Ok(memories)
+    }
+}
+
+// ── Summarizer impl ──────────────────────────────────────────────────
+
+#[async_trait::async_trait]
+impl<'a> crate::context_budget::compaction::Summarizer for LlmBackend<'a> {
+    async fn summarize(&self, messages: &[ChatMessage]) -> Result<String, String> {
+        let (router, compaction_model, req_context) = match self {
+            Self::Router {
+                router,
+                compaction_model,
+                context,
+            } => (*router, compaction_model.clone(), context.clone()),
+            Self::Direct { .. } => {
+                return Err("No router available for LLM summarization".into());
+            }
+        };
+
+        let mut sum_messages = Vec::with_capacity(2);
+        sum_messages.push(ChatMessage::system(
+            "You are a conversation summarizer. Summarize the following conversation messages \
+             into a concise paragraph that captures the key points, decisions made, and important \
+             context. Focus on information that would be needed to continue the conversation. \
+             Be concise but complete.",
+        ));
+        let combined: String = messages
+            .iter()
+            .map(|m| {
+                let role = match m.role {
+                    openalpaca_llm::Role::User => "User",
+                    openalpaca_llm::Role::Assistant => "Assistant",
+                    openalpaca_llm::Role::System => "System",
+                    openalpaca_llm::Role::Tool => "Tool",
+                };
+                format!("[{role}]: {}", m.content)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        sum_messages.push(ChatMessage::user(&combined));
+
+        let request = RouterRequest {
+            messages: Arc::new(sum_messages),
+            tools: Arc::new(vec![]),
+            model: compaction_model,
+            temperature: Some(0.0),
+            max_tokens: Some(2048),
+            context: req_context,
+            tool_choice: None,
+            tools_token_estimate: None,
+            enable_caching: false,
+            thinking: None,
+            context_management: None,
+        };
+
+        let response = router.complete(request).await.map_err(|e| e.to_string())?;
+        Ok(response.content)
+    }
 }
