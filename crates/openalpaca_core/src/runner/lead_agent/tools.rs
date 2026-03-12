@@ -8,8 +8,8 @@ use crate::events::SystemEvent;
 use crate::middleware::prompt::format_tool_guidance;
 use crate::runner::{LoopConfig, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy, ToolExecutor};
-use crate::tools::registry::BuiltInTool;
-use crate::tools::{ContextualToolExecutor, ToolExecutionContext, ToolRegistry};
+use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
+use crate::tools::{ContextualToolExecutor, ToolRegistry};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -216,19 +216,14 @@ impl BuiltInTool for SpawnSubagentTool {
         self.spawn_count.fetch_add(1, Ordering::SeqCst);
         let agent_start = std::time::Instant::now();
 
-        // 5. Build ContextualToolExecutor + SandboxManager for subagent
-        let ctx_exec = ToolExecutionContext {
-            owner_id: Some(self.created_by.clone()),
-            task_id: Some(self.task_id.clone()),
+        // 5. Build SandboxManager for subagent
+        let subagent_tool_ctx = ToolContext {
             agent_id: Some(agent_id.to_string()),
-            db: self.db.clone(),
+            task_id: Some(self.task_id.clone()),
+            owner_id: Some(self.created_by.clone()),
             workspace_id: self.workspace_id.clone(),
         };
-        let contextual_executor = Arc::new(ContextualToolExecutor::new(
-            self.tool_registry.clone(),
-            ctx_exec,
-        ));
-        let mut sandbox = SandboxManager::with_defaults(contextual_executor, self.bus.clone());
+        let mut sandbox = SandboxManager::with_defaults(self.tool_registry.clone(), self.bus.clone());
         if let Some(ref broker) = self.confirmation_broker {
             sandbox.set_confirmation_broker(broker.clone());
         }
@@ -308,6 +303,7 @@ impl BuiltInTool for SpawnSubagentTool {
                 Some(&task_id),
                 None, // context_budget
                 child_token,
+                Some(&subagent_tool_ctx),
             )
             .await;
 
@@ -740,6 +736,53 @@ pub fn spawn_subagent_tool_definition_from_templates(
         strict: None,
         input_examples: None,
     }
+}
+
+// ── register_coordination_tools ──────────────────────────────────────
+
+/// Register the 4 lead-agent coordination tools into a mutable `ToolRegistry`.
+///
+/// Call this before wrapping the registry in `Arc` to populate it with
+/// `spawn_subagent`, `spawn_subagents_batch` (optional), `check_subagent_status`,
+/// and `wait_for_subagents`.
+#[allow(clippy::too_many_arguments)]
+pub fn register_coordination_tools(
+    registry: &mut crate::tools::ToolRegistry,
+    spawn_tool: Arc<SpawnSubagentTool>,
+    batch_spawn_tool: Option<Arc<SpawnSubagentsBatchTool>>,
+    check_status_tool: Arc<CheckSubagentStatusTool>,
+    wait_tool: Arc<WaitForSubagentsTool>,
+    spawn_def: openalpaca_llm::ToolDefinition,
+    batch_def: Option<openalpaca_llm::ToolDefinition>,
+    check_def: openalpaca_llm::ToolDefinition,
+    wait_def: openalpaca_llm::ToolDefinition,
+) {
+    registry.register(RegisteredTool {
+        definition: spawn_def,
+        backend: ToolBackend::BuiltIn(spawn_tool),
+        provides_capabilities: vec!["orchestration".to_string()],
+        exempt_from_timeout: false,
+    });
+    if let (Some(batch), Some(def)) = (batch_spawn_tool, batch_def) {
+        registry.register(RegisteredTool {
+            definition: def,
+            backend: ToolBackend::BuiltIn(batch),
+            provides_capabilities: vec!["orchestration".to_string()],
+            exempt_from_timeout: false,
+        });
+    }
+    registry.register(RegisteredTool {
+        definition: check_def,
+        backend: ToolBackend::BuiltIn(check_status_tool),
+        provides_capabilities: vec!["orchestration".to_string()],
+        exempt_from_timeout: true,
+    });
+    registry.register(RegisteredTool {
+        definition: wait_def,
+        backend: ToolBackend::BuiltIn(wait_tool),
+        provides_capabilities: vec!["orchestration".to_string()],
+        exempt_from_timeout: true,
+    });
 }
 
 // ── LeadAgentToolExecutor ────────────────────────────────────────────
