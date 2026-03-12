@@ -376,7 +376,7 @@ Expected: All existing + new tests pass
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/openalpaca_core/src/tools/builtins/mod.rs crates/openalpaca_core/src/tools/config/mod.rs
+git add crates/openalpaca_core/src/tools/builtins/ crates/openalpaca_core/src/tools/config/mod.rs
 git commit -m "feat(capability): built-in tools declare capabilities, workspace tools registered"
 ```
 
