@@ -1,7 +1,7 @@
 //! TOML-based agent configuration file structure
 
 use super::subagent::{
-    AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent,
+    AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Capability, SubAgent,
 };
 use super::template::{AgentTemplate, AgentTemplateFrontmatter, extract_persona};
 use chrono::Utc;
@@ -69,7 +69,7 @@ impl AgentConfigFile {
     pub fn from_subagent(agent: &SubAgent) -> Self {
         // Extract skills.denied from constraints.denied_capabilities
         // that are NOT in the assigned skills list
-        let assigned: Vec<String> = agent.skills.iter().map(|s| s.name.clone()).collect();
+        let assigned: Vec<String> = agent.capabilities.iter().map(|s| s.name.clone()).collect();
         let denied: Vec<String> = agent
             .constraints
             .denied_capabilities
@@ -185,11 +185,11 @@ impl AgentConfigFile {
 
     /// Convert TOML config to in-memory SubAgent.
     pub fn into_subagent(self) -> SubAgent {
-        let skills: Vec<Skill> = self
+        let capabilities: Vec<Capability> = self
             .skills
             .assigned
             .iter()
-            .map(|name| Skill {
+            .map(|name| Capability {
                 name: name.clone(),
                 category: "assigned".to_string(),
                 proficiency: 1.0,
@@ -267,7 +267,7 @@ impl AgentConfigFile {
             icon: self.agent.icon,
             status: AgentStatus::Idle,
             current_task: None,
-            skills,
+            capabilities,
             preset,
             constraints,
             llm_config,
@@ -422,11 +422,11 @@ impl AgentConfigFile {
 
     /// Convert TOML config to storage SubAgentConfig.
     pub fn into_storage_config(self) -> SubAgentConfig {
-        let skills_json: Vec<Skill> = self
+        let skills_json: Vec<Capability> = self
             .skills
             .assigned
             .iter()
-            .map(|name| Skill {
+            .map(|name| Capability {
                 name: name.clone(),
                 category: "assigned".to_string(),
                 proficiency: 1.0,

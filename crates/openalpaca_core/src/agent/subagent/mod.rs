@@ -19,7 +19,7 @@ pub struct SubAgent {
     pub icon: Option<String>,
     pub status: AgentStatus,
     pub current_task: Option<String>,
-    pub skills: Vec<Skill>,
+    pub capabilities: Vec<Capability>,
     pub preset: AgentPreset,
     pub constraints: AgentConstraints,
     pub llm_config: AgentLlmConfig,
@@ -60,9 +60,9 @@ impl std::fmt::Display for AgentStatus {
     }
 }
 
-/// A skill the agent has been assigned.
+/// A capability the agent has been assigned.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Skill {
+pub struct Capability {
     pub name: String,
     pub category: String,
     pub proficiency: f32,
@@ -155,7 +155,7 @@ impl AgentConstraints {
 impl SubAgent {
     /// Hydrate from a storage SubAgentConfig.
     pub fn from_config(config: &openalpaca_storage::SubAgentConfig) -> Self {
-        let skills: Vec<Skill> = serde_json::from_str(&config.skills_json).unwrap_or_default();
+        let capabilities: Vec<Capability> = serde_json::from_str(&config.skills_json).unwrap_or_default();
         let preset: AgentPreset = serde_json::from_str(&config.preset_json).unwrap_or_default();
         let mut constraints: AgentConstraints = config
             .constraints_json
@@ -190,7 +190,7 @@ impl SubAgent {
             icon: config.icon.clone(),
             status,
             current_task: config.current_task_id.clone(),
-            skills,
+            capabilities,
             preset,
             constraints,
             llm_config,

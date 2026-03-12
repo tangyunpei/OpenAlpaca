@@ -51,7 +51,7 @@ impl SkillMatcher {
 
                 let matched: Vec<String> = uncovered
                     .iter()
-                    .filter(|skill| agent.skills.iter().any(|s| &s.name == *skill))
+                    .filter(|skill| agent.capabilities.iter().any(|s| &s.name == *skill))
                     .cloned()
                     .collect();
 

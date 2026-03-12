@@ -43,7 +43,7 @@ fn test_into_subagent() {
     let agent = config.into_subagent();
     assert_eq!(agent.id, "test_agent");
     assert_eq!(agent.name, "Test Agent");
-    assert_eq!(agent.skills.len(), 2);
+    assert_eq!(agent.capabilities.len(), 2);
     assert_eq!(agent.preset.temperature, 0.3);
     assert_eq!(agent.constraints.max_tool_calls, Some(20));
     assert!(agent.status.is_available());
@@ -221,7 +221,7 @@ fn test_from_template_roundtrip_to_subagent() {
 
     assert_eq!(agent.id, "bridge_agent");
     assert_eq!(agent.template_id, "bridge_agent");
-    assert_eq!(agent.skills.len(), 2);
+    assert_eq!(agent.capabilities.len(), 2);
     assert_eq!(agent.preset.temperature, 0.3);
     assert!(
         agent
@@ -262,7 +262,7 @@ fn test_into_template_roundtrip() {
     let agent = config2.into_subagent();
 
     assert_eq!(agent.id, "test_agent");
-    assert_eq!(agent.skills.len(), 2);
+    assert_eq!(agent.capabilities.len(), 2);
     assert_eq!(agent.preset.temperature, 0.3);
     assert!(
         agent

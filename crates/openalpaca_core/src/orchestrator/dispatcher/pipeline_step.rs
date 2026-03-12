@@ -220,7 +220,7 @@ pub(super) async fn execute_pipeline_step(
         "Agent '{}' loaded {} tool definitions for skills: {:?}",
         agent_id,
         tools.len(),
-        agent.skills.iter().map(|s| &s.name).collect::<Vec<_>>()
+        agent.capabilities.iter().map(|s| &s.name).collect::<Vec<_>>()
     );
 
     // Build system prompt with role description and tool awareness

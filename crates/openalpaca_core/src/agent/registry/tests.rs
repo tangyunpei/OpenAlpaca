@@ -1,5 +1,5 @@
 use super::*;
-use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, Skill};
+use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, Capability};
 use crate::agent::template::{AgentTemplate, AgentTemplateFrontmatter, parse_agent_markdown};
 
 fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
@@ -11,9 +11,9 @@ fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
         icon: None,
         status: AgentStatus::Idle,
         current_task: None,
-        skills: skills
+        capabilities: skills
             .into_iter()
-            .map(|s| Skill {
+            .map(|s| Capability {
                 name: s.to_string(),
                 category: "test".to_string(),
                 proficiency: 1.0,
@@ -171,7 +171,7 @@ fn test_update_config_success() {
 
     let (agent, version) = reg.get_with_version("a1").unwrap();
     assert_eq!(agent.name, "Updated Agent");
-    assert_eq!(agent.skills.len(), 2);
+    assert_eq!(agent.capabilities.len(), 2);
     assert_eq!(version, 1);
 }
 
@@ -491,8 +491,8 @@ You are a test agent.
     assert_eq!(inst.preset.persona, "You are a test agent.");
     assert_eq!(inst.preset.temperature, 0.3);
     // 1 explicit skill + 2 injected workspace tools
-    assert_eq!(inst.skills.len(), 3);
-    assert_eq!(inst.skills[0].name, "file_read");
-    assert_eq!(inst.skills[1].name, "workspace_read");
-    assert_eq!(inst.skills[2].name, "workspace_write");
+    assert_eq!(inst.capabilities.len(), 3);
+    assert_eq!(inst.capabilities[0].name, "file_read");
+    assert_eq!(inst.capabilities[1].name, "workspace_read");
+    assert_eq!(inst.capabilities[2].name, "workspace_write");
 }

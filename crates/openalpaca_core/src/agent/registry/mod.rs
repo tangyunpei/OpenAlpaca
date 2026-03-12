@@ -357,7 +357,7 @@ impl AgentRegistry {
     pub fn find_by_skill(&self, skill_name: &str) -> Vec<SubAgent> {
         self.lock_instances()
             .values()
-            .filter(|r| r.agent.skills.iter().any(|s| s.name == skill_name))
+            .filter(|r| r.agent.capabilities.iter().any(|s| s.name == skill_name))
             .map(|r| r.agent.clone())
             .collect()
     }
