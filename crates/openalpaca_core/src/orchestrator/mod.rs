@@ -53,7 +53,7 @@ use std::time::Instant;
 use uuid::Uuid;
 
 /// Provides connector status to the orchestrator without core depending on openalpaca_connectors.
-/// Implemented at daemon level (same inversion pattern as MessageHandler, ToolExecutor).
+/// Implemented at daemon level (same inversion pattern as MessageHandler, BuiltInTool).
 pub trait ConnectorStatusProvider: Send + Sync {
     /// Return (connector_name, status) pairs. Status: "active", "disabled", "unconfigured", "error"
     fn list_status(&self) -> Vec<(String, String)>;
