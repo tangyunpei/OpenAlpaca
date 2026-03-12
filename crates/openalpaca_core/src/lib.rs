@@ -2,6 +2,7 @@ pub mod agent;
 pub mod bus;
 pub mod chat;
 pub mod context;
+pub mod context_budget;
 pub mod daemon_config;
 pub mod events;
 pub mod gateway;
