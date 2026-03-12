@@ -685,6 +685,7 @@ git commit -m "feat(capability): rewrite resolve_agent_tools with capability int
 - Modify: `crates/openalpaca_core/src/orchestrator/dispatcher/lead_agent.rs`
 - Modify: `crates/openalpaca_core/src/orchestrator/dispatcher/tests.rs`
 - Modify: `crates/openalpaca_core/src/runner/lead_agent/prompt.rs`
+- Modify: `crates/openalpaca_core/src/runner/lead_agent/tools.rs`
 - Modify: `crates/openalpaca_core/src/runner/lead_agent/tests.rs`
 - Modify: `crates/openalpaca_core/src/agent/template/tests.rs`
 
