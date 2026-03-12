@@ -279,7 +279,7 @@ pub fn tools_for_capabilities_with_deny(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p openalpaca_core -- tools::registry::tests::test_tools_for_capabilities`
-Expected: All 4 new tests pass
+Expected: All 6 new tests pass
 
 - [ ] **Step 5: Commit**
 
@@ -294,22 +294,31 @@ git commit -m "feat(capability): add tools_for_capabilities() to ToolRegistry"
 
 **Files:**
 - Modify: `crates/openalpaca_core/src/tools/builtins/mod.rs`
+- Modify: `crates/openalpaca_core/src/tools/builtins/file_ops.rs`
+- Modify: `crates/openalpaca_core/src/tools/builtins/web_search.rs`
+- Modify: `crates/openalpaca_core/src/tools/builtins/web_fetch.rs`
+- Modify: `crates/openalpaca_core/src/tools/builtins/shell_execute.rs`
+- Modify: `crates/openalpaca_core/src/tools/builtins/memory_search.rs`
+- Modify: `crates/openalpaca_core/src/tools/builtins/update_persona/mod.rs`
+- Modify: `crates/openalpaca_core/src/tools/builtins/send.rs`
 - Modify: `crates/openalpaca_core/src/tools/config/mod.rs`
 
-- [ ] **Step 1: Update `builtin_tools()` — each tool declares capabilities**
+- [ ] **Step 1: Update each tool module — add `provides_capabilities` to RegisteredTool**
 
-In `crates/openalpaca_core/src/tools/builtins/mod.rs`, update every `RegisteredTool` construction in `builtin_tools()` (lines 46-70) and `builtin_tools_with_persona_context()` (lines 74-89). Add `provides_capabilities` to each:
+`RegisteredTool` is constructed in individual tool module files, NOT in `builtins/mod.rs`. Each file has a function that returns `RegisteredTool`. Add `provides_capabilities` to each:
 
-| Tool | `provides_capabilities` |
-|------|------------------------|
-| `web_search` | `vec!["web_access".into()]` |
-| `web_fetch` | `vec!["web_access".into()]` |
-| `file_read` | `vec!["file_read".into()]` |
-| `file_write` | `vec!["file_write".into()]` |
-| `shell_execute` | `vec!["shell_execute".into()]` |
-| `memory_search` | `vec!["memory_read".into()]` |
-| `update_persona` | `vec!["persona_write".into()]` |
-| `send` | `vec!["messaging".into()]` |
+| File | Function | `provides_capabilities` |
+|------|----------|------------------------|
+| `file_ops.rs:49` | `file_read_tool()` | `vec!["file_read".into()]` |
+| `file_ops.rs:156` | `file_write_tool()` | `vec!["file_write".into()]` |
+| `web_search.rs:100` | `web_search_tool()` | `vec!["web_access".into()]` |
+| `web_fetch.rs:101` | `web_fetch_tool()` | `vec!["web_access".into()]` |
+| `shell_execute.rs:67` | `shell_execute_tool()` | `vec!["shell_execute".into()]` |
+| `memory_search.rs:106` | `memory_search_tool()` | `vec!["memory_read".into()]` |
+| `update_persona/mod.rs:178` | `update_persona_tool()` | `vec!["persona_write".into()]` |
+| `send.rs:112` | `send_tool()` | `vec!["messaging".into()]` |
+
+For each, add the field to the existing `RegisteredTool { definition, backend }` struct literal.
 
 - [ ] **Step 2: Register workspace tools in `builtin_tools()`**
 
@@ -506,7 +515,14 @@ In `agent/template/tests.rs`, update ALL YAML test constants and assertions:
 - `skills: capabilities.into_iter()...` → `capabilities: capabilities.into_iter()...`
 - `template_from_agent()`: update `.skills` → `.capabilities`
 
-- [ ] **Step 8: Fix any remaining compilation errors**
+- [ ] **Step 8: Update orchestrator files with `.skills` references**
+
+These files reference `agent.skills` and must be updated to `agent.capabilities`:
+
+- `orchestrator/task_planner/prompt.rs` (line 18): `agent.skills` → `agent.capabilities`, `skills_str` → `capabilities_str`
+- `orchestrator/dispatcher/pipeline_step.rs` (line 223): `agent.skills` → `agent.capabilities`, update tracing message
+
+- [ ] **Step 9: Fix any remaining compilation errors**
 
 Run: `cargo check -p openalpaca_core --all-targets`
 Fix any remaining references to old names. Check:
@@ -514,14 +530,13 @@ Fix any remaining references to old names. Check:
 - `orchestrator/dispatcher/core.rs`
 - `orchestrator/handlers.rs`
 - `orchestrator/mod.rs`
-- `orchestrator/dispatcher/pipeline_step.rs` (tracing log)
 
-- [ ] **Step 9: Run full test suite**
+- [ ] **Step 10: Run full test suite**
 
 Run: `cargo test -p openalpaca_core`
 Expected: All tests pass
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add -A crates/openalpaca_core/
@@ -534,6 +549,8 @@ git commit -m "refactor(agent): rename skills→capabilities in config, template
 
 **Files:**
 - Modify: `config/agents/*.md` (all 9 files)
+
+**IMPORTANT ORDERING:** Task 6 MUST be committed together with Task 8 (or after it). Changing config files to use `capabilities: ["orchestration"]` while code still calls `find_templates_by_capability("lead_orchestration")` will break lead agent dispatch at runtime. If implementing sequentially, do Task 8 Step 3 (the "lead_orchestration" → "orchestration" string change) before committing Task 6.
 
 - [ ] **Step 1: Update all agent configs**
 
@@ -820,6 +837,8 @@ Add the default function:
 fn default_invoke_max_depth() -> usize { 2 }
 ```
 
+**Also update the manual `Default` impl** for `InvokeConfig` (lines 41-51 of types.rs). Add `max_depth: default_invoke_max_depth()` to the `Self { ... }` block, otherwise `Default::default()` produces `max_depth: 0` which breaks the root skill.
+
 - [ ] **Step 2: Update `apply_legacy_compat()`**
 
 In `apply_legacy_compat()` (lines 360-383), add at the end:
@@ -1052,9 +1071,10 @@ Create `crates/openalpaca_core/src/orchestrator/skill/invoke_executor.rs`:
 
 ```rust
 use crate::orchestrator::skill::catalog::SkillCatalog;
-use crate::runner::agentic_loop::{run_agentic_loop_routed, LoopConfig};
-use crate::tools::registry::ToolRegistry;
-use openalpaca_llm::routing::router::LlmRouter;
+use crate::runner::{run_agentic_loop_routed, LoopConfig};  // re-exported from runner/mod.rs (agentic_loop is private)
+use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolRegistry};
+use async_trait::async_trait;
+use openalpaca_llm::LlmRouter;  // re-export, NOT openalpaca_llm::routing::router::LlmRouter
 use openalpaca_llm::{ChatMessage, ToolDefinition};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
