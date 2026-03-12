@@ -12,7 +12,8 @@ use crate::events::SystemEvent;
 use crate::middleware::prompt::format_tool_guidance;
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
-use crate::tools::{ContextualToolExecutor, ToolExecutionContext, ToolRegistry};
+use crate::tools::ToolRegistry;
+use crate::tools::registry::ToolContext;
 use arc_swap::ArcSwap;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter};
@@ -89,18 +90,15 @@ pub(super) async fn execute_pipeline_step(
 ) -> PipelineStepResult {
     let agent_id = &agent.id;
 
-    // Per-step sandbox with ContextualToolExecutor scoped to this agent.
-    let ctx_exec = ToolExecutionContext {
-        owner_id: Some(pctx.created_by.clone()),
-        task_id: Some(pctx.task_id.clone()),
+    // Per-step sandbox scoped to this agent via ToolContext.
+    let tool_ctx = ToolContext {
         agent_id: Some(agent_id.clone()),
-        db: pctx.db.clone(),
+        task_id: Some(pctx.task_id.clone()),
+        owner_id: Some(pctx.created_by.clone()),
         workspace_id: pctx.workspace_id.clone(),
     };
-    let contextual_executor =
-        Arc::new(ContextualToolExecutor::new(pctx.tool_registry.clone(), ctx_exec));
     let mut per_request_sandbox =
-        SandboxManager::with_defaults(contextual_executor, pctx.bus.clone());
+        SandboxManager::with_defaults(pctx.tool_registry.clone(), pctx.bus.clone());
     if let Some(ref broker) = pctx.broker {
         per_request_sandbox.set_confirmation_broker(broker.clone());
     }
@@ -395,6 +393,7 @@ pub(super) async fn execute_pipeline_step(
         Some(&pctx.task_id),
         Some(&context_budget),
         Some(pctx.cancel_token.clone()),
+        Some(&tool_ctx),
     )
     .await;
 

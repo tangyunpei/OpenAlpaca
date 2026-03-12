@@ -14,7 +14,7 @@ use crate::orchestrator::task_state::{TaskState, TaskWorkspace, WorkspaceEntryTy
 use crate::runner::{LoopConfig, LoopFinishReason, LoopResult, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::ToolRegistry;
-use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
+use crate::tools::registry::ToolContext;
 use arc_swap::ArcSwap;
 use openalpaca_llm::{ChatMessage, LlmRouter};
 use openalpaca_storage::Database;

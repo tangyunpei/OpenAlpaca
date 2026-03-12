@@ -159,6 +159,7 @@ impl SkillInvocationToolExecutor {
             None,  // task_id
             None,  // context_budget
             self.cancel_token.clone(),
+            None,  // tool_context — no sandbox/tools used yet
         )
         .await;
 

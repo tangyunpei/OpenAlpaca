@@ -47,28 +47,12 @@ impl SecurityGate {
 mod tests {
     use super::*;
     use crate::bus::EventBus;
-    use crate::security::sandbox::ToolExecutor;
-    use async_trait::async_trait;
-
-    struct NoopExecutor;
-
-    #[async_trait]
-    impl ToolExecutor for NoopExecutor {
-        async fn execute(
-            &self,
-            _tool_name: &str,
-            _arguments: &serde_json::Value,
-        ) -> Result<String, String> {
-            Ok("ok".to_string())
-        }
-        fn registered_tools(&self) -> Vec<String> {
-            vec![]
-        }
-    }
+    use crate::tools::ToolRegistry;
 
     fn make_gate() -> SecurityGate {
+        let registry = Arc::new(ToolRegistry::new());
         let sandbox = Arc::new(SandboxManager::with_defaults(
-            Arc::new(NoopExecutor),
+            registry,
             EventBus::default(),
         ));
         SecurityGate::new(sandbox)

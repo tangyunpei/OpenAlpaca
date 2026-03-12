@@ -13,11 +13,10 @@ use crate::orchestrator::{ConversationContext, Orchestrator};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
-use crate::tools::{ContextualToolExecutor, ToolExecutionContext};
+use crate::tools::registry::ToolContext;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, ContentPart};
 use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
-use std::sync::Arc;
 use uuid::Uuid;
 
 impl Orchestrator {
@@ -356,20 +355,15 @@ impl Orchestrator {
                 });
             }
 
-            // Per-request sandbox with ContextualToolExecutor for owner-scoped tools
-            let ctx_exec = ToolExecutionContext {
-                owner_id: owner_id.map(|s| s.to_string()),
-                task_id: None,
+            // Per-request sandbox with ToolContext for owner-scoped tools
+            let tool_ctx = ToolContext {
                 agent_id: None,
-                db: self.db.clone(),
+                task_id: None,
+                owner_id: owner_id.map(|s| s.to_string()),
                 workspace_id: scope_ctx.workspace_id.clone(),
             };
-            let contextual_executor = Arc::new(ContextualToolExecutor::new(
-                self.tool_registry.clone(),
-                ctx_exec,
-            ));
             let mut per_request_sandbox =
-                SandboxManager::with_defaults(contextual_executor, self.bus.clone());
+                SandboxManager::with_defaults(self.tool_registry.clone(), self.bus.clone());
             if let Ok(guard) = self.confirmation_broker.read() {
                 if let Some(broker) = guard.as_ref() {
                     per_request_sandbox.set_confirmation_broker(broker.clone());
@@ -388,6 +382,7 @@ impl Orchestrator {
                 None,
                 None, // context_budget
                 None, // cancel_token — interactive queries are not cancellable
+                Some(&tool_ctx),
             )
             .await;
             let latency_ms = call_start.elapsed().as_millis() as i64;
@@ -563,6 +558,7 @@ impl Orchestrator {
             None,
             None, // context_budget
             None,
+            None, // tool_context — no tools used in social queries
         )
         .await;
         let latency_ms = call_start.elapsed().as_millis() as i64;

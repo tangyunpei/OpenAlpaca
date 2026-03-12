@@ -25,17 +25,14 @@ pub(super) async fn execute_single_node(
 ) -> NodeResult {
     let agent_id = agent.id.clone();
 
-    // Build ContextualToolExecutor for workspace access
-    let ctx_exec = ToolExecutionContext {
-        owner_id: Some(created_by.clone()),
-        task_id: Some(task_id.clone()),
+    // Build ToolContext for workspace access
+    let tool_ctx = ToolContext {
         agent_id: Some(agent_id.clone()),
-        db: db.clone(),
+        task_id: Some(task_id.clone()),
+        owner_id: Some(created_by.clone()),
         workspace_id,
     };
-    let contextual_executor =
-        Arc::new(ContextualToolExecutor::new(tool_registry.clone(), ctx_exec));
-    let mut per_request_sandbox = SandboxManager::with_defaults(contextual_executor, bus.clone());
+    let mut per_request_sandbox = SandboxManager::with_defaults(tool_registry.clone(), bus.clone());
     if let Some(broker) = confirmation_broker {
         per_request_sandbox.set_confirmation_broker(broker);
     }
@@ -202,6 +199,7 @@ pub(super) async fn execute_single_node(
         Some(&task_id),
         Some(&context_budget),
         cancel_token,
+        Some(&tool_ctx),
     )
     .await;
 
