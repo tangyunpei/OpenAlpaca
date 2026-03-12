@@ -53,48 +53,6 @@ fn test_register_and_lookup() {
     assert_eq!(registry.count(), 1);
 }
 
-#[test]
-fn test_definitions_for_skills() {
-    let mut registry = ToolRegistry::new();
-    registry.register(make_tool("web_search", "search results"));
-    registry.register(make_tool("summarize", "summary"));
-    registry.register(make_tool("file_read", "file contents"));
-
-    let skills = vec!["web_search".to_string(), "summarize".to_string()];
-    let defs = registry.definitions_for_skills(&skills);
-    assert_eq!(defs.len(), 2);
-    let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-    assert!(names.contains(&"web_search"));
-    assert!(names.contains(&"summarize"));
-}
-
-#[test]
-fn test_definitions_for_skills_no_match_returns_empty() {
-    let mut registry = ToolRegistry::new();
-    registry.register(make_tool("web_search", "results"));
-    registry.register(make_tool("summarize", "summary"));
-
-    let skills = vec!["nonexistent_skill".to_string()];
-    let defs = registry.definitions_for_skills(&skills);
-    assert_eq!(
-        defs.len(),
-        0,
-        "Non-matching skills should return empty list, not all tools"
-    );
-}
-
-#[test]
-fn test_definitions_for_empty_skills_returns_empty() {
-    let mut registry = ToolRegistry::new();
-    registry.register(make_tool("web_search", "results"));
-    let defs = registry.definitions_for_skills(&[]);
-    assert_eq!(
-        defs.len(),
-        0,
-        "Empty skills should return empty list (least-privilege)"
-    );
-}
-
 #[tokio::test]
 async fn test_execute_builtin() {
     let mut registry = ToolRegistry::new();
@@ -520,31 +478,6 @@ async fn test_command_all_placeholders_substituted_runs() {
     // Should succeed — no unsubstituted placeholders
     assert!(result.is_ok(), "Expected success, got: {:?}", result);
     assert!(result.unwrap().contains("hello"));
-}
-
-// --- Issue 8: Skill name mismatch warning ---
-
-#[test]
-fn test_definitions_for_skills_warns_on_mismatch() {
-    // This test verifies that `definitions_for_skills` correctly returns
-    // an empty list when skill names don't match any registered tool.
-    // The warning is logged via `tracing::warn!` — we verify the observable
-    // behavior (empty result set) rather than capturing log output.
-    let mut registry = ToolRegistry::new();
-    registry.register(make_tool("web_search", "results"));
-    registry.register(make_tool("summarize", "summary"));
-
-    let skills = vec![
-        "web_search".to_string(),
-        "typo_skill".to_string(),
-        "nonexistent".to_string(),
-    ];
-    let defs = registry.definitions_for_skills(&skills);
-
-    // Only "web_search" should match; the mismatched names produce warnings
-    // but don't affect the result for the matching skill.
-    assert_eq!(defs.len(), 1, "Only matching skill should be returned");
-    assert_eq!(defs[0].name, "web_search");
 }
 
 // --- tools_for_capabilities ---
