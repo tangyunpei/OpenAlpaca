@@ -197,12 +197,22 @@ async fn run_agentic_loop_inner(
         None
     };
 
+    // Build context_management from budget manager (Phase D)
+    let context_management = context_budget.map(|budget| {
+        openalpaca_llm::context_management::ContextManagement::from_budget(
+            budget.compaction_trigger(),
+            5, // keep 5 recent tool-use blocks
+            2, // keep 2 recent thinking turns
+        )
+    });
+
     tracing::info!(
         agent_id = agent_id,
         tools_count = tools_arc.len(),
         max_rounds = config.max_rounds,
         max_cost = config.max_cost,
         backend = if backend.supports_retry() { "router" } else { "direct" },
+        context_management = context_management.is_some(),
         "Agentic loop started"
     );
 
@@ -321,6 +331,7 @@ async fn run_agentic_loop_inner(
                     config.thinking.clone(),
                     config.stream_callback.as_ref(),
                     config.max_stream_duration,
+                    context_management.clone(),
                 ) => result,
                 _ = token.cancelled() => {
                     tracing::info!(agent_id = agent_id, round = state.rounds + 1, "LLM call interrupted by cancellation");
@@ -339,6 +350,7 @@ async fn run_agentic_loop_inner(
                     config.thinking.clone(),
                     config.stream_callback.as_ref(),
                     config.max_stream_duration,
+                    context_management.clone(),
                 )
                 .await
         };
