@@ -664,3 +664,57 @@ async fn test_anthropic_sse_parser_thinking_event() {
     assert!(got_thinking);
     assert!(got_text);
 }
+
+// ── Context Management Tests ─────────────────────────────────────
+
+#[test]
+fn test_build_request_body_with_context_management() {
+    use crate::context_management::{ContextEdit, ContextManagement};
+
+    let request = ChatRequest {
+        messages: Arc::new(vec![ChatMessage::user("hello")]),
+        tools: Arc::new(vec![]),
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: Some(ContextManagement {
+            edits: vec![
+                ContextEdit::ClearThinking {
+                    keep_thinking_turns: 2,
+                },
+                ContextEdit::ClearToolUses {
+                    trigger_tokens: 100_000,
+                    keep_tool_uses: 5,
+                },
+            ],
+        }),
+    };
+
+    let body = request::build_request_body("claude-sonnet-4-20250514", 4096, &request);
+    assert!(body.get("context_management").is_some());
+    let edits = body["context_management"]["edits"].as_array().unwrap();
+    assert_eq!(edits.len(), 2);
+    assert_eq!(edits[0]["type"], "clear_thinking_20251015");
+    assert_eq!(edits[1]["type"], "clear_tool_uses_20250919");
+}
+
+#[test]
+fn test_build_request_body_without_context_management() {
+    let request = ChatRequest {
+        messages: Arc::new(vec![ChatMessage::user("hello")]),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: None,
+    };
+
+    let body = request::build_request_body("claude-sonnet-4-20250514", 4096, &request);
+    assert!(body.get("context_management").is_none());
+}

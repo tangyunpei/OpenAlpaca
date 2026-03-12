@@ -245,5 +245,10 @@ pub(super) fn build_request_body(
         }
     }
 
+    // Context management (server-side tool/thinking clearing)
+    if let Some(ref ctx_mgmt) = request.context_management {
+        body["context_management"] = ctx_mgmt.to_json();
+    }
+
     body
 }
