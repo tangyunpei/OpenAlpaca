@@ -159,7 +159,7 @@ pub(crate) fn compress_context(
                 // Start a new round when we see a user message (except the first)
                 if !current_round_parts.is_empty() {
                     summary_parts.push(format!("Round {round}:"));
-                    summary_parts.extend(current_round_parts.drain(..));
+                    summary_parts.append(&mut current_round_parts);
                     round += 1;
                 }
                 current_round_parts.push(format!(
