@@ -11,6 +11,22 @@ impl BuiltInTool for MockBuiltIn {
     }
 }
 
+fn make_tool_with_caps(name: &str, caps: Vec<&str>) -> RegisteredTool {
+    RegisteredTool {
+        definition: ToolDefinition {
+            name: name.to_string(),
+            description: format!("{} tool", name),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+            strict: None,
+            input_examples: None,
+        },
+        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+            response: "ok".to_string(),
+        })),
+        provides_capabilities: caps.into_iter().map(String::from).collect(),
+    }
+}
+
 fn make_tool(name: &str, response: &str) -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
@@ -529,4 +545,77 @@ fn test_definitions_for_skills_warns_on_mismatch() {
     // but don't affect the result for the matching skill.
     assert_eq!(defs.len(), 1, "Only matching skill should be returned");
     assert_eq!(defs[0].name, "web_search");
+}
+
+// --- tools_for_capabilities ---
+
+#[test]
+fn test_tools_for_capabilities_basic() {
+    let mut registry = ToolRegistry::new();
+    registry.register(make_tool_with_caps("file_read", vec!["file_read"]));
+    registry.register(make_tool_with_caps("web_search", vec!["web_access"]));
+
+    let result = registry.tools_for_capabilities(&["file_read".to_string()]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].name, "file_read");
+}
+
+#[test]
+fn test_tools_for_capabilities_multi_capability_tool() {
+    let mut registry = ToolRegistry::new();
+    registry.register(make_tool_with_caps("web_fetch", vec!["web_access"]));
+
+    let result = registry.tools_for_capabilities(&["web_access".to_string()]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].name, "web_fetch");
+
+    let result = registry.tools_for_capabilities(&["shell_execute".to_string()]);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_tools_for_capabilities_empty_returns_empty() {
+    let mut registry = ToolRegistry::new();
+    registry.register(make_tool_with_caps("file_read", vec!["file_read"]));
+
+    let result = registry.tools_for_capabilities(&[]);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_tools_for_capabilities_no_capability_tools_excluded() {
+    let mut registry = ToolRegistry::new();
+    registry.register(make_tool_with_caps("orphan_tool", vec![]));
+
+    let result = registry.tools_for_capabilities(&["file_read".to_string()]);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_tools_for_capabilities_with_deny_basic() {
+    let mut registry = ToolRegistry::new();
+    registry.register(make_tool_with_caps("file_read", vec!["file_read"]));
+    registry.register(make_tool_with_caps("web_search", vec!["web_access"]));
+    registry.register(make_tool_with_caps("shell", vec!["shell_execute"]));
+
+    let result = registry.tools_for_capabilities_with_deny(
+        &["file_read".to_string(), "web_access".to_string()],
+        &["web_access".to_string()],
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].name, "file_read");
+}
+
+#[test]
+fn test_tools_for_capabilities_with_deny_excludes_any_denied() {
+    let mut registry = ToolRegistry::new();
+    registry.register(make_tool_with_caps("file_rw", vec!["file_read", "file_write"]));
+    registry.register(make_tool_with_caps("reader", vec!["file_read"]));
+
+    let result = registry.tools_for_capabilities_with_deny(
+        &["file_read".to_string()],
+        &["file_write".to_string()],
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].name, "reader");
 }
