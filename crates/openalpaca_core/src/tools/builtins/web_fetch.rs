@@ -123,6 +123,6 @@ pub(super) fn web_fetch_tool() -> RegisteredTool {
             ]),
         },
         backend: ToolBackend::BuiltIn(Arc::new(WebFetchTool)),
-        provides_capabilities: vec![],
+        provides_capabilities: vec!["web_access".into()],
     }
 }
