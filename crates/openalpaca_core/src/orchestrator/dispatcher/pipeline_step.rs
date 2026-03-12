@@ -218,7 +218,7 @@ pub(super) async fn execute_pipeline_step(
     } else {
         String::new()
     };
-    let system_prompt = format!(
+    let mut system_prompt = format!(
         "<identity>\n{}\n</identity>\n\n\
          <assignment>\n\
          Role: {}\n\
@@ -238,6 +238,74 @@ pub(super) async fn execute_pipeline_step(
         tool_guidance,
         connector_suffix,
     );
+
+    // --- Context Package (Phase C) ---
+    {
+        let denied_sections = agent.constraints.denied_sections.clone();
+
+        let mut pkg_builder = crate::context_budget::ContextPackageBuilder::new(
+            role_description.to_string(),
+        );
+
+        // Add workspace artifacts from previous_output
+        if let Some(ref output) = *previous_output {
+            pkg_builder = pkg_builder.workspace_artifact(output.clone());
+        }
+
+        // Add cached workspace context as artifact if non-empty
+        if !cached_workspace_context.is_empty() {
+            pkg_builder = pkg_builder.workspace_artifact(cached_workspace_context.to_string());
+        }
+
+        // Apply denied_sections from agent constraints
+        if !denied_sections.is_empty() {
+            pkg_builder = pkg_builder.denied_sections(&denied_sections);
+        }
+
+        let context_package = pkg_builder.build();
+
+        // Emit telemetry
+        let injected_sections_tokens = {
+            let mut t = 0usize;
+            if let Some(ref s) = context_package.conversation_summary { t += s.len() / 4 + 20; }
+            for m in &context_package.relevant_memories { t += m.len() / 4 + 10; }
+            if let Some(ref s) = context_package.user_context { t += s.len() / 4 + 20; }
+            for a in &context_package.workspace_artifacts { t += a.len() / 4 + 20; }
+            t
+        };
+        pctx.bus.publish(crate::events::SystemEvent::ContextPackageBuilt {
+            request_id: uuid::Uuid::new_v4(),
+            agent_id: agent.id.clone(),
+            sections_included: context_package.sections_included()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect(),
+            total_tokens: injected_sections_tokens,
+            memories_count: context_package.relevant_memories.len(),
+            timestamp: chrono::Utc::now(),
+        });
+
+        // Append context package optional sections to system_prompt
+        if let Some(ref summary) = context_package.conversation_summary {
+            system_prompt.push_str(&format!(
+                "\n\n<conversation-context>\n{}\n</conversation-context>",
+                summary
+            ));
+        }
+        if !context_package.relevant_memories.is_empty() {
+            let mem_block = context_package.relevant_memories.join("\n- ");
+            system_prompt.push_str(&format!(
+                "\n\n<relevant-memories>\n- {}\n</relevant-memories>",
+                mem_block
+            ));
+        }
+        if let Some(ref ctx) = context_package.user_context {
+            system_prompt.push_str(&format!(
+                "\n\n<user-context>\n{}\n</user-context>",
+                ctx
+            ));
+        }
+    }
 
     // Build messages: system + task + workspace context
     let mut messages = vec![ChatMessage::system(&system_prompt)];
