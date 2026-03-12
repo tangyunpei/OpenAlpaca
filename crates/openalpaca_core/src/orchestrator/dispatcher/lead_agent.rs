@@ -31,12 +31,12 @@ impl TaskDispatcher {
         let now = Utc::now();
 
         // Spawn a lead agent instance from the singleton template.
-        // Prefer templates with "lead_orchestration" skill, fall back to any template.
+        // Prefer templates with "orchestration" capability, fall back to any template.
         let lead_agent = {
             let templates = self
                 .shared_context
                 .agent_registry
-                .find_templates_by_capability("lead_orchestration");
+                .find_templates_by_capability("orchestration");
             let mut spawned = None;
             for t in &templates {
                 if let Ok(agent) = self

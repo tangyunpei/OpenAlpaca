@@ -15,19 +15,19 @@ pub struct SkillMatch {
 pub struct SkillMatcher;
 
 impl SkillMatcher {
-    /// Find agents that can cover the required skills.
+    /// Find agents that can cover the required capabilities.
     ///
     /// Strategy: greedy set-cover — sort idle agents by number of matching
-    /// skills (descending), pick agents until all skills are covered.
+    /// capabilities (descending), pick agents until all capabilities are covered.
     /// Partial coverage is a warning, not an error.
-    /// Empty skills or no idle agents → error.
+    /// Empty capabilities or no idle agents → error.
     pub fn match_skills(
         &self,
         required: &[String],
         registry: &AgentRegistry,
     ) -> Result<Vec<SkillMatch>, String> {
         if required.is_empty() {
-            return Err("No skills specified for matching".to_string());
+            return Err("No capabilities specified for matching".to_string());
         }
 
         let idle_agents = registry.list_idle();
@@ -84,7 +84,7 @@ impl SkillMatcher {
         }
 
         if matches.is_empty() {
-            return Err("No agents match the required skills".to_string());
+            return Err("No agents match the required capabilities".to_string());
         }
 
         Ok(matches)

@@ -108,7 +108,7 @@ fn test_no_matching() {
     let matcher = SkillMatcher;
     let result = matcher.match_skills(&["text_generate".to_string()], &reg);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("No agents match"));
+    assert!(result.unwrap_err().contains("No agents match the required capabilities"));
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn test_empty_skills() {
     let matcher = SkillMatcher;
     let result = matcher.match_skills(&[], &reg);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("No skills specified"));
+    assert!(result.unwrap_err().contains("No capabilities specified"));
 }
 
 #[test]

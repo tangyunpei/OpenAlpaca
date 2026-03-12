@@ -28,10 +28,10 @@ pub(crate) fn make_agent(id: &str, capabilities: Vec<&str>) -> SubAgent {
 }
 
 /// Create a minimal AgentTemplate from a SubAgent (for test setup).
-/// Templates with "lead_orchestration" skill are marked singleton
+/// Templates with "orchestration" capability are marked singleton
 /// (matching production behavior where the lead agent is the singleton).
 pub(crate) fn template_from_agent(agent: &SubAgent) -> AgentTemplate {
-    let is_lead = agent.capabilities.iter().any(|s| s.name == "lead_orchestration");
+    let is_lead = agent.capabilities.iter().any(|c| c.name == "orchestration");
     AgentTemplate {
         frontmatter: AgentTemplateFrontmatter {
             id: agent.template_id.clone(),

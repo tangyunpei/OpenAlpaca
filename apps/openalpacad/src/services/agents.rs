@@ -123,10 +123,10 @@ fn persist_template_to_db(
     let repo = openalpaca_storage::SubAgentRepository::new(db);
     let persona = openalpaca_core::agent::template::extract_persona(template);
     let fm = &template.frontmatter;
-    let skills: Vec<openalpaca_core::agent::Skill> = fm
-        .skills
+    let skills: Vec<openalpaca_core::agent::Capability> = fm
+        .capabilities
         .iter()
-        .map(|s| openalpaca_core::agent::Skill {
+        .map(|s| openalpaca_core::agent::Capability {
             name: s.clone(),
             category: "assigned".to_string(),
             proficiency: 1.0,
@@ -142,8 +142,8 @@ fn persist_template_to_db(
         timeout_seconds: fm.timeout_seconds,
         max_cost_per_task: fm.max_cost_per_task,
         require_confirmation_for: fm.require_confirmation_for.clone(),
-        allowed_capabilities: fm.skills.clone(),
-        denied_capabilities: fm.denied_skills.clone(),
+        allowed_capabilities: fm.capabilities.clone(),
+        denied_capabilities: fm.denied_capabilities.clone(),
         ..Default::default()
     };
     let llm_config = openalpaca_core::agent::AgentLlmConfig {

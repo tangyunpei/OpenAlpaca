@@ -3,12 +3,11 @@ id: "research_agent"
 name: "Research Agent"
 description: "Focused on web search, data collection, and information synthesis"
 icon: "magnifying_glass"
-skills:
-  - "web_search"
-  - "web_fetch"
+capabilities:
+  - "web_access"
   - "workspace_read"
   - "workspace_write"
-denied_skills:
+denied_capabilities:
   - "shell_execute"
   - "file_write"
 temperature: 0.3

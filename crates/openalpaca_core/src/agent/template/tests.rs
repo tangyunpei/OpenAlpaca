@@ -52,7 +52,7 @@ description: "Orchestrates complex tasks"
 icon: "brain"
 singleton: true
 capabilities:
-  - "lead_orchestration"
+  - "orchestration"
 temperature: 0.3
 verbosity: "detailed"
 model: "claude-sonnet-4-5-20250929"
@@ -123,7 +123,7 @@ fn test_parse_singleton() {
     let fm = parse_agent_frontmatter(SINGLETON_AGENT).expect("should parse");
     assert_eq!(fm.id, "lead_agent");
     assert!(fm.singleton);
-    assert_eq!(fm.capabilities, vec!["lead_orchestration"]);
+    assert_eq!(fm.capabilities, vec!["orchestration"]);
 }
 
 #[test]

@@ -4,12 +4,9 @@ name: "Lead Agent"
 description: "Orchestrates complex tasks by analyzing objectives, delegating to specialized subagents, and synthesizing results"
 icon: "brain"
 singleton: true
-skills:
-  - "lead_orchestration"
-  - "spawn_subagent"
-  - "check_subagent_status"
-  - "wait_for_subagents"
-  - "memory_search"
+capabilities:
+  - "orchestration"
+  - "memory_read"
   - "workspace_read"
   - "workspace_write"
 temperature: 0.3
