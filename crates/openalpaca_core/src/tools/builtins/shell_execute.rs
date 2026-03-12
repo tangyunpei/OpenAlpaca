@@ -17,7 +17,7 @@ impl BuiltInTool for ShellExecuteTool {
         // The primary timeout is enforced by the SandboxManager (default 60s from
         // daemon_config.execution.agent_defaults.max_tool_runtime_secs). This 300s
         // timeout is a defense-in-depth safety net in case the sandbox layer is
-        // bypassed (e.g. RegistryToolExecutor used directly).
+        // bypassed (e.g. ToolRegistry used directly).
         let timeout = std::time::Duration::from_secs(300);
 
         let output = tokio::time::timeout(timeout, {

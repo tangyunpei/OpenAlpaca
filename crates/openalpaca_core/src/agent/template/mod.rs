@@ -527,7 +527,7 @@ impl AgentTemplate {
 
         // Always include workspace tools — they are infrastructure tools
         // available to any agent executing in a task context (pipeline/DAG).
-        // The ContextualToolExecutor already gates them on task_id presence.
+        // The workspace tools themselves gate on task_id via ToolContext.
         let mut allowed_capabilities = fm.capabilities.clone();
         for ws_tool in ["workspace_read", "workspace_write"] {
             if !allowed_capabilities.iter().any(|c| c == ws_tool) {
