@@ -282,7 +282,7 @@ async fn run_agentic_loop_inner(
                     messages_before = messages.len(),
                     "Budget compaction triggered"
                 );
-                compress_context(Arc::make_mut(&mut messages), config.context_tail_keep);
+                compress_context(Arc::make_mut(&mut messages), config.context_tail_keep, context_budget);
                 known_token_count = estimate_messages_tokens(&messages);
                 tracing::info!(
                     agent_id = agent_id,
@@ -299,7 +299,7 @@ async fn run_agentic_loop_inner(
                 max = config.max_context_tokens,
                 "Legacy compression triggered"
             );
-            compress_context(Arc::make_mut(&mut messages), config.context_tail_keep);
+            compress_context(Arc::make_mut(&mut messages), config.context_tail_keep, None);
             known_token_count = estimate_messages_tokens(&messages);
         }
 

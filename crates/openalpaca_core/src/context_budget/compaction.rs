@@ -90,7 +90,7 @@ impl CompactionPipeline {
                 // compress_context expects tail_keep in "rounds" (×3 internally)
                 // Convert min_recent (message count) to rounds via ceiling division
                 let tail_keep = ((min_recent + 2) / 3).max(1);
-                crate::runner::compress_context(&mut fallback, tail_keep);
+                crate::runner::compress_context(&mut fallback, tail_keep, None);
                 let messages_after = fallback.len();
                 CompactionResult {
                     compacted_messages: fallback,
