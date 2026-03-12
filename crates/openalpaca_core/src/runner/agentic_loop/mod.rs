@@ -145,7 +145,7 @@ pub async fn run_agentic_loop_routed(
         task_id: task_id.map(|s| s.to_string()),
     };
     run_agentic_loop_inner(
-        LlmBackend::Router { router, context },
+        LlmBackend::Router { router, context, compaction_model: config.compaction_model.clone() },
         initial_messages,
         tools,
         config,
