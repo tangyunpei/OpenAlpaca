@@ -5,7 +5,8 @@ use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
 use crate::events::SystemEvent;
-use crate::middleware::prompt::format_tool_guidance;
+use crate::prompt_ctx::ContextManager;
+use crate::prompt_ctx::section::ContextBundle;
 use crate::runner::{LoopConfig, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
@@ -60,9 +61,15 @@ pub struct SpawnSubagentTool {
     concurrency_semaphore: Arc<tokio::sync::Semaphore>,
     /// Pre-computed static part of the subagent system prompt (Opt-LA-3).
     /// Contains `{PERSONA}` and `{TOOL_GUIDANCE}` placeholders for substitution.
+    /// Kept for fallback; main path uses PromptBuilder with context distillation.
+    #[allow(dead_code)]
     prompt_template: String,
     /// Optional confirmation broker for interactive tool approval.
     confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
+    /// ContextManager for distilling parent context into sub-agent packages.
+    context_manager: Arc<ContextManager>,
+    /// Parent context bundle (resolved once, shared across spawns).
+    parent_bundle: Arc<ContextBundle>,
 }
 
 impl SpawnSubagentTool {
@@ -83,6 +90,8 @@ impl SpawnSubagentTool {
         max_concurrent_subagents: usize,
         workspace_id: Option<String>,
         confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
+        context_manager: Arc<ContextManager>,
+        parent_bundle: Arc<ContextBundle>,
     ) -> Self {
         let prompt_template = "\
             <identity>\n{PERSONA}\n</identity>\n\n\
@@ -120,6 +129,8 @@ impl SpawnSubagentTool {
             workspace_id,
             prompt_template,
             confirmation_broker,
+            context_manager,
+            parent_bundle,
         }
     }
 
@@ -231,24 +242,69 @@ impl BuiltInTool for SpawnSubagentTool {
         // 6. Resolve tools for subagent's skills
         let tools = crate::tools::resolve_agent_tools(&agent, &self.tool_registry);
 
-        // 7. Build messages with agent persona + objective (uses cached template)
-        let tool_guidance = format_tool_guidance(&tools);
-        let system_prompt = self
-            .prompt_template
-            .replace("{PERSONA}", &agent.preset.persona)
-            .replace("{TOOL_GUIDANCE}", &tool_guidance);
-        let messages = vec![
-            ChatMessage::system(&system_prompt),
-            ChatMessage::user(objective),
-        ];
-
-        // 8. Build LoopConfig from daemon defaults + agent constraints
+        // 7. Build LoopConfig from daemon defaults + agent constraints
         let loop_config =
             LoopConfig::from_agent(&self.daemon_config.load().execution.agent_defaults, &agent)
                 .with_context_window(
                     self.router.model_registry(),
                     agent.llm_config.model.as_deref(),
                 );
+
+        // 8. Build messages with context distillation via PromptBuilder
+        let default_model = self.router.default_model();
+        let model_id = agent.llm_config.model.as_deref()
+            .unwrap_or(&default_model);
+        let model_window = self.router.model_registry()
+            .get_model_info(model_id)
+            .map(|info| info.context_window as usize)
+            .unwrap_or(200_000);
+
+        // Distill parent context for this sub-agent
+        let context_package = self.context_manager.distill(
+            &self.parent_bundle,
+            &agent.constraints,
+            model_window,
+            objective,
+            None, // no predecessor handoff for lead agent spawns
+        );
+        let bundle = context_package.to_bundle();
+
+        // Build prompt via PromptBuilder
+        let builder = crate::prompt::PromptBuilder::new(model_window);
+        let builder = builder
+            .raw_system_block(
+                "agent_identity",
+                &format!("<identity>\n{}\n</identity>", agent.preset.persona),
+                crate::prompt_ctx::SectionPriority::High,
+            )
+            .raw_system_block(
+                "scope",
+                "<scope>\nYou are a subagent working on a single objective assigned by a lead agent. \
+                 Focus exclusively on your assigned objective. Do not attempt work outside your scope.\n</scope>",
+                crate::prompt_ctx::SectionPriority::Normal,
+            )
+            .raw_system_block(
+                "output_format",
+                "<output-format>\nProvide a clear, complete result. Start with a brief summary of what you accomplished, \
+                 followed by the detailed output. The lead agent will use your result to synthesize a \
+                 final response, so be thorough and specific.\n</output-format>",
+                crate::prompt_ctx::SectionPriority::Normal,
+            )
+            .raw_system_block(
+                "constraints",
+                "<constraints>\nYou operate independently — you cannot communicate with other subagents directly. \
+                 Use workspace_read and workspace_write tools to access or share data across agents.\n</constraints>",
+                crate::prompt_ctx::SectionPriority::Normal,
+            )
+            .tools(&tools)
+            .context_bundle(&bundle);
+
+        let built = builder.build();
+
+        // Build messages from PromptBuilder output
+        let mut messages = vec![ChatMessage::system(&built.system_message)];
+        messages.extend(built.context_messages);
+        messages.push(ChatMessage::user(objective));
 
         let mut sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
         if self.daemon_config.load().security.auto_approve_confirmations {
@@ -784,4 +840,3 @@ pub fn register_coordination_tools(
         exempt_from_timeout: true,
     });
 }
-

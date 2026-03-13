@@ -18,6 +18,7 @@ use crate::daemon_config::DaemonConfig;
 use crate::events::SystemEvent;
 use crate::lane::LaneManager;
 use crate::orchestrator::ConnectorStatusProvider;
+use crate::prompt_ctx::ContextManager;
 use crate::security::gate::SecurityGate;
 use arc_swap::ArcSwap;
 use chrono::Utc;
@@ -59,6 +60,8 @@ pub struct TaskDispatcher {
     cached_connector_guidance: std::sync::Mutex<(String, Instant)>,
     /// Optional confirmation broker for interactive tool approval in agent pipelines.
     pub(crate) confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
+    /// Context manager for distilling parent context into sub-agent packages.
+    pub(crate) context_manager: Arc<ContextManager>,
 }
 
 impl TaskDispatcher {
@@ -74,6 +77,7 @@ impl TaskDispatcher {
         embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
         connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
+        context_manager: Arc<ContextManager>,
     ) -> Self {
         Self {
             shared_context,
@@ -89,6 +93,7 @@ impl TaskDispatcher {
             connector_status,
             cached_connector_guidance: std::sync::Mutex::new((String::new(), Instant::now())),
             confirmation_broker: Arc::new(RwLock::new(None)),
+            context_manager,
         }
     }
 
