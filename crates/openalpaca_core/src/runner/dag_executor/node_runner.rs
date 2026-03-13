@@ -101,10 +101,8 @@ pub(super) async fn execute_single_node(
         builder = builder.raw_system_block("connector_guidance", &connector_suffix, crate::prompt_ctx::SectionPriority::Normal);
     }
 
-    // Context package: workspace artifacts via ContextPackage
+    // Context package: workspace artifacts for telemetry
     {
-        let denied_sections = agent.constraints.denied_sections.clone();
-
         // Build workspace artifact content
         let ws_ctx = if let Some(ref state) = *workspace_snapshot {
             state.workspace.format_for_prompt(&node.workspace_keys)
@@ -138,12 +136,8 @@ pub(super) async fn execute_single_node(
             timestamp: chrono::Utc::now(),
         });
 
-        // Inject workspace context into system prompt via builder
-        if !ws_ctx.is_empty() && !denied_sections.iter().any(|d| d.eq_ignore_ascii_case("workspace_artifact")) {
-            builder = builder.raw_system_block("workspace_context", &format!(
-                "<workspace-context>\n{}\n</workspace-context>", ws_ctx
-            ), crate::prompt_ctx::SectionPriority::Normal);
-        }
+        // Workspace context is injected as a user message below (lines 165+),
+        // not in the system prompt, to keep it in the untrusted zone.
     }
 
     let built = builder.build();
