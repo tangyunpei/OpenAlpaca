@@ -2,18 +2,20 @@
 //! LLM call, progress tracking, and state persistence.
 
 use super::outcome::update_state_with_retry;
-use super::usage;
 use super::retrieve_memory_block;
+use super::usage;
 use crate::agent::subagent::{AgentStatus, SubAgent};
 use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
 use crate::events::SystemEvent;
-use crate::middleware::prompt::format_tool_guidance;
+use crate::prompt::PromptBuilder;
+use crate::prompt_ctx::package::{AgentSummary, HandoffContext};
+use crate::prompt_ctx::SectionPriority;
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
-use crate::tools::ToolRegistry;
 use crate::tools::registry::ToolContext;
+use crate::tools::ToolRegistry;
 use arc_swap::ArcSwap;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter};
@@ -133,7 +135,7 @@ pub(super) async fn execute_pipeline_step(
         pctx.bus.clone(),
     );
 
-    // Assignment → Running
+    // Assignment -> Running
     if let (Some(db), Some(assign_id)) = (&pctx.db, assignment_id) {
         let repo = openalpaca_storage::repository::TaskRepository::new(db);
         let _ = repo.update_assignment_status(
@@ -181,7 +183,7 @@ pub(super) async fn execute_pipeline_step(
         let _ = repo.update_progress(&pctx.task_id, step as i32, pctx.total_agents as i32);
     }
 
-    // Build LoopConfig — agent constraints override daemon defaults
+    // Build LoopConfig -- agent constraints override daemon defaults
     let mut loop_config = LoopConfig::from_agent(
         &pctx.daemon_config.load().execution.agent_defaults,
         agent,
@@ -192,15 +194,25 @@ pub(super) async fn execute_pipeline_step(
     );
 
     // Set compaction model from daemon config
-    loop_config.compaction_model = pctx.daemon_config.load()
-        .execution.context.compaction_model.clone();
+    loop_config.compaction_model = pctx
+        .daemon_config
+        .load()
+        .execution
+        .context
+        .compaction_model
+        .clone();
 
     // Instantiate ContextBudgetManager for budget-aware compaction
     let context_budget = {
         let default_model = pctx.router.default_model();
-        let model_id = agent.llm_config.model.as_deref()
+        let model_id = agent
+            .llm_config
+            .model
+            .as_deref()
             .unwrap_or(&default_model);
-        let context_window = pctx.router.model_registry()
+        let context_window = pctx
+            .router
+            .model_registry()
             .get_model_info(model_id)
             .map(|info| info.context_window as usize)
             .unwrap_or(200_000);
@@ -218,11 +230,14 @@ pub(super) async fn execute_pipeline_step(
         "Agent '{}' loaded {} tool definitions for capabilities: {:?}",
         agent_id,
         tools.len(),
-        agent.capabilities.iter().map(|s| &s.name).collect::<Vec<_>>()
+        agent
+            .capabilities
+            .iter()
+            .map(|s| &s.name)
+            .collect::<Vec<_>>()
     );
 
-    // Build system prompt with role description and tool awareness
-    let tool_guidance = format_tool_guidance(&tools);
+    // --- Context Package (Phase C) -> HandoffContext-based ---
     let is_last_step = step == pctx.total_agents - 1;
     let output_note = if is_last_step {
         "Your output is the final result delivered to the user. Make it complete and polished."
@@ -230,102 +245,129 @@ pub(super) async fn execute_pipeline_step(
         "Your output will be passed to the next agent in the pipeline. Be thorough and \
          include all relevant details so the next agent can build on your work."
     };
-    let connector_suffix = if !pctx.connector_block.is_empty() {
-        format!("\n{}", pctx.connector_block)
-    } else {
-        String::new()
-    };
-    let mut system_prompt = format!(
-        "<identity>\n{}\n</identity>\n\n\
-         <assignment>\n\
-         Role: {}\n\
-         Pipeline step: {} of {}\n\
-         </assignment>\n\n\
-         <scope>\n\
-         Focus on completing your assigned role. Do not attempt work outside your role description.\n\
-         </scope>\n\n\
-         <output-format>\n\
-         {}\n\
-         </output-format>{}{}",
-        agent.preset.persona,
-        role_description,
-        step + 1,
-        pctx.total_agents,
-        output_note,
-        tool_guidance,
-        connector_suffix,
-    );
 
-    // --- Context Package (Phase C) ---
+    // Build HandoffContext from predecessor output (if present)
+    let handoff = previous_output.as_ref().map(|output| HandoffContext {
+        producer: AgentSummary {
+            name: if step > 0 {
+                format!("step_{}", step - 1)
+            } else {
+                "unknown".to_string()
+            },
+            role: "pipeline_predecessor".to_string(),
+            step: if step > 0 { step - 1 } else { 0 },
+        },
+        task_assigned: pctx.description.clone(),
+        output: output.clone(),
+        decisions: vec![],
+        handoff_notes: None,
+    });
+
+    // Build ContextPackage sections from handoff + workspace
+    let denied_sections: std::collections::HashSet<String> = agent
+        .constraints
+        .denied_sections
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+    let mut package_sections = Vec::new();
+
+    // Task description (Critical) -- always included
+    package_sections.push(crate::prompt_ctx::PackageSection {
+        kind: crate::prompt_ctx::PackageSectionKind::TaskDescription,
+        content: role_description.to_string(),
+        token_estimate: role_description.len() / 4,
+        priority: SectionPriority::Critical,
+    });
+
+    // Predecessor output (High) -- from HandoffContext
+    if let Some(ref h) = handoff
+        && !denied_sections.contains("workspace_artifacts")
     {
-        let denied_sections = agent.constraints.denied_sections.clone();
+        package_sections.push(crate::prompt_ctx::PackageSection {
+            kind: crate::prompt_ctx::PackageSectionKind::PredecessorOutput,
+            content: h.format(),
+            token_estimate: h.token_estimate(),
+            priority: SectionPriority::High,
+        });
+    }
 
-        let mut pkg_builder = crate::context_budget::ContextPackageBuilder::new(
-            role_description.to_string(),
-        );
+    // Workspace context (Normal)
+    if !cached_workspace_context.is_empty()
+        && !denied_sections.contains("workspace_artifacts")
+    {
+        package_sections.push(crate::prompt_ctx::PackageSection {
+            kind: crate::prompt_ctx::PackageSectionKind::WorkspaceArtifact,
+            content: cached_workspace_context.to_string(),
+            token_estimate: cached_workspace_context.len() / 4,
+            priority: SectionPriority::Normal,
+        });
+    }
 
-        // Add workspace artifacts from previous_output
-        if let Some(ref output) = *previous_output {
-            pkg_builder = pkg_builder.workspace_artifact(output.clone());
-        }
+    let total_tokens: usize = package_sections.iter().map(|s| s.token_estimate).sum();
+    let context_package = crate::prompt_ctx::ContextPackage {
+        sections: package_sections,
+        total_tokens,
+        budget: total_tokens + 1000, // generous budget for pipeline steps
+        sub_agent_window: context_budget.model_context_window(),
+    };
 
-        // Add cached workspace context as artifact if non-empty
-        if !cached_workspace_context.is_empty() {
-            pkg_builder = pkg_builder.workspace_artifact(cached_workspace_context.to_string());
-        }
-
-        // Apply denied_sections from agent constraints
-        if !denied_sections.is_empty() {
-            pkg_builder = pkg_builder.denied_sections(&denied_sections);
-        }
-
-        let context_package = pkg_builder.build();
-
-        // Emit telemetry
-        let injected_sections_tokens = {
-            let mut t = 0usize;
-            if let Some(ref s) = context_package.conversation_summary { t += s.len() / 4 + 20; }
-            for m in &context_package.relevant_memories { t += m.len() / 4 + 10; }
-            if let Some(ref s) = context_package.user_context { t += s.len() / 4 + 20; }
-            for a in &context_package.workspace_artifacts { t += a.len() / 4 + 20; }
-            t
-        };
-        pctx.bus.publish(crate::events::SystemEvent::ContextPackageBuilt {
+    // Emit telemetry
+    let sections_included: Vec<String> = context_package
+        .sections
+        .iter()
+        .map(|s| s.kind.source_name().to_string())
+        .collect();
+    pctx.bus
+        .publish(crate::events::SystemEvent::ContextPackageBuilt {
             request_id: uuid::Uuid::new_v4(),
             agent_id: agent.id.clone(),
-            sections_included: context_package.sections_included()
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect(),
-            total_tokens: injected_sections_tokens,
-            memories_count: context_package.relevant_memories.len(),
+            sections_included,
+            total_tokens,
+            memories_count: 0,
             timestamp: chrono::Utc::now(),
         });
 
-        // Append context package optional sections to system_prompt
-        if let Some(ref summary) = context_package.conversation_summary {
-            system_prompt.push_str(&format!(
-                "\n\n<conversation-context>\n{}\n</conversation-context>",
-                summary
-            ));
-        }
-        if !context_package.relevant_memories.is_empty() {
-            let mem_block = context_package.relevant_memories.join("\n- ");
-            system_prompt.push_str(&format!(
-                "\n\n<relevant-memories>\n- {}\n</relevant-memories>",
-                mem_block
-            ));
-        }
-        if let Some(ref ctx) = context_package.user_context {
-            system_prompt.push_str(&format!(
-                "\n\n<user-context>\n{}\n</user-context>",
-                ctx
-            ));
-        }
+    let bundle = context_package.to_bundle();
+
+    // Build prompt via PromptBuilder
+    let model_window = context_budget.model_context_window();
+    let identity_block = format!("<identity>\n{}\n</identity>", agent.preset.persona);
+    let assignment_block = format!(
+        "<assignment>\nRole: {}\nPipeline step: {} of {}\n</assignment>",
+        role_description,
+        step + 1,
+        pctx.total_agents
+    );
+    let scope_block = "<scope>\nFocus on completing your assigned role. \
+                        Do not attempt work outside your role description.\n</scope>";
+    let output_block = format!("<output-format>\n{}\n</output-format>", output_note);
+
+    let mut builder = PromptBuilder::new(model_window);
+    builder = builder
+        .raw_system_block("agent_identity", &identity_block, SectionPriority::High)
+        .raw_system_block("assignment", &assignment_block, SectionPriority::Critical)
+        .raw_system_block("scope", scope_block, SectionPriority::Normal)
+        .raw_system_block("output_format", &output_block, SectionPriority::Normal)
+        .tools(&tools);
+
+    if !pctx.connector_block.is_empty() {
+        builder = builder.raw_system_block(
+            "connector_guidance",
+            &pctx.connector_block,
+            SectionPriority::Normal,
+        );
     }
 
-    // Build messages: system + task + workspace context
+    // Inject context bundle (HandoffContext + workspace sections)
+    builder = builder.context_bundle(&bundle);
+
+    let built = builder.build();
+    let system_prompt = built.system_message;
+
+    // Build messages: system + context messages from bundle + task
     let mut messages = vec![ChatMessage::system(&system_prompt)];
+    messages.extend(built.context_messages);
 
     // Inject memory context for the first agent in the pipeline
     if step == 0
@@ -357,28 +399,6 @@ pub(super) async fn execute_pipeline_step(
     }
 
     messages.push(ChatMessage::user(&pctx.description));
-
-    // Inject shared workspace context (supplements previous_output for backward compat)
-    if !cached_workspace_context.is_empty() {
-        messages.push(ChatMessage::user(&format!(
-            "<workspace>\n\
-             Results from previous pipeline agents. Use this data to complete your role. \
-             You can also call workspace_read and workspace_write to access or update entries.\n\n\
-             {}\n\
-             </workspace>",
-            cached_workspace_context
-        )));
-    } else if let Some(prev) = previous_output {
-        // Backward compat: if workspace is empty but previous_output exists
-        messages.push(ChatMessage::user(&format!(
-            "<previous-agent-output>\n\
-             The previous agent in the pipeline produced this result. \
-             Build on this output to complete your role.\n\n\
-             {}\n\
-             </previous-agent-output>",
-            prev
-        )));
-    }
 
     // Run agentic loop for this agent
     let agent_start = std::time::Instant::now();
@@ -427,7 +447,7 @@ pub(super) async fn execute_pipeline_step(
         &pctx.bus,
     );
 
-    // Assignment → Completed or Failed
+    // Assignment -> Completed or Failed
     if let (Some(db), Some(assign_id)) = (&pctx.db, assignment_id) {
         let repo = openalpaca_storage::repository::TaskRepository::new(db);
         let status = if agent_success {
