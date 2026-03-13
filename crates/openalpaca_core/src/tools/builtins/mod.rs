@@ -3,12 +3,6 @@ mod helpers;
 mod memory_search;
 mod send;
 mod shell_execute;
-// Stub tools — not registered (always returned "not implemented").
-// Kept for potential future implementation.
-#[allow(dead_code)]
-mod summarize;
-#[allow(dead_code)]
-mod text_generate;
 mod update_persona;
 mod web_fetch;
 mod web_search;
