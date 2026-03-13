@@ -1,3 +1,4 @@
+pub mod compaction;
 pub mod manager;
 pub mod section;
 pub mod sources;
