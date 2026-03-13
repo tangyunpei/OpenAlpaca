@@ -48,7 +48,6 @@ pub(super) fn chunk_message(text: &str) -> Vec<String> {
 
 /// Escape special characters for Telegram MarkdownV2 format.
 /// Characters that must be escaped: _ * [ ] ( ) ~ ` > # + - = | { } . !
-#[allow(dead_code)]
 pub(super) fn escape_markdown_v2(text: &str) -> String {
     let special_chars = [
         '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',
