@@ -106,4 +106,40 @@ impl ContextBudgetManager {
     pub fn section_breakdown(&self) -> Vec<(&'static str, usize)> {
         self.sections.clone()
     }
+
+    pub fn compaction_tier(&self, message_tokens: usize) -> CompactionTier {
+        let total = self.fixed_zone_tokens() + message_tokens;
+        let utilization = total as f64 / self.model_context_window as f64;
+        match utilization {
+            u if u < 0.60 => CompactionTier::None,
+            u if u < 0.70 => CompactionTier::TruncateToolResults,
+            u if u < 0.75 => CompactionTier::DropMultimedia,
+            u if u < 0.80 => CompactionTier::DiscardSocial,
+            u if u < 0.85 => CompactionTier::HeuristicSummary,
+            _ => CompactionTier::LlmSummary,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CompactionTier {
+    None,
+    TruncateToolResults,
+    DropMultimedia,
+    DiscardSocial,
+    HeuristicSummary,
+    LlmSummary,
+}
+
+impl CompactionTier {
+    pub fn next(self) -> Option<CompactionTier> {
+        match self {
+            Self::None => Some(Self::TruncateToolResults),
+            Self::TruncateToolResults => Some(Self::DropMultimedia),
+            Self::DropMultimedia => Some(Self::DiscardSocial),
+            Self::DiscardSocial => Some(Self::HeuristicSummary),
+            Self::HeuristicSummary => Some(Self::LlmSummary),
+            Self::LlmSummary => None,
+        }
+    }
 }

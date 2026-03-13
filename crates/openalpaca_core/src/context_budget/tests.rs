@@ -1,4 +1,4 @@
-use super::budget::{ContextBudgetManager, RenderedSection};
+use super::budget::{CompactionTier, ContextBudgetManager, RenderedSection};
 use crate::daemon_config::ContextBudgetConfig;
 
 #[test]
@@ -133,6 +133,31 @@ fn test_section_breakdown() {
     assert_eq!(breakdown.len(), 2);
     assert_eq!(breakdown[0], ("system_prompt", 5_000));
     assert_eq!(breakdown[1], ("tools", 3_000));
+}
+
+#[test]
+fn test_compaction_tier_thresholds() {
+    let config = ContextBudgetConfig {
+        autocompact_buffer_ratio: 0.165,
+        compaction_target_ratio: 0.50,
+        compaction_model: None,
+        max_extractions_per_compaction: 10,
+        min_recent_messages: 4,
+    };
+    let budget = ContextBudgetManager::new(200_000, &config);
+
+    // 50% utilization → None (below 60%)
+    assert_eq!(budget.compaction_tier(100_000), CompactionTier::None);
+    // 65% → TruncateToolResults (60-70%)
+    assert_eq!(budget.compaction_tier(130_000), CompactionTier::TruncateToolResults);
+    // 72.5% → DropMultimedia (70-75%)
+    assert_eq!(budget.compaction_tier(145_000), CompactionTier::DropMultimedia);
+    // 77.5% → DiscardSocial (75-80%)
+    assert_eq!(budget.compaction_tier(155_000), CompactionTier::DiscardSocial);
+    // 82.5% → HeuristicSummary (80-85%)
+    assert_eq!(budget.compaction_tier(165_000), CompactionTier::HeuristicSummary);
+    // 90% → LlmSummary (85%+)
+    assert_eq!(budget.compaction_tier(180_000), CompactionTier::LlmSummary);
 }
 
 // ── Compaction tests ──────────────────────────────────────────────
