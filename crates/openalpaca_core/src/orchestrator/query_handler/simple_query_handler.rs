@@ -6,7 +6,7 @@ use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::bootstrap::bootstrap_to_prompt_block;
 use crate::middleware::guard::{OutputGuard, detect_hallucinated_send};
 use crate::middleware::identity::identity_to_prompt_block;
-use crate::middleware::prompt::{AgentPersona, PromptAssembler};
+use crate::middleware::prompt::AgentPersona;
 use crate::orchestrator::{ConversationContext, Orchestrator};
 use crate::prompt::PromptBuilder;
 use crate::prompt_ctx::{SectionPriority, sources::{ContextRequest, ExecutionPath}};
@@ -513,12 +513,11 @@ impl Orchestrator {
                 poisoned.into_inner().clone()
             }
         };
-        let agent_persona = AgentPersona {
-            role: "Assistant".to_string(),
-            tone: "Concise and professional".to_string(),
-            domain_knowledge: vec![],
-        };
-        let system_prompt = PromptAssembler::assemble(&system_persona, &agent_persona);
+        // Inline prompt for this trivial 1-round, 0-tool social path.
+        let system_prompt = format!(
+            "<system_instructions>\n{}\n</system_instructions>\n\n<agent_role>\nRole: Assistant\nTone: Concise and professional\n</agent_role>",
+            system_persona.base_instructions
+        );
 
         let mut messages = Vec::with_capacity(2 + ctx.recent_messages.len());
         messages.push(ChatMessage::system(&system_prompt));

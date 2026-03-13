@@ -50,7 +50,6 @@ use openalpaca_storage::{Database, Task};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
 use uuid::Uuid;
 
 /// Provides connector status to the orchestrator without core depending on openalpaca_connectors.
@@ -108,15 +107,6 @@ pub struct LlmMetadata {
     pub tokens_out: u32,
 }
 
-/// Cached base system prompt (invariant parts assembled once).
-/// Contains: persona + identity + bootstrap.
-/// Excludes: skills catalog (has its own cache, hot-reloaded independently),
-///           connector guidance, tools, user profile, memory (all per-request).
-struct CachedBasePrompt {
-    base: String,
-    built_at: Instant,
-}
-
 /// The Orchestrator: unified message handler for all user interactions.
 ///
 /// Intent-based routing:
@@ -166,8 +156,6 @@ pub struct Orchestrator {
     /// Keyed by request_id to avoid races between concurrent requests.
     /// Populated after LLM response, removed by bridge after reading.
     pub llm_metadata_map: DashMap<Uuid, LlmMetadata>,
-    /// Cached base system prompt (persona + identity + bootstrap). TTL-based invalidation.
-    cached_base_prompt: Arc<ArcSwap<Option<CachedBasePrompt>>>,
     /// Optional broker for interactive tool confirmation (set post-construction via `set_confirmation_broker()`).
     pub confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
     /// Context manager for resolving dynamic context (memory, user profile, etc.) via PromptBuilder.
@@ -309,7 +297,6 @@ impl Orchestrator {
             connector_status,
             connector_sender,
             llm_metadata_map: DashMap::new(),
-            cached_base_prompt: Arc::new(ArcSwap::from_pointee(None)),
             confirmation_broker: Arc::new(RwLock::new(None)),
             context_manager,
         }
@@ -347,11 +334,6 @@ impl Orchestrator {
         }
     }
 
-    /// Invalidate the cached base system prompt (called when persona/identity/bootstrap change).
-    fn invalidate_base_prompt_cache(&self) {
-        self.cached_base_prompt.store(Arc::new(None));
-    }
-
     pub fn update_system_persona(&self, persona: SystemPersona) {
         match self.system_persona.write() {
             Ok(mut guard) => {
@@ -363,13 +345,13 @@ impl Orchestrator {
                 *guard = persona;
             }
         }
-        self.invalidate_base_prompt_cache();
+
     }
 
     /// Replace the active identity document (from IDENTITY.md reload or bootstrap).
     ///
     /// If the identity has a non-empty name, also updates `system_persona.name`
-    /// so that `PromptAssembler::assemble()` uses the chosen name.
+    /// so that prompt assembly uses the chosen name.
     pub fn update_identity_document(&self, doc: Option<IdentityDocument>) {
         // Update system persona name if identity provides one
         if let Some(ref identity) = doc
@@ -399,7 +381,7 @@ impl Orchestrator {
                 *guard = doc;
             }
         }
-        self.invalidate_base_prompt_cache();
+
     }
 
     /// Set the path to IDENTITY.md for writes.
@@ -421,7 +403,7 @@ impl Orchestrator {
                 *guard = doc;
             }
         }
-        self.invalidate_base_prompt_cache();
+
     }
 
     /// Set the path to BOOTSTRAP.md for deletion on completion.

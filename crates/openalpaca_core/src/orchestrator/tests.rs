@@ -1616,36 +1616,6 @@ fn test_system_event_task_failed_without_outcome_kind() {
     }
 }
 
-// ── CachedBasePrompt tests ────────────────────────────────────
-
-#[test]
-fn test_cached_base_prompt_returns_same_value_within_ttl() {
-    let orc = make_orchestrator();
-    let prompt1 = orc.get_or_build_base_prompt();
-    let prompt2 = orc.get_or_build_base_prompt();
-    assert_eq!(prompt1, prompt2, "Cache should return identical prompt within TTL");
-    assert!(!prompt1.is_empty(), "Base prompt should be non-empty");
-}
-
-#[test]
-fn test_cached_base_prompt_invalidation_rebuilds() {
-    let orc = make_orchestrator();
-    let prompt1 = orc.get_or_build_base_prompt();
-    assert!(prompt1.contains("OpenAlpaca"), "Default persona name should appear");
-
-    // Update persona to something different — this also invalidates the cache
-    let mut custom_persona = SystemPersona::default();
-    custom_persona.name = "TestBot9000".to_string();
-    orc.update_system_persona(custom_persona);
-
-    let prompt2 = orc.get_or_build_base_prompt();
-    assert!(
-        prompt2.contains("TestBot9000"),
-        "Post-invalidation prompt should reflect updated persona"
-    );
-    assert_ne!(prompt1, prompt2, "Invalidation should produce a different prompt");
-}
-
 // ── wrap_untrusted_context injection regression tests ─────────────
 
 #[test]
