@@ -514,10 +514,10 @@ pub fn spawn_event_bridge(
                     );
                 }
                 openalpaca_core::events::SystemEvent::ContextPackageBuilt {
-                    request_id, ref agent_id, ref sections_included, total_tokens, memories_count, ..
+                    request_id, ref agent_id, ref sections, total_tokens, budget, sub_agent_window, ..
                 } => {
                     tracing::debug!(
-                        %request_id, %agent_id, ?sections_included, total_tokens, memories_count,
+                        %request_id, %agent_id, ?sections, total_tokens, budget, sub_agent_window,
                         "Context package built for sub-agent"
                     );
                 } // NO catch-all: compiler will flag any missing SystemEvent variant

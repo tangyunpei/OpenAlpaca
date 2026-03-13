@@ -70,96 +70,84 @@ pub(super) async fn execute_single_node(
     // Resolve tools via shared helper
     let tools = crate::tools::resolve_agent_tools(&agent, &tool_registry);
 
-    // Build system prompt
-    let tool_guidance = format_tool_guidance(&tools);
+    // Build prompt via PromptBuilder
+    let model_window = context_budget.model_context_window();
+    let identity_block = format!("<identity>\n{}\n</identity>", agent.preset.persona);
+    let assignment_block = format!(
+        "<assignment>\nSub-task: {}\nDescription: {}\n</assignment>",
+        node.title, node.description
+    );
+    let scope_block = "<scope>\nYou are responsible for completing only the sub-task described above. \
+        Do not attempt work outside your assignment. Your output will be stored \
+        in the workspace for downstream nodes that depend on your results.\n</scope>";
+    let output_block = "<output-format>\nProvide a complete, self-contained result for your sub-task. Other agents \
+        will consume your output, so be specific and include all relevant details.\n</output-format>";
+
     let connector_suffix = if !connector_guidance.is_empty() {
         format!("\n{}", connector_guidance)
     } else {
         String::new()
     };
-    let mut system_prompt = format!(
-        "<identity>\n{}\n</identity>\n\n\
-         <assignment>\n\
-         Sub-task: {}\n\
-         Description: {}\n\
-         </assignment>\n\n\
-         <scope>\n\
-         You are responsible for completing only the sub-task described above. \
-         Do not attempt work outside your assignment. Your output will be stored \
-         in the workspace for downstream nodes that depend on your results.\n\
-         </scope>\n\n\
-         <output-format>\n\
-         Provide a complete, self-contained result for your sub-task. Other agents \
-         will consume your output, so be specific and include all relevant details.\n\
-         </output-format>{}{}",
-        agent.preset.persona, node.title, node.description, tool_guidance, connector_suffix
-    );
 
-    // --- Context Package (Phase C) ---
+    let mut builder = crate::prompt::PromptBuilder::new(model_window);
+    builder = builder
+        .raw_system_block("agent_identity", &identity_block, crate::prompt_ctx::SectionPriority::High)
+        .raw_system_block("assignment", &assignment_block, crate::prompt_ctx::SectionPriority::Critical)
+        .raw_system_block("scope", scope_block, crate::prompt_ctx::SectionPriority::Normal)
+        .raw_system_block("output_format", output_block, crate::prompt_ctx::SectionPriority::Normal)
+        .tools(&tools);
+
+    if !connector_suffix.is_empty() {
+        builder = builder.raw_system_block("connector_guidance", &connector_suffix, crate::prompt_ctx::SectionPriority::Normal);
+    }
+
+    // Context package: workspace artifacts via ContextPackage
     {
         let denied_sections = agent.constraints.denied_sections.clone();
 
-        let mut pkg_builder = crate::context_budget::ContextPackageBuilder::new(
-            node.description.clone(),
-        );
-
-        // Workspace context will be loaded after this block, so we check workspace_snapshot
-        // to pre-populate artifacts. The actual workspace injection into messages happens later.
-        if let Some(ref state) = *workspace_snapshot {
-            let ws_ctx = state.workspace.format_for_prompt(&node.workspace_keys);
-            if !ws_ctx.is_empty() {
-                pkg_builder = pkg_builder.workspace_artifact(ws_ctx);
-            }
-        }
-
-        if !denied_sections.is_empty() {
-            pkg_builder = pkg_builder.denied_sections(&denied_sections);
-        }
-
-        let context_package = pkg_builder.build();
-
-        // Emit telemetry
-        let injected_sections_tokens = {
-            let mut t = 0usize;
-            if let Some(ref s) = context_package.conversation_summary { t += s.len() / 4 + 20; }
-            for m in &context_package.relevant_memories { t += m.len() / 4 + 10; }
-            if let Some(ref s) = context_package.user_context { t += s.len() / 4 + 20; }
-            for a in &context_package.workspace_artifacts { t += a.len() / 4 + 20; }
-            t
+        // Build workspace artifact content
+        let ws_ctx = if let Some(ref state) = *workspace_snapshot {
+            state.workspace.format_for_prompt(&node.workspace_keys)
+        } else {
+            String::new()
         };
+
+        // Build a minimal ContextPackage for telemetry
+        let mut package_sections = Vec::new();
+        if !ws_ctx.is_empty() {
+            package_sections.push(crate::prompt_ctx::PackageSection {
+                kind: crate::prompt_ctx::PackageSectionKind::WorkspaceArtifact,
+                content: ws_ctx.clone(),
+                token_estimate: ws_ctx.len() / 4,
+                priority: crate::prompt_ctx::SectionPriority::Normal,
+            });
+        }
+
+        let total_tokens: usize = package_sections.iter().map(|s| s.token_estimate).sum();
+
+        // Emit telemetry with new schema
         bus.publish(crate::events::SystemEvent::ContextPackageBuilt {
             request_id: uuid::Uuid::new_v4(),
             agent_id: agent.id.clone(),
-            sections_included: context_package.sections_included()
-                .into_iter()
-                .map(|s| s.to_string())
+            sections: package_sections.iter()
+                .map(|s| (s.kind.source_name().to_string(), s.token_estimate))
                 .collect(),
-            total_tokens: injected_sections_tokens,
-            memories_count: context_package.relevant_memories.len(),
+            total_tokens,
+            budget: (model_window as f64 * 0.40) as usize,
+            sub_agent_window: model_window,
             timestamp: chrono::Utc::now(),
         });
 
-        // Append context package optional sections to system_prompt
-        if let Some(ref summary) = context_package.conversation_summary {
-            system_prompt.push_str(&format!(
-                "\n\n<conversation-context>\n{}\n</conversation-context>",
-                summary
-            ));
-        }
-        if !context_package.relevant_memories.is_empty() {
-            let mem_block = context_package.relevant_memories.join("\n- ");
-            system_prompt.push_str(&format!(
-                "\n\n<relevant-memories>\n- {}\n</relevant-memories>",
-                mem_block
-            ));
-        }
-        if let Some(ref ctx) = context_package.user_context {
-            system_prompt.push_str(&format!(
-                "\n\n<user-context>\n{}\n</user-context>",
-                ctx
-            ));
+        // Inject workspace context into system prompt via builder
+        if !ws_ctx.is_empty() && !denied_sections.iter().any(|d| d.eq_ignore_ascii_case("workspace_artifact")) {
+            builder = builder.raw_system_block("workspace_context", &format!(
+                "<workspace-context>\n{}\n</workspace-context>", ws_ctx
+            ), crate::prompt_ctx::SectionPriority::Normal);
         }
     }
+
+    let built = builder.build();
+    let system_prompt = built.system_message;
 
     // Build messages: system + task + workspace context for this node
     let mut messages = vec![

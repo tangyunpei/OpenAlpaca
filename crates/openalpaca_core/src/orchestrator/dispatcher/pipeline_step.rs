@@ -313,18 +313,18 @@ pub(super) async fn execute_pipeline_step(
     };
 
     // Emit telemetry
-    let sections_included: Vec<String> = context_package
-        .sections
-        .iter()
-        .map(|s| s.kind.source_name().to_string())
-        .collect();
     pctx.bus
         .publish(crate::events::SystemEvent::ContextPackageBuilt {
             request_id: uuid::Uuid::new_v4(),
             agent_id: agent.id.clone(),
-            sections_included,
+            sections: context_package
+                .sections
+                .iter()
+                .map(|s| (s.kind.source_name().to_string(), s.token_estimate))
+                .collect(),
             total_tokens,
-            memories_count: 0,
+            budget: context_package.budget,
+            sub_agent_window: context_package.sub_agent_window,
             timestamp: chrono::Utc::now(),
         });
 
