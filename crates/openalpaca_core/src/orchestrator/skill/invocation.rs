@@ -19,6 +19,7 @@ use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::builtins::ScriptToolBuiltIn;
 use crate::tools::registry::{RegisteredTool, ToolBackend, ToolContext};
+use super::invoke_executor::{SkillInvocationBuiltInAdapter, SkillInvocationToolExecutor};
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, ToolChoice};
 use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
@@ -384,7 +385,9 @@ impl Orchestrator {
                 owner_id: owner_id.map(|s| s.to_string()),
                 workspace_id: scope_ctx.workspace_id.clone(),
             };
-            let registry = if !skill_doc.frontmatter.scripts.is_empty() {
+            let needs_clone = !skill_doc.frontmatter.scripts.is_empty()
+                || !skill_doc.frontmatter.depends_on.is_empty();
+            let registry = if needs_clone {
                 let mut cloned = (*self.tool_registry).clone();
                 for cfg in &skill_doc.frontmatter.scripts {
                     let tool = ScriptToolBuiltIn::new(&entry.skill_dir, cfg)?;
@@ -394,6 +397,48 @@ impl Orchestrator {
                         provides_capabilities: vec![],
                         exempt_from_timeout: false,
                     });
+                }
+                // Register invoke_skill:* backends so the sandbox can execute them
+                if !skill_doc.frontmatter.depends_on.is_empty() {
+                    let call_stack = vec![skill_name.to_string()];
+                    let executor = Arc::new(SkillInvocationToolExecutor::new(
+                        self.skill_catalog.clone(),
+                        self.tool_registry.clone(),
+                        router.clone(),
+                        self.bus.clone(),
+                        call_stack,
+                        3, // max nesting depth
+                        None,
+                    ));
+                    for dep_id in &skill_doc.frontmatter.depends_on {
+                        if self.skill_catalog.get(dep_id).is_some() {
+                            let tool_name = format!("invoke_skill:{}", dep_id);
+                            cloned.register(RegisteredTool {
+                                definition: openalpaca_llm::ToolDefinition {
+                                    name: tool_name,
+                                    description: format!("Invoke the '{}' skill", dep_id),
+                                    parameters: serde_json::json!({
+                                        "type": "object",
+                                        "properties": {
+                                            "query": {
+                                                "type": "string",
+                                                "description": "The input/query to pass to the skill"
+                                            }
+                                        },
+                                        "required": ["query"]
+                                    }),
+                                    strict: None,
+                                    input_examples: None,
+                                },
+                                backend: ToolBackend::BuiltIn(Arc::new(SkillInvocationBuiltInAdapter {
+                                    executor: executor.clone(),
+                                    skill_id: dep_id.clone(),
+                                })),
+                                provides_capabilities: vec![],
+                                exempt_from_timeout: true, // nested skills manage own timeouts
+                            });
+                        }
+                    }
                 }
                 Arc::new(cloned)
             } else {
