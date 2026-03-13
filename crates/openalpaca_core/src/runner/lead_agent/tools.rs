@@ -243,12 +243,13 @@ impl BuiltInTool for SpawnSubagentTool {
         let tools = crate::tools::resolve_agent_tools(&agent, &self.tool_registry);
 
         // 7. Build LoopConfig from daemon defaults + agent constraints
-        let loop_config =
+        let mut loop_config =
             LoopConfig::from_agent(&self.daemon_config.load().execution.agent_defaults, &agent)
                 .with_context_window(
                     self.router.model_registry(),
                     agent.llm_config.model.as_deref(),
                 );
+        loop_config.event_bus = Some(self.bus.clone());
 
         // 8. Build messages with context distillation via PromptBuilder
         let default_model = self.router.default_model();

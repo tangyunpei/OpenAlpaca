@@ -1,4 +1,5 @@
 use crate::agent::subagent::AgentConstraints;
+use crate::bus::EventBus;
 use crate::security::capabilities::CapabilityManager;
 use openalpaca_llm::{ModelRegistry, StreamEvent, ThinkingConfig, ToolChoice};
 use std::sync::Arc;
@@ -57,6 +58,9 @@ pub struct LoopConfig {
     /// Model to use for LLM-based context compaction (extraction + summarization).
     /// When `None`, falls back to heuristic-only compaction.
     pub compaction_model: Option<String>,
+    /// Optional event bus for emitting compaction telemetry.
+    /// When set, the agentic loop publishes `CompactionTriggered` events.
+    pub event_bus: Option<EventBus>,
 }
 
 impl Clone for LoopConfig {
@@ -78,6 +82,7 @@ impl Clone for LoopConfig {
             stream_callback: self.stream_callback.clone(),
             max_stream_duration: self.max_stream_duration,
             compaction_model: self.compaction_model.clone(),
+            event_bus: self.event_bus.clone(),
         }
     }
 }
@@ -97,6 +102,7 @@ impl std::fmt::Debug for LoopConfig {
             .field("stream_callback", &self.stream_callback.is_some())
             .field("max_stream_duration", &self.max_stream_duration)
             .field("compaction_model", &self.compaction_model)
+            .field("event_bus", &self.event_bus.is_some())
             .finish()
     }
 }
@@ -120,6 +126,7 @@ impl Default for LoopConfig {
             stream_callback: None,
             max_stream_duration: Duration::from_secs(600),
             compaction_model: None,
+            event_bus: None,
         }
     }
 }
@@ -178,6 +185,7 @@ impl LoopConfig {
             stream_callback: None,
             max_stream_duration: Duration::from_secs(600),
             compaction_model: None,
+            event_bus: None,
         }
     }
 

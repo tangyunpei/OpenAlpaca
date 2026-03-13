@@ -201,6 +201,7 @@ pub(super) async fn execute_pipeline_step(
         .context
         .compaction_model
         .clone();
+    loop_config.event_bus = Some(pctx.bus.clone());
 
     // Instantiate ContextBudgetManager for budget-aware compaction
     let context_budget = {

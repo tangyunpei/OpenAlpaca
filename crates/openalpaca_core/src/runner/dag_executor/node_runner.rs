@@ -46,6 +46,7 @@ pub(super) async fn execute_single_node(
     // Set compaction model from daemon config
     loop_config.compaction_model = daemon_config.load()
         .execution.context.compaction_model.clone();
+    loop_config.event_bus = Some(bus.clone());
 
     // Instantiate ContextBudgetManager for budget-aware compaction
     let context_budget = {

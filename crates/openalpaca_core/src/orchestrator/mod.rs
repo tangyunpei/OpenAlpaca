@@ -270,6 +270,11 @@ impl Orchestrator {
             connector_status.clone(),
             context_manager.clone(),
         );
+        let loop_config = {
+            let mut lc = loop_config;
+            lc.event_bus = Some(bus.clone());
+            lc
+        };
         Self {
             shared_context,
             lane_manager,
