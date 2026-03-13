@@ -411,9 +411,10 @@ pub enum SystemEvent {
     ContextPackageBuilt {
         request_id: Uuid,
         agent_id: String,
-        sections_included: Vec<String>,
+        sections: Vec<(String, usize)>,
         total_tokens: usize,
-        memories_count: usize,
+        budget: usize,
+        sub_agent_window: usize,
         timestamp: DateTime<Utc>,
     },
 }

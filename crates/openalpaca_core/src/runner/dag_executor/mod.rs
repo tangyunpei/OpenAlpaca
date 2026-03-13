@@ -27,7 +27,6 @@ use tokio_util::sync::CancellationToken;
 use crate::bus::EventBus;
 use crate::context::{DagSummary, SharedContext};
 use crate::events::SystemEvent;
-use crate::middleware::prompt::format_tool_guidance;
 use chrono::Utc;
 
 use node_runner::execute_single_node;
