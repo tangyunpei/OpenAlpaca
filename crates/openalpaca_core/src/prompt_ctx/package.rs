@@ -428,4 +428,32 @@ mod tests {
             PackageSectionKind::WorkspaceArtifact
         );
     }
+
+    #[test]
+    fn test_merge_no_handoff_notes() {
+        let h1 = HandoffContext {
+            producer: AgentSummary {
+                name: "a".to_string(),
+                role: "r".to_string(),
+                step: 1,
+            },
+            task_assigned: "t1".to_string(),
+            output: "o1".to_string(),
+            decisions: vec![],
+            handoff_notes: None,
+        };
+        let h2 = HandoffContext {
+            producer: AgentSummary {
+                name: "b".to_string(),
+                role: "r".to_string(),
+                step: 2,
+            },
+            task_assigned: "t2".to_string(),
+            output: "o2".to_string(),
+            decisions: vec![],
+            handoff_notes: None,
+        };
+        let merged = HandoffContext::merge(&[h1, h2]);
+        assert!(merged.handoff_notes.is_none());
+    }
 }
