@@ -141,6 +141,47 @@ pub(super) async fn execute_single_node(
     }
 
     let built = builder.build();
+
+    // --- Context Budget Telemetry ---
+    {
+        let default_model = router.default_model();
+        let model_id = agent.llm_config.model.as_deref()
+            .unwrap_or(&default_model);
+        let request_id = uuid::Uuid::new_v4();
+        let mut budget_snapshot =
+            crate::context_budget::ContextBudgetManager::new(
+                model_window,
+                &daemon_config.load().execution.context,
+            );
+        budget_snapshot.register_section("system_prompt", built.total_prompt_tokens);
+        budget_snapshot.register_section("tools", tools.len() * 200);
+
+        tracing::debug!(
+            request_id = %request_id,
+            agent_id = %agent_id,
+            model_window,
+            fixed_zone = budget_snapshot.fixed_zone_tokens(),
+            free_zone = budget_snapshot.free_zone_capacity(),
+            buffer = budget_snapshot.autocompact_buffer(),
+            "Context budget computed (DAG node)"
+        );
+
+        bus.publish(crate::events::SystemEvent::ContextBudgetComputed {
+            request_id,
+            model: model_id.to_string(),
+            window_size: model_window,
+            fixed_zone_tokens: budget_snapshot.fixed_zone_tokens(),
+            free_zone_tokens: budget_snapshot.free_zone_capacity(),
+            buffer_size: budget_snapshot.autocompact_buffer(),
+            section_breakdown: budget_snapshot
+                .section_breakdown()
+                .into_iter()
+                .map(|(n, t)| (n.to_string(), t))
+                .collect(),
+            timestamp: chrono::Utc::now(),
+        });
+    }
+
     let system_prompt = built.system_message;
 
     // Build messages: system + task + workspace context for this node

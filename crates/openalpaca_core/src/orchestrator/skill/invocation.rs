@@ -371,6 +371,38 @@ impl Orchestrator {
         budget.register_section("system_prompt", built.total_prompt_tokens);
         budget.register_section("tools", tools_for_loop.len() * 200);
 
+        // --- Context Budget Telemetry ---
+        {
+            let model_id = self.llm_router.as_ref()
+                .map(|r| r.default_model())
+                .unwrap_or_else(|| "default".to_string());
+
+            tracing::debug!(
+                request_id = %request_id,
+                skill = skill_name,
+                model_window,
+                fixed_zone = budget.fixed_zone_tokens(),
+                free_zone = budget.free_zone_capacity(),
+                buffer = budget.autocompact_buffer(),
+                "Context budget computed (skill invocation)"
+            );
+
+            self.bus.publish(SystemEvent::ContextBudgetComputed {
+                request_id,
+                model: model_id,
+                window_size: model_window,
+                fixed_zone_tokens: budget.fixed_zone_tokens(),
+                free_zone_tokens: budget.free_zone_capacity(),
+                buffer_size: budget.autocompact_buffer(),
+                section_breakdown: budget
+                    .section_breakdown()
+                    .into_iter()
+                    .map(|(n, t)| (n.to_string(), t))
+                    .collect(),
+                timestamp: Utc::now(),
+            });
+        }
+
         // Metadata accumulators for SkillInvocationResult
         let mut inv_finish_reason = LoopFinishReason::Complete;
         let mut inv_rounds_used = 0usize;
