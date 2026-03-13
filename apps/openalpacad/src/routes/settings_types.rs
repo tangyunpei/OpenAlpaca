@@ -24,7 +24,6 @@ pub struct LlmUsageQuery {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct LlmUsageDailyQuery {
     pub agent_id: Option<String>,
     pub date: Option<String>,

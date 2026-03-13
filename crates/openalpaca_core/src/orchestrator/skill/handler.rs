@@ -10,7 +10,6 @@ use openalpaca_storage::SkillExecutionEntry;
 use uuid::Uuid;
 
 /// Result of a skill invocation, carrying LLM metadata alongside the output content.
-#[allow(dead_code)]
 pub(crate) struct SkillInvocationResult {
     pub content: String,
     pub finish_reason: LoopFinishReason,
