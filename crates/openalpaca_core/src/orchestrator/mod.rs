@@ -38,6 +38,7 @@ use crate::middleware::bootstrap::BootstrapDocument;
 use crate::middleware::identity::IdentityDocument;
 use crate::middleware::prompt::SystemPersona;
 use crate::middleware::user::UserDocument;
+use crate::prompt_ctx::ContextManager;
 use crate::runner::LoopConfig;
 use crate::security::gate::SecurityGate;
 use crate::security::policy::Principal;
@@ -169,6 +170,8 @@ pub struct Orchestrator {
     cached_base_prompt: Arc<ArcSwap<Option<CachedBasePrompt>>>,
     /// Optional broker for interactive tool confirmation (set post-construction via `set_confirmation_broker()`).
     pub confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
+    /// Context manager for resolving dynamic context (memory, user profile, etc.) via PromptBuilder.
+    context_manager: ContextManager,
 }
 
 /// Full conversation context for prompt building and summary update.
@@ -241,6 +244,31 @@ impl Orchestrator {
             Arc::new(RwLock::new(None));
         let connector_sender: Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>> =
             Arc::new(RwLock::new(None));
+        let user_document: Arc<RwLock<Option<UserDocument>>> = Arc::new(RwLock::new(None));
+
+        let context_manager = if let Some(ref db_ref) = db {
+            let sources: Vec<Box<dyn crate::prompt_ctx::sources::ContextSource>> = vec![
+                Box::new(crate::prompt_ctx::sources::memory::MemorySource::new(
+                    Arc::new(db_ref.clone()),
+                )),
+                Box::new(
+                    crate::prompt_ctx::sources::conversation::ConversationSource::new(),
+                ),
+                Box::new(
+                    crate::prompt_ctx::sources::user_profile::UserProfileSource::new(
+                        user_document.clone(),
+                    ),
+                ),
+                Box::new(crate::prompt_ctx::sources::skill::SkillContextSource::new()),
+                Box::new(
+                    crate::prompt_ctx::sources::workspace::WorkspaceSource::new(),
+                ),
+            ];
+            ContextManager::new(sources, daemon_config.clone())
+        } else {
+            ContextManager::noop()
+        };
+
         let task_dispatcher = TaskDispatcher::new(
             shared_context.clone(),
             lane_manager.clone(),
@@ -258,7 +286,7 @@ impl Orchestrator {
             lane_manager,
             bus,
             system_persona: Arc::new(RwLock::new(system_persona)),
-            user_document: Arc::new(RwLock::new(None)),
+            user_document,
             identity_document: Arc::new(RwLock::new(None)),
             llm_router,
             loop_config,
@@ -282,6 +310,7 @@ impl Orchestrator {
             llm_metadata_map: DashMap::new(),
             cached_base_prompt: Arc::new(ArcSwap::from_pointee(None)),
             confirmation_broker: Arc::new(RwLock::new(None)),
+            context_manager,
         }
     }
 
