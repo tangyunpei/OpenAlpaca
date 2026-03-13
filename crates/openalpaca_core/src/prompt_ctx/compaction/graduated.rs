@@ -8,6 +8,16 @@ pub struct CompactionReport {
     pub tiers_applied: Vec<CompactionTier>,
     pub initial_tokens: usize,
     pub final_tokens: usize,
+    /// Number of memories extracted during LlmSummary phase.
+    pub memories_extracted: usize,
+    /// Number of messages discarded during compaction.
+    pub messages_discarded: usize,
+    /// Message count before compaction started.
+    pub messages_before: usize,
+    /// Message count after compaction completed.
+    pub messages_after: usize,
+    /// Error from LlmSummary phase (None = success or phase not reached).
+    pub compaction_error: Option<String>,
 }
 
 impl CompactionReport {
@@ -38,6 +48,7 @@ impl<'a> GraduatedCompactor<'a> {
     ) -> CompactionReport {
         let mut report = CompactionReport {
             initial_tokens: crate::runner::estimate_messages_tokens(messages) as usize,
+            messages_before: messages.len(),
             ..Default::default()
         };
 
@@ -74,6 +85,9 @@ impl<'a> GraduatedCompactor<'a> {
                         self.summarizer,
                     )
                     .await;
+                    report.memories_extracted = result.extracted_memories.len();
+                    report.messages_discarded += result.messages_discarded;
+                    report.compaction_error = result.error.clone();
                     *messages = result.compacted_messages;
                 }
             }
@@ -98,6 +112,7 @@ impl<'a> GraduatedCompactor<'a> {
 
         report.final_tokens =
             crate::runner::estimate_messages_tokens(messages) as usize;
+        report.messages_after = messages.len();
         report
     }
 }
@@ -147,6 +162,56 @@ pub fn drop_multimedia(messages: &mut [ChatMessage]) {
 mod tests {
     use super::*;
     use openalpaca_llm::ImageSource;
+
+    #[tokio::test]
+    async fn test_compaction_report_carries_result_data() {
+        use crate::context_budget::compaction::{ExtractedMemory, MemoryExtractor, Summarizer};
+        use crate::context_budget::ContextBudgetManager;
+        use crate::daemon_config::ContextBudgetConfig;
+        use openalpaca_llm::ChatMessage;
+
+        struct TestExtractor;
+        #[async_trait::async_trait]
+        impl MemoryExtractor for TestExtractor {
+            async fn extract(&self, _: &[ChatMessage]) -> Result<Vec<ExtractedMemory>, String> {
+                Ok(vec![ExtractedMemory {
+                    kind: "fact".into(),
+                    content: "test memory".into(),
+                }])
+            }
+        }
+
+        struct TestSummarizer;
+        #[async_trait::async_trait]
+        impl Summarizer for TestSummarizer {
+            async fn summarize(&self, _: &[ChatMessage]) -> Result<String, String> {
+                Ok("[Summary]".into())
+            }
+        }
+
+        let cfg = ContextBudgetConfig {
+            autocompact_buffer_ratio: 0.15,
+            ..ContextBudgetConfig::default()
+        };
+        let budget = ContextBudgetManager::new(100, &cfg);
+
+        let mut messages = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("initial"),
+        ];
+        for i in 0..20 {
+            messages.push(ChatMessage::user(&format!("msg {i}")));
+            messages.push(ChatMessage::assistant(&format!("resp {i}")));
+        }
+        messages.push(ChatMessage::user("recent"));
+        messages.push(ChatMessage::assistant("recent resp"));
+
+        let compactor = GraduatedCompactor::new(&budget, &TestExtractor, &TestSummarizer);
+        let report = compactor.compact(&mut messages, 2).await;
+
+        assert!(report.memories_extracted > 0, "should carry extracted memory count");
+        assert!(report.messages_before > 0, "should carry messages_before");
+    }
 
     #[test]
     fn test_truncate_tool_results() {

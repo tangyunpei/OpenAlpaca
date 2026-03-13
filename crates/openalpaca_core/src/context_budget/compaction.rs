@@ -31,9 +31,7 @@ pub struct CompactionResult {
     pub compacted_messages: Vec<ChatMessage>,
     pub extracted_memories: Vec<ExtractedMemory>,
     pub messages_discarded: usize,
-    #[allow(dead_code)]
     pub messages_before: usize,
-    #[allow(dead_code)]
     pub messages_after: usize,
     pub error: Option<String>,
 }
