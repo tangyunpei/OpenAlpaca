@@ -12,6 +12,8 @@
 
 **Naming deviation:** The spec uses `context/` as the new module name, but `lib.rs` already has `pub mod context;` (for `SharedContext`). This plan uses `prompt_ctx/` instead to avoid the conflict. The `prompt/` module is used as-is.
 
+**API deviation:** `PromptBuilder::identity()` and `bootstrap()` take `&str` (pre-rendered text) instead of the spec's `&IdentityDocument` / `&BootstrapDocument`. Rationale: the builder doesn't need to know about document types — callers render to string before calling. This keeps the builder decoupled from document internals.
+
 ---
 
 ## Chunk 1: Phase 1 — Foundation (No Behavior Change)
@@ -235,7 +237,7 @@ Write the implementation above the tests in `builder.rs`:
 ```rust
 use crate::middleware::prompt::{
     format_connector_guidance, format_message_source, format_tool_guidance,
-    AgentPersona, PromptAssembler, SystemPersona,
+    AgentPersona, SystemPersona,
 };
 use crate::prompt_ctx::{ContextBundle, InjectionMode, SectionPriority, TrustLevel};
 use openalpaca_llm::{ChatMessage, ToolDefinition};
@@ -277,12 +279,6 @@ impl PromptBuilder {
     }
 
     pub fn system_persona(&mut self, persona: &SystemPersona) -> &mut Self {
-        let agent = AgentPersona {
-            role: String::new(),
-            tone: String::new(),
-            domain_knowledge: vec![],
-        };
-        // Use existing PromptAssembler for the system block only
         let content = format!(
             "<system_instructions>\nIdentity: {}\nCore Values:\n{}\nSafety Rules:\n{}\nBase Instructions: {}\n</system_instructions>\n",
             persona.name,
@@ -577,6 +573,18 @@ impl PromptBuilder {
             section.content.truncate(end);
             section.content.push_str("\n[...truncated]");
             section.token_estimate = section.content.len() / 4;
+            // Update Message target to reflect truncated content
+            match &section.target {
+                SectionTarget::Message(msg) => {
+                    let new_msg = ChatMessage {
+                        role: msg.role.clone(),
+                        content: section.content.clone(),
+                        ..msg.clone()
+                    };
+                    section.target = SectionTarget::Message(new_msg);
+                }
+                SectionTarget::SystemPromptBlock => {}
+            }
         }
     }
 }
@@ -624,7 +632,7 @@ Append to the `tests` module in `builder.rs`:
         // Use a tiny window so trimming is forced
         let mut builder = PromptBuilder::new(100); // 100 tokens = 400 chars
         let persona = SystemPersona::default();
-        builder.system_persona(&persona); // ~60 tokens (Critical, never dropped)
+        builder.system_persona(&persona); // ~125 tokens (Critical — exceeds 75-token cap alone, but never dropped)
         builder.bootstrap("This is a long bootstrap block that should be dropped first because it is Optional priority and takes many tokens");
         let built = builder.build();
 
@@ -706,8 +714,11 @@ pub enum ExecutionPath {
 #[derive(Debug, Clone)]
 pub struct ContextRequest {
     pub query: String,
+    pub intent: crate::orchestrator::intent::Intent,
     pub path: ExecutionPath,
+    pub skill: Option<std::sync::Arc<crate::middleware::skill::types::SkillDocument>>,
     pub owner_id: Option<String>,
+    pub scope: crate::memory::scope_context::MemoryScopeContext,
     pub model_context_window: usize,
     pub reserved_tokens: usize,
 }
@@ -728,22 +739,42 @@ pub trait ContextSource: Send + Sync {
 // crates/openalpaca_core/src/prompt_ctx/manager.rs
 use crate::prompt_ctx::section::{ContextBundle, ContextSection, SectionPriority};
 use crate::prompt_ctx::sources::{ContextRequest, ContextSource};
+use arc_swap::ArcSwap;
+use std::sync::Arc;
 
 pub struct ContextManager {
     sources: Vec<Box<dyn ContextSource>>,
-    autocompact_buffer_ratio: f64,
+    config: Arc<ArcSwap<crate::daemon_config::DaemonConfig>>,
 }
 
 impl ContextManager {
-    pub fn new(sources: Vec<Box<dyn ContextSource>>, autocompact_buffer_ratio: f64) -> Self {
+    /// Construct with dependency injection. The spec constructor wires the 5 concrete
+    /// sources internally. `config` provides live-reloadable `autocompact_buffer_ratio`
+    /// via `config.load().execution.context.autocompact_buffer_ratio`.
+    ///
+    /// For tests / CLI without storage, pass an empty `sources` vec.
+    pub fn new(
+        sources: Vec<Box<dyn ContextSource>>,
+        config: Arc<ArcSwap<crate::daemon_config::DaemonConfig>>,
+    ) -> Self {
+        Self { sources, config }
+    }
+
+    /// No-op manager for CLI / test environments without storage.
+    pub fn noop() -> Self {
+        use arc_swap::ArcSwap;
         Self {
-            sources,
-            autocompact_buffer_ratio,
+            sources: Vec::new(),
+            config: Arc::new(ArcSwap::from_pointee(crate::daemon_config::DaemonConfig::default())),
         }
     }
 
+    fn autocompact_buffer_ratio(&self) -> f64 {
+        self.config.load().execution.context.autocompact_buffer_ratio
+    }
+
     pub async fn resolve(&self, request: &ContextRequest) -> ContextBundle {
-        let buffer = (request.model_context_window as f64 * self.autocompact_buffer_ratio) as usize;
+        let buffer = (request.model_context_window as f64 * self.autocompact_buffer_ratio()) as usize;
         let available = request
             .model_context_window
             .saturating_sub(request.reserved_tokens)
@@ -808,6 +839,27 @@ mod tests {
     use super::*;
     use crate::prompt_ctx::*;
     use crate::prompt_ctx::sources::ExecutionPath;
+    use arc_swap::ArcSwap;
+    use std::sync::Arc;
+
+    fn test_config_with_buffer(ratio: f64) -> crate::daemon_config::DaemonConfig {
+        let mut config = crate::daemon_config::DaemonConfig::default();
+        config.execution.context.autocompact_buffer_ratio = ratio;
+        config
+    }
+
+    fn test_request(window: usize, reserved: usize) -> ContextRequest {
+        ContextRequest {
+            query: "test".to_string(),
+            intent: crate::orchestrator::intent::Intent::SimpleQuery,
+            path: ExecutionPath::SimpleQuery,
+            skill: None,
+            owner_id: None,
+            scope: Default::default(),
+            model_context_window: window,
+            reserved_tokens: reserved,
+        }
+    }
 
     struct FakeSource {
         sections: Vec<ContextSection>,
@@ -848,15 +900,10 @@ mod tests {
             ],
         };
 
-        let mgr = ContextManager::new(vec![Box::new(source)], 0.165);
-        let request = ContextRequest {
-            query: "test".to_string(),
-            path: ExecutionPath::SimpleQuery,
-            owner_id: None,
-            model_context_window: 1000, // 1000 tokens total
-            reserved_tokens: 500,       // 500 reserved for static
-            // available = 1000 - 500 - 165 = 335
-        };
+        let config = Arc::new(ArcSwap::from_pointee(test_config_with_buffer(0.165)));
+        let mgr = ContextManager::new(vec![Box::new(source)], config);
+        let request = test_request(1000, 500);
+        // available = 1000 - 500 - 165 = 335
         let bundle = mgr.resolve(&request).await;
 
         // Both sections (100 each = 200) fit in 335 budget
@@ -891,15 +938,10 @@ mod tests {
             ],
         };
 
-        let mgr = ContextManager::new(vec![Box::new(source)], 0.0);
-        let request = ContextRequest {
-            query: "test".to_string(),
-            path: ExecutionPath::SimpleQuery,
-            owner_id: None,
-            model_context_window: 500,
-            reserved_tokens: 200,
-            // available = 500 - 200 - 0 = 300. Only fits 200 (High), not both.
-        };
+        let config = Arc::new(ArcSwap::from_pointee(test_config_with_buffer(0.0)));
+        let mgr = ContextManager::new(vec![Box::new(source)], config);
+        let request = test_request(500, 200);
+        // available = 500 - 200 - 0 = 300. Only fits 200 (High), not both.
         let bundle = mgr.resolve(&request).await;
 
         assert_eq!(bundle.sections.len(), 1);
@@ -986,7 +1028,15 @@ Implementation details for each source:
 
 **WorkspaceSource:** Returns workspace artifact sections from `TaskState` / cached outputs. `priority: Low`, `injection: UserMessage { tag: "workspace_artifact", trust: Untrusted }`. `active_for` returns `true` for `PipelineStep`, `DagNode`, `LeadAgent`.
 
-- [ ] **Step 1: Implement each source following the pattern above**
+- [ ] **Step 1: Implement each source with constructor and real dependencies**
+
+Each source must have a `new()` constructor accepting its dependencies:
+
+- `MemorySource::new(db: Arc<Database>, embedder: Option<Arc<dyn Embedder>>)` — calls `MemoryRepository::search_hybrid_cascade()` with `request.scope`
+- `ConversationSource::new()` — takes session summary from request context
+- `UserProfileSource::new(user_document: Arc<RwLock<Option<UserDocument>>>)` — calls `user_to_prompt_block()`
+- `SkillContextSource::new(skill_catalog: Arc<SkillCatalog>)` — uses `request.skill` to resolve context files
+- `WorkspaceSource::new()` — returns cached workspace artifacts
 
 The key pattern for each source file:
 
@@ -995,15 +1045,37 @@ use crate::prompt_ctx::*;
 use crate::prompt_ctx::sources::{ContextRequest, ContextSource, ExecutionPath};
 use async_trait::async_trait;
 
-pub struct XSource { /* dependencies */ }
+pub struct MemorySource {
+    db: Arc<Database>,
+    embedder: Option<Arc<dyn Embedder>>,
+}
+
+impl MemorySource {
+    pub fn new(db: Arc<Database>, embedder: Option<Arc<dyn Embedder>>) -> Self {
+        Self { db, embedder }
+    }
+}
 
 #[async_trait]
-impl ContextSource for XSource {
-    fn name(&self) -> &'static str { "x_source" }
+impl ContextSource for MemorySource {
+    fn name(&self) -> &'static str { "memory" }
 
     async fn resolve(&self, request: &ContextRequest) -> Vec<ContextSection> {
-        // Resolve and return sections
-        vec![]
+        let repo = MemoryRepository::new(&self.db);
+        let results = repo.search_hybrid_cascade(&request.query, &request.scope, 10).await;
+        results.into_iter().map(|entry| ContextSection {
+            source: "memory",
+            kind: ContextKind::Memory,
+            content: entry.content.clone(),
+            token_estimate: entry.content.len() / 4,
+            priority: SectionPriority::Normal,
+            relevance: entry.score as f32,
+            key: ContextKey::Memory(entry.id),
+            injection: InjectionMode::UserMessage {
+                tag: "retrieved_memory".to_string(),
+                trust: TrustLevel::Untrusted,
+            },
+        }).collect()
     }
 
     fn active_for(&self, path: &ExecutionPath) -> bool {
@@ -1012,11 +1084,15 @@ impl ContextSource for XSource {
 }
 ```
 
-- [ ] **Step 2: Run `cargo check -p openalpaca_core`**
+- [ ] **Step 2: Write integration test for MemorySource**
 
-Expected: compiles clean.
+Test that `MemorySource` returns non-empty sections when given a seeded database. Use an in-memory SQLite database with `MemoryRepository::insert()` to seed test data, then verify `resolve()` returns sections with correct `ContextKind::Memory` and `InjectionMode::UserMessage`.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Run `cargo check -p openalpaca_core` and `cargo test -p openalpaca_core prompt_ctx`**
+
+Expected: compiles clean, MemorySource integration test passes.
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add crates/openalpaca_core/src/prompt_ctx/sources/
@@ -1047,6 +1123,14 @@ use crate::prompt_ctx::{ContextManager, ContextRequest, ExecutionPath};
 The existing code builds `system_prompt` via `get_or_build_base_prompt()` + manual string concatenation. Replace with:
 
 ```rust
+// Hoist model_window before PromptBuilder construction.
+// Default to 200_000 when no LLM router is present (echo-stub path).
+let model_window = self.llm_router.as_ref()
+    .and_then(|r| config_for_loop.model.as_deref()
+        .and_then(|m| r.model_registry().get_model_info(m)))
+    .map(|info| info.context_window as usize)
+    .unwrap_or(200_000);
+
 // Build static sections first
 let mut builder = PromptBuilder::new(model_window);
 builder
@@ -1087,7 +1171,22 @@ Change the `run_agentic_loop_routed()` call from `context_budget: None` to `cont
 
 - [ ] **Step 4: Add `context_manager` field to `Orchestrator`**
 
-Add `pub context_manager: ContextManager` to the `Orchestrator` struct in `orchestrator/mod.rs`. Initialize it in `Orchestrator::new()` using the constructor from the spec.
+Add `context_manager: ContextManager` (private field) to the `Orchestrator` struct in `orchestrator/mod.rs`. Initialize inside `new()` using:
+```rust
+let context_manager = if let Some(ref db) = db {
+    let sources: Vec<Box<dyn ContextSource>> = vec![
+        Box::new(MemorySource::new(db.clone(), embedder.clone())),
+        Box::new(ConversationSource::new()),
+        Box::new(UserProfileSource::new(user_document.clone())),
+        Box::new(SkillContextSource::new(skill_catalog.clone())),
+        Box::new(WorkspaceSource::new()),
+    ];
+    ContextManager::new(sources, config.clone())
+} else {
+    ContextManager::noop() // CLI mode without storage
+};
+```
+No change to `Orchestrator::new()` public signature — `context_manager` is constructed from existing args.
 
 - [ ] **Step 5: Preserve existing handler-specific behaviors**
 
@@ -1096,11 +1195,18 @@ Keep these in the handler (not in PromptBuilder):
 - `try_direct_send()` — before PromptBuilder
 - `apply_send_keepalive` — after tool resolution
 - `loop_overrides` — applied to LoopConfig
-- `build_send_context()` — via `builder.raw_system_block("send_context", &send_ctx, SectionPriority::Normal)`
+- `build_send_context()` + `send_rules` — both remain in handler. Inject via `builder.raw_system_block("send_context", &send_ctx, SectionPriority::Normal)` and `builder.raw_system_block("send_rules", &send_rules, SectionPriority::Normal)` in the same conditional branch that checks `tool_defs.iter().any(|d| d.name == "send")`
 
-- [ ] **Step 6: Run `cargo test -p openalpaca_core` (full crate)**
+- [ ] **Step 6a: Write smoke test**
 
-Expected: all existing tests pass. New prompt path produces equivalent output.
+Add a test in `orchestrator/query_handler/simple_query_handler.rs` tests that asserts:
+- `built.system_message` contains `<system_instructions>`, `<agent_role>`, identity block
+- `built.section_registry` contains "system_persona", "agent_persona", "identity", "tools", "connector_guidance"
+- `built.total_prompt_tokens` is within 10% of the token total from the previous `system_prompt.len() / 4` estimate
+
+- [ ] **Step 6b: Run `cargo test -p openalpaca_core` (full crate)**
+
+Expected: all existing tests pass plus new smoke test passes.
 
 - [ ] **Step 7: Commit**
 
@@ -1206,21 +1312,199 @@ git commit -m "feat(context_budget): add CompactionTier enum and compaction_tier
 ### Task 8: Implement GraduatedCompactor
 
 **Files:**
-- Create: `crates/openalpaca_core/src/context_budget/graduated.rs`
-- Modify: `crates/openalpaca_core/src/context_budget/mod.rs`
+- Create: `crates/openalpaca_core/src/prompt_ctx/compaction/mod.rs`
+- Create: `crates/openalpaca_core/src/prompt_ctx/compaction/graduated.rs`
+- Modify: `crates/openalpaca_core/src/prompt_ctx/mod.rs` (add `pub mod compaction;`)
 
-- [ ] **Step 1: Implement tier functions and compactor**
+Note: `GraduatedCompactor` lives in `prompt_ctx/compaction/` (not `context_budget/`) because `context_budget/` is marked for deprecation in Phase 6. `CompactionTier` stays in `context_budget/budget.rs` since it's a method on `ContextBudgetManager`.
 
-The `GraduatedCompactor` takes `&dyn MemoryExtractor + &dyn Summarizer` (not `LlmBackend`) to avoid visibility issues. Implements `truncate_tool_results()`, `drop_multimedia()`, and the escalation loop with termination guard at `LlmSummary`.
+- [ ] **Step 1: Write failing test for truncate_tool_results**
 
-- [ ] **Step 2: Write tests for tier 1 (truncate tool results) and tier 2 (drop multimedia)**
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openalpaca_llm::{ChatMessage, Role};
 
-Test that tool result messages get truncated to 50%, and that image/audio/document parts get replaced with text placeholders.
+    #[test]
+    fn test_truncate_tool_results() {
+        let mut messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("hello"),
+            ChatMessage { role: Role::Tool, content: "x".repeat(1000), ..Default::default() },
+        ];
+        truncate_tool_results(&mut messages);
+        // Tool result should be truncated to 50%
+        assert!(messages[2].content.len() <= 520); // 500 + "[...truncated]"
+    }
 
-- [ ] **Step 3: Run tests, commit**
+    #[test]
+    fn test_drop_multimedia() {
+        use openalpaca_llm::ContentPart;
+        let mut messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage {
+                role: Role::User,
+                content: String::new(),
+                parts: Some(vec![
+                    ContentPart::Image { url: "data:image/png;base64,abc".into(), detail: None },
+                    ContentPart::Text { text: "describe this".into() },
+                ]),
+                ..Default::default()
+            },
+        ];
+        drop_multimedia(&mut messages);
+        let parts = messages[1].parts.as_ref().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0], ContentPart::Text { text } if text.contains("[image removed")));
+    }
+}
+```
+
+- [ ] **Step 2: Implement GraduatedCompactor and tier functions**
+
+```rust
+// crates/openalpaca_core/src/prompt_ctx/compaction/graduated.rs
+use crate::context_budget::{CompactionTier, ContextBudgetManager};
+use crate::context_budget::compaction::{MemoryExtractor, Summarizer};
+use openalpaca_llm::{ChatMessage, ContentPart, Role};
+
+/// Report of compaction actions taken.
+#[derive(Debug, Default)]
+pub struct CompactionReport {
+    pub tiers_applied: Vec<CompactionTier>,
+    pub initial_tokens: usize,
+    pub final_tokens: usize,
+}
+
+impl CompactionReport {
+    pub fn record_tier(&mut self, tier: CompactionTier) {
+        self.tiers_applied.push(tier);
+    }
+}
+
+pub struct GraduatedCompactor<'a> {
+    budget: &'a ContextBudgetManager,
+    extractor: &'a dyn MemoryExtractor,
+    summarizer: &'a dyn Summarizer,
+}
+
+impl<'a> GraduatedCompactor<'a> {
+    pub fn new(
+        budget: &'a ContextBudgetManager,
+        extractor: &'a dyn MemoryExtractor,
+        summarizer: &'a dyn Summarizer,
+    ) -> Self {
+        Self { budget, extractor, summarizer }
+    }
+
+    pub async fn compact(
+        &self,
+        messages: &mut Vec<ChatMessage>,
+        tail_keep: usize,
+    ) -> CompactionReport {
+        let mut report = CompactionReport {
+            initial_tokens: crate::runner::agentic_loop::context::estimate_messages_tokens(messages) as usize,
+            ..Default::default()
+        };
+
+        let mut current_tier = self.budget.compaction_tier(report.initial_tokens);
+        if current_tier == CompactionTier::None {
+            report.final_tokens = report.initial_tokens;
+            return report;
+        }
+
+        loop {
+            match current_tier {
+                CompactionTier::None => break,
+                CompactionTier::TruncateToolResults => truncate_tool_results(messages),
+                CompactionTier::DropMultimedia => drop_multimedia(messages),
+                CompactionTier::DiscardSocial => {
+                    let min_recent = self.budget.min_recent_messages();
+                    let cleaned = crate::context_budget::compaction::CompactionPipeline::discard_social(messages, min_recent);
+                    *messages = cleaned;
+                }
+                CompactionTier::HeuristicSummary => {
+                    crate::runner::agentic_loop::context::compress_context(messages, tail_keep, Some(self.budget));
+                }
+                CompactionTier::LlmSummary => {
+                    // Use existing CompactionPipeline for LLM-based summarization
+                    let pipeline = crate::context_budget::compaction::CompactionPipeline::new(
+                        self.extractor, self.summarizer,
+                    );
+                    pipeline.compact(messages, tail_keep, Some(self.budget)).await;
+                }
+            }
+            report.record_tier(current_tier);
+
+            let tokens_now = crate::runner::agentic_loop::context::estimate_messages_tokens(messages) as usize;
+            let new_tier = self.budget.compaction_tier(tokens_now);
+            if new_tier <= current_tier {
+                break; // No progress or regression — stop
+            }
+            match current_tier.next() {
+                Some(next) => current_tier = next,
+                None => {
+                    tracing::warn!("Compaction exhausted all tiers, still at {tokens_now} tokens");
+                    break;
+                }
+            }
+        }
+
+        report.final_tokens = crate::runner::agentic_loop::context::estimate_messages_tokens(messages) as usize;
+        report
+    }
+}
+
+/// Tier 1: Truncate tool result messages to 50% of their size.
+pub fn truncate_tool_results(messages: &mut [ChatMessage]) {
+    for msg in messages.iter_mut() {
+        if msg.role == Role::Tool && msg.content.len() > 200 {
+            let target = msg.content.len() / 2;
+            let end = msg.content.floor_char_boundary(target);
+            msg.content.truncate(end);
+            msg.content.push_str("\n[...truncated]");
+        }
+    }
+}
+
+/// Tier 2: Replace image/audio/document parts with text placeholders.
+pub fn drop_multimedia(messages: &mut [ChatMessage]) {
+    for msg in messages.iter_mut() {
+        if let Some(ref mut parts) = msg.parts {
+            for part in parts.iter_mut() {
+                match part {
+                    ContentPart::Image { .. } => {
+                        *part = ContentPart::Text { text: "[image removed to save context]".into() };
+                    }
+                    ContentPart::Audio { .. } => {
+                        *part = ContentPart::Text { text: "[audio removed to save context]".into() };
+                    }
+                    ContentPart::Document { filename, .. } => {
+                        let name = filename.clone();
+                        *part = ContentPart::Text { text: format!("[document '{name}' removed to save context]") };
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+```
+
+- [ ] **Step 3: Create `compaction/mod.rs` and register in `prompt_ctx/mod.rs`**
+
+```rust
+// crates/openalpaca_core/src/prompt_ctx/compaction/mod.rs
+mod graduated;
+pub use graduated::{CompactionReport, GraduatedCompactor, truncate_tool_results, drop_multimedia};
+```
+
+- [ ] **Step 4: Run tests, commit**
 
 ```bash
-git commit -m "feat(context_budget): implement GraduatedCompactor with 5 compaction tiers"
+cargo test -p openalpaca_core prompt_ctx::compaction -v
+git commit -m "feat(prompt_ctx): implement GraduatedCompactor with 5 compaction tiers"
 ```
 
 ---
@@ -1306,7 +1590,9 @@ git commit -m "feat: wire GraduatedCompactor into agentic loop, replacing binary
 
 Follow the spec section 6. Include `to_bundle()` with the injection mode mapping table. Include `HandoffContext::format()` and `HandoffContext::merge()`.
 
-- [ ] **Step 2: Write tests for `to_bundle()` injection modes and `HandoffContext::format()`**
+- [ ] **Step 2: Write tests for `to_bundle()` injection modes, `HandoffContext::format()`, and `HandoffContext::merge()`**
+
+Test `merge()` verifies: all predecessors' content appears in merged output, producer attribution is preserved for each predecessor.
 
 - [ ] **Step 3: Commit**
 
@@ -1323,7 +1609,7 @@ git commit -m "feat(prompt_ctx): add ContextPackage v2 with HandoffContext and t
 
 - [ ] **Step 1: Implement `distill()` method**
 
-Follow spec section 6.1. Re-prioritize parent sections for sub-agent, budget-fill with greedy algorithm, access control via `denied_sections`.
+Follow spec section 6.1. Re-prioritize parent sections for sub-agent, budget-fill with greedy algorithm, access control via `denied_sections`. Hardcode `const SUB_AGENT_CONTEXT_RATIO: f64 = 0.40` for now — config wiring is deferred to Task 17 Step 3.
 
 - [ ] **Step 2: Write tests for distillation (budget adaptation, denied sections, priority remapping)**
 
@@ -1360,14 +1646,21 @@ git commit -m "feat: wire Pipeline steps with HandoffContext and PromptBuilder"
 
 **Files:**
 - Modify: `crates/openalpaca_core/src/runner/dag_executor/node_runner.rs`
+- Modify: `crates/openalpaca_core/src/events.rs` (update `ContextPackageBuilt` fields)
+- Modify: `apps/openalpacad/src/event_bridge.rs` (update serialization pattern match)
+- Modify: `apps/openalpaca-gui/src/lib/daemon.ts` (add `context_package_built` variant to `ServerEvent`)
 
 - [ ] **Step 1: Replace ContextPackageBuilder with ContextManager::distill()**
 
 - [ ] **Step 2: Wire PromptBuilder for DAG nodes**
 
-- [ ] **Step 3: Update `SystemEvent::ContextPackageBuilt` fields**
+- [ ] **Step 3: Update `SystemEvent::ContextPackageBuilt` event schema**
 
-Change from `{sections_included, total_tokens, memories_count}` to `{sections: Vec<(String, usize)>, total_tokens, budget, sub_agent_window}`. Update event_bridge.rs serialization.
+In `events.rs`: change `ContextPackageBuilt` from `{sections_included, total_tokens, memories_count}` to `{sections: Vec<(String, usize)>, total_tokens, budget, sub_agent_window}`.
+
+In `event_bridge.rs`: update the pattern match (currently ~line 516) for the new field names.
+
+In `daemon.ts`: add `context_package_built` variant to the `ServerEvent` TypeScript union with fields `{ type: "context_package_built"; agent_id: string; sections: [string, number][]; total_tokens: number; budget: number; sub_agent_window: number; ts: string; instance_id: string; _id: number }`.
 
 - [ ] **Step 4: Run tests, commit**
 
@@ -1402,9 +1695,9 @@ git commit -m "feat: wire Lead Agent sub-agent spawning with context distillatio
 **Files:**
 - Modify: `crates/openalpaca_core/src/orchestrator/skill/invocation.rs`
 
-- [ ] **Step 1: Replace manual prompt assembly with PromptBuilder**
+- [ ] **Step 1: Replace manual prompt assembly with ContextManager + PromptBuilder**
 
-The skill invocation path already has the most complex prompt assembly (~80 lines). Replace with PromptBuilder chain, preserving skill-specific sections (skill block, context sources, send context) via `raw_system_block()`.
+The skill invocation path already has the most complex prompt assembly (~80 lines). Construct a `ContextRequest` with `ExecutionPath::SkillInvocation` and call `context_manager.resolve()` to get a `ContextBundle`, then pass it to `PromptBuilder`. Remove the manual memory retrieval block (lines 313-376 of `invocation.rs`) and the hardcoded `budget = 2000` (line 355). Preserve skill-specific sections (skill block, context sources, send context) via `raw_system_block()`.
 
 - [ ] **Step 2: Run tests, commit**
 
@@ -1435,16 +1728,21 @@ git commit -m "feat: wire Lead Agent prompt with PromptBuilder"
 
 **Files:**
 - Modify: `crates/openalpaca_core/src/middleware/prompt.rs` (remove `PromptAssembler`)
-- Modify: `crates/openalpaca_core/src/context_budget/mod.rs` (add forwarding re-exports)
 - Delete: `crates/openalpaca_core/src/context_budget/package.rs` (old ContextPackage)
+- Delete: `crates/openalpaca_core/src/context_budget/budget.rs` (moved to `prompt_ctx/` — move `ContextBudgetManager` + `CompactionTier` first)
+- Delete: `crates/openalpaca_core/src/context_budget/compaction.rs` (moved to `prompt_ctx/compaction/`)
+- Delete: `crates/openalpaca_core/src/context_budget/tests.rs` (migrated with budget.rs)
+- Modify: `crates/openalpaca_core/src/context_budget/mod.rs` (reduce to forwarding re-exports: `pub use crate::prompt_ctx::*;`)
+
+**Prerequisite:** Verify `SystemEvent::ContextPackageBuilt` was migrated to the new field shape (`sections`, `budget`, `sub_agent_window`) in Task 13. If not done, do it now before deleting `context_budget/package.rs`.
 
 - [ ] **Step 1: Remove `PromptAssembler` from `middleware/prompt.rs`**
 
 Keep `SystemPersona`, `AgentPersona`, `format_tool_guidance()`, `format_connector_guidance()`, `format_message_source()`. Only remove `PromptAssembler` and its test.
 
-- [ ] **Step 2: Delete old `ContextPackage` and `ContextPackageBuilder`**
+- [ ] **Step 2: Move `ContextBudgetManager` and `CompactionTier` to `prompt_ctx/budget.rs`**
 
-Remove `context_budget/package.rs`. Update `context_budget/mod.rs` re-exports.
+Create `prompt_ctx/budget.rs` with the moved types. Update all imports. Then reduce `context_budget/mod.rs` to `pub use crate::prompt_ctx::*;` as a forwarding shim. Delete `context_budget/budget.rs`, `context_budget/compaction.rs`, `context_budget/package.rs`, `context_budget/tests.rs`.
 
 - [ ] **Step 3: Move hardcoded budgets to `daemon.toml`**
 
