@@ -85,6 +85,45 @@ Two-layer architecture separating **what context to include** from **how to asse
 
 The ContextManager owns the full lifecycle of context: what to fetch, how to rank it, how much space it gets, and when it's stale.
 
+### 3.0 Constructor & Dependencies
+
+```rust
+pub struct ContextManager {
+    sources: Vec<Box<dyn ContextSource>>,
+    config: Arc<ArcSwap<DaemonConfig>>,
+}
+
+impl ContextManager {
+    /// Build from shared daemon state. Called once at startup, stored in Orchestrator.
+    pub fn new(
+        db: Option<Arc<Database>>,
+        embedder: Option<Arc<dyn Embedder>>,
+        user_document: Arc<RwLock<Option<UserDocument>>>,
+        skill_catalog: Arc<SkillCatalog>,
+        config: Arc<ArcSwap<DaemonConfig>>,
+    ) -> Self {
+        let mut sources: Vec<Box<dyn ContextSource>> = Vec::new();
+
+        if let Some(ref db) = db {
+            sources.push(Box::new(MemorySource::new(db.clone(), embedder.clone())));
+        }
+        sources.push(Box::new(ConversationSource));
+        sources.push(Box::new(UserProfileSource::new(user_document)));
+        sources.push(Box::new(SkillContextSource::new(skill_catalog)));
+        sources.push(Box::new(WorkspaceSource::new(db)));
+
+        Self { sources, config }
+    }
+
+    fn autocompact_buffer(&self, model_window: usize) -> usize {
+        let ratio = self.config.load().orchestrator.context.autocompact_buffer_ratio;
+        (model_window as f64 * ratio) as usize
+    }
+}
+```
+
+`ContextManager` lives in `openalpaca_core` (same crate as Orchestrator). It depends on `openalpaca_storage` (for `Database`) and `openalpaca_llm` (for `Embedder`) — both are existing dependencies of `openalpaca_core`.
+
 ### 3.1 Context Request
 
 Each execution path creates a `ContextRequest` describing what context it needs:
@@ -181,12 +220,17 @@ pub enum ContextKind {
     UserProfile,
 }
 
+/// Ordering: Critical > High > Normal > Low > Optional.
+/// Variants are declared in ASCENDING order so that derived `Ord`
+/// gives `Optional(0) < Low(1) < Normal(2) < High(3) < Critical(4)`.
+/// Use `b.priority.cmp(&a.priority)` for highest-first sorting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SectionPriority {
-    Critical,   // never trimmed (system persona, safety)
-    High,       // trimmed last (identity, active skill body)
-    Normal,     // trimmed proportionally (user profile, memories, summary)
-    Low,        // trimmed first (workspace artifacts, skill file refs)
     Optional,   // dropped entirely under pressure (bootstrap, skills catalog)
+    Low,        // trimmed first (workspace artifacts, skill file refs)
+    Normal,     // trimmed proportionally (user profile, memories, summary)
+    High,       // trimmed last (identity, active skill body)
+    Critical,   // never trimmed (system persona, safety)
 }
 
 pub enum InjectionMode {
@@ -232,16 +276,20 @@ impl ContextManager {
             - self.autocompact_buffer(request.model_context_window);
 
         // 2. Resolve all active sources in parallel
-        let mut sections: Vec<ContextSection> = Vec::new();
-        for source in &self.sources {
-            if source.active_for(&request.path) {
-                sections.extend(source.resolve(&request).await);
-            }
-        }
+        let active: Vec<&dyn ContextSource> = self.sources.iter()
+            .filter(|s| s.active_for(&request.path))
+            .map(|s| s.as_ref())
+            .collect();
+        let results = futures_util::future::join_all(
+            active.iter().map(|s| s.resolve(&request))
+        ).await;
+        let mut sections: Vec<ContextSection> = results.into_iter().flatten().collect();
 
-        // 3. Sort: priority desc, then relevance desc within tier
+        // 3. Sort: highest priority first, then highest relevance within tier
+        //    SectionPriority derives Ord with Optional(0) < Critical(4),
+        //    so b.cmp(a) gives descending (Critical first).
         sections.sort_by(|a, b| {
-            a.priority.cmp(&b.priority)
+            b.priority.cmp(&a.priority)
                 .then(b.relevance.partial_cmp(&a.relevance)
                     .unwrap_or(std::cmp::Ordering::Equal))
         });
@@ -271,6 +319,26 @@ impl ContextManager {
             available_budget: available,
         }
     }
+
+    /// Pre-compute static section token estimates so the caller can populate
+    /// `ContextRequest.reserved_tokens` before calling `resolve()`.
+    ///
+    /// This breaks the chicken-and-egg: callers build static sections first,
+    /// estimate their cost, then pass `reserved_tokens` into the context request.
+    ///
+    /// Usage:
+    /// ```rust
+    /// let reserved = PromptBuilder::new(window)
+    ///     .system_persona(&soul)
+    ///     .agent_persona(&agent)
+    ///     .tools(&tool_defs)
+    ///     .estimate_static_tokens();
+    /// let request = ContextRequest { reserved_tokens: reserved, ... };
+    /// let bundle = context_manager.resolve(request).await;
+    /// // Now add dynamic sections and build
+    /// builder.context_bundle(&bundle).build();
+    /// ```
+    pub fn estimate_static_tokens(&self) -> usize;
 }
 ```
 
@@ -292,6 +360,12 @@ struct SeenEntry {
 
 impl ContextLifecycle {
     /// Should this section be re-injected?
+    ///
+    /// The caller resolves the staleness threshold per `ContextKind` from config:
+    /// - `ContextKind::Memory` → `lifecycle.memory_stale_after`
+    /// - `ContextKind::UserProfile` → `lifecycle.profile_stale_after`
+    /// - `ContextKind::ConversationSummary` → `lifecycle.summary_stale_after`
+    /// - Others → `Duration::MAX` (never re-inject automatically)
     pub fn should_inject(&self, key: &ContextKey, staleness_threshold: Duration) -> bool {
         match self.seen.get(key) {
             None => true,
@@ -385,6 +459,12 @@ impl PromptBuilder {
 
     // ── Dynamic sections (from ContextBundle) ──
     pub fn context_bundle(&mut self, bundle: &ContextBundle) -> &mut Self;
+
+    // ── Pre-resolve estimation ──
+    /// Estimate total tokens of sections added so far (static sections).
+    /// Call this BEFORE `context_bundle()` to get `reserved_tokens` for
+    /// `ContextRequest`, breaking the chicken-and-egg dependency.
+    pub fn estimate_static_tokens(&self) -> usize;
 
     // ── Build with enforcement ──
     pub fn build(mut self) -> BuiltPrompt;
@@ -499,21 +579,22 @@ pub enum CompactionTier {
 
 ### 5.2 Tier Selection
 
-The budget manager reports which tier is appropriate based on utilization:
+The budget manager reports which tier is appropriate based on utilization of the **full model context window** (not the compaction trigger). This ensures the percentages in the config map directly to observable window usage:
 
 ```rust
 impl ContextBudgetManager {
     pub fn compaction_tier(&self, message_tokens: usize) -> CompactionTier {
         let total = self.fixed_zone_tokens() + message_tokens;
-        let effective_limit = self.compaction_trigger(); // window * 0.835
-        let utilization = total as f64 / effective_limit as f64;
+        // Utilization is against the FULL model window, so 70% means
+        // 70% of the model's total context capacity.
+        let utilization = total as f64 / self.model_context_window as f64;
 
         match utilization {
-            u if u < 0.70 => CompactionTier::None,
-            u if u < 0.80 => CompactionTier::TruncateToolResults,
-            u if u < 0.85 => CompactionTier::DropMultimedia,
-            u if u < 0.90 => CompactionTier::DiscardSocial,
-            u if u < 0.95 => CompactionTier::HeuristicSummary,
+            u if u < 0.60 => CompactionTier::None,
+            u if u < 0.70 => CompactionTier::TruncateToolResults,
+            u if u < 0.75 => CompactionTier::DropMultimedia,
+            u if u < 0.80 => CompactionTier::DiscardSocial,
+            u if u < 0.85 => CompactionTier::HeuristicSummary,
             _              => CompactionTier::LlmSummary,
         }
     }
@@ -528,10 +609,14 @@ Tries the selected tier, checks if utilization dropped enough, escalates if not:
 pub struct GraduatedCompactor;
 
 impl GraduatedCompactor {
+    /// Run graduated compaction. Takes trait objects for LLM-based tiers
+    /// (not `LlmBackend` directly) so this module doesn't depend on
+    /// `agentic_loop/backend.rs`'s `pub(super)` type.
     pub async fn compact(
         messages: &mut Vec<ChatMessage>,
         budget: &ContextBudgetManager,
-        backend: &LlmBackend<'_>,
+        extractor: &dyn MemoryExtractor,
+        summarizer: &dyn Summarizer,
         lifecycle: &mut ContextLifecycle,
     ) -> CompactionReport {
         let mut report = CompactionReport::new();
@@ -561,8 +646,8 @@ impl GraduatedCompactor {
                     let result = CompactionPipeline::compact(
                         owned,
                         budget.min_recent_messages(),
-                        backend,
-                        backend,
+                        extractor,
+                        summarizer,
                     ).await;
                     for mem in &result.extracted_memories {
                         report.extracted_memories.push(mem.clone());
@@ -578,7 +663,18 @@ impl GraduatedCompactor {
             // Check if sufficient
             let next_tier = budget.compaction_tier(after_tokens);
             if next_tier >= current_tier {
-                current_tier = current_tier.next(); // escalate
+                // Escalate to next tier. If we're already at LlmSummary
+                // (the final tier), stop — nothing heavier to try.
+                match current_tier.next() {
+                    Some(higher) => current_tier = higher,
+                    None => {
+                        tracing::warn!(
+                            after_tokens,
+                            "All compaction tiers exhausted; utilization still high"
+                        );
+                        break;
+                    }
+                }
             } else if next_tier == CompactionTier::None {
                 break;
             } else {
@@ -602,15 +698,15 @@ impl GraduatedCompactor {
 
 ### 5.5 Practical Impact
 
-Example with a 200K token window:
+Example with a 200K token window (thresholds measured against full window):
 
 | Scenario | Binary (current) | Graduated |
 |----------|-------------------|-----------|
-| 140K tokens (70%) | Nothing | Tier 1: truncate tools → ~120K |
-| 160K tokens (80%) | Nothing | Tier 2: drop multimedia → ~130K |
-| 170K tokens (85%) | Full compression → ~80K (lossy) | Tier 3: social discard → ~155K |
-| 175K tokens (87.5%) | Full compression → ~80K | Tier 4: heuristic → ~100K |
-| 190K tokens (95%) | Full compression → ~80K | Tier 5: LLM summary → ~90K |
+| 120K tokens (60%) | Nothing | Tier 1: truncate tool results → ~100K |
+| 140K tokens (70%) | Nothing | Tier 2: drop multimedia → ~110K |
+| 150K tokens (75%) | Nothing | Tier 3: social discard → ~135K |
+| 160K tokens (80%) | Nothing | Tier 4: heuristic summary → ~90K |
+| 170K tokens (85%) | Full compression → ~80K (lossy) | Tier 5: LLM summary → ~85K (high quality) |
 
 The current system jumps from "do nothing" to "lossy full compression." Graduated compaction preserves more context for longer.
 
@@ -678,9 +774,11 @@ impl ContextManager {
         }
 
         // 4. Budget-fill with greedy algorithm
+        //    Sort: highest priority first (b.cmp(a)), then smallest sections
+        //    first within a tier (a.cmp(b) on tokens) to fit more items.
         package_sections.sort_by(|a, b| {
-            a.priority.cmp(&b.priority)
-                .then(b.token_estimate.cmp(&a.token_estimate).reverse())
+            b.priority.cmp(&a.priority)
+                .then(a.token_estimate.cmp(&b.token_estimate))
         });
 
         let mut used = 0usize;
@@ -773,8 +871,53 @@ pub enum PackageSectionKind {
 }
 
 impl ContextPackage {
-    /// Convert to ContextBundle for PromptBuilder consumption
-    pub fn to_bundle(&self) -> ContextBundle { ... }
+    /// Convert to ContextBundle for PromptBuilder consumption.
+    ///
+    /// Injection mode mapping (security-relevant):
+    /// - TaskDescription → SystemPrompt (trusted, system-generated)
+    /// - PredecessorOutput → UserMessage { trust: Untrusted } (agent output, potential injection)
+    /// - ConversationSummary → UserMessage { trust: Untrusted } (user-derived)
+    /// - Memory → UserMessage { trust: Untrusted } (retrieved content)
+    /// - WorkspaceArtifact → UserMessage { trust: Untrusted } (external content)
+    /// - UserProfile → SystemMessage (loaded from config, trusted)
+    pub fn to_bundle(&self) -> ContextBundle {
+        ContextBundle {
+            sections: self.sections.iter().map(|s| {
+                let injection = match s.kind {
+                    PackageSectionKind::TaskDescription => InjectionMode::SystemPrompt,
+                    PackageSectionKind::UserProfile => InjectionMode::SystemMessage,
+                    PackageSectionKind::PredecessorOutput => InjectionMode::UserMessage {
+                        tag: "predecessor_output".to_string(),
+                        trust: TrustLevel::Untrusted,
+                    },
+                    PackageSectionKind::ConversationSummary => InjectionMode::UserMessage {
+                        tag: "conversation_summary".to_string(),
+                        trust: TrustLevel::Untrusted,
+                    },
+                    PackageSectionKind::Memory => InjectionMode::UserMessage {
+                        tag: "retrieved_memory".to_string(),
+                        trust: TrustLevel::Untrusted,
+                    },
+                    PackageSectionKind::WorkspaceArtifact => InjectionMode::UserMessage {
+                        tag: "workspace_artifact".to_string(),
+                        trust: TrustLevel::Untrusted,
+                    },
+                };
+                ContextSection {
+                    source: s.kind.source_name(),
+                    kind: s.kind.to_context_kind(),
+                    content: s.content.clone(),
+                    token_estimate: s.token_estimate,
+                    priority: s.priority,
+                    relevance: 1.0,
+                    key: ContextKey::Package(s.kind.key_name()),
+                    injection,
+                }
+            }).collect(),
+            total_tokens: self.total_tokens,
+            available_budget: self.budget,
+        }
+    }
 }
 ```
 
@@ -869,12 +1012,12 @@ max_prompt_ratio = 0.75
 autocompact_buffer_ratio = 0.165
 
 [orchestrator.context.compaction_thresholds]
-# Utilization triggers for each tier (fraction of compaction_trigger)
-truncate_tool_results = 0.70
-drop_multimedia = 0.80
-discard_social = 0.85
-heuristic_summary = 0.90
-llm_summary = 0.95
+# Utilization triggers for each tier (fraction of full model context window)
+truncate_tool_results = 0.60
+drop_multimedia = 0.70
+discard_social = 0.75
+heuristic_summary = 0.80
+llm_summary = 0.85
 
 [orchestrator.context.section_budgets]
 # Maximum fraction of context budget per section type (caps, not reservations)
@@ -917,8 +1060,15 @@ Six phases, each independently shippable and testable:
 - SimpleQuery uses `ContextManager::resolve()` + `PromptBuilder`
 - Pass `ContextBudgetManager` to agentic loop (closes gap #1)
 - `BuiltPrompt.section_registry` auto-registers with budget manager
-- Delete manual prompt assembly code in simple_query_handler
-- Equivalence test: compare prompt output before/after
+- Replace manual prompt assembly code in simple_query_handler
+- **Preserved behaviors** (not in PromptBuilder — remain in handler):
+  - `adapt_parts_for_model()` — multimodal part conversion per model capability
+  - `try_direct_send()` — bypass agentic loop for simple send commands
+  - `apply_send_keepalive` — keep-alive for send tool invocations
+  - `loop_overrides` — deep-query tier config adjustments
+  These stay in the handler as pre/post-processing around PromptBuilder.
+- Smoke test: verify all critical prompt sections are present (persona, identity,
+  tools, memories, connectors) and token totals are within 10% of previous output
 
 ### Phase 4: Graduated Compaction
 - Add `compaction_tier()` to `ContextBudgetManager`
@@ -934,6 +1084,11 @@ Six phases, each independently shippable and testable:
 - Wire DAG nodes with distilled packages
 - Wire Lead Agent sub-agent spawning with distillation
 - Delete old `ContextPackageBuilder`
+- **Event migration**: Update `SystemEvent::ContextPackageBuilt` fields to match new
+  `ContextPackage` shape. Update `event_bridge.rs` WebSocket serialization and
+  GUI `ServerEvent` TypeScript type. The event keeps the same variant name but
+  fields change from `{sections_included, total_tokens, memories_count}` to
+  `{sections: Vec<(kind, tokens)>, total_tokens, budget, sub_agent_window}`.
 
 ### Phase 6: Wire Remaining Paths + Cleanup
 - Skill invocation uses `ContextManager` + `PromptBuilder`
