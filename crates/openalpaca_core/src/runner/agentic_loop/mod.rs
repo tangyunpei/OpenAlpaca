@@ -282,66 +282,34 @@ async fn run_agentic_loop_inner(
             let msg_tokens = estimate_messages_tokens(&messages) as usize;
             if budget.should_compact(msg_tokens) {
                 let messages_before = messages.len();
+                let tier = budget.compaction_tier(msg_tokens);
 
-                // Try LLM-based compaction if compaction model is available
-                let can_llm_compact = matches!(&backend, LlmBackend::Router { compaction_model: Some(_), .. });
+                tracing::info!(
+                    agent_id = agent_id,
+                    msg_tokens,
+                    trigger = budget.compaction_trigger(),
+                    messages_before,
+                    ?tier,
+                    "Graduated compaction triggered"
+                );
 
-                if can_llm_compact {
-                    tracing::info!(
-                        agent_id = agent_id,
-                        msg_tokens,
-                        trigger = budget.compaction_trigger(),
-                        messages_before,
-                        "LLM compaction triggered"
-                    );
+                let compactor = crate::prompt_ctx::compaction::GraduatedCompactor::new(
+                    budget, &backend, &backend,
+                );
+                let report = compactor.compact(
+                    Arc::make_mut(&mut messages),
+                    config.context_tail_keep,
+                ).await;
 
-                    // Extract messages from Arc for CompactionPipeline (takes Vec by value)
-                    let owned = Arc::try_unwrap(messages)
-                        .unwrap_or_else(|arc| (*arc).clone());
-
-                    let result = crate::context_budget::compaction::CompactionPipeline::compact(
-                        owned,
-                        budget.min_recent_messages(),
-                        &backend,
-                        &backend,
-                    )
-                    .await;
-
-                    // Log extracted memories (telemetry only — no DB storage)
-                    for mem in &result.extracted_memories {
-                        tracing::info!(
-                            kind = %mem.kind,
-                            preview = %crate::runner::agentic_loop::context::truncate_for_summary(&mem.content, 100),
-                            "Compaction: extracted memory"
-                        );
-                    }
-
-                    tracing::info!(
-                        agent_id = agent_id,
-                        messages_before,
-                        messages_after = result.compacted_messages.len(),
-                        memories_extracted = result.extracted_memories.len(),
-                        messages_discarded = result.messages_discarded,
-                        error = ?result.error,
-                        "LLM compaction completed"
-                    );
-
-                    messages = Arc::new(result.compacted_messages);
-                } else {
-                    // Heuristic fallback
-                    tracing::info!(
-                        agent_id = agent_id,
-                        msg_tokens,
-                        messages_before,
-                        "Heuristic compaction triggered (no compaction model)"
-                    );
-                    compress_context(Arc::make_mut(&mut messages), config.context_tail_keep, Some(budget));
-                    tracing::info!(
-                        agent_id = agent_id,
-                        messages_after = messages.len(),
-                        "Heuristic compaction completed"
-                    );
-                }
+                tracing::info!(
+                    agent_id = agent_id,
+                    messages_before,
+                    messages_after = messages.len(),
+                    tiers_applied = ?report.tiers_applied,
+                    initial_tokens = report.initial_tokens,
+                    final_tokens = report.final_tokens,
+                    "Graduated compaction completed"
+                );
 
                 known_token_count = estimate_messages_tokens(&messages);
             }
