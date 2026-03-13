@@ -1,11 +1,6 @@
 use super::Orchestrator;
-use crate::middleware::bootstrap::bootstrap_to_prompt_block;
-use crate::middleware::identity::identity_to_prompt_block;
-use crate::middleware::prompt::{AgentPersona, PromptAssembler};
 use openalpaca_llm::{ChatMessage, ContentPart, ImageSource, Role, ToolChoice, ToolDefinition};
 use openalpaca_storage::repository::PreferenceRepository;
-use std::sync::Arc;
-use std::time::Duration;
 
 /// Optional overrides for handle_simple_query loop configuration.
 /// Used by the deep_query triage tier to expand budget and provide LLM-suggested tools.
@@ -136,92 +131,7 @@ fn apply_send_keepalive(
     intent_has_send
 }
 
-const BASE_PROMPT_TTL: Duration = Duration::from_secs(30);
-
 impl Orchestrator {
-    /// Get the base system prompt from cache or build fresh.
-    /// Base prompt = persona + identity + bootstrap.
-    /// Skills catalog, connector guidance, tools, and memory are per-request.
-    pub(super) fn get_or_build_base_prompt(&self) -> String {
-        // Fast path: check cache
-        let current = self.cached_base_prompt.load();
-        if let Some(ref cached) = **current
-            && cached.built_at.elapsed() < BASE_PROMPT_TTL
-        {
-            return cached.base.clone();
-        }
-
-        // Release the Guard slot before the slow path to avoid holding a
-        // hazard-pointer slot across multiple RwLock acquisitions.
-        let current_arc: Arc<Option<super::CachedBasePrompt>> = Arc::clone(&*current);
-        drop(current);
-
-        // Slow path: build fresh
-        let base = self.build_base_system_prompt();
-        let new_entry = Arc::new(Some(super::CachedBasePrompt {
-            base: base.clone(),
-            built_at: std::time::Instant::now(),
-        }));
-        // CAS to avoid thundering herd: if another thread already rebuilt,
-        // their value wins and we discard ours (harmless — same content).
-        let _ = self
-            .cached_base_prompt
-            .compare_and_swap(&current_arc, new_entry);
-        base
-    }
-
-    /// Build the invariant base system prompt from current documents.
-    /// Excludes skills catalog — that has its own cache in SkillCatalog
-    /// and is hot-reloaded independently via reload_skill().
-    fn build_base_system_prompt(&self) -> String {
-        let system_persona = match self.system_persona.read() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => {
-                tracing::warn!("System persona lock poisoned during read; recovering");
-                poisoned.into_inner().clone()
-            }
-        };
-        let agent_persona = AgentPersona {
-            role: "Assistant".to_string(),
-            tone: "Concise and professional".to_string(),
-            domain_knowledge: vec![],
-        };
-        let mut prompt = PromptAssembler::assemble(&system_persona, &agent_persona);
-
-        // Bootstrap block
-        if let Ok(guard) = self.bootstrap_document.read()
-            && let Some(ref doc) = *guard
-        {
-            let block = bootstrap_to_prompt_block(doc);
-            if !block.is_empty() {
-                prompt.push('\n');
-                prompt.push_str(&block);
-            }
-        }
-
-        // Identity block
-        // Note: identity_budget is read from daemon_config here and cached for up to
-        // BASE_PROMPT_TTL (30s). If daemon_config is hot-reloaded, the new budget
-        // takes effect after TTL expiry or explicit invalidation.
-        if let Ok(guard) = self.identity_document.read()
-            && let Some(ref doc) = *guard
-        {
-            let identity_budget = self
-                .daemon_config
-                .load()
-                .orchestrator
-                .prompt_budgets
-                .identity_budget;
-            let id_block = identity_to_prompt_block(doc, Some(identity_budget));
-            if !id_block.is_empty() {
-                prompt.push('\n');
-                prompt.push_str(&id_block);
-            }
-        }
-
-        prompt
-    }
-
     /// Build a deterministic `<send_context>` block with resolved recipient info.
     /// This removes ambiguity: the LLM sees facts, not hints.
     pub(in crate::orchestrator) fn build_send_context(&self, owner_id: Option<&str>) -> String {
