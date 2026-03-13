@@ -3,26 +3,28 @@
 
 use super::context::inject_skill_context;
 use super::handler::SkillInvocationResult;
+use super::invoke_executor::{SkillInvocationBuiltInAdapter, SkillInvocationToolExecutor};
 use super::output::{deterministic_repair, validate_skill_output};
 use super::preflight::preflight_permissions;
 use crate::events::SystemEvent;
 use crate::memory::scope_context::MemoryScopeContext;
+use crate::middleware::bootstrap::bootstrap_to_prompt_block;
 use crate::middleware::guard::{OutputGuard, detect_hallucinated_send};
-use crate::middleware::prompt::{
-    format_connector_guidance, format_message_source, format_tool_guidance,
-};
+use crate::middleware::identity::identity_to_prompt_block;
+use crate::middleware::prompt::AgentPersona;
 use crate::middleware::skill::skill_to_prompt_block;
-use crate::middleware::user::user_to_prompt_block;
 use crate::orchestrator::{ConversationContext, Orchestrator};
+use crate::prompt::PromptBuilder;
+use crate::prompt_ctx::sources::{ContextRequest, ExecutionPath};
+use crate::prompt_ctx::SectionPriority;
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::builtins::ScriptToolBuiltIn;
 use crate::tools::registry::{RegisteredTool, ToolBackend, ToolContext};
-use super::invoke_executor::{SkillInvocationBuiltInAdapter, SkillInvocationToolExecutor};
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, ToolChoice};
-use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
+use openalpaca_storage::repository::LlmUsageRepository;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -57,22 +59,75 @@ impl Orchestrator {
         let injected_context =
             inject_skill_context(&skill_doc.frontmatter.context, &entry.skill_dir).await?;
 
-        // Base prompt from cache (persona + identity + bootstrap)
-        let mut system_prompt = self.get_or_build_base_prompt();
+        // ── Build prompt via PromptBuilder ──────────────────────────────────
+        //
+        // Determine model context window for budget calculations.
+        let model_window = self
+            .llm_router
+            .as_ref()
+            .and_then(|r| {
+                let default = r.default_model();
+                r.model_registry().get_model_info(&default)
+            })
+            .map(|info| info.context_window as usize)
+            .unwrap_or(200_000);
 
-        // Inject skill context block
+        // Extract prompt components
+        let system_persona = match self.system_persona.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("System persona lock poisoned during read; recovering");
+                poisoned.into_inner().clone()
+            }
+        };
+        let agent_persona = AgentPersona {
+            role: "Assistant".to_string(),
+            tone: "Concise and professional".to_string(),
+            domain_knowledge: vec![],
+        };
+        let identity_block = if let Ok(guard) = self.identity_document.read()
+            && let Some(ref doc) = *guard
+        {
+            let identity_budget = self
+                .daemon_config
+                .load()
+                .orchestrator
+                .prompt_budgets
+                .identity_budget;
+            identity_to_prompt_block(doc, Some(identity_budget))
+        } else {
+            String::new()
+        };
+        let bootstrap_block = if let Ok(guard) = self.bootstrap_document.read()
+            && let Some(ref doc) = *guard
+        {
+            bootstrap_to_prompt_block(doc)
+        } else {
+            String::new()
+        };
+
         let skill_block = skill_to_prompt_block(&skill_doc);
+
+        let mut builder = PromptBuilder::new(model_window)
+            .system_persona(&system_persona)
+            .agent_persona(&agent_persona)
+            .identity(&identity_block)
+            .bootstrap(&bootstrap_block);
+
+        // Skill block (High priority — this is an active skill invocation)
         if !skill_block.is_empty() {
-            system_prompt.push('\n');
-            system_prompt.push_str(&skill_block);
+            builder =
+                builder.raw_system_block("skill_body", &skill_block, SectionPriority::High);
         }
 
-        // Inject context from skill's context.sources (files, globs)
+        // Injected skill context sources (Normal)
         if !injected_context.is_empty() {
-            system_prompt.push_str("\n### SKILL REFERENCE CONTEXT ###\n");
-            system_prompt.push_str(&injected_context);
+            builder = builder.raw_system_block(
+                "skill_context",
+                &injected_context,
+                SectionPriority::Normal,
+            );
 
-            // Emit context injected event
             self.bus.publish(SystemEvent::SkillContextInjected {
                 request_id,
                 skill_id: skill_name.to_string(),
@@ -81,16 +136,8 @@ impl Orchestrator {
             });
         }
 
-        // Connector awareness: message source is always useful for context
-        let source_block = format_message_source(source);
-        if !source_block.is_empty() {
-            system_prompt.push('\n');
-            system_prompt.push_str(&source_block);
-        }
-        // NOTE: Full connector guidance (with send tool mention) is injected
-        // later, after tool_names is resolved, only if send is available.
-
-        // Identity block is already included via get_or_build_base_prompt().
+        // Message source
+        builder = builder.message_source(source);
 
         // Resolve tools via capability model, falling back to legacy name-based matching.
         // Intent-suggested tools are intentionally NOT merged here to maintain
@@ -105,7 +152,9 @@ impl Orchestrator {
                 let names = &skill_doc.frontmatter.tools.allow;
                 let resolved: Vec<openalpaca_llm::ToolDefinition> = names
                     .iter()
-                    .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
+                    .filter_map(|name| {
+                        self.tool_registry.get(name).map(|t| t.definition.clone())
+                    })
                     .collect();
                 if resolved.len() < names.len() {
                     let resolved_names: Vec<&str> =
@@ -198,37 +247,47 @@ impl Orchestrator {
             }
         }
 
-        // Connector guidance: inject channel awareness unconditionally.
-        // The block is purely informational (no tool mentions), so it's safe
-        // regardless of which tools are resolved.
+        // Connector guidance via PromptBuilder
+        let sendable_channels: Vec<String> = self
+            .connector_sender
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|p| p.sendable_channels()))
+            .unwrap_or_default();
         if let Ok(guard) = self.connector_status.read()
             && let Some(ref provider) = *guard
         {
             let statuses = provider.list_status();
-            let block = format_connector_guidance(&statuses, None);
-            if !block.is_empty() {
-                system_prompt.push('\n');
-                system_prompt.push_str(&block);
-            }
+            let sendable_ref = if sendable_channels.is_empty() {
+                None
+            } else {
+                Some(sendable_channels.as_slice())
+            };
+            builder = builder.connector_guidance(&statuses, sendable_ref);
         }
 
         let (tools_for_loop, policy_opt, config_for_loop);
         if !tool_defs.is_empty() {
-            let tool_names_log: Vec<&str> = tool_defs.iter().map(|d| d.name.as_str()).collect();
+            let tool_names_log: Vec<&str> =
+                tool_defs.iter().map(|d| d.name.as_str()).collect();
             tracing::info!(
                 "Skill invocation '{}' with {} tools: {:?}",
                 skill_name,
                 tool_defs.len(),
                 tool_names_log
             );
-            system_prompt.push_str(&format_tool_guidance(&tool_defs));
+            // Register tools in builder
+            builder = builder.tools(&tool_defs);
 
             // Inject factual send_context when send is available
             if tool_defs.iter().any(|d| d.name == "send") {
                 let send_ctx = self.build_send_context(owner_id);
                 if !send_ctx.is_empty() {
-                    system_prompt.push('\n');
-                    system_prompt.push_str(&send_ctx);
+                    builder = builder.raw_system_block(
+                        "send_context",
+                        &send_ctx,
+                        SectionPriority::Normal,
+                    );
                 }
             }
             let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
@@ -242,13 +301,27 @@ impl Orchestrator {
                 agent_id: "orchestrator".to_string(),
                 allowed_capabilities: resolved,
                 denied_capabilities: denied_caps,
-                require_confirmation_for: skill_doc.frontmatter.permissions.confirm.tools.clone(),
-                max_tool_calls: skill_doc.frontmatter.tools.rate_limit.max_calls.map(|n| n as u32),
+                require_confirmation_for: skill_doc
+                    .frontmatter
+                    .permissions
+                    .confirm
+                    .tools
+                    .clone(),
+                max_tool_calls: skill_doc
+                    .frontmatter
+                    .tools
+                    .rate_limit
+                    .max_calls
+                    .map(|n| n as u32),
                 max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
                 stream_id: stream_id.map(|s| s.to_string()),
                 lane_key: None,
                 confirmation_timeout_secs: None,
-                auto_approve: self.daemon_config.load().security.auto_approve_confirmations,
+                auto_approve: self
+                    .daemon_config
+                    .load()
+                    .security
+                    .auto_approve_confirmations,
             });
             let skill_cfg = &self.daemon_config.load().execution.skill_defaults;
             config_for_loop = LoopConfig {
@@ -270,6 +343,34 @@ impl Orchestrator {
             config_for_loop = self.loop_config.clone();
         }
 
+        // ── Resolve dynamic context via ContextManager ─────────────────────
+        let reserved = builder.estimate_static_tokens();
+        let ctx_request = ContextRequest {
+            query: query.to_string(),
+            intent: crate::orchestrator::intent::Intent::SimpleQuery {
+                query: query.to_string(),
+            },
+            path: ExecutionPath::SkillInvocation {
+                skill_id: skill_name.to_string(),
+            },
+            skill: Some(Arc::new(skill_doc.clone())),
+            owner_id: owner_id.map(|s| s.to_string()),
+            scope: scope_ctx.clone(),
+            model_context_window: model_window,
+            reserved_tokens: reserved,
+        };
+        let bundle = self.context_manager.resolve(&ctx_request).await;
+        builder = builder.context_bundle(&bundle);
+
+        let built = builder.build();
+
+        // Build ContextBudgetManager for agentic loop
+        let ctx_config = &self.daemon_config.load().execution.context;
+        let mut budget =
+            crate::context_budget::ContextBudgetManager::new(model_window, ctx_config);
+        budget.register_section("system_prompt", built.total_prompt_tokens);
+        budget.register_section("tools", tools_for_loop.len() * 200);
+
         // Metadata accumulators for SkillInvocationResult
         let mut inv_finish_reason = LoopFinishReason::Complete;
         let mut inv_rounds_used = 0usize;
@@ -280,26 +381,16 @@ impl Orchestrator {
         let mut inv_model_used: Option<String> = None;
 
         let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
-            let mut messages = Vec::with_capacity(4 + ctx.recent_messages.len());
-            messages.push(ChatMessage::system(&system_prompt));
+            let mut messages = Vec::with_capacity(
+                4 + built.context_messages.len() + ctx.recent_messages.len(),
+            );
+            messages.push(ChatMessage::system(&built.system_message));
 
-            // Inject user profile if available
-            if let Ok(guard) = self.user_document.read()
-                && let Some(ref doc) = *guard
-            {
-                let user_budget = self
-                    .daemon_config
-                    .load()
-                    .orchestrator
-                    .prompt_budgets
-                    .user_profile_budget;
-                let profile_block = user_to_prompt_block(doc, Some(user_budget));
-                if !profile_block.is_empty() {
-                    messages.push(ChatMessage::system(&profile_block));
-                }
-            }
+            // Insert context messages from PromptBuilder (user profile, memory, etc.)
+            messages.extend(built.context_messages);
 
             // Inject session summary if available (user-role to prevent prompt injection)
+            // (ConversationSource is a stub; manual injection preserved until wired)
             if let Some(ref summary) = ctx.summary {
                 messages.push(ChatMessage::user(
                     &crate::orchestrator::wrap_untrusted_context(
@@ -308,71 +399,6 @@ impl Orchestrator {
                         "user_derived",
                     ),
                 ));
-            }
-
-            // Retrieval injection: hybrid FTS+vector search for user memories
-            if let (Some(db), Some(oid)) = (&self.db, owner_id) {
-                let repo = MemoryRepository::new(db);
-                let top_k = if !tools_for_loop.is_empty() { 5 } else { 10 };
-
-                let query_embedding = if let Some(ref embedder) = self.embedder {
-                    embedder
-                        .embed(&[query])
-                        .await
-                        .ok()
-                        .and_then(|v| v.into_iter().next())
-                } else {
-                    None
-                };
-
-                let cascade_scopes = scope_ctx.cascade_scopes();
-                let memories = repo
-                    .search_hybrid_cascade(
-                        oid,
-                        query,
-                        query_embedding.as_deref(),
-                        top_k,
-                        None,
-                        &cascade_scopes,
-                    )
-                    .unwrap_or_default();
-
-                if !memories.is_empty() {
-                    // Track access for importance decay + boost
-                    let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-                    let boost = self
-                        .daemon_config
-                        .load()
-                        .orchestrator
-                        .memory
-                        .decay
-                        .access_boost;
-                    if let Err(e) = repo.touch_accessed(&ids, boost) {
-                        tracing::warn!("Failed to track memory access: {e}");
-                    }
-
-                    let mut inner = String::new();
-                    let mut budget = 2000usize;
-                    for m in &memories {
-                        let entry = format!(
-                            "- [{}] {}\n",
-                            m.kind.as_str(),
-                            m.content.chars().take(300).collect::<String>()
-                        );
-                        if entry.len() > budget {
-                            break;
-                        }
-                        budget -= entry.len();
-                        inner.push_str(&entry);
-                    }
-                    messages.push(ChatMessage::user(
-                        &crate::orchestrator::wrap_untrusted_context(
-                            &inner,
-                            "retrieved_memory",
-                            "retrieved",
-                        ),
-                    ));
-                }
             }
 
             messages.extend(ctx.recent_messages.clone());
@@ -416,7 +442,10 @@ impl Orchestrator {
                             cloned.register(RegisteredTool {
                                 definition: openalpaca_llm::ToolDefinition {
                                     name: tool_name,
-                                    description: format!("Invoke the '{}' skill", dep_id),
+                                    description: format!(
+                                        "Invoke the '{}' skill",
+                                        dep_id
+                                    ),
                                     parameters: serde_json::json!({
                                         "type": "object",
                                         "properties": {
@@ -430,10 +459,12 @@ impl Orchestrator {
                                     strict: None,
                                     input_examples: None,
                                 },
-                                backend: ToolBackend::BuiltIn(Arc::new(SkillInvocationBuiltInAdapter {
-                                    executor: executor.clone(),
-                                    skill_id: dep_id.clone(),
-                                })),
+                                backend: ToolBackend::BuiltIn(Arc::new(
+                                    SkillInvocationBuiltInAdapter {
+                                        executor: executor.clone(),
+                                        skill_id: dep_id.clone(),
+                                    },
+                                )),
                                 provides_capabilities: vec![],
                                 exempt_from_timeout: true, // nested skills manage own timeouts
                             });
@@ -466,8 +497,8 @@ impl Orchestrator {
                 "orchestrator",
                 policy_opt.as_ref(),
                 None,
-                None, // context_budget
-                None, // cancel_token — interactive skill calls are not cancellable
+                Some(&budget), // context_budget
+                None,          // cancel_token — interactive skill calls are not cancellable
                 Some(&tool_ctx),
             )
             .await;
@@ -492,7 +523,9 @@ impl Orchestrator {
             );
 
             let call_status = match &result.finish_reason {
-                LoopFinishReason::Complete | LoopFinishReason::MaxRounds | LoopFinishReason::Truncated => "success",
+                LoopFinishReason::Complete
+                | LoopFinishReason::MaxRounds
+                | LoopFinishReason::Truncated => "success",
                 LoopFinishReason::CostExceeded => "cost_exceeded",
                 LoopFinishReason::Cancelled => "cancelled",
                 LoopFinishReason::Error(_) => "error",
@@ -557,15 +590,20 @@ impl Orchestrator {
             // Post-hoc guard: detect hallucinated send confirmations
             let tool_name_refs: Vec<&str> =
                 resolved_tool_names.iter().map(|s| s.as_str()).collect();
-            if detect_hallucinated_send(&tool_name_refs, result.tool_calls_made, &result.final_content) {
+            if detect_hallucinated_send(
+                &tool_name_refs,
+                result.tool_calls_made,
+                &result.final_content,
+            ) {
                 tracing::warn!(
                     tool_calls = result.tool_calls_made,
                     "Detected hallucinated send confirmation in skill invocation; overriding response"
                 );
                 (
-                    "⚠️ 消息未实际发送。模型生成了确认文本但未调用发送工具。请重新发送请求。\n\n\
-                     ⚠️ Message was NOT actually sent. The model generated confirmation text \
-                     without calling the send tool. Please retry your send request.".to_string(),
+                    "\u{26a0}\u{fe0f} \u{6d88}\u{606f}\u{672a}\u{5b9e}\u{9645}\u{53d1}\u{9001}\u{3002}\u{6a21}\u{578b}\u{751f}\u{6210}\u{4e86}\u{786e}\u{8ba4}\u{6587}\u{672c}\u{4f46}\u{672a}\u{8c03}\u{7528}\u{53d1}\u{9001}\u{5de5}\u{5177}\u{3002}\u{8bf7}\u{91cd}\u{65b0}\u{53d1}\u{9001}\u{8bf7}\u{6c42}\u{3002}\n\n\
+                     \u{26a0}\u{fe0f} Message was NOT actually sent. The model generated confirmation text \
+                     without calling the send tool. Please retry your send request."
+                        .to_string(),
                     false,
                 )
             } else {
