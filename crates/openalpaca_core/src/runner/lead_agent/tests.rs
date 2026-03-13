@@ -55,6 +55,8 @@ fn test_lead_agent_registry_contains_coordination_tools() {
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         None,
         None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
     ));
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
@@ -361,6 +363,8 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         None,
         None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
     ));
     let check_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
@@ -414,6 +418,8 @@ fn test_batch_spawn_tool_present_when_enabled() {
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         None,
         None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
     ));
     let batch_tool = Some(Arc::new(SpawnSubagentsBatchTool::new(spawn_tool.clone())));
     let check_tool = Arc::new(CheckSubagentStatusTool {
@@ -466,6 +472,8 @@ async fn test_batch_spawn_empty_array_error() {
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         None, // workspace_id
         None, // confirmation_broker
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
     ));
     let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
 
@@ -503,6 +511,8 @@ async fn test_batch_spawn_exceeds_max_error() {
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         None, // workspace_id
         None, // confirmation_broker
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
     ));
     let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
 

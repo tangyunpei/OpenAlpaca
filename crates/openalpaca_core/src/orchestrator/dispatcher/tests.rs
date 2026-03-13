@@ -34,6 +34,7 @@ fn setup_with_config(agents: Vec<SubAgent>, config: DaemonConfig) -> TaskDispatc
         None,
         daemon_config,
         Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
     )
 }
 
@@ -585,6 +586,7 @@ async fn test_pipeline_non_singleton_workspace_artifact_count() {
         None,
         daemon_config,
         std::sync::Arc::new(std::sync::RwLock::new(None)),
+        std::sync::Arc::new(crate::prompt_ctx::ContextManager::noop()),
     );
 
     // ── 4. Dispatch ──────────────────────────────────────────────────
@@ -1006,6 +1008,7 @@ async fn test_pipeline_text_only_no_artifacts_e2e() {
         None,
         daemon_config,
         std::sync::Arc::new(std::sync::RwLock::new(None)),
+        std::sync::Arc::new(crate::prompt_ctx::ContextManager::noop()),
     );
 
     // ── 4. Dispatch ──────────────────────────────────────────────────

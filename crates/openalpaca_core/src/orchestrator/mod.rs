@@ -171,7 +171,7 @@ pub struct Orchestrator {
     /// Optional broker for interactive tool confirmation (set post-construction via `set_confirmation_broker()`).
     pub confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
     /// Context manager for resolving dynamic context (memory, user profile, etc.) via PromptBuilder.
-    context_manager: ContextManager,
+    context_manager: Arc<ContextManager>,
 }
 
 /// Full conversation context for prompt building and summary update.
@@ -246,7 +246,7 @@ impl Orchestrator {
             Arc::new(RwLock::new(None));
         let user_document: Arc<RwLock<Option<UserDocument>>> = Arc::new(RwLock::new(None));
 
-        let context_manager = if let Some(ref db_ref) = db {
+        let context_manager = Arc::new(if let Some(ref db_ref) = db {
             let sources: Vec<Box<dyn crate::prompt_ctx::sources::ContextSource>> = vec![
                 Box::new(crate::prompt_ctx::sources::memory::MemorySource::new(
                     Arc::new(db_ref.clone()),
@@ -267,7 +267,7 @@ impl Orchestrator {
             ContextManager::new(sources, daemon_config.clone())
         } else {
             ContextManager::noop()
-        };
+        });
 
         let task_dispatcher = TaskDispatcher::new(
             shared_context.clone(),
@@ -280,6 +280,7 @@ impl Orchestrator {
             embedder.clone(),
             daemon_config.clone(),
             connector_status.clone(),
+            context_manager.clone(),
         );
         Self {
             shared_context,

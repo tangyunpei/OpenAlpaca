@@ -29,6 +29,8 @@ use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
 use crate::middleware::prompt::format_tool_guidance;
+use crate::prompt_ctx::ContextManager;
+use crate::prompt_ctx::section::ContextBundle;
 use crate::runner::{LoopConfig, LoopResult, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::ToolRegistry;
@@ -84,6 +86,7 @@ pub async fn run_lead_agent(
     cancel_token: Option<CancellationToken>,
     connector_guidance: &str,
     confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
+    context_manager: Arc<ContextManager>,
 ) -> LeadAgentResult {
     tracing::info!(
         lead_agent = %lead_agent.id,
@@ -129,6 +132,10 @@ pub async fn run_lead_agent(
     // 4. Build coordination tools with shared SubagentTracker
     let tracker = Arc::new(SubagentTracker::new());
 
+    // Resolve parent context bundle once, shared across all subagent spawns.
+    // TODO: In future, resolve via context_manager.resolve() with LeadAgent path
+    let parent_bundle = Arc::new(ContextBundle::empty());
+
     let spawn_tool = Arc::new(SpawnSubagentTool::new(
         router.clone(),
         tool_registry.clone(),
@@ -149,6 +156,8 @@ pub async fn run_lead_agent(
             .max_concurrent_subagents,
         workspace_id.clone(),
         confirmation_broker.clone(),
+        context_manager,
+        parent_bundle,
     ));
 
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
