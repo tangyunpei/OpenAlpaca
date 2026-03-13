@@ -13,6 +13,7 @@ use tool_helpers::{format_tool_error, format_tool_error_with_hint, truncate_tool
 #[cfg(test)]
 use tool_helpers::MAX_TOOL_RESULT_SIZE;
 
+use chrono::Utc;
 use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::registry::ToolContext;
@@ -310,6 +311,23 @@ async fn run_agentic_loop_inner(
                     final_tokens = report.final_tokens,
                     "Graduated compaction completed"
                 );
+
+                // Emit CompactionTriggered telemetry
+                if let Some(ref bus) = config.event_bus {
+                    bus.publish(crate::events::SystemEvent::CompactionTriggered {
+                        request_id: uuid::Uuid::new_v4(),
+                        utilization_pct: report.initial_tokens as f64
+                            / budget.model_context_window() as f64
+                            * 100.0,
+                        messages_before: report.messages_before,
+                        messages_after: report.messages_after,
+                        memories_extracted: report.memories_extracted,
+                        messages_discarded: report.messages_discarded,
+                        summary_tokens: report.initial_tokens
+                            .saturating_sub(report.final_tokens),
+                        timestamp: Utc::now(),
+                    });
+                }
 
                 known_token_count = estimate_messages_tokens(&messages);
             }

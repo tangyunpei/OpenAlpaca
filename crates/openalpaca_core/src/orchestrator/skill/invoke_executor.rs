@@ -215,10 +215,11 @@ impl SkillInvocationToolExecutor {
             ChatMessage::user(query),
         ];
 
-        let config = LoopConfig {
+        let mut config = LoopConfig {
             max_rounds: 10,
             ..LoopConfig::default()
         };
+        config.event_bus = Some(self.bus.clone());
 
         // Build per-invocation sandbox so nested skills can execute tools
         let sandbox = SandboxManager::with_defaults(registry, self.bus.clone());
