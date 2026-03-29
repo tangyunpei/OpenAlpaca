@@ -215,6 +215,13 @@ impl LlmRouter {
         true
     }
 
+    /// Remove a provider and all its registered models.
+    /// Returns the list of model IDs that were removed.
+    pub fn deregister_provider(&self, provider_type: &ProviderType) -> Vec<String> {
+        self.providers.remove(provider_type);
+        self.model_registry.remove_by_provider(provider_type)
+    }
+
     /// Register a CLI backend for fallback.
     pub fn register_cli_backend(&self, provider_type: ProviderType, backend: Arc<dyn LlmProvider>) {
         self.cli_backends.insert(provider_type, backend);
