@@ -246,7 +246,7 @@ impl ModelRegistry {
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
-            .map(|info| info.provider)
+            .map(|info| info.provider.clone())
     }
 
     /// Resolve provider name as a string for a model ID.
@@ -341,11 +341,11 @@ impl ModelRegistry {
 
     /// Mark all default models for a provider as discovered.
     /// Fallback for providers with only managed keys.
-    pub fn mark_defaults_discovered_for_provider(&self, provider: ProviderType) -> usize {
+    pub fn mark_defaults_discovered_for_provider(&self, provider: &ProviderType) -> usize {
         let mut models = self.models.write().unwrap_or_else(|p| p.into_inner());
         let mut count = 0;
         for info in models.values_mut() {
-            if info.provider == provider && !info.discovered {
+            if info.provider == *provider && !info.discovered {
                 info.discovered = true;
                 count += 1;
             }

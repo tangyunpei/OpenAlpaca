@@ -114,7 +114,7 @@ impl LlmRouter {
         let key_pool = KeyPool::new(
             vec![ApiKey::new(
                 "default".to_string(),
-                provider_type,
+                provider_type.clone(),
                 String::new(),
             )],
             SelectionStrategy::RoundRobin,
@@ -183,13 +183,13 @@ impl LlmRouter {
 
     /// Get list of configured providers.
     pub fn configured_providers(&self) -> Vec<ProviderType> {
-        self.providers.iter().map(|entry| *entry.key()).collect()
+        self.providers.iter().map(|entry| entry.key().clone()).collect()
     }
 
     /// Hot-reload the key pool for a specific provider.
     /// Returns true if the provider was found and updated.
-    pub fn reload_keys(&self, provider: ProviderType, new_pool: KeyPool) -> bool {
-        if let Some(entry) = self.providers.get(&provider) {
+    pub fn reload_keys(&self, provider: &ProviderType, new_pool: KeyPool) -> bool {
+        if let Some(entry) = self.providers.get(provider) {
             entry.key_pool.store(Arc::new(new_pool));
             true
         } else {
@@ -222,12 +222,12 @@ impl LlmRouter {
 
     /// Get registered CLI backend provider types.
     pub fn cli_backend_providers(&self) -> Vec<ProviderType> {
-        self.cli_backends.iter().map(|e| *e.key()).collect()
+        self.cli_backends.iter().map(|e| e.key().clone()).collect()
     }
 
     /// Check if a CLI backend is registered for a provider type.
-    pub fn has_cli_backend(&self, provider_type: ProviderType) -> bool {
-        self.cli_backends.contains_key(&provider_type)
+    pub fn has_cli_backend(&self, provider_type: &ProviderType) -> bool {
+        self.cli_backends.contains_key(provider_type)
     }
 
     /// Get a reference to the model registry.
@@ -236,8 +236,8 @@ impl LlmRouter {
     }
 
     /// Get key statuses for a provider.
-    pub async fn key_statuses(&self, provider: ProviderType) -> Option<Vec<KeyStatus>> {
-        if let Some(entry) = self.providers.get(&provider) {
+    pub async fn key_statuses(&self, provider: &ProviderType) -> Option<Vec<KeyStatus>> {
+        if let Some(entry) = self.providers.get(provider) {
             let pool = entry.value().key_pool.load();
             Some(pool.key_statuses().await)
         } else {

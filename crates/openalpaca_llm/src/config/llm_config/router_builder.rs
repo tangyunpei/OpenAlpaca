@@ -185,7 +185,7 @@ fn build_router_from_hierarchical(
                     };
 
                     let mut api_key =
-                        ApiKey::new(key_config.id.clone(), provider_type, secret.clone());
+                        ApiKey::new(key_config.id.clone(), provider_type.clone(), secret.clone());
                     api_key.tier = key_config.tier.clone();
                     api_key.monthly_budget = key_config.monthly_budget;
                     api_key.rate_limit = key_config.rate_limit;
@@ -233,7 +233,7 @@ fn build_router_from_hierarchical(
             // Build the actual provider.
             // Skip providers that require keys but have none resolved.
             let prov_defaults = runtime_config.provider_defaults.get(provider_name);
-            let provider: Box<dyn LlmProvider> = match provider_type {
+            let provider: Box<dyn LlmProvider> = match &provider_type {
                 #[cfg(feature = "anthropic")]
                 ProviderType::Anthropic => {
                     let Some(key) = first_secret else {

@@ -300,11 +300,11 @@ async fn handle_llm_config_change(ctx: &FileWatcherContext) {
                             {
                                 match openalpaca_llm::settings_service::build_key_pool_from_provider_config(
                                     provider_config,
-                                    provider_type,
+                                    provider_type.clone(),
                                     Some(&*ctx.secret_store),
                                 ) {
                                     Ok(pool) => {
-                                        router.reload_keys(provider_type, pool);
+                                        router.reload_keys(&provider_type, pool);
                                     }
                                     Err(e) => {
                                         warn!(

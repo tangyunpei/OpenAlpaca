@@ -77,7 +77,7 @@ impl LlmRouter {
     /// or when the provider returns 0 models (e.g. managed/OAuth keys only).
     pub async fn refresh_models(&self) {
         for entry in self.providers.iter() {
-            let provider_type = *entry.key();
+            let provider_type = entry.key().clone();
             let prov_entry = entry.value();
             let pool = prov_entry.key_pool.load();
 
@@ -87,7 +87,7 @@ impl LlmRouter {
                     // No API-compatible key — fall back to hardcoded defaults
                     let count = self
                         .model_registry
-                        .mark_defaults_discovered_for_provider(provider_type);
+                        .mark_defaults_discovered_for_provider(&provider_type);
                     if count > 0 {
                         tracing::info!(
                             "No API key for {:?}, marked {} default models as discovered",
@@ -105,7 +105,7 @@ impl LlmRouter {
                     if count == 0 {
                         let dc = self
                             .model_registry
-                            .mark_defaults_discovered_for_provider(provider_type);
+                            .mark_defaults_discovered_for_provider(&provider_type);
                         tracing::info!(
                             "Provider {:?} returned 0 models, marked {} defaults",
                             provider_type,
@@ -117,7 +117,7 @@ impl LlmRouter {
                         self.model_registry.register_discovered(
                             model_id,
                             ModelInfo {
-                                provider: provider_type,
+                                provider: provider_type.clone(),
                                 input_price_per_million: 0.0,
                                 output_price_per_million: 0.0,
                                 context_window: 0,
@@ -134,7 +134,7 @@ impl LlmRouter {
                 Err(e) => {
                     tracing::warn!("Failed to list models from {:?}: {}", provider_type, e);
                     self.model_registry
-                        .mark_defaults_discovered_for_provider(provider_type);
+                        .mark_defaults_discovered_for_provider(&provider_type);
                 }
             }
         }

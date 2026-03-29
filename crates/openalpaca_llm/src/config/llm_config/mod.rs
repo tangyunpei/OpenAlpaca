@@ -136,6 +136,9 @@ pub(crate) fn parse_provider_type(name: &str) -> Option<ProviderType> {
         "anthropic" => Some(ProviderType::Anthropic),
         "openai" => Some(ProviderType::OpenAI),
         "ollama" => Some(ProviderType::Ollama),
+        other if other.starts_with("plugin:") => {
+            Some(ProviderType::Plugin(other.strip_prefix("plugin:").unwrap().to_string()))
+        }
         _ => None,
     }
 }
