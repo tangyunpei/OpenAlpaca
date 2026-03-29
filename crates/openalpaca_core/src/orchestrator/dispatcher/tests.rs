@@ -560,7 +560,7 @@ async fn test_pipeline_non_singleton_workspace_artifact_count() {
     let mut rx = bus.subscribe();
 
     // Build a registry with workspace tools so workspace_write is available
-    let mut registry = crate::tools::ToolRegistry::new();
+    let registry = crate::tools::ToolRegistry::new();
     let ws_tools = crate::tools::builtins::builtin_tools(
         Some(db.clone()), None, None, None, None,
     );

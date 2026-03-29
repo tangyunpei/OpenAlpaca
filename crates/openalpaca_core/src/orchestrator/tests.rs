@@ -717,7 +717,7 @@ fn make_orchestrator_with_tools_and_llm(
     router: Arc<LlmRouter>,
     tool_names: &[&str],
 ) -> Orchestrator {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     for name in tool_names {
         registry.register(make_mock_tool(name));
     }

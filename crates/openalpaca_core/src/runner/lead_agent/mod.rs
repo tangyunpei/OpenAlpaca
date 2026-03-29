@@ -176,7 +176,7 @@ pub async fn run_lead_agent(
 
     // Build a per-request ToolRegistry containing the base tools plus
     // lead agent coordination tools (spawn, check_status, wait, batch_spawn).
-    let mut lead_registry = (*tool_registry).clone();
+    let lead_registry = (*tool_registry).clone();
     let batch_tool = if batch_spawn_enabled {
         Some(Arc::new(SpawnSubagentsBatchTool::new(spawn_tool.clone())))
     } else {
@@ -188,7 +188,7 @@ pub async fn run_lead_agent(
         None
     };
     register_coordination_tools(
-        &mut lead_registry,
+        &lead_registry,
         spawn_tool.clone(),
         batch_tool,
         check_status_tool,

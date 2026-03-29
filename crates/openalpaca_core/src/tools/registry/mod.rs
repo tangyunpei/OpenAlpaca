@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use dashmap::DashMap;
 use openalpaca_llm::ToolDefinition;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,6 +29,7 @@ pub enum ToolBackend {
         args_template: Option<String>,
         timeout_secs: u64,
     },
+    Plugin(Arc<dyn openalpaca_api::plugin_traits::PluginToolExecutor>),
 }
 
 /// Trait for built-in tool implementations.
@@ -59,17 +61,22 @@ pub struct RegisteredTool {
 
 /// Central registry mapping tool names to definitions and execution backends.
 ///
-/// Populated at startup (built-ins + user TOML), then shared as `Arc<ToolRegistry>`.
-/// All read methods are `&self` — no locking needed after init.
+/// Backed by `DashMap` for lock-free concurrent reads and writes.
+/// Shared as `Arc<ToolRegistry>` — tools can be registered and removed at runtime
+/// (e.g. when plugins load/unload) without requiring `&mut self`.
 pub struct ToolRegistry {
-    tools: HashMap<String, RegisteredTool>,
+    tools: DashMap<String, RegisteredTool>,
     http_client: reqwest::Client,
 }
 
 impl Clone for ToolRegistry {
     fn clone(&self) -> Self {
+        let new_tools = DashMap::new();
+        for entry in self.tools.iter() {
+            new_tools.insert(entry.key().clone(), entry.value().clone());
+        }
         Self {
-            tools: self.tools.clone(),
+            tools: new_tools,
             http_client: self.http_client.clone(),
         }
     }
@@ -100,19 +107,25 @@ impl ToolRegistry {
             .expect("Failed to create shared HTTP client");
 
         Self {
-            tools: HashMap::new(),
+            tools: DashMap::new(),
             http_client,
         }
     }
 
-    /// Register a tool. Called only during startup before wrapping in Arc.
-    pub fn register(&mut self, tool: RegisteredTool) {
+    /// Register a tool. Safe to call at any time, including after wrapping in Arc.
+    pub fn register(&self, tool: RegisteredTool) {
         self.tools.insert(tool.definition.name.clone(), tool);
     }
 
-    /// Look up a tool by name.
-    pub fn get(&self, name: &str) -> Option<&RegisteredTool> {
-        self.tools.get(name)
+    /// Remove a tool by name. Returns true if the tool existed.
+    pub fn remove(&self, name: &str) -> bool {
+        self.tools.remove(name).is_some()
+    }
+
+    /// Look up a tool by name. Returns a clone because DashMap guards
+    /// must not be held across await points.
+    pub fn get(&self, name: &str) -> Option<RegisteredTool> {
+        self.tools.get(name).map(|r| r.value().clone())
     }
 
     /// Execute a tool by name.
@@ -124,15 +137,19 @@ impl ToolRegistry {
         tool_name: &str,
         arguments: &serde_json::Value,
     ) -> Result<String, String> {
-        let tool = self
-            .tools
-            .get(tool_name)
-            .ok_or_else(|| format!("Unknown tool: '{}'", tool_name))?;
+        // Extract definition + backend and drop the DashMap guard before any .await
+        let (definition, backend) = {
+            let entry = self
+                .tools
+                .get(tool_name)
+                .ok_or_else(|| format!("Unknown tool: '{}'", tool_name))?;
+            (entry.definition.clone(), entry.backend.clone())
+        };
 
         // Pre-validate arguments against the tool's JSON Schema definition.
-        validate_tool_arguments(&tool.definition, arguments)?;
+        validate_tool_arguments(&definition, arguments)?;
 
-        match &tool.backend {
+        match &backend {
             ToolBackend::BuiltIn(handler) => handler.execute(arguments).await,
             ToolBackend::Http {
                 method,
@@ -148,38 +165,44 @@ impl ToolRegistry {
                 args_template,
                 timeout_secs,
             } => execute_command(command, args_template.as_deref(), *timeout_secs, arguments).await,
+            ToolBackend::Plugin(executor) => executor.execute(tool_name, arguments).await,
         }
     }
 
     /// Execute a tool by name with per-invocation context.
     /// Routes to BuiltInTool::execute_with_context() for BuiltIn backends.
-    /// For Http/Command backends, context is ignored (they don't need identity).
+    /// For Http/Command/Plugin backends, context is ignored (they don't need identity).
     pub async fn execute_with_context(
         &self,
         tool_name: &str,
         arguments: &serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<String, String> {
-        let tool = self
-            .tools
-            .get(tool_name)
-            .ok_or_else(|| format!("Tool '{}' not found in registry", tool_name))?;
+        // Extract definition + backend and drop the DashMap guard before any .await
+        let (definition, backend) = {
+            let entry = self
+                .tools
+                .get(tool_name)
+                .ok_or_else(|| format!("Tool '{}' not found in registry", tool_name))?;
+            (entry.definition.clone(), entry.backend.clone())
+        };
 
         // Pre-validate arguments (same validation as execute())
-        validate_tool_arguments(&tool.definition, arguments)?;
+        validate_tool_arguments(&definition, arguments)?;
 
-        match &tool.backend {
+        match &backend {
             ToolBackend::BuiltIn(implementation) => {
                 implementation.execute_with_context(arguments, ctx).await
             }
-            ToolBackend::Http { .. } => self.execute(tool_name, arguments).await,
-            ToolBackend::Command { .. } => self.execute(tool_name, arguments).await,
+            ToolBackend::Http { .. } | ToolBackend::Command { .. } | ToolBackend::Plugin(_) => {
+                self.execute(tool_name, arguments).await
+            }
         }
     }
 
     /// List registered tool names.
     pub fn registered_tool_names(&self) -> Vec<String> {
-        self.tools.keys().cloned().collect()
+        self.tools.iter().map(|e| e.key().clone()).collect()
     }
 
     /// Number of registered tools.
@@ -191,7 +214,7 @@ impl ToolRegistry {
     pub fn is_exempt_from_timeout(&self, tool_name: &str) -> bool {
         self.tools
             .get(tool_name)
-            .map(|t| t.exempt_from_timeout)
+            .map(|t| t.value().exempt_from_timeout)
             .unwrap_or(false)
     }
 
@@ -202,13 +225,13 @@ impl ToolRegistry {
             return vec![];
         }
         self.tools
-            .values()
-            .filter(|tool| {
-                tool.provides_capabilities
+            .iter()
+            .filter(|entry| {
+                entry.value().provides_capabilities
                     .iter()
                     .any(|cap| capabilities.contains(cap))
             })
-            .map(|tool| tool.definition.clone())
+            .map(|entry| entry.value().definition.clone())
             .collect()
     }
 
@@ -224,18 +247,18 @@ impl ToolRegistry {
             return vec![];
         }
         self.tools
-            .values()
-            .filter(|tool| {
-                tool.provides_capabilities
+            .iter()
+            .filter(|entry| {
+                entry.value().provides_capabilities
                     .iter()
                     .any(|cap| capabilities.contains(cap))
             })
-            .filter(|tool| {
-                !tool.provides_capabilities
+            .filter(|entry| {
+                !entry.value().provides_capabilities
                     .iter()
                     .any(|cap| denied.contains(cap))
             })
-            .map(|tool| tool.definition.clone())
+            .map(|entry| entry.value().definition.clone())
             .collect()
     }
 
@@ -244,9 +267,9 @@ impl ToolRegistry {
     pub fn command_backend_tool_names(&self) -> Vec<String> {
         self.tools
             .iter()
-            .filter_map(|(name, tool)| match &tool.backend {
-                ToolBackend::Command { .. } => Some(name.clone()),
-                _ => None,
+            .filter_map(|entry| match &entry.value().backend {
+                ToolBackend::Command { .. } => Some(entry.key().clone()),
+                ToolBackend::BuiltIn(_) | ToolBackend::Http { .. } | ToolBackend::Plugin(_) => None,
             })
             .collect()
     }

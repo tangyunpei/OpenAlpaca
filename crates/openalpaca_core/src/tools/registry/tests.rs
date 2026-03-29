@@ -47,7 +47,7 @@ fn make_tool(name: &str, response: &str) -> RegisteredTool {
 
 #[test]
 fn test_register_and_lookup() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(make_tool("test_tool", "ok"));
 
     assert!(registry.get("test_tool").is_some());
@@ -57,7 +57,7 @@ fn test_register_and_lookup() {
 
 #[tokio::test]
 async fn test_execute_builtin() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(make_tool("test_tool", "hello"));
 
     let result = registry.execute("test_tool", &serde_json::json!({})).await;
@@ -77,7 +77,7 @@ async fn test_execute_unknown_tool() {
 
 #[test]
 fn test_registered_tool_names() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(make_tool("web_search", "results"));
     registry.register(make_tool("summarize", "summary"));
 
@@ -89,7 +89,7 @@ fn test_registered_tool_names() {
 
 #[test]
 fn test_command_backend_tool_names_empty_for_builtins() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(make_tool("web_search", "results"));
     registry.register(make_tool("summarize", "summary"));
 
@@ -102,7 +102,7 @@ fn test_command_backend_tool_names_empty_for_builtins() {
 
 #[test]
 fn test_command_backend_tool_names_returns_command_tools() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     // Register a built-in tool
     registry.register(make_tool("web_search", "results"));
     // Register a command-backend tool
@@ -131,7 +131,7 @@ fn test_command_backend_tool_names_returns_command_tools() {
 #[tokio::test]
 async fn test_execute_http_ssrf_blocks_private_ip() {
     // Verify that execute_http validates URLs (SSRF protection)
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "internal_api".to_string(),
@@ -162,7 +162,7 @@ async fn test_execute_http_ssrf_blocks_private_ip() {
 
 #[tokio::test]
 async fn test_execute_http_ssrf_blocks_localhost() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "local_api".to_string(),
@@ -193,7 +193,7 @@ async fn test_execute_http_ssrf_blocks_localhost() {
 
 #[tokio::test]
 async fn test_http_unsubstituted_placeholder_detected() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "weather".to_string(),
@@ -237,7 +237,7 @@ async fn test_http_unsubstituted_placeholder_detected() {
 
 #[tokio::test]
 async fn test_http_all_placeholders_substituted_passes() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "weather".to_string(),
@@ -282,7 +282,7 @@ async fn test_http_all_placeholders_substituted_passes() {
 
 #[tokio::test]
 async fn test_schema_missing_required_field() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "search".to_string(),
@@ -316,7 +316,7 @@ async fn test_schema_missing_required_field() {
 
 #[tokio::test]
 async fn test_schema_wrong_type() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "search".to_string(),
@@ -357,7 +357,7 @@ async fn test_schema_wrong_type() {
 
 #[tokio::test]
 async fn test_schema_valid_args_pass() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "search".to_string(),
@@ -389,7 +389,7 @@ async fn test_schema_valid_args_pass() {
 
 #[tokio::test]
 async fn test_schema_non_object_args_rejected() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "search".to_string(),
@@ -416,7 +416,7 @@ async fn test_schema_non_object_args_rejected() {
 
 #[tokio::test]
 async fn test_command_unsubstituted_placeholder_detected() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "git_log".to_string(),
@@ -461,7 +461,7 @@ async fn test_command_unsubstituted_placeholder_detected() {
 
 #[tokio::test]
 async fn test_command_all_placeholders_substituted_runs() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "echo_tool".to_string(),
@@ -497,7 +497,7 @@ async fn test_command_all_placeholders_substituted_runs() {
 
 #[tokio::test]
 async fn test_registry_execute_with_context_routes_to_builtin() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "test_tool".to_string(),
@@ -650,7 +650,7 @@ async fn test_workspace_read_requires_task_id() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
 
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     for tool in builtin_tools(Some(db), None, None, None, None) {
         registry.register(tool);
     }
@@ -675,7 +675,7 @@ async fn test_workspace_read_requires_task_id() {
 
 #[test]
 fn test_tools_for_capabilities_basic() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(make_tool_with_caps("file_read", vec!["file_read"]));
     registry.register(make_tool_with_caps("web_search", vec!["web_access"]));
 
@@ -686,7 +686,7 @@ fn test_tools_for_capabilities_basic() {
 
 #[test]
 fn test_tools_for_capabilities_multi_capability_tool() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(make_tool_with_caps("web_fetch", vec!["web_access"]));
 
     let result = registry.tools_for_capabilities(&["web_access".to_string()]);
@@ -699,7 +699,7 @@ fn test_tools_for_capabilities_multi_capability_tool() {
 
 #[test]
 fn test_tools_for_capabilities_empty_returns_empty() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(make_tool_with_caps("file_read", vec!["file_read"]));
 
     let result = registry.tools_for_capabilities(&[]);
@@ -708,7 +708,7 @@ fn test_tools_for_capabilities_empty_returns_empty() {
 
 #[test]
 fn test_tools_for_capabilities_no_capability_tools_excluded() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(make_tool_with_caps("orphan_tool", vec![]));
 
     let result = registry.tools_for_capabilities(&["file_read".to_string()]);
@@ -717,7 +717,7 @@ fn test_tools_for_capabilities_no_capability_tools_excluded() {
 
 #[test]
 fn test_tools_for_capabilities_with_deny_basic() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(make_tool_with_caps("file_read", vec!["file_read"]));
     registry.register(make_tool_with_caps("web_search", vec!["web_access"]));
     registry.register(make_tool_with_caps("shell", vec!["shell_execute"]));
@@ -732,7 +732,7 @@ fn test_tools_for_capabilities_with_deny_basic() {
 
 #[test]
 fn test_tools_for_capabilities_with_deny_excludes_any_denied() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(make_tool_with_caps("file_rw", vec!["file_read", "file_write"]));
     registry.register(make_tool_with_caps("reader", vec!["file_read"]));
 

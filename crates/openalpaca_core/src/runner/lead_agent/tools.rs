@@ -797,14 +797,13 @@ pub fn spawn_subagent_tool_definition_from_templates(
 
 // ── register_coordination_tools ──────────────────────────────────────
 
-/// Register the 4 lead-agent coordination tools into a mutable `ToolRegistry`.
+/// Register the 4 lead-agent coordination tools into a `ToolRegistry`.
 ///
-/// Call this before wrapping the registry in `Arc` to populate it with
-/// `spawn_subagent`, `spawn_subagents_batch` (optional), `check_subagent_status`,
-/// and `wait_for_subagents`.
+/// Can be called at any time — the registry uses DashMap internally and
+/// does not require `&mut`.
 #[allow(clippy::too_many_arguments)]
 pub fn register_coordination_tools(
-    registry: &mut crate::tools::ToolRegistry,
+    registry: &crate::tools::ToolRegistry,
     spawn_tool: Arc<SpawnSubagentTool>,
     batch_spawn_tool: Option<Arc<SpawnSubagentsBatchTool>>,
     check_status_tool: Arc<CheckSubagentStatusTool>,

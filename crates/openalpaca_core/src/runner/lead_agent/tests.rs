@@ -16,7 +16,7 @@ fn test_lead_agent_registry_contains_coordination_tools() {
         }
     }
 
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "web_search".to_string(),
@@ -64,7 +64,7 @@ fn test_lead_agent_registry_contains_coordination_tools() {
     let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
 
     register_coordination_tools(
-        &mut registry,
+        &registry,
         spawn_tool,
         None, // no batch spawn
         check_status_tool,
@@ -371,9 +371,9 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
     });
     let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
 
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     register_coordination_tools(
-        &mut registry,
+        &registry,
         spawn_tool,
         None, // batch disabled
         check_tool,
@@ -427,9 +427,9 @@ fn test_batch_spawn_tool_present_when_enabled() {
     });
     let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
 
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     register_coordination_tools(
-        &mut registry,
+        &registry,
         spawn_tool,
         batch_tool, // batch enabled
         check_tool,
@@ -539,7 +539,7 @@ fn test_lead_agent_registry_exposes_command_backend_tools() {
     // them as shell-like tools.
     use crate::tools::registry::{RegisteredTool, ToolBackend};
 
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     // Register a command-backend tool
     registry.register(RegisteredTool {
         definition: ToolDefinition {
