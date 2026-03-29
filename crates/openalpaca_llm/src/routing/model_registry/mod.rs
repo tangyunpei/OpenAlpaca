@@ -316,6 +316,26 @@ impl ModelRegistry {
         self.models.write().unwrap_or_else(|p| p.into_inner()).insert(model_id, info);
     }
 
+    /// Remove a model from the registry. Returns true if it existed.
+    pub fn remove(&self, model_id: &str) -> bool {
+        self.models.write().unwrap_or_else(|p| p.into_inner()).remove(model_id).is_some()
+    }
+
+    /// Remove all models for a given provider type.
+    /// Returns the list of model IDs that were removed.
+    pub fn remove_by_provider(&self, provider_type: &ProviderType) -> Vec<String> {
+        let mut models = self.models.write().unwrap_or_else(|p| p.into_inner());
+        let to_remove: Vec<String> = models
+            .iter()
+            .filter(|(_, info)| &info.provider == provider_type)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &to_remove {
+            models.remove(id);
+        }
+        to_remove
+    }
+
     /// Register a model only if it's not already present.
     pub fn register_if_absent(&self, model_id: String, info: ModelInfo) {
         let mut models = self.models.write().unwrap_or_else(|p| p.into_inner());
