@@ -42,12 +42,15 @@ pub async fn list_plugins_handler(
     let plugins = pm.list_plugins().await;
     let items: Vec<serde_json::Value> = plugins
         .into_iter()
-        .map(|(name, version, status, tools)| {
+        .map(|p| {
             serde_json::json!({
-                "name": name,
-                "version": version,
-                "status": status,
-                "tools": tools,
+                "name": p.name,
+                "version": p.version,
+                "status": p.status,
+                "tools": p.tools,
+                "connector": p.connector,
+                "provider": p.provider,
+                "models": p.models,
             })
         })
         .collect();
