@@ -238,7 +238,7 @@ impl TelegramConnector {
 
 #[async_trait]
 impl Connector for TelegramConnector {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "telegram"
     }
 

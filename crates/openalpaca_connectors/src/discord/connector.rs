@@ -500,7 +500,7 @@ impl DiscordConnector {
 
 #[async_trait]
 impl Connector for DiscordConnector {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "discord"
     }
 
