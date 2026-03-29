@@ -36,4 +36,5 @@ pub struct AppState {
     pub daemon_config_path: PathBuf,
     pub web_search_config: Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
     pub confirmation_broker: Option<Arc<ConfirmationBroker>>,
+    pub plugin_manager: Option<Arc<openalpaca_plugins::PluginManager>>,
 }

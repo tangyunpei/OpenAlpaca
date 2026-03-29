@@ -315,6 +315,17 @@ async fn async_main(
     }
     let cost_tracker_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
+    // Initialize PluginManager
+    let plugin_dir = paths::app_dir()?.join("plugins");
+    std::fs::create_dir_all(&plugin_dir).ok();
+    let plugin_manager = Arc::new(openalpaca_plugins::PluginManager::new(
+        plugin_dir,
+        svcs.tool_registry.clone(),
+    ));
+    if let Err(e) = plugin_manager.start().await {
+        warn!("plugin manager startup: {e}");
+    }
+
     // Step 10: Create ConfirmationBroker and construct Orchestrator
     let confirmation_broker = Arc::new(openalpaca_core::security::confirmation::ConfirmationBroker::new());
 
@@ -546,6 +557,7 @@ async fn async_main(
         daemon_config_path,
         web_search_config: svcs.web_search_config,
         confirmation_broker: Some(confirmation_broker),
+        plugin_manager: Some(plugin_manager),
     });
 
     let app = router::build_router(state);
