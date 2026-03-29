@@ -248,7 +248,7 @@ impl IMessageConnector {
 
 #[async_trait]
 impl Connector for IMessageConnector {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "imessage"
     }
 

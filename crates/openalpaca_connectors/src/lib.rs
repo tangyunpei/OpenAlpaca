@@ -42,7 +42,7 @@ use std::sync::Arc;
 #[async_trait]
 pub trait Connector: Send + Sync {
     /// The unique identifier for this connector (e.g., "telegram", "imessage")
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
 
     /// Start the connector. This is typically a blocking call that
     /// runs the connector's main loop (e.g., polling, webhook server).
