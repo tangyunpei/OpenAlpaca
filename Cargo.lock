@@ -4243,6 +4243,7 @@ dependencies = [
  "chrono",
  "notify",
  "openalpaca_api",
+ "openalpaca_connectors",
  "openalpaca_core",
  "openalpaca_llm",
  "serde",

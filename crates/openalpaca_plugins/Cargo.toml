@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 openalpaca_api = { workspace = true }
+openalpaca_connectors = { workspace = true }
 openalpaca_core = { workspace = true }
 openalpaca_llm = { workspace = true }
 tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "fs"] }

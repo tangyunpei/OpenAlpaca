@@ -20,9 +20,9 @@ default = []
 # Enable Telegram connector
 telegram = ["dep:teloxide", "dep:sha2"]
 # Enable iMessage connector (macOS only)
-imessage = ["dep:rusqlite", "dep:tokio-util", "dep:sha2"]
+imessage = ["dep:rusqlite", "dep:sha2"]
 # Enable Discord connector
-discord = ["dep:twilight-gateway", "dep:twilight-http", "dep:twilight-model", "dep:sha2", "dep:tokio-util", "dep:reqwest", "dep:rustls"]
+discord = ["dep:twilight-gateway", "dep:twilight-http", "dep:twilight-model", "dep:sha2", "dep:reqwest", "dep:rustls"]
 # Future: WeChat connector
 # wechat = []
 
@@ -43,6 +43,9 @@ uuid.workspace = true
 # Concurrent map (for pending confirmations)
 dashmap.workspace = true
 
+# CancellationToken is used unconditionally by ConnectorHandle::Plugin
+tokio-util.workspace = true
+
 # Internal crates
 openalpaca_api.workspace = true
 openalpaca_core.workspace = true
@@ -53,7 +56,6 @@ teloxide = { workspace = true, optional = true }
 
 # Optional: iMessage (only when feature enabled, macOS only)
 rusqlite = { workspace = true, optional = true }
-tokio-util = { workspace = true, optional = true }
 
 # Optional: SHA-256 hashing for attachment dedup (telegram + imessage + discord)
 sha2 = { workspace = true, optional = true }
