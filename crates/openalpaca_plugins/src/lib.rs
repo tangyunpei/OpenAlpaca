@@ -1,9 +1,11 @@
+pub mod bridge;
 pub mod error;
 pub mod manifest;
 pub mod permission_gate;
 pub mod process_pool;
 pub mod stdio_channel;
 
+pub use bridge::PluginToolProxy;
 pub use error::PluginError;
 pub use manifest::PluginManifest;
 pub use permission_gate::PermissionGate;
