@@ -20,7 +20,7 @@ impl BuiltInTool for MockTool {
 }
 
 fn make_registry() -> Arc<ToolRegistry> {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: openalpaca_llm::ToolDefinition {
             name: "web_search".to_string(),

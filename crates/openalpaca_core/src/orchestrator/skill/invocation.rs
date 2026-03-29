@@ -446,7 +446,7 @@ impl Orchestrator {
             let needs_clone = !skill_doc.frontmatter.scripts.is_empty()
                 || !skill_doc.frontmatter.depends_on.is_empty();
             let registry = if needs_clone {
-                let mut cloned = (*self.tool_registry).clone();
+                let cloned = (*self.tool_registry).clone();
                 for cfg in &skill_doc.frontmatter.scripts {
                     let tool = ScriptToolBuiltIn::new(&entry.skill_dir, cfg)?;
                     cloned.register(RegisteredTool {

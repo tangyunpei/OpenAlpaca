@@ -22,7 +22,7 @@ pub(super) fn build_tool_registry(
     daemon_config: &Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
     web_search_config: &Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
 ) -> (Arc<openalpaca_core::tools::ToolRegistry>, ConnectorSendLock) {
-    let mut tool_registry = openalpaca_core::tools::ToolRegistry::new();
+    let tool_registry = openalpaca_core::tools::ToolRegistry::new();
 
     // Register built-in tools (including update_persona)
     let persona_ctx = PersonaToolContext {
