@@ -10,7 +10,7 @@ pub use bridge::PluginConnector;
 pub use bridge::PluginLlmProvider;
 pub use bridge::PluginToolProxy;
 pub use error::PluginError;
-pub use manager::{PluginManager, PluginStatus};
+pub use manager::{PluginInfo, PluginManager, PluginStatus};
 pub use manifest::PluginManifest;
 pub use permission_gate::PermissionGate;
 pub use process_pool::PluginProcess;

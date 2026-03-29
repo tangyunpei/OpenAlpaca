@@ -66,9 +66,26 @@ pub struct PluginState {
     pub status: PluginStatus,
     pub process: Option<PluginProcess>,
     pub registered_tools: Vec<String>,
+    pub registered_connector: Option<String>,
+    pub registered_provider: Option<String>,
+    pub registered_models: Vec<String>,
     pub restart_count: u32,
     pub last_health: Option<Instant>,
     pub plugin_dir: PathBuf,
+}
+
+// ── PluginInfo ──────────────────────────────────────────────────────
+
+/// Summary of a loaded plugin returned by [`PluginManager::list_plugins`].
+#[derive(Debug, Clone)]
+pub struct PluginInfo {
+    pub name: String,
+    pub version: String,
+    pub status: String,
+    pub tools: Vec<String>,
+    pub connector: Option<String>,
+    pub provider: Option<String>,
+    pub models: Vec<String>,
 }
 
 // ── PluginManager ───────────────────────────────────────────────────────
@@ -162,6 +179,9 @@ impl PluginManager {
                     status: PluginStatus::Loading,
                     process: None,
                     registered_tools: Vec::new(),
+                    registered_connector: None,
+                    registered_provider: None,
+                    registered_models: Vec::new(),
                     restart_count: 0,
                     last_health: None,
                     plugin_dir: plugin_dir.to_path_buf(),
@@ -242,6 +262,46 @@ impl PluginManager {
             registered_tools = tools;
         }
 
+        // Discover connector
+        let mut registered_connector = None;
+        if manifest.types.connector {
+            match process.channel.call("connector/info", Value::Object(Default::default())).await {
+                Ok(info) => {
+                    let platform = info.get("platform")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or(&name)
+                        .to_string();
+                    info!(plugin = %name, platform = %platform, "discovered connector");
+                    registered_connector = Some(platform);
+                }
+                Err(e) => warn!(plugin = %name, error = %e, "connector/info failed"),
+            }
+        }
+
+        // Discover provider
+        let mut registered_provider = None;
+        let mut registered_models = Vec::new();
+        if manifest.types.provider {
+            match process.channel.call("provider/info", Value::Object(Default::default())).await {
+                Ok(info) => {
+                    let provider_name = info.get("provider_name")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or(&name)
+                        .to_string();
+                    if let Some(models) = info.get("models").and_then(|m| m.as_array()) {
+                        for model in models {
+                            if let Some(model_id) = model.get("id").and_then(|id| id.as_str()) {
+                                registered_models.push(model_id.to_string());
+                            }
+                        }
+                    }
+                    info!(plugin = %name, provider = %provider_name, models = registered_models.len(), "discovered provider");
+                    registered_provider = Some(provider_name);
+                }
+                Err(e) => warn!(plugin = %name, error = %e, "provider/info failed"),
+            }
+        }
+
         // Step 8: Track state as Running
         {
             let mut plugins = self.plugins.write().await;
@@ -249,6 +309,9 @@ impl PluginManager {
                 state.status = PluginStatus::Running;
                 state.process = Some(process);
                 state.registered_tools = registered_tools;
+                state.registered_connector = registered_connector;
+                state.registered_provider = registered_provider;
+                state.registered_models = registered_models;
                 state.last_health = Some(Instant::now());
             }
         }
@@ -269,6 +332,10 @@ impl PluginManager {
             self.tool_registry.remove(tool_name);
             debug!(plugin = name, tool = %tool_name, "unregistered tool");
         }
+
+        // NOTE: Connector deregistration from ConnectorManager and provider
+        // deregistration from LlmRouter are the daemon's responsibility, since
+        // PluginManager does not hold references to those subsystems.
 
         // Graceful shutdown + kill
         if let Some(mut process) = state.process {
@@ -365,6 +432,9 @@ impl PluginManager {
                     status: PluginStatus::Disabled,
                     process: None,
                     registered_tools: Vec::new(),
+                    registered_connector: None,
+                    registered_provider: None,
+                    registered_models: Vec::new(),
                     restart_count: 0,
                     last_health: None,
                     plugin_dir,
@@ -377,18 +447,19 @@ impl PluginManager {
         Ok(())
     }
 
-    /// List all tracked plugins: `(name, version, status, tools)`.
-    pub async fn list_plugins(&self) -> Vec<(String, String, String, Vec<String>)> {
+    /// List all tracked plugins with full metadata.
+    pub async fn list_plugins(&self) -> Vec<PluginInfo> {
         let plugins = self.plugins.read().await;
         plugins
             .iter()
-            .map(|(name, state)| {
-                (
-                    name.clone(),
-                    state.manifest.plugin.version.clone(),
-                    state.status.to_string(),
-                    state.registered_tools.clone(),
-                )
+            .map(|(name, state)| PluginInfo {
+                name: name.clone(),
+                version: state.manifest.plugin.version.clone(),
+                status: state.status.to_string(),
+                tools: state.registered_tools.clone(),
+                connector: state.registered_connector.clone(),
+                provider: state.registered_provider.clone(),
+                models: state.registered_models.clone(),
             })
             .collect()
     }
@@ -424,6 +495,38 @@ impl PluginManager {
         }
 
         Ok(())
+    }
+
+    // ── bridge accessors ─────────────────────────────────────────────
+
+    /// Get the [`PluginConnector`](crate::bridge::PluginConnector) for a loaded
+    /// connector plugin, or `None` if the plugin is not loaded or does not
+    /// provide a connector.
+    pub async fn get_plugin_connector(&self, name: &str) -> Option<crate::bridge::PluginConnector> {
+        let plugins = self.plugins.read().await;
+        let state = plugins.get(name)?;
+        let platform = state.registered_connector.as_ref()?.clone();
+        let channel = state.process.as_ref()?.channel.clone();
+        Some(crate::bridge::PluginConnector::new(name.to_string(), platform, channel))
+    }
+
+    /// Get the [`PluginLlmProvider`](crate::bridge::PluginLlmProvider) for a
+    /// loaded provider plugin, along with its discovered model IDs. Returns
+    /// `None` if the plugin is not loaded or does not provide an LLM provider.
+    pub async fn get_plugin_provider(&self, name: &str) -> Option<(crate::bridge::PluginLlmProvider, Vec<String>)> {
+        let plugins = self.plugins.read().await;
+        let state = plugins.get(name)?;
+        let provider_name = state.registered_provider.as_ref()?.clone();
+        let channel = state.process.as_ref()?.channel.clone();
+        let models = state.registered_models.clone();
+        let provider = crate::bridge::PluginLlmProvider::new(
+            name.to_string(),
+            provider_name,
+            true,  // supports_tools (TODO: get from provider/info)
+            false, // supports_streaming (TODO: get from provider/info)
+            channel,
+        );
+        Some((provider, models))
     }
 
     // ── internal helpers ─────────────────────────────────────────────
