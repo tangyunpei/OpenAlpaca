@@ -328,6 +328,66 @@ impl EventBroadcaster {
                     });
                     repo.log("soul_updated", None, Some(&detail), None)
                 }
+                // Plugin lifecycle events
+                ServerEvent::PluginLoaded {
+                    plugin_id, tools, ..
+                } => {
+                    let detail = serde_json::json!({
+                        "plugin_id": plugin_id,
+                        "tools": tools
+                    });
+                    repo.log("plugin_loaded", None, Some(&detail), None)
+                }
+                ServerEvent::PluginUnloaded { plugin_id, .. } => {
+                    let detail = serde_json::json!({
+                        "plugin_id": plugin_id
+                    });
+                    repo.log("plugin_unloaded", None, Some(&detail), None)
+                }
+                ServerEvent::PluginCrashed {
+                    plugin_id,
+                    error,
+                    restart_in_secs,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "plugin_id": plugin_id,
+                        "error": error,
+                        "restart_in_secs": restart_in_secs
+                    });
+                    repo.log("plugin_crashed", None, Some(&detail), None)
+                }
+                ServerEvent::PluginDisabled {
+                    plugin_id, reason, ..
+                } => {
+                    let detail = serde_json::json!({
+                        "plugin_id": plugin_id,
+                        "reason": reason
+                    });
+                    repo.log("plugin_disabled", None, Some(&detail), None)
+                }
+                ServerEvent::PluginPendingApproval {
+                    plugin_id,
+                    capabilities,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "plugin_id": plugin_id,
+                        "capabilities": capabilities
+                    });
+                    repo.log("plugin_pending_approval", None, Some(&detail), None)
+                }
+                ServerEvent::PluginNeedsConfig {
+                    plugin_id,
+                    missing_keys,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "plugin_id": plugin_id,
+                        "missing_keys": missing_keys
+                    });
+                    repo.log("plugin_needs_config", None, Some(&detail), None)
+                }
             };
             if let Err(e) = persist_result {
                 tracing::warn!("Failed to persist event to DB: {e}");
