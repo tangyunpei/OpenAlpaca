@@ -81,7 +81,7 @@ fn build_api_keys_from_provider_config(
                 return Err(format!("No secret for key '{}'", key_config.id));
             };
 
-            let mut api_key = ApiKey::new(key_config.id.clone(), provider_type, secret);
+            let mut api_key = ApiKey::new(key_config.id.clone(), provider_type.clone(), secret);
             api_key.tier = key_config.tier.clone();
             api_key.monthly_budget = key_config.monthly_budget;
             api_key.priority = match key_config.priority.as_deref() {

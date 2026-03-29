@@ -77,7 +77,7 @@ impl LlmSettingsService {
         let mut providers = HashMap::new();
         let configured = self.router.configured_providers();
 
-        for &provider_type in ProviderType::all() {
+        for provider_type in ProviderType::all() {
             let provider_name = provider_type.to_string();
             let is_configured = configured.contains(&provider_type);
 
@@ -505,7 +505,7 @@ impl LlmSettingsService {
     pub async fn key_health(&self) -> HashMap<String, Vec<KeyStatus>> {
         let mut result = HashMap::new();
         for provider_type in self.router.configured_providers() {
-            if let Some(statuses) = self.router.key_statuses(provider_type).await {
+            if let Some(statuses) = self.router.key_statuses(&provider_type).await {
                 result.insert(provider_type.to_string(), statuses);
             }
         }
@@ -563,7 +563,7 @@ impl LlmSettingsService {
     /// Used by TokenManager to create merged pools (config keys + discovered keys).
     pub fn build_key_pool_for_provider(
         &self,
-        provider_type: ProviderType,
+        provider_type: &ProviderType,
     ) -> Result<KeyPool, String> {
         let config =
             read_config(&self.config_path).map_err(|e| format!("Failed to read config: {e}"))?;
@@ -574,7 +574,7 @@ impl LlmSettingsService {
     /// Used by TokenManager to merge config keys with discovered keys.
     pub fn build_key_pool_keys_for_provider(
         &self,
-        provider_type: ProviderType,
+        provider_type: &ProviderType,
     ) -> Result<Vec<ApiKey>, String> {
         let config =
             read_config(&self.config_path).map_err(|e| format!("Failed to read config: {e}"))?;
@@ -610,10 +610,10 @@ impl LlmSettingsService {
             .map_err(|e| format!("Failed to write config: {e}"))?;
 
         // 4. Build new KeyPool from updated config
-        let new_pool = self.build_key_pool_from_config(&config, provider_type)?;
+        let new_pool = self.build_key_pool_from_config(&config, &provider_type)?;
 
         // 5. Hot-reload via ArcSwap — register provider if not yet in router
-        if !self.router.reload_keys(provider_type, new_pool) {
+        if !self.router.reload_keys(&provider_type, new_pool) {
             tracing::info!(
                 "Provider {:?} not in router, registering now",
                 provider_type
@@ -631,14 +631,14 @@ impl LlmSettingsService {
         config: &LlmRouterConfig,
         provider_type: ProviderType,
     ) -> Result<(), String> {
-        let api_keys = self.build_api_keys_from_config(config, provider_type)?;
+        let api_keys = self.build_api_keys_from_config(config, &provider_type)?;
         let first_key = api_keys
             .first()
             .ok_or_else(|| format!("No keys for {:?}, cannot register provider", provider_type))?
             .secret
             .clone();
 
-        let pool = self.build_key_pool_from_config(config, provider_type)?;
+        let pool = self.build_key_pool_from_config(config, &provider_type)?;
 
         let provider_name = provider_type.to_string();
         let base_url = config
@@ -648,7 +648,7 @@ impl LlmSettingsService {
             .and_then(|pc| pc.base_url.clone());
 
         let rt = self.router.runtime_config();
-        let provider: Option<Arc<dyn crate::LlmProvider>> = match provider_type {
+        let provider: Option<Arc<dyn crate::LlmProvider>> = match &provider_type {
             #[cfg(feature = "anthropic")]
             ProviderType::Anthropic => {
                 let model = rt
@@ -697,12 +697,11 @@ impl LlmSettingsService {
         match provider {
             Some(p) => {
                 self.router.register_provider(provider_type, p, pool);
-                tracing::info!("Registered provider {:?} in router", provider_type);
+                tracing::info!("Registered provider in router");
                 Ok(())
             }
             None => Err(format!(
-                "Provider {:?} not available (feature not enabled)",
-                provider_type
+                "Provider not available (feature not enabled)"
             )),
         }
     }
@@ -711,7 +710,7 @@ impl LlmSettingsService {
     fn build_key_pool_from_config(
         &self,
         config: &LlmRouterConfig,
-        provider_type: ProviderType,
+        provider_type: &ProviderType,
     ) -> Result<KeyPool, String> {
         let api_keys = self.build_api_keys_from_config(config, provider_type)?;
 
@@ -739,7 +738,7 @@ impl LlmSettingsService {
     fn build_api_keys_from_config(
         &self,
         config: &LlmRouterConfig,
-        provider_type: ProviderType,
+        provider_type: &ProviderType,
     ) -> Result<Vec<ApiKey>, String> {
         let provider_name = provider_type.to_string();
 
@@ -777,7 +776,7 @@ impl LlmSettingsService {
                     return Err(format!("No secret for key '{}'", key_config.id));
                 };
 
-                let mut api_key = ApiKey::new(key_config.id.clone(), provider_type, secret);
+                let mut api_key = ApiKey::new(key_config.id.clone(), provider_type.clone(), secret);
                 api_key.tier = key_config.tier.clone();
                 api_key.monthly_budget = key_config.monthly_budget;
                 api_key.priority = match key_config.priority.as_deref() {
@@ -811,6 +810,9 @@ fn parse_provider_type(name: &str) -> Option<ProviderType> {
         "anthropic" => Some(ProviderType::Anthropic),
         "openai" => Some(ProviderType::OpenAI),
         "ollama" => Some(ProviderType::Ollama),
+        other if other.starts_with("plugin:") => {
+            Some(ProviderType::Plugin(other.strip_prefix("plugin:").unwrap().to_string()))
+        }
         _ => None,
     }
 }

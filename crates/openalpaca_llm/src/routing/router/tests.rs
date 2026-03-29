@@ -197,7 +197,7 @@ async fn test_overloaded_error_does_not_cooldown_key() {
     assert!(result.is_ok());
 
     let statuses = router
-        .key_statuses(ProviderType::Anthropic)
+        .key_statuses(&ProviderType::Anthropic)
         .await
         .expect("anthropic provider key statuses should exist");
     assert_eq!(statuses.len(), 1);
@@ -248,7 +248,7 @@ async fn test_openai_overloaded_error_does_not_cooldown_key() {
     assert!(result.is_ok());
 
     let statuses = router
-        .key_statuses(ProviderType::OpenAI)
+        .key_statuses(&ProviderType::OpenAI)
         .await
         .expect("openai provider key statuses should exist");
     assert_eq!(statuses.len(), 1);
@@ -451,7 +451,7 @@ async fn test_hot_reload_keys() {
         ],
         SelectionStrategy::RoundRobin,
     );
-    assert!(router.reload_keys(ProviderType::Anthropic, new_pool));
+    assert!(router.reload_keys(&ProviderType::Anthropic, new_pool));
 
     // Second call works with new pool
     let result = router.complete(make_request(None)).await;
@@ -459,7 +459,7 @@ async fn test_hot_reload_keys() {
 
     // Verify reload returns false for unconfigured provider
     let empty_pool = KeyPool::new(vec![], SelectionStrategy::RoundRobin);
-    assert!(!router.reload_keys(ProviderType::OpenAI, empty_pool));
+    assert!(!router.reload_keys(&ProviderType::OpenAI, empty_pool));
 }
 
 #[tokio::test]
@@ -486,7 +486,7 @@ async fn test_register_provider_new() {
     );
 
     assert!(!router.reload_keys(
-        ProviderType::OpenAI,
+        &ProviderType::OpenAI,
         KeyPool::new(vec![], SelectionStrategy::RoundRobin)
     ));
     assert!(router.register_provider(ProviderType::OpenAI, provider, pool));
