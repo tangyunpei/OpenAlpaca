@@ -10,6 +10,7 @@ pub mod daemon;
 pub mod daemon_config_cli;
 pub mod gui;
 pub mod llm;
+pub mod plugin;
 mod llm_keys;
 mod llm_status;
 pub mod status;

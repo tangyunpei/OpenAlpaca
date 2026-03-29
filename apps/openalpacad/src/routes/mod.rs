@@ -17,6 +17,7 @@ pub mod orchestrator_latency;
 pub mod preferences;
 pub mod settings;
 mod settings_types;
+pub mod plugins;
 pub mod skills;
 pub mod tasks;
 mod tasks_types;
@@ -78,6 +79,10 @@ pub use settings::{
     get_orchestrator_config, get_provider_usage, list_models, refresh_models, reorder_keys,
     rescan_credentials, set_key_priority, update_orchestrator_config, update_web_search_config,
     upsert_key, validate_key,
+};
+pub use plugins::{
+    approve_plugin_handler, deny_plugin_handler, disable_plugin_handler, enable_plugin_handler,
+    list_plugins_handler, set_plugin_config_handler,
 };
 pub use skills::skill_health_handler;
 pub use tasks::{

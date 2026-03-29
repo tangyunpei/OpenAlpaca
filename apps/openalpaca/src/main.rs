@@ -55,6 +55,9 @@ enum Commands {
 
     /// Chat with the Orchestrator
     Chat(commands::chat::ChatArgs),
+
+    /// Manage plugins (list, approve, deny, enable, disable, config)
+    Plugin(commands::plugin::PluginArgs),
 }
 
 #[tokio::main]
@@ -70,5 +73,6 @@ async fn main() -> Result<()> {
         Commands::Agents(args) => commands::agents::run(args).await,
         Commands::Llm(args) => commands::llm::run(args).await,
         Commands::Chat(args) => commands::chat::run(args).await,
+        Commands::Plugin(args) => commands::plugin::run(args).await,
     }
 }
