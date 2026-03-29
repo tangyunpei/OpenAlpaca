@@ -1,5 +1,9 @@
 # Dead Code Cleanup — Approach A
 
+> **Status:** COMPLETED (2026-03-14)
+> **Branch:** `AgenticLoopOptimization`
+> **Commits:** `7241f3d` → `d4cafa7` → `e330d77` → `3dad532` → `dd0bb49` → `b29f6f2`
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Remove false-positive `#[allow(dead_code)]` annotations, delete unused stub modules, and wire `CompactionResult` fields into the `CompactionTriggered` telemetry event.
@@ -22,7 +26,7 @@ These 4 sites suppress warnings on code that IS actively used. The compiler can'
 - Modify: `crates/openalpaca_connectors/src/lib.rs:73,75`
 - Modify: `apps/openalpacad/src/routes/settings_types.rs:27`
 
-- [ ] **Step 1: Remove annotation from `SkillInvocationResult`**
+- [x] **Step 1: Remove annotation from `SkillInvocationResult`**
 
 In `crates/openalpaca_core/src/orchestrator/skill/handler.rs`, remove line 13:
 ```rust
@@ -36,7 +40,7 @@ pub(crate) struct SkillInvocationResult {
 pub(crate) struct SkillInvocationResult {
 ```
 
-- [ ] **Step 2: Remove annotation from `escape_markdown_v2`**
+- [x] **Step 2: Remove annotation from `escape_markdown_v2`**
 
 In `crates/openalpaca_connectors/src/telegram/delivery.rs`, remove line 51:
 ```rust
@@ -48,7 +52,9 @@ pub(super) fn escape_markdown_v2(text: &str) -> String {
 pub(super) fn escape_markdown_v2(text: &str) -> String {
 ```
 
-- [ ] **Step 3: Remove annotations from `ConnectorBuilder` fields**
+> **CORRECTION (commit `b29f6f2`):** This was NOT a false positive. `escape_markdown_v2` is only called from `telegram/tests.rs`, not the lib target. Restored `#[allow(dead_code)] // used in tests only` on the function.
+
+- [x] **Step 3: Remove annotations from `ConnectorBuilder` fields**
 
 In `crates/openalpaca_connectors/src/lib.rs`, remove lines 73 and 75:
 ```rust
@@ -65,7 +71,7 @@ pub struct ConnectorBuilder {
     bus: Arc<EventBus>,
 ```
 
-- [ ] **Step 4: Remove annotation from `LlmUsageDailyQuery`**
+- [x] **Step 4: Remove annotation from `LlmUsageDailyQuery`**
 
 In `apps/openalpacad/src/routes/settings_types.rs`, remove line 27:
 ```rust
@@ -79,12 +85,16 @@ pub struct LlmUsageDailyQuery {
 pub struct LlmUsageDailyQuery {
 ```
 
-- [ ] **Step 5: Build to verify no new warnings**
+> **CORRECTION (commit `b29f6f2`):** Removing the struct-level annotation exposed a warning on the `date` field, which is only populated via serde `Deserialize`. Added targeted field-level `#[allow(dead_code)] // populated via serde Deserialize` on the `date` field instead of restoring the struct-level annotation.
+
+- [x] **Step 5: Build to verify no new warnings**
 
 Run: `cargo check --all-targets 2>&1 | grep "warning"`
 Expected: No new `dead_code` warnings from the removed annotations (these are all actively used code).
 
-- [ ] **Step 6: Commit**
+> **NOTE:** Step 5 initially revealed 3 new warnings from Steps 2, 4, and Task 3 Step 5. These were fixed in commit `b29f6f2`.
+
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/openalpaca_core/src/orchestrator/skill/handler.rs \
@@ -111,7 +121,7 @@ The `summarize` and `text_generate` modules are stubs that always return "not im
 - Delete: `crates/openalpaca_core/src/tools/builtins/text_generate.rs`
 - Modify: `crates/openalpaca_core/src/tools/builtins/mod.rs:6-11`
 
-- [ ] **Step 1: Remove module declarations from `mod.rs`**
+- [x] **Step 1: Remove module declarations from `mod.rs`**
 
 In `crates/openalpaca_core/src/tools/builtins/mod.rs`, remove lines 6-11:
 ```rust
@@ -124,19 +134,19 @@ mod summarize;
 mod text_generate;
 ```
 
-- [ ] **Step 2: Delete the stub files**
+- [x] **Step 2: Delete the stub files**
 
 ```bash
 rm crates/openalpaca_core/src/tools/builtins/summarize.rs
 rm crates/openalpaca_core/src/tools/builtins/text_generate.rs
 ```
 
-- [ ] **Step 3: Build and run existing tests**
+- [x] **Step 3: Build and run existing tests**
 
 Run: `cargo test -p openalpaca_core -- tools::builtins`
 Expected: All existing builtin tool tests pass. The deleted stub tests (`test_summarize_tool`, `test_text_generate_tool`) are gone.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add -A crates/openalpaca_core/src/tools/builtins/
@@ -159,7 +169,7 @@ The `GraduatedCompactor` returns a `CompactionReport` but it lacks data from the
 - Modify: `crates/openalpaca_core/src/context_budget/compaction.rs:30-38`
 - Test: `crates/openalpaca_core/src/prompt_ctx/compaction/graduated.rs` (existing tests + new test)
 
-- [ ] **Step 1: Write failing test for CompactionReport carrying CompactionResult data**
+- [x] **Step 1: Write failing test for CompactionReport carrying CompactionResult data**
 
 Add to `crates/openalpaca_core/src/prompt_ctx/compaction/graduated.rs` tests module:
 
@@ -217,12 +227,12 @@ async fn test_compaction_report_carries_result_data() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p openalpaca_core -- compaction::graduated::tests::test_compaction_report_carries_result_data`
 Expected: FAIL — `CompactionReport` doesn't have `memories_extracted`, `messages_before` fields.
 
-- [ ] **Step 3: Extend `CompactionReport` struct**
+- [x] **Step 3: Extend `CompactionReport` struct**
 
 In `crates/openalpaca_core/src/prompt_ctx/compaction/graduated.rs`, update the struct:
 
@@ -246,7 +256,7 @@ pub struct CompactionReport {
 }
 ```
 
-- [ ] **Step 4: Populate new fields in `GraduatedCompactor::compact()`**
+- [x] **Step 4: Populate new fields in `GraduatedCompactor::compact()`**
 
 Two locations need changes:
 
@@ -317,7 +327,7 @@ report.messages_after = messages.len();
 report
 ```
 
-- [ ] **Step 5: Remove `#[allow(dead_code)]` from `CompactionResult` fields**
+- [x] **Step 5: Remove `#[allow(dead_code)]` from `CompactionResult` fields**
 
 In `crates/openalpaca_core/src/context_budget/compaction.rs`, the `messages_before` and `messages_after` fields are now read by `GraduatedCompactor`. Remove their annotations (lines 34-37):
 
@@ -345,12 +355,14 @@ pub struct CompactionResult {
 }
 ```
 
-- [ ] **Step 6: Run test to verify it passes**
+> **CORRECTION (commit `b29f6f2`):** These fields are NOT actually read by `GraduatedCompactor`. The compactor uses `messages.len()` directly for `report.messages_before`/`messages_after` instead of reading `result.messages_before`/`result.messages_after`. Restored `#[allow(dead_code)]` on both fields.
+
+- [x] **Step 6: Run test to verify it passes**
 
 Run: `cargo test -p openalpaca_core -- compaction::graduated::tests::test_compaction_report_carries_result_data`
 Expected: PASS
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/openalpaca_core/src/prompt_ctx/compaction/graduated.rs \
@@ -386,7 +398,7 @@ Thread the `EventBus` into the agentic loop via `LoopConfig` so compaction can e
 - `orchestrator/query_handler/simple_query_handler.rs` — 2 call sites use `..self.loop_config.clone()`, inherit the bus from `Orchestrator.loop_config`
 - `orchestrator/skill/invocation.rs` — 1 call site uses `..self.loop_config.clone()`, inherits the bus
 
-- [ ] **Step 1: Add `event_bus` field to `LoopConfig`**
+- [x] **Step 1: Add `event_bus` field to `LoopConfig`**
 
 In `crates/openalpaca_core/src/runner/agentic_loop/config.rs`:
 
@@ -423,7 +435,7 @@ use crate::bus::EventBus;
 ```
 This literal enumerates every field explicitly (no `..Default::default()`), so it will fail to compile without this addition.
 
-- [ ] **Step 2: Emit `CompactionTriggered` from `run_agentic_loop_inner`**
+- [x] **Step 2: Emit `CompactionTriggered` from `run_agentic_loop_inner`**
 
 In `crates/openalpaca_core/src/runner/agentic_loop/mod.rs`, after the existing `tracing::info!` block for "Graduated compaction completed" (around line 312), add:
 
@@ -452,7 +464,7 @@ use chrono::Utc;
 use uuid::Uuid;
 ```
 
-- [ ] **Step 3: Set `event_bus` on `Orchestrator.loop_config`**
+- [x] **Step 3: Set `event_bus` on `Orchestrator.loop_config`**
 
 In `crates/openalpaca_core/src/orchestrator/mod.rs`, after the existing `loop_config` is stored (line 281), set the bus. The simplest approach: set it on the config before storing:
 
@@ -470,7 +482,7 @@ In `crates/openalpaca_core/src/orchestrator/mod.rs`, after the existing `loop_co
 
 This ensures all `self.loop_config.clone()` calls in query handlers and skill invocation inherit the bus.
 
-- [ ] **Step 4: Set `event_bus` on LoopConfig at 4 non-orchestrator call sites**
+- [x] **Step 4: Set `event_bus` on LoopConfig at 4 non-orchestrator call sites**
 
 These callers construct `LoopConfig` via `LoopConfig::from_agent()` / `LoopConfig::from_lead_agent()` which defaults `event_bus` to `None`. They need to set it explicitly:
 
@@ -502,7 +514,7 @@ config.event_bus = Some(self.bus.clone());
 ```
 Note: the `config` binding may need `let mut config = ...`.
 
-- [ ] **Step 5: Build and run all tests**
+- [x] **Step 5: Build and run all tests**
 
 ```bash
 cargo check --all-targets
@@ -511,7 +523,7 @@ cargo test -p openalpaca_core
 
 Expected: All tests pass. The 14 test call sites use `..Default::default()` so they automatically get `event_bus: None` — no test changes needed.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/openalpaca_core/src/runner/agentic_loop/config.rs \
@@ -535,7 +547,21 @@ and summary token delta."
 
 ## Final Verification
 
-- [ ] **Full workspace build**: `cargo check --all-targets`
-- [ ] **All tests pass**: `cargo test`
-- [ ] **No new warnings**: `cargo clippy --all-targets 2>&1 | grep "dead_code"` should return nothing
-- [ ] **Only pre-existing warnings remain**: `cargo clippy --all-targets 2>&1 | grep "warning"` count should be ≤ previous count minus the 1 dead_code warning we fixed
+- [x] **Full workspace build**: `cargo check --all-targets`
+- [x] **All tests pass**: `cargo test`
+- [x] **No new warnings**: `cargo clippy --all-targets 2>&1 | grep "dead_code"` should return nothing
+- [x] **Only pre-existing warnings remain**: `cargo clippy --all-targets 2>&1 | grep "warning"` count should be ≤ previous count minus the 1 dead_code warning we fixed
+
+---
+
+## Deferred: Category 4 — Intentional Dead Code
+
+The following items were identified during the audit but intentionally left for a future design session:
+
+| Item | Reason kept |
+|------|-------------|
+| `SpawnSubagentTool.prompt_template` | Part of subagent tool API, not yet wired |
+| `repair_prompt()` | Self-healing capability, not yet integrated |
+| `StreamEntry.created_at` / `.lane_key` | Part of streaming data model |
+| Various serde-only fields | Populated via deserialization, compiler can't trace |
+| Public API methods | Part of library public surface |
