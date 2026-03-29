@@ -16,7 +16,6 @@ use crate::ConnectorBuilder;
 #[cfg(feature = "telegram")]
 use teloxide::dispatching::ShutdownToken;
 
-#[cfg(any(feature = "imessage", feature = "discord"))]
 use tokio_util::sync::CancellationToken;
 
 /// Handle to a running connector, allowing graceful shutdown.
@@ -32,6 +31,8 @@ pub enum ConnectorHandle {
     IMessage(CancellationToken, Arc<AtomicBool>),
     #[cfg(feature = "discord")]
     Discord(CancellationToken, Arc<AtomicBool>),
+    /// Plugin-backed connector managed by PluginManager.
+    Plugin(CancellationToken, Arc<AtomicBool>),
     /// For future connectors or testing
     None,
 }
@@ -55,6 +56,7 @@ impl std::fmt::Debug for ConnectorHandle {
             ConnectorHandle::IMessage(..) => write!(f, "ConnectorHandle::IMessage"),
             #[cfg(feature = "discord")]
             ConnectorHandle::Discord(..) => write!(f, "ConnectorHandle::Discord"),
+            ConnectorHandle::Plugin(..) => write!(f, "ConnectorHandle::Plugin"),
             ConnectorHandle::None => write!(f, "ConnectorHandle::None"),
         }
     }
@@ -70,6 +72,7 @@ impl ConnectorHandle {
             ConnectorHandle::IMessage(_, running) => running.load(Ordering::Acquire),
             #[cfg(feature = "discord")]
             ConnectorHandle::Discord(_, running) => running.load(Ordering::Acquire),
+            ConnectorHandle::Plugin(_, running) => running.load(Ordering::Acquire),
             ConnectorHandle::None => false,
         }
     }
@@ -88,6 +91,9 @@ impl ConnectorHandle {
             }
             #[cfg(feature = "discord")]
             ConnectorHandle::Discord(token, _) => {
+                token.cancel();
+            }
+            ConnectorHandle::Plugin(token, _) => {
                 token.cancel();
             }
             ConnectorHandle::None => {}
