@@ -14,6 +14,7 @@
   import TaskPanel from "$lib/components/TaskPanel.svelte";
   import AgentStatusPanel from "$lib/components/AgentStatusPanel.svelte";
   import SkillHealthPanel from "$lib/components/SkillHealthPanel.svelte";
+  import PluginsPanel from "$lib/components/PluginsPanel.svelte";
   import ChatPanel from "$lib/components/ChatPanel.svelte";
   import SettingsDrawer from "$lib/components/SettingsDrawer.svelte";
 
@@ -24,6 +25,7 @@
   import { subscribeToKeyEvents } from "$lib/stores/settings";
   import { subscribeToChatEvents } from "$lib/stores/chat";
   import { loadSkillHealth } from "$lib/stores/skills";
+  import { loadPlugins, subscribeToPluginEvents, pluginList } from "$lib/stores/plugins";
 
   // Reactive state from stores
   let statusState = $state("disconnected");
@@ -31,14 +33,16 @@
   let eventList = $state<ServerEvent[]>([]);
   let error = $state<string | null>(null);
 
-  let rightTab = $state<"tasks" | "agents" | "skills">("tasks");
+  let rightTab = $state<"tasks" | "agents" | "skills" | "plugins">("tasks");
   let drawerOpen = $state(false);
 
   // Counts for tab badges
   let activeTaskCount = $state(0);
   let instanceCount = $state(0);
+  let pluginCount = $state(0);
   const unsubActiveCount = activeTasks.subscribe((v) => (activeTaskCount = v.length));
   const unsubInstanceCount = instanceList.subscribe((v) => (instanceCount = v.length));
+  const unsubPluginCount = pluginList.subscribe((v) => (pluginCount = v.length));
 
   // Store subscriptions
   const unsubState = connectionState.subscribe((v) => {
@@ -59,6 +63,7 @@
   let unsubInstanceEvents: (() => void) | null = null;
   let unsubKeyEvents: (() => void) | null = null;
   let unsubChatEvents: (() => void) | null = null;
+  let unsubPluginEvents: (() => void) | null = null;
 
   onMount(() => {
     connectToDaemon();
@@ -67,6 +72,7 @@
     unsubInstanceEvents = subscribeToInstanceEvents();
     unsubKeyEvents = subscribeToKeyEvents();
     unsubChatEvents = subscribeToChatEvents();
+    unsubPluginEvents = subscribeToPluginEvents();
   });
 
   onDestroy(() => {
@@ -80,15 +86,17 @@
     unsubInstanceEvents?.();
     unsubKeyEvents?.();
     unsubChatEvents?.();
+    unsubPluginEvents?.();
     unsubActiveCount();
     unsubInstanceCount();
+    unsubPluginCount();
   });
 
   function toggleDrawer() {
     drawerOpen = !drawerOpen;
   }
 
-  function handleRightTabChange(tab: "tasks" | "agents" | "skills") {
+  function handleRightTabChange(tab: "tasks" | "agents" | "skills" | "plugins") {
     rightTab = tab;
     if (tab === "tasks") loadTasks();
     if (tab === "agents") {
@@ -96,6 +104,7 @@
       loadInstances();
     }
     if (tab === "skills") loadSkillHealth();
+    if (tab === "plugins") loadPlugins();
   }
 </script>
 
@@ -161,6 +170,16 @@
           >
             Skills
           </button>
+          <button
+            class="oa-tab-item"
+            data-active={rightTab === 'plugins'}
+            onclick={() => handleRightTabChange('plugins')}
+          >
+            Plugins
+            {#if pluginCount > 0}
+              <span class="oa-count-badge">{pluginCount}</span>
+            {/if}
+          </button>
         </div>
       </div>
 
@@ -169,8 +188,10 @@
           <TaskPanel />
         {:else if rightTab === "agents"}
           <AgentStatusPanel />
-        {:else}
+        {:else if rightTab === "skills"}
           <SkillHealthPanel />
+        {:else if rightTab === "plugins"}
+          <PluginsPanel />
         {/if}
       </div>
     </div>
