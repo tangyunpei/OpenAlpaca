@@ -10,7 +10,7 @@ fn make_agent(id: &str, name: &str) -> SubAgent {
         icon: None,
         status: AgentStatus::Idle,
         current_task: None,
-        skills: vec![],
+        capabilities: vec![],
         preset: AgentPreset::default(),
         constraints: AgentConstraints::default(),
         llm_config: AgentLlmConfig::default(),

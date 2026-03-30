@@ -276,6 +276,8 @@ fn parse_claude_output(stdout: &str) -> Result<ChatResponse, LlmError> {
                 model: "claude_cli".to_string(),
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
+                thinking: None,
+                parts: None,
             })
         }
         Err(_) => {
@@ -286,6 +288,8 @@ fn parse_claude_output(stdout: &str) -> Result<ChatResponse, LlmError> {
                 model: "claude_cli".to_string(),
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
+                thinking: None,
+                parts: None,
             })
         }
     }
@@ -308,6 +312,8 @@ fn parse_codex_output(stdout: &str) -> Result<ChatResponse, LlmError> {
                 model: "codex_cli".to_string(),
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
+                thinking: None,
+                parts: None,
             })
         }
         Err(_) => {
@@ -318,6 +324,8 @@ fn parse_codex_output(stdout: &str) -> Result<ChatResponse, LlmError> {
                 model: "codex_cli".to_string(),
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
+                thinking: None,
+                parts: None,
             })
         }
     }

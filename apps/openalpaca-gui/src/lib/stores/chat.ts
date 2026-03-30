@@ -11,7 +11,7 @@ import {
   createChatStream,
 } from "../api/chat";
 import { uploadFile } from "../api/files";
-import type { ChatMessage, ChatStreamDoneData, AttachmentRef, AttachmentDisplay } from "../types";
+import type { ChatMessage, ChatStreamDoneData, AttachmentRef, AttachmentDisplay, ToolConfirmation } from "../types";
 
 export const chatMessages = writable<ChatMessage[]>([]);
 export const chatLoading = writable(false);
@@ -315,6 +315,29 @@ export async function sendChatMessage(content: string): Promise<void> {
       currentStreamId.set(null);
     });
 
+    es.addEventListener("confirmation_requested", (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data);
+        const confirmation: ToolConfirmation = {
+          request_id: data.request_id,
+          tool_name: data.tool_name,
+          tool_arguments: data.tool_arguments,
+          status: "pending",
+        };
+        const confirmMsg: ChatMessage = {
+          id: nextLocalId--,
+          lane_key: resp.lane_key,
+          role: "system",
+          content: `Tool **${confirmation.tool_name}** requires confirmation before executing.`,
+          created_at: new Date().toISOString(),
+          confirmation,
+        };
+        chatMessages.update((msgs) => [...msgs, confirmMsg]);
+      } catch {
+        // ignore parse errors
+      }
+    });
+
     es.onerror = () => {
       // Connection-level error (different from SSE "error" event)
       es.close();
@@ -407,6 +430,17 @@ export function subscribeToTaskResultEvents(): () => void {
       },
     ]);
   });
+}
+
+/** Update the local confirmation status for a given request_id. */
+export function updateConfirmationStatus(requestId: string, status: "approved" | "denied"): void {
+  chatMessages.update((msgs) =>
+    msgs.map((m) =>
+      m.confirmation?.request_id === requestId
+        ? { ...m, confirmation: { ...m.confirmation, status } }
+        : m,
+    ),
+  );
 }
 
 /** Reset completion injection dedupe (call on clearHistory). */

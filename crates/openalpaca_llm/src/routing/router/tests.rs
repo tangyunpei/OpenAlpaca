@@ -29,6 +29,8 @@ impl MockProvider {
                 ..Default::default()
             },
             finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
         }
     }
 }
@@ -64,12 +66,16 @@ impl LlmProvider for MockProvider {
 fn make_request(model: Option<&str>) -> RouterRequest {
     RouterRequest {
         model: model.map(|m| m.to_string()),
-        messages: vec![ChatMessage::user("test")],
+        messages: Arc::new(vec![ChatMessage::user("test")]),
         tools: Arc::new(vec![]),
         temperature: None,
         max_tokens: None,
         context: RequestContext::default(),
         tool_choice: None,
+        tools_token_estimate: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: None,
     }
 }
 
@@ -191,7 +197,7 @@ async fn test_overloaded_error_does_not_cooldown_key() {
     assert!(result.is_ok());
 
     let statuses = router
-        .key_statuses(ProviderType::Anthropic)
+        .key_statuses(&ProviderType::Anthropic)
         .await
         .expect("anthropic provider key statuses should exist");
     assert_eq!(statuses.len(), 1);
@@ -242,7 +248,7 @@ async fn test_openai_overloaded_error_does_not_cooldown_key() {
     assert!(result.is_ok());
 
     let statuses = router
-        .key_statuses(ProviderType::OpenAI)
+        .key_statuses(&ProviderType::OpenAI)
         .await
         .expect("openai provider key statuses should exist");
     assert_eq!(statuses.len(), 1);
@@ -445,7 +451,7 @@ async fn test_hot_reload_keys() {
         ],
         SelectionStrategy::RoundRobin,
     );
-    assert!(router.reload_keys(ProviderType::Anthropic, new_pool));
+    assert!(router.reload_keys(&ProviderType::Anthropic, new_pool));
 
     // Second call works with new pool
     let result = router.complete(make_request(None)).await;
@@ -453,7 +459,7 @@ async fn test_hot_reload_keys() {
 
     // Verify reload returns false for unconfigured provider
     let empty_pool = KeyPool::new(vec![], SelectionStrategy::RoundRobin);
-    assert!(!router.reload_keys(ProviderType::OpenAI, empty_pool));
+    assert!(!router.reload_keys(&ProviderType::OpenAI, empty_pool));
 }
 
 #[tokio::test]
@@ -480,7 +486,7 @@ async fn test_register_provider_new() {
     );
 
     assert!(!router.reload_keys(
-        ProviderType::OpenAI,
+        &ProviderType::OpenAI,
         KeyPool::new(vec![], SelectionStrategy::RoundRobin)
     ));
     assert!(router.register_provider(ProviderType::OpenAI, provider, pool));
@@ -1001,4 +1007,145 @@ async fn test_estimated_llm_capacity_all_keys_limited_with_cli() {
     assert_eq!(info.key_capacity, 0);
     assert!(info.has_cli_fallback);
     assert_eq!(info.effective_capacity, 1);
+}
+
+#[tokio::test]
+async fn test_streaming_key_rotation_on_rate_limit() {
+    // First call rate-limited, second call succeeds
+    let provider = Arc::new(MockProvider::new(
+        "openai",
+        vec![
+            Err(LlmError::RateLimited {
+                retry_after_ms: 1000,
+            }),
+            Ok(MockProvider::ok_response("gpt-5.2")),
+        ],
+    ));
+
+    let key_pool = KeyPool::new(
+        vec![
+            ApiKey::new("k1".to_string(), ProviderType::OpenAI, "sk-1".to_string()),
+            ApiKey::new("k2".to_string(), ProviderType::OpenAI, "sk-2".to_string()),
+        ],
+        SelectionStrategy::RoundRobin,
+    );
+
+    let mut providers = HashMap::new();
+    providers.insert(
+        ProviderType::OpenAI,
+        ProviderEntry {
+            provider,
+            key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+        },
+    );
+
+    let router = LlmRouter::new(
+        providers,
+        ModelRegistry::with_defaults(),
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "gpt-5.2".to_string(),
+    );
+
+    let request = make_request(Some("gpt-5.2"));
+    let result = router.complete_streaming(request).await;
+    assert!(result.is_ok(), "Streaming should succeed after key rotation");
+}
+
+#[tokio::test]
+async fn test_streaming_all_keys_rate_limited() {
+    // Both calls rate-limited — should return AllKeysRateLimited
+    let provider = Arc::new(MockProvider::new(
+        "openai",
+        vec![
+            Err(LlmError::RateLimited {
+                retry_after_ms: 1000,
+            }),
+            Err(LlmError::RateLimited {
+                retry_after_ms: 2000,
+            }),
+        ],
+    ));
+
+    let key_pool = KeyPool::new(
+        vec![
+            ApiKey::new("k1".to_string(), ProviderType::OpenAI, "sk-1".to_string()),
+            ApiKey::new("k2".to_string(), ProviderType::OpenAI, "sk-2".to_string()),
+        ],
+        SelectionStrategy::RoundRobin,
+    );
+
+    let mut providers = HashMap::new();
+    providers.insert(
+        ProviderType::OpenAI,
+        ProviderEntry {
+            provider,
+            key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+        },
+    );
+
+    let router = LlmRouter::new(
+        providers,
+        ModelRegistry::with_defaults(),
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "gpt-5.2".to_string(),
+    );
+
+    let request = make_request(Some("gpt-5.2"));
+    let result = router.complete_streaming(request).await;
+    assert!(
+        matches!(result, Err(LlmRouterError::AllKeysRateLimited)),
+        "Should return AllKeysRateLimited when all keys fail"
+    );
+}
+
+#[tokio::test]
+async fn test_streaming_non_retryable_error_fails_immediately() {
+    // Non-retryable error (e.g. bad request) — should NOT retry
+    let provider = Arc::new(MockProvider::new(
+        "openai",
+        vec![
+            Err(LlmError::Api {
+                status: 400,
+                message: "Bad request".to_string(),
+            }),
+            Ok(MockProvider::ok_response("gpt-5.2")), // should never reach this
+        ],
+    ));
+
+    let key_pool = KeyPool::new(
+        vec![
+            ApiKey::new("k1".to_string(), ProviderType::OpenAI, "sk-1".to_string()),
+            ApiKey::new("k2".to_string(), ProviderType::OpenAI, "sk-2".to_string()),
+        ],
+        SelectionStrategy::RoundRobin,
+    );
+
+    let mut providers = HashMap::new();
+    providers.insert(
+        ProviderType::OpenAI,
+        ProviderEntry {
+            provider,
+            key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+        },
+    );
+
+    let router = LlmRouter::new(
+        providers,
+        ModelRegistry::with_defaults(),
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "gpt-5.2".to_string(),
+    );
+
+    let request = make_request(Some("gpt-5.2"));
+    let result = router.complete_streaming(request).await;
+    assert!(
+        matches!(
+            result,
+            Err(LlmRouterError::Llm(LlmError::Api { status: 400, .. }))
+        ),
+        "Non-retryable errors should fail immediately"
+    );
 }

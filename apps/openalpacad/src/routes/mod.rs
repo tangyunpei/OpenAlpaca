@@ -1,19 +1,26 @@
 //! Route handlers for daemon HTTP API
 
 pub mod agents;
+mod agents_types;
 pub mod auth;
 pub mod chat;
+mod chat_types;
 pub mod command;
 pub mod connectors;
 pub mod dispatch_decisions;
 pub mod events;
 pub mod events_history;
 pub mod files;
+mod files_types;
 pub mod memory;
 pub mod orchestrator_latency;
 pub mod preferences;
 pub mod settings;
+mod settings_types;
+pub mod plugins;
+pub mod skills;
 pub mod tasks;
+mod tasks_types;
 
 pub use agents::{
     agent_action_handler,
@@ -40,8 +47,9 @@ pub use agents::{
 };
 pub use auth::generate_link_token_handler;
 pub use chat::{
-    chat_stream_handler, delete_chat_history_handler, get_chat_history_handler,
-    get_conversation_messages_handler, list_conversations_handler, send_chat_handler,
+    chat_stream_handler, confirm_tool, delete_chat_history_handler, delete_feedback_handler,
+    get_chat_history_handler, get_conversation_messages_handler, get_feedback_handler,
+    list_conversations_handler, send_chat_handler, upsert_feedback_handler,
 };
 pub use command::command_handler;
 pub use connectors::{
@@ -72,6 +80,11 @@ pub use settings::{
     rescan_credentials, set_key_priority, update_orchestrator_config, update_web_search_config,
     upsert_key, validate_key,
 };
+pub use plugins::{
+    approve_plugin_handler, deny_plugin_handler, disable_plugin_handler, enable_plugin_handler,
+    list_plugins_handler, set_plugin_config_handler,
+};
+pub use skills::skill_health_handler;
 pub use tasks::{
     create_task_handler, get_task_dag_handler, get_task_handler, list_tasks_handler,
     task_action_handler,

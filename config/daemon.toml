@@ -3,6 +3,7 @@ max_cost = 1
 max_rounds = 15
 max_tool_runtime_secs = 60
 max_tools_per_round = 5
+confirmation_timeout_secs = 300
 
 [execution.dag]
 critical_path_scheduling_enabled = false
@@ -22,13 +23,23 @@ max_rounds = 18
 max_tool_runtime_secs = 300
 max_tools_per_round = 3
 
+[execution.context]
+autocompact_buffer_ratio = 0.165
+compaction_target_ratio = 0.50
+# compaction_model = "claude-haiku-4-5-20251001"
+max_extractions_per_compaction = 10
+min_recent_messages = 4
+
 [execution.planner]
 dag_prefer_predictable_enabled = false
+deep_query_max_rounds = 10
+deep_query_max_tools_per_round = 4
 dispatch_analysis_enabled = false
 max_retries = 0
 max_tokens = 1024
 plan_protocol_v2_enabled = false
 planning_timeout_secs = 15
+two_phase_enabled = true
 
 [orchestrator.costs]
 extract_every_n_turns = 5
@@ -61,6 +72,7 @@ user_profile_budget = 1000
 
 [security]
 max_input_length = 32768
+auto_approve_confirmations = false
 
 [server]
 event_broadcaster_capacity = 64
@@ -77,6 +89,9 @@ stream_chunk_words = 3
 [server.embedding_indexer]
 batch_size = 50
 poll_interval_secs = 30
+
+[telemetry]
+store_query_preview = true
 
 [upload]
 allowed_mime_prefixes = [

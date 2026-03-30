@@ -1,33 +1,10 @@
 use super::*;
-use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, Skill};
-
-fn make_agent(id: &str, name: &str, skills: &[&str]) -> SubAgent {
-    SubAgent {
-        id: id.to_string(),
-        template_id: id.to_string(),
-        name: name.to_string(),
-        description: Some(format!("{} agent", name)),
-        icon: None,
-        status: AgentStatus::Idle,
-        current_task: None,
-        skills: skills
-            .iter()
-            .map(|s| Skill {
-                name: s.to_string(),
-                category: "test".to_string(),
-                proficiency: 0.9,
-            })
-            .collect(),
-        preset: AgentPreset::default(),
-        constraints: AgentConstraints::default(),
-        llm_config: AgentLlmConfig::default(),
-    }
-}
 
 #[test]
-fn test_lead_agent_tool_executor_routes_correctly() {
-    // Test that LeadAgentToolExecutor lists spawn_subagent + contextual tools.
-    // We test registered_tools() which only requires the struct, not actual execution.
+fn test_lead_agent_registry_contains_coordination_tools() {
+    // Verify that register_coordination_tools populates the registry with
+    // spawn_subagent, check_subagent_status, and wait_for_subagents.
+    // batch_spawn is absent when None is passed.
     use crate::tools::registry::{RegisteredTool, ToolBackend};
 
     struct NoopTool;
@@ -39,32 +16,23 @@ fn test_lead_agent_tool_executor_routes_correctly() {
         }
     }
 
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "web_search".to_string(),
             description: "test".to_string(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(NoopTool)),
+        provides_capabilities: vec!["web_search".to_string()],
+        exempt_from_timeout: false,
     });
-    let registry = Arc::new(registry);
 
-    // Build a ContextualToolExecutor with task_id so workspace tools are listed
-    let ctx_exec = ToolExecutionContext {
-        owner_id: None,
-        task_id: Some("task-1".to_string()),
-        agent_id: None,
-        db: None,
-        workspace_id: None,
-    };
-    let contextual = Arc::new(ContextualToolExecutor::new(registry.clone(), ctx_exec));
-
-    // Build a minimal SpawnSubagentTool — we won't call execute(), just need
-    // it for the LeadAgentToolExecutor construction
     let tracker = Arc::new(SubagentTracker::new());
-    let spawn_tool = Arc::new(SpawnSubagentTool {
-        router: Arc::new(openalpaca_llm::LlmRouter::new(
+    let spawn_tool = Arc::new(SpawnSubagentTool::new(
+        Arc::new(openalpaca_llm::LlmRouter::new(
             std::collections::HashMap::new(),
             openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
             std::collections::HashMap::new(),
@@ -73,42 +41,46 @@ fn test_lead_agent_tool_executor_routes_correctly() {
             )),
             "test-model".to_string(),
         )),
-        tool_registry: registry,
-        shared_context: Arc::new(SharedContext::new()),
-        bus: EventBus::default(),
-        db: None,
-        task_id: "task-1".to_string(),
-        created_by: "user-1".to_string(),
-        lead_template_id: "test-lead".to_string(),
-        daemon_config: Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
-        spawn_count: AtomicUsize::new(0),
-        workspace_id: None,
-        cancel_token: None,
-        tracker: tracker.clone(),
-        depth: 0,
-        max_concurrent_subagents: DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(
-            DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        )),
-        prompt_template: String::new(),
-    });
+        Arc::new(ToolRegistry::new()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        "task-1".to_string(),
+        "user-1".to_string(),
+        "test-lead".to_string(),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        None,
+        tracker.clone(),
+        0,
+        DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        None,
+        None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+    ));
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
     });
     let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
 
-    let executor =
-        LeadAgentToolExecutor::new(spawn_tool, None, check_status_tool, wait_tool, contextual);
+    register_coordination_tools(
+        &registry,
+        spawn_tool,
+        None, // no batch spawn
+        check_status_tool,
+        wait_tool,
+        spawn_subagent_tool_definition_from_templates(&[]),
+        None,
+        check_subagent_status_tool_definition(),
+        wait_for_subagents_tool_definition(),
+    );
 
-    let tools = executor.registered_tools();
+    let tools = registry.registered_tool_names();
     assert!(tools.contains(&"spawn_subagent".to_string()));
     assert!(!tools.contains(&"spawn_subagents_batch".to_string()));
     assert!(tools.contains(&"check_subagent_status".to_string()));
     assert!(tools.contains(&"wait_for_subagents".to_string()));
     assert!(tools.contains(&"web_search".to_string()));
-    // workspace tools should be listed since task_id is set
-    assert!(tools.contains(&"workspace_read".to_string()));
-    assert!(tools.contains(&"workspace_write".to_string()));
 }
 
 // ── SubagentTracker tests ────────────────────────────────────────
@@ -331,7 +303,7 @@ async fn test_check_subagent_status_tool_queued() {
 
 #[test]
 fn test_batch_spawn_tool_definition_includes_agents() {
-    use crate::agent::template::AgentTemplateFrontmatter;
+    use crate::agent::template::{AgentSource, AgentTemplateFrontmatter};
 
     let templates = vec![AgentTemplate {
         frontmatter: AgentTemplateFrontmatter {
@@ -340,8 +312,8 @@ fn test_batch_spawn_tool_definition_includes_agents() {
             description: "Research agent".to_string(),
             icon: None,
             singleton: false,
-            skills: vec!["web_search".to_string()],
-            denied_skills: vec![],
+            capabilities: vec!["web_search".to_string()],
+            denied_capabilities: vec![],
             temperature: 0.5,
             verbosity: "normal".to_string(),
             model: None,
@@ -354,6 +326,7 @@ fn test_batch_spawn_tool_definition_includes_agents() {
         },
         body: String::new(),
         sections: HashMap::new(),
+        source: AgentSource::default(),
     }];
 
     let def = spawn_subagents_batch_tool_definition(&templates);
@@ -364,28 +337,8 @@ fn test_batch_spawn_tool_definition_includes_agents() {
 
 #[test]
 fn test_batch_spawn_tool_hidden_when_disabled() {
-    // When batch_spawn_enabled is false, registered_tools should NOT list it
-    use crate::tools::registry::{RegisteredTool, ToolBackend};
-
-    struct NoopTool;
-    #[async_trait]
-    impl BuiltInTool for NoopTool {
-        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
-            Ok("noop".to_string())
-        }
-    }
-
-    let mut registry = ToolRegistry::new();
-    registry.register(RegisteredTool {
-        definition: ToolDefinition {
-            name: "web_search".to_string(),
-            description: "test".to_string(),
-            parameters: serde_json::json!({"type": "object"}),
-        },
-        backend: ToolBackend::BuiltIn(Arc::new(NoopTool)),
-    });
-    let registry = Arc::new(registry);
-
+    // When batch_spawn is disabled (None passed), spawn_subagents_batch should NOT
+    // appear in the registry.
     let tracker = Arc::new(SubagentTracker::new());
     let spawn_tool = Arc::new(SpawnSubagentTool::new(
         Arc::new(openalpaca_llm::LlmRouter::new(
@@ -397,7 +350,7 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
             )),
             "test-model".to_string(),
         )),
-        registry.clone(),
+        Arc::new(ToolRegistry::new()),
         Arc::new(SharedContext::new()),
         EventBus::default(),
         None,
@@ -409,51 +362,38 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
         tracker.clone(),
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        None, // workspace_id
+        None,
+        None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
     ));
     let check_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
     });
     let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
-    let ctx_exec = ToolExecutionContext {
-        owner_id: None,
-        task_id: Some("task-1".to_string()),
-        agent_id: None,
-        db: None,
-        workspace_id: None,
-    };
-    let contextual = Arc::new(ContextualToolExecutor::new(registry, ctx_exec));
 
-    // batch_spawn_tool = None -> not in registered_tools
-    let executor = LeadAgentToolExecutor::new(spawn_tool, None, check_tool, wait_tool, contextual);
-    let tools = executor.registered_tools();
+    let registry = ToolRegistry::new();
+    register_coordination_tools(
+        &registry,
+        spawn_tool,
+        None, // batch disabled
+        check_tool,
+        wait_tool,
+        spawn_subagent_tool_definition_from_templates(&[]),
+        None,
+        check_subagent_status_tool_definition(),
+        wait_for_subagents_tool_definition(),
+    );
+
+    let tools = registry.registered_tool_names();
     assert!(!tools.contains(&"spawn_subagents_batch".to_string()));
     assert!(tools.contains(&"spawn_subagent".to_string()));
 }
 
 #[test]
 fn test_batch_spawn_tool_present_when_enabled() {
-    use crate::tools::registry::{RegisteredTool, ToolBackend};
-
-    struct NoopTool;
-    #[async_trait]
-    impl BuiltInTool for NoopTool {
-        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
-            Ok("noop".to_string())
-        }
-    }
-
-    let mut registry = ToolRegistry::new();
-    registry.register(RegisteredTool {
-        definition: ToolDefinition {
-            name: "web_search".to_string(),
-            description: "test".to_string(),
-            parameters: serde_json::json!({"type": "object"}),
-        },
-        backend: ToolBackend::BuiltIn(Arc::new(NoopTool)),
-    });
-    let registry = Arc::new(registry);
-
+    // When batch_spawn is enabled (Some passed), spawn_subagents_batch should
+    // appear in the registry.
     let tracker = Arc::new(SubagentTracker::new());
     let spawn_tool = Arc::new(SpawnSubagentTool::new(
         Arc::new(openalpaca_llm::LlmRouter::new(
@@ -465,7 +405,7 @@ fn test_batch_spawn_tool_present_when_enabled() {
             )),
             "test-model".to_string(),
         )),
-        registry.clone(),
+        Arc::new(ToolRegistry::new()),
         Arc::new(SharedContext::new()),
         EventBus::default(),
         None,
@@ -477,26 +417,31 @@ fn test_batch_spawn_tool_present_when_enabled() {
         tracker.clone(),
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        None, // workspace_id
+        None,
+        None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
     ));
     let batch_tool = Some(Arc::new(SpawnSubagentsBatchTool::new(spawn_tool.clone())));
     let check_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
     });
     let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
-    let ctx_exec = ToolExecutionContext {
-        owner_id: None,
-        task_id: Some("task-1".to_string()),
-        agent_id: None,
-        db: None,
-        workspace_id: None,
-    };
-    let contextual = Arc::new(ContextualToolExecutor::new(registry, ctx_exec));
 
-    // batch_spawn_tool = Some -> IS in registered_tools
-    let executor =
-        LeadAgentToolExecutor::new(spawn_tool, batch_tool, check_tool, wait_tool, contextual);
-    let tools = executor.registered_tools();
+    let registry = ToolRegistry::new();
+    register_coordination_tools(
+        &registry,
+        spawn_tool,
+        batch_tool, // batch enabled
+        check_tool,
+        wait_tool,
+        spawn_subagent_tool_definition_from_templates(&[]),
+        Some(spawn_subagents_batch_tool_definition(&[])),
+        check_subagent_status_tool_definition(),
+        wait_for_subagents_tool_definition(),
+    );
+
+    let tools = registry.registered_tool_names();
     assert!(tools.contains(&"spawn_subagents_batch".to_string()));
     assert!(tools.contains(&"spawn_subagent".to_string()));
 }
@@ -527,6 +472,9 @@ async fn test_batch_spawn_empty_array_error() {
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         None, // workspace_id
+        None, // confirmation_broker
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
     ));
     let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
 
@@ -563,6 +511,9 @@ async fn test_batch_spawn_exceeds_max_error() {
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
         None, // workspace_id
+        None, // confirmation_broker
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
     ));
     let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
 
@@ -583,82 +534,35 @@ async fn test_batch_spawn_exceeds_max_error() {
 }
 
 #[test]
-fn test_lead_agent_executor_delegates_shell_like_tools() {
-    // Verify that LeadAgentToolExecutor.shell_like_tools() delegates to the
-    // contextual executor instead of returning an empty Vec (the default).
+fn test_lead_agent_registry_exposes_command_backend_tools() {
+    // Verify that command-backend tools registered in the ToolRegistry are
+    // reported by command_backend_tool_names() so SandboxManager can treat
+    // them as shell-like tools.
     use crate::tools::registry::{RegisteredTool, ToolBackend};
 
-    struct NoopTool;
-    #[async_trait]
-    impl BuiltInTool for NoopTool {
-        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
-            Ok("noop".to_string())
-        }
-    }
-
-    let mut registry = ToolRegistry::new();
-    // Register a command-backend tool so command_backend_tool_names() is non-empty
+    let registry = ToolRegistry::new();
+    // Register a command-backend tool
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "my_cmd_tool".to_string(),
             description: "test command tool".to_string(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::Command {
             command: "echo".to_string(),
             args_template: Some("hello".to_string()),
             timeout_secs: 10,
         },
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
     });
-    let registry = Arc::new(registry);
 
-    let ctx_exec = ToolExecutionContext {
-        owner_id: None,
-        task_id: Some("task-1".to_string()),
-        agent_id: None,
-        db: None,
-        workspace_id: None,
-    };
-    let contextual = Arc::new(ContextualToolExecutor::new(registry.clone(), ctx_exec));
-
-    let tracker = Arc::new(SubagentTracker::new());
-    let spawn_tool = Arc::new(SpawnSubagentTool::new(
-        Arc::new(openalpaca_llm::LlmRouter::new(
-            std::collections::HashMap::new(),
-            openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
-            std::collections::HashMap::new(),
-            Arc::new(openalpaca_llm::CostTracker::new(
-                openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
-            )),
-            "test-model".to_string(),
-        )),
-        registry,
-        Arc::new(SharedContext::new()),
-        EventBus::default(),
-        None,
-        "task-1".to_string(),
-        "user-1".to_string(),
-        "test-lead".to_string(),
-        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
-        None,
-        tracker.clone(),
-        0,
-        DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        None,
-    ));
-    let check_tool = Arc::new(CheckSubagentStatusTool {
-        tracker: tracker.clone(),
-    });
-    let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
-
-    let executor = LeadAgentToolExecutor::new(spawn_tool, None, check_tool, wait_tool, contextual);
-
-    // shell_like_tools() should include "my_cmd_tool" from the registry
-    let shell_tools = executor.shell_like_tools();
+    let shell_tools = registry.command_backend_tool_names();
     assert!(
         shell_tools.contains(&"my_cmd_tool".to_string()),
-        "LeadAgentToolExecutor.shell_like_tools() should delegate to contextual executor \
-         and include command-backend tools. Got: {:?}",
+        "command_backend_tool_names() should include command-backend tools. Got: {:?}",
         shell_tools
     );
 }

@@ -8,7 +8,7 @@ name = "Test Agent"
 description = "A test agent"
 icon = "star"
 
-[skills]
+[capabilities]
 assigned = ["web_search", "summarize"]
 denied = ["shell_execute"]
 
@@ -29,7 +29,7 @@ require_confirmation_for = ["file_delete"]
 fn test_parse_toml() {
     let config: AgentConfigFile = toml::from_str(sample_toml()).unwrap();
     assert_eq!(config.agent.id, "test_agent");
-    assert_eq!(config.skills.assigned.len(), 2);
+    assert_eq!(config.capabilities.assigned.len(), 2);
     assert_eq!(config.preset.temperature, Some(0.3));
     assert_eq!(
         config.constraints.as_ref().unwrap().max_tool_calls,
@@ -43,10 +43,20 @@ fn test_into_subagent() {
     let agent = config.into_subagent();
     assert_eq!(agent.id, "test_agent");
     assert_eq!(agent.name, "Test Agent");
-    assert_eq!(agent.skills.len(), 2);
+    assert_eq!(agent.capabilities.len(), 2);
     assert_eq!(agent.preset.temperature, 0.3);
     assert_eq!(agent.constraints.max_tool_calls, Some(20));
     assert!(agent.status.is_available());
+}
+
+#[test]
+fn test_require_confirmation_for_roundtrip() {
+    let config: AgentConfigFile = toml::from_str(sample_toml()).unwrap();
+    let agent = config.into_subagent();
+    assert_eq!(
+        agent.constraints.require_confirmation_for,
+        vec!["file_delete"]
+    );
 }
 
 #[test]
@@ -62,7 +72,7 @@ fn test_into_storage_config() {
 fn test_skills_denied_merged_into_denied_capabilities() {
     let config: AgentConfigFile = toml::from_str(sample_toml()).unwrap();
     let agent = config.into_subagent();
-    // skills.denied = ["shell_execute"] should be merged
+    // capabilities.denied = ["shell_execute"] should be merged
     assert!(
         agent
             .constraints
@@ -79,7 +89,7 @@ id = "cap_agent"
 name = "Cap Agent"
 description = "Agent with capabilities"
 
-[skills]
+[capabilities]
 assigned = ["web_search"]
 denied = ["shell_execute"]
 
@@ -97,7 +107,7 @@ denied_capabilities = ["file_write"]
         agent.constraints.allowed_capabilities,
         vec!["web_search", "summarize"]
     );
-    // "file_write" from denied_capabilities + "shell_execute" from skills.denied
+    // "file_write" from denied_capabilities + "shell_execute" from capabilities.denied
     assert!(
         agent
             .constraints
@@ -120,7 +130,7 @@ id = "no_constraints"
 name = "No Constraints"
 description = "Agent without constraints section"
 
-[skills]
+[capabilities]
 assigned = ["web_search"]
 denied = ["shell_execute"]
 
@@ -129,7 +139,7 @@ persona = "test"
 "#;
     let config: AgentConfigFile = toml::from_str(toml_str).unwrap();
     let agent = config.into_subagent();
-    // skills.denied should still be captured even without [constraints]
+    // capabilities.denied should still be captured even without [constraints]
     assert!(
         agent
             .constraints
@@ -148,10 +158,10 @@ id: "bridge_agent"
 name: "Bridge Agent"
 description: "Agent for bridge testing"
 icon: "bridge"
-skills:
+capabilities:
   - "web_search"
   - "summarize"
-denied_skills:
+denied_capabilities:
   - "shell_execute"
 temperature: 0.3
 verbosity: "detailed"
@@ -181,9 +191,9 @@ fn test_from_template() {
     assert_eq!(config.agent.id, "bridge_agent");
     assert_eq!(config.agent.name, "Bridge Agent");
     assert_eq!(config.agent.icon, Some("bridge".to_string()));
-    assert_eq!(config.skills.assigned, vec!["web_search", "summarize"]);
+    assert_eq!(config.capabilities.assigned, vec!["web_search", "summarize"]);
     assert_eq!(
-        config.skills.denied,
+        config.capabilities.denied,
         Some(vec!["shell_execute".to_string()])
     );
     assert_eq!(config.preset.temperature, Some(0.3));
@@ -211,7 +221,7 @@ fn test_from_template_roundtrip_to_subagent() {
 
     assert_eq!(agent.id, "bridge_agent");
     assert_eq!(agent.template_id, "bridge_agent");
-    assert_eq!(agent.skills.len(), 2);
+    assert_eq!(agent.capabilities.len(), 2);
     assert_eq!(agent.preset.temperature, 0.3);
     assert!(
         agent
@@ -229,8 +239,8 @@ fn test_into_template() {
 
     assert_eq!(template.frontmatter.id, "test_agent");
     assert_eq!(template.frontmatter.name, "Test Agent");
-    assert_eq!(template.frontmatter.skills, vec!["web_search", "summarize"]);
-    assert_eq!(template.frontmatter.denied_skills, vec!["shell_execute"]);
+    assert_eq!(template.frontmatter.capabilities, vec!["web_search", "summarize"]);
+    assert_eq!(template.frontmatter.denied_capabilities, vec!["shell_execute"]);
     assert_eq!(template.frontmatter.temperature, 0.3);
     assert_eq!(template.frontmatter.max_tool_calls, Some(20));
     assert!(
@@ -252,7 +262,7 @@ fn test_into_template_roundtrip() {
     let agent = config2.into_subagent();
 
     assert_eq!(agent.id, "test_agent");
-    assert_eq!(agent.skills.len(), 2);
+    assert_eq!(agent.capabilities.len(), 2);
     assert_eq!(agent.preset.temperature, 0.3);
     assert!(
         agent

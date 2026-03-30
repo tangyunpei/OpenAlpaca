@@ -19,22 +19,45 @@ use chrono::Utc;
 use regex::Regex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
+
+/// Where a skill's execution logic comes from.
+#[derive(Clone)]
+pub enum SkillSource {
+    /// Traditional file-based skill (SKILL.md)
+    FileBased,
+    /// Plugin-backed skill (executed via PluginSkillExecutor)
+    Plugin {
+        plugin_id: String,
+        executor: Arc<dyn openalpaca_api::plugin_traits::PluginSkillExecutor>,
+    },
+}
+
+impl std::fmt::Debug for SkillSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FileBased => write!(f, "FileBased"),
+            Self::Plugin { plugin_id, .. } => write!(f, "Plugin({plugin_id})"),
+        }
+    }
+}
 
 /// A catalog entry: Level 1 metadata + path for deferred Level 2 loading.
 #[derive(Debug, Clone)]
 pub struct SkillEntry {
     /// Parsed frontmatter (always available after catalog scan).
     pub frontmatter: SkillFrontmatter,
-    /// Absolute path to the SKILL.md file.
-    pub skill_md_path: PathBuf,
-    /// Absolute path to the skill directory (parent of SKILL.md).
-    pub skill_dir: PathBuf,
+    /// Absolute path to the SKILL.md file (None for plugin skills).
+    pub skill_md_path: Option<PathBuf>,
+    /// Absolute path to the skill directory (None for plugin skills).
+    pub skill_dir: Option<PathBuf>,
     /// Compiled trigger regex patterns (compiled once at scan time).
     /// Patterns that fail to compile are silently dropped.
     pub compiled_triggers: Vec<Regex>,
     /// Where this skill was discovered.
     pub scope: SkillScope,
+    /// Where this skill's execution logic comes from.
+    pub source: SkillSource,
 }
 
 /// Cached catalog summary: `(name, description, command)` tuples.
@@ -147,6 +170,7 @@ impl SkillCatalog {
         {
             total += self.scan_directory(dir, SkillScope::Project);
         }
+        self.validate_dependencies();
         total
     }
 
@@ -167,6 +191,30 @@ impl SkillCatalog {
 
         let frontmatter =
             parse_skill_frontmatter(&content).map_err(|e| format!("parse error: {}", e))?;
+
+        // Deprecation warnings for parsed-but-dead fields
+        if frontmatter.context.summarize.enabled {
+            let msg = format!(
+                "Skill '{}': 'context.summarize.enabled' is deprecated and has no effect. \
+                 Use 'context.budget_tokens' for context size control.",
+                frontmatter.name
+            );
+            tracing::warn!("SkillCatalog: {}", msg);
+            if let Ok(mut errors) = self.validation_errors.write() {
+                errors.push(msg);
+            }
+        }
+        if !frontmatter.tools.defaults.is_empty() {
+            let msg = format!(
+                "Skill '{}': 'tools.defaults' is deprecated and has no effect. \
+                 Tool default arguments are not injected at runtime.",
+                frontmatter.name
+            );
+            tracing::warn!("SkillCatalog: {}", msg);
+            if let Ok(mut errors) = self.validation_errors.write() {
+                errors.push(msg);
+            }
+        }
 
         // Validation: invoke.mode == "disabled" => skip
         if frontmatter.invoke.mode == "disabled" {
@@ -215,10 +263,11 @@ impl SkillCatalog {
 
         let entry = SkillEntry {
             frontmatter,
-            skill_md_path: skill_md.to_path_buf(),
-            skill_dir: skill_dir.to_path_buf(),
+            skill_md_path: Some(skill_md.to_path_buf()),
+            skill_dir: Some(skill_dir.to_path_buf()),
             compiled_triggers,
             scope,
+            source: SkillSource::FileBased,
         };
 
         // Insert entry and command/alias indices
@@ -429,11 +478,21 @@ impl SkillCatalog {
             .get(name)
             .ok_or_else(|| format!("Skill '{}' not found in catalog", name))?;
 
-        let content = std::fs::read_to_string(&entry.skill_md_path)
-            .map_err(|e| format!("Failed to read {}: {}", entry.skill_md_path.display(), e))?;
+        if entry.skill_md_path.is_none() {
+            // Plugin skill — return synthetic document
+            return Ok(SkillDocument {
+                frontmatter: entry.frontmatter.clone(),
+                body: entry.frontmatter.description.clone(),
+                sections: HashMap::new(),
+            });
+        }
+        let path = entry.skill_md_path.as_ref().unwrap();
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
         parse_skill_markdown(&content)
-            .map_err(|e| format!("Failed to parse {}: {}", entry.skill_md_path.display(), e))
+            .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))
     }
 
     /// Remove a skill from the catalog by ID or name.
@@ -461,6 +520,61 @@ impl SkillCatalog {
         self.invalidate_summary_cache();
     }
 
+    /// Register a plugin-backed skill into the catalog.
+    ///
+    /// Plugin skills have no filesystem path — their execution is delegated
+    /// to the `PluginSkillExecutor` provided by the plugin runtime.
+    pub fn register_plugin_skill(
+        &self,
+        skill_id: String,
+        frontmatter: SkillFrontmatter,
+        executor: Arc<dyn openalpaca_api::plugin_traits::PluginSkillExecutor>,
+        plugin_id: String,
+    ) {
+        let compiled = Self::compile_triggers(&frontmatter);
+        let entry = SkillEntry {
+            frontmatter: frontmatter.clone(),
+            skill_md_path: None,
+            skill_dir: None,
+            compiled_triggers: compiled,
+            scope: SkillScope::User,
+            source: SkillSource::Plugin { plugin_id, executor },
+        };
+        let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
+        // Update command index
+        if let Some(ref cmd) = frontmatter.invoke.slash {
+            let mut cmd_idx = self.command_index.write().unwrap_or_else(|p| p.into_inner());
+            cmd_idx.insert(cmd.clone(), skill_id.clone());
+        }
+        for alias in &frontmatter.invoke.aliases {
+            let mut alias_idx = self.alias_index.write().unwrap_or_else(|p| p.into_inner());
+            alias_idx.insert(alias.clone(), skill_id.clone());
+        }
+        entries.insert(skill_id, entry);
+        self.invalidate_summary_cache();
+    }
+
+    /// Compile routing.intent patterns into regexes for trigger matching.
+    fn compile_triggers(frontmatter: &SkillFrontmatter) -> Vec<Regex> {
+        frontmatter
+            .routing
+            .intent
+            .iter()
+            .filter_map(|pattern| match Regex::new(&format!("(?i){}", pattern)) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    tracing::warn!(
+                        "SkillCatalog: invalid trigger pattern '{}' in {}: {}",
+                        pattern,
+                        frontmatter.name,
+                        e
+                    );
+                    None
+                }
+            })
+            .collect()
+    }
+
     /// Hot-reload a single skill directory.
     ///
     /// Removes the old entry (if any) and re-scans the directory.
@@ -484,10 +598,11 @@ impl SkillCatalog {
             // Skill was deleted — remove from catalog
             if let Some(dir_name) = skill_dir.file_name().and_then(|n| n.to_str()) {
                 // Try to find and remove by directory name
+                let skill_dir_buf = skill_dir.to_path_buf();
                 let entries_to_remove: Vec<String> = match self.entries.read() {
                     Ok(guard) => guard
                         .iter()
-                        .filter(|(_, e)| e.skill_dir == skill_dir)
+                        .filter(|(_, e)| e.skill_dir.as_ref() == Some(&skill_dir_buf))
                         .map(|(k, _)| k.clone())
                         .collect(),
                     Err(_) => return Err("Lock poisoned".to_string()),
@@ -506,10 +621,11 @@ impl SkillCatalog {
         let fm = parse_skill_frontmatter(&content).map_err(|e| format!("parse error: {}", e))?;
 
         // Remove old entries for this directory (handles renames)
+        let skill_dir_buf = skill_dir.to_path_buf();
         let old_keys: Vec<String> = match self.entries.read() {
             Ok(guard) => guard
                 .iter()
-                .filter(|(_, e)| e.skill_dir == skill_dir)
+                .filter(|(_, e)| e.skill_dir.as_ref() == Some(&skill_dir_buf))
                 .map(|(k, _)| k.clone())
                 .collect(),
             Err(_) => Vec::new(),
@@ -551,6 +667,106 @@ impl SkillCatalog {
             Ok(guard) => guard.clone(),
             Err(_) => Vec::new(),
         }
+    }
+
+    /// Validate that all `depends_on` references exist and contain no cycles.
+    /// Call after `scan_directory()` or `scan_multi_scope()`.
+    pub fn validate_dependencies(&self) -> Vec<String> {
+        use std::collections::HashSet;
+
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut errors = Vec::new();
+
+        // Phase 1: Check existence of all dependency references
+        for (id, entry) in entries.iter() {
+            for dep_id in &entry.frontmatter.depends_on {
+                if !entries.contains_key(dep_id) {
+                    errors.push(format!(
+                        "Skill '{}' depends on '{}' which does not exist",
+                        id, dep_id
+                    ));
+                }
+            }
+        }
+
+        // Phase 2: Three-color DFS cycle detection
+        // White = not visited, Gray = in current path, Black = fully explored
+        #[derive(Clone, Copy, PartialEq)]
+        enum Color {
+            White,
+            Gray,
+            Black,
+        }
+
+        let mut color: HashMap<&str, Color> =
+            entries.keys().map(|k| (k.as_str(), Color::White)).collect();
+        let mut reported_cycles: HashSet<String> = HashSet::new();
+
+        // Use iterative DFS to avoid lifetime issues with recursive functions
+        for start_id in entries.keys() {
+            if color.get(start_id.as_str()) != Some(&Color::White) {
+                continue;
+            }
+
+            // Stack holds (node, iterator index into depends_on)
+            let mut stack: Vec<(&str, usize)> = vec![(start_id.as_str(), 0)];
+            color.insert(start_id.as_str(), Color::Gray);
+
+            while let Some((node, idx)) = stack.last_mut() {
+                let deps = entries
+                    .get(*node)
+                    .map(|e| &e.frontmatter.depends_on)
+                    .cloned()
+                    .unwrap_or_default();
+
+                if *idx >= deps.len() {
+                    // All neighbors explored — mark black
+                    color.insert(*node, Color::Black);
+                    stack.pop();
+                    continue;
+                }
+
+                let dep = deps[*idx].clone();
+                *idx += 1;
+
+                // Resolve to the key stored in entries (stable &str lifetime)
+                let dep_key = match entries.get_key_value(dep.as_str()) {
+                    Some((k, _)) => k.as_str(),
+                    None => continue, // Already reported in Phase 1
+                };
+
+                match color.get(dep_key) {
+                    Some(Color::Gray) => {
+                        // Back edge — cycle found
+                        let msg = format!("Cycle detected: '{}' -> '{}'", node, dep);
+                        if reported_cycles.insert(msg.clone()) {
+                            errors.push(msg);
+                        }
+                    }
+                    Some(Color::White) | None => {
+                        color.insert(dep_key, Color::Gray);
+                        stack.push((dep_key, 0));
+                    }
+                    Some(Color::Black) => {} // Already fully explored
+                }
+            }
+        }
+
+        if !errors.is_empty() {
+            for err in &errors {
+                tracing::warn!("{}", err);
+            }
+            let mut validation_errors = self
+                .validation_errors
+                .write()
+                .unwrap_or_else(|p| p.into_inner());
+            validation_errors.extend(errors.clone());
+        }
+
+        errors
     }
 }
 

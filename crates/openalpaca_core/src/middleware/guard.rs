@@ -2,7 +2,7 @@ use regex::Regex;
 use std::borrow::Cow;
 
 /// Detect if the model hallucinated a send confirmation without calling the tool.
-/// Returns true if `send_message` was available, no tools were called, and the
+/// Returns true if `send` was available, no tools were called, and the
 /// response text contains send-success patterns.
 pub fn detect_hallucinated_send(
     tool_names: &[&str],
@@ -12,7 +12,7 @@ pub fn detect_hallucinated_send(
     if tool_calls_made > 0 {
         return false;
     }
-    if !tool_names.contains(&"send_message") && !tool_names.contains(&"send_file") {
+    if !tool_names.contains(&"send") {
         return false;
     }
 
@@ -49,17 +49,15 @@ pub fn detect_hallucinated_send(
         }
     }
 
-    // File-specific hallucination patterns
-    if tool_names.contains(&"send_file") {
-        for pat in FILE_CN_PATTERNS {
-            if response.contains(pat) {
-                return true;
-            }
+    // File-specific hallucination patterns (always checked since unified `send` handles both)
+    for pat in FILE_CN_PATTERNS {
+        if response.contains(pat) {
+            return true;
         }
-        for pat in FILE_EN_PATTERNS {
-            if lower.contains(pat) {
-                return true;
-            }
+    }
+    for pat in FILE_EN_PATTERNS {
+        if lower.contains(pat) {
+            return true;
         }
     }
 
@@ -145,7 +143,7 @@ mod tests {
     #[test]
     fn hallucination_detected_chinese_success() {
         assert!(detect_hallucinated_send(
-            &["send_message"],
+            &["send"],
             0,
             "✅ 发送成功！消息已通过Telegram发出。"
         ));
@@ -154,7 +152,7 @@ mod tests {
     #[test]
     fn hallucination_detected_english_success() {
         assert!(detect_hallucinated_send(
-            &["send_message"],
+            &["send"],
             0,
             "Message sent successfully via Telegram!"
         ));
@@ -164,7 +162,7 @@ mod tests {
     fn no_hallucination_when_tool_called() {
         // tool_calls_made > 0 → not hallucination, even with success text
         assert!(!detect_hallucinated_send(
-            &["send_message"],
+            &["send"],
             1,
             "✅ 发送成功！"
         ));
@@ -172,7 +170,7 @@ mod tests {
 
     #[test]
     fn no_hallucination_without_send_tool() {
-        // send_message not in tool list → not our concern
+        // send not in tool list → not our concern
         assert!(!detect_hallucinated_send(
             &["web_fetch"],
             0,
@@ -184,7 +182,7 @@ mod tests {
     fn no_hallucination_normal_response() {
         // No success patterns → not hallucination
         assert!(!detect_hallucinated_send(
-            &["send_message"],
+            &["send"],
             0,
             "好的，我可以帮你发送消息。请告诉我收件人。"
         ));
@@ -193,7 +191,7 @@ mod tests {
     #[test]
     fn hallucination_detected_already_sent() {
         assert!(detect_hallucinated_send(
-            &["send_message"],
+            &["send"],
             0,
             "消息已发送到你的Telegram联系人。"
         ));
@@ -204,7 +202,7 @@ mod tests {
     #[test]
     fn hallucination_detected_send_file_english() {
         assert!(detect_hallucinated_send(
-            &["send_file"],
+            &["send"],
             0,
             "File sent successfully via Telegram!"
         ));
@@ -213,7 +211,7 @@ mod tests {
     #[test]
     fn hallucination_detected_send_file_chinese() {
         assert!(detect_hallucinated_send(
-            &["send_file"],
+            &["send"],
             0,
             "文件已发送到你的Telegram联系人。"
         ));
@@ -222,7 +220,7 @@ mod tests {
     #[test]
     fn no_hallucination_send_file_when_tool_called() {
         assert!(!detect_hallucinated_send(
-            &["send_file"],
+            &["send"],
             1,
             "文件已发送到你的Telegram联系人。"
         ));
@@ -231,7 +229,7 @@ mod tests {
     #[test]
     fn no_hallucination_send_file_normal_response() {
         assert!(!detect_hallucinated_send(
-            &["send_file"],
+            &["send"],
             0,
             "请告诉我文件路径，我来帮你发送。"
         ));

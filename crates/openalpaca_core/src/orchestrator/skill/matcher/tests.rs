@@ -1,6 +1,6 @@
 use super::*;
 use crate::agent::subagent::{
-    AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Skill, SubAgent,
+    AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Capability, SubAgent,
 };
 
 fn make_agent(id: &str, name: &str, skills: Vec<&str>) -> SubAgent {
@@ -12,9 +12,9 @@ fn make_agent(id: &str, name: &str, skills: Vec<&str>) -> SubAgent {
         icon: None,
         status: AgentStatus::Idle,
         current_task: None,
-        skills: skills
+        capabilities: skills
             .into_iter()
-            .map(|s| Skill {
+            .map(|s| Capability {
                 name: s.to_string(),
                 category: "test".to_string(),
                 proficiency: 1.0,
@@ -108,7 +108,7 @@ fn test_no_matching() {
     let matcher = SkillMatcher;
     let result = matcher.match_skills(&["text_generate".to_string()], &reg);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("No agents match"));
+    assert!(result.unwrap_err().contains("No agents match the required capabilities"));
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn test_empty_skills() {
     let matcher = SkillMatcher;
     let result = matcher.match_skills(&[], &reg);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("No skills specified"));
+    assert!(result.unwrap_err().contains("No capabilities specified"));
 }
 
 #[test]

@@ -11,22 +11,43 @@ impl BuiltInTool for MockBuiltIn {
     }
 }
 
+fn make_tool_with_caps(name: &str, caps: Vec<&str>) -> RegisteredTool {
+    RegisteredTool {
+        definition: ToolDefinition {
+            name: name.to_string(),
+            description: format!("{} tool", name),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+            strict: None,
+            input_examples: None,
+        },
+        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+            response: "ok".to_string(),
+        })),
+        provides_capabilities: caps.into_iter().map(String::from).collect(),
+        exempt_from_timeout: false,
+    }
+}
+
 fn make_tool(name: &str, response: &str) -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: name.to_string(),
             description: format!("{} tool", name),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
             response: response.to_string(),
         })),
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
     }
 }
 
 #[test]
 fn test_register_and_lookup() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(make_tool("test_tool", "ok"));
 
     assert!(registry.get("test_tool").is_some());
@@ -34,51 +55,9 @@ fn test_register_and_lookup() {
     assert_eq!(registry.count(), 1);
 }
 
-#[test]
-fn test_definitions_for_skills() {
-    let mut registry = ToolRegistry::new();
-    registry.register(make_tool("web_search", "search results"));
-    registry.register(make_tool("summarize", "summary"));
-    registry.register(make_tool("file_read", "file contents"));
-
-    let skills = vec!["web_search".to_string(), "summarize".to_string()];
-    let defs = registry.definitions_for_skills(&skills);
-    assert_eq!(defs.len(), 2);
-    let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-    assert!(names.contains(&"web_search"));
-    assert!(names.contains(&"summarize"));
-}
-
-#[test]
-fn test_definitions_for_skills_no_match_returns_empty() {
-    let mut registry = ToolRegistry::new();
-    registry.register(make_tool("web_search", "results"));
-    registry.register(make_tool("summarize", "summary"));
-
-    let skills = vec!["nonexistent_skill".to_string()];
-    let defs = registry.definitions_for_skills(&skills);
-    assert_eq!(
-        defs.len(),
-        0,
-        "Non-matching skills should return empty list, not all tools"
-    );
-}
-
-#[test]
-fn test_definitions_for_empty_skills_returns_empty() {
-    let mut registry = ToolRegistry::new();
-    registry.register(make_tool("web_search", "results"));
-    let defs = registry.definitions_for_skills(&[]);
-    assert_eq!(
-        defs.len(),
-        0,
-        "Empty skills should return empty list (least-privilege)"
-    );
-}
-
 #[tokio::test]
 async fn test_execute_builtin() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(make_tool("test_tool", "hello"));
 
     let result = registry.execute("test_tool", &serde_json::json!({})).await;
@@ -98,7 +77,7 @@ async fn test_execute_unknown_tool() {
 
 #[test]
 fn test_registered_tool_names() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(make_tool("web_search", "results"));
     registry.register(make_tool("summarize", "summary"));
 
@@ -110,7 +89,7 @@ fn test_registered_tool_names() {
 
 #[test]
 fn test_command_backend_tool_names_empty_for_builtins() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(make_tool("web_search", "results"));
     registry.register(make_tool("summarize", "summary"));
 
@@ -123,7 +102,7 @@ fn test_command_backend_tool_names_empty_for_builtins() {
 
 #[test]
 fn test_command_backend_tool_names_returns_command_tools() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     // Register a built-in tool
     registry.register(make_tool("web_search", "results"));
     // Register a command-backend tool
@@ -132,12 +111,16 @@ fn test_command_backend_tool_names_returns_command_tools() {
             name: "git_log".to_string(),
             description: "Show git log".to_string(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::Command {
             command: "git".to_string(),
             args_template: Some("log --oneline -n {count}".to_string()),
             timeout_secs: 15,
         },
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
     });
 
     let cmd_tools = registry.command_backend_tool_names();
@@ -148,12 +131,14 @@ fn test_command_backend_tool_names_returns_command_tools() {
 #[tokio::test]
 async fn test_execute_http_ssrf_blocks_private_ip() {
     // Verify that execute_http validates URLs (SSRF protection)
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "internal_api".to_string(),
             description: "Internal API".to_string(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::Http {
             method: "GET".to_string(),
@@ -161,6 +146,8 @@ async fn test_execute_http_ssrf_blocks_private_ip() {
             headers: HashMap::new(),
             timeout_secs: 10,
         },
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
     });
 
     let result = registry
@@ -175,12 +162,14 @@ async fn test_execute_http_ssrf_blocks_private_ip() {
 
 #[tokio::test]
 async fn test_execute_http_ssrf_blocks_localhost() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "local_api".to_string(),
             description: "Local API".to_string(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::Http {
             method: "GET".to_string(),
@@ -188,6 +177,8 @@ async fn test_execute_http_ssrf_blocks_localhost() {
             headers: HashMap::new(),
             timeout_secs: 10,
         },
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
     });
 
     let result = registry.execute("local_api", &serde_json::json!({})).await;
@@ -202,7 +193,7 @@ async fn test_execute_http_ssrf_blocks_localhost() {
 
 #[tokio::test]
 async fn test_http_unsubstituted_placeholder_detected() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "weather".to_string(),
@@ -214,6 +205,8 @@ async fn test_http_unsubstituted_placeholder_detected() {
                 },
                 "required": ["city"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::Http {
             method: "GET".to_string(),
@@ -221,6 +214,8 @@ async fn test_http_unsubstituted_placeholder_detected() {
             headers: HashMap::new(),
             timeout_secs: 10,
         },
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
     });
 
     // Only provide "city" but not "units" — {units} should be detected
@@ -242,7 +237,7 @@ async fn test_http_unsubstituted_placeholder_detected() {
 
 #[tokio::test]
 async fn test_http_all_placeholders_substituted_passes() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "weather".to_string(),
@@ -254,6 +249,8 @@ async fn test_http_all_placeholders_substituted_passes() {
                 },
                 "required": ["city"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::Http {
             method: "GET".to_string(),
@@ -262,6 +259,8 @@ async fn test_http_all_placeholders_substituted_passes() {
             headers: HashMap::new(),
             timeout_secs: 10,
         },
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
     });
 
     // This will pass placeholder check but fail on the actual HTTP request
@@ -283,7 +282,7 @@ async fn test_http_all_placeholders_substituted_passes() {
 
 #[tokio::test]
 async fn test_schema_missing_required_field() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "search".to_string(),
@@ -295,10 +294,14 @@ async fn test_schema_missing_required_field() {
                 },
                 "required": ["query"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
             response: "ok".to_string(),
         })),
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
     });
 
     let result = registry.execute("search", &serde_json::json!({})).await;
@@ -313,7 +316,7 @@ async fn test_schema_missing_required_field() {
 
 #[tokio::test]
 async fn test_schema_wrong_type() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "search".to_string(),
@@ -326,10 +329,14 @@ async fn test_schema_wrong_type() {
                 },
                 "required": ["query"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
             response: "ok".to_string(),
         })),
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
     });
 
     // limit should be integer, but we pass a string
@@ -350,7 +357,7 @@ async fn test_schema_wrong_type() {
 
 #[tokio::test]
 async fn test_schema_valid_args_pass() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "search".to_string(),
@@ -363,10 +370,14 @@ async fn test_schema_valid_args_pass() {
                 },
                 "required": ["query"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
             response: "ok".to_string(),
         })),
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
     });
 
     let result = registry
@@ -378,16 +389,20 @@ async fn test_schema_valid_args_pass() {
 
 #[tokio::test]
 async fn test_schema_non_object_args_rejected() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "search".to_string(),
             description: "Search".to_string(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
             response: "ok".to_string(),
         })),
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
     });
 
     let result = registry
@@ -401,7 +416,7 @@ async fn test_schema_non_object_args_rejected() {
 
 #[tokio::test]
 async fn test_command_unsubstituted_placeholder_detected() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "git_log".to_string(),
@@ -414,12 +429,16 @@ async fn test_command_unsubstituted_placeholder_detected() {
                 },
                 "required": ["count"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::Command {
             command: "git".to_string(),
             args_template: Some("log --oneline -n {count} {branch}".to_string()),
             timeout_secs: 15,
         },
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
     });
 
     // Only provide "count" but not "branch" — {branch} should be detected
@@ -442,7 +461,7 @@ async fn test_command_unsubstituted_placeholder_detected() {
 
 #[tokio::test]
 async fn test_command_all_placeholders_substituted_runs() {
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "echo_tool".to_string(),
@@ -454,12 +473,16 @@ async fn test_command_all_placeholders_substituted_runs() {
                 },
                 "required": ["msg"]
             }),
+            strict: None,
+            input_examples: None,
         },
         backend: ToolBackend::Command {
             command: "echo".to_string(),
             args_template: Some("{msg}".to_string()),
             timeout_secs: 5,
         },
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
     });
 
     let result = registry
@@ -470,27 +493,253 @@ async fn test_command_all_placeholders_substituted_runs() {
     assert!(result.unwrap().contains("hello"));
 }
 
-// --- Issue 8: Skill name mismatch warning ---
+// --- registry::execute_with_context ---
+
+#[tokio::test]
+async fn test_registry_execute_with_context_routes_to_builtin() {
+    let registry = ToolRegistry::new();
+    registry.register(RegisteredTool {
+        definition: ToolDefinition {
+            name: "test_tool".to_string(),
+            description: "Test".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
+        },
+        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+            response: "mock".to_string(),
+        })),
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
+    });
+
+    let ctx = super::ToolContext::default();
+    let result = registry
+        .execute_with_context("test_tool", &serde_json::json!({}), &ctx)
+        .await;
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), "mock");
+}
+
+#[tokio::test]
+async fn test_registry_execute_with_context_unknown_tool() {
+    let registry = ToolRegistry::new();
+    let ctx = super::ToolContext::default();
+    let result = registry
+        .execute_with_context("no_such_tool", &serde_json::json!({}), &ctx)
+        .await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("not found"));
+}
+
+// --- ToolContext and execute_with_context ---
+
+#[tokio::test]
+async fn test_execute_with_context_defaults_to_execute() {
+    // A tool that only implements execute() should work via execute_with_context()
+    let tool = MockBuiltIn {
+        response: "mock".to_string(),
+    };
+    let ctx = super::ToolContext {
+        agent_id: Some("test-agent".to_string()),
+        task_id: None,
+        owner_id: None,
+        workspace_id: None,
+    };
+    let args = serde_json::json!({"key": "value"});
+    let result = tool.execute_with_context(&args, &ctx).await.unwrap();
+    assert_eq!(result, "mock");
+}
+
+// --- memory_search reads from ToolContext ---
+
+#[tokio::test]
+async fn test_memory_search_reads_context_not_args() {
+    use super::ToolContext;
+
+    struct ContextCaptureTool;
+
+    #[async_trait]
+    impl super::BuiltInTool for ContextCaptureTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Err("should not be called directly".to_string())
+        }
+        async fn execute_with_context(
+            &self,
+            arguments: &serde_json::Value,
+            ctx: &ToolContext,
+        ) -> Result<String, String> {
+            Ok(serde_json::json!({
+                "ctx_owner": ctx.owner_id,
+                "ctx_workspace": ctx.workspace_id,
+                "args": arguments,
+            })
+            .to_string())
+        }
+    }
+
+    let tool = ContextCaptureTool;
+    let ctx = ToolContext {
+        owner_id: Some("real-owner".to_string()),
+        workspace_id: Some("ws-1".to_string()),
+        ..Default::default()
+    };
+    let result = tool
+        .execute_with_context(
+            &serde_json::json!({"query": "test", "owner_id": "spoofed"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["ctx_owner"], "real-owner");
+    assert_eq!(parsed["ctx_workspace"], "ws-1");
+}
+
+// --- missing owner_id returns error ---
+
+#[tokio::test]
+async fn test_missing_owner_id_returns_error() {
+    // A mock tool that mimics MemorySearchTool's execute_with_context:
+    // requires ctx.owner_id and returns an error when it is None.
+    struct OwnerRequiringTool;
+
+    #[async_trait]
+    impl super::BuiltInTool for OwnerRequiringTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Err("direct execute not supported".to_string())
+        }
+
+        async fn execute_with_context(
+            &self,
+            _arguments: &serde_json::Value,
+            ctx: &super::ToolContext,
+        ) -> Result<String, String> {
+            let _owner_id = ctx.owner_id.as_deref().ok_or_else(|| {
+                "Tool requires owner_id but none provided in execution context".to_string()
+            })?;
+            Ok("ok".to_string())
+        }
+    }
+
+    let ctx = super::ToolContext {
+        owner_id: None,
+        ..Default::default()
+    };
+    let tool = OwnerRequiringTool;
+    let result = tool
+        .execute_with_context(&serde_json::json!({"query": "test"}), &ctx)
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("owner_id"),
+        "Error should mention owner_id, got: {}",
+        err
+    );
+}
+
+// --- workspace tool requires task_id ---
+
+#[tokio::test]
+async fn test_workspace_read_requires_task_id() {
+    // WorkspaceReadTool is private; test through the registry's execute_with_context.
+    // When ctx.task_id is None the tool must return an error.
+    use crate::tools::builtins::builtin_tools;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+
+    let registry = ToolRegistry::new();
+    for tool in builtin_tools(Some(db), None, None, None, None) {
+        registry.register(tool);
+    }
+
+    let ctx = super::ToolContext {
+        task_id: None,
+        ..Default::default()
+    };
+    let result = registry
+        .execute_with_context("workspace_read", &serde_json::json!({}), &ctx)
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("task") || err.contains("context"),
+        "Error should mention missing task context, got: {}",
+        err
+    );
+}
+
+// --- tools_for_capabilities ---
 
 #[test]
-fn test_definitions_for_skills_warns_on_mismatch() {
-    // This test verifies that `definitions_for_skills` correctly returns
-    // an empty list when skill names don't match any registered tool.
-    // The warning is logged via `tracing::warn!` — we verify the observable
-    // behavior (empty result set) rather than capturing log output.
-    let mut registry = ToolRegistry::new();
-    registry.register(make_tool("web_search", "results"));
-    registry.register(make_tool("summarize", "summary"));
+fn test_tools_for_capabilities_basic() {
+    let registry = ToolRegistry::new();
+    registry.register(make_tool_with_caps("file_read", vec!["file_read"]));
+    registry.register(make_tool_with_caps("web_search", vec!["web_access"]));
 
-    let skills = vec![
-        "web_search".to_string(),
-        "typo_skill".to_string(),
-        "nonexistent".to_string(),
-    ];
-    let defs = registry.definitions_for_skills(&skills);
+    let result = registry.tools_for_capabilities(&["file_read".to_string()]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].name, "file_read");
+}
 
-    // Only "web_search" should match; the mismatched names produce warnings
-    // but don't affect the result for the matching skill.
-    assert_eq!(defs.len(), 1, "Only matching skill should be returned");
-    assert_eq!(defs[0].name, "web_search");
+#[test]
+fn test_tools_for_capabilities_multi_capability_tool() {
+    let registry = ToolRegistry::new();
+    registry.register(make_tool_with_caps("web_fetch", vec!["web_access"]));
+
+    let result = registry.tools_for_capabilities(&["web_access".to_string()]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].name, "web_fetch");
+
+    let result = registry.tools_for_capabilities(&["shell_execute".to_string()]);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_tools_for_capabilities_empty_returns_empty() {
+    let registry = ToolRegistry::new();
+    registry.register(make_tool_with_caps("file_read", vec!["file_read"]));
+
+    let result = registry.tools_for_capabilities(&[]);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_tools_for_capabilities_no_capability_tools_excluded() {
+    let registry = ToolRegistry::new();
+    registry.register(make_tool_with_caps("orphan_tool", vec![]));
+
+    let result = registry.tools_for_capabilities(&["file_read".to_string()]);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_tools_for_capabilities_with_deny_basic() {
+    let registry = ToolRegistry::new();
+    registry.register(make_tool_with_caps("file_read", vec!["file_read"]));
+    registry.register(make_tool_with_caps("web_search", vec!["web_access"]));
+    registry.register(make_tool_with_caps("shell", vec!["shell_execute"]));
+
+    let result = registry.tools_for_capabilities_with_deny(
+        &["file_read".to_string(), "web_access".to_string()],
+        &["web_access".to_string()],
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].name, "file_read");
+}
+
+#[test]
+fn test_tools_for_capabilities_with_deny_excludes_any_denied() {
+    let registry = ToolRegistry::new();
+    registry.register(make_tool_with_caps("file_rw", vec!["file_read", "file_write"]));
+    registry.register(make_tool_with_caps("reader", vec!["file_read"]));
+
+    let result = registry.tools_for_capabilities_with_deny(
+        &["file_read".to_string()],
+        &["file_write".to_string()],
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].name, "reader");
 }

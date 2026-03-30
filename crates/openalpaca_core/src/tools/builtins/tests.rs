@@ -3,7 +3,8 @@ use super::*;
 #[test]
 fn test_builtin_tools_count_without_db() {
     let tools = builtin_tools(None, None, None, None, None);
-    assert_eq!(tools.len(), 5);
+    // 5 base tools + 2 workspace tools (workspace_read, workspace_write)
+    assert_eq!(tools.len(), 7);
 }
 
 #[test]
@@ -12,7 +13,8 @@ fn test_builtin_tools_count_with_db() {
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let tools = builtin_tools(Some(db), None, Some(dc), None, None);
-    assert_eq!(tools.len(), 6);
+    // 6 base tools (with memory_search) + 2 workspace tools (workspace_read, workspace_write)
+    assert_eq!(tools.len(), 8);
 }
 
 #[test]
@@ -25,24 +27,117 @@ fn test_all_tools_have_valid_definitions() {
 }
 
 #[test]
-fn test_builtin_tools_with_soul_context_includes_update_soul() {
+fn test_builtin_tools_with_persona_context_includes_update_persona() {
     use crate::bus::EventBus;
 
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
-    let ctx = SoulToolContext {
+    let ctx = PersonaToolContext {
         soul_path: dir.path().join("SOUL.md"),
+        user_path: dir.path().join("USER.md"),
+        identity_path: dir.path().join("IDENTITY.md"),
         backup_dir: dir.path().join("backups"),
         bus: EventBus::new(16),
         max_backups: None,
     };
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
-    let tools = builtin_tools_with_soul_context(Some(db), None, ctx, Some(dc), None, None);
-    assert_eq!(tools.len(), 7, "Should have 7 tools (6 base + update_soul)");
+    let tools = builtin_tools_with_persona_context(Some(db), None, ctx, Some(dc), None, None, None);
+    // 8 base (6 + 2 workspace) + 1 update_persona = 9 (no send since connector_send_provider is None)
+    assert_eq!(tools.len(), 9, "Should have 9 tools (8 base + update_persona)");
     assert!(
-        tools.iter().any(|t| t.definition.name == "update_soul"),
-        "update_soul tool must be present"
+        tools.iter().any(|t| t.definition.name == "update_persona"),
+        "update_persona tool must be present"
     );
+}
+
+// --- Gap 7.4: strict + input_examples snapshot tests ---
+
+#[test]
+fn test_all_tools_have_strict_enabled() {
+    use crate::bus::EventBus;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let ctx = PersonaToolContext {
+        soul_path: dir.path().join("SOUL.md"),
+        user_path: dir.path().join("USER.md"),
+        identity_path: dir.path().join("IDENTITY.md"),
+        backup_dir: dir.path().join("backups"),
+        bus: EventBus::new(16),
+        max_backups: None,
+    };
+    let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+    let provider: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
+    let tools = builtin_tools_with_persona_context(
+        Some(db), None, ctx, Some(dc), None, None, Some(provider),
+    );
+    for tool in &tools {
+        assert_eq!(
+            tool.definition.strict, Some(true),
+            "Tool '{}' should have strict: Some(true)",
+            tool.definition.name
+        );
+    }
+    // Also check workspace tool definitions
+    for def in workspace_tool_definitions() {
+        assert_eq!(
+            def.strict, Some(true),
+            "Tool '{}' should have strict: Some(true)",
+            def.name
+        );
+    }
+}
+
+#[test]
+fn test_all_tool_descriptions_are_detailed() {
+    let tools = builtin_tools(None, None, None, None, None);
+    for tool in &tools {
+        assert!(
+            tool.definition.description.len() > 100,
+            "Tool '{}' description is too short ({} chars): '{}'",
+            tool.definition.name,
+            tool.definition.description.len(),
+            tool.definition.description,
+        );
+    }
+}
+
+#[test]
+fn test_complex_tools_have_input_examples() {
+    use crate::bus::EventBus;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let ctx = PersonaToolContext {
+        soul_path: dir.path().join("SOUL.md"),
+        user_path: dir.path().join("USER.md"),
+        identity_path: dir.path().join("IDENTITY.md"),
+        backup_dir: dir.path().join("backups"),
+        bus: EventBus::new(16),
+        max_backups: None,
+    };
+    let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+    let provider: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
+    let tools = builtin_tools_with_persona_context(
+        Some(db), None, ctx, Some(dc), None, None, Some(provider),
+    );
+
+    let tools_needing_examples = ["update_persona", "send"];
+    for tool in &tools {
+        if tools_needing_examples.contains(&tool.definition.name.as_str()) {
+            assert!(
+                tool.definition.input_examples.is_some(),
+                "Tool '{}' should have input_examples",
+                tool.definition.name
+            );
+        }
+    }
+    // workspace_write also needs examples
+    for def in workspace_tool_definitions() {
+        if def.name == "workspace_write" {
+            assert!(def.input_examples.is_some(), "workspace_write should have input_examples");
+        }
+    }
 }
 
 // --- Issue 2: shell_execute 300s defense-in-depth timeout ---
@@ -80,7 +175,8 @@ fn test_builtin_tools_uses_explicit_workspace_root() {
 
     // Pass an explicit workspace root — should not fall back to current_dir()
     let tools = builtin_tools(None, None, None, None, Some(ws_root.clone()));
-    assert_eq!(tools.len(), 5);
+    // 5 base tools + 2 workspace tools (workspace_read, workspace_write)
+    assert_eq!(tools.len(), 7);
 
     // Verify tools were created (they compile and register without error
     // when given an explicit workspace root).
@@ -94,5 +190,27 @@ fn test_builtin_tools_falls_back_to_current_dir_when_none() {
     // When workspace_root is None, should fall back to current_dir()
     // This must not panic even if current_dir() is available.
     let tools = builtin_tools(None, None, None, None, None);
-    assert_eq!(tools.len(), 5);
+    // 5 base tools + 2 workspace tools (workspace_read, workspace_write)
+    assert_eq!(tools.len(), 7);
+}
+
+// --- json_to_cli_args ---
+
+#[test]
+fn test_json_to_cli_args_strings() {
+    let args = json_to_cli_args(&serde_json::json!({"name": "alice", "age": "30"}));
+    assert!(args.contains(&"--name=alice".to_string()));
+    assert!(args.contains(&"--age=30".to_string()));
+}
+
+#[test]
+fn test_json_to_cli_args_empty() {
+    let args = json_to_cli_args(&serde_json::json!({}));
+    assert!(args.is_empty());
+}
+
+#[test]
+fn test_json_to_cli_args_non_object() {
+    let args = json_to_cli_args(&serde_json::json!("not an object"));
+    assert!(args.is_empty());
 }

@@ -1,9 +1,21 @@
 use async_trait::async_trait;
+use dashmap::DashMap;
 use openalpaca_llm::ToolDefinition;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Per-invocation execution context passed to tools that need identity.
+/// Lightweight — no Arc deps, no DB handles. Just identity strings.
+#[derive(Debug, Clone, Default)]
+pub struct ToolContext {
+    pub agent_id: Option<String>,
+    pub task_id: Option<String>,
+    pub owner_id: Option<String>,
+    pub workspace_id: Option<String>,
+}
+
 /// Backend that executes a tool's logic.
+#[derive(Clone)]
 pub enum ToolBackend {
     BuiltIn(Arc<dyn BuiltInTool>),
     Http {
@@ -17,26 +29,57 @@ pub enum ToolBackend {
         args_template: Option<String>,
         timeout_secs: u64,
     },
+    Plugin(Arc<dyn openalpaca_api::plugin_traits::PluginToolExecutor>),
 }
 
 /// Trait for built-in tool implementations.
 #[async_trait]
 pub trait BuiltInTool: Send + Sync {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String>;
+
+    /// Execute with per-invocation context. Default delegates to execute().
+    /// Override for tools that need identity (owner_id, task_id, etc.).
+    async fn execute_with_context(
+        &self,
+        arguments: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<String, String> {
+        self.execute(arguments).await
+    }
 }
 
 /// A tool registered in the registry: its LLM-facing definition + execution backend.
+#[derive(Clone)]
 pub struct RegisteredTool {
     pub definition: ToolDefinition,
     pub backend: ToolBackend,
+    pub provides_capabilities: Vec<String>,
+    /// When true, SandboxManager skips the per-tool timeout for this tool.
+    /// Used for coordination tools that manage their own timeouts.
+    pub exempt_from_timeout: bool,
 }
 
 /// Central registry mapping tool names to definitions and execution backends.
 ///
-/// Populated at startup (built-ins + user TOML), then shared as `Arc<ToolRegistry>`.
-/// All read methods are `&self` — no locking needed after init.
+/// Backed by `DashMap` for lock-free concurrent reads and writes.
+/// Shared as `Arc<ToolRegistry>` — tools can be registered and removed at runtime
+/// (e.g. when plugins load/unload) without requiring `&mut self`.
 pub struct ToolRegistry {
-    tools: HashMap<String, RegisteredTool>,
+    tools: DashMap<String, RegisteredTool>,
+    http_client: reqwest::Client,
+}
+
+impl Clone for ToolRegistry {
+    fn clone(&self) -> Self {
+        let new_tools = DashMap::new();
+        for entry in self.tools.iter() {
+            new_tools.insert(entry.key().clone(), entry.value().clone());
+        }
+        Self {
+            tools: new_tools,
+            http_client: self.http_client.clone(),
+        }
+    }
 }
 
 impl Default for ToolRegistry {
@@ -47,57 +90,42 @@ impl Default for ToolRegistry {
 
 impl ToolRegistry {
     pub fn new() -> Self {
+        let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                attempt.error("too many redirects")
+            } else if let Err(e) =
+                crate::tools::url_validation::validate_url(attempt.url().as_str())
+            {
+                attempt.error(format!("redirect blocked by SSRF policy: {}", e))
+            } else {
+                attempt.follow()
+            }
+        });
+        let http_client = reqwest::Client::builder()
+            .redirect(redirect_policy)
+            .build()
+            .expect("Failed to create shared HTTP client");
+
         Self {
-            tools: HashMap::new(),
+            tools: DashMap::new(),
+            http_client,
         }
     }
 
-    /// Register a tool. Called only during startup before wrapping in Arc.
-    pub fn register(&mut self, tool: RegisteredTool) {
+    /// Register a tool. Safe to call at any time, including after wrapping in Arc.
+    pub fn register(&self, tool: RegisteredTool) {
         self.tools.insert(tool.definition.name.clone(), tool);
     }
 
-    /// Look up a tool by name.
-    pub fn get(&self, name: &str) -> Option<&RegisteredTool> {
-        self.tools.get(name)
+    /// Remove a tool by name. Returns true if the tool existed.
+    pub fn remove(&self, name: &str) -> bool {
+        self.tools.remove(name).is_some()
     }
 
-    /// Return tool definitions filtered by skill names.
-    /// If `skill_names` is empty, returns an empty list (least-privilege:
-    /// agents without explicit skills get no tools from the registry).
-    /// The caller (`resolve_agent_tools`) adds workspace tools separately.
-    /// If non-empty but no names match, also returns empty.
-    /// Logs warnings for skill names that don't match any registered tool.
-    pub fn definitions_for_skills(&self, skill_names: &[String]) -> Vec<ToolDefinition> {
-        if skill_names.is_empty() {
-            tracing::debug!(
-                "definitions_for_skills called with empty skills — returning empty (least-privilege)"
-            );
-            return Vec::new();
-        }
-
-        // Warn for each skill name that doesn't match a registered tool.
-        // This helps catch typos in agent config files and stale skill references.
-        // Skip runtime-contextual tools that are resolved outside the registry
-        // (workspace tools by ContextualToolExecutor, memory_search by resolve_agent_tools).
-        const RUNTIME_TOOLS: &[&str] = &["workspace_read", "workspace_write", "memory_search"];
-        for skill in skill_names {
-            if !self.tools.contains_key(skill) && !RUNTIME_TOOLS.contains(&skill.as_str()) {
-                tracing::warn!(
-                    skill = %skill,
-                    "Skill name '{}' does not match any registered tool — \
-                     the agent will not receive this tool. Check for typos in \
-                     the agent's skill configuration.",
-                    skill,
-                );
-            }
-        }
-
-        self.tools
-            .values()
-            .filter(|t| skill_names.contains(&t.definition.name))
-            .map(|t| t.definition.clone())
-            .collect()
+    /// Look up a tool by name. Returns a clone because DashMap guards
+    /// must not be held across await points.
+    pub fn get(&self, name: &str) -> Option<RegisteredTool> {
+        self.tools.get(name).map(|r| r.value().clone())
     }
 
     /// Execute a tool by name.
@@ -109,33 +137,72 @@ impl ToolRegistry {
         tool_name: &str,
         arguments: &serde_json::Value,
     ) -> Result<String, String> {
-        let tool = self
-            .tools
-            .get(tool_name)
-            .ok_or_else(|| format!("Unknown tool: '{}'", tool_name))?;
+        // Extract definition + backend and drop the DashMap guard before any .await
+        let (definition, backend) = {
+            let entry = self
+                .tools
+                .get(tool_name)
+                .ok_or_else(|| format!("Unknown tool: '{}'", tool_name))?;
+            (entry.definition.clone(), entry.backend.clone())
+        };
 
         // Pre-validate arguments against the tool's JSON Schema definition.
-        validate_tool_arguments(&tool.definition, arguments)?;
+        validate_tool_arguments(&definition, arguments)?;
 
-        match &tool.backend {
+        match &backend {
             ToolBackend::BuiltIn(handler) => handler.execute(arguments).await,
             ToolBackend::Http {
                 method,
                 url,
                 headers,
                 timeout_secs,
-            } => execute_http(method, url, headers, *timeout_secs, arguments).await,
+            } => {
+                execute_http(&self.http_client, method, url, headers, *timeout_secs, arguments)
+                    .await
+            }
             ToolBackend::Command {
                 command,
                 args_template,
                 timeout_secs,
             } => execute_command(command, args_template.as_deref(), *timeout_secs, arguments).await,
+            ToolBackend::Plugin(executor) => executor.execute(tool_name, arguments).await,
         }
     }
 
-    /// List registered tool names (used by InputSanitizer via ToolExecutor trait).
+    /// Execute a tool by name with per-invocation context.
+    /// Routes to BuiltInTool::execute_with_context() for BuiltIn backends.
+    /// For Http/Command/Plugin backends, context is ignored (they don't need identity).
+    pub async fn execute_with_context(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
+        // Extract definition + backend and drop the DashMap guard before any .await
+        let (definition, backend) = {
+            let entry = self
+                .tools
+                .get(tool_name)
+                .ok_or_else(|| format!("Tool '{}' not found in registry", tool_name))?;
+            (entry.definition.clone(), entry.backend.clone())
+        };
+
+        // Pre-validate arguments (same validation as execute())
+        validate_tool_arguments(&definition, arguments)?;
+
+        match &backend {
+            ToolBackend::BuiltIn(implementation) => {
+                implementation.execute_with_context(arguments, ctx).await
+            }
+            ToolBackend::Http { .. } | ToolBackend::Command { .. } | ToolBackend::Plugin(_) => {
+                self.execute(tool_name, arguments).await
+            }
+        }
+    }
+
+    /// List registered tool names.
     pub fn registered_tool_names(&self) -> Vec<String> {
-        self.tools.keys().cloned().collect()
+        self.tools.iter().map(|e| e.key().clone()).collect()
     }
 
     /// Number of registered tools.
@@ -143,21 +210,74 @@ impl ToolRegistry {
         self.tools.len()
     }
 
+    /// Check if a tool is exempt from the per-tool sandbox timeout.
+    pub fn is_exempt_from_timeout(&self, tool_name: &str) -> bool {
+        self.tools
+            .get(tool_name)
+            .map(|t| t.value().exempt_from_timeout)
+            .unwrap_or(false)
+    }
+
+    /// Returns tool definitions for all tools whose `provides_capabilities`
+    /// intersects with the requested capabilities. Empty capabilities returns empty.
+    pub fn tools_for_capabilities(&self, capabilities: &[String]) -> Vec<ToolDefinition> {
+        if capabilities.is_empty() {
+            return vec![];
+        }
+        self.tools
+            .iter()
+            .filter(|entry| {
+                entry.value().provides_capabilities
+                    .iter()
+                    .any(|cap| capabilities.contains(cap))
+            })
+            .map(|entry| entry.value().definition.clone())
+            .collect()
+    }
+
+    /// Returns tool definitions for all tools whose `provides_capabilities`
+    /// intersects with the requested capabilities, excluding tools that provide
+    /// any denied capability.
+    pub fn tools_for_capabilities_with_deny(
+        &self,
+        capabilities: &[String],
+        denied: &[String],
+    ) -> Vec<ToolDefinition> {
+        if capabilities.is_empty() {
+            return vec![];
+        }
+        self.tools
+            .iter()
+            .filter(|entry| {
+                entry.value().provides_capabilities
+                    .iter()
+                    .any(|cap| capabilities.contains(cap))
+            })
+            .filter(|entry| {
+                !entry.value().provides_capabilities
+                    .iter()
+                    .any(|cap| denied.contains(cap))
+            })
+            .map(|entry| entry.value().definition.clone())
+            .collect()
+    }
+
     /// Return the names of tools that use command backends (i.e., execute via shell).
     /// These should be treated like shell tools for injection sanitization.
     pub fn command_backend_tool_names(&self) -> Vec<String> {
         self.tools
             .iter()
-            .filter_map(|(name, tool)| match &tool.backend {
-                ToolBackend::Command { .. } => Some(name.clone()),
-                _ => None,
+            .filter_map(|entry| match &entry.value().backend {
+                ToolBackend::Command { .. } => Some(entry.key().clone()),
+                ToolBackend::BuiltIn(_) | ToolBackend::Http { .. } | ToolBackend::Plugin(_) => None,
             })
             .collect()
     }
 }
 
-/// Execute an HTTP backend tool call.
+/// Execute an HTTP backend tool call using the shared HTTP client.
 async fn execute_http(
+    client: &reqwest::Client,
     method: &str,
     url_template: &str,
     headers: &HashMap<String, String>,
@@ -195,23 +315,6 @@ async fn execute_http(
     // redirect requests to internal/private endpoints.
     crate::tools::url_validation::validate_url(&url)?;
 
-    // Custom redirect policy: validate each redirect target via SSRF checks.
-    // reqwest::Client::new() uses the default policy which follows redirects
-    // blindly, allowing a malicious external server to redirect to internal/
-    // private endpoints (e.g., http://169.254.169.254/ or http://127.0.0.1/).
-    let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
-        if attempt.previous().len() >= 10 {
-            attempt.error("too many redirects")
-        } else if let Err(e) = crate::tools::url_validation::validate_url(attempt.url().as_str()) {
-            attempt.error(format!("redirect blocked by SSRF policy: {}", e))
-        } else {
-            attempt.follow()
-        }
-    });
-    let client = reqwest::Client::builder()
-        .redirect(redirect_policy)
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     let timeout = std::time::Duration::from_secs(timeout_secs);
 
     let mut request = match method.to_uppercase().as_str() {

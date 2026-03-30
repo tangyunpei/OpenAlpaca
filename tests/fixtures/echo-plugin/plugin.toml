@@ -1,0 +1,12 @@
+[plugin]
+name = "echo-test"
+version = "0.1.0"
+description = "Test plugin that echoes tool calls"
+entry = "./echo-server.sh"
+mcp_compatible = true
+
+[capabilities]
+provides = ["testing"]
+
+[types]
+tools = true

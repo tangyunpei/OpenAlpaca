@@ -2,7 +2,10 @@ pub mod agent;
 pub mod bus;
 pub mod chat;
 pub mod context;
+pub mod context_budget;
 pub mod daemon_config;
+pub mod prompt;
+pub mod prompt_ctx;
 pub mod events;
 pub mod gateway;
 pub mod lane;
@@ -13,6 +16,7 @@ pub mod runner;
 pub mod security;
 pub mod tools;
 pub mod types;
+pub mod utils;
 
 #[cfg(test)]
 pub(crate) mod test_util;

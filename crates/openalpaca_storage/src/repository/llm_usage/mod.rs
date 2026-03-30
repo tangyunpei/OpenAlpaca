@@ -135,6 +135,33 @@ impl<'a> LlmUsageRepository<'a> {
         })
     }
 
+    /// Replace (overwrite) a daily usage row. Used for shutdown flush where the
+    /// CostTracker holds cumulative totals that already include previously-persisted data.
+    pub fn replace_daily_usage(&self, usage: &LlmUsageDaily) -> Result<()> {
+        self.db.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO llm_usage_daily (date, agent_id, model, total_requests, total_input_tokens, total_output_tokens, total_cost_usd)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(date, agent_id, model) DO UPDATE SET
+                   total_requests = excluded.total_requests,
+                   total_input_tokens = excluded.total_input_tokens,
+                   total_output_tokens = excluded.total_output_tokens,
+                   total_cost_usd = excluded.total_cost_usd",
+                rusqlite::params![
+                    usage.date,
+                    usage.agent_id,
+                    usage.model,
+                    usage.total_requests,
+                    usage.total_input_tokens,
+                    usage.total_output_tokens,
+                    usage.total_cost_usd,
+                ],
+            )
+            .context("Failed to replace daily usage")?;
+            Ok(())
+        })
+    }
+
     /// Get all usage (no agent filter).
     pub fn get_all_usage(&self, limit: usize) -> Result<Vec<LlmCallLog>> {
         self.db.with_connection(|conn| {
@@ -212,6 +239,33 @@ impl<'a> LlmUsageRepository<'a> {
                 logs.push(row?);
             }
             Ok(logs)
+        })
+    }
+
+    /// Get all usage rows for today (all agents/models). Used to seed CostTracker at startup.
+    pub fn get_today_usage(&self) -> Result<Vec<LlmUsageDaily>> {
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT date, agent_id, model, total_requests, total_input_tokens, total_output_tokens, total_cost_usd
+                 FROM llm_usage_daily WHERE date = ?",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![today], |row| {
+                Ok(LlmUsageDaily {
+                    date: row.get(0)?,
+                    agent_id: row.get(1)?,
+                    model: row.get(2)?,
+                    total_requests: row.get(3)?,
+                    total_input_tokens: row.get(4)?,
+                    total_output_tokens: row.get(5)?,
+                    total_cost_usd: row.get(6)?,
+                })
+            })?;
+            let mut usage = Vec::new();
+            for row in rows {
+                usage.push(row?);
+            }
+            Ok(usage)
         })
     }
 

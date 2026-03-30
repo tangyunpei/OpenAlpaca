@@ -12,51 +12,17 @@ use axum::{
     response::IntoResponse,
 };
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
 use openalpaca_core::context::TaskEntryStatus;
 use openalpaca_core::events::SystemEvent;
 use openalpaca_core::lane::TaskLaneStatus;
-use openalpaca_core::orchestrator::{ParsedOutcomeFields, parse_outcome};
+use openalpaca_core::orchestrator::parse_outcome;
 use openalpaca_storage::{Task, TaskRepository, TaskStatus};
 
+use super::tasks_types::*;
 use crate::AppState;
-
-// ── Request / Response Types ──────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct CreateTaskRequest {
-    pub title: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub priority: Option<i32>,
-    pub created_by: String,
-    pub source_lane: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ListTasksQuery {
-    pub created_by: Option<String>,
-    pub status: Option<String>,
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TaskActionRequest {
-    pub action: String, // "cancel", "pause", "resume"
-}
-
-#[derive(Debug, Serialize)]
-pub struct TaskResponse {
-    pub task: Task,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub assignments: Option<Vec<openalpaca_storage::TaskAgentAssignment>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub outcome: Option<ParsedOutcomeFields>,
-}
 
 // ── Handlers ──────────────────────────────────────────────────────
 

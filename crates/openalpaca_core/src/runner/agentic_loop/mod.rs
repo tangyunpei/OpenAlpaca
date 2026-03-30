@@ -1,395 +1,103 @@
-use crate::agent::subagent::AgentConstraints;
+mod backend;
+mod config;
+mod context;
+mod tool_helpers;
+
+// Public API (unchanged from before the split)
+pub use config::{LoopConfig, LoopFinishReason, LoopResult, StreamCallback};
+
+// Internal re-exports so the core loop and tests can access submodule items
+use backend::LlmBackend;
+pub(crate) use context::{compress_context, estimate_messages_tokens};
+use tool_helpers::{format_tool_error, format_tool_error_with_hint, truncate_tool_result};
+#[cfg(test)]
+use tool_helpers::MAX_TOOL_RESULT_SIZE;
+
+use chrono::Utc;
 use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+use crate::tools::registry::ToolContext;
 use openalpaca_llm::{
-    ChatMessage, ChatRequest, FinishReason, LlmProvider, LlmRouter, LlmRouterError, RequestContext,
-    RouterRequest, ToolChoice, ToolDefinition,
+    ChatMessage, FinishReason, LlmProvider, LlmRouter, LlmRouterError, RequestContext,
+    ToolDefinition,
 };
+#[cfg(test)]
+use openalpaca_llm::ChatRequest;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-/// Maximum tool result size before truncation (32 KB).
-const MAX_TOOL_RESULT_SIZE: usize = 32 * 1024;
+/// Maximum retries when LLM response is truncated due to max_tokens.
+const MAX_TOKENS_RETRIES: usize = 2;
 
-/// Truncate tool result text if it exceeds the byte limit to prevent blowing
-/// up the LLM context window. Uses byte-aware truncation at char boundaries.
-fn truncate_tool_result(text: String) -> String {
-    if text.len() <= MAX_TOOL_RESULT_SIZE {
-        return text;
-    }
-    // Find the nearest char boundary at or before MAX_TOOL_RESULT_SIZE bytes
-    let mut end = MAX_TOOL_RESULT_SIZE;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!(
-        "{}\n\n[... truncated: showing first {} of {} bytes]",
-        &text[..end],
-        end,
-        text.len()
-    )
+/// Accumulates loop execution state and builds `LoopResult` on exit.
+/// Private to this module — avoids repeating the 8-field struct construction
+/// at every exit point.
+struct LoopState {
+    start: Instant,
+    rounds: usize,
+    total_input: u32,
+    total_output: u32,
+    tool_calls_made: usize,
+    last_assistant_content: String,
+    last_model: Option<String>,
+    cost_warning_emitted: bool,
+    max_tokens_retries: usize,
+    last_cost: f64,
 }
 
-/// Format a tool error message with the standard `[tool_error]` prefix.
-/// Centralizes the error format so the LLM always sees a consistent pattern.
-fn format_tool_error(msg: &str) -> String {
-    format!("[tool_error] {}", msg)
-}
-
-/// Estimate tokens for a single content part.
-fn estimate_part_tokens(part: &openalpaca_llm::ContentPart) -> u32 {
-    match part {
-        openalpaca_llm::ContentPart::Text { text } => (text.len() / 4) as u32,
-        openalpaca_llm::ContentPart::Image { detail, .. } => {
-            match detail.as_deref() {
-                Some("low") => 85,
-                _ => 1590, // high/default — one Anthropic tile
-            }
-        }
-        openalpaca_llm::ContentPart::Audio { data, .. } => {
-            // ~25 tokens/sec; ensure non-empty audio gets at least 25 tokens
-            ((data.len() as f64 / 4096.0) * 25.0).ceil().max(25.0) as u32
-        }
-        openalpaca_llm::ContentPart::Document { extracted_text, .. } => extracted_text
-            .as_ref()
-            .map_or(500, |t| (t.len() / 4) as u32),
-        openalpaca_llm::ContentPart::FileRef { .. } => 50,
-    }
-}
-
-/// Estimate tokens in a message list using the 1 token ≈ 4 bytes heuristic.
-/// When multimodal parts are present, estimates per-part tokens instead.
-/// Consistent with `estimate_request_tokens` in the LLM router.
-fn estimate_messages_tokens(messages: &[ChatMessage]) -> u32 {
-    let tokens: u32 = messages
-        .iter()
-        .map(|m| {
-            let content_tokens: u32 = if let Some(ref parts) = m.parts {
-                parts.iter().map(estimate_part_tokens).sum()
-            } else {
-                (m.content.len() / 4) as u32
-            };
-            let tool_call_tokens: u32 = m.tool_calls.as_ref().map_or(0, |tcs| {
-                tcs.iter()
-                    .map(|tc| ((tc.name.len() + tc.arguments.to_string().len()) / 4) as u32)
-                    .sum()
-            });
-            content_tokens + tool_call_tokens
-        })
-        .sum();
-    tokens.max(100)
-}
-
-/// Compress context by replacing older rounds with a compact summary.
-///
-/// Preserves:
-/// - Message 0 (system prompt)
-/// - Message 1 (initial user query)
-/// - The last `tail_keep × 3` messages (most recent rounds)
-///
-/// Everything in between is replaced with a single user message summarizing
-/// what happened in those earlier rounds (tool calls made, brief results).
-fn compress_context(messages: &mut Vec<ChatMessage>, tail_keep: usize) {
-    // Each "round" is roughly: 1 assistant message + N tool results ≈ 3 messages
-    let keep_tail = tail_keep * 3;
-    if messages.len() <= 2 + keep_tail {
-        return; // Nothing to compress
-    }
-
-    let compress_end = messages.len() - keep_tail;
-
-    // Build summary from messages[2..compress_end]
-    let mut summary_parts = Vec::new();
-    for msg in &messages[2..compress_end] {
-        // Summarize multimodal parts when present
-        if let Some(ref parts) = msg.parts {
-            let role_label = match msg.role {
-                openalpaca_llm::Role::User => "User",
-                openalpaca_llm::Role::Assistant => "Assistant",
-                openalpaca_llm::Role::System => "System",
-                openalpaca_llm::Role::Tool => "Tool",
-            };
-            for part in parts {
-                match part {
-                    openalpaca_llm::ContentPart::Image { .. } => {
-                        summary_parts.push(format!("- {role_label}: [sent an image]"));
-                    }
-                    openalpaca_llm::ContentPart::Audio { .. } => {
-                        summary_parts.push(format!("- {role_label}: [sent audio]"));
-                    }
-                    openalpaca_llm::ContentPart::Document {
-                        filename,
-                        extracted_text,
-                        ..
-                    } => {
-                        let excerpt = extracted_text
-                            .as_ref()
-                            .map(|t| truncate_for_summary(t, 200))
-                            .unwrap_or_default();
-                        summary_parts
-                            .push(format!("- {role_label}: [attached: {filename}] {excerpt}"));
-                    }
-                    openalpaca_llm::ContentPart::FileRef { filename, .. } => {
-                        summary_parts.push(format!("- {role_label}: [attached: {filename}]"));
-                    }
-                    openalpaca_llm::ContentPart::Text { text } if !text.is_empty() => {
-                        summary_parts.push(format!(
-                            "- {role_label}: {}",
-                            truncate_for_summary(text, 200)
-                        ));
-                    }
-                    _ => {}
-                }
-            }
-            continue;
-        }
-
-        match msg.role {
-            openalpaca_llm::Role::Assistant => {
-                if !msg.content.is_empty() {
-                    summary_parts.push(format!(
-                        "- Agent: {}",
-                        truncate_for_summary(&msg.content, 200)
-                    ));
-                }
-                if let Some(ref tcs) = msg.tool_calls {
-                    for tc in tcs {
-                        summary_parts.push(format!("- Called: {}", tc.name));
-                    }
-                }
-            }
-            openalpaca_llm::Role::Tool => {
-                summary_parts.push(format!(
-                    "- Result: {}",
-                    truncate_for_summary(&msg.content, 300)
-                ));
-            }
-            _ => {}
-        }
-    }
-
-    let summary = format!(
-        "[Context compressed: {} earlier messages summarized]\n{}",
-        compress_end - 2,
-        summary_parts.join("\n")
-    );
-
-    // Replace messages[2..compress_end] with a single user message
-    messages.splice(
-        2..compress_end,
-        std::iter::once(ChatMessage::user(&summary)),
-    );
-}
-
-/// Truncate text for inclusion in a compressed summary.
-fn truncate_for_summary(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
-        text.to_string()
-    } else {
-        let end = text.floor_char_boundary(max_chars);
-        format!("{}...", &text[..end])
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct LoopConfig {
-    pub max_rounds: usize,
-    pub max_tools_per_round: usize,
-    pub max_tool_runtime: Duration,
-    pub max_cost: f64,
-    /// Override model for this loop (used by LlmRouter).
-    pub model: Option<String>,
-    /// Fallback models (informational — fallback is handled by router's fallback chain).
-    pub fallback_models: Vec<String>,
-    /// Agent model constraints for access control enforcement.
-    pub agent_constraints: Option<AgentConstraints>,
-    /// Input token rate ($ per 1M tokens) for cost estimation fallback.
-    /// Set from model registry pricing when available.
-    pub fallback_input_rate: f64,
-    /// Output token rate ($ per 1M tokens) for cost estimation fallback.
-    /// Set from model registry pricing when available.
-    pub fallback_output_rate: f64,
-    /// Maximum estimated input tokens before triggering context compression.
-    /// When `> 0` and estimated tokens exceed this, older rounds are compressed
-    /// into a summary, preserving the system prompt + initial query + recent rounds.
-    /// Default: `0` (disabled — auto-set from model context window × 0.6 via
-    /// `with_context_window()`).
-    pub max_context_tokens: u32,
-    /// Number of most recent conversation rounds to always preserve during
-    /// context compression. Each "round" is roughly 3 messages (assistant +
-    /// tool results). Default: `4`.
-    pub context_tail_keep: usize,
-    /// Tool choice to force on the first round only (`rounds == 0`).
-    /// After the first round, reverts to `None` (auto).
-    pub initial_tool_choice: Option<ToolChoice>,
-}
-
-impl Default for LoopConfig {
-    fn default() -> Self {
+impl LoopState {
+    fn new() -> Self {
         Self {
-            max_rounds: 15,
-            max_tools_per_round: 5,
-            max_tool_runtime: Duration::from_secs(60),
-            max_cost: 1.00,
-            model: None,
-            fallback_models: Vec::new(),
-            agent_constraints: None,
-            fallback_input_rate: FALLBACK_INPUT_RATE,
-            fallback_output_rate: FALLBACK_OUTPUT_RATE,
-            max_context_tokens: 0,
-            context_tail_keep: 4,
-            initial_tool_choice: None,
+            start: Instant::now(),
+            rounds: 0,
+            total_input: 0,
+            total_output: 0,
+            tool_calls_made: 0,
+            last_assistant_content: String::new(),
+            last_model: None,
+            cost_warning_emitted: false,
+            max_tokens_retries: 0,
+            last_cost: 0.0,
+        }
+    }
+
+    /// Build a `LoopResult` using accumulated state.
+    fn result(&self, finish_reason: LoopFinishReason) -> LoopResult {
+        LoopResult {
+            final_content: self.last_assistant_content.clone(),
+            rounds_used: self.rounds,
+            total_input_tokens: self.total_input,
+            total_output_tokens: self.total_output,
+            tool_calls_made: self.tool_calls_made,
+            finish_reason,
+            model_used: self.last_model.clone(),
+            elapsed: self.start.elapsed(),
+            estimated_cost: self.last_cost,
+        }
+    }
+
+    /// Build a `LoopResult` with custom final content.
+    fn result_with_content(
+        &self,
+        content: String,
+        finish_reason: LoopFinishReason,
+    ) -> LoopResult {
+        LoopResult {
+            final_content: content,
+            rounds_used: self.rounds,
+            total_input_tokens: self.total_input,
+            total_output_tokens: self.total_output,
+            tool_calls_made: self.tool_calls_made,
+            finish_reason,
+            model_used: self.last_model.clone(),
+            elapsed: self.start.elapsed(),
+            estimated_cost: self.last_cost,
         }
     }
 }
 
-impl LoopConfig {
-    /// Build from daemon defaults + agent-level overrides.
-    /// Works with both `AgentDefaults` and `LeadAgentDefaults` since they share the
-    /// same field names. Pass the raw field values to keep the factory generic.
-    ///
-    /// Validates the agent's configured model against its model access constraints.
-    /// If the model is denied, falls back to `None` (router default) with a warning.
-    pub fn from_defaults(
-        max_rounds: usize,
-        max_tools_per_round: usize,
-        max_tool_runtime_secs: u64,
-        max_cost: f64,
-        agent: &crate::agent::subagent::SubAgent,
-    ) -> Self {
-        // Validate the agent's configured model against its model access constraints
-        let model = if let Some(ref model_id) = agent.llm_config.model {
-            match CapabilityManager::check_model_access(&agent.id, model_id, &agent.constraints) {
-                Ok(()) => Some(model_id.clone()),
-                Err(violation) => {
-                    tracing::warn!(
-                        agent_id = %agent.id,
-                        model = %model_id,
-                        "Model access denied for agent, falling back to router default: {}",
-                        violation,
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        Self {
-            max_rounds: agent.constraints.max_rounds.unwrap_or(max_rounds),
-            max_tools_per_round,
-            max_tool_runtime: Duration::from_secs(
-                agent
-                    .constraints
-                    .timeout_seconds
-                    .unwrap_or(max_tool_runtime_secs),
-            ),
-            max_cost: agent.constraints.max_cost_per_task.unwrap_or(max_cost),
-            model,
-            fallback_models: agent.llm_config.fallback_models.clone(),
-            agent_constraints: Some(agent.constraints.clone()),
-            fallback_input_rate: FALLBACK_INPUT_RATE,
-            fallback_output_rate: FALLBACK_OUTPUT_RATE,
-            max_context_tokens: 0,
-            context_tail_keep: 4,
-            initial_tool_choice: None,
-        }
-    }
-
-    /// Set cost estimation rates from model registry pricing.
-    /// If the model is found in the registry, uses its actual pricing.
-    /// Otherwise keeps the default fallback rates (Sonnet-like).
-    pub fn with_model_pricing(
-        mut self,
-        registry: &openalpaca_llm::ModelRegistry,
-        model_id: Option<&str>,
-    ) -> Self {
-        if let Some(model) = model_id
-            && let Some(pricing) = registry.get_pricing(model)
-        {
-            self.fallback_input_rate = pricing.input_price_per_million;
-            self.fallback_output_rate = pricing.output_price_per_million;
-        }
-        self
-    }
-
-    /// Set context compression budget from model registry.
-    /// Uses 60% of the model's context window as the compression trigger threshold.
-    /// Only sets the budget if `max_context_tokens` is still 0 (not explicitly configured).
-    pub fn with_context_window(
-        mut self,
-        registry: &openalpaca_llm::ModelRegistry,
-        model_id: Option<&str>,
-    ) -> Self {
-        if self.max_context_tokens == 0
-            && let Some(model) = model_id
-            && let Some(info) = registry.get_model_info(model)
-            && info.context_window > 0
-        {
-            self.max_context_tokens = (info.context_window as f64 * 0.6) as u32;
-        }
-        self
-    }
-
-    /// Build from `AgentDefaults` + agent constraint overrides.
-    pub fn from_agent(
-        defaults: &crate::daemon_config::AgentDefaults,
-        agent: &crate::agent::subagent::SubAgent,
-    ) -> Self {
-        Self::from_defaults(
-            defaults.max_rounds,
-            defaults.max_tools_per_round,
-            defaults.max_tool_runtime_secs,
-            defaults.max_cost,
-            agent,
-        )
-    }
-
-    /// Build from `LeadAgentDefaults` + agent constraint overrides.
-    pub fn from_lead_agent(
-        defaults: &crate::daemon_config::LeadAgentDefaults,
-        agent: &crate::agent::subagent::SubAgent,
-    ) -> Self {
-        Self::from_defaults(
-            defaults.max_rounds,
-            defaults.max_tools_per_round,
-            defaults.max_tool_runtime_secs,
-            defaults.max_cost,
-            agent,
-        )
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct LoopResult {
-    pub final_content: String,
-    pub rounds_used: usize,
-    pub total_input_tokens: u32,
-    pub total_output_tokens: u32,
-    pub tool_calls_made: usize,
-    pub finish_reason: LoopFinishReason,
-    /// Actual model from API response (may differ from requested due to fallback).
-    pub model_used: Option<String>,
-    /// Wall-clock time for the entire loop execution.
-    pub elapsed: Duration,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum LoopFinishReason {
-    Complete,
-    MaxRounds,
-    CostExceeded,
-    Cancelled,
-    Error(String),
-}
-
-/// Run the agentic loop (legacy, test-only).
-///
-/// Production code should use [`run_agentic_loop_routed`] instead, which
-/// routes through `LlmRouter` with Arc-wrapped tools (cheap ref-count clone
-/// per round). This legacy version deep-clones `Vec<ToolDefinition>` each
-/// round, which is acceptable for test usage but wasteful in production.
+/// Legacy/test entry point — direct provider, no retry.
 ///
 /// When `sandbox` is `Some`, tool calls are routed through the SandboxManager
 /// with capability checks, input sanitization, and timeout enforcement.
@@ -403,315 +111,26 @@ pub async fn run_agentic_loop(
     sandbox: Option<&SandboxManager>,
     agent_id: &str,
     sandbox_policy: Option<&SandboxPolicy>,
+    context_budget: Option<&crate::context_budget::ContextBudgetManager>,
     cancel_token: Option<CancellationToken>,
+    tool_context: Option<&ToolContext>,
 ) -> LoopResult {
-    let start = Instant::now();
-    let mut messages = initial_messages;
-    let mut rounds = 0usize;
-    let mut total_input = 0u32;
-    let mut total_output = 0u32;
-    let mut tool_calls_made = 0usize;
-    let mut last_assistant_content = String::new();
-    let mut last_model: Option<String> = None;
-
-    // Incremental token estimation: track cumulative count and only estimate
-    // newly-appended messages each round, rather than re-scanning the full list.
-    let mut known_token_count: u32 = estimate_messages_tokens(&messages);
-
-    tracing::info!(
-        agent_id = agent_id,
-        tools_count = tools.len(),
-        max_rounds = config.max_rounds,
-        max_cost = config.max_cost,
-        "Agentic loop started (direct provider)"
-    );
-
-    loop {
-        // Check cancellation before each round
-        if let Some(ref token) = cancel_token
-            && token.is_cancelled()
-        {
-            tracing::info!(
-                agent_id = agent_id,
-                rounds = rounds,
-                "Agentic loop cancelled"
-            );
-            return LoopResult {
-                final_content: last_assistant_content,
-                rounds_used: rounds,
-                total_input_tokens: total_input,
-                total_output_tokens: total_output,
-                tool_calls_made,
-                finish_reason: LoopFinishReason::Cancelled,
-                model_used: last_model.clone(),
-                elapsed: start.elapsed(),
-            };
-        }
-
-        if rounds >= config.max_rounds {
-            tracing::info!(
-                agent_id = agent_id,
-                rounds = rounds,
-                "Agentic loop exiting: max rounds reached"
-            );
-            return LoopResult {
-                final_content: last_assistant_content,
-                rounds_used: rounds,
-                total_input_tokens: total_input,
-                total_output_tokens: total_output,
-                tool_calls_made,
-                finish_reason: LoopFinishReason::MaxRounds,
-                model_used: last_model.clone(),
-                elapsed: start.elapsed(),
-            };
-        }
-
-        let estimated_cost = estimate_cost(
-            total_input,
-            total_output,
-            config.fallback_input_rate,
-            config.fallback_output_rate,
-        );
-        if estimated_cost > config.max_cost {
-            tracing::info!(
-                agent_id = agent_id,
-                rounds = rounds,
-                "Agentic loop exiting: cost limit exceeded"
-            );
-            return LoopResult {
-                final_content: last_assistant_content,
-                rounds_used: rounds,
-                total_input_tokens: total_input,
-                total_output_tokens: total_output,
-                tool_calls_made,
-                finish_reason: LoopFinishReason::CostExceeded,
-                model_used: last_model.clone(),
-                elapsed: start.elapsed(),
-            };
-        }
-
-        // Context compression: if estimated tokens exceed the budget,
-        // compress older rounds into a summary to reduce cost and latency.
-        if config.max_context_tokens > 0 && known_token_count > config.max_context_tokens {
-            tracing::info!(
-                agent_id = agent_id,
-                estimated_tokens = known_token_count,
-                max_context_tokens = config.max_context_tokens,
-                messages_before = messages.len(),
-                "Compressing context: token budget exceeded"
-            );
-            compress_context(&mut messages, config.context_tail_keep);
-            known_token_count = estimate_messages_tokens(&messages);
-            tracing::info!(
-                agent_id = agent_id,
-                messages_after = messages.len(),
-                estimated_tokens_after = known_token_count,
-                "Context compressed"
-            );
-        }
-
-        let prev_msg_len = messages.len();
-
-        let request = ChatRequest {
-            messages: messages.clone(),
-            tools: tools.clone(),
-            model: None,
-            temperature: None,
-            max_tokens: None,
-            tool_choice: if rounds == 0 {
-                config.initial_tool_choice.clone()
-            } else {
-                None
-            },
-        };
-
-        tracing::debug!(
-            agent_id = agent_id,
-            round = rounds + 1,
-            messages_count = messages.len(),
-            "LLM call starting"
-        );
-
-        // Race LLM call against cancellation token (if present)
-        let llm_result = if let Some(ref token) = cancel_token {
-            tokio::select! {
-                result = provider.chat(request) => result,
-                _ = token.cancelled() => {
-                    tracing::info!(agent_id = agent_id, round = rounds + 1, "LLM call interrupted by cancellation");
-                    return LoopResult {
-                        final_content: last_assistant_content,
-                        rounds_used: rounds,
-                        total_input_tokens: total_input,
-                        total_output_tokens: total_output,
-                        tool_calls_made,
-                        finish_reason: LoopFinishReason::Cancelled,
-                        model_used: last_model.clone(),
-                        elapsed: start.elapsed(),
-                    };
-                }
-            }
-        } else {
-            provider.chat(request).await
-        };
-
-        match llm_result {
-            Ok(response) => {
-                total_input += response.usage.input_tokens;
-                total_output += response.usage.output_tokens;
-                rounds += 1;
-                last_model = Some(response.model.clone());
-
-                // Use actual input tokens as ground truth for our estimate
-                if response.usage.input_tokens > 0 {
-                    known_token_count = response.usage.input_tokens;
-                }
-
-                tracing::debug!(
-                    agent_id = agent_id,
-                    round = rounds,
-                    model = %response.model,
-                    input_tokens = response.usage.input_tokens,
-                    output_tokens = response.usage.output_tokens,
-                    finish_reason = ?response.finish_reason,
-                    "LLM call completed"
-                );
-
-                // Capture last content before any branching
-                if !response.content.is_empty() {
-                    last_assistant_content = response.content.clone();
-                }
-
-                if response.finish_reason == FinishReason::ToolUse
-                    && !response.tool_calls.is_empty()
-                {
-                    // Record assistant message with tool calls
-                    messages.push(ChatMessage::assistant_with_tools(&response));
-
-                    // Enforce max_tools_per_round
-                    let calls_this_round =
-                        response.tool_calls.len().min(config.max_tools_per_round);
-
-                    for tc in response.tool_calls.iter().take(calls_this_round) {
-                        // Enforce max_tool_calls from sandbox policy
-                        if let Some(policy) = sandbox_policy
-                            && let Some(max_calls) = policy.max_tool_calls
-                            && tool_calls_made >= max_calls as usize
-                        {
-                            let err = format_tool_error(
-                                "max_tool_calls limit reached — no more tool calls allowed",
-                            );
-                            messages.push(ChatMessage::tool_result(&tc.id, &err));
-                            continue;
-                        }
-
-                        tool_calls_made += 1;
-
-                        tracing::debug!(
-                            agent_id = agent_id,
-                            round = rounds,
-                            tool = %tc.name,
-                            tool_call_number = tool_calls_made,
-                            "Executing tool"
-                        );
-
-                        // Tool error convention: errors use format_tool_error()
-                        // so the LLM sees a consistent format regardless of the tool.
-                        let result_text = if let (Some(sbx), Some(policy)) =
-                            (sandbox, sandbox_policy)
-                        {
-                            // Route through sandbox
-                            match sbx.execute_tool(agent_id, tc, policy).await {
-                                Ok(output) => truncate_tool_result(output),
-                                Err(err) => {
-                                    truncate_tool_result(format_tool_error(&err.to_string()))
-                                }
-                            }
-                        } else {
-                            tracing::warn!(
-                                agent_id = agent_id,
-                                tool = tc.name,
-                                "Sandbox not configured — returning stub for tool call (misconfiguration?)"
-                            );
-                            format_tool_error(&format!(
-                                "tool '{}' not available — sandbox not configured",
-                                tc.name
-                            ))
-                        };
-
-                        tracing::debug!(
-                            agent_id = agent_id,
-                            round = rounds,
-                            tool = %tc.name,
-                            success = !result_text.starts_with("[tool_error]"),
-                            result_len = result_text.len(),
-                            "Tool execution completed"
-                        );
-
-                        messages.push(ChatMessage::tool_result(&tc.id, &result_text));
-                    }
-
-                    // If we truncated, add error for remaining tool calls
-                    for tc in response.tool_calls.iter().skip(calls_this_round) {
-                        let err = format_tool_error("max tools per round exceeded");
-                        messages.push(ChatMessage::tool_result(&tc.id, &err));
-                    }
-
-                    // Update token estimate incrementally for newly-appended messages
-                    if messages.len() > prev_msg_len {
-                        known_token_count +=
-                            estimate_messages_tokens(&messages[prev_msg_len..]);
-                    }
-
-                    continue;
-                }
-
-                // No tool calls or stop -> done
-                tracing::info!(
-                    agent_id = agent_id,
-                    rounds = rounds,
-                    total_input_tokens = total_input,
-                    total_output_tokens = total_output,
-                    tool_calls = tool_calls_made,
-                    content_len = response.content.len(),
-                    "Agentic loop completed successfully"
-                );
-                return LoopResult {
-                    final_content: response.content,
-                    rounds_used: rounds,
-                    total_input_tokens: total_input,
-                    total_output_tokens: total_output,
-                    tool_calls_made,
-                    finish_reason: LoopFinishReason::Complete,
-                    model_used: last_model.clone(),
-                    elapsed: start.elapsed(),
-                };
-            }
-            Err(e) => {
-                tracing::warn!(
-                    agent_id = agent_id,
-                    rounds = rounds,
-                    error = %e,
-                    "Agentic loop exiting: LLM error"
-                );
-                return LoopResult {
-                    final_content: last_assistant_content,
-                    rounds_used: rounds,
-                    total_input_tokens: total_input,
-                    total_output_tokens: total_output,
-                    tool_calls_made,
-                    finish_reason: LoopFinishReason::Error(e.to_string()),
-                    model_used: last_model.clone(),
-                    elapsed: start.elapsed(),
-                };
-            }
-        }
-    }
+    run_agentic_loop_inner(
+        LlmBackend::Direct { provider },
+        initial_messages,
+        tools,
+        config,
+        sandbox,
+        agent_id,
+        sandbox_policy,
+        context_budget,
+        cancel_token,
+        tool_context,
+    )
+    .await
 }
 
-/// Run the agentic loop using the LlmRouter (multi-provider, multi-key).
-///
-/// Same bounded-loop logic as `run_agentic_loop`, but uses `RouterRequest`
-/// and `router.complete()` with key rotation, fallback chains, and cost tracking.
+/// Production entry point — router with key rotation, fallback, cost tracking.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agentic_loop_routed(
     router: &LlmRouter,
@@ -722,178 +141,277 @@ pub async fn run_agentic_loop_routed(
     agent_id: &str,
     sandbox_policy: Option<&SandboxPolicy>,
     task_id: Option<&str>,
+    context_budget: Option<&crate::context_budget::ContextBudgetManager>,
     cancel_token: Option<CancellationToken>,
+    tool_context: Option<&ToolContext>,
 ) -> LoopResult {
-    let start = Instant::now();
-    let mut messages = initial_messages;
-    let mut rounds = 0usize;
-    let mut total_input = 0u32;
-    let mut total_output = 0u32;
-    let mut tool_calls_made = 0usize;
-    let mut last_assistant_content = String::new();
-    let mut last_model: Option<String> = None;
-    let mut consecutive_llm_errors: usize = 0;
-    const MAX_LLM_RETRIES: usize = 3;
-
     let context = RequestContext {
         agent_id: Some(agent_id.to_string()),
         task_id: task_id.map(|s| s.to_string()),
     };
+    run_agentic_loop_inner(
+        LlmBackend::Router { router, context, compaction_model: config.compaction_model.clone() },
+        initial_messages,
+        tools,
+        config,
+        sandbox,
+        agent_id,
+        sandbox_policy,
+        context_budget,
+        cancel_token,
+        tool_context,
+    )
+    .await
+}
 
-    // Wrap tools in Arc once — they don't change between rounds
+/// Core agentic loop implementation shared by both Direct and Router backends.
+#[allow(clippy::too_many_arguments)]
+async fn run_agentic_loop_inner(
+    backend: LlmBackend<'_>,
+    initial_messages: Vec<ChatMessage>,
+    tools: Vec<ToolDefinition>,
+    config: &LoopConfig,
+    sandbox: Option<&SandboxManager>,
+    agent_id: &str,
+    sandbox_policy: Option<&SandboxPolicy>,
+    context_budget: Option<&crate::context_budget::ContextBudgetManager>,
+    cancel_token: Option<CancellationToken>,
+    tool_context: Option<&ToolContext>,
+) -> LoopResult {
+    let mut state = LoopState::new();
+    let mut messages: Arc<Vec<ChatMessage>> = Arc::new(initial_messages);
     let tools_arc = Arc::new(tools);
-
-    // Incremental token estimation: track cumulative count and only estimate
-    // newly-appended messages each round, rather than re-scanning the full list.
     let mut known_token_count: u32 = estimate_messages_tokens(&messages);
+    let mut consecutive_llm_errors: usize = 0;
+    const MAX_LLM_RETRIES: usize = 3;
+
+    // Pre-compute tool token estimate once — avoids re-serializing tool JSON
+    // schemas on every Router retry attempt. `None` for Direct backend because
+    // it uses `ChatRequest` which doesn't pass through `estimate_request_tokens`.
+    let tools_token_estimate: Option<u32> = if backend.supports_retry() {
+        let tool_bytes: usize = tools_arc
+            .iter()
+            .map(|t| {
+                let base = t.description.len() + t.parameters.to_string().len();
+                let examples = t.input_examples.as_ref().map_or(0, |ex| {
+                    ex.iter().map(|e| e.to_string().len()).sum()
+                });
+                base + examples
+            })
+            .sum();
+        Some((tool_bytes / 4) as u32)
+    } else {
+        None
+    };
+
+    // Build context_management from budget manager (Phase D)
+    let context_management = context_budget.map(|budget| {
+        openalpaca_llm::context_management::ContextManagement::from_budget(
+            budget.compaction_trigger(),
+            5, // keep 5 recent tool-use blocks
+            2, // keep 2 recent thinking turns
+        )
+    });
 
     tracing::info!(
         agent_id = agent_id,
         tools_count = tools_arc.len(),
         max_rounds = config.max_rounds,
         max_cost = config.max_cost,
+        backend = if backend.supports_retry() { "router" } else { "direct" },
+        context_management = context_management.is_some(),
         "Agentic loop started"
     );
 
     loop {
-        // Check cancellation before each round
+        // ── 1. Cancellation check ──────────────────────────────────
         if let Some(ref token) = cancel_token
             && token.is_cancelled()
         {
             tracing::info!(
                 agent_id = agent_id,
-                rounds = rounds,
+                rounds = state.rounds,
                 "Agentic loop cancelled"
             );
-            return LoopResult {
-                final_content: last_assistant_content,
-                rounds_used: rounds,
-                total_input_tokens: total_input,
-                total_output_tokens: total_output,
-                tool_calls_made,
-                finish_reason: LoopFinishReason::Cancelled,
-                model_used: last_model.clone(),
-                elapsed: start.elapsed(),
-            };
+            return state.result(LoopFinishReason::Cancelled);
         }
 
-        if rounds >= config.max_rounds {
+        // ── 2. Max rounds check ────────────────────────────────────
+        if state.rounds >= config.max_rounds {
             tracing::info!(
                 agent_id = agent_id,
-                rounds = rounds,
+                rounds = state.rounds,
                 "Agentic loop exiting: max rounds reached"
             );
-            return LoopResult {
-                final_content: last_assistant_content,
-                rounds_used: rounds,
-                total_input_tokens: total_input,
-                total_output_tokens: total_output,
-                tool_calls_made,
-                finish_reason: LoopFinishReason::MaxRounds,
-                model_used: last_model.clone(),
-                elapsed: start.elapsed(),
-            };
+            return state.result(LoopFinishReason::MaxRounds);
         }
 
-        // Check cost using local token tracking (avoids per-round async lock acquisition)
-        let estimated_cost = estimate_cost(
-            total_input,
-            total_output,
-            config.fallback_input_rate,
-            config.fallback_output_rate,
-        );
-        if estimated_cost > config.max_cost {
+        // ── 3. Cost check (CostTracker for Router, local estimate for Direct) ──
+        let accumulated_cost = backend.task_cost(state.total_input, state.total_output).await;
+        state.last_cost = accumulated_cost;
+        let cost_ratio = accumulated_cost / config.max_cost;
+        if cost_ratio >= 0.8 && !state.cost_warning_emitted {
+            state.cost_warning_emitted = true;
+            let warning = format!(
+                "[system] Budget {:.0}% consumed (${:.4}/{:.2}). \
+                 Prioritize completing the current task efficiently.",
+                cost_ratio * 100.0,
+                accumulated_cost,
+                config.max_cost,
+            );
+            Arc::make_mut(&mut messages).push(ChatMessage::user(&warning));
+            tracing::info!(
+                agent_id,
+                cost_ratio,
+                accumulated_cost,
+                "Cost warning emitted at {:.0}%",
+                cost_ratio * 100.0,
+            );
+        }
+        if accumulated_cost > config.max_cost {
             tracing::info!(
                 agent_id = agent_id,
-                rounds = rounds,
-                estimated_cost,
+                rounds = state.rounds,
+                accumulated_cost,
                 "Agentic loop exiting: cost limit exceeded"
             );
-            return LoopResult {
-                final_content: last_assistant_content,
-                rounds_used: rounds,
-                total_input_tokens: total_input,
-                total_output_tokens: total_output,
-                tool_calls_made,
-                finish_reason: LoopFinishReason::CostExceeded,
-                model_used: last_model.clone(),
-                elapsed: start.elapsed(),
-            };
+            return state.result(LoopFinishReason::CostExceeded);
         }
 
-        // Context compression: if estimated tokens exceed the budget,
-        // compress older rounds into a summary to reduce cost and latency.
-        if config.max_context_tokens > 0 && known_token_count > config.max_context_tokens {
-            tracing::info!(
+        // ── 4. Context compression (budget-aware) ──────────────────
+        if let Some(budget) = context_budget {
+            let msg_tokens = estimate_messages_tokens(&messages) as usize;
+            if budget.should_compact(msg_tokens) {
+                let messages_before = messages.len();
+                let tier = budget.compaction_tier(msg_tokens);
+
+                tracing::info!(
+                    agent_id = agent_id,
+                    msg_tokens,
+                    trigger = budget.compaction_trigger(),
+                    messages_before,
+                    ?tier,
+                    "Graduated compaction triggered"
+                );
+
+                let compactor = crate::prompt_ctx::compaction::GraduatedCompactor::new(
+                    budget, &backend, &backend,
+                );
+                let report = compactor.compact(
+                    Arc::make_mut(&mut messages),
+                    config.context_tail_keep,
+                ).await;
+
+                tracing::info!(
+                    agent_id = agent_id,
+                    messages_before,
+                    messages_after = messages.len(),
+                    tiers_applied = ?report.tiers_applied,
+                    initial_tokens = report.initial_tokens,
+                    final_tokens = report.final_tokens,
+                    "Graduated compaction completed"
+                );
+
+                // Emit CompactionTriggered telemetry
+                if let Some(ref bus) = config.event_bus {
+                    bus.publish(crate::events::SystemEvent::CompactionTriggered {
+                        request_id: uuid::Uuid::new_v4(),
+                        utilization_pct: report.initial_tokens as f64
+                            / budget.model_context_window() as f64
+                            * 100.0,
+                        messages_before: report.messages_before,
+                        messages_after: report.messages_after,
+                        memories_extracted: report.memories_extracted,
+                        messages_discarded: report.messages_discarded,
+                        summary_tokens: report.initial_tokens
+                            .saturating_sub(report.final_tokens),
+                        timestamp: Utc::now(),
+                    });
+                }
+
+                known_token_count = estimate_messages_tokens(&messages);
+            }
+        } else if config.max_context_tokens > 0 && known_token_count > config.max_context_tokens {
+            // Legacy fallback (no budget manager)
+            tracing::debug!(
                 agent_id = agent_id,
-                estimated_tokens = known_token_count,
-                max_context_tokens = config.max_context_tokens,
-                messages_before = messages.len(),
-                "Compressing context: token budget exceeded"
+                tokens = known_token_count,
+                max = config.max_context_tokens,
+                "Legacy compression triggered"
             );
-            compress_context(&mut messages, config.context_tail_keep);
+            compress_context(Arc::make_mut(&mut messages), config.context_tail_keep, None);
             known_token_count = estimate_messages_tokens(&messages);
-            tracing::info!(
-                agent_id = agent_id,
-                messages_after = messages.len(),
-                estimated_tokens_after = known_token_count,
-                "Context compressed"
-            );
         }
 
         let prev_msg_len = messages.len();
 
-        let request = RouterRequest {
-            model: config.model.clone(),
-            messages: messages.clone(),
-            tools: Arc::clone(&tools_arc),
-            temperature: None,
-            max_tokens: None,
-            context: context.clone(),
-            tool_choice: if rounds == 0 {
-                config.initial_tool_choice.clone()
-            } else {
-                None
-            },
+        // ── 5. LLM call ───────────────────────────────────────────
+        let tool_choice = if state.rounds == 0 {
+            config.initial_tool_choice.clone()
+        } else {
+            None
         };
 
         tracing::debug!(
             agent_id = agent_id,
-            round = rounds + 1,
+            round = state.rounds + 1,
             messages_count = messages.len(),
             "LLM call starting"
         );
 
-        // Race LLM call against cancellation token (if present).
-        // This allows interrupting long-running LLM calls (10-60s) mid-flight.
         let llm_result = if let Some(ref token) = cancel_token {
             tokio::select! {
-                result = router.complete(request) => result,
+                result = backend.complete(
+                    Arc::clone(&messages),
+                    Arc::clone(&tools_arc),
+                    config.model.clone(),
+                    tool_choice,
+                    tools_token_estimate,
+                    config.enable_caching,
+                    config.thinking.clone(),
+                    config.stream_callback.as_ref(),
+                    config.max_stream_duration,
+                    context_management.clone(),
+                ) => result,
                 _ = token.cancelled() => {
-                    tracing::info!(agent_id = agent_id, round = rounds + 1, "LLM call interrupted by cancellation");
-                    return LoopResult {
-                        final_content: last_assistant_content,
-                        rounds_used: rounds,
-                        total_input_tokens: total_input,
-                        total_output_tokens: total_output,
-                        tool_calls_made,
-                        finish_reason: LoopFinishReason::Cancelled,
-                        model_used: last_model.clone(),
-                        elapsed: start.elapsed(),
-                    };
+                    tracing::info!(agent_id = agent_id, round = state.rounds + 1, "LLM call interrupted by cancellation");
+                    return state.result(LoopFinishReason::Cancelled);
                 }
             }
         } else {
-            router.complete(request).await
+            backend
+                .complete(
+                    Arc::clone(&messages),
+                    Arc::clone(&tools_arc),
+                    config.model.clone(),
+                    tool_choice,
+                    tools_token_estimate,
+                    config.enable_caching,
+                    config.thinking.clone(),
+                    config.stream_callback.as_ref(),
+                    config.max_stream_duration,
+                    context_management.clone(),
+                )
+                .await
         };
 
+        // ── 6. Handle response ─────────────────────────────────────
         match llm_result {
             Ok(response) => {
                 consecutive_llm_errors = 0;
-                // Enforce model access constraints: if the router resolved to a
-                // model the agent is not allowed to use (e.g., via fallback chain),
-                // abort with an error rather than processing the response.
-                if let Some(ref constraints) = config.agent_constraints
+
+                // Record usage first — the API call already happened, tokens
+                // were consumed regardless of whether we accept the response.
+                state.total_input += response.usage.input_tokens;
+                state.total_output += response.usage.output_tokens;
+                state.rounds += 1;
+                state.last_model = Some(response.model.clone());
+
+                // Model access check (Router only): the router may fallback to a
+                // different model than requested. Verify the agent is allowed to
+                // use the actual model.
+                if backend.supports_retry()
+                    && let Some(ref constraints) = config.agent_constraints
                     && let Err(violation) = CapabilityManager::check_model_access(
                         agent_id,
                         &response.model,
@@ -906,25 +424,11 @@ pub async fn run_agentic_loop_routed(
                         "Model access denied at runtime: {}",
                         violation,
                     );
-                    return LoopResult {
-                        final_content: last_assistant_content,
-                        rounds_used: rounds,
-                        total_input_tokens: total_input,
-                        total_output_tokens: total_output,
-                        tool_calls_made,
-                        finish_reason: LoopFinishReason::Error(format!(
-                            "Model access denied: {}",
-                            violation
-                        )),
-                        model_used: Some(response.model),
-                        elapsed: start.elapsed(),
-                    };
+                    return state.result(LoopFinishReason::Error(format!(
+                        "Model access denied: {}",
+                        violation
+                    )));
                 }
-
-                total_input += response.usage.input_tokens;
-                total_output += response.usage.output_tokens;
-                rounds += 1;
-                last_model = Some(response.model.clone());
 
                 // Use actual input tokens as ground truth for our estimate
                 if response.usage.input_tokens > 0 {
@@ -933,7 +437,7 @@ pub async fn run_agentic_loop_routed(
 
                 tracing::debug!(
                     agent_id = agent_id,
-                    round = rounds,
+                    round = state.rounds,
                     model = %response.model,
                     input_tokens = response.usage.input_tokens,
                     output_tokens = response.usage.output_tokens,
@@ -941,77 +445,145 @@ pub async fn run_agentic_loop_routed(
                     "LLM call completed"
                 );
 
-                // Capture last content before any branching
-                if !response.content.is_empty() {
-                    last_assistant_content = response.content.clone();
+                if response.usage.cache_read_input_tokens > 0 {
+                    tracing::debug!(
+                        agent_id = agent_id,
+                        round = state.rounds,
+                        cache_read_tokens = response.usage.cache_read_input_tokens,
+                        cache_creation_tokens = response.usage.cache_creation_input_tokens,
+                        "Prompt cache hit"
+                    );
                 }
 
+                if let Some(ref thinking_text) = response.thinking {
+                    tracing::debug!(
+                        agent_id = agent_id,
+                        round = state.rounds,
+                        thinking_len = thinking_text.len(),
+                        "Extended thinking produced"
+                    );
+                }
+
+                // Capture last content before any branching
+                if !response.content.is_empty() {
+                    state.last_assistant_content = response.content.clone();
+                }
+
+                // ── Tool execution ─────────────────────────────────
+                // IMPORTANT: Thinking blocks are NOT included in conversation history.
+                // Only the text content and tool calls are pushed as assistant messages.
+                // Anthropic API strips thinking from re-sent messages automatically,
+                // but we also omit response.thinking from the ChatMessage to be explicit.
                 if response.finish_reason == FinishReason::ToolUse
                     && !response.tool_calls.is_empty()
                 {
-                    messages.push(ChatMessage::assistant_with_tools(&response));
+                    Arc::make_mut(&mut messages)
+                        .push(ChatMessage::assistant_with_tools(&response));
 
                     let calls_this_round =
                         response.tool_calls.len().min(config.max_tools_per_round);
 
-                    for tc in response.tool_calls.iter().take(calls_this_round) {
-                        // Enforce max_tool_calls from sandbox policy
-                        if let Some(policy) = sandbox_policy
-                            && let Some(max_calls) = policy.max_tool_calls
-                            && tool_calls_made >= max_calls as usize
-                        {
-                            let err = format_tool_error(
-                                "max_tool_calls limit reached — no more tool calls allowed",
-                            );
-                            messages.push(ChatMessage::tool_result(&tc.id, &err));
-                            continue;
-                        }
+                    // Pre-compute budget before spawning futures
+                    let remaining_budget = sandbox_policy
+                        .and_then(|p| p.max_tool_calls)
+                        .map(|max| (max as usize).saturating_sub(state.tool_calls_made));
 
-                        tool_calls_made += 1;
+                    // Partition: executable vs over-budget
+                    let (executable, over_budget): (Vec<_>, Vec<_>) = response
+                        .tool_calls
+                        .iter()
+                        .take(calls_this_round)
+                        .enumerate()
+                        .partition(|(i, _)| remaining_budget.is_none_or(|budget| *i < budget));
+                    let executable: Vec<_> = executable.into_iter().map(|(_, tc)| tc).collect();
+                    let over_budget: Vec<_> = over_budget.into_iter().map(|(_, tc)| tc).collect();
 
-                        tracing::debug!(
+                    if sandbox.is_none() {
+                        tracing::warn!(
                             agent_id = agent_id,
-                            round = rounds,
-                            tool = %tc.name,
-                            tool_call_number = tool_calls_made,
-                            "Executing tool"
+                            round = state.rounds,
+                            tools = executable.len(),
+                            "Sandbox not configured — returning stub for tool calls (misconfiguration?)"
                         );
-                        let result_text = if let (Some(sbx), Some(policy)) =
-                            (sandbox, sandbox_policy)
-                        {
-                            match sbx.execute_tool(agent_id, tc, policy).await {
-                                Ok(output) => truncate_tool_result(output),
-                                Err(err) => {
-                                    truncate_tool_result(format_tool_error(&err.to_string()))
-                                }
-                            }
-                        } else {
-                            tracing::warn!(
-                                agent_id = agent_id,
-                                tool = tc.name,
-                                "Sandbox not configured — returning stub for tool call (misconfiguration?)"
-                            );
-                            format_tool_error(&format!(
-                                "tool '{}' not available — sandbox not configured",
-                                tc.name
-                            ))
-                        };
+                    }
 
+                    tracing::debug!(
+                        agent_id = agent_id,
+                        round = state.rounds,
+                        tools = executable.len(),
+                        "Executing tools in parallel"
+                    );
+
+                    let effective_ctx = tool_context.cloned().unwrap_or_else(|| ToolContext {
+                        agent_id: Some(agent_id.to_string()),
+                        ..Default::default()
+                    });
+                    let tool_futures = executable.iter().map(|&tc| {
+                        let ctx_ref = &effective_ctx;
+                        async move {
+                            if let (Some(sbx), Some(policy)) = (sandbox, sandbox_policy) {
+                                match sbx.execute_tool(tc, policy, ctx_ref).await {
+                                    Ok(output) => truncate_tool_result(output),
+                                    Err(err) => {
+                                        truncate_tool_result(format_tool_error_with_hint(&tc.name, &err.to_string()))
+                                    }
+                                }
+                            } else {
+                                format_tool_error(&format!(
+                                    "tool '{}' not available — sandbox not configured",
+                                    tc.name
+                                ))
+                            }
+                        }
+                    });
+
+                    // Race tool execution against cancellation
+                    let results = if let Some(ref token) = cancel_token {
+                        tokio::select! {
+                            results = futures_util::future::join_all(tool_futures) => results,
+                            _ = token.cancelled() => {
+                                tracing::info!(
+                                    agent_id = agent_id,
+                                    round = state.rounds,
+                                    "Cancelled during parallel tool execution"
+                                );
+                                return state.result(LoopFinishReason::Cancelled);
+                            }
+                        }
+                    } else {
+                        futures_util::future::join_all(tool_futures).await
+                    };
+
+                    // Collect results in order (join_all preserves input order)
+                    for (tc, result_text) in executable.iter().zip(results.iter()) {
+                        state.tool_calls_made += 1;
                         tracing::debug!(
                             agent_id = agent_id,
-                            round = rounds,
+                            round = state.rounds,
                             tool = %tc.name,
+                            tool_call_number = state.tool_calls_made,
                             success = !result_text.starts_with("[tool_error]"),
                             result_len = result_text.len(),
                             "Tool execution completed"
                         );
-
-                        messages.push(ChatMessage::tool_result(&tc.id, &result_text));
+                        Arc::make_mut(&mut messages)
+                            .push(ChatMessage::tool_result(&tc.id, result_text));
                     }
 
+                    // Over-budget tools get error
+                    for tc in &over_budget {
+                        let err = format_tool_error(
+                            "max_tool_calls limit reached — no more tool calls allowed",
+                        );
+                        Arc::make_mut(&mut messages)
+                            .push(ChatMessage::tool_result(&tc.id, &err));
+                    }
+
+                    // Overflow tools (exceeding max_tools_per_round) get error
                     for tc in response.tool_calls.iter().skip(calls_this_round) {
                         let err = format_tool_error("max tools per round exceeded");
-                        messages.push(ChatMessage::tool_result(&tc.id, &err));
+                        Arc::make_mut(&mut messages)
+                            .push(ChatMessage::tool_result(&tc.id, &err));
                     }
 
                     // Update token estimate incrementally for newly-appended messages
@@ -1023,101 +595,97 @@ pub async fn run_agentic_loop_routed(
                     continue;
                 }
 
+                // MaxTokens — retry with continuation prompt
+                if response.finish_reason == FinishReason::MaxTokens {
+                    state.max_tokens_retries += 1;
+                    if state.max_tokens_retries <= MAX_TOKENS_RETRIES {
+                        Arc::make_mut(&mut messages)
+                            .push(ChatMessage::assistant(&response.content));
+                        Arc::make_mut(&mut messages).push(ChatMessage::user(
+                            "Your previous response was truncated due to length limits. \
+                             Continue from where you left off.",
+                        ));
+                        tracing::warn!(
+                            agent_id,
+                            round = state.rounds,
+                            retry = state.max_tokens_retries,
+                            "MaxTokens hit — injecting continuation prompt"
+                        );
+                        continue;
+                    }
+                    tracing::warn!(agent_id, "MaxTokens retries exhausted, returning partial");
+                    return state.result_with_content(
+                        response.content,
+                        LoopFinishReason::Truncated,
+                    );
+                }
+
+                // No tool calls → done
                 tracing::info!(
                     agent_id = agent_id,
-                    rounds = rounds,
-                    total_input_tokens = total_input,
-                    total_output_tokens = total_output,
-                    tool_calls = tool_calls_made,
+                    rounds = state.rounds,
+                    total_input_tokens = state.total_input,
+                    total_output_tokens = state.total_output,
+                    tool_calls = state.tool_calls_made,
                     content_len = response.content.len(),
                     "Agentic loop completed successfully"
                 );
-                return LoopResult {
-                    final_content: response.content,
-                    rounds_used: rounds,
-                    total_input_tokens: total_input,
-                    total_output_tokens: total_output,
-                    tool_calls_made,
-                    finish_reason: LoopFinishReason::Complete,
-                    model_used: last_model.clone(),
-                    elapsed: start.elapsed(),
-                };
+                return state.result_with_content(response.content, LoopFinishReason::Complete);
             }
-            Err(e) => {
-                let is_transient = matches!(
-                    e,
-                    LlmRouterError::MaxRetriesExceeded
-                        | LlmRouterError::AllKeysRateLimited
-                        | LlmRouterError::AllFallbacksFailed
-                ) || matches!(&e, LlmRouterError::Llm(inner) if inner.is_transient());
 
-                if is_transient
-                    && consecutive_llm_errors < MAX_LLM_RETRIES
-                    && rounds < config.max_rounds
-                {
-                    consecutive_llm_errors += 1;
-                    let backoff_secs = (1u64 << consecutive_llm_errors).min(30);
-                    tracing::warn!(
-                        agent_id = agent_id,
-                        rounds = rounds,
-                        error = %e,
-                        attempt = consecutive_llm_errors,
-                        max_attempts = MAX_LLM_RETRIES,
-                        backoff_secs = backoff_secs,
-                        "Transient LLM error, retrying after backoff"
-                    );
-                    if let Some(ref token) = cancel_token {
-                        tokio::select! {
-                            () = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
-                            () = token.cancelled() => {
-                                tracing::info!(agent_id = agent_id, rounds = rounds, "Agentic loop cancelled during retry backoff");
-                                return LoopResult {
-                                    final_content: last_assistant_content,
-                                    rounds_used: rounds,
-                                    total_input_tokens: total_input,
-                                    total_output_tokens: total_output,
-                                    tool_calls_made,
-                                    finish_reason: LoopFinishReason::Cancelled,
-                                    model_used: last_model.clone(),
-                                    elapsed: start.elapsed(),
-                                };
+            // ── 7. Error handling ──────────────────────────────────
+            Err(e) => {
+                // Router backend: retry transient errors with exponential backoff.
+                // Direct backend: return error immediately (no retry).
+                if backend.supports_retry() {
+                    let is_transient = matches!(
+                        e,
+                        LlmRouterError::MaxRetriesExceeded
+                            | LlmRouterError::AllKeysRateLimited
+                            | LlmRouterError::AllFallbacksFailed
+                    ) || matches!(&e, LlmRouterError::Llm(inner) if inner.is_transient());
+
+                    if is_transient
+                        && consecutive_llm_errors < MAX_LLM_RETRIES
+                        && state.rounds < config.max_rounds
+                    {
+                        consecutive_llm_errors += 1;
+                        state.rounds += 1; // count retry against round budget
+                        let backoff_secs = (1u64 << consecutive_llm_errors).min(30);
+                        tracing::warn!(
+                            agent_id = agent_id,
+                            rounds = state.rounds,
+                            error = %e,
+                            attempt = consecutive_llm_errors,
+                            max_attempts = MAX_LLM_RETRIES,
+                            backoff_secs = backoff_secs,
+                            "Transient LLM error, retrying after backoff"
+                        );
+                        if let Some(ref token) = cancel_token {
+                            tokio::select! {
+                                () = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
+                                () = token.cancelled() => {
+                                    tracing::info!(agent_id = agent_id, rounds = state.rounds, "Agentic loop cancelled during retry backoff");
+                                    return state.result(LoopFinishReason::Cancelled);
+                                }
                             }
+                        } else {
+                            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                         }
-                    } else {
-                        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                        continue;
                     }
-                    continue;
                 }
 
                 tracing::warn!(
                     agent_id = agent_id,
-                    rounds = rounds,
+                    rounds = state.rounds,
                     error = %e,
                     "Agentic loop exiting: LLM error"
                 );
-                return LoopResult {
-                    final_content: last_assistant_content,
-                    rounds_used: rounds,
-                    total_input_tokens: total_input,
-                    total_output_tokens: total_output,
-                    tool_calls_made,
-                    finish_reason: LoopFinishReason::Error(e.to_string()),
-                    model_used: last_model.clone(),
-                    elapsed: start.elapsed(),
-                };
+                return state.result(LoopFinishReason::Error(e.to_string()));
             }
         }
     }
-}
-
-/// Fallback cost rates for the non-routed (test) path.
-/// Claude Sonnet pricing as conservative upper bound.
-const FALLBACK_INPUT_RATE: f64 = 3.0; // $ per 1M tokens
-const FALLBACK_OUTPUT_RATE: f64 = 15.0; // $ per 1M tokens
-
-fn estimate_cost(input_tokens: u32, output_tokens: u32, input_rate: f64, output_rate: f64) -> f64 {
-    (input_tokens as f64 * input_rate / 1_000_000.0)
-        + (output_tokens as f64 * output_rate / 1_000_000.0)
 }
 
 #[cfg(test)]

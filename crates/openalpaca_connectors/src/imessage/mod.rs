@@ -4,8 +4,13 @@
 //! and sending replies via AppleScript (osascript).
 
 mod connector;
+mod handler;
 mod reader;
+mod routing;
 mod sender;
+
+#[cfg(test)]
+mod tests;
 
 pub use connector::IMessageConnector;
 pub use sender::IMessageSender;

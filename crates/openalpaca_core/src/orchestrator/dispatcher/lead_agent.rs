@@ -31,12 +31,12 @@ impl TaskDispatcher {
         let now = Utc::now();
 
         // Spawn a lead agent instance from the singleton template.
-        // Prefer templates with "lead_orchestration" skill, fall back to any template.
+        // Prefer templates with "orchestration" capability, fall back to any template.
         let lead_agent = {
             let templates = self
                 .shared_context
                 .agent_registry
-                .find_templates_by_skill("lead_orchestration");
+                .find_templates_by_capability("orchestration");
             let mut spawned = None;
             for t in &templates {
                 if let Ok(agent) = self
@@ -185,6 +185,8 @@ impl TaskDispatcher {
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
         let connector_block = self.connector_guidance_block();
+        let broker = self.confirmation_broker.read().ok().and_then(|g| g.clone());
+        let context_manager = self.context_manager.clone();
 
         // Create cancellation token for this task
         let cancel_token = CancellationToken::new();
@@ -245,6 +247,8 @@ impl TaskDispatcher {
                 workspace_id.clone(),
                 Some(cancel_token),
                 &connector_block,
+                broker,
+                context_manager,
             )
             .await;
 

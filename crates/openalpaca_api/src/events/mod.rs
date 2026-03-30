@@ -173,6 +173,31 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// A skill invocation started
+    SkillInvocationStarted {
+        request_id: String,
+        skill_id: String,
+        query_preview: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// A skill invocation completed successfully
+    SkillCompleted {
+        request_id: String,
+        skill_id: String,
+        duration_ms: u64,
+        output_preview: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// A skill invocation failed
+    SkillFailed {
+        request_id: String,
+        skill_id: String,
+        error: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
     /// A task DAG was replanned during execution
     TaskReplanned {
         task_id: String,
@@ -181,6 +206,17 @@ pub enum ServerEvent {
         decision: String,
         nodes_added: usize,
         nodes_removed: usize,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// A tool requires interactive human confirmation before execution
+    ToolConfirmationRequested {
+        request_id: String,
+        agent_id: String,
+        tool_name: String,
+        tool_arguments: serde_json::Value,
+        stream_id: Option<String>,
+        lane_key: Option<String>,
         ts: DateTime<Utc>,
         instance_id: String,
     },
@@ -196,6 +232,36 @@ pub enum ServerEvent {
         backup_path: Option<String>,
         ts: DateTime<Utc>,
         instance_id: String,
+    },
+    /// A plugin was loaded and registered its tools
+    PluginLoaded {
+        plugin_id: String,
+        tools: Vec<String>,
+    },
+    /// A plugin was unloaded (graceful shutdown)
+    PluginUnloaded {
+        plugin_id: String,
+    },
+    /// A plugin process crashed unexpectedly
+    PluginCrashed {
+        plugin_id: String,
+        error: String,
+        restart_in_secs: u64,
+    },
+    /// A plugin was disabled by the system or user
+    PluginDisabled {
+        plugin_id: String,
+        reason: String,
+    },
+    /// A plugin requires capability approval before activation
+    PluginPendingApproval {
+        plugin_id: String,
+        capabilities: Vec<String>,
+    },
+    /// A plugin needs configuration keys before it can start
+    PluginNeedsConfig {
+        plugin_id: String,
+        missing_keys: Vec<String>,
     },
 }
 

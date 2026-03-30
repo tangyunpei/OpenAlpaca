@@ -13,6 +13,8 @@ pub struct CallRecord {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cost_usd: f64,
+    pub cache_creation_tokens: u32,
+    pub cache_read_tokens: u32,
 }
 
 /// Aggregated usage statistics for a single entity (agent or task).
@@ -23,6 +25,8 @@ pub struct UsageStats {
     pub total_output_tokens: u64,
     pub total_cost_usd: f64,
     pub by_model: HashMap<String, ModelUsageStats>,
+    pub total_cache_creation_tokens: u64,
+    pub total_cache_read_tokens: u64,
 }
 
 /// Per-model usage statistics.
@@ -32,6 +36,8 @@ pub struct ModelUsageStats {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cost_usd: f64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
 }
 
 /// Tracks costs across agents, tasks, and providers.
@@ -78,12 +84,16 @@ impl CostTracker {
             stats.total_input_tokens += record.input_tokens as u64;
             stats.total_output_tokens += record.output_tokens as u64;
             stats.total_cost_usd += record.cost_usd;
+            stats.total_cache_creation_tokens += record.cache_creation_tokens as u64;
+            stats.total_cache_read_tokens += record.cache_read_tokens as u64;
 
             let model_stats = stats.by_model.entry(record.model.clone()).or_default();
             model_stats.requests += 1;
             model_stats.input_tokens += record.input_tokens as u64;
             model_stats.output_tokens += record.output_tokens as u64;
             model_stats.cost_usd += record.cost_usd;
+            model_stats.cache_creation_tokens += record.cache_creation_tokens as u64;
+            model_stats.cache_read_tokens += record.cache_read_tokens as u64;
         }
 
         // Update task usage if task_id is present
@@ -94,12 +104,16 @@ impl CostTracker {
             stats.total_input_tokens += record.input_tokens as u64;
             stats.total_output_tokens += record.output_tokens as u64;
             stats.total_cost_usd += record.cost_usd;
+            stats.total_cache_creation_tokens += record.cache_creation_tokens as u64;
+            stats.total_cache_read_tokens += record.cache_read_tokens as u64;
 
             let model_stats = stats.by_model.entry(record.model.clone()).or_default();
             model_stats.requests += 1;
             model_stats.input_tokens += record.input_tokens as u64;
             model_stats.output_tokens += record.output_tokens as u64;
             model_stats.cost_usd += record.cost_usd;
+            model_stats.cache_creation_tokens += record.cache_creation_tokens as u64;
+            model_stats.cache_read_tokens += record.cache_read_tokens as u64;
         }
 
         // Update provider usage (resolve model → provider)
@@ -115,13 +129,40 @@ impl CostTracker {
             stats.total_input_tokens += record.input_tokens as u64;
             stats.total_output_tokens += record.output_tokens as u64;
             stats.total_cost_usd += record.cost_usd;
+            stats.total_cache_creation_tokens += record.cache_creation_tokens as u64;
+            stats.total_cache_read_tokens += record.cache_read_tokens as u64;
 
             let model_stats = stats.by_model.entry(record.model.clone()).or_default();
             model_stats.requests += 1;
             model_stats.input_tokens += record.input_tokens as u64;
             model_stats.output_tokens += record.output_tokens as u64;
             model_stats.cost_usd += record.cost_usd;
+            model_stats.cache_creation_tokens += record.cache_creation_tokens as u64;
+            model_stats.cache_read_tokens += record.cache_read_tokens as u64;
         }
+    }
+
+    /// Convenience method to record usage from a ChatResponse's Usage struct.
+    /// Calculates cost automatically using the model registry.
+    pub async fn record_usage(
+        &self,
+        agent_id: &str,
+        task_id: Option<&str>,
+        model: &str,
+        usage: &crate::types::Usage,
+    ) {
+        let cost = self.calculate_cost(model, usage.input_tokens, usage.output_tokens);
+        let record = CallRecord {
+            agent_id: agent_id.to_string(),
+            task_id: task_id.map(|s| s.to_string()),
+            model: model.to_string(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cost_usd: cost,
+            cache_creation_tokens: usage.cache_creation_input_tokens,
+            cache_read_tokens: usage.cache_read_input_tokens,
+        };
+        self.record(&record).await;
     }
 
     /// Check if a task is still within budget.
@@ -166,20 +207,12 @@ impl CostTracker {
             .sum()
     }
 
-    /// Flush in-memory cost data to the database for persistence across restarts.
+    /// Produce a point-in-time snapshot of all cost tracking data.
     ///
-    /// TODO: The daemon should call this periodically (e.g., every 60s) and on
-    /// graceful shutdown to persist accumulated cost data to the `llm_usage_daily`
-    /// table. This method is a stub because `openalpaca_llm` does not depend on
-    /// `openalpaca_storage` — the actual DB writes should be performed by the
-    /// daemon layer (e.g., in `openalpacad`) which has access to both crates.
-    ///
-    /// Suggested integration pattern:
-    /// 1. Daemon reads agent/task/provider usage snapshots via the existing
-    ///    `get_agent_usage()` / `get_task_usage()` / `all_provider_usage()` methods.
-    /// 2. Daemon writes rows to `llm_usage_daily` via `openalpaca_storage`.
-    /// 3. After successful flush, daemon calls `reset_flushed()` (not yet implemented)
-    ///    or tracks high-water marks to avoid double-counting.
+    /// Per-call persistence is already handled by `record_and_log()` in the
+    /// storage layer, so periodic flushing is unnecessary. The daemon calls
+    /// this on graceful shutdown as defense-in-depth, writing the cumulative
+    /// totals via `replace_daily_usage()` (overwrite, not additive).
     pub async fn snapshot_for_flush(&self) -> CostSnapshot {
         CostSnapshot {
             agent_usage: self.agent_usage.read().await.clone(),
@@ -190,18 +223,45 @@ impl CostTracker {
 
     /// Load persisted cost data from the database on daemon startup.
     ///
-    /// TODO: The daemon should call this at startup to restore cost data from the
-    /// `llm_usage_daily` table so that budget enforcement is accurate across
-    /// restarts. Similar to `snapshot_for_flush`, the actual DB reads should be
-    /// performed by the daemon layer which has access to `openalpaca_storage`.
-    ///
-    /// Suggested integration pattern:
-    /// 1. Daemon reads today's rows from `llm_usage_daily` via `openalpaca_storage`.
-    /// 2. Daemon calls this method with the loaded data to seed the in-memory tracker.
+    /// Called by `restore_cost_tracker()` in the daemon to seed the in-memory
+    /// tracker from today's `llm_usage_daily` rows, ensuring budget enforcement
+    /// is accurate across restarts.
     pub async fn load_snapshot(&self, snapshot: CostSnapshot) {
         *self.agent_usage.write().await = snapshot.agent_usage;
         *self.task_usage.write().await = snapshot.task_usage;
         *self.provider_usage.write().await = snapshot.provider_usage;
+    }
+
+    /// Cache hit ratio across all agents: cache_read_tokens / total_input_tokens.
+    /// Returns 0.0 if no input tokens have been recorded.
+    pub async fn cache_hit_ratio(&self) -> f64 {
+        let usage = self.agent_usage.read().await;
+        let total_input: u64 = usage.values().map(|s| s.total_input_tokens).sum();
+        let total_cache_read: u64 = usage.values().map(|s| s.total_cache_read_tokens).sum();
+        if total_input == 0 {
+            0.0
+        } else {
+            total_cache_read as f64 / total_input as f64
+        }
+    }
+
+    /// Aggregated cache statistics across all agents.
+    pub async fn cache_stats(&self) -> CacheStats {
+        let usage = self.agent_usage.read().await;
+        let total_input: u64 = usage.values().map(|s| s.total_input_tokens).sum();
+        let total_cache_read: u64 = usage.values().map(|s| s.total_cache_read_tokens).sum();
+        let total_cache_creation: u64 =
+            usage.values().map(|s| s.total_cache_creation_tokens).sum();
+        CacheStats {
+            total_cache_read_tokens: total_cache_read,
+            total_cache_creation_tokens: total_cache_creation,
+            total_input_tokens: total_input,
+            hit_ratio: if total_input == 0 {
+                0.0
+            } else {
+                total_cache_read as f64 / total_input as f64
+            },
+        }
     }
 }
 
@@ -212,6 +272,15 @@ pub struct CostSnapshot {
     pub agent_usage: HashMap<String, UsageStats>,
     pub task_usage: HashMap<String, UsageStats>,
     pub provider_usage: HashMap<String, UsageStats>,
+}
+
+/// Aggregated cache performance statistics.
+#[derive(Debug, Clone)]
+pub struct CacheStats {
+    pub total_cache_read_tokens: u64,
+    pub total_cache_creation_tokens: u64,
+    pub total_input_tokens: u64,
+    pub hit_ratio: f64,
 }
 
 #[cfg(test)]

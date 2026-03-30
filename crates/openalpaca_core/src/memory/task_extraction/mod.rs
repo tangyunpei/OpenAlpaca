@@ -116,7 +116,7 @@ pub async fn extract_task_memories(
 
     let request = RouterRequest {
         model: None,
-        messages: vec![
+        messages: Arc::new(vec![
             ChatMessage::system(
                 "You are a knowledge extractor for task outputs. \
                  Extract factual learnings and insights. \
@@ -124,7 +124,7 @@ pub async fn extract_task_memories(
                  No markdown fences, no commentary.",
             ),
             ChatMessage::user(&user_prompt),
-        ],
+        ]),
         tools: Arc::new(vec![]),
         temperature: Some(0.0),
         max_tokens: Some(512),
@@ -133,6 +133,10 @@ pub async fn extract_task_memories(
             task_id: Some(params.task_id.clone()),
         },
         tool_choice: None,
+        tools_token_estimate: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: None,
     };
 
     // LLM call

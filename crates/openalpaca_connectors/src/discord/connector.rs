@@ -462,6 +462,7 @@ impl DiscordConnector {
                     id: channel_id.to_string(),
                 },
                 workspace_path: None,
+                stream_id: None,
             })
             .await;
 
@@ -499,7 +500,7 @@ impl DiscordConnector {
 
 #[async_trait]
 impl Connector for DiscordConnector {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "discord"
     }
 

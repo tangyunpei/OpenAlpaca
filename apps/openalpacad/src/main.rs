@@ -229,8 +229,17 @@ async fn async_main(
     // Single EventBus for system-wide event distribution
     let bus = EventBus::new(daemon_config.load().server.event_bus_capacity);
 
+    // Create ChatStreamManager early (zero deps — just DashMap::new()) so the
+    // event bridge can forward ToolConfirmationRequested events to SSE streams.
+    let chat_stream_manager = Arc::new(ChatStreamManager::new());
+
     // Spawn SystemEvent → ServerEvent bridge
-    event_bridge::spawn_event_bridge(event_broadcaster.clone(), &bus, cancel_token.clone());
+    event_bridge::spawn_event_bridge(
+        event_broadcaster.clone(),
+        &bus,
+        Some(chat_stream_manager.clone()),
+        cancel_token.clone(),
+    );
 
     // Step 8: Initialize WakeManager
     let (wake_tx, wake_rx) = mpsc::channel(daemon_config.load().server.wake_channel_capacity);
@@ -242,7 +251,7 @@ async fn async_main(
     let mut watch_paths = Vec::new();
     let agents_dir = config_base_dir.join("agents");
     if agents_dir.exists() {
-        watch_paths.push(agents_dir);
+        watch_paths.push(agents_dir.clone());
     }
     let llm_config_path = config_base_dir.join("llm.toml");
     if llm_config_path.exists() {
@@ -295,12 +304,35 @@ async fn async_main(
     .await?;
 
     // Verify critical tool registered
-    if svcs.tool_registry.get("update_soul").is_none() {
-        anyhow::bail!("update_soul tool failed to register — SOUL.md updates will not work");
+    if svcs.tool_registry.get("update_persona").is_none() {
+        anyhow::bail!("update_persona tool failed to register — persona updates will not work");
     }
 
-    // Step 10: Construct Orchestrator
+    // Restore CostTracker from today's persisted usage so budget enforcement
+    // is accurate across daemon restarts.
+    if let Some(ref router) = svcs.llm_router {
+        services::restore_cost_tracker(router, &db).await;
+    }
+    let cost_tracker_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+    // Initialize PluginManager
+    let plugin_dir = paths::app_dir()?.join("plugins");
+    std::fs::create_dir_all(&plugin_dir).ok();
+    let plugin_manager = Arc::new(openalpaca_plugins::PluginManager::new(
+        plugin_dir,
+        svcs.tool_registry.clone(),
+        Some(svcs.skill_catalog.clone()),
+        Some(svcs.shared_context.agent_registry.clone()),
+    ));
+    if let Err(e) = plugin_manager.start().await {
+        warn!("plugin manager startup: {e}");
+    }
+
+    // Step 10: Create ConfirmationBroker and construct Orchestrator
+    let confirmation_broker = Arc::new(openalpaca_core::security::confirmation::ConfirmationBroker::new());
+
     let llm_router_for_reload = svcs.llm_router.clone();
+    let llm_router_for_shutdown = svcs.llm_router.clone();
     let web_search_config_for_reload = svcs.web_search_config.clone();
     let lane_manager = Arc::new(LaneManager::new());
 
@@ -319,6 +351,9 @@ async fn async_main(
         svcs.skill_router.clone(),
         daemon_config.clone(),
     ));
+
+    // Wire confirmation broker into orchestrator
+    orchestrator.set_confirmation_broker(confirmation_broker.clone());
 
     // Set initial documents
     orchestrator.update_user_document(initial_user_document);
@@ -347,7 +382,9 @@ async fn async_main(
             llm_config_path: llm_config_path.clone(),
             daemon_config_path: daemon_config_path.clone(),
             skills_dir,
+            agents_dir,
             orchestrator: orchestrator.clone(),
+            agent_registry: svcs.shared_context.agent_registry.clone(),
             llm_router: llm_router_for_reload,
             secret_store: svcs.secret_store,
             skill_catalog: svcs.skill_catalog,
@@ -402,12 +439,13 @@ async fn async_main(
     let notif_bus = bus.clone();
     let chat_bus = bus.clone();
     let connector_bus = bus.clone();
-    let connector_manager = managers::connector::ConnectorManager::new(
+    let mut connector_manager = managers::connector::ConnectorManager::new(
         db.clone(),
         bus,
         gateway.clone(),
         daemon_config.clone(),
     );
+    connector_manager.set_confirmation_broker(confirmation_broker.clone());
     connector_manager.start_all().await;
 
     // Create send bridge before connector-awareness block so it's available for both
@@ -427,7 +465,7 @@ async fn async_main(
 
         // 2. Wire send bridge into orchestrator and shared lock
         orchestrator.set_connector_send_provider(send_bridge.clone());
-        // Populate the shared lock so the send_message tool can access it
+        // Populate the shared lock so the send tool can access it
         if let Ok(mut guard) = svcs.connector_send_lock.write() {
             *guard = Some(send_bridge.clone());
         }
@@ -468,8 +506,7 @@ async fn async_main(
         tokio::spawn(dispatcher.run());
     }
 
-    // Build ChatService
-    let chat_stream_manager = Arc::new(ChatStreamManager::new());
+    // Build ChatService (chat_stream_manager created earlier for event bridge)
     let chat_service = Arc::new(ChatService::new(
         gateway.clone(),
         chat_stream_manager.clone(),
@@ -494,8 +531,10 @@ async fn async_main(
         cancel_token.clone(),
     );
     background::spawn_asset_cleanup(db.clone(), daemon_config.clone(), cancel_token.clone());
+    background::spawn_telemetry_cleanup(db.clone(), cancel_token.clone());
 
     // Step 14: Build AppState and HTTP router
+    let db_for_shutdown = db.clone();
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
 
     let state = Arc::new(AppState {
@@ -519,6 +558,8 @@ async fn async_main(
         daemon_config: daemon_config.clone(),
         daemon_config_path,
         web_search_config: svcs.web_search_config,
+        confirmation_broker: Some(confirmation_broker),
+        plugin_manager: Some(plugin_manager),
     });
 
     let app = router::build_router(state);
@@ -558,6 +599,11 @@ async fn async_main(
 
     if let Err(e) = server.await {
         error!("Server error: {e}");
+    }
+
+    // Flush CostTracker to DB (defense-in-depth)
+    if let Some(ref router) = llm_router_for_shutdown {
+        services::flush_cost_tracker(router, &db_for_shutdown, &cost_tracker_date).await;
     }
 
     // Shutdown connectors

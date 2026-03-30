@@ -14,6 +14,7 @@ impl MessageHandler for StubHandler {
         _scope: Scope,
         _lane_key: String,
         _workspace_path: Option<String>,
+        _stream_id: Option<String>,
     ) -> Result<HandleResult, String> {
         Ok(HandleResult::text(format!("Echo: {content}")))
     }
@@ -33,6 +34,7 @@ impl MessageHandler for FailHandler {
         _scope: Scope,
         _lane_key: String,
         _workspace_path: Option<String>,
+        _stream_id: Option<String>,
     ) -> Result<HandleResult, String> {
         Err("Access denied".to_string())
     }
@@ -77,6 +79,7 @@ async fn test_handle_event_echo() {
             scope: Scope::Global,
             attachments: Vec::new(),
             workspace_path: None,
+            stream_id: None,
         })
         .await;
     assert_eq!(resp.lane_key.user_id, "user1");
@@ -100,6 +103,7 @@ async fn test_handle_event_creates_lane() {
         scope: Scope::Global,
         attachments: Vec::new(),
         workspace_path: None,
+        stream_id: None,
     })
     .await;
     assert_eq!(gw.lane_manager.conversation_count(), 1);
@@ -115,6 +119,7 @@ async fn test_handle_event_creates_lane() {
         scope: Scope::Global,
         attachments: Vec::new(),
         workspace_path: None,
+        stream_id: None,
     })
     .await;
     assert_eq!(gw.lane_manager.conversation_count(), 1);
@@ -133,6 +138,7 @@ async fn test_handle_event_error_propagation() {
             scope: Scope::Global,
             attachments: Vec::new(),
             workspace_path: None,
+            stream_id: None,
         })
         .await;
     assert!(resp.is_error);
@@ -153,6 +159,7 @@ async fn test_handle_event_emits_user_request() {
         scope: Scope::Global,
         attachments: Vec::new(),
         workspace_path: None,
+        stream_id: None,
     })
     .await;
 
@@ -182,6 +189,7 @@ async fn test_handle_event_records_message_on_lane() {
         scope: Scope::Global,
         attachments: Vec::new(),
         workspace_path: None,
+        stream_id: None,
     })
     .await;
     gw.handle_event(GatewayRequest {
@@ -194,6 +202,7 @@ async fn test_handle_event_records_message_on_lane() {
         scope: Scope::Global,
         attachments: Vec::new(),
         workspace_path: None,
+        stream_id: None,
     })
     .await;
 
@@ -220,6 +229,7 @@ async fn test_principal_aware_lane_derivation() {
             scope: Scope::Global,
             attachments: Vec::new(),
             workspace_path: None,
+            stream_id: None,
         })
         .await;
     assert_eq!(resp.lane_key.user_id, "global1");
@@ -241,6 +251,7 @@ async fn test_principal_aware_lane_derivation() {
             scope: Scope::Global,
             attachments: Vec::new(),
             workspace_path: None,
+            stream_id: None,
         })
         .await;
     assert_eq!(resp2.lane_key.user_id, "tg_user_456");
@@ -258,6 +269,7 @@ async fn test_principal_aware_lane_derivation() {
             scope: Scope::Global,
             attachments: Vec::new(),
             workspace_path: None,
+            stream_id: None,
         })
         .await;
     assert_eq!(resp3.lane_key.user_id, "tg_user_789");
@@ -301,6 +313,7 @@ async fn test_gateway_persists_messages() {
         scope: Scope::Global,
         attachments: Vec::new(),
         workspace_path: None,
+        stream_id: None,
     })
     .await;
 
@@ -353,6 +366,7 @@ async fn test_full_gateway_stack_integration() {
             scope: Scope::Global,
             attachments: Vec::new(),
             workspace_path: None,
+            stream_id: None,
         })
         .await;
     let r2 = gw
@@ -365,6 +379,7 @@ async fn test_full_gateway_stack_integration() {
             scope: Scope::Global,
             attachments: Vec::new(),
             workspace_path: None,
+            stream_id: None,
         })
         .await;
     let r3 = gw
@@ -378,6 +393,7 @@ async fn test_full_gateway_stack_integration() {
             scope: Scope::Global,
             attachments: Vec::new(),
             workspace_path: None,
+            stream_id: None,
         })
         .await;
 
@@ -406,7 +422,7 @@ async fn test_full_gateway_stack_integration() {
         icon: None,
         status: AgentStatus::Idle,
         current_task: None,
-        skills: vec![],
+        capabilities: vec![],
         preset: AgentPreset::default(),
         constraints: AgentConstraints::default(),
         llm_config: AgentLlmConfig::default(),

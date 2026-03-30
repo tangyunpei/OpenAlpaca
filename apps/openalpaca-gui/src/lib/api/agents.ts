@@ -2,8 +2,7 @@
  * REST API client for agent endpoints.
  */
 
-import { get } from "svelte/store";
-import { connectionInfo, type ConnectionInfo } from "../daemon";
+import { ensureConnection } from "./connection";
 import type {
   Agent,
   AgentDetailResponse,
@@ -13,12 +12,6 @@ import type {
   CreateAgentRequest,
   CreateAgentFromTomlRequest,
 } from "../types";
-
-async function ensureConnection(): Promise<ConnectionInfo> {
-  const conn = get(connectionInfo);
-  if (!conn) throw new Error("Not connected to daemon");
-  return conn;
-}
 
 export interface ListAgentsQuery {
   status?: string;

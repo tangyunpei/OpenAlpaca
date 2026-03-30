@@ -36,6 +36,8 @@ async fn test_record_agent_usage() {
         input_tokens: 100,
         output_tokens: 50,
         cost_usd: 0.001,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
     };
     tracker.record(&record).await;
 
@@ -56,6 +58,8 @@ async fn test_record_task_usage() {
         input_tokens: 200,
         output_tokens: 100,
         cost_usd: 0.002,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
     };
     tracker.record(&record).await;
 
@@ -74,6 +78,8 @@ async fn test_check_task_budget_within() {
         input_tokens: 100,
         output_tokens: 50,
         cost_usd: 0.50,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
     };
     tracker.record(&record).await;
     assert!(tracker.check_task_budget("task1", 1.00).await);
@@ -89,6 +95,8 @@ async fn test_check_task_budget_exceeded() {
         input_tokens: 100,
         output_tokens: 50,
         cost_usd: 1.50,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
     };
     tracker.record(&record).await;
     assert!(!tracker.check_task_budget("task1", 1.00).await);
@@ -111,6 +119,8 @@ async fn test_multiple_records_accumulate() {
             input_tokens: 100,
             output_tokens: 50,
             cost_usd: 0.1 * (i + 1) as f64,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
         };
         tracker.record(&record).await;
     }
@@ -119,4 +129,71 @@ async fn test_multiple_records_accumulate() {
     assert_eq!(usage.total_requests, 3);
     assert_eq!(usage.total_input_tokens, 300);
     assert_eq!(usage.total_output_tokens, 150);
+}
+
+#[tokio::test]
+async fn test_cache_hit_ratio_calculation() {
+    let tracker = make_tracker();
+    let record = CallRecord {
+        agent_id: "agent1".to_string(),
+        task_id: None,
+        model: "claude-sonnet-4-5-20250929".to_string(),
+        input_tokens: 1000,
+        output_tokens: 200,
+        cost_usd: 0.01,
+        cache_creation_tokens: 100,
+        cache_read_tokens: 800,
+    };
+    tracker.record(&record).await;
+
+    let ratio = tracker.cache_hit_ratio().await;
+    assert!((ratio - 0.8).abs() < 0.001, "ratio={}", ratio);
+}
+
+#[tokio::test]
+async fn test_cache_hit_ratio_no_calls() {
+    let tracker = make_tracker();
+    let ratio = tracker.cache_hit_ratio().await;
+    assert!((ratio - 0.0).abs() < 0.001);
+}
+
+#[tokio::test]
+async fn test_cache_stats_aggregation() {
+    let tracker = make_tracker();
+
+    tracker
+        .record(&CallRecord {
+            agent_id: "agent1".to_string(),
+            task_id: None,
+            model: "claude-sonnet-4-5-20250929".to_string(),
+            input_tokens: 1000,
+            output_tokens: 200,
+            cost_usd: 0.01,
+            cache_creation_tokens: 100,
+            cache_read_tokens: 800,
+        })
+        .await;
+
+    tracker
+        .record(&CallRecord {
+            agent_id: "agent1".to_string(),
+            task_id: None,
+            model: "claude-sonnet-4-5-20250929".to_string(),
+            input_tokens: 600,
+            output_tokens: 100,
+            cost_usd: 0.005,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 500,
+        })
+        .await;
+
+    let stats = tracker.cache_stats().await;
+    assert_eq!(stats.total_cache_creation_tokens, 100);
+    assert_eq!(stats.total_cache_read_tokens, 1300);
+    assert_eq!(stats.total_input_tokens, 1600);
+    assert!(
+        (stats.hit_ratio - 0.8125).abs() < 0.001,
+        "ratio={}",
+        stats.hit_ratio
+    );
 }

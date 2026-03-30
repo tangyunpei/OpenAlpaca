@@ -8,6 +8,7 @@ members = [
     "crates/openalpaca_platform_macos",
     "crates/openalpaca_connectors",
     "crates/openalpaca_llm",
+    "crates/openalpaca_plugins",
     "apps/openalpacad",
     "apps/openalpaca",
     "apps/openalpaca-gui/src-tauri",
@@ -115,9 +116,12 @@ twilight-http = "0.17"
 twilight-model = "0.17"
 
 openalpaca_llm = { path = "crates/openalpaca_llm" }
+openalpaca_plugins = { path = "crates/openalpaca_plugins" }
 arc-swap = "1"
 signal-hook = "0.4.3"
 aes-gcm = "0.10"
+bytes = "1"
+pin-project-lite = "0.2"
 sha2 = "0.10"
 infer = "0.16"
 pdf-extract = "0.8"

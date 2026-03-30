@@ -1,5 +1,5 @@
 use crate::daemon_config::DaemonConfig;
-use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
@@ -13,6 +13,33 @@ struct MemorySearchTool {
 
 #[async_trait]
 impl BuiltInTool for MemorySearchTool {
+    async fn execute_with_context(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
+        // Read identity from context, not from arguments (anti-spoofing)
+        let owner_id = ctx.owner_id.as_deref().ok_or_else(|| {
+            "Tool 'memory_search' requires owner_id but none provided in execution context"
+                .to_string()
+        })?;
+
+        let mut args = arguments.clone();
+        if let Some(obj) = args.as_object_mut() {
+            obj.insert(
+                "owner_id".to_string(),
+                serde_json::Value::String(owner_id.to_string()),
+            );
+            if let Some(ref ws_id) = ctx.workspace_id {
+                obj.insert(
+                    "workspace_id".to_string(),
+                    serde_json::Value::String(ws_id.clone()),
+                );
+            }
+        }
+        self.execute(&args).await
+    }
+
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         let query = arguments
             .get("query")
@@ -106,22 +133,35 @@ pub(super) fn memory_search_tool(
     RegisteredTool {
         definition: ToolDefinition {
             name: "memory_search".to_string(),
-            description: "Search the user's memory for relevant facts, preferences, and knowledge. Use this when you need to recall something the user told you previously.".to_string(),
+            description: "Search the user's long-term memory store for relevant facts, \
+                preferences, past conversations, and learned knowledge. Uses hybrid \
+                search combining full-text search and vector similarity. Returns up to \
+                'limit' results (default 5, max 100), each with content, relevance \
+                score, and metadata. Use this to recall user preferences, past \
+                decisions, or contextual information before acting."
+                .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search query to find relevant memories"
+                        "description": "Natural language search query to find relevant memories (e.g., 'user's preferred language', 'last discussed project')"
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum number of results to return (default: 5)"
+                        "description": "Maximum number of results to return (default: 5, max: 100)"
                     }
                 },
                 "required": ["query"]
             }),
+            strict: Some(true),
+            input_examples: Some(vec![
+                serde_json::json!({"query": "user preferences for code style"}),
+                serde_json::json!({"query": "previous conversation about authentication", "limit": 10}),
+            ]),
         },
         backend: ToolBackend::BuiltIn(Arc::new(MemorySearchTool { db, embedder, daemon_config })),
+        provides_capabilities: vec!["memory_read".into()],
+        exempt_from_timeout: false,
     }
 }

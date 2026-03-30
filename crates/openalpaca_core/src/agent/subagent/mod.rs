@@ -19,7 +19,7 @@ pub struct SubAgent {
     pub icon: Option<String>,
     pub status: AgentStatus,
     pub current_task: Option<String>,
-    pub skills: Vec<Skill>,
+    pub capabilities: Vec<Capability>,
     pub preset: AgentPreset,
     pub constraints: AgentConstraints,
     pub llm_config: AgentLlmConfig,
@@ -60,9 +60,9 @@ impl std::fmt::Display for AgentStatus {
     }
 }
 
-/// A skill the agent has been assigned.
+/// A capability the agent has been assigned.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Skill {
+pub struct Capability {
     pub name: String,
     pub category: String,
     pub proficiency: f32,
@@ -119,6 +119,15 @@ pub struct AgentConstraints {
     pub allowed_models: Vec<String>,
     #[serde(default)]
     pub denied_models: Vec<String>,
+    /// When true, skip interactive confirmations for this agent.
+    #[serde(default)]
+    pub auto_approve: bool,
+    /// Sections to exclude from ContextPackage (e.g. ["conversation_summary", "user_context"]).
+    #[serde(default)]
+    pub denied_sections: Vec<String>,
+    /// Maximum total context tokens for this agent. Overrides model default if set.
+    #[serde(default)]
+    pub max_context_tokens: Option<usize>,
 }
 
 impl AgentConstraints {
@@ -137,13 +146,16 @@ impl AgentConstraints {
         for s in &mut self.denied_models {
             *s = s.to_lowercase();
         }
+        for s in &mut self.denied_sections {
+            *s = s.to_lowercase();
+        }
     }
 }
 
 impl SubAgent {
     /// Hydrate from a storage SubAgentConfig.
     pub fn from_config(config: &openalpaca_storage::SubAgentConfig) -> Self {
-        let skills: Vec<Skill> = serde_json::from_str(&config.skills_json).unwrap_or_default();
+        let capabilities: Vec<Capability> = serde_json::from_str(&config.skills_json).unwrap_or_default();
         let preset: AgentPreset = serde_json::from_str(&config.preset_json).unwrap_or_default();
         let mut constraints: AgentConstraints = config
             .constraints_json
@@ -178,7 +190,7 @@ impl SubAgent {
             icon: config.icon.clone(),
             status,
             current_task: config.current_task_id.clone(),
-            skills,
+            capabilities,
             preset,
             constraints,
             llm_config,

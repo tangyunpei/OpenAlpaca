@@ -365,4 +365,56 @@ pub enum SystemEvent {
         error: String,
         timestamp: DateTime<Utc>,
     },
+    /// A tool requires interactive human confirmation before execution
+    ToolConfirmationRequested {
+        request_id: String,
+        agent_id: String,
+        tool_name: String,
+        tool_arguments: serde_json::Value,
+        /// SSE stream ID for routing to the active chat stream
+        stream_id: Option<String>,
+        /// Lane key for routing to connectors (e.g. "telegram:12345")
+        lane_key: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
+    /// Context budget was computed for a request (Phase A observability)
+    ContextBudgetComputed {
+        request_id: Uuid,
+        model: String,
+        window_size: usize,
+        fixed_zone_tokens: usize,
+        free_zone_tokens: usize,
+        buffer_size: usize,
+        section_breakdown: Vec<(String, usize)>,
+        timestamp: DateTime<Utc>,
+    },
+    /// Context compaction was triggered and completed
+    CompactionTriggered {
+        request_id: Uuid,
+        utilization_pct: f64,
+        messages_before: usize,
+        messages_after: usize,
+        memories_extracted: usize,
+        messages_discarded: usize,
+        summary_tokens: usize,
+        timestamp: DateTime<Utc>,
+    },
+    /// A single compaction phase completed
+    CompactionPhaseCompleted {
+        request_id: Uuid,
+        phase: String,
+        duration_ms: u64,
+        items_processed: usize,
+        timestamp: DateTime<Utc>,
+    },
+    /// Context package built for sub-agent dispatch
+    ContextPackageBuilt {
+        request_id: Uuid,
+        agent_id: String,
+        sections: Vec<(String, usize)>,
+        total_tokens: usize,
+        budget: usize,
+        sub_agent_window: usize,
+        timestamp: DateTime<Utc>,
+    },
 }

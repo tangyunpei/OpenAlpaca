@@ -37,7 +37,14 @@ export type ServerEvent =
   | { type: "skill_catalog_updated"; skill_name: string; action: string; ts: string; instance_id: string; _id: number }
   | { type: "task_replanned"; task_id: string; replan_number: number; decision: string; nodes_added: number; nodes_removed: number; ts: string; instance_id: string; _id: number }
   | { type: "soul_updated"; actor: string; mode: string; content_sha256: string; backup_path: string | null; ts: string; instance_id: string; _id: number }
-  | { type: "daemon_config_changed"; ts: string; instance_id: string; _id: number };
+  | { type: "context_package_built"; agent_id: string; sections: [string, number][]; total_tokens: number; budget: number; sub_agent_window: number; ts: string; instance_id: string; _id: number }
+  | { type: "daemon_config_changed"; ts: string; instance_id: string; _id: number }
+  | { type: "plugin_loaded"; plugin_id: string; tools: string[]; _id: number }
+  | { type: "plugin_unloaded"; plugin_id: string; _id: number }
+  | { type: "plugin_crashed"; plugin_id: string; error: string; restart_in_secs: number; _id: number }
+  | { type: "plugin_disabled"; plugin_id: string; reason: string; _id: number }
+  | { type: "plugin_pending_approval"; plugin_id: string; capabilities: string[]; _id: number }
+  | { type: "plugin_needs_config"; plugin_id: string; missing_keys: string[]; _id: number };
 
 /** Connection state */
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "error";

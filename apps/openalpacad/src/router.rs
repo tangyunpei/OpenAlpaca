@@ -264,6 +264,48 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/daemon/config/providers/web-search",
             put(crate::routes::update_web_search_config),
         )
+        // Message feedback routes (Phase 4b)
+        .route(
+            "/v1/chat/messages/{message_id}/feedback",
+            put(crate::routes::upsert_feedback_handler)
+                .get(crate::routes::get_feedback_handler)
+                .delete(crate::routes::delete_feedback_handler),
+        )
+        // Skill health routes (Phase 4a)
+        .route(
+            "/v1/skills/health",
+            get(crate::routes::skill_health_handler),
+        )
+        // Tool confirmation route
+        .route(
+            "/v1/chat/confirmations/{request_id}",
+            post(crate::routes::confirm_tool),
+        )
+        // Plugin routes
+        .route(
+            "/v1/plugins",
+            get(crate::routes::list_plugins_handler),
+        )
+        .route(
+            "/v1/plugins/{name}/approve",
+            post(crate::routes::approve_plugin_handler),
+        )
+        .route(
+            "/v1/plugins/{name}/deny",
+            post(crate::routes::deny_plugin_handler),
+        )
+        .route(
+            "/v1/plugins/{name}/enable",
+            post(crate::routes::enable_plugin_handler),
+        )
+        .route(
+            "/v1/plugins/{name}/disable",
+            post(crate::routes::disable_plugin_handler),
+        )
+        .route(
+            "/v1/plugins/{name}/config",
+            post(crate::routes::set_plugin_config_handler),
+        )
         // Memory routes
         .route("/v1/memory", get(crate::routes::list_memories_handler))
         .route("/v1/memory/reindex", post(crate::routes::reindex_handler))

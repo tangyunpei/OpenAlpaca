@@ -11,116 +11,15 @@ use crate::keys::key_pool::{
 };
 use crate::keys::secret_store::SecretStore;
 use crate::routing::router::LlmRouter;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-// ── Response / Request Types ──────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmSettingsResponse {
-    pub orchestrator: OrchestratorInfo,
-    pub providers: HashMap<String, ProviderInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrchestratorInfo {
-    pub model: String,
-    pub fallback_models: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderInfo {
-    pub enabled: bool,
-    pub key_selection_strategy: String,
-    pub keys: Vec<KeyInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeyInfo {
-    pub id: String,
-    pub masked_secret: String,
-    pub tier: Option<String>,
-    pub priority: String,
-    pub source: String,
-    pub notes: Option<String>,
-    pub status: String,
-    pub monthly_usage_usd: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub managed: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub credential_status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub credential_expires_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub external_usage: Option<crate::routing::provider_usage::ExternalUsage>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeyInput {
-    pub id: Option<String>,
-    pub secret: String,
-    pub tier: Option<String>,
-    pub priority: Option<String>,
-    pub source: Option<String>,
-    pub notes: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AddKeyRequest {
-    pub provider: String,
-    pub key: KeyInput,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReorderKeysRequest {
-    pub provider: String,
-    pub key_order: Vec<String>,
-    pub primary_key_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetKeyPriorityRequest {
-    pub provider: String,
-    pub key_id: String,
-    pub priority: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidateKeyRequest {
-    pub provider: String,
-    pub secret: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeyValidationResult {
-    pub valid: bool,
-    pub tier: Option<String>,
-    pub detected_source: Option<String>,
-    pub models_available: Vec<String>,
-    pub rate_limits: Option<String>,
-    pub format_error: Option<String>,
-}
-
-// ── Orchestrator Config Types ────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrchestratorConfigResponse {
-    pub model: String,
-    pub fallback_models: Vec<String>,
-    pub active_agents: usize,
-    pub active_tasks: usize,
-    pub daily_cost_usd: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateOrchestratorRequest {
-    pub model: String,
-    pub fallback_models: Vec<String>,
-}
-
-// ── Service ──────────────────────────────────────────────────────────
+pub use super::settings_types::{
+    AddKeyRequest, KeyInfo, KeyInput, KeyValidationResult, LlmSettingsResponse,
+    OrchestratorConfigResponse, OrchestratorInfo, ProviderInfo, ReorderKeysRequest,
+    SetKeyPriorityRequest, UpdateOrchestratorRequest, ValidateKeyRequest,
+};
 
 /// High-level service for managing LLM settings.
 /// Decouples route handlers from domain logic.
@@ -178,7 +77,7 @@ impl LlmSettingsService {
         let mut providers = HashMap::new();
         let configured = self.router.configured_providers();
 
-        for &provider_type in ProviderType::all() {
+        for provider_type in ProviderType::all() {
             let provider_name = provider_type.to_string();
             let is_configured = configured.contains(&provider_type);
 
@@ -606,7 +505,7 @@ impl LlmSettingsService {
     pub async fn key_health(&self) -> HashMap<String, Vec<KeyStatus>> {
         let mut result = HashMap::new();
         for provider_type in self.router.configured_providers() {
-            if let Some(statuses) = self.router.key_statuses(provider_type).await {
+            if let Some(statuses) = self.router.key_statuses(&provider_type).await {
                 result.insert(provider_type.to_string(), statuses);
             }
         }
@@ -664,7 +563,7 @@ impl LlmSettingsService {
     /// Used by TokenManager to create merged pools (config keys + discovered keys).
     pub fn build_key_pool_for_provider(
         &self,
-        provider_type: ProviderType,
+        provider_type: &ProviderType,
     ) -> Result<KeyPool, String> {
         let config =
             read_config(&self.config_path).map_err(|e| format!("Failed to read config: {e}"))?;
@@ -675,7 +574,7 @@ impl LlmSettingsService {
     /// Used by TokenManager to merge config keys with discovered keys.
     pub fn build_key_pool_keys_for_provider(
         &self,
-        provider_type: ProviderType,
+        provider_type: &ProviderType,
     ) -> Result<Vec<ApiKey>, String> {
         let config =
             read_config(&self.config_path).map_err(|e| format!("Failed to read config: {e}"))?;
@@ -711,10 +610,10 @@ impl LlmSettingsService {
             .map_err(|e| format!("Failed to write config: {e}"))?;
 
         // 4. Build new KeyPool from updated config
-        let new_pool = self.build_key_pool_from_config(&config, provider_type)?;
+        let new_pool = self.build_key_pool_from_config(&config, &provider_type)?;
 
         // 5. Hot-reload via ArcSwap — register provider if not yet in router
-        if !self.router.reload_keys(provider_type, new_pool) {
+        if !self.router.reload_keys(&provider_type, new_pool) {
             tracing::info!(
                 "Provider {:?} not in router, registering now",
                 provider_type
@@ -732,14 +631,14 @@ impl LlmSettingsService {
         config: &LlmRouterConfig,
         provider_type: ProviderType,
     ) -> Result<(), String> {
-        let api_keys = self.build_api_keys_from_config(config, provider_type)?;
+        let api_keys = self.build_api_keys_from_config(config, &provider_type)?;
         let first_key = api_keys
             .first()
             .ok_or_else(|| format!("No keys for {:?}, cannot register provider", provider_type))?
             .secret
             .clone();
 
-        let pool = self.build_key_pool_from_config(config, provider_type)?;
+        let pool = self.build_key_pool_from_config(config, &provider_type)?;
 
         let provider_name = provider_type.to_string();
         let base_url = config
@@ -749,7 +648,7 @@ impl LlmSettingsService {
             .and_then(|pc| pc.base_url.clone());
 
         let rt = self.router.runtime_config();
-        let provider: Option<Arc<dyn crate::LlmProvider>> = match provider_type {
+        let provider: Option<Arc<dyn crate::LlmProvider>> = match &provider_type {
             #[cfg(feature = "anthropic")]
             ProviderType::Anthropic => {
                 let model = rt
@@ -798,12 +697,11 @@ impl LlmSettingsService {
         match provider {
             Some(p) => {
                 self.router.register_provider(provider_type, p, pool);
-                tracing::info!("Registered provider {:?} in router", provider_type);
+                tracing::info!("Registered provider in router");
                 Ok(())
             }
             None => Err(format!(
-                "Provider {:?} not available (feature not enabled)",
-                provider_type
+                "Provider not available (feature not enabled)"
             )),
         }
     }
@@ -812,7 +710,7 @@ impl LlmSettingsService {
     fn build_key_pool_from_config(
         &self,
         config: &LlmRouterConfig,
-        provider_type: ProviderType,
+        provider_type: &ProviderType,
     ) -> Result<KeyPool, String> {
         let api_keys = self.build_api_keys_from_config(config, provider_type)?;
 
@@ -840,7 +738,7 @@ impl LlmSettingsService {
     fn build_api_keys_from_config(
         &self,
         config: &LlmRouterConfig,
-        provider_type: ProviderType,
+        provider_type: &ProviderType,
     ) -> Result<Vec<ApiKey>, String> {
         let provider_name = provider_type.to_string();
 
@@ -878,7 +776,7 @@ impl LlmSettingsService {
                     return Err(format!("No secret for key '{}'", key_config.id));
                 };
 
-                let mut api_key = ApiKey::new(key_config.id.clone(), provider_type, secret);
+                let mut api_key = ApiKey::new(key_config.id.clone(), provider_type.clone(), secret);
                 api_key.tier = key_config.tier.clone();
                 api_key.monthly_budget = key_config.monthly_budget;
                 api_key.priority = match key_config.priority.as_deref() {
@@ -912,105 +810,11 @@ fn parse_provider_type(name: &str) -> Option<ProviderType> {
         "anthropic" => Some(ProviderType::Anthropic),
         "openai" => Some(ProviderType::OpenAI),
         "ollama" => Some(ProviderType::Ollama),
+        other if other.starts_with("plugin:") => {
+            Some(ProviderType::Plugin(other.strip_prefix("plugin:").unwrap().to_string()))
+        }
         _ => None,
     }
 }
 
-/// Build a `KeyPool` from a `ProviderConfig` without needing an `LlmSettingsService` instance.
-///
-/// Used by the hot-reload handler in main.rs to rebuild key pools when llm.toml changes.
-/// Resolves secrets via env vars and secret_store (keychain). Encrypted keys require
-/// a `KeyEncryptor` which is lazily loaded.
-pub fn build_key_pool_from_provider_config(
-    provider_config: &ProviderConfig,
-    provider_type: ProviderType,
-    secret_store: Option<&dyn SecretStore>,
-) -> Result<KeyPool, String> {
-    let api_keys =
-        build_api_keys_from_provider_config(provider_config, provider_type, secret_store)?;
-
-    let strategy_str = provider_config
-        .key_selection_strategy
-        .as_deref()
-        .or(provider_config.strategy.as_deref());
-    let strategy = match strategy_str {
-        Some("lru") | Some("least_recently_used") => SelectionStrategy::LeastRecentlyUsed,
-        Some("primary_fallback") => SelectionStrategy::PrimaryFallback,
-        _ => SelectionStrategy::RoundRobin,
-    };
-
-    Ok(KeyPool::new(api_keys, strategy))
-}
-
-/// Build a `Vec<ApiKey>` from a `ProviderConfig` without needing an `LlmSettingsService` instance.
-fn build_api_keys_from_provider_config(
-    provider_config: &ProviderConfig,
-    provider_type: ProviderType,
-    secret_store: Option<&dyn SecretStore>,
-) -> Result<Vec<ApiKey>, String> {
-    let mut api_keys = Vec::new();
-
-    if let Some(ref keys) = provider_config.keys {
-        // Lazily load encryptor only if needed
-        let mut encryptor: Option<KeyEncryptor> = None;
-
-        for key_config in keys {
-            let secret = if let Some(ref env_var) = key_config.secret_env {
-                std::env::var(env_var).map_err(|_| {
-                    format!("Missing env var '{}' for key '{}'", env_var, key_config.id)
-                })?
-            } else if let Some(ref sref) = key_config.secret_ref {
-                match secret_store {
-                    Some(store) => store.get(sref)?.ok_or_else(|| {
-                        format!(
-                            "Secret '{}' not found in keychain for key '{}'",
-                            sref, key_config.id
-                        )
-                    })?,
-                    None => {
-                        return Err(format!(
-                            "No secret store available to resolve '{}' for key '{}'",
-                            sref, key_config.id
-                        ));
-                    }
-                }
-            } else if let Some(ref encrypted) = key_config.secret_encrypted {
-                if KeyEncryptor::is_encrypted(encrypted) {
-                    let enc = match encryptor {
-                        Some(ref e) => e,
-                        None => {
-                            encryptor = Some(KeyEncryptor::load_or_generate()?);
-                            encryptor.as_ref().unwrap()
-                        }
-                    };
-                    enc.decrypt(encrypted)
-                        .map_err(|e| format!("Failed to decrypt key '{}': {e}", key_config.id))?
-                } else {
-                    encrypted.clone()
-                }
-            } else {
-                return Err(format!("No secret for key '{}'", key_config.id));
-            };
-
-            let mut api_key = ApiKey::new(key_config.id.clone(), provider_type, secret);
-            api_key.tier = key_config.tier.clone();
-            api_key.monthly_budget = key_config.monthly_budget;
-            api_key.priority = match key_config.priority.as_deref() {
-                Some("fallback") => KeyPriority::Fallback,
-                _ => KeyPriority::Primary,
-            };
-            api_key.source = match key_config.source.as_deref() {
-                Some("api_console") => KeySource::ApiConsole,
-                Some("claude_code") => KeySource::ClaudeCode,
-                Some("claude_max_pro") => KeySource::ClaudeMaxPro,
-                Some("codex") => KeySource::Codex,
-                Some("environment") => KeySource::Environment,
-                _ => KeySource::Other,
-            };
-            api_key.notes = key_config.notes.clone();
-            api_keys.push(api_key);
-        }
-    }
-
-    Ok(api_keys)
-}
+pub use super::key_pool_builder::build_key_pool_from_provider_config;

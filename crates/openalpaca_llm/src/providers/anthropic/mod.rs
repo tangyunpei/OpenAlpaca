@@ -1,13 +1,31 @@
+mod request;
+mod response;
+mod streaming;
+
 use crate::LlmProvider;
 use crate::error::LlmError;
 use crate::types::*;
 use async_trait::async_trait;
 use reqwest::header::HeaderMap;
 
-const DEFAULT_MODEL: &str = "claude-sonnet-4-5-20250929";
+const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
+
+/// Build the `anthropic-beta` header value by collecting all active beta features.
+///
+/// Returns an empty string when no beta features are needed; the caller should
+/// skip setting the header in that case.
+fn build_beta_header(request: &ChatRequest) -> String {
+    let mut flags: Vec<&str> = Vec::new();
+
+    if request.context_management.is_some() {
+        flags.push("context-management-2025-01-15");
+    }
+
+    flags.join(",")
+}
 
 fn parse_retry_after_ms(headers: &HeaderMap) -> Option<u64> {
     headers
@@ -45,264 +63,17 @@ impl AnthropicProvider {
         }
     }
 
-    /// Build Anthropic content blocks from a ChatMessage.
-    ///
-    /// If the message has multimodal `parts`, builds an array of content blocks
-    /// in Anthropic's format. If parts is None, returns a plain string value.
-    fn build_message_content(msg: &ChatMessage) -> serde_json::Value {
-        let parts = match &msg.parts {
-            Some(parts) if !parts.is_empty() => parts,
-            _ => return serde_json::Value::String(msg.content.clone()),
-        };
-
-        let blocks: Vec<serde_json::Value> = parts
-            .iter()
-            .filter_map(|part| match part {
-                ContentPart::Text { text } => {
-                    if text.trim().is_empty() {
-                        None
-                    } else {
-                        Some(serde_json::json!({ "type": "text", "text": text }))
-                    }
-                }
-                ContentPart::Image { source, .. } => match source {
-                    ImageSource::Base64 { media_type, data } => Some(serde_json::json!({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": data.as_str(),
-                        }
-                    })),
-                    ImageSource::Url { url } => Some(serde_json::json!({
-                        "type": "image",
-                        "source": {
-                            "type": "url",
-                            "url": url,
-                        }
-                    })),
-                    ImageSource::FileAsset { file_id, media_type } => {
-                        // FileAsset should be resolved to Base64 before reaching the provider.
-                        // If it hasn't been, emit a placeholder text block.
-                        Some(serde_json::json!({
-                            "type": "text",
-                            "text": format!("[image file_id={} not resolved — media_type={}]", file_id, media_type),
-                        }))
-                    }
-                },
-                ContentPart::Audio { .. } => {
-                    // Anthropic does not support audio input
-                    Some(serde_json::json!({
-                        "type": "text",
-                        "text": "[audio content — not supported by this model]",
-                    }))
-                }
-                ContentPart::Document {
-                    filename,
-                    mime_type,
-                    extracted_text,
-                    ..
-                } => {
-                    // Anthropic supports PDF via beta; fall back to extracted text for now
-                    if let Some(text) = extracted_text {
-                        Some(serde_json::json!({
-                            "type": "text",
-                            "text": format!("[Document: {} ({})]\n{}", filename, mime_type, text),
-                        }))
-                    } else {
-                        Some(serde_json::json!({
-                            "type": "text",
-                            "text": format!("[Document: {} ({}) — no extracted text available]", filename, mime_type),
-                        }))
-                    }
-                }
-                ContentPart::FileRef {
-                    file_id,
-                    filename,
-                    mime_type,
-                } => Some(serde_json::json!({
-                    "type": "text",
-                    "text": format!("[File reference: {} ({}) id={}]", filename, mime_type, file_id),
-                })),
-            })
-            .collect();
-
-        if blocks.is_empty() {
-            if !msg.content.trim().is_empty() {
-                return serde_json::Value::String(msg.content.clone());
-            }
-            return serde_json::Value::Array(vec![serde_json::json!({
-                "type": "text",
-                "text": "[empty message]",
-            })]);
-        }
-
-        serde_json::Value::Array(blocks)
+    #[cfg(test)]
+    pub(crate) fn build_request_body(&self, request: &ChatRequest) -> serde_json::Value {
+        request::build_request_body(&self.model, self.max_tokens, request)
     }
 
-    fn build_request_body(&self, request: &ChatRequest) -> serde_json::Value {
-        let model = request.model.as_deref().unwrap_or(&self.model);
-        let max_tokens = request.max_tokens.unwrap_or(self.max_tokens);
-
-        // Extract system message (Anthropic uses top-level system field)
-        let mut system_text = String::new();
-        let mut messages = Vec::new();
-
-        for msg in &request.messages {
-            match msg.role {
-                Role::System => {
-                    if !system_text.is_empty() {
-                        system_text.push('\n');
-                    }
-                    system_text.push_str(&msg.content);
-                }
-                Role::User => {
-                    messages.push(serde_json::json!({
-                        "role": "user",
-                        "content": Self::build_message_content(msg),
-                    }));
-                }
-                Role::Assistant => {
-                    if let Some(ref tool_calls) = msg.tool_calls {
-                        // Assistant message with tool use
-                        let mut content = Vec::new();
-                        if !msg.content.is_empty() {
-                            content.push(serde_json::json!({
-                                "type": "text",
-                                "text": msg.content,
-                            }));
-                        }
-                        for tc in tool_calls {
-                            content.push(serde_json::json!({
-                                "type": "tool_use",
-                                "id": tc.id,
-                                "name": tc.name,
-                                "input": tc.arguments,
-                            }));
-                        }
-                        messages.push(serde_json::json!({
-                            "role": "assistant",
-                            "content": content,
-                        }));
-                    } else {
-                        messages.push(serde_json::json!({
-                            "role": "assistant",
-                            "content": msg.content,
-                        }));
-                    }
-                }
-                Role::Tool => {
-                    messages.push(serde_json::json!({
-                        "role": "user",
-                        "content": [{
-                            "type": "tool_result",
-                            "tool_use_id": msg.tool_call_id,
-                            "content": msg.content,
-                        }],
-                    }));
-                }
-            }
-        }
-
-        let mut body = serde_json::json!({
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": messages,
-        });
-
-        if !system_text.is_empty() {
-            body["system"] = serde_json::Value::String(system_text);
-        }
-
-        if let Some(temp) = request.temperature {
-            body["temperature"] = serde_json::json!(temp);
-        }
-
-        if !request.tools.is_empty() {
-            let tools: Vec<serde_json::Value> = request
-                .tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "name": t.name,
-                        "description": t.description,
-                        "input_schema": t.parameters,
-                    })
-                })
-                .collect();
-            body["tools"] = serde_json::Value::Array(tools);
-
-            if let Some(ref choice) = request.tool_choice {
-                body["tool_choice"] = match choice {
-                    ToolChoice::Auto => serde_json::json!({"type": "auto"}),
-                    ToolChoice::Any => serde_json::json!({"type": "any"}),
-                    ToolChoice::Tool(name) => serde_json::json!({"type": "tool", "name": name}),
-                };
-            }
-        }
-
-        body
-    }
-
-    fn parse_response(&self, body: serde_json::Value) -> Result<ChatResponse, LlmError> {
-        let model = body["model"].as_str().unwrap_or(&self.model).to_string();
-
-        let base_input = body["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
-        let cache_creation = body["usage"]["cache_creation_input_tokens"]
-            .as_u64()
-            .unwrap_or(0) as u32;
-        let cache_read = body["usage"]["cache_read_input_tokens"]
-            .as_u64()
-            .unwrap_or(0) as u32;
-
-        let usage = Usage {
-            input_tokens: base_input + cache_creation + cache_read,
-            output_tokens: body["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32,
-            cache_creation_input_tokens: cache_creation,
-            cache_read_input_tokens: cache_read,
-        };
-
-        let stop_reason = body["stop_reason"].as_str().unwrap_or("end_turn");
-        let finish_reason = match stop_reason {
-            "end_turn" => FinishReason::Stop,
-            "tool_use" => FinishReason::ToolUse,
-            "max_tokens" => FinishReason::MaxTokens,
-            _ => FinishReason::Stop,
-        };
-
-        let mut content = String::new();
-        let mut tool_calls = Vec::new();
-
-        if let Some(content_blocks) = body["content"].as_array() {
-            for block in content_blocks {
-                match block["type"].as_str() {
-                    Some("text") => {
-                        if let Some(text) = block["text"].as_str() {
-                            if !content.is_empty() {
-                                content.push('\n');
-                            }
-                            content.push_str(text);
-                        }
-                    }
-                    Some("tool_use") => {
-                        tool_calls.push(ToolCall {
-                            id: block["id"].as_str().unwrap_or_default().to_string(),
-                            name: block["name"].as_str().unwrap_or_default().to_string(),
-                            arguments: block["input"].clone(),
-                        });
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        Ok(ChatResponse {
-            content,
-            tool_calls,
-            model,
-            usage,
-            finish_reason,
-        })
+    #[cfg(test)]
+    pub(crate) fn parse_response(
+        &self,
+        body: serde_json::Value,
+    ) -> Result<ChatResponse, LlmError> {
+        response::parse_response(&self.model, body)
     }
 }
 
@@ -356,15 +127,23 @@ impl LlmProvider for AnthropicProvider {
         key: &str,
         request: ChatRequest,
     ) -> Result<ChatResponse, LlmError> {
-        let body = self.build_request_body(&request);
+        let body = request::build_request_body(&self.model, self.max_tokens, &request);
         let model_id = request.model.as_deref().unwrap_or(&self.model);
 
-        let response = self
+        let mut req_builder = self
             .client
             .post(API_URL)
             .header("x-api-key", key)
             .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+
+        // Add anthropic-beta header when beta features are in use
+        let beta_flags = build_beta_header(&request);
+        if !beta_flags.is_empty() {
+            req_builder = req_builder.header("anthropic-beta", beta_flags);
+        }
+
+        let response = req_builder
             .json(&body)
             .send()
             .await
@@ -414,9 +193,81 @@ impl LlmProvider for AnthropicProvider {
             return Err(LlmError::Api { status, message });
         }
 
-        self.parse_response(response_body)
+        response::parse_response(&self.model, response_body)
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn chat_streaming_with_key(
+        &self,
+        key: &str,
+        request: ChatRequest,
+    ) -> Result<ChatStream, LlmError> {
+        let mut body = request::build_request_body(&self.model, self.max_tokens, &request);
+        body["stream"] = serde_json::json!(true);
+        let model_id = request.model.as_deref().unwrap_or(&self.model);
+
+        let mut req_builder = self
+            .client
+            .post(API_URL)
+            .header("x-api-key", key)
+            .header("anthropic-version", API_VERSION)
+            .header("content-type", "application/json");
+
+        // Add anthropic-beta header when beta features are in use
+        let beta_flags = build_beta_header(&request);
+        if !beta_flags.is_empty() {
+            req_builder = req_builder.header("anthropic-beta", beta_flags);
+        }
+
+        let response = req_builder
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+
+        let status = response.status().as_u16();
+
+        if status == 429 {
+            let retry_after_ms = parse_retry_after_ms(response.headers()).unwrap_or(1_000);
+            return Err(LlmError::RateLimited { retry_after_ms });
+        }
+
+        if status == 529 {
+            let retry_after_ms = parse_retry_after_ms(response.headers());
+            return Err(LlmError::Overloaded {
+                status,
+                retry_after_ms,
+            });
+        }
+
+        if status >= 400 {
+            let error_body: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| LlmError::Serialization(e.to_string()))?;
+            let message = error_body["error"]["message"]
+                .as_str()
+                .unwrap_or("Unknown error")
+                .to_string();
+            return Err(LlmError::Api { status, message });
+        }
+
+        tracing::debug!(
+            provider = "anthropic",
+            model = model_id,
+            "Streaming response started"
+        );
+
+        let byte_stream = response.bytes_stream();
+        Ok(Box::pin(streaming::parse_anthropic_sse(byte_stream)))
     }
 }
+
+#[cfg(test)]
+use streaming::parse_anthropic_sse;
 
 #[cfg(test)]
 mod tests;

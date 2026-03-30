@@ -17,98 +17,12 @@ use axum::{
 use chrono::Utc;
 use futures_util::stream::Stream;
 use openalpaca_core::events::SystemEvent;
-use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, convert::Infallible, sync::Arc};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
+use super::chat_types::*;
 use crate::AppState;
-
-// ── Request / Response types ────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct ChatSendRequest {
-    pub content: String,
-    #[serde(default)]
-    pub attachments: Vec<openalpaca_storage::AttachmentRef>,
-}
-
-#[derive(Serialize)]
-pub struct ChatSendResponseBody {
-    pub stream_id: String,
-    pub lane_key: String,
-}
-
-#[derive(Deserialize)]
-pub struct HistoryQuery {
-    pub limit: Option<i64>,
-    pub offset: Option<i64>,
-    pub lane_key: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct ConversationsQuery {
-    pub source: Option<String>,
-    pub limit: Option<i64>,
-    pub offset: Option<i64>,
-}
-
-#[derive(Serialize)]
-pub struct ConversationsResponse {
-    pub conversations: Vec<openalpaca_storage::Conversation>,
-}
-
-#[derive(Serialize)]
-pub struct ConversationMessagesResponse {
-    pub messages: Vec<openalpaca_storage::ConversationMessage>,
-    pub total: i64,
-}
-
-#[derive(Serialize)]
-pub struct ChatHistoryResponse {
-    pub messages: Vec<openalpaca_storage::ConversationMessage>,
-    pub total: i64,
-    pub lane_key: String,
-}
-
-#[derive(Deserialize)]
-pub struct DeleteHistoryQuery {
-    pub lane_key: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct ChatDeleteResponse {
-    pub deleted: u64,
-}
-
-#[derive(Serialize)]
-struct ErrorResponse {
-    error: ErrorDetail,
-}
-
-#[derive(Serialize)]
-struct ErrorDetail {
-    code: String,
-    message: String,
-}
-
-/// Check if the given lane_key belongs to the specified user.
-/// Lane key format is "{user_id}:{source_name}".
-fn is_lane_owned_by(lane_key: &str, user_id: &str) -> bool {
-    lane_key.starts_with(&format!("{}:", user_id))
-}
-
-fn error_response(status: StatusCode, code: &str, message: &str) -> impl IntoResponse {
-    (
-        status,
-        Json(ErrorResponse {
-            error: ErrorDetail {
-                code: code.to_string(),
-                message: message.to_string(),
-            },
-        }),
-    )
-}
 
 // ── POST /v1/chat ───────────────────────────────────────────────────
 
@@ -267,6 +181,17 @@ fn make_sse_stream(
                 openalpaca_core::chat::ChatStreamEvent::Error { message } => Event::default()
                     .event("error")
                     .data(serde_json::json!({"message": message}).to_string()),
+                openalpaca_core::chat::ChatStreamEvent::ConfirmationRequested {
+                    request_id,
+                    tool_name,
+                    tool_arguments,
+                } => Event::default()
+                    .event("confirmation_requested")
+                    .data(serde_json::json!({
+                        "request_id": request_id,
+                        "tool_name": tool_name,
+                        "tool_arguments": tool_arguments,
+                    }).to_string()),
             };
             Some(Ok(sse_event))
         }
@@ -439,6 +364,111 @@ pub async fn get_conversation_messages_handler(
             &e.to_string(),
         )
         .into_response(),
+    }
+}
+
+// ── PUT /v1/chat/messages/:message_id/feedback ────────────────────
+
+pub async fn upsert_feedback_handler(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<i64>,
+    Json(body): Json<FeedbackRequest>,
+) -> impl IntoResponse {
+    if body.feedback != "positive" && body.feedback != "negative" {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "INVALID_FEEDBACK",
+            "feedback must be 'positive' or 'negative'",
+        )
+        .into_response();
+    }
+
+    let repo = openalpaca_storage::MessageFeedbackRepository::new(&state.db);
+    match repo.upsert(message_id, &body.feedback, body.comment.as_deref()) {
+        Ok(()) => Json(FeedbackResponse {
+            message_id,
+            feedback: body.feedback,
+            comment: body.comment,
+        })
+        .into_response(),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            &e.to_string(),
+        )
+        .into_response(),
+    }
+}
+
+// ── GET /v1/chat/messages/:message_id/feedback ────────────────────
+
+pub async fn get_feedback_handler(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<i64>,
+) -> impl IntoResponse {
+    let repo = openalpaca_storage::MessageFeedbackRepository::new(&state.db);
+    match repo.get_by_message(message_id) {
+        Ok(Some(fb)) => Json(FeedbackResponse {
+            message_id: fb.message_id,
+            feedback: fb.feedback,
+            comment: fb.comment,
+        })
+        .into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            &e.to_string(),
+        )
+        .into_response(),
+    }
+}
+
+// ── DELETE /v1/chat/messages/:message_id/feedback ─────────────────
+
+pub async fn delete_feedback_handler(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<i64>,
+) -> impl IntoResponse {
+    let repo = openalpaca_storage::MessageFeedbackRepository::new(&state.db);
+    match repo.delete(message_id) {
+        Ok(deleted) => Json(FeedbackDeleteResponse { deleted }).into_response(),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            &e.to_string(),
+        )
+        .into_response(),
+    }
+}
+
+// ── POST /v1/chat/confirmations/:request_id ──────────────────────
+
+pub async fn confirm_tool(
+    State(state): State<Arc<AppState>>,
+    Path(request_id): Path<String>,
+    Json(body): Json<ConfirmationBody>,
+) -> impl IntoResponse {
+    let broker = match &state.confirmation_broker {
+        Some(b) => b,
+        None => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "CONFIRMATION_NOT_CONFIGURED",
+                "Confirmation broker is not configured",
+            )
+            .into_response();
+        }
+    };
+
+    match broker.respond(
+        &request_id,
+        openalpaca_core::security::confirmation::ConfirmationResponse {
+            approved: body.approved,
+        },
+    ) {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(e) => error_response(StatusCode::NOT_FOUND, "NOT_FOUND", &e).into_response(),
     }
 }
 

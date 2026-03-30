@@ -95,11 +95,16 @@ apps/openalpaca-gui/src-tauri/gen/
 !docs/Daemon_Manual.md
 !docs/Installation_Manual.md
 !docs/QuickStart_Manual.md
+!docs/Skill_Template_Reference.md
+!docs/tools/*.md
 !docs/api/*
 !docs/plans/Unified_Memory_System.md
 !config/agents/*.md
 !config/orchestrator/templates/
 !config/orchestrator/templates/*.md
+!config/skills/*.md
+!config/skills/*/*.md
+!config/skills/*/*/*.md
 # ============================================
 # Agent
 # ============================================

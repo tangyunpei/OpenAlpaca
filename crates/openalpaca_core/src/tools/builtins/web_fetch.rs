@@ -101,18 +101,29 @@ pub(super) fn web_fetch_tool() -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "web_fetch".to_string(),
-            description: "Fetch content from a URL".to_string(),
+            description: "Fetch and return the text content of a web page. Only text-based \
+                content types are supported (HTML, JSON, XML, plain text). Response is \
+                truncated to 8KB. Use web_search first to find relevant URLs, then \
+                web_fetch to retrieve specific pages. For downloading files, use \
+                shell_execute with curl instead."
+                .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "The URL to fetch"
+                        "description": "The full URL to fetch (must be https:// or http://). Internal/private IPs are blocked."
                     }
                 },
                 "required": ["url"]
             }),
+            strict: Some(true),
+            input_examples: Some(vec![
+                serde_json::json!({"url": "https://api.example.com/data"}),
+            ]),
         },
         backend: ToolBackend::BuiltIn(Arc::new(WebFetchTool)),
+        provides_capabilities: vec!["web_access".into()],
+        exempt_from_timeout: false,
     }
 }

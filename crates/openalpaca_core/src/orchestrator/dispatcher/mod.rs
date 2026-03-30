@@ -4,7 +4,10 @@ mod core;
 mod dag;
 pub(crate) mod decision;
 mod lead_agent;
+pub(crate) mod memory;
+pub(crate) mod outcome;
 mod pipeline;
+mod pipeline_step;
 #[cfg(test)]
 mod tests;
 pub(crate) mod usage;
@@ -15,6 +18,7 @@ use crate::daemon_config::DaemonConfig;
 use crate::events::SystemEvent;
 use crate::lane::LaneManager;
 use crate::orchestrator::ConnectorStatusProvider;
+use crate::prompt_ctx::ContextManager;
 use crate::security::gate::SecurityGate;
 use arc_swap::ArcSwap;
 use chrono::Utc;
@@ -29,156 +33,15 @@ use crate::tools::ToolRegistry;
 
 use super::skill_matcher::{SkillMatch, SkillMatcher};
 use super::task_planner::TaskPlan;
-use crate::memory::scope_context::MemoryScopeContext;
-use crate::memory::task_extraction::{TaskExtractionParams, extract_task_memories};
-use openalpaca_storage::repository::MemoryRepository;
 use openalpaca_storage::repository::dispatch_decision::{
     DispatchDecisionRecord, DispatchDecisionRepository,
 };
 
-/// Retrieve relevant user memories as a formatted block for agent prompts.
-/// Mirrors the retrieval pattern used in `handle_simple_query()`.
-///
-/// When `scope_ctx` is provided, uses cascading search (Workspace → Global).
-/// When `None`, falls back to unscoped global search (backward compatibility for
-/// pipeline and lead_agent contexts that don't yet carry scope context).
-pub(super) async fn retrieve_memory_block(
-    db: &Database,
-    embedder: Option<&Arc<dyn openalpaca_llm::Embedder>>,
-    owner_id: &str,
-    query: &str,
-    top_k: usize,
-    scope_ctx: Option<&MemoryScopeContext>,
-    access_boost: f64,
-) -> Option<String> {
-    let repo = MemoryRepository::new(db);
-    let query_embedding = if let Some(embedder) = embedder {
-        match embedder.embed(&[query]).await {
-            Ok(v) => v.into_iter().next(),
-            Err(e) => {
-                tracing::warn!("Memory embedding failed, falling back to text-only search: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let memories = if let Some(ctx) = scope_ctx {
-        let cascade_scopes = ctx.cascade_scopes();
-        match repo.search_hybrid_cascade(
-            owner_id,
-            query,
-            query_embedding.as_deref(),
-            top_k,
-            None,
-            &cascade_scopes,
-        ) {
-            Ok(results) => results,
-            Err(e) => {
-                tracing::warn!("Memory cascade search failed: {e}");
-                Vec::new()
-            }
-        }
-    } else {
-        match repo.search_hybrid(
-            owner_id,
-            query,
-            query_embedding.as_deref(),
-            top_k,
-            None,
-            None,
-            None,
-        ) {
-            Ok(results) => results,
-            Err(e) => {
-                tracing::warn!("Memory search failed: {e}");
-                Vec::new()
-            }
-        }
-    };
-
-    if memories.is_empty() {
-        return None;
-    }
-
-    // Track access for importance decay + boost
-    let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-    if let Err(e) = repo.touch_accessed(&ids, access_boost) {
-        tracing::warn!("Failed to track memory access: {e}");
-    }
-
-    let mut inner = String::new();
-    let mut budget = 2000usize;
-    for m in &memories {
-        let entry = format!(
-            "- [{}] {}\n",
-            m.kind.as_str(),
-            m.content.chars().take(300).collect::<String>()
-        );
-        if entry.len() > budget {
-            break;
-        }
-        budget -= entry.len();
-        inner.push_str(&entry);
-    }
-    Some(super::wrap_untrusted_context(
-        &inner,
-        "retrieved_memory",
-        "retrieved",
-    ))
-}
-
-/// Spawn a background task to extract memories from a completed task output.
-/// Fire-and-forget: does not block the caller. Only runs for successful tasks.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn spawn_task_memory_extraction(
-    db: &Database,
-    router: &Arc<LlmRouter>,
-    embedder: &Option<Arc<dyn openalpaca_llm::Embedder>>,
-    daemon_config: &Arc<ArcSwap<DaemonConfig>>,
-    owner_id: &str,
-    task_id: &str,
-    task_description: &str,
-    task_output: &str,
-    source_path: &str,
-    success: bool,
-    workspace_id: Option<String>,
-) {
-    if !success {
-        return;
-    }
-    let dcfg = daemon_config.load();
-    if !dcfg.orchestrator.costs.task_extract_enabled {
-        return;
-    }
-
-    let params = TaskExtractionParams {
-        owner_id: owner_id.to_string(),
-        task_id: task_id.to_string(),
-        task_description: task_description.to_string(),
-        task_output: task_output.to_string(),
-        source_path: source_path.to_string(),
-        workspace_id,
-    };
-    let db = db.clone();
-    let router = router.clone();
-    let embedder = embedder.clone();
-    let daemon_config = daemon_config.clone();
-
-    let task_id_for_log = params.task_id.clone();
-    let handle = tokio::spawn(async move {
-        extract_task_memories(params, db, router, embedder, daemon_config).await;
-    });
-    // Separate lightweight task to catch panics from the extraction task
-    tokio::spawn(async move {
-        if let Err(e) = handle.await {
-            tracing::warn!(
-                "Fire-and-forget memory extraction failed for task '{}': {e}",
-                task_id_for_log,
-            );
-        }
-    });
-}
+// Re-export for use by child modules (pipeline, dag, lead_agent)
+pub(super) use memory::{retrieve_memory_block, spawn_task_memory_extraction};
+use outcome::{finalize_task_with_outcome, persist_conversation, update_state_with_retry};
+#[cfg(test)]
+use outcome::{build_task_outcome, finalize_task};
 
 /// Dispatches complex tasks by matching skills to agents and creating task lanes.
 pub struct TaskDispatcher {
@@ -195,6 +58,10 @@ pub struct TaskDispatcher {
     connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
     /// Cached connector guidance with 10s TTL (Opt-8b).
     cached_connector_guidance: std::sync::Mutex<(String, Instant)>,
+    /// Optional confirmation broker for interactive tool approval in agent pipelines.
+    pub(crate) confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
+    /// Context manager for distilling parent context into sub-agent packages.
+    pub(crate) context_manager: Arc<ContextManager>,
 }
 
 impl TaskDispatcher {
@@ -210,6 +77,7 @@ impl TaskDispatcher {
         embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
         connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
+        context_manager: Arc<ContextManager>,
     ) -> Self {
         Self {
             shared_context,
@@ -224,6 +92,8 @@ impl TaskDispatcher {
             daemon_config,
             connector_status,
             cached_connector_guidance: std::sync::Mutex::new((String::new(), Instant::now())),
+            confirmation_broker: Arc::new(RwLock::new(None)),
+            context_manager,
         }
     }
 
@@ -641,363 +511,5 @@ pub(super) fn format_task_result(title: &str, summary: &str, is_success: bool) -
         format!("**Task completed: {}**\n\n{}", title, summary)
     } else {
         format!("**Task failed: {}**\n\n{}", title, summary)
-    }
-}
-
-use crate::orchestrator::task_state::{TaskOutcome, TaskState};
-use openalpaca_storage::OutcomeKind;
-
-/// Persist a state update with retry (up to 3 attempts) to handle optimistic locking conflicts.
-///
-/// Returns `true` if the update was successfully persisted, `false` if all retries were
-/// exhausted or a DB error occurred.
-pub(super) async fn update_state_with_retry(
-    db: &openalpaca_storage::Database,
-    task_id: &str,
-    mutate: impl Fn(&mut TaskState),
-    context: &str,
-) -> bool {
-    const MAX_RETRIES: usize = 3;
-    for attempt in 0..MAX_RETRIES {
-        let repo = openalpaca_storage::repository::TaskRepository::new(db);
-        let existing = match repo.get(task_id) {
-            Ok(Some(t)) => t,
-            _ => return false,
-        };
-        let sj = match existing.state_json.as_deref() {
-            Some(s) => s,
-            None => return false,
-        };
-        let mut state: TaskState = match serde_json::from_str(sj) {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-        mutate(&mut state);
-        match repo.update_state(task_id, &state.to_json(), existing.state_version) {
-            Ok(true) => return true,
-            Ok(false) => {
-                if attempt < MAX_RETRIES - 1 {
-                    tracing::debug!(
-                        "State update version conflict ({}) for task '{}' (attempt {}/{}), retrying",
-                        context,
-                        task_id,
-                        attempt + 1,
-                        MAX_RETRIES
-                    );
-                    // Linear backoff with pseudo-jitter (avoids rand dependency).
-                    // Jitter from task_id hash reduces contention under DAG parallelism.
-                    let pseudo_jitter = task_id.as_bytes().iter().map(|b| *b as u64).sum::<u64>() % 5;
-                    tokio::time::sleep(std::time::Duration::from_millis(10 + (attempt as u64 * 5) + pseudo_jitter)).await;
-                } else {
-                    tracing::warn!(
-                        "State update ({}) for task '{}' failed after {} retries — state may be stale",
-                        context,
-                        task_id,
-                        MAX_RETRIES
-                    );
-                    return false;
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "State update ({}) failed for task '{}': {}",
-                    context,
-                    task_id,
-                    e
-                );
-                return false;
-            }
-        }
-    }
-    false
-}
-
-/// Maximum length for the summary stored in `result_summary` column.
-const MAX_SUMMARY_LENGTH: usize = 2000;
-
-/// Build a structured TaskOutcome from the current task state.
-///
-/// Reads the task's state_json from the DB (if available), uses it to collect
-/// step summaries and artifact pointers, then classifies the outcome.
-///
-/// If state_json is unavailable (lead agent with no state, legacy tasks),
-/// falls back to constructing a minimal outcome from the provided content.
-pub(super) fn build_task_outcome(
-    db: Option<&openalpaca_storage::Database>,
-    task_id: &str,
-    final_content: &str,
-    success: bool,
-) -> TaskOutcome {
-    // Try to read state_json for rich outcome data
-    if let Some(db) = db {
-        let repo = openalpaca_storage::repository::TaskRepository::new(db);
-        if let Ok(Some(task)) = repo.get(task_id) {
-            if let Some(ref sj) = task.state_json {
-                if let Ok(state) = serde_json::from_str::<TaskState>(sj) {
-                    let fallback = if final_content.is_empty() {
-                        if success { "Task completed." } else { "Task failed." }
-                    } else {
-                        final_content
-                    };
-                    let mut outcome = if state.dag.is_some() {
-                        state.build_outcome_dag(fallback, None)
-                    } else {
-                        state.build_outcome(fallback, None)
-                    };
-                    if !success {
-                        outcome.outcome_kind = OutcomeKind::Failed;
-                        // Prepend error reason if it's not already in the summary
-                        if !final_content.is_empty() && !outcome.summary.contains(final_content) {
-                            outcome.summary =
-                                format!("{}\n\n{}", final_content, outcome.summary);
-                        }
-                    }
-                    return outcome;
-                }
-            }
-        }
-    }
-
-    // Fallback: no state_json available, build minimal outcome from content
-    let summary = if final_content.is_empty() {
-        if success { "Task completed.".to_string() } else { "Task failed.".to_string() }
-    } else {
-        final_content.to_string()
-    };
-
-    if success {
-        TaskOutcome {
-            summary,
-            outcome_kind: OutcomeKind::TextOnly,
-            artifacts: Vec::new(),
-            no_artifact_reason: Some("No artifacts were produced.".to_string()),
-        }
-    } else {
-        TaskOutcome {
-            summary,
-            outcome_kind: OutcomeKind::Failed,
-            artifacts: Vec::new(),
-            no_artifact_reason: None,
-        }
-    }
-}
-
-/// Log warnings for inconsistent terminal task states.
-///
-/// This is observability-only (never blocks or fails). It catches cases like:
-/// - Empty outcome summary at terminal time
-/// - success=true but outcome_kind=Failed (or vice versa)
-fn check_terminal_consistency(task_id: &str, success: bool, outcome: &TaskOutcome) {
-    if outcome.summary.is_empty() {
-        tracing::warn!(
-            task_id,
-            success,
-            outcome_kind = %outcome.outcome_kind.as_str(),
-            "Terminal task has empty outcome summary"
-        );
-    }
-    if success && outcome.outcome_kind == OutcomeKind::Failed {
-        tracing::warn!(
-            task_id,
-            "Task marked successful but outcome_kind=Failed — inconsistent state"
-        );
-    }
-    if !success && outcome.outcome_kind != OutcomeKind::Failed {
-        tracing::warn!(
-            task_id,
-            outcome_kind = %outcome.outcome_kind.as_str(),
-            "Task marked failed but outcome_kind is not Failed — inconsistent state"
-        );
-    }
-}
-
-/// Finalize a task with a structured outcome.
-///
-/// This is the unified replacement for the ad-hoc assembly in each execution mode.
-/// It:
-/// 1. Builds the TaskOutcome (via `build_task_outcome`)
-/// 2. Checks terminal consistency (log-only warnings)
-/// 3. Persists the outcome to DB (outcome_json, outcome_kind, artifact_count)
-/// 4. Delegates to `finalize_task` for status update, `result_summary`, and event emission
-pub(super) fn finalize_task_with_outcome(
-    ctx: &crate::context::SharedContext,
-    bus: &crate::bus::EventBus,
-    db: Option<&openalpaca_storage::Database>,
-    task_id: &str,
-    final_content: &str,
-    success: bool,
-) -> TaskOutcome {
-    let outcome = build_task_outcome(db, task_id, final_content, success);
-
-    // Observability: log warnings for inconsistent terminal states
-    check_terminal_consistency(task_id, success, &outcome);
-
-    // Persist structured outcome fields to DB (outcome_json, outcome_kind, artifact_count)
-    if let Some(db) = db {
-        let repo = openalpaca_storage::repository::TaskRepository::new(db);
-        let outcome_json = match serde_json::to_string(&outcome) {
-            Ok(json) => json,
-            Err(e) => {
-                tracing::warn!(
-                    "finalize_task_with_outcome: failed to serialize outcome for task '{}': {e}",
-                    task_id
-                );
-                // Skip DB write — don't persist invalid/empty JSON
-                String::new()
-            }
-        };
-        if outcome_json.is_empty() {
-            tracing::warn!(
-                "finalize_task_with_outcome: skipping set_outcome for task '{}' due to empty outcome_json",
-                task_id
-            );
-        } else if let Err(e) = repo.set_outcome(
-            task_id,
-            &outcome_json,
-            outcome.outcome_kind,
-            outcome.artifacts.len() as i32,
-        ) {
-            tracing::warn!(
-                "finalize_task_with_outcome: failed to set outcome for task '{}': {e}",
-                task_id
-            );
-        }
-    }
-
-    // Delegate status update + result_summary + event emission to existing finalize_task
-    let truncated_summary: String = outcome.summary.chars().take(MAX_SUMMARY_LENGTH).collect();
-    finalize_task(
-        ctx,
-        bus,
-        db,
-        task_id,
-        &truncated_summary,
-        success,
-        Some(outcome.outcome_kind),
-        Some(outcome.artifacts.len() as i32),
-        Some(&outcome.summary),
-    );
-
-    outcome
-}
-
-/// Update task status in registry + DB + emit event for a completed or failed task.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn finalize_task(
-    ctx: &crate::context::SharedContext,
-    bus: &crate::bus::EventBus,
-    db: Option<&openalpaca_storage::Database>,
-    task_id: &str,
-    summary: &str,
-    success: bool,
-    outcome_kind: Option<OutcomeKind>,
-    artifact_count: Option<i32>,
-    outcome_summary: Option<&str>,
-) {
-    let now = chrono::Utc::now();
-    if success {
-        ctx.task_registry
-            .update_status(task_id, crate::context::TaskEntryStatus::Completed);
-        if let Some(db) = db {
-            let repo = openalpaca_storage::repository::TaskRepository::new(db);
-            if let Err(e) = repo.update_status(task_id, openalpaca_storage::TaskStatus::Completed) {
-                tracing::warn!(
-                    "finalize_task: failed to update status for task '{}': {e}",
-                    task_id
-                );
-            }
-            if let Err(e) = repo.set_result(task_id, summary) {
-                tracing::warn!(
-                    "finalize_task: failed to set result for task '{}': {e}",
-                    task_id
-                );
-            }
-        }
-        bus.publish(crate::events::SystemEvent::TaskCompleted {
-            task_id: task_id.to_string(),
-            result_summary: Some(summary.to_string()),
-            outcome_kind: outcome_kind.map(|k| k.as_str().to_string()),
-            artifact_count,
-            outcome_summary: outcome_summary.map(|s| s.chars().take(500).collect()),
-            timestamp: now,
-        });
-    } else {
-        ctx.task_registry
-            .update_status(task_id, crate::context::TaskEntryStatus::Failed);
-        if let Some(db) = db {
-            let repo = openalpaca_storage::repository::TaskRepository::new(db);
-            if let Err(e) = repo.update_status(task_id, openalpaca_storage::TaskStatus::Failed) {
-                tracing::warn!(
-                    "finalize_task: failed to update status for task '{}': {e}",
-                    task_id
-                );
-            }
-            if let Err(e) = repo.set_result(task_id, summary) {
-                tracing::warn!(
-                    "finalize_task: failed to set result for task '{}': {e}",
-                    task_id
-                );
-            }
-        }
-        bus.publish(crate::events::SystemEvent::TaskFailed {
-            task_id: task_id.to_string(),
-            error: summary.to_string(),
-            outcome_kind: outcome_kind.map(|k| k.as_str().to_string()),
-            timestamp: now,
-        });
-    }
-}
-
-/// Persist a task result as a conversation message.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn persist_conversation(
-    db: &openalpaca_storage::Database,
-    lane_key: &str,
-    source: &str,
-    content: String,
-    model: Option<String>,
-    tokens_in: i64,
-    tokens_out: i64,
-    runtime_secs: i64,
-) {
-    let conv_repo = openalpaca_storage::ConversationRepository::new(db);
-    if let Err(e) = conv_repo.get_or_create_conversation(lane_key, source) {
-        tracing::warn!(
-            "persist_conversation: failed to get/create conversation for lane '{}': {e}",
-            lane_key
-        );
-        return;
-    }
-
-    let msg = openalpaca_storage::ConversationMessage {
-        id: 0,
-        lane_key: lane_key.to_string(),
-        role: "assistant".to_string(),
-        content,
-        source: Some(source.to_string()),
-        model,
-        tokens_in: Some(tokens_in),
-        tokens_out: Some(tokens_out),
-        duration_ms: Some(runtime_secs * 1000),
-        created_at: String::new(),
-        content_json: None,
-        display_text: None,
-    };
-
-    match conv_repo.insert(&msg) {
-        Ok(_) => {
-            if let Err(e) = conv_repo.increment_message_count(lane_key) {
-                tracing::warn!(
-                    "persist_conversation: failed to increment message count for lane '{}': {e}",
-                    lane_key
-                );
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                "persist_conversation: failed to insert assistant message for lane '{}': {e}",
-                lane_key
-            );
-        }
     }
 }

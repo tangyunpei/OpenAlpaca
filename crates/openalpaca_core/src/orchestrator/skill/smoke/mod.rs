@@ -57,8 +57,15 @@ pub fn validate_smoke_config(skill_id: &str, catalog: &SkillCatalog) -> Vec<Smok
     }
 
     let mut results = Vec::new();
+    let skill_dir = match entry.skill_dir {
+        Some(ref d) => d,
+        None => {
+            // Plugin skills have no filesystem directory — smoke tests are not applicable
+            return Vec::new();
+        }
+    };
     for input_file in &doc.frontmatter.tests.smoke {
-        let full_path = entry.skill_dir.join(input_file);
+        let full_path = skill_dir.join(input_file);
         if !full_path.exists() {
             results.push(SmokeTestResult {
                 skill_id: skill_id.to_string(),

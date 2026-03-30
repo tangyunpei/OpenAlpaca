@@ -1,3 +1,7 @@
+mod request;
+mod response;
+mod streaming;
+
 use crate::LlmProvider;
 use crate::error::LlmError;
 use crate::types::*;
@@ -72,237 +76,15 @@ impl OpenAiProvider {
         }
     }
 
-    /// Build OpenAI content value from a ChatMessage.
-    ///
-    /// If the message has multimodal `parts`, builds an array of content objects
-    /// in OpenAI's format. If parts is None, returns a plain string value.
-    fn build_message_content(msg: &ChatMessage) -> serde_json::Value {
-        let parts = match &msg.parts {
-            Some(parts) if !parts.is_empty() => parts,
-            _ => return serde_json::Value::String(msg.content.clone()),
-        };
-
-        let blocks: Vec<serde_json::Value> = parts
-            .iter()
-            .filter_map(|part| match part {
-                ContentPart::Text { text } => {
-                    if text.trim().is_empty() {
-                        None
-                    } else {
-                        Some(serde_json::json!({ "type": "text", "text": text }))
-                    }
-                }
-                ContentPart::Image { source, detail } => {
-                    let url = match source {
-                        ImageSource::Base64 { media_type, data } => {
-                            format!("data:{};base64,{}", media_type, data.as_str())
-                        }
-                        ImageSource::Url { url } => url.clone(),
-                        ImageSource::FileAsset { file_id, media_type } => {
-                            // Should be resolved before reaching provider
-                            return Some(serde_json::json!({
-                                "type": "text",
-                                "text": format!("[image file_id={} not resolved — media_type={}]", file_id, media_type),
-                            }));
-                        }
-                    };
-                    let detail_val = detail.as_deref().unwrap_or("auto");
-                    Some(serde_json::json!({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": url,
-                            "detail": detail_val,
-                        }
-                    }))
-                }
-                ContentPart::Audio { data, format } => Some(serde_json::json!({
-                    "type": "input_audio",
-                    "input_audio": {
-                        "data": data.as_str(),
-                        "format": format,
-                    }
-                })),
-                ContentPart::Document {
-                    filename,
-                    mime_type,
-                    extracted_text,
-                    ..
-                } => {
-                    // OpenAI has no native document input; use extracted text fallback
-                    if let Some(text) = extracted_text {
-                        Some(serde_json::json!({
-                            "type": "text",
-                            "text": format!("[Document: {} ({})]\n{}", filename, mime_type, text),
-                        }))
-                    } else {
-                        Some(serde_json::json!({
-                            "type": "text",
-                            "text": format!("[Document: {} ({}) — no extracted text available]", filename, mime_type),
-                        }))
-                    }
-                }
-                ContentPart::FileRef {
-                    file_id,
-                    filename,
-                    mime_type,
-                } => Some(serde_json::json!({
-                    "type": "text",
-                    "text": format!("[File reference: {} ({}) id={}]", filename, mime_type, file_id),
-                })),
-            })
-            .collect();
-
-        if blocks.is_empty() {
-            if !msg.content.trim().is_empty() {
-                return serde_json::Value::String(msg.content.clone());
-            }
-            return serde_json::Value::String("[empty message]".to_string());
-        }
-
-        serde_json::Value::Array(blocks)
-    }
-
     pub(crate) fn build_request_body(&self, request: &ChatRequest) -> serde_json::Value {
-        let model = request.model.as_deref().unwrap_or(&self.model);
-        let max_tokens = request.max_tokens.unwrap_or(self.max_tokens);
-
-        let messages: Vec<serde_json::Value> = request
-            .messages
-            .iter()
-            .map(|msg| {
-                let role = match msg.role {
-                    Role::System => "system",
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                    Role::Tool => "tool",
-                };
-
-                let content = if matches!(msg.role, Role::User) {
-                    Self::build_message_content(msg)
-                } else {
-                    serde_json::Value::String(msg.content.clone())
-                };
-
-                let mut obj = serde_json::json!({
-                    "role": role,
-                    "content": content,
-                });
-
-                if let Some(ref tool_calls) = msg.tool_calls {
-                    let tcs: Vec<serde_json::Value> = tool_calls
-                        .iter()
-                        .map(|tc| {
-                            serde_json::json!({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.name,
-                                    "arguments": tc.arguments.to_string(),
-                                }
-                            })
-                        })
-                        .collect();
-                    obj["tool_calls"] = serde_json::Value::Array(tcs);
-                }
-
-                if let Some(ref tool_call_id) = msg.tool_call_id {
-                    obj["tool_call_id"] = serde_json::Value::String(tool_call_id.clone());
-                }
-
-                obj
-            })
-            .collect();
-
-        let mut body = serde_json::json!({
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": messages,
-        });
-
-        if let Some(temp) = request.temperature {
-            body["temperature"] = serde_json::json!(temp);
-        }
-
-        if !request.tools.is_empty() {
-            let tools: Vec<serde_json::Value> = request
-                .tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.parameters,
-                        }
-                    })
-                })
-                .collect();
-            body["tools"] = serde_json::Value::Array(tools);
-
-            if let Some(ref choice) = request.tool_choice {
-                body["tool_choice"] = match choice {
-                    ToolChoice::Auto => serde_json::json!("auto"),
-                    ToolChoice::Any => serde_json::json!("required"),
-                    ToolChoice::Tool(name) => serde_json::json!({
-                        "type": "function",
-                        "function": {"name": name}
-                    }),
-                };
-            }
-        }
-
-        body
+        request::build_request_body(&self.model, self.max_tokens, request)
     }
 
-    pub(crate) fn parse_response(&self, body: serde_json::Value) -> Result<ChatResponse, LlmError> {
-        let model = body["model"].as_str().unwrap_or(&self.model).to_string();
-
-        let usage = Usage {
-            input_tokens: body["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-            output_tokens: body["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
-            ..Default::default()
-        };
-
-        let choice = &body["choices"][0];
-        let message = &choice["message"];
-
-        let content = message["content"].as_str().unwrap_or("").to_string();
-
-        let finish_reason_str = choice["finish_reason"].as_str().unwrap_or("stop");
-        let finish_reason = match finish_reason_str {
-            "stop" => FinishReason::Stop,
-            "tool_calls" => FinishReason::ToolUse,
-            "length" => FinishReason::MaxTokens,
-            _ => FinishReason::Stop,
-        };
-
-        let mut tool_calls = Vec::new();
-        if let Some(tcs) = message["tool_calls"].as_array() {
-            for tc in tcs {
-                let id = tc["id"].as_str().unwrap_or_default().to_string();
-                let name = tc["function"]["name"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
-                let arguments: serde_json::Value = serde_json::from_str(args_str)
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                tool_calls.push(ToolCall {
-                    id,
-                    name,
-                    arguments,
-                });
-            }
-        }
-
-        Ok(ChatResponse {
-            content,
-            tool_calls,
-            model,
-            usage,
-            finish_reason,
-        })
+    pub(crate) fn parse_response(
+        &self,
+        body: serde_json::Value,
+    ) -> Result<ChatResponse, LlmError> {
+        response::parse_response(&self.model, body)
     }
 }
 
@@ -429,7 +211,74 @@ impl LlmProvider for OpenAiProvider {
 
         self.parse_response(response_body)
     }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn chat_streaming_with_key(
+        &self,
+        key: &str,
+        request: ChatRequest,
+    ) -> Result<ChatStream, LlmError> {
+        let mut body = self.build_request_body(&request);
+        body["stream"] = serde_json::json!(true);
+        if self.base_url == DEFAULT_BASE_URL {
+            body["stream_options"] = serde_json::json!({"include_usage": true});
+        }
+        let url = format!("{}/chat/completions", self.base_url);
+
+        let mut req_builder = self
+            .client
+            .post(&url)
+            .header("content-type", "application/json");
+
+        if !key.is_empty() {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", key));
+        } else if let Some(ref api_key) = self.api_key {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let response = req_builder
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+
+        let status = response.status().as_u16();
+
+        if status == 429 {
+            let retry_after_ms = parse_retry_after_ms(response.headers()).unwrap_or(1_000);
+            return Err(LlmError::RateLimited { retry_after_ms });
+        }
+
+        if status == 503 || status == 529 {
+            let retry_after_ms = parse_retry_after_ms(response.headers());
+            return Err(LlmError::Overloaded {
+                status,
+                retry_after_ms,
+            });
+        }
+
+        if status >= 400 {
+            let error_body: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| LlmError::Serialization(e.to_string()))?;
+            let message = error_body["error"]["message"]
+                .as_str()
+                .unwrap_or("Unknown error")
+                .to_string();
+            return Err(LlmError::Api { status, message });
+        }
+
+        let byte_stream = response.bytes_stream();
+        Ok(Box::pin(streaming::parse_openai_sse(byte_stream)))
+    }
 }
+
+#[cfg(test)]
+use streaming::parse_openai_sse;
 
 #[cfg(test)]
 mod tests;

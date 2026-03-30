@@ -3,16 +3,15 @@ id: "review_agent"
 name: "Review Agent"
 description: "Code review and quality assurance agent. Can read files and run test/lint/build commands but cannot write or modify files. Use for code review, test verification, linting, security audits, and quality checks where the agent needs to inspect code and run validation commands without making changes."
 icon: "magnifying_glass_tilted"
-skills:
+capabilities:
   - "file_read"
   - "shell_execute"
-  - "memory_search"
+  - "memory_read"
   - "workspace_read"
   - "workspace_write"
-denied_skills:
+denied_capabilities:
   - "file_write"
-  - "web_search"
-  - "web_fetch"
+  - "web_access"
 temperature: 0.2
 verbosity: "detailed"
 model: "claude-sonnet-4-6"

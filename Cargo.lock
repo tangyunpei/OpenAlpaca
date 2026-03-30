@@ -4108,6 +4108,7 @@ dependencies = [
 name = "openalpaca_api"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "serde",
  "serde_json",
@@ -4121,6 +4122,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "chrono",
+ "dashmap",
  "openalpaca_api",
  "openalpaca_core",
  "openalpaca_storage",
@@ -4203,11 +4205,14 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "dashmap",
  "directories",
  "fastembed",
  "file-lock",
+ "futures-util",
  "keyring",
+ "pin-project-lite",
  "rand 0.10.0",
  "reqwest 0.13.2",
  "serde",
@@ -4229,6 +4234,27 @@ version = "0.1.0"
 [[package]]
 name = "openalpaca_platform_macos"
 version = "0.1.0"
+
+[[package]]
+name = "openalpaca_plugins"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "notify",
+ "openalpaca_api",
+ "openalpaca_connectors",
+ "openalpaca_core",
+ "openalpaca_llm",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.9.11+spec-1.1.0",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "openalpaca_storage"
@@ -4284,6 +4310,7 @@ dependencies = [
  "openalpaca_connectors",
  "openalpaca_core",
  "openalpaca_llm",
+ "openalpaca_plugins",
  "openalpaca_storage",
  "openalpaca_wake",
  "opener",

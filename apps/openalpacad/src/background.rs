@@ -356,3 +356,32 @@ pub fn spawn_asset_cleanup(
         }
     });
 }
+
+/// Spawn telemetry cleanup task.
+///
+/// Runs once per day, removing old skill_execution_log rows (>90 days)
+/// and old tool_execution_log rows (>7 days).
+pub fn spawn_telemetry_cleanup(db: Database, cancel: CancellationToken) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(86400)) => {}
+                _ = cancel.cancelled() => {
+                    tracing::info!("Telemetry cleanup task shutting down");
+                    break;
+                }
+            }
+            let repo = openalpaca_storage::SkillExecutionRepository::new(&db);
+            match repo.cleanup_old(90, 7) {
+                Ok((skill_rows, tool_rows)) => {
+                    if skill_rows > 0 || tool_rows > 0 {
+                        tracing::info!(
+                            "Telemetry cleanup: {skill_rows} skill + {tool_rows} tool rows removed"
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!("Telemetry cleanup failed: {e}"),
+            }
+        }
+    });
+}

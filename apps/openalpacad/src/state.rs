@@ -8,6 +8,7 @@ use openalpaca_core::{
     agent::AgentConfigService,
     chat::{ChatService, ChatStreamManager},
     gateway::Gateway,
+    security::confirmation::ConfirmationBroker,
 };
 use openalpaca_storage::Database;
 
@@ -34,4 +35,6 @@ pub struct AppState {
     pub daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
     pub daemon_config_path: PathBuf,
     pub web_search_config: Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
+    pub confirmation_broker: Option<Arc<ConfirmationBroker>>,
+    pub plugin_manager: Option<Arc<openalpaca_plugins::PluginManager>>,
 }

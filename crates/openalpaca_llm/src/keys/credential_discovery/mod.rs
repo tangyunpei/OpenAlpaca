@@ -222,11 +222,11 @@ impl TokenManager {
         router: &LlmRouter,
         cred: &DiscoveredCredential,
     ) {
-        let provider_type = cred.provider_type;
+        let provider_type = &cred.provider_type;
 
         // Build a discovered key
         let key_id = format!("auto_{:?}", cred.source).to_lowercase();
-        let mut api_key = ApiKey::new(key_id, provider_type, cred.token.access_token.clone());
+        let mut api_key = ApiKey::new(key_id, provider_type.clone(), cred.token.access_token.clone());
         api_key.priority = KeyPriority::Fallback;
         api_key.source = match cred.source {
             CredentialSource::ClaudeCode => KeySource::ClaudeCode,
@@ -250,7 +250,7 @@ impl TokenManager {
                 {
                     // Provider not configured — register it
                     tracing::info!("Registering auto-discovered provider {:?}", provider_type);
-                    self.register_auto_provider(router, provider_type, cred)
+                    self.register_auto_provider(router, provider_type.clone(), cred)
                         .await;
                 }
             }
@@ -261,7 +261,7 @@ impl TokenManager {
                     e
                 );
                 // No existing config — register a new provider with just the discovered key
-                self.register_auto_provider(router, provider_type, cred)
+                self.register_auto_provider(router, provider_type.clone(), cred)
                     .await;
             }
         }
@@ -271,7 +271,7 @@ impl TokenManager {
     async fn build_merged_pool(
         &self,
         settings_service: &LlmSettingsService,
-        provider_type: ProviderType,
+        provider_type: &ProviderType,
         extra_keys: Vec<ApiKey>,
     ) -> Option<KeyPool> {
         // Get the base pool from config
@@ -314,7 +314,7 @@ impl TokenManager {
         cred: &DiscoveredCredential,
     ) {
         let key_id = format!("auto_{:?}", cred.source).to_lowercase();
-        let mut api_key = ApiKey::new(key_id, provider_type, cred.token.access_token.clone());
+        let mut api_key = ApiKey::new(key_id, provider_type.clone(), cred.token.access_token.clone());
         api_key.priority = KeyPriority::Fallback;
         api_key.source = match cred.source {
             CredentialSource::ClaudeCode => KeySource::ClaudeCode,
@@ -324,7 +324,7 @@ impl TokenManager {
         let pool = KeyPool::new(vec![api_key], SelectionStrategy::PrimaryFallback);
 
         // Build the provider implementation
-        let provider: Option<Arc<dyn crate::LlmProvider>> = match provider_type {
+        let provider: Option<Arc<dyn crate::LlmProvider>> = match &provider_type {
             #[cfg(feature = "anthropic")]
             ProviderType::Anthropic => Some(Arc::new(
                 crate::providers::anthropic::AnthropicProvider::new(
@@ -345,7 +345,6 @@ impl TokenManager {
 
         if let Some(provider) = provider {
             router.register_provider(provider_type, provider, pool);
-            tracing::info!("Registered auto-discovered provider {:?}", provider_type);
         }
     }
 }

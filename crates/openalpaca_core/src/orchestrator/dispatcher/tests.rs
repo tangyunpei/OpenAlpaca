@@ -17,11 +17,8 @@ fn setup_with_config(agents: Vec<SubAgent>, config: DaemonConfig) -> TaskDispatc
     let lane_mgr = Arc::new(LaneManager::new());
     let bus = EventBus::default();
     let tool_registry = Arc::new(crate::tools::ToolRegistry::new());
-    let executor = Arc::new(crate::tools::RegistryToolExecutor::new(
-        tool_registry.clone(),
-    ));
     let sandbox = Arc::new(crate::security::sandbox::SandboxManager::with_defaults(
-        executor,
+        tool_registry.clone(),
         bus.clone(),
     ));
     let gate = Arc::new(crate::security::gate::SecurityGate::new(sandbox));
@@ -37,6 +34,7 @@ fn setup_with_config(agents: Vec<SubAgent>, config: DaemonConfig) -> TaskDispatc
         None,
         daemon_config,
         Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
     )
 }
 
@@ -171,7 +169,7 @@ fn test_dispatch_planned_with_use_lead_agent_routes_correctly() {
 #[test]
 fn test_dispatch_lead_agent_marks_agent_busy() {
     let dispatcher = setup(vec![
-        make_agent("lead-01", vec!["lead_orchestration"]),
+        make_agent("lead-01", vec!["orchestration"]),
         make_agent("worker-01", vec!["web_search"]),
     ]);
 
@@ -204,11 +202,11 @@ fn test_dispatch_lead_agent_marks_agent_busy() {
 }
 
 #[test]
-fn test_dispatch_lead_agent_prefers_lead_orchestration_skill() {
-    // When an agent with "lead_orchestration" skill exists, it should be preferred
+fn test_dispatch_lead_agent_prefers_orchestration_capability() {
+    // When an agent with "orchestration" capability exists, it should be preferred
     let dispatcher = setup(vec![
         make_agent("worker-01", vec!["web_search"]),
-        make_agent("lead-01", vec!["lead_orchestration"]),
+        make_agent("lead-01", vec!["orchestration"]),
     ]);
 
     let result = dispatcher.dispatch_lead_agent(
@@ -222,7 +220,7 @@ fn test_dispatch_lead_agent_prefers_lead_orchestration_skill() {
 
     assert!(result.is_ok());
 
-    // lead-01 should be busy (it has lead_orchestration skill)
+    // lead-01 should be busy (it has orchestration capability)
     let lead = dispatcher
         .shared_context
         .agent_registry
@@ -241,7 +239,7 @@ fn test_dispatch_lead_agent_prefers_lead_orchestration_skill() {
 
 #[test]
 fn test_dispatch_lead_agent_fallback_to_any_idle_agent() {
-    // When no agent has "lead_orchestration" skill, any idle agent template is used.
+    // When no agent has "orchestration" capability, any idle agent template is used.
     // The worker-01 template is non-singleton, so spawn_instance creates a new instance
     // with a UUID suffix. We verify that:
     // 1. dispatch succeeds
@@ -524,6 +522,8 @@ async fn test_pipeline_non_singleton_workspace_artifact_count() {
                 ..Default::default()
             },
             finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
         },
         // Round 2: agent returns final text
         ChatResponse {
@@ -536,6 +536,8 @@ async fn test_pipeline_non_singleton_workspace_artifact_count() {
                 ..Default::default()
             },
             finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
         },
     ]));
 
@@ -557,12 +559,17 @@ async fn test_pipeline_non_singleton_workspace_artifact_count() {
     let bus = crate::bus::EventBus::default();
     let mut rx = bus.subscribe();
 
-    let tool_registry = std::sync::Arc::new(crate::tools::ToolRegistry::new());
-    let executor = std::sync::Arc::new(crate::tools::RegistryToolExecutor::new(
-        tool_registry.clone(),
-    ));
+    // Build a registry with workspace tools so workspace_write is available
+    let registry = crate::tools::ToolRegistry::new();
+    let ws_tools = crate::tools::builtins::builtin_tools(
+        Some(db.clone()), None, None, None, None,
+    );
+    for t in ws_tools {
+        registry.register(t);
+    }
+    let tool_registry = std::sync::Arc::new(registry);
     let sandbox = std::sync::Arc::new(
-        crate::security::sandbox::SandboxManager::with_defaults(executor, bus.clone()),
+        crate::security::sandbox::SandboxManager::with_defaults(tool_registry.clone(), bus.clone()),
     );
     let gate = std::sync::Arc::new(crate::security::gate::SecurityGate::new(sandbox));
     let daemon_config =
@@ -579,6 +586,7 @@ async fn test_pipeline_non_singleton_workspace_artifact_count() {
         None,
         daemon_config,
         std::sync::Arc::new(std::sync::RwLock::new(None)),
+        std::sync::Arc::new(crate::prompt_ctx::ContextManager::noop()),
     );
 
     // ── 4. Dispatch ──────────────────────────────────────────────────
@@ -960,6 +968,8 @@ async fn test_pipeline_text_only_no_artifacts_e2e() {
                 ..Default::default()
             },
             finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
         },
     ]));
 
@@ -980,11 +990,8 @@ async fn test_pipeline_text_only_no_artifacts_e2e() {
     let mut rx = bus.subscribe();
 
     let tool_registry = std::sync::Arc::new(crate::tools::ToolRegistry::new());
-    let executor = std::sync::Arc::new(crate::tools::RegistryToolExecutor::new(
-        tool_registry.clone(),
-    ));
     let sandbox = std::sync::Arc::new(
-        crate::security::sandbox::SandboxManager::with_defaults(executor, bus.clone()),
+        crate::security::sandbox::SandboxManager::with_defaults(tool_registry.clone(), bus.clone()),
     );
     let gate = std::sync::Arc::new(crate::security::gate::SecurityGate::new(sandbox));
     let daemon_config =
@@ -1001,6 +1008,7 @@ async fn test_pipeline_text_only_no_artifacts_e2e() {
         None,
         daemon_config,
         std::sync::Arc::new(std::sync::RwLock::new(None)),
+        std::sync::Arc::new(crate::prompt_ctx::ContextManager::noop()),
     );
 
     // ── 4. Dispatch ──────────────────────────────────────────────────

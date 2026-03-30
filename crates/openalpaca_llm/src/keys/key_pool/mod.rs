@@ -7,22 +7,26 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 /// Provider type for categorizing API keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderType {
     Anthropic,
     OpenAI,
     Ollama,
+    Plugin(String),
 }
 
 impl ProviderType {
-    /// Return all known provider variants.
+    /// Return all built-in provider variants (excludes dynamic Plugin variants).
     pub fn all() -> &'static [ProviderType] {
-        &[
+        // SAFETY: These are the three unit variants which contain no heap data,
+        // so a static slice is fine despite ProviderType not being Copy.
+        static BUILTINS: [ProviderType; 3] = [
             ProviderType::Anthropic,
             ProviderType::OpenAI,
             ProviderType::Ollama,
-        ]
+        ];
+        &BUILTINS
     }
 }
 
@@ -32,6 +36,7 @@ impl std::fmt::Display for ProviderType {
             Self::Anthropic => write!(f, "anthropic"),
             Self::OpenAI => write!(f, "openai"),
             Self::Ollama => write!(f, "ollama"),
+            Self::Plugin(name) => write!(f, "plugin:{name}"),
         }
     }
 }

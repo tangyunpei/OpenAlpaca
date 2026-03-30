@@ -22,8 +22,13 @@ pub use models::{AttachmentRef, FileAsset, FileAssetStatus};
 pub use models::{Conversation, ConversationMessage};
 pub use models::{ConversationMap, ExternalIdentity, GlobalUser, LinkToken};
 pub use models::{MemoryKind, MemoryScope, MemorySource, MemoryV2};
+pub use models::{MessageFeedback, SkillSatisfaction};
+pub use models::{SkillExecutionEntry, ToolExecutionEntry};
+pub use models::SkillHealthMetrics;
 pub use repository::{
     AgentRepository, ConfigRepository, ConversationRepository, EventLogRepository,
     FileAssetRepository, IdentityRepository, LlmUsageRepository, MemoryRepository,
-    OrchestratorLatencyRepository, PreferenceRepository, SubAgentRepository, TaskRepository,
+    MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository,
+    SkillExecutionRepository, SubAgentRepository, TaskRepository,
 };
+pub use repository::llm_usage::LlmUsageDaily;

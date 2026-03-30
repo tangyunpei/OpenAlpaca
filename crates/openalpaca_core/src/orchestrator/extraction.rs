@@ -109,13 +109,13 @@ pub(super) async fn extract_user_traits_background(
     }
     let request = RouterRequest {
         model: dcfg.orchestrator.costs.extraction_model.clone(),
-        messages: vec![
+        messages: Arc::new(vec![
             ChatMessage::system(
                 "<role>You are a user trait extractor for OpenAlpaca.</role>\n\
                  <output_format>Output ONLY valid JSON matching the schema. No markdown fences, no commentary.</output_format>",
             ),
             ChatMessage::user(&user_prompt),
-        ],
+        ]),
         tools: Arc::new(vec![]),
         temperature: Some(0.0),
         max_tokens: Some(256),
@@ -124,6 +124,10 @@ pub(super) async fn extract_user_traits_background(
             task_id: None,
         },
         tool_choice: None,
+        tools_token_estimate: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: None,
     };
 
     let call_start = std::time::Instant::now();

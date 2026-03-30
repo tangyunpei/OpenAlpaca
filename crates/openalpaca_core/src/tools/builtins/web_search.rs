@@ -100,15 +100,18 @@ pub(super) fn web_search_tool(config: Arc<ArcSwap<WebSearchConfig>>) -> Register
     RegisteredTool {
         definition: ToolDefinition {
             name: "web_search".to_string(),
-            description: "Search the web for information using Brave Search. \
-                Returns titles, URLs, and descriptions."
+            description: "Search the web using Brave Search API. Returns a JSON array of \
+                results, each containing 'title', 'url', and 'description'. Use this to \
+                find current information, documentation, or references. Default returns \
+                5 results (max 20). Use web_fetch to retrieve full page content from a \
+                specific URL found in results."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search query"
+                        "description": "The search query (natural language or keywords)"
                     },
                     "count": {
                         "type": "integer",
@@ -117,8 +120,12 @@ pub(super) fn web_search_tool(config: Arc<ArcSwap<WebSearchConfig>>) -> Register
                 },
                 "required": ["query"]
             }),
+            strict: Some(true),
+            input_examples: None,
         },
         backend: ToolBackend::BuiltIn(Arc::new(WebSearchTool { config })),
+        provides_capabilities: vec!["web_access".into()],
+        exempt_from_timeout: false,
     }
 }
 

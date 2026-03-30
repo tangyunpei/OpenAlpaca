@@ -41,6 +41,7 @@ pub struct RouteScore {
     pub keyword_ratio: f64,
     pub recency_bonus: f64,
     pub negative_hit: bool,
+    pub health_bonus: f64,
 }
 
 /// Weighted scoring router for skill selection.
@@ -148,6 +149,7 @@ impl SkillRouter {
                 keyword_ratio,
                 recency_bonus,
                 negative_hit,
+                health_bonus: 0.0,
             });
         }
 
@@ -245,6 +247,9 @@ fn build_reason(rs: &RouteScore) -> String {
     }
     if rs.negative_hit {
         parts.push("negative keyword penalty");
+    }
+    if rs.health_bonus > 0.0 {
+        parts.push("health bonus");
     }
     if parts.is_empty() {
         "base score only".to_string()

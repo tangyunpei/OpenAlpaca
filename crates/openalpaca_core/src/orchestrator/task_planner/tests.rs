@@ -174,7 +174,7 @@ fn make_agent(id: &str) -> SubAgent {
         icon: None,
         status: AgentStatus::Idle,
         current_task: None,
-        skills: vec![],
+        capabilities: vec![],
         preset: AgentPreset::default(),
         constraints: AgentConstraints::default(),
         llm_config: AgentLlmConfig::default(),
@@ -1189,6 +1189,100 @@ fn test_classify_lightweight_missing_classification_field() {
 #[test]
 fn test_planner_config_two_phase_defaults() {
     let config = crate::daemon_config::PlannerConfig::default();
-    assert!(!config.two_phase_enabled);
+    assert!(config.two_phase_enabled);
     assert!(config.triage_model.is_none());
+}
+
+#[test]
+fn test_planner_config_deep_query_defaults() {
+    let config = crate::daemon_config::PlannerConfig::default();
+    assert_eq!(config.deep_query_max_rounds, 10);
+    assert_eq!(config.deep_query_max_tools_per_round, 4);
+}
+
+#[test]
+fn test_planner_config_two_phase_default_true() {
+    let config = crate::daemon_config::PlannerConfig::default();
+    assert!(config.two_phase_enabled);
+}
+
+// ── TriageResult parsing tests ──────────────────────────────────────
+
+#[test]
+fn test_triage_result_parse_simple_query() {
+    let json = r#"{"classification": "simple_query", "suggested_tools": []}"#;
+    let result: TriageResult = serde_json::from_str(json).unwrap();
+    assert_eq!(result.classification, "simple_query");
+    assert!(result.suggested_tools.is_empty());
+}
+
+#[test]
+fn test_triage_result_parse_deep_query_with_tools() {
+    let json =
+        r#"{"classification": "deep_query", "suggested_tools": ["web_search", "file_read"]}"#;
+    let result: TriageResult = serde_json::from_str(json).unwrap();
+    assert_eq!(result.classification, "deep_query");
+    assert_eq!(result.suggested_tools, vec!["web_search", "file_read"]);
+}
+
+#[test]
+fn test_triage_result_parse_missing_tools_defaults_empty() {
+    let json = r#"{"classification": "complex_task"}"#;
+    let result: TriageResult = serde_json::from_str(json).unwrap();
+    assert_eq!(result.classification, "complex_task");
+    assert!(result.suggested_tools.is_empty());
+}
+
+#[test]
+fn test_triage_result_parse_unknown_class() {
+    let json = r#"{"classification": "something_else", "suggested_tools": ["web_search"]}"#;
+    let result: TriageResult = serde_json::from_str(json).unwrap();
+    assert_eq!(result.classification, "something_else");
+}
+
+#[test]
+fn test_classify_lightweight_parse_triage_result_deep_query() {
+    let json = r#"{"classification": "deep_query", "suggested_tools": ["web_search"]}"#;
+    let json_str = extract_json_block(json);
+    let result: Result<TriageResult, _> = serde_json::from_str(json_str);
+    assert!(result.is_ok());
+    let tr = result.unwrap();
+    assert_eq!(tr.classification, "deep_query");
+    assert_eq!(tr.suggested_tools, vec!["web_search"]);
+}
+
+#[test]
+fn test_classify_lightweight_parse_legacy_format_fallback() {
+    // Bare string without JSON — should fail to parse as TriageResult
+    let raw = "simple_query";
+    let json_str = extract_json_block(raw);
+    let result: Result<TriageResult, _> = serde_json::from_str(json_str);
+    assert!(result.is_err());
+    // Fallback: check if raw contains "simple"
+    assert!(raw.contains("simple"));
+}
+
+#[test]
+fn test_triage_result_from_json_block_with_markdown() {
+    let raw = "```json\n{\"classification\": \"deep_query\", \"suggested_tools\": [\"web_search\"]}\n```";
+    let json_str = extract_json_block(raw);
+    let result: TriageResult = serde_json::from_str(json_str).unwrap();
+    assert_eq!(result.classification, "deep_query");
+    assert_eq!(result.suggested_tools, vec!["web_search"]);
+}
+
+#[test]
+fn test_triage_result_hallucinated_tools_are_strings() {
+    // LLM may suggest tools that don't exist — we just store them as strings,
+    // resolution against registry happens in the handler
+    let json = r#"{"classification": "deep_query", "suggested_tools": ["nonexistent_tool"]}"#;
+    let result: TriageResult = serde_json::from_str(json).unwrap();
+    assert_eq!(result.suggested_tools, vec!["nonexistent_tool"]);
+}
+
+#[test]
+fn test_triage_result_extra_fields_ignored() {
+    let json = r#"{"classification": "simple_query", "suggested_tools": [], "reasoning": "just a question"}"#;
+    let result: TriageResult = serde_json::from_str(json).unwrap();
+    assert_eq!(result.classification, "simple_query");
 }

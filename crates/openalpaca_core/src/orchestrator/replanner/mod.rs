@@ -83,12 +83,16 @@ impl Replanner {
 
         let request = RouterRequest {
             model: None,
-            messages,
+            messages: Arc::new(messages),
             tools: Arc::new(vec![]),
             temperature: Some(0.0),
             max_tokens: Some(2048),
             context: RequestContext::default(),
             tool_choice: None,
+            tools_token_estimate: None,
+            enable_caching: false,
+            thinking: None,
+            context_management: None,
         };
 
         let response = router

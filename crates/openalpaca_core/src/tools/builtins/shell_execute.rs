@@ -17,7 +17,7 @@ impl BuiltInTool for ShellExecuteTool {
         // The primary timeout is enforced by the SandboxManager (default 60s from
         // daemon_config.execution.agent_defaults.max_tool_runtime_secs). This 300s
         // timeout is a defense-in-depth safety net in case the sandbox layer is
-        // bypassed (e.g. RegistryToolExecutor used directly).
+        // bypassed (e.g. ToolRegistry used directly).
         let timeout = std::time::Duration::from_secs(300);
 
         let output = tokio::time::timeout(timeout, {
@@ -67,18 +67,30 @@ pub(super) fn shell_execute_tool() -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "shell_execute".to_string(),
-            description: "Run a shell command. Note: command chaining (;, &&, ||) and command substitution (backticks, $()) are blocked by security filters.".to_string(),
+            description: "Execute a single shell command and return its output. Command \
+                chaining (;, &&, ||) and subshells ($()) are blocked for security. \
+                Timeout: 300 seconds. Output is truncated to 512KB. Use for system \
+                operations, package management, git commands, build tools, and any \
+                operations not covered by other tools."
+                .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "The shell command to execute"
+                        "description": "The shell command to execute (single command only, no chaining)"
                     }
                 },
                 "required": ["command"]
             }),
+            strict: Some(true),
+            input_examples: Some(vec![
+                serde_json::json!({"command": "ls -la /tmp"}),
+                serde_json::json!({"command": "grep -rn 'TODO' src/"}),
+            ]),
         },
         backend: ToolBackend::BuiltIn(Arc::new(ShellExecuteTool)),
+        provides_capabilities: vec!["shell_execute".into()],
+        exempt_from_timeout: false,
     }
 }

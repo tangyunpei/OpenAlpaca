@@ -66,7 +66,7 @@ pub(super) async fn update_summary_background(
     }
     let request = RouterRequest {
         model: dcfg.orchestrator.costs.summary_model.clone(),
-        messages: vec![
+        messages: Arc::new(vec![
             ChatMessage::system(
                 "<role>You are a conversation summarizer for OpenAlpaca.</role>\n\n\
                  <task>Produce an updated summary incorporating new messages into the existing summary.</task>\n\n\
@@ -80,7 +80,7 @@ pub(super) async fn update_summary_background(
                  <output_format>Output ONLY a JSON object: {\"summary\": \"...\"}</output_format>",
             ),
             ChatMessage::user(&user_prompt),
-        ],
+        ]),
         tools: Arc::new(vec![]),
         temperature: Some(0.0),
         max_tokens: Some(1536),
@@ -89,6 +89,10 @@ pub(super) async fn update_summary_background(
             task_id: None,
         },
         tool_choice: None,
+        tools_token_estimate: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: None,
     };
 
     let call_start = std::time::Instant::now();

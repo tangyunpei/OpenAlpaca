@@ -31,14 +31,10 @@ pub(crate) fn record_llm_usage(
         .resolve_provider(actual_model)
         .map(|p| p.to_string())
         .unwrap_or_else(|| "unknown".to_string());
-    let call_cost = router.cost_tracker.calculate_cost(
-        actual_model,
-        loop_result.total_input_tokens,
-        loop_result.total_output_tokens,
-    );
+    let call_cost = loop_result.estimated_cost;
 
     let call_status = match &loop_result.finish_reason {
-        LoopFinishReason::Complete | LoopFinishReason::MaxRounds => "success",
+        LoopFinishReason::Complete | LoopFinishReason::MaxRounds | LoopFinishReason::Truncated => "success",
         LoopFinishReason::CostExceeded => "cost_exceeded",
         LoopFinishReason::Cancelled => "cancelled",
         LoopFinishReason::Error(_) => "error",

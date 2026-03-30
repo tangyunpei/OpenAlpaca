@@ -75,7 +75,7 @@ fn test_agent_registry_in_shared_context() {
         icon: None,
         status: AgentStatus::Idle,
         current_task: None,
-        skills: vec![],
+        capabilities: vec![],
         preset: AgentPreset::default(),
         constraints: AgentConstraints::default(),
         llm_config: AgentLlmConfig::default(),

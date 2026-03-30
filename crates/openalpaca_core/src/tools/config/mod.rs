@@ -16,6 +16,8 @@ pub struct ToolConfig {
     pub description: String,
     pub parameters: serde_json::Value,
     pub backend: ToolBackendConfig,
+    #[serde(default)]
+    pub provides_capabilities: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -106,8 +108,12 @@ pub fn load_tools_from_file(path: &Path) -> Result<Vec<RegisteredTool>, String> 
                 name: tc.name,
                 description: tc.description,
                 parameters: tc.parameters,
+                strict: None,
+                input_examples: None,
             },
             backend,
+            provides_capabilities: tc.provides_capabilities,
+            exempt_from_timeout: false,
         });
     }
 

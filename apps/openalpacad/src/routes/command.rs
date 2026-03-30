@@ -92,6 +92,7 @@ pub async fn command_handler(
                     principal: Principal::System,
                     scope: Scope::Global,
                     workspace_path,
+                    stream_id: None,
                 })
                 .await;
 

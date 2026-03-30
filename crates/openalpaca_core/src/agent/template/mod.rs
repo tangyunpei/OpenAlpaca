@@ -10,10 +10,38 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+/// Where an agent's execution logic comes from.
+#[derive(Clone)]
+pub enum AgentSource {
+    /// Internal agent running the built-in agentic loop.
+    Internal,
+    /// Plugin-backed agent running an external reasoning loop.
+    Plugin {
+        plugin_id: String,
+        executor: Arc<dyn openalpaca_api::plugin_traits::PluginAgentExecutor>,
+    },
+}
+
+impl Default for AgentSource {
+    fn default() -> Self {
+        Self::Internal
+    }
+}
+
+impl std::fmt::Debug for AgentSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Internal => write!(f, "Internal"),
+            Self::Plugin { plugin_id, .. } => write!(f, "Plugin({plugin_id})"),
+        }
+    }
+}
 
 /// YAML frontmatter metadata for an agent template.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,10 +56,10 @@ pub struct AgentTemplateFrontmatter {
     pub icon: Option<String>,
     /// If true, only one instance can be active at a time.
     pub singleton: bool,
-    /// Tool/skill names this agent can use.
-    pub skills: Vec<String>,
-    /// Tool/skill names explicitly denied.
-    pub denied_skills: Vec<String>,
+    /// Tool/capability names this agent can use.
+    pub capabilities: Vec<String>,
+    /// Tool/capability names explicitly denied.
+    pub denied_capabilities: Vec<String>,
     /// LLM temperature (default 0.5).
     pub temperature: f32,
     /// Verbosity level: "concise", "normal", "detailed" (default "normal").
@@ -53,13 +81,15 @@ pub struct AgentTemplateFrontmatter {
 }
 
 /// Full parsed agent template document.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct AgentTemplate {
     pub frontmatter: AgentTemplateFrontmatter,
     /// The full markdown body (persona, guidelines, examples).
     pub body: String,
     /// Parsed `## Section` headings -> body text.
     pub sections: HashMap<String, String>,
+    /// Where this agent's execution logic comes from.
+    pub source: AgentSource,
 }
 
 /// Errors that can occur while parsing an agent template.
@@ -191,8 +221,8 @@ fn parse_agent_frontmatter_lines(
     let mut description: Option<String> = None;
     let mut icon: Option<String> = None;
     let mut singleton: bool = false;
-    let mut skills: Vec<String> = Vec::new();
-    let mut denied_skills: Vec<String> = Vec::new();
+    let mut capabilities: Vec<String> = Vec::new();
+    let mut denied_capabilities: Vec<String> = Vec::new();
     let mut temperature: f32 = 0.5;
     let mut verbosity: String = "normal".to_string();
     let mut model: Option<String> = None;
@@ -239,22 +269,22 @@ fn parse_agent_frontmatter_lines(
             idx += 1;
             continue;
         }
-        // "skills:" list (must come before "denied_skills:" check)
-        if trimmed == "skills:" {
-            skills = parse_yaml_list(lines, &mut idx);
+        // "capabilities:" list (must come before "denied_capabilities:" check)
+        if trimmed == "capabilities:" {
+            capabilities = parse_yaml_list(lines, &mut idx);
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("skills: ") {
-            skills = vec![strip_outer_quotes(rest)];
+        if let Some(rest) = trimmed.strip_prefix("capabilities: ") {
+            capabilities = vec![strip_outer_quotes(rest)];
             idx += 1;
             continue;
         }
-        if trimmed == "denied_skills:" {
-            denied_skills = parse_yaml_list(lines, &mut idx);
+        if trimmed == "denied_capabilities:" {
+            denied_capabilities = parse_yaml_list(lines, &mut idx);
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("denied_skills: ") {
-            denied_skills = vec![strip_outer_quotes(rest)];
+        if let Some(rest) = trimmed.strip_prefix("denied_capabilities: ") {
+            denied_capabilities = vec![strip_outer_quotes(rest)];
             idx += 1;
             continue;
         }
@@ -324,8 +354,8 @@ fn parse_agent_frontmatter_lines(
         description,
         icon,
         singleton,
-        skills,
-        denied_skills,
+        capabilities,
+        denied_capabilities,
         temperature,
         verbosity,
         model,
@@ -406,6 +436,7 @@ pub fn parse_agent_markdown(input: &str) -> Result<AgentTemplate, AgentParseErro
         frontmatter,
         body,
         sections,
+        source: AgentSource::default(),
     })
 }
 
@@ -428,16 +459,16 @@ pub fn render_agent_markdown(template: &AgentTemplate) -> String {
     if fm.singleton {
         out.push_str("singleton: true\n");
     }
-    if !fm.skills.is_empty() {
-        out.push_str("skills:\n");
-        for skill in &fm.skills {
-            out.push_str(&format!("  - \"{}\"\n", skill));
+    if !fm.capabilities.is_empty() {
+        out.push_str("capabilities:\n");
+        for cap in &fm.capabilities {
+            out.push_str(&format!("  - \"{}\"\n", cap));
         }
     }
-    if !fm.denied_skills.is_empty() {
-        out.push_str("denied_skills:\n");
-        for skill in &fm.denied_skills {
-            out.push_str(&format!("  - \"{}\"\n", skill));
+    if !fm.denied_capabilities.is_empty() {
+        out.push_str("denied_capabilities:\n");
+        for cap in &fm.denied_capabilities {
+            out.push_str(&format!("  - \"{}\"\n", cap));
         }
     }
     out.push_str(&format!("temperature: {}\n", fm.temperature));
@@ -503,21 +534,21 @@ impl AgentTemplate {
         let fm = &self.frontmatter;
         let persona = extract_persona(self);
 
-        let mut skills: Vec<Skill> = fm
-            .skills
+        let mut capabilities: Vec<Capability> = fm
+            .capabilities
             .iter()
-            .map(|name| Skill {
+            .map(|name| Capability {
                 name: name.clone(),
                 category: "assigned".to_string(),
                 proficiency: 1.0,
             })
             .collect();
 
-        // Inject workspace tools into skills so they appear in tool resolution
-        // (resolve_agent_tools uses agent.skills to look up definitions).
+        // Inject workspace tools into capabilities so they appear in tool resolution
+        // (resolve_agent_tools uses agent.capabilities to look up definitions).
         for ws_tool in ["workspace_read", "workspace_write"] {
-            if !skills.iter().any(|s| s.name == ws_tool) {
-                skills.push(Skill {
+            if !capabilities.iter().any(|s| s.name == ws_tool) {
+                capabilities.push(Capability {
                     name: ws_tool.to_string(),
                     category: "infrastructure".to_string(),
                     proficiency: 1.0,
@@ -525,17 +556,16 @@ impl AgentTemplate {
             }
         }
 
-        // Merge denied_skills into denied_capabilities.
         // Always include workspace tools — they are infrastructure tools
         // available to any agent executing in a task context (pipeline/DAG).
-        // The ContextualToolExecutor already gates them on task_id presence.
-        let mut allowed_capabilities = fm.skills.clone();
+        // The workspace tools themselves gate on task_id via ToolContext.
+        let mut allowed_capabilities = fm.capabilities.clone();
         for ws_tool in ["workspace_read", "workspace_write"] {
             if !allowed_capabilities.iter().any(|c| c == ws_tool) {
                 allowed_capabilities.push(ws_tool.to_string());
             }
         }
-        let denied_capabilities = fm.denied_skills.clone();
+        let denied_capabilities = fm.denied_capabilities.clone();
 
         SubAgent {
             id: instance_id.to_string(),
@@ -547,7 +577,7 @@ impl AgentTemplate {
                 task_id: task_id.to_string(),
             },
             current_task: Some(task_id.to_string()),
-            skills,
+            capabilities,
             preset: AgentPreset {
                 persona,
                 temperature: fm.temperature,

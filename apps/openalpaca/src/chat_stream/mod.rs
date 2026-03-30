@@ -67,7 +67,7 @@ pub async fn stream_chat(
         urlencoding::encode(client.token())
     );
     let http_resp = client.get_sse_stream(&path).await?;
-    stream_sse_events(http_resp, opts).await
+    stream_sse_events(http_resp, opts, client).await
 }
 
 /// POST /v1/chat with attachments → ChatSendResponse
@@ -119,6 +119,7 @@ struct SseState {
 async fn stream_sse_events(
     response: reqwest::Response,
     opts: &StreamOptions,
+    client: &DaemonClient,
 ) -> Result<StreamResult> {
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
@@ -138,7 +139,11 @@ async fn stream_sse_events(
                             let event_text = buffer[..pos].to_string();
                             let skip = if buffer[pos..].starts_with("\r\n\r\n") { 4 } else { 2 };
                             buffer = buffer[pos + skip..].to_string();
-                            process_sse_event(&event_text, opts.verbose, &mut state)?;
+                            if is_confirmation_event(&event_text) {
+                                handle_confirmation_prompt(client, &event_text).await?;
+                            } else {
+                                process_sse_event(&event_text, opts.verbose, &mut state)?;
+                            }
                         }
                     }
                     Some(Err(e)) => {
@@ -189,6 +194,72 @@ fn parse_task_title(content: &str) -> Option<String> {
     let end = rest.find('\n').unwrap_or(rest.len());
     let title = rest[..end].trim().to_string();
     if title.is_empty() { None } else { Some(title) }
+}
+
+/// Check if an SSE event is a tool confirmation request.
+fn is_confirmation_event(event_text: &str) -> bool {
+    event_text
+        .lines()
+        .any(|line| line.strip_prefix("event:").map(|v| v.trim()) == Some("confirmation_requested"))
+}
+
+/// Handle a tool confirmation prompt: show details, prompt Y/N, POST response.
+///
+/// Uses `block_in_place()` to read stdin synchronously. While blocked, the SSE
+/// stream buffers incoming events (including additional confirmations). This is
+/// fine for CLI — the user can only answer one prompt at a time, and the 300s
+/// server timeout (configurable via `confirmation_timeout_secs`) is sufficient
+/// for sequential multi-prompt scenarios.
+async fn handle_confirmation_prompt(client: &DaemonClient, event_text: &str) -> Result<()> {
+    let mut data = String::new();
+    for line in event_text.lines() {
+        if let Some(val) = line.strip_prefix("data:") {
+            data = val.trim().to_string();
+        }
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&data)?;
+    let request_id = parsed["request_id"].as_str().unwrap_or("");
+    let tool_name = parsed["tool_name"].as_str().unwrap_or("");
+    let args = &parsed["tool_arguments"];
+
+    println!();
+    println!(
+        "{}",
+        format!("Tool '{}' requires confirmation", tool_name)
+            .yellow()
+            .bold()
+    );
+    if !args.is_null() {
+        println!(
+            "{}",
+            format!("Arguments: {}", serde_json::to_string_pretty(args).unwrap_or_default())
+                .dimmed()
+        );
+    }
+
+    let approved = tokio::task::block_in_place(|| {
+        print!("Allow execution? [y/N] ");
+        std::io::stdout().flush().ok();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).ok();
+        matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
+    });
+
+    let body = serde_json::json!({ "approved": approved });
+    client
+        .post_raw(
+            &format!("/v1/chat/confirmations/{}", request_id),
+            &body,
+        )
+        .await?;
+
+    let status = if approved {
+        "Approved".green()
+    } else {
+        "Denied".red()
+    };
+    println!("{}", status);
+    Ok(())
 }
 
 fn find_event_boundary(buf: &str) -> Option<usize> {

@@ -1,4 +1,6 @@
 use super::*;
+use crate::orchestrator::skill_catalog::SkillCatalog;
+use crate::orchestrator::skill_router::SkillRouter;
 
 fn parser() -> IntentParser {
     IntentParser
@@ -202,14 +204,14 @@ fn test_suggest_tools_multi_tool_ordering() {
     );
 }
 
-// --- update_soul intent routing tests ---
+// --- update_persona intent routing tests ---
 
 #[test]
-fn test_suggest_tools_update_soul_persona() {
+fn test_suggest_tools_update_persona_soul() {
     let tools = parser().suggest_tools("update my persona to be more friendly");
     assert!(
-        tools.contains(&"update_soul".to_string()),
-        "Should suggest update_soul: {:?}",
+        tools.contains(&"update_persona".to_string()),
+        "Should suggest update_persona: {:?}",
         tools
     );
 }
@@ -218,13 +220,13 @@ fn test_suggest_tools_update_soul_persona() {
 fn test_suggest_tools_edit_soul_md_suppresses_file_write() {
     let tools = parser().suggest_tools("edit SOUL.md with new vibe");
     assert!(
-        tools.contains(&"update_soul".to_string()),
-        "Should suggest update_soul: {:?}",
+        tools.contains(&"update_persona".to_string()),
+        "Should suggest update_persona: {:?}",
         tools
     );
     assert!(
         !tools.contains(&"file_write".to_string()),
-        "update_soul should suppress file_write: {:?}",
+        "update_persona should suppress file_write: {:?}",
         tools
     );
 }
@@ -233,18 +235,18 @@ fn test_suggest_tools_edit_soul_md_suppresses_file_write() {
 fn test_suggest_tools_change_personality() {
     let tools = parser().suggest_tools("change personality to pirate");
     assert!(
-        tools.contains(&"update_soul".to_string()),
-        "Should suggest update_soul: {:?}",
+        tools.contains(&"update_persona".to_string()),
+        "Should suggest update_persona: {:?}",
         tools
     );
 }
 
 #[test]
-fn test_suggest_tools_write_readme_no_update_soul() {
+fn test_suggest_tools_write_readme_no_update_persona() {
     let tools = parser().suggest_tools("write README.md with installation instructions");
     assert!(
-        !tools.contains(&"update_soul".to_string()),
-        "Should NOT suggest update_soul for unrelated write: {:?}",
+        !tools.contains(&"update_persona".to_string()),
+        "Should NOT suggest update_persona for unrelated write: {:?}",
         tools
     );
 }
@@ -580,25 +582,25 @@ fn test_router_no_match_falls_through() {
     );
 }
 
-// --- send_message tool suggestion tests (connector awareness) ---
+// --- send tool suggestion tests (connector awareness) ---
 
 #[test]
-fn test_suggest_tools_bare_telegram_no_send_message() {
-    // Bare "telegram" without a send verb should NOT suggest send_message
+fn test_suggest_tools_bare_telegram_no_send() {
+    // Bare "telegram" without a send verb should NOT suggest send
     let tools = parser().suggest_tools("how do I set up Telegram?");
     assert!(
-        !tools.contains(&"send_message".to_string()),
-        "Bare 'telegram' should NOT suggest send_message: {:?}",
+        !tools.contains(&"send".to_string()),
+        "Bare 'telegram' should NOT suggest send: {:?}",
         tools
     );
 }
 
 #[test]
-fn test_suggest_tools_bare_imessage_no_send_message() {
+fn test_suggest_tools_bare_imessage_no_send() {
     let tools = parser().suggest_tools("configure imessage connector");
     assert!(
-        !tools.contains(&"send_message".to_string()),
-        "Bare 'imessage' should NOT suggest send_message: {:?}",
+        !tools.contains(&"send".to_string()),
+        "Bare 'imessage' should NOT suggest send: {:?}",
         tools
     );
 }
@@ -607,8 +609,8 @@ fn test_suggest_tools_bare_imessage_no_send_message() {
 fn test_suggest_tools_send_via_telegram() {
     let tools = parser().suggest_tools("send a message via telegram");
     assert!(
-        tools.contains(&"send_message".to_string()),
-        "Expected send_message for 'send via telegram': {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for 'send via telegram': {:?}",
         tools
     );
 }
@@ -617,8 +619,8 @@ fn test_suggest_tools_send_via_telegram() {
 fn test_suggest_tools_send_via_imessage() {
     let tools = parser().suggest_tools("send this to John via imessage");
     assert!(
-        tools.contains(&"send_message".to_string()),
-        "Expected send_message for 'send via imessage': {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for 'send via imessage': {:?}",
         tools
     );
 }
@@ -627,8 +629,8 @@ fn test_suggest_tools_send_via_imessage() {
 fn test_suggest_tools_send_message_phrase() {
     let tools = parser().suggest_tools("send message to Bob");
     assert!(
-        tools.contains(&"send_message".to_string()),
-        "Expected send_message for 'send message': {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for 'send message': {:?}",
         tools
     );
 }
@@ -637,8 +639,8 @@ fn test_suggest_tools_send_message_phrase() {
 fn test_suggest_tools_forward_to() {
     let tools = parser().suggest_tools("forward to my phone");
     assert!(
-        tools.contains(&"send_message".to_string()),
-        "Expected send_message for 'forward to': {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for 'forward to': {:?}",
         tools
     );
 }
@@ -647,8 +649,8 @@ fn test_suggest_tools_forward_to() {
 fn test_suggest_tools_chinese_send_telegram() {
     let tools = parser().suggest_tools("发一条消息到telegram");
     assert!(
-        tools.contains(&"send_message".to_string()),
-        "Expected send_message for Chinese+telegram: {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for Chinese+telegram: {:?}",
         tools
     );
 }
@@ -657,44 +659,40 @@ fn test_suggest_tools_chinese_send_telegram() {
 
 #[test]
 fn test_suggest_tools_chinese_give_imessage() {
-    // "可以给我的imessage发消息" — the "给" + "imessage" pattern
     let tools = parser().suggest_tools("可以给我的imessage发消息");
     assert!(
-        tools.contains(&"send_message".to_string()),
-        "Expected send_message for '给...imessage': {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for '给...imessage': {:?}",
         tools
     );
 }
 
 #[test]
 fn test_suggest_tools_via_imessage() {
-    // "通过imessage发消息" — parity with "通过telegram"
     let tools = parser().suggest_tools("通过imessage发消息");
     assert!(
-        tools.contains(&"send_message".to_string()),
-        "Expected send_message for '通过imessage': {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for '通过imessage': {:?}",
         tools
     );
 }
 
 #[test]
 fn test_suggest_tools_give_telegram_sms() {
-    // "给telegram发短信"
     let tools = parser().suggest_tools("给telegram发短信");
     assert!(
-        tools.contains(&"send_message".to_string()),
-        "Expected send_message for '给telegram发短信': {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for '给telegram发短信': {:?}",
         tools
     );
 }
 
 #[test]
 fn test_suggest_tools_text_to_via_telegram() {
-    // "text to John via telegram"
     let tools = parser().suggest_tools("text to John via telegram");
     assert!(
-        tools.contains(&"send_message".to_string()),
-        "Expected send_message for 'text to...via telegram': {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for 'text to...via telegram': {:?}",
         tools
     );
 }
@@ -703,19 +701,18 @@ fn test_suggest_tools_text_to_via_telegram() {
 fn test_suggest_tools_msg_to() {
     let tools = parser().suggest_tools("msg to my friend on telegram");
     assert!(
-        tools.contains(&"send_message".to_string()),
-        "Expected send_message for 'msg to': {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for 'msg to': {:?}",
         tools
     );
 }
 
 #[test]
 fn test_suggest_tools_chinese_message_telegram() {
-    // "消息" + "telegram" pattern
     let tools = parser().suggest_tools("请给telegram发送测试短信");
     assert!(
-        tools.contains(&"send_message".to_string()),
-        "Expected send_message for '短信+telegram': {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for '短信+telegram': {:?}",
         tools
     );
 }
@@ -724,21 +721,20 @@ fn test_suggest_tools_chinese_message_telegram() {
 fn test_suggest_tools_via_imessage_english() {
     let tools = parser().suggest_tools("send greetings via imessage");
     assert!(
-        tools.contains(&"send_message".to_string()),
-        "Expected send_message for 'via imessage': {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for 'via imessage': {:?}",
         tools
     );
 }
 
-// --- P1a: "给" without send-semantic verb should NOT trigger send_message ---
+// --- P1a: "给" without send-semantic verb should NOT trigger send ---
 
 #[test]
 fn test_suggest_tools_chinese_give_intro_telegram_no_send() {
-    // "给我介绍一下telegram" = "tell me about Telegram" — NOT a send intent
     let tools = parser().suggest_tools("给我介绍一下telegram");
     assert!(
-        !tools.contains(&"send_message".to_string()),
-        "'给我介绍一下telegram' should NOT suggest send_message: {:?}",
+        !tools.contains(&"send".to_string()),
+        "'给我介绍一下telegram' should NOT suggest send: {:?}",
         tools
     );
 }
@@ -746,39 +742,33 @@ fn test_suggest_tools_chinese_give_intro_telegram_no_send() {
 // Verify existing negative tests still pass with expanded patterns
 
 #[test]
-fn test_suggest_tools_bare_telegram_no_send_message_still_negative() {
-    // "how do I set up Telegram?" — no send verb, no 给, no 消息/短信, no "via "
+fn test_suggest_tools_bare_telegram_no_send_still_negative() {
     let tools = parser().suggest_tools("how do I set up Telegram?");
     assert!(
-        !tools.contains(&"send_message".to_string()),
-        "Bare 'telegram' should still NOT suggest send_message: {:?}",
+        !tools.contains(&"send".to_string()),
+        "Bare 'telegram' should still NOT suggest send: {:?}",
         tools
     );
 }
 
 #[test]
-fn test_suggest_tools_bare_imessage_no_send_message_still_negative() {
+fn test_suggest_tools_bare_imessage_no_send_still_negative() {
     let tools = parser().suggest_tools("configure imessage connector");
     assert!(
-        !tools.contains(&"send_message".to_string()),
-        "Bare 'imessage' should still NOT suggest send_message: {:?}",
+        !tools.contains(&"send".to_string()),
+        "Bare 'imessage' should still NOT suggest send: {:?}",
         tools
     );
 }
 
-// --- send_file tool suggestion tests ---
+// --- send tool file-related suggestion tests ---
 
 #[test]
 fn test_suggest_tools_send_file_via_telegram() {
     let tools = parser().suggest_tools("send a file via telegram");
     assert!(
-        tools.contains(&"send_file".to_string()),
-        "Expected send_file: {:?}",
-        tools
-    );
-    assert!(
-        !tools.contains(&"send_message".to_string()),
-        "send_file should suppress send_message: {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for file via telegram: {:?}",
         tools
     );
 }
@@ -787,13 +777,8 @@ fn test_suggest_tools_send_file_via_telegram() {
 fn test_suggest_tools_send_photo_via_imessage() {
     let tools = parser().suggest_tools("send a photo via imessage");
     assert!(
-        tools.contains(&"send_file".to_string()),
-        "Expected send_file: {:?}",
-        tools
-    );
-    assert!(
-        !tools.contains(&"send_message".to_string()),
-        "send_file should suppress send_message: {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for photo via imessage: {:?}",
         tools
     );
 }
@@ -802,13 +787,8 @@ fn test_suggest_tools_send_photo_via_imessage() {
 fn test_suggest_tools_send_image_via_telegram() {
     let tools = parser().suggest_tools("send image to friend via telegram");
     assert!(
-        tools.contains(&"send_file".to_string()),
-        "Expected send_file: {:?}",
-        tools
-    );
-    assert!(
-        !tools.contains(&"send_message".to_string()),
-        "send_file should suppress send_message: {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for image via telegram: {:?}",
         tools
     );
 }
@@ -817,8 +797,8 @@ fn test_suggest_tools_send_image_via_telegram() {
 fn test_suggest_tools_send_document() {
     let tools = parser().suggest_tools("send document to Bob");
     assert!(
-        tools.contains(&"send_file".to_string()),
-        "Expected send_file: {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for document: {:?}",
         tools
     );
 }
@@ -827,13 +807,8 @@ fn test_suggest_tools_send_document() {
 fn test_suggest_tools_chinese_send_file() {
     let tools = parser().suggest_tools("发文件到telegram");
     assert!(
-        tools.contains(&"send_file".to_string()),
-        "Expected send_file for '发文件到telegram': {:?}",
-        tools
-    );
-    assert!(
-        !tools.contains(&"send_message".to_string()),
-        "send_file should suppress send_message: {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for '发文件到telegram': {:?}",
         tools
     );
 }
@@ -842,8 +817,8 @@ fn test_suggest_tools_chinese_send_file() {
 fn test_suggest_tools_chinese_send_photo() {
     let tools = parser().suggest_tools("发图片给朋友");
     assert!(
-        tools.contains(&"send_file".to_string()),
-        "Expected send_file for '发图片给朋友': {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for '发图片给朋友': {:?}",
         tools
     );
 }
@@ -852,28 +827,18 @@ fn test_suggest_tools_chinese_send_photo() {
 fn test_suggest_tools_chinese_send_video() {
     let tools = parser().suggest_tools("发视频到imessage");
     assert!(
-        tools.contains(&"send_file".to_string()),
-        "Expected send_file for '发视频到imessage': {:?}",
-        tools
-    );
-    assert!(
-        !tools.contains(&"send_message".to_string()),
-        "send_file should suppress send_message: {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for '发视频到imessage': {:?}",
         tools
     );
 }
 
 #[test]
-fn test_suggest_tools_send_message_not_suppressed_without_file() {
+fn test_suggest_tools_send_message_without_file() {
     let tools = parser().suggest_tools("send greetings via imessage");
     assert!(
-        tools.contains(&"send_message".to_string()),
-        "Expected send_message without file keywords: {:?}",
-        tools
-    );
-    assert!(
-        !tools.contains(&"send_file".to_string()),
-        "Should NOT have send_file without file keywords: {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send without file keywords: {:?}",
         tools
     );
 }
@@ -882,7 +847,6 @@ fn test_suggest_tools_send_message_not_suppressed_without_file() {
 
 #[test]
 fn test_suggest_tools_plain_continuation_chinese_no_tools() {
-    // "好的，发吧" is a plain text follow-up, no send keywords → empty
     let tools = parser().suggest_tools("好的，发吧");
     assert!(
         tools.is_empty(),
@@ -893,7 +857,6 @@ fn test_suggest_tools_plain_continuation_chinese_no_tools() {
 
 #[test]
 fn test_suggest_tools_plain_continuation_english_no_tools() {
-    // "ok go ahead" is a plain text follow-up → empty
     let tools = parser().suggest_tools("ok go ahead");
     assert!(
         tools.is_empty(),
@@ -903,17 +866,11 @@ fn test_suggest_tools_plain_continuation_english_no_tools() {
 }
 
 #[test]
-fn test_suggest_tools_text_send_continuation_only_send_message() {
-    // "发消息给他" has send_message keywords but no file keywords
+fn test_suggest_tools_text_send_continuation() {
     let tools = parser().suggest_tools("发消息给他");
     assert!(
-        tools.contains(&"send_message".to_string()),
-        "Expected send_message for '发消息给他': {:?}",
-        tools
-    );
-    assert!(
-        !tools.contains(&"send_file".to_string()),
-        "Should NOT have send_file for '发消息给他': {:?}",
+        tools.contains(&"send".to_string()),
+        "Expected send for '发消息给他': {:?}",
         tools
     );
 }
