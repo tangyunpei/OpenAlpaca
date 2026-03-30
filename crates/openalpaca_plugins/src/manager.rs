@@ -8,11 +8,17 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+use openalpaca_core::agent::registry::AgentRegistry;
+use openalpaca_core::agent::template::{AgentSource, AgentTemplate, AgentTemplateFrontmatter};
+use openalpaca_core::middleware::skill::{
+    InvokeConfig, RoutingConfig, SkillFrontmatter,
+};
+use openalpaca_core::orchestrator::skill_catalog::SkillCatalog;
 use openalpaca_core::tools::registry::{RegisteredTool, ToolBackend};
 use openalpaca_core::tools::ToolRegistry;
 use openalpaca_llm::ToolDefinition;
 
-use crate::bridge::PluginToolProxy;
+use crate::bridge::{PluginAgentBridge, PluginSkillBridge, PluginToolProxy};
 use crate::error::PluginError;
 use crate::manifest::PluginManifest;
 use crate::permission_gate::PermissionGate;
@@ -69,6 +75,8 @@ pub struct PluginState {
     pub registered_connector: Option<String>,
     pub registered_provider: Option<String>,
     pub registered_models: Vec<String>,
+    pub registered_skills: Vec<String>,
+    pub registered_agents: Vec<String>,
     pub restart_count: u32,
     pub last_health: Option<Instant>,
     pub plugin_dir: PathBuf,
@@ -86,6 +94,8 @@ pub struct PluginInfo {
     pub connector: Option<String>,
     pub provider: Option<String>,
     pub models: Vec<String>,
+    pub skills: Vec<String>,
+    pub agents: Vec<String>,
 }
 
 // ── PluginManager ───────────────────────────────────────────────────────
@@ -97,6 +107,8 @@ pub struct PluginManager {
     plugin_dir: PathBuf,
     permission_gate: PermissionGate,
     tool_registry: Arc<ToolRegistry>,
+    skill_catalog: Option<Arc<SkillCatalog>>,
+    agent_registry: Option<Arc<AgentRegistry>>,
 }
 
 impl PluginManager {
@@ -104,13 +116,22 @@ impl PluginManager {
     ///
     /// - `plugin_dir`: root directory containing plugin subdirectories.
     /// - `tool_registry`: shared tool registry where discovered plugin tools are registered.
-    pub fn new(plugin_dir: PathBuf, tool_registry: Arc<ToolRegistry>) -> Self {
+    /// - `skill_catalog`: optional skill catalog for registering plugin-backed skills.
+    /// - `agent_registry`: optional agent registry for registering plugin-backed agents.
+    pub fn new(
+        plugin_dir: PathBuf,
+        tool_registry: Arc<ToolRegistry>,
+        skill_catalog: Option<Arc<SkillCatalog>>,
+        agent_registry: Option<Arc<AgentRegistry>>,
+    ) -> Self {
         let permission_gate = PermissionGate::new(&plugin_dir);
         Self {
             plugins: Arc::new(RwLock::new(HashMap::new())),
             plugin_dir,
             permission_gate,
             tool_registry,
+            skill_catalog,
+            agent_registry,
         }
     }
 
@@ -182,6 +203,8 @@ impl PluginManager {
                     registered_connector: None,
                     registered_provider: None,
                     registered_models: Vec::new(),
+                    registered_skills: Vec::new(),
+                    registered_agents: Vec::new(),
                     restart_count: 0,
                     last_health: None,
                     plugin_dir: plugin_dir.to_path_buf(),
@@ -302,6 +325,67 @@ impl PluginManager {
             }
         }
 
+        // Discover skill
+        let mut registered_skills = Vec::new();
+        if manifest.types.skill {
+            match process.channel.call("skill/info", Value::Object(Default::default())).await {
+                Ok(info) => {
+                    let id = info.get("id")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or(&name)
+                        .to_string();
+
+                    if let Some(ref catalog) = self.skill_catalog {
+                        let bridge = Arc::new(PluginSkillBridge::new(
+                            name.clone(),
+                            id.clone(),
+                            process.channel.clone(),
+                        ));
+
+                        let frontmatter = build_skill_frontmatter_from_info(&info, &name);
+
+                        catalog.register_plugin_skill(
+                            id.clone(),
+                            frontmatter,
+                            bridge,
+                            name.clone(),
+                        );
+                        registered_skills.push(id.clone());
+                        info!(plugin = %name, skill = %id, "registered plugin skill");
+                    }
+                }
+                Err(e) => warn!(plugin = %name, error = %e, "skill/info failed"),
+            }
+        }
+
+        // Discover agent
+        let mut registered_agents = Vec::new();
+        if manifest.types.agent {
+            match process.channel.call("agent/info", Value::Object(Default::default())).await {
+                Ok(info) => {
+                    let id = info.get("id")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or(&name)
+                        .to_string();
+
+                    if let Some(ref registry) = self.agent_registry {
+                        let bridge = Arc::new(PluginAgentBridge::new(
+                            name.clone(),
+                            id.clone(),
+                            process.channel.clone(),
+                        ));
+
+                        let template = build_agent_template_from_info(&info, &name, bridge);
+
+                        registry.register_template(template);
+                        registered_agents.push(id.clone());
+                        info!(plugin = %name, agent = %id, "registered plugin agent");
+                    }
+                }
+                Err(e) => warn!(plugin = %name, error = %e, "agent/info failed"),
+            }
+        }
+
         // Step 8: Track state as Running
         {
             let mut plugins = self.plugins.write().await;
@@ -312,6 +396,8 @@ impl PluginManager {
                 state.registered_connector = registered_connector;
                 state.registered_provider = registered_provider;
                 state.registered_models = registered_models;
+                state.registered_skills = registered_skills;
+                state.registered_agents = registered_agents;
                 state.last_health = Some(Instant::now());
             }
         }
@@ -331,6 +417,22 @@ impl PluginManager {
         for tool_name in &state.registered_tools {
             self.tool_registry.remove(tool_name);
             debug!(plugin = name, tool = %tool_name, "unregistered tool");
+        }
+
+        // Unregister plugin skills from the skill catalog
+        if let Some(ref catalog) = self.skill_catalog {
+            for skill_id in &state.registered_skills {
+                catalog.remove(skill_id);
+                debug!(plugin = name, skill = %skill_id, "unregistered plugin skill");
+            }
+        }
+
+        // Unregister plugin agent templates from the agent registry
+        if let Some(ref registry) = self.agent_registry {
+            for agent_id in &state.registered_agents {
+                registry.remove_template(agent_id);
+                debug!(plugin = name, agent = %agent_id, "unregistered plugin agent template");
+            }
         }
 
         // NOTE: Connector deregistration from ConnectorManager and provider
@@ -435,6 +537,8 @@ impl PluginManager {
                     registered_connector: None,
                     registered_provider: None,
                     registered_models: Vec::new(),
+                    registered_skills: Vec::new(),
+                    registered_agents: Vec::new(),
                     restart_count: 0,
                     last_health: None,
                     plugin_dir,
@@ -460,6 +564,8 @@ impl PluginManager {
                 connector: state.registered_connector.clone(),
                 provider: state.registered_provider.clone(),
                 models: state.registered_models.clone(),
+                skills: state.registered_skills.clone(),
+                agents: state.registered_agents.clone(),
             })
             .collect()
     }
@@ -612,6 +718,161 @@ impl PluginManager {
         );
 
         Ok(registered)
+    }
+}
+
+/// Build a [`SkillFrontmatter`] from a `skill/info` JSON response.
+///
+/// Extracts name, description, invoke config, and routing patterns from the
+/// plugin's response, using sensible defaults for any missing fields.
+fn build_skill_frontmatter_from_info(info: &Value, plugin_name: &str) -> SkillFrontmatter {
+    let name = info
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or(plugin_name)
+        .to_string();
+
+    let description = info
+        .get("description")
+        .and_then(|d| d.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let mode = info
+        .get("invoke")
+        .and_then(|inv| inv.get("mode"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("manual")
+        .to_string();
+
+    let slash = info
+        .get("invoke")
+        .and_then(|inv| inv.get("slash"))
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
+
+    let aliases: Vec<String> = info
+        .get("invoke")
+        .and_then(|inv| inv.get("aliases"))
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let intent: Vec<String> = info
+        .get("routing")
+        .and_then(|r| r.get("intent"))
+        .and_then(|i| i.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let keywords: Vec<String> = info
+        .get("routing")
+        .and_then(|r| r.get("keywords"))
+        .and_then(|k| k.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    SkillFrontmatter {
+        name,
+        description,
+        invoke: InvokeConfig {
+            mode,
+            slash,
+            aliases,
+            ..Default::default()
+        },
+        routing: RoutingConfig {
+            intent,
+            keywords,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Build an [`AgentTemplate`] from an `agent/info` JSON response.
+///
+/// Creates a minimal template with the plugin bridge as the execution source.
+fn build_agent_template_from_info(
+    info: &Value,
+    plugin_name: &str,
+    bridge: Arc<PluginAgentBridge>,
+) -> AgentTemplate {
+    let id = info
+        .get("id")
+        .and_then(|i| i.as_str())
+        .unwrap_or(plugin_name)
+        .to_string();
+
+    let name = info
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or(plugin_name)
+        .to_string();
+
+    let description = info
+        .get("description")
+        .and_then(|d| d.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let capabilities: Vec<String> = info
+        .get("capabilities")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let model = info
+        .get("model")
+        .and_then(|m| m.as_str())
+        .map(|s| s.to_string());
+
+    let singleton = info
+        .get("singleton")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
+
+    AgentTemplate {
+        frontmatter: AgentTemplateFrontmatter {
+            id,
+            name,
+            description,
+            icon: None,
+            singleton,
+            capabilities,
+            denied_capabilities: Vec::new(),
+            temperature: 0.5,
+            verbosity: "normal".to_string(),
+            model,
+            fallback_models: Vec::new(),
+            max_tool_calls: None,
+            timeout_seconds: None,
+            max_cost_per_task: None,
+            max_rounds: None,
+            require_confirmation_for: Vec::new(),
+        },
+        body: String::new(),
+        sections: HashMap::new(),
+        source: AgentSource::Plugin {
+            plugin_id: plugin_name.to_string(),
+            executor: bridge,
+        },
     }
 }
 

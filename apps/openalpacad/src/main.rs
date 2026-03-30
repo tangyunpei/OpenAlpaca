@@ -321,6 +321,8 @@ async fn async_main(
     let plugin_manager = Arc::new(openalpaca_plugins::PluginManager::new(
         plugin_dir,
         svcs.tool_registry.clone(),
+        Some(svcs.skill_catalog.clone()),
+        Some(svcs.shared_context.agent_registry.clone()),
     ));
     if let Err(e) = plugin_manager.start().await {
         warn!("plugin manager startup: {e}");
