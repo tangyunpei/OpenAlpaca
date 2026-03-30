@@ -303,7 +303,7 @@ async fn test_check_subagent_status_tool_queued() {
 
 #[test]
 fn test_batch_spawn_tool_definition_includes_agents() {
-    use crate::agent::template::AgentTemplateFrontmatter;
+    use crate::agent::template::{AgentSource, AgentTemplateFrontmatter};
 
     let templates = vec![AgentTemplate {
         frontmatter: AgentTemplateFrontmatter {
@@ -326,6 +326,7 @@ fn test_batch_spawn_tool_definition_includes_agents() {
         },
         body: String::new(),
         sections: HashMap::new(),
+        source: AgentSource::default(),
     }];
 
     let def = spawn_subagents_batch_tool_definition(&templates);

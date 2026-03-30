@@ -1,7 +1,7 @@
 use crate::agent::subagent::{
     AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Capability, SubAgent,
 };
-use crate::agent::template::{AgentTemplate, AgentTemplateFrontmatter};
+use crate::agent::template::{AgentSource, AgentTemplate, AgentTemplateFrontmatter};
 use std::collections::HashMap;
 
 pub(crate) fn make_agent(id: &str, capabilities: Vec<&str>) -> SubAgent {
@@ -53,5 +53,6 @@ pub(crate) fn template_from_agent(agent: &SubAgent) -> AgentTemplate {
         },
         body: String::new(),
         sections: HashMap::new(),
+        source: AgentSource::default(),
     }
 }

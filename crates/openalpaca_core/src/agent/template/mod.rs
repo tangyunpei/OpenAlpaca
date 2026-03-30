@@ -10,10 +10,38 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+/// Where an agent's execution logic comes from.
+#[derive(Clone)]
+pub enum AgentSource {
+    /// Internal agent running the built-in agentic loop.
+    Internal,
+    /// Plugin-backed agent running an external reasoning loop.
+    Plugin {
+        plugin_id: String,
+        executor: Arc<dyn openalpaca_api::plugin_traits::PluginAgentExecutor>,
+    },
+}
+
+impl Default for AgentSource {
+    fn default() -> Self {
+        Self::Internal
+    }
+}
+
+impl std::fmt::Debug for AgentSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Internal => write!(f, "Internal"),
+            Self::Plugin { plugin_id, .. } => write!(f, "Plugin({plugin_id})"),
+        }
+    }
+}
 
 /// YAML frontmatter metadata for an agent template.
 #[derive(Debug, Clone, PartialEq)]
@@ -53,13 +81,15 @@ pub struct AgentTemplateFrontmatter {
 }
 
 /// Full parsed agent template document.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct AgentTemplate {
     pub frontmatter: AgentTemplateFrontmatter,
     /// The full markdown body (persona, guidelines, examples).
     pub body: String,
     /// Parsed `## Section` headings -> body text.
     pub sections: HashMap<String, String>,
+    /// Where this agent's execution logic comes from.
+    pub source: AgentSource,
 }
 
 /// Errors that can occur while parsing an agent template.
@@ -406,6 +436,7 @@ pub fn parse_agent_markdown(input: &str) -> Result<AgentTemplate, AgentParseErro
         frontmatter,
         body,
         sections,
+        source: AgentSource::default(),
     })
 }
 
