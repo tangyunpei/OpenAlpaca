@@ -417,6 +417,7 @@ impl AgentConfigFile {
             frontmatter,
             body,
             sections,
+            source: super::template::AgentSource::default(),
         }
     }
 

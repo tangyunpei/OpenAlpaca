@@ -1,6 +1,6 @@
 use super::*;
 use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, Capability};
-use crate::agent::template::{AgentTemplate, AgentTemplateFrontmatter, parse_agent_markdown};
+use crate::agent::template::{AgentSource, AgentTemplate, AgentTemplateFrontmatter, parse_agent_markdown};
 
 fn make_agent(id: &str, skills: Vec<&str>) -> SubAgent {
     SubAgent {
@@ -47,6 +47,7 @@ fn make_template(id: &str, skills: Vec<&str>, singleton: bool) -> AgentTemplate 
         },
         body: String::new(),
         sections: std::collections::HashMap::new(),
+        source: AgentSource::default(),
     }
 }
 
