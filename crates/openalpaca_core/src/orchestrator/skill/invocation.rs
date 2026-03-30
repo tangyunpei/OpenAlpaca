@@ -55,9 +55,12 @@ impl Orchestrator {
         // Permissions preflight: reject early if sandbox config is inconsistent
         preflight_permissions(&skill_doc.frontmatter)?;
 
-        // Context injection from skill's context.sources
-        let injected_context =
-            inject_skill_context(&skill_doc.frontmatter.context, &entry.skill_dir).await?;
+        // Context injection from skill's context.sources (file-based skills only)
+        let injected_context = if let Some(ref skill_dir) = entry.skill_dir {
+            inject_skill_context(&skill_doc.frontmatter.context, skill_dir).await?
+        } else {
+            String::new()
+        };
 
         // ── Build prompt via PromptBuilder ──────────────────────────────────
         //
@@ -447,14 +450,16 @@ impl Orchestrator {
                 || !skill_doc.frontmatter.depends_on.is_empty();
             let registry = if needs_clone {
                 let cloned = (*self.tool_registry).clone();
-                for cfg in &skill_doc.frontmatter.scripts {
-                    let tool = ScriptToolBuiltIn::new(&entry.skill_dir, cfg)?;
-                    cloned.register(RegisteredTool {
-                        definition: ScriptToolBuiltIn::tool_definition(&cfg.name),
-                        backend: ToolBackend::BuiltIn(Arc::new(tool)),
-                        provides_capabilities: vec![],
-                        exempt_from_timeout: false,
-                    });
+                if let Some(ref skill_dir) = entry.skill_dir {
+                    for cfg in &skill_doc.frontmatter.scripts {
+                        let tool = ScriptToolBuiltIn::new(skill_dir, cfg)?;
+                        cloned.register(RegisteredTool {
+                            definition: ScriptToolBuiltIn::tool_definition(&cfg.name),
+                            backend: ToolBackend::BuiltIn(Arc::new(tool)),
+                            provides_capabilities: vec![],
+                            exempt_from_timeout: false,
+                        });
+                    }
                 }
                 // Register invoke_skill:* backends so the sandbox can execute them
                 if !skill_doc.frontmatter.depends_on.is_empty() {
