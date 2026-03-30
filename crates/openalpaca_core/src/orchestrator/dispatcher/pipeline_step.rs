@@ -445,7 +445,179 @@ pub(super) async fn execute_pipeline_step(
 
     messages.push(ChatMessage::user(&pctx.description));
 
-    // Run agentic loop for this agent
+    // ── Plugin agent dispatch path ──────────────────────────────────────
+    // If the agent's template has AgentSource::Plugin, route to the
+    // PluginAgentExecutor instead of the internal agentic loop.
+    if let Some(template) = pctx.ctx.agent_registry.get_template(&agent.template_id) {
+        if let crate::agent::AgentSource::Plugin { ref executor, .. } = template.source {
+            tracing::info!(
+                "Agent '{}' is plugin-backed — routing to PluginAgentExecutor",
+                agent_id
+            );
+
+            let plugin_ctx = serde_json::json!({
+                "previous_output": previous_output,
+                "task_id": pctx.task_id,
+            });
+            let instructions = format!("{}\n\nRole: {}", system_prompt, role_description);
+
+            let plugin_start = std::time::Instant::now();
+
+            let accepted = match executor
+                .spawn(agent_id, &pctx.task_id, &instructions, &plugin_ctx)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    let error = format!("plugin agent spawn failed: {e}");
+                    tracing::error!("{}", error);
+                    busy_guard.restore();
+                    return PipelineStepResult {
+                        success: false,
+                        error: Some(error),
+                        raw_content: String::new(),
+                        display_content: String::new(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        tool_calls_made: 0,
+                    };
+                }
+            };
+
+            if !accepted {
+                let error = "Plugin agent rejected the task".to_string();
+                tracing::warn!("{}", error);
+                busy_guard.restore();
+                return PipelineStepResult {
+                    success: false,
+                    error: Some(error),
+                    raw_content: String::new(),
+                    display_content: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    tool_calls_made: 0,
+                };
+            }
+
+            // Step loop: poll the plugin agent, proxying tool requests
+            const MAX_PLUGIN_ITERATIONS: usize = 50;
+            let mut tool_results: Option<serde_json::Value> = None;
+            let mut total_tool_calls: usize = 0;
+
+            for iteration in 0..MAX_PLUGIN_ITERATIONS {
+                let (status, output, tool_calls) = match executor
+                    .step(agent_id, tool_results.as_ref())
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let error = format!("plugin agent step failed: {e}");
+                        tracing::error!("{}", error);
+                        let _ = executor.stop(agent_id).await;
+                        busy_guard.restore();
+                        return PipelineStepResult {
+                            success: false,
+                            error: Some(error),
+                            raw_content: String::new(),
+                            display_content: String::new(),
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            tool_calls_made: total_tool_calls,
+                        };
+                    }
+                };
+
+                match status.as_str() {
+                    "complete" => {
+                        let runtime = plugin_start.elapsed().as_secs() as i64;
+                        tracing::info!(
+                            "Plugin agent '{}' completed in {} iterations ({}s)",
+                            agent_id,
+                            iteration + 1,
+                            runtime,
+                        );
+                        busy_guard.restore();
+                        return PipelineStepResult {
+                            success: true,
+                            error: None,
+                            raw_content: output.clone(),
+                            display_content: if output.is_empty() {
+                                format!(
+                                    "Plugin agent completed in {} iterations ({} tool calls)",
+                                    iteration + 1,
+                                    total_tool_calls,
+                                )
+                            } else {
+                                output
+                            },
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            tool_calls_made: total_tool_calls,
+                        };
+                    }
+                    "failed" => {
+                        tracing::error!("Plugin agent '{}' failed: {}", agent_id, output);
+                        busy_guard.restore();
+                        return PipelineStepResult {
+                            success: false,
+                            error: Some(output),
+                            raw_content: String::new(),
+                            display_content: String::new(),
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            tool_calls_made: total_tool_calls,
+                        };
+                    }
+                    "tool_request" => {
+                        let mut results = Vec::new();
+                        for call in &tool_calls {
+                            let name = call
+                                .get("tool")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("");
+                            let args = call
+                                .get("arguments")
+                                .cloned()
+                                .unwrap_or_default();
+                            let result = pctx
+                                .tool_registry
+                                .execute_with_context(name, &args, &tool_ctx)
+                                .await;
+                            results.push(serde_json::json!({
+                                "tool": name,
+                                "result": result.unwrap_or_else(|e| e),
+                            }));
+                            total_tool_calls += 1;
+                        }
+                        tool_results = Some(serde_json::json!(results));
+                    }
+                    _ => {
+                        // "working" — wait briefly then poll again
+                        tool_results = None;
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+            }
+
+            // Exceeded max iterations
+            let error =
+                format!("Plugin agent '{}' exceeded max iterations ({MAX_PLUGIN_ITERATIONS})", agent_id);
+            tracing::error!("{}", error);
+            let _ = executor.stop(agent_id).await;
+            busy_guard.restore();
+            return PipelineStepResult {
+                success: false,
+                error: Some(error),
+                raw_content: String::new(),
+                display_content: String::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                tool_calls_made: total_tool_calls,
+            };
+        }
+    }
+
+    // ── Internal agent: run agentic loop ────────────────────────────────
     let agent_start = std::time::Instant::now();
     let result = run_agentic_loop_routed(
         pctx.router.as_ref(),
