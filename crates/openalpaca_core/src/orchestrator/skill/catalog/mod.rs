@@ -19,22 +19,45 @@ use chrono::Utc;
 use regex::Regex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
+
+/// Where a skill's execution logic comes from.
+#[derive(Clone)]
+pub enum SkillSource {
+    /// Traditional file-based skill (SKILL.md)
+    FileBased,
+    /// Plugin-backed skill (executed via PluginSkillExecutor)
+    Plugin {
+        plugin_id: String,
+        executor: Arc<dyn openalpaca_api::plugin_traits::PluginSkillExecutor>,
+    },
+}
+
+impl std::fmt::Debug for SkillSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FileBased => write!(f, "FileBased"),
+            Self::Plugin { plugin_id, .. } => write!(f, "Plugin({plugin_id})"),
+        }
+    }
+}
 
 /// A catalog entry: Level 1 metadata + path for deferred Level 2 loading.
 #[derive(Debug, Clone)]
 pub struct SkillEntry {
     /// Parsed frontmatter (always available after catalog scan).
     pub frontmatter: SkillFrontmatter,
-    /// Absolute path to the SKILL.md file.
-    pub skill_md_path: PathBuf,
-    /// Absolute path to the skill directory (parent of SKILL.md).
-    pub skill_dir: PathBuf,
+    /// Absolute path to the SKILL.md file (None for plugin skills).
+    pub skill_md_path: Option<PathBuf>,
+    /// Absolute path to the skill directory (None for plugin skills).
+    pub skill_dir: Option<PathBuf>,
     /// Compiled trigger regex patterns (compiled once at scan time).
     /// Patterns that fail to compile are silently dropped.
     pub compiled_triggers: Vec<Regex>,
     /// Where this skill was discovered.
     pub scope: SkillScope,
+    /// Where this skill's execution logic comes from.
+    pub source: SkillSource,
 }
 
 /// Cached catalog summary: `(name, description, command)` tuples.
@@ -240,10 +263,11 @@ impl SkillCatalog {
 
         let entry = SkillEntry {
             frontmatter,
-            skill_md_path: skill_md.to_path_buf(),
-            skill_dir: skill_dir.to_path_buf(),
+            skill_md_path: Some(skill_md.to_path_buf()),
+            skill_dir: Some(skill_dir.to_path_buf()),
             compiled_triggers,
             scope,
+            source: SkillSource::FileBased,
         };
 
         // Insert entry and command/alias indices
@@ -454,11 +478,21 @@ impl SkillCatalog {
             .get(name)
             .ok_or_else(|| format!("Skill '{}' not found in catalog", name))?;
 
-        let content = std::fs::read_to_string(&entry.skill_md_path)
-            .map_err(|e| format!("Failed to read {}: {}", entry.skill_md_path.display(), e))?;
+        if entry.skill_md_path.is_none() {
+            // Plugin skill — return synthetic document
+            return Ok(SkillDocument {
+                frontmatter: entry.frontmatter.clone(),
+                body: entry.frontmatter.description.clone(),
+                sections: HashMap::new(),
+            });
+        }
+        let path = entry.skill_md_path.as_ref().unwrap();
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
         parse_skill_markdown(&content)
-            .map_err(|e| format!("Failed to parse {}: {}", entry.skill_md_path.display(), e))
+            .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))
     }
 
     /// Remove a skill from the catalog by ID or name.
@@ -486,6 +520,61 @@ impl SkillCatalog {
         self.invalidate_summary_cache();
     }
 
+    /// Register a plugin-backed skill into the catalog.
+    ///
+    /// Plugin skills have no filesystem path — their execution is delegated
+    /// to the `PluginSkillExecutor` provided by the plugin runtime.
+    pub fn register_plugin_skill(
+        &self,
+        skill_id: String,
+        frontmatter: SkillFrontmatter,
+        executor: Arc<dyn openalpaca_api::plugin_traits::PluginSkillExecutor>,
+        plugin_id: String,
+    ) {
+        let compiled = Self::compile_triggers(&frontmatter);
+        let entry = SkillEntry {
+            frontmatter: frontmatter.clone(),
+            skill_md_path: None,
+            skill_dir: None,
+            compiled_triggers: compiled,
+            scope: SkillScope::User,
+            source: SkillSource::Plugin { plugin_id, executor },
+        };
+        let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
+        // Update command index
+        if let Some(ref cmd) = frontmatter.invoke.slash {
+            let mut cmd_idx = self.command_index.write().unwrap_or_else(|p| p.into_inner());
+            cmd_idx.insert(cmd.clone(), skill_id.clone());
+        }
+        for alias in &frontmatter.invoke.aliases {
+            let mut alias_idx = self.alias_index.write().unwrap_or_else(|p| p.into_inner());
+            alias_idx.insert(alias.clone(), skill_id.clone());
+        }
+        entries.insert(skill_id, entry);
+        self.invalidate_summary_cache();
+    }
+
+    /// Compile routing.intent patterns into regexes for trigger matching.
+    fn compile_triggers(frontmatter: &SkillFrontmatter) -> Vec<Regex> {
+        frontmatter
+            .routing
+            .intent
+            .iter()
+            .filter_map(|pattern| match Regex::new(&format!("(?i){}", pattern)) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    tracing::warn!(
+                        "SkillCatalog: invalid trigger pattern '{}' in {}: {}",
+                        pattern,
+                        frontmatter.name,
+                        e
+                    );
+                    None
+                }
+            })
+            .collect()
+    }
+
     /// Hot-reload a single skill directory.
     ///
     /// Removes the old entry (if any) and re-scans the directory.
@@ -509,10 +598,11 @@ impl SkillCatalog {
             // Skill was deleted — remove from catalog
             if let Some(dir_name) = skill_dir.file_name().and_then(|n| n.to_str()) {
                 // Try to find and remove by directory name
+                let skill_dir_buf = skill_dir.to_path_buf();
                 let entries_to_remove: Vec<String> = match self.entries.read() {
                     Ok(guard) => guard
                         .iter()
-                        .filter(|(_, e)| e.skill_dir == skill_dir)
+                        .filter(|(_, e)| e.skill_dir.as_ref() == Some(&skill_dir_buf))
                         .map(|(k, _)| k.clone())
                         .collect(),
                     Err(_) => return Err("Lock poisoned".to_string()),
@@ -531,10 +621,11 @@ impl SkillCatalog {
         let fm = parse_skill_frontmatter(&content).map_err(|e| format!("parse error: {}", e))?;
 
         // Remove old entries for this directory (handles renames)
+        let skill_dir_buf = skill_dir.to_path_buf();
         let old_keys: Vec<String> = match self.entries.read() {
             Ok(guard) => guard
                 .iter()
-                .filter(|(_, e)| e.skill_dir == skill_dir)
+                .filter(|(_, e)| e.skill_dir.as_ref() == Some(&skill_dir_buf))
                 .map(|(k, _)| k.clone())
                 .collect(),
             Err(_) => Vec::new(),

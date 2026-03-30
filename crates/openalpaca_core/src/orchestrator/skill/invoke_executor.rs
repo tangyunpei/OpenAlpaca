@@ -144,15 +144,17 @@ impl SkillInvocationToolExecutor {
         let registry = if needs_clone {
             let cloned = (*self.tool_registry).clone();
 
-            // Register script tools
-            for cfg in &skill_doc.frontmatter.scripts {
-                let tool = ScriptToolBuiltIn::new(&entry.skill_dir, cfg)?;
-                cloned.register(RegisteredTool {
-                    definition: ScriptToolBuiltIn::tool_definition(&cfg.name),
-                    backend: ToolBackend::BuiltIn(Arc::new(tool)),
-                    provides_capabilities: vec![],
-                    exempt_from_timeout: false,
-                });
+            // Register script tools (file-based skills only)
+            if let Some(ref skill_dir) = entry.skill_dir {
+                for cfg in &skill_doc.frontmatter.scripts {
+                    let tool = ScriptToolBuiltIn::new(skill_dir, cfg)?;
+                    cloned.register(RegisteredTool {
+                        definition: ScriptToolBuiltIn::tool_definition(&cfg.name),
+                        backend: ToolBackend::BuiltIn(Arc::new(tool)),
+                        provides_capabilities: vec![],
+                        exempt_from_timeout: false,
+                    });
+                }
             }
 
             // Register invoke_skill:* backends for nested dependencies
