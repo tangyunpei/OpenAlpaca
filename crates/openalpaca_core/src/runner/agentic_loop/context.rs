@@ -58,30 +58,9 @@ pub(crate) fn compress_context(
     tail_keep: usize,
     budget: Option<&crate::context_budget::ContextBudgetManager>,
 ) {
-    let min_recent = budget
-        .map(|b| b.min_recent_messages())
-        .unwrap_or(tail_keep * 3);
-
-    // Phase 1: Social discard (always applied when budget is present)
-    if budget.is_some() && messages.len() > 2 + min_recent {
-        let cleaned =
-            crate::context_budget::compaction::CompactionPipeline::discard_social(messages, min_recent);
-        if cleaned.len() < messages.len() {
-            tracing::debug!(
-                discarded = messages.len() - cleaned.len(),
-                "Heuristic: social messages discarded"
-            );
-            *messages = cleaned;
-        }
-
-        // Check if social discard alone was sufficient
-        if let Some(b) = budget {
-            let tokens_after = estimate_messages_tokens(messages) as usize;
-            if !b.should_compact(tokens_after) {
-                return; // Social discard was enough
-            }
-        }
-    }
+    // Phase 1 (DiscardSocial) removed — the graduated compactor already
+    // handles DiscardSocial as its own tier before reaching HeuristicSummary,
+    // and the legacy fallback path passes budget: None which skipped this block.
 
     // Phase 2: Determine compression boundary
     let keep_tail = if let Some(b) = budget {
