@@ -592,9 +592,25 @@ pub(super) async fn execute_pipeline_step(
                         tool_results = Some(serde_json::json!(results));
                     }
                     _ => {
-                        // "working" — wait briefly then poll again
+                        // "working" — wait briefly then poll again, respecting cancellation
                         tool_results = None;
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                            _ = pctx.cancel_token.cancelled() => {
+                                tracing::info!(agent_id, "plugin agent cancelled during poll");
+                                let _ = executor.stop(agent_id).await;
+                                busy_guard.restore();
+                                return PipelineStepResult {
+                                    success: false,
+                                    error: Some("Cancelled".to_string()),
+                                    raw_content: String::new(),
+                                    display_content: String::new(),
+                                    input_tokens: 0,
+                                    output_tokens: 0,
+                                    tool_calls_made: total_tool_calls,
+                                };
+                            }
+                        }
                     }
                 }
             }
