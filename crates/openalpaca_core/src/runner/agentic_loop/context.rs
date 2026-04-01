@@ -41,7 +41,7 @@ pub(crate) fn estimate_messages_tokens(messages: &[ChatMessage]) -> u32 {
             content_tokens + tool_call_tokens
         })
         .sum();
-    tokens.max(100)
+    tokens
 }
 
 /// Compress context by replacing older rounds with a compact summary.
