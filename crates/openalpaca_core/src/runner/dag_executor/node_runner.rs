@@ -227,7 +227,8 @@ pub(super) async fn execute_single_node(
     )
     .await;
 
-    let agent_runtime = agent_start.elapsed().as_secs() as i64;
+    let agent_elapsed = agent_start.elapsed();
+    let agent_runtime = agent_elapsed.as_secs() as i64;
 
     tracing::info!(
         "DAG node '{}' (agent '{}'): reason={:?}, rounds={}, tokens={}/{}",
@@ -251,7 +252,7 @@ pub(super) async fn execute_single_node(
         loop_config.model.as_deref(),
         &agent_id,
         &task_id,
-        agent_start.elapsed().as_millis() as i64,
+        agent_elapsed.as_millis() as i64,
         db.as_ref(),
         &bus,
     );
@@ -275,7 +276,7 @@ pub(super) async fn execute_single_node(
         agent_id,
         success,
         final_content: result.final_content.clone(),
-        duration_ms: agent_start.elapsed().as_millis() as u64,
+        duration_ms: agent_elapsed.as_millis() as u64,
         loop_result: result,
     }
 }

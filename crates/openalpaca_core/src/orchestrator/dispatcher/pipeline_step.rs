@@ -634,7 +634,8 @@ pub(super) async fn execute_pipeline_step(
     )
     .await;
 
-    let agent_runtime = agent_start.elapsed().as_secs() as i64;
+    let agent_elapsed = agent_start.elapsed();
+    let agent_runtime = agent_elapsed.as_secs() as i64;
 
     tracing::info!(
         "Agent '{}' finished step {}/{}: reason={:?}, rounds={}, tokens={}/{}",
@@ -659,7 +660,7 @@ pub(super) async fn execute_pipeline_step(
         loop_config.model.as_deref(),
         agent_id,
         &pctx.task_id,
-        agent_start.elapsed().as_millis() as i64,
+        agent_elapsed.as_millis() as i64,
         pctx.db.as_ref(),
         &pctx.bus,
     );
