@@ -259,7 +259,7 @@ async fn run_agentic_loop_inner(
                 accumulated_cost,
                 config.max_cost,
             );
-            Arc::make_mut(&mut messages).push(ChatMessage::user(&warning));
+            Arc::make_mut(&mut messages).push(ChatMessage::system(&warning));
             tracing::info!(
                 agent_id,
                 cost_ratio,
