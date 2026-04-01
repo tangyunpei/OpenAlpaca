@@ -1075,3 +1075,237 @@ async fn test_pipeline_text_only_no_artifacts_e2e() {
     );
     assert!(parsed.artifacts.is_empty());
 }
+
+// ── Plugin agent dispatch path tests ─────────────────────────────
+
+/// Mock PluginAgentExecutor that completes immediately after spawn.
+mod plugin_mock {
+    use async_trait::async_trait;
+    use openalpaca_api::plugin_traits::PluginAgentExecutor;
+    use serde_json::Value;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Mock that spawn()→Ok(true), step()→("complete", output, []).
+    pub(super) struct ImmediateCompleteMock {
+        pub output: String,
+        pub step_count: AtomicUsize,
+    }
+
+    impl ImmediateCompleteMock {
+        pub fn new(output: &str) -> Self {
+            Self {
+                output: output.to_string(),
+                step_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PluginAgentExecutor for ImmediateCompleteMock {
+        async fn spawn(
+            &self,
+            _instance_id: &str,
+            _task_id: &str,
+            _instructions: &str,
+            _context: &Value,
+        ) -> Result<bool, String> {
+            Ok(true)
+        }
+
+        async fn step(
+            &self,
+            _instance_id: &str,
+            _tool_results: Option<&Value>,
+        ) -> Result<(String, String, Vec<Value>), String> {
+            self.step_count.fetch_add(1, Ordering::SeqCst);
+            Ok(("complete".to_string(), self.output.clone(), vec![]))
+        }
+
+        async fn stop(&self, _instance_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn plugin_id(&self) -> &str {
+            "test-plugin"
+        }
+
+        fn agent_id(&self) -> &str {
+            "test-agent"
+        }
+    }
+
+    /// Mock that always returns "working" — never completes on its own.
+    /// Used to test cancellation.
+    pub(super) struct NeverCompleteMock {
+        pub step_count: AtomicUsize,
+        pub stopped: std::sync::atomic::AtomicBool,
+    }
+
+    impl NeverCompleteMock {
+        pub fn new() -> Self {
+            Self {
+                step_count: AtomicUsize::new(0),
+                stopped: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PluginAgentExecutor for NeverCompleteMock {
+        async fn spawn(
+            &self,
+            _instance_id: &str,
+            _task_id: &str,
+            _instructions: &str,
+            _context: &Value,
+        ) -> Result<bool, String> {
+            Ok(true)
+        }
+
+        async fn step(
+            &self,
+            _instance_id: &str,
+            _tool_results: Option<&Value>,
+        ) -> Result<(String, String, Vec<Value>), String> {
+            self.step_count.fetch_add(1, Ordering::SeqCst);
+            // Simulate work taking time — the caller polls with 500ms sleep
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            Ok(("working".to_string(), String::new(), vec![]))
+        }
+
+        async fn stop(&self, _instance_id: &str) -> Result<(), String> {
+            self.stopped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn plugin_id(&self) -> &str {
+            "test-plugin"
+        }
+
+        fn agent_id(&self) -> &str {
+            "test-agent"
+        }
+    }
+}
+
+/// Test plugin agent dispatch: spawn → step("complete") → output returned.
+/// Mirrors the protocol loop in pipeline_step.rs execute_pipeline_step().
+#[tokio::test]
+async fn test_plugin_agent_complete_path() {
+    use openalpaca_api::plugin_traits::PluginAgentExecutor;
+    use std::sync::atomic::Ordering;
+
+    let executor = plugin_mock::ImmediateCompleteMock::new("Done processing the task.");
+
+    // Replicate the spawn/step protocol from pipeline_step.rs
+    let accepted = executor
+        .spawn("inst-1", "task-1", "Do something", &serde_json::json!({}))
+        .await
+        .expect("spawn should succeed");
+    assert!(accepted, "Plugin agent should accept the task");
+
+    // Step loop (mirrors pipeline_step.rs lines 507–616)
+    let max_iterations = 50;
+    let mut final_output = String::new();
+    let mut completed = false;
+
+    for _iteration in 0..max_iterations {
+        let (status, output, _tool_calls) = executor
+            .step("inst-1", None)
+            .await
+            .expect("step should succeed");
+
+        match status.as_str() {
+            "complete" => {
+                final_output = output;
+                completed = true;
+                break;
+            }
+            "working" => continue,
+            other => panic!("Unexpected status: {other}"),
+        }
+    }
+
+    assert!(completed, "Plugin agent should have completed");
+    assert_eq!(final_output, "Done processing the task.");
+    assert_eq!(
+        executor.step_count.load(Ordering::SeqCst),
+        1,
+        "Should have taken exactly 1 step"
+    );
+}
+
+/// Test plugin agent cancellation: step() returns "working" forever,
+/// cancel_token fires after 100ms, verify stop() is called within 1s.
+#[tokio::test]
+async fn test_plugin_agent_cancellation() {
+    use openalpaca_api::plugin_traits::PluginAgentExecutor;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    let executor = Arc::new(plugin_mock::NeverCompleteMock::new());
+    let cancel_token = CancellationToken::new();
+
+    // Fire cancellation after 100ms
+    let token_clone = cancel_token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        token_clone.cancel();
+    });
+
+    // Replicate the plugin dispatch loop from pipeline_step.rs,
+    // including the tokio::select! cancellation check on "working" status.
+    let executor_ref = executor.clone();
+    let accepted = executor_ref
+        .spawn("inst-2", "task-2", "Endless work", &serde_json::json!({}))
+        .await
+        .expect("spawn should succeed");
+    assert!(accepted);
+
+    let max_iterations = 50;
+    let mut cancelled = false;
+
+    let start = std::time::Instant::now();
+
+    for _iteration in 0..max_iterations {
+        let (status, _output, _tool_calls) = executor_ref
+            .step("inst-2", None)
+            .await
+            .expect("step should succeed");
+
+        match status.as_str() {
+            "complete" => break,
+            "working" => {
+                // This mirrors the cancel-aware poll in pipeline_step.rs
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                    _ = cancel_token.cancelled() => {
+                        let _ = executor_ref.stop("inst-2").await;
+                        cancelled = true;
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let elapsed = start.elapsed();
+
+    assert!(cancelled, "Should have been cancelled");
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "Cancellation should happen within 1s, took {:?}",
+        elapsed
+    );
+    assert!(
+        executor.stopped.load(Ordering::SeqCst),
+        "stop() should have been called"
+    );
+    assert!(
+        executor.step_count.load(Ordering::SeqCst) >= 1,
+        "Should have polled at least once before cancellation"
+    );
+}
