@@ -247,6 +247,124 @@ mod tests {
         assert!(messages[2].content.len() <= 520); // 500 + "[...truncated]"
     }
 
+    #[tokio::test]
+    async fn test_multi_tier_escalation() {
+        use crate::context_budget::compaction::{ExtractedMemory, MemoryExtractor, Summarizer};
+        use crate::context_budget::ContextBudgetManager;
+        use crate::daemon_config::ContextBudgetConfig;
+        use openalpaca_llm::ChatMessage;
+
+        struct NoopExtractor;
+        #[async_trait::async_trait]
+        impl MemoryExtractor for NoopExtractor {
+            async fn extract(&self, _: &[ChatMessage]) -> Result<Vec<ExtractedMemory>, String> {
+                Ok(vec![])
+            }
+        }
+
+        struct TruncatingSummarizer;
+        #[async_trait::async_trait]
+        impl Summarizer for TruncatingSummarizer {
+            async fn summarize(&self, _: &[ChatMessage]) -> Result<String, String> {
+                Ok("[Summary]".into())
+            }
+        }
+
+        // Use a large buffer ratio (0.50) so should_compact triggers at 50%
+        // utilization while compaction_tier starts at a lower tier (~65%).
+        // This creates a gap where early tiers (TruncateToolResults, DropMultimedia)
+        // are no-ops for text-only messages, forcing escalation through multiple tiers.
+        let cfg = ContextBudgetConfig {
+            autocompact_buffer_ratio: 0.50,
+            ..ContextBudgetConfig::default()
+        };
+        let budget = ContextBudgetManager::new(1000, &cfg);
+
+        let mut messages = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("initial query"),
+        ];
+        // Text-only assistant/user pairs (~28 tokens each).
+        // TruncateToolResults and DropMultimedia are no-ops for these,
+        // forcing escalation to DiscardSocial / HeuristicSummary.
+        for i in 0..24 {
+            messages.push(ChatMessage::assistant(&format!("Using tool {i}")));
+            messages.push(ChatMessage::user(&"x".repeat(100)));
+        }
+        // Social messages (gives DiscardSocial something to remove)
+        messages.push(ChatMessage::user("thanks!"));
+        messages.push(ChatMessage::assistant("You're welcome!"));
+
+        let compactor = GraduatedCompactor::new(&budget, &NoopExtractor, &TruncatingSummarizer);
+        let report = compactor.compact(&mut messages, 2, None).await;
+
+        assert!(
+            report.tiers_applied.len() > 1,
+            "Expected multi-tier escalation, got {:?}",
+            report.tiers_applied
+        );
+        assert!(
+            report.messages_before > report.messages_after,
+            "Expected fewer messages after compaction"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_messages_discarded_counts_all_tiers() {
+        use crate::context_budget::compaction::{ExtractedMemory, MemoryExtractor, Summarizer};
+        use crate::context_budget::ContextBudgetManager;
+        use crate::daemon_config::ContextBudgetConfig;
+        use openalpaca_llm::ChatMessage;
+
+        struct NoopExtractor;
+        #[async_trait::async_trait]
+        impl MemoryExtractor for NoopExtractor {
+            async fn extract(&self, _: &[ChatMessage]) -> Result<Vec<ExtractedMemory>, String> {
+                Ok(vec![])
+            }
+        }
+
+        struct TruncatingSummarizer;
+        #[async_trait::async_trait]
+        impl Summarizer for TruncatingSummarizer {
+            async fn summarize(&self, _: &[ChatMessage]) -> Result<String, String> {
+                Ok("[Summary]".into())
+            }
+        }
+
+        // Same setup as test_multi_tier_escalation: large buffer ratio
+        // forces early should_compact trigger, text-only messages force
+        // escalation through no-op tiers until DiscardSocial/HeuristicSummary.
+        let cfg = ContextBudgetConfig {
+            autocompact_buffer_ratio: 0.50,
+            ..ContextBudgetConfig::default()
+        };
+        let budget = ContextBudgetManager::new(1000, &cfg);
+
+        let mut messages = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("initial query"),
+        ];
+        for i in 0..24 {
+            messages.push(ChatMessage::assistant(&format!("Using tool {i}")));
+            messages.push(ChatMessage::user(&"x".repeat(100)));
+        }
+        // Social messages so DiscardSocial tier can remove them
+        messages.push(ChatMessage::user("thanks!"));
+        messages.push(ChatMessage::assistant("You're welcome!"));
+
+        let compactor = GraduatedCompactor::new(&budget, &NoopExtractor, &TruncatingSummarizer);
+        let report = compactor.compact(&mut messages, 2, None).await;
+
+        // messages_discarded should accumulate across all tiers that remove messages
+        // (previously it was only set for LlmSummary)
+        assert!(
+            report.messages_discarded > 0,
+            "Expected messages_discarded > 0 across tiers, got {}",
+            report.messages_discarded
+        );
+    }
+
     #[test]
     fn test_drop_multimedia() {
         let mut messages = vec![
