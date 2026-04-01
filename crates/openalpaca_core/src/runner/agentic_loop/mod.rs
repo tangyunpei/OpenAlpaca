@@ -150,7 +150,7 @@ pub async fn run_agentic_loop_routed(
         task_id: task_id.map(|s| s.to_string()),
     };
     run_agentic_loop_inner(
-        LlmBackend::Router { router, context, compaction_model: config.compaction_model.clone() },
+        LlmBackend::Router { router, context, compaction_model: config.compaction_model.clone(), fallback_models: config.fallback_models.clone() },
         initial_messages,
         tools,
         config,
@@ -332,16 +332,6 @@ async fn run_agentic_loop_inner(
 
                 known_token_count = estimate_messages_tokens(&messages);
             }
-        } else if config.max_context_tokens > 0 && known_token_count > config.max_context_tokens {
-            // Legacy fallback (no budget manager)
-            tracing::debug!(
-                agent_id = agent_id,
-                tokens = known_token_count,
-                max = config.max_context_tokens,
-                "Legacy compression triggered"
-            );
-            compress_context(Arc::make_mut(&mut messages), config.context_tail_keep, None);
-            known_token_count = estimate_messages_tokens(&messages);
         }
 
         let prev_msg_len = messages.len();

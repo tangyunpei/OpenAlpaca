@@ -26,11 +26,9 @@ pub struct LoopConfig {
     pub fallback_models: Vec<String>,
     /// Agent model constraints for access control enforcement.
     pub agent_constraints: Option<AgentConstraints>,
-    /// Maximum estimated input tokens before triggering context compression.
-    /// When `> 0` and estimated tokens exceed this, older rounds are compressed
-    /// into a summary, preserving the system prompt + initial query + recent rounds.
-    /// Default: `0` (disabled — auto-set from model context window × `context_threshold` via
-    /// `with_context_window()`).
+    /// **Deprecated:** Use `ContextBudgetManager` instead. This field is ignored
+    /// when `context_budget` is provided (which is always the case in production).
+    /// Retained only for `with_context_window()` seed calculation.
     pub max_context_tokens: u32,
     /// Number of most recent conversation rounds to always preserve during
     /// context compression. Each "round" is roughly 3 messages (assistant +
