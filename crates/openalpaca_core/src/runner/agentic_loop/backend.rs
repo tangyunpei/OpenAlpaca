@@ -18,6 +18,8 @@ pub(super) enum LlmBackend<'a> {
         context: RequestContext,
         /// Dedicated model for LLM-based context compaction (extraction + summarization).
         compaction_model: Option<String>,
+        /// Per-agent fallback model chain (forwarded to `RouterRequest`).
+        fallback_models: Vec<String>,
     },
 }
 
@@ -55,7 +57,7 @@ impl<'a> LlmBackend<'a> {
                 };
                 provider.chat(request).await.map_err(LlmRouterError::Llm)
             }
-            LlmBackend::Router { router, context, .. } => {
+            LlmBackend::Router { router, context, fallback_models, .. } => {
                 // Try streaming if callback is set
                 if let Some(callback) = stream_callback {
                     let stream_request = RouterRequest {
@@ -70,6 +72,7 @@ impl<'a> LlmBackend<'a> {
                         enable_caching,
                         thinking: thinking.clone(),
                         context_management: context_management.clone(),
+                        fallback_models: fallback_models.clone(),
                     };
                     match router.complete_streaming(stream_request).await {
                         Ok(stream) => {
@@ -138,6 +141,7 @@ impl<'a> LlmBackend<'a> {
                     enable_caching,
                     thinking,
                     context_management,
+                    fallback_models: fallback_models.clone(),
                 };
                 router.complete(request).await
             }
@@ -199,6 +203,7 @@ impl<'a> crate::context_budget::compaction::MemoryExtractor for LlmBackend<'a> {
                 router,
                 compaction_model,
                 context,
+                ..
             } => (*router, compaction_model.clone(), context.clone()),
             Self::Direct { .. } => {
                 return Err("No router available for LLM extraction".into());
@@ -241,6 +246,7 @@ impl<'a> crate::context_budget::compaction::MemoryExtractor for LlmBackend<'a> {
             enable_caching: false,
             thinking: None,
             context_management: None,
+            fallback_models: Vec::new(),
         };
 
         let response = router.complete(request).await.map_err(|e| e.to_string())?;
@@ -282,6 +288,7 @@ impl<'a> crate::context_budget::compaction::Summarizer for LlmBackend<'a> {
                 router,
                 compaction_model,
                 context,
+                ..
             } => (*router, compaction_model.clone(), context.clone()),
             Self::Direct { .. } => {
                 return Err("No router available for LLM summarization".into());
@@ -322,6 +329,7 @@ impl<'a> crate::context_budget::compaction::Summarizer for LlmBackend<'a> {
             enable_caching: false,
             thinking: None,
             context_management: None,
+            fallback_models: Vec::new(),
         };
 
         let response = router.complete(request).await.map_err(|e| e.to_string())?;

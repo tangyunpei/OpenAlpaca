@@ -257,6 +257,7 @@ pub(super) async fn plan_inner(
             enable_caching: false,
             thinking: None,
             context_management: None,
+            fallback_models: Vec::new(),
         };
 
         let response = tokio::time::timeout(deadline, router.complete(request))
@@ -411,6 +412,7 @@ impl TaskPlanner {
             enable_caching: false,
             thinking: None,
             context_management: None,
+            fallback_models: Vec::new(),
         };
         let deadline = Duration::from_secs(timeout_secs);
         let response = tokio::time::timeout(deadline, router.complete(request))

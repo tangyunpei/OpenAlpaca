@@ -76,6 +76,7 @@ fn make_request(model: Option<&str>) -> RouterRequest {
         enable_caching: false,
         thinking: None,
         context_management: None,
+        fallback_models: Vec::new(),
     }
 }
 

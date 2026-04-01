@@ -128,6 +128,7 @@ pub(super) async fn extract_user_traits_background(
         enable_caching: false,
         thinking: None,
         context_management: None,
+        fallback_models: Vec::new(),
     };
 
     let call_start = std::time::Instant::now();

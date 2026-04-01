@@ -9,13 +9,17 @@ impl LlmRouter {
         original_model: &str,
         request: &RouterRequest,
     ) -> Result<ChatResponse, LlmRouterError> {
-        // 1. Try model-level fallback chains (existing behavior)
-        if let Some(fallback_chain) = self.fallback_chains.get(original_model) {
-            for fallback_model in fallback_chain {
-                match self.try_model(fallback_model, request).await {
-                    Ok(response) => return Ok(response),
-                    Err(_) => continue,
-                }
+        // 1. Try model-level fallback chains.
+        //    Per-request fallback_models override the global chain when non-empty.
+        let chain = if !request.fallback_models.is_empty() {
+            request.fallback_models.clone()
+        } else {
+            self.fallback_chains.get(original_model).cloned().unwrap_or_default()
+        };
+        for fallback_model in &chain {
+            match self.try_model(fallback_model, request).await {
+                Ok(response) => return Ok(response),
+                Err(_) => continue,
             }
         }
 

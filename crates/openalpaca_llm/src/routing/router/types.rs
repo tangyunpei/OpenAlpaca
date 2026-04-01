@@ -30,6 +30,8 @@ pub struct RouterRequest {
     pub thinking: Option<ThinkingConfig>,
     /// Context management configuration (Anthropic only).
     pub context_management: Option<crate::context_management::ContextManagement>,
+    /// Per-request fallback model chain (overrides global fallback when non-empty).
+    pub fallback_models: Vec<String>,
 }
 
 /// Errors from the LLM router.

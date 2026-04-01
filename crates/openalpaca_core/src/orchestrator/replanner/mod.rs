@@ -93,6 +93,7 @@ impl Replanner {
             enable_caching: false,
             thinking: None,
             context_management: None,
+            fallback_models: Vec::new(),
         };
 
         let response = router
