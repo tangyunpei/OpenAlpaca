@@ -270,7 +270,18 @@ pub async fn run_lead_agent(
             }
 
             let mut block = String::from("### RETRIEVED MEMORY ###\n");
-            let mut budget = 2000usize;
+            // Derive memory budget from the model's context window so it scales
+            // with the available context (context_budget is not yet constructed).
+            let model_window = {
+                let default_model = router.default_model();
+                let mid = lead_agent.llm_config.model.as_deref()
+                    .unwrap_or(&default_model);
+                router.model_registry()
+                    .get_model_info(mid)
+                    .map(|i| i.context_window)
+                    .unwrap_or(128_000)
+            };
+            let mut budget = (model_window as usize / 20).max(500).min(8000);
             for m in &memories {
                 let entry = format!(
                     "- [{}] {}\n",
