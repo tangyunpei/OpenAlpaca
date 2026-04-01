@@ -45,6 +45,7 @@ impl<'a> GraduatedCompactor<'a> {
         &self,
         messages: &mut Vec<ChatMessage>,
         tail_keep: usize,
+        cancel_token: Option<tokio_util::sync::CancellationToken>,
     ) -> CompactionReport {
         let mut report = CompactionReport {
             initial_tokens: crate::runner::estimate_messages_tokens(messages) as usize,
@@ -78,13 +79,22 @@ impl<'a> GraduatedCompactor<'a> {
                     // Use existing CompactionPipeline for LLM-based summarization
                     let min_recent = self.budget.min_recent_messages();
                     let owned = std::mem::take(messages);
-                    let result = crate::context_budget::compaction::CompactionPipeline::compact(
-                        owned,
-                        min_recent,
-                        self.extractor,
-                        self.summarizer,
-                    )
-                    .await;
+                    let result = if let Some(ref token) = cancel_token {
+                        tokio::select! {
+                            res = crate::context_budget::compaction::CompactionPipeline::compact(
+                                owned.clone(), min_recent, self.extractor, self.summarizer,
+                            ) => res,
+                            _ = token.cancelled() => {
+                                *messages = owned;
+                                tracing::info!("Compaction cancelled");
+                                break;
+                            }
+                        }
+                    } else {
+                        crate::context_budget::compaction::CompactionPipeline::compact(
+                            owned, min_recent, self.extractor, self.summarizer,
+                        ).await
+                    };
                     report.memories_extracted = result.extracted_memories.len();
                     report.messages_discarded += result.messages_discarded;
                     report.compaction_error = result.error.clone();
@@ -192,7 +202,11 @@ mod tests {
             autocompact_buffer_ratio: 0.15,
             ..ContextBudgetConfig::default()
         };
-        let budget = ContextBudgetManager::new(100, &cfg);
+        // Use a small context window so the test messages (short strings) still
+        // exceed the 85% utilization threshold required to reach the LlmSummary tier.
+        // Previously the estimate_messages_tokens floor of 100 made this work at
+        // window=100; without the floor the real token count is much lower.
+        let budget = ContextBudgetManager::new(50, &cfg);
 
         let mut messages = vec![
             ChatMessage::system("sys"),
@@ -206,7 +220,7 @@ mod tests {
         messages.push(ChatMessage::assistant("recent resp"));
 
         let compactor = GraduatedCompactor::new(&budget, &TestExtractor, &TestSummarizer);
-        let report = compactor.compact(&mut messages, 2).await;
+        let report = compactor.compact(&mut messages, 2, None).await;
 
         assert!(report.memories_extracted > 0, "should carry extracted memory count");
         assert!(report.messages_before > 0, "should carry messages_before");

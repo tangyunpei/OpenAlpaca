@@ -300,6 +300,7 @@ async fn run_agentic_loop_inner(
                 let report = compactor.compact(
                     Arc::make_mut(&mut messages),
                     config.context_tail_keep,
+                    cancel_token.clone(),
                 ).await;
 
                 tracing::info!(
