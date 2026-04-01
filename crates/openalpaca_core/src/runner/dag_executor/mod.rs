@@ -155,6 +155,15 @@ pub async fn execute_dag(
     // Mark initial ready nodes
     mark_ready_nodes(dag);
 
+    // Build index for O(1) node lookups by ID (owned keys to avoid borrowing dag).
+    // Rebuilt only after replan events that mutate dag.nodes.
+    let mut node_index: std::collections::HashMap<String, usize> = dag
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.node_id.clone(), i))
+        .collect();
+
     loop {
         // Check cancellation
         if let Some(ref token) = cancel_token
@@ -219,14 +228,6 @@ pub async fn execute_dag(
         if ready_info.is_empty() && running_count == 0 {
             break;
         }
-
-        // Build index for O(1) node lookups by ID (owned keys to avoid borrowing dag)
-        let node_index: std::collections::HashMap<String, usize> = dag
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.node_id.clone(), i))
-            .collect();
 
         // Opt-7c: Pre-load workspace snapshot once per batch instead of N times
         // for N concurrent nodes. Each node filters by its own workspace_keys.
@@ -532,6 +533,13 @@ pub async fn execute_dag(
                                     Ok(merged) => {
                                         *dag = merged;
                                         mark_ready_nodes(dag);
+                                        // Rebuild node_index after replan mutated dag.nodes
+                                        node_index = dag
+                                            .nodes
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(i, n)| (n.node_id.clone(), i))
+                                            .collect();
                                         persist_dag_state(dag, task_id, &db).await;
 
                                         bus.publish(SystemEvent::TaskReplanned {
