@@ -823,6 +823,99 @@ fn test_truncate_falls_back_to_word_boundary() {
     assert_eq!(truncated_content.len(), space_pos);
 }
 
+// ─── context compaction inside agentic loop ─────────────────────────
+
+#[tokio::test]
+async fn test_compaction_triggers_during_agentic_loop() {
+    use crate::context_budget::ContextBudgetManager;
+    use crate::daemon_config::ContextBudgetConfig;
+
+    // Create a budget with a very small context window so that a few rounds
+    // of tool-use responses push the token count past the compaction trigger.
+    //
+    // Window: 800 tokens
+    //   autocompact_buffer = 800 * 0.165 = 132
+    //   compaction_trigger = 800 - 132 = 668
+    //
+    // Each tool-use round adds ~300 tokens of content (padded assistant message
+    // + stub tool-error result). After 3 rounds the accumulated messages
+    // (~900+ tokens estimated) should exceed the trigger and fire compaction.
+    let budget_config = ContextBudgetConfig::default();
+    let budget = ContextBudgetManager::new(800, &budget_config);
+
+    // Build a tool-use response with a large content payload to inflate tokens.
+    let make_fat_tool_response = |id: &str| ChatResponse {
+        content: "x".repeat(400), // ~100 tokens
+        tool_calls: vec![openalpaca_llm::ToolCall {
+            id: id.to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({"query": "a]".repeat(200)}), // ~100 tokens
+        }],
+        model: "mock-model".to_string(),
+        usage: Usage {
+            input_tokens: 50,
+            output_tokens: 50,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::ToolUse,
+        thinking: None,
+        parts: None,
+    };
+
+    let provider = MockProvider::new(vec![
+        Ok(make_fat_tool_response("tc_a")),
+        Ok(make_fat_tool_response("tc_b")),
+        Ok(make_fat_tool_response("tc_c")),
+        Ok(make_fat_tool_response("tc_d")),
+        Ok(MockProvider::simple_response("Final compacted answer.")),
+    ]);
+
+    let messages = vec![
+        ChatMessage::system("You are a helpful assistant."),
+        ChatMessage::user("Search for information repeatedly."),
+    ];
+    let config = LoopConfig {
+        max_rounds: 10,
+        max_cost: 10.0,
+        enable_caching: false,
+        thinking: None,
+        context_tail_keep: 2,
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider,
+        messages,
+        vec![],
+        &config,
+        None,
+        "test_compaction",
+        None,
+        Some(&budget), // context_budget
+        None,
+        None,
+    )
+    .await;
+
+    // The loop must complete successfully with the expected final answer.
+    // If compaction didn't work, the context would overflow or the loop
+    // would bail out early — neither of which produces this content.
+    assert_eq!(
+        result.finish_reason,
+        LoopFinishReason::Complete,
+        "Loop should complete successfully, got: {:?}",
+        result.finish_reason
+    );
+    assert_eq!(result.final_content, "Final compacted answer.");
+    // At least 4 tool-use rounds + 1 final = 5 rounds
+    assert!(
+        result.rounds_used >= 5,
+        "Expected at least 5 rounds (4 tool + 1 final), got {}",
+        result.rounds_used
+    );
+    assert_eq!(result.tool_calls_made, 4);
+}
+
 #[test]
 fn test_truncate_min_cut_guard_skips_distant_sentence() {
     // Sentence boundary exists but is below the 75% threshold — should fall through
