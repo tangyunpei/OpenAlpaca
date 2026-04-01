@@ -85,26 +85,31 @@ pub(crate) fn compress_context(
 
     // Phase 2: Determine compression boundary
     let keep_tail = if let Some(b) = budget {
-        // Token-aware: walk backwards counting tokens until we hit the target
         let target = b.compaction_target_tokens();
-        let mut tail_tokens = 0usize;
-        let mut boundary = messages.len();
-        for (i, msg) in messages.iter().enumerate().rev() {
-            if i <= 1 {
-                break; // Never compress system + initial query
+        if target == 0 {
+            // No free zone — fall back to keeping a fixed tail
+            tail_keep * 3
+        } else {
+            // Token-aware: walk backwards counting tokens until we hit the target
+            let mut tail_tokens = 0usize;
+            let mut boundary = messages.len();
+            for (i, msg) in messages.iter().enumerate().rev() {
+                if i <= 1 {
+                    break; // Never compress system + initial query
+                }
+                let msg_tokens = if let Some(ref parts) = msg.parts {
+                    parts.iter().map(|p| estimate_part_tokens(p) as usize).sum()
+                } else {
+                    msg.content.len() / 4
+                };
+                if tail_tokens + msg_tokens > target && boundary < messages.len() {
+                    break;
+                }
+                tail_tokens += msg_tokens;
+                boundary = i;
             }
-            let msg_tokens = if let Some(ref parts) = msg.parts {
-                parts.iter().map(|p| estimate_part_tokens(p) as usize).sum()
-            } else {
-                msg.content.len() / 4
-            };
-            if tail_tokens + msg_tokens > target && boundary < messages.len() {
-                break;
-            }
-            tail_tokens += msg_tokens;
-            boundary = i;
+            messages.len() - boundary
         }
-        messages.len() - boundary
     } else {
         // Legacy: fixed tail_keep × 3
         tail_keep * 3
