@@ -95,9 +95,8 @@ impl<'a> GraduatedCompactor<'a> {
 
             let tokens_now =
                 crate::runner::estimate_messages_tokens(messages) as usize;
-            let new_tier = self.budget.compaction_tier(tokens_now);
-            if new_tier <= current_tier {
-                break; // No progress or regression — stop
+            if !self.budget.should_compact(tokens_now) {
+                break; // Compaction succeeded — tokens are below trigger
             }
             match current_tier.next() {
                 Some(next) => current_tier = next,
