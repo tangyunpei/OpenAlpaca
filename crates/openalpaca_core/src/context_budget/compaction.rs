@@ -30,6 +30,7 @@ pub struct CompactionPipeline;
 pub struct CompactionResult {
     pub compacted_messages: Vec<ChatMessage>,
     pub extracted_memories: Vec<ExtractedMemory>,
+    #[allow(dead_code)]
     pub messages_discarded: usize,
     #[allow(dead_code)]
     pub messages_before: usize,

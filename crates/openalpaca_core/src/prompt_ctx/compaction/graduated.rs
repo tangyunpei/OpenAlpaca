@@ -60,6 +60,8 @@ impl<'a> GraduatedCompactor<'a> {
         }
 
         loop {
+            let msgs_before_tier = messages.len();
+
             match current_tier {
                 CompactionTier::None => break,
                 CompactionTier::TruncateToolResults => truncate_tool_results(messages),
@@ -96,12 +98,14 @@ impl<'a> GraduatedCompactor<'a> {
                         ).await
                     };
                     report.memories_extracted = result.extracted_memories.len();
-                    report.messages_discarded += result.messages_discarded;
                     report.compaction_error = result.error.clone();
                     *messages = result.compacted_messages;
                 }
             }
             report.record_tier(current_tier);
+
+            let msgs_after_tier = messages.len();
+            report.messages_discarded += msgs_before_tier.saturating_sub(msgs_after_tier);
 
             let tokens_now =
                 crate::runner::estimate_messages_tokens(messages) as usize;
