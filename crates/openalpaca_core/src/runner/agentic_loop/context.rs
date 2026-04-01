@@ -219,3 +219,49 @@ pub(crate) fn truncate_for_summary(text: &str, max_chars: usize) -> String {
         format!("{}...", &text[..end])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_estimate_empty_messages_returns_zero() {
+        assert_eq!(estimate_messages_tokens(&[]), 0);
+    }
+
+    #[test]
+    fn test_compress_context_zero_target_preserves_tail() {
+        use crate::context_budget::ContextBudgetManager;
+        use crate::daemon_config::ContextBudgetConfig;
+
+        let cfg = ContextBudgetConfig::default();
+        let mut budget = ContextBudgetManager::new(100, &cfg);
+        // Register enough fixed sections to consume the entire window,
+        // making free_zone_capacity (and thus compaction_target_tokens) 0.
+        budget.register_section("huge_system", 100);
+
+        let mut messages = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("query"),
+        ];
+        for i in 0..10 {
+            messages.push(ChatMessage::assistant(&format!("resp {i}")));
+            messages.push(ChatMessage::user(&format!("msg {i}")));
+        }
+        let len_before = messages.len();
+
+        compress_context(&mut messages, 4, Some(&budget));
+
+        assert!(
+            messages.len() > 2,
+            "Should preserve more than just system + query, got {}",
+            messages.len()
+        );
+        assert!(
+            messages.len() < len_before,
+            "Should still compress something ({} >= {})",
+            messages.len(),
+            len_before
+        );
+    }
+}
