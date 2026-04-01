@@ -1,6 +1,6 @@
 use super::*;
 use async_trait::async_trait;
-use openalpaca_llm::{ChatResponse, LlmError, Usage};
+use openalpaca_llm::{ChatResponse, LlmError, LlmRouter, ProviderType, Usage};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Mock provider for testing the agentic loop.
@@ -937,4 +937,234 @@ fn test_truncate_min_cut_guard_skips_distant_sentence() {
     let truncated_content = result.split("\n\n[... truncated:").next().unwrap();
     // Should NOT cut at the distant sentence boundary — should use line boundary instead
     assert_eq!(truncated_content.len(), newline_pos);
+}
+
+// ─── Router backend path tests ───────────────────────────────────────
+
+/// Mock provider for testing the router-based agentic loop path.
+/// Implements LlmProvider and returns canned responses via `chat_with_key`.
+struct MockRouterProvider {
+    responses: Vec<Result<ChatResponse, LlmError>>,
+    call_count: AtomicUsize,
+}
+
+impl MockRouterProvider {
+    fn new(responses: Vec<Result<ChatResponse, LlmError>>) -> Self {
+        Self {
+            responses,
+            call_count: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for MockRouterProvider {
+    fn name(&self) -> &str {
+        "mock-router"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
+        if idx < self.responses.len() {
+            self.responses[idx].clone()
+        } else {
+            self.responses
+                .last()
+                .cloned()
+                .unwrap_or(Err(LlmError::NotConfigured))
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_agentic_loop_routed_completes() {
+    // Build a real LlmRouter with a mock provider using single_provider().
+    // This exercises the production code path (run_agentic_loop_routed) that
+    // goes through LlmRouter::complete → execute_with_retry → chat_with_key.
+    let provider = Arc::new(MockRouterProvider::new(vec![Ok(ChatResponse {
+        content: "Router response".to_string(),
+        tool_calls: vec![],
+        model: "claude-sonnet-4-20250514".to_string(),
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::Stop,
+        thinking: None,
+        parts: None,
+    })]));
+
+    let router = LlmRouter::single_provider(
+        provider,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let messages = vec![ChatMessage::user("hello via router")];
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        thinking: None,
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        messages,
+        vec![],
+        &config,
+        None,    // sandbox
+        "test",  // agent_id
+        None,    // sandbox_policy
+        None,    // task_id
+        None,    // context_budget
+        None,    // cancel_token
+        None,    // tool_context
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert_eq!(result.final_content, "Router response");
+    assert_eq!(result.rounds_used, 1);
+    assert_eq!(result.total_input_tokens, 10);
+    assert_eq!(result.total_output_tokens, 5);
+    assert_eq!(
+        result.model_used,
+        Some("claude-sonnet-4-20250514".to_string())
+    );
+}
+
+#[tokio::test]
+async fn test_agentic_loop_routed_with_tool_calls() {
+    // Test that router path handles tool calls properly (two rounds:
+    // first returns tool_use, second returns stop).
+    let provider = Arc::new(MockRouterProvider::new(vec![
+        Ok(ChatResponse {
+            content: "Using tool.".to_string(),
+            tool_calls: vec![openalpaca_llm::ToolCall {
+                id: "tc_r1".to_string(),
+                name: "search".to_string(),
+                arguments: serde_json::json!({"query": "test"}),
+            }],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage {
+                input_tokens: 20,
+                output_tokens: 15,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        }),
+        Ok(ChatResponse {
+            content: "Router done.".to_string(),
+            tool_calls: vec![],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage {
+                input_tokens: 30,
+                output_tokens: 10,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        }),
+    ]));
+
+    let router = LlmRouter::single_provider(
+        provider,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let messages = vec![ChatMessage::user("search via router")];
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        thinking: None,
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        messages,
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        Some("task-123"), // task_id set for cost tracking
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert_eq!(result.final_content, "Router done.");
+    assert_eq!(result.rounds_used, 2);
+    assert_eq!(result.tool_calls_made, 1);
+    // Tokens are cumulative: 20+30 input, 15+10 output
+    assert_eq!(result.total_input_tokens, 50);
+    assert_eq!(result.total_output_tokens, 25);
+}
+
+#[tokio::test]
+async fn test_agentic_loop_routed_respects_max_rounds() {
+    // Router path should also respect max_rounds — mock always returns tool_use
+    let provider = Arc::new(MockRouterProvider::new(vec![Ok(ChatResponse {
+        content: "Using tool.".to_string(),
+        tool_calls: vec![openalpaca_llm::ToolCall {
+            id: "tc_r1".to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({}),
+        }],
+        model: "claude-sonnet-4-20250514".to_string(),
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::ToolUse,
+        thinking: None,
+        parts: None,
+    })]));
+
+    let router = LlmRouter::single_provider(
+        provider,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let messages = vec![ChatMessage::user("loop forever")];
+    let config = LoopConfig {
+        max_rounds: 3,
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        thinking: None,
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        messages,
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::MaxRounds);
+    assert_eq!(result.rounds_used, 3);
 }
