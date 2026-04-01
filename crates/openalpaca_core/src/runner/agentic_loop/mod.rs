@@ -592,6 +592,7 @@ async fn run_agentic_loop_inner(
                             estimate_messages_tokens(&messages[prev_msg_len..]);
                     }
 
+                    state.max_tokens_retries = 0;
                     continue;
                 }
 
