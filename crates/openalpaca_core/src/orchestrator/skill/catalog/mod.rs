@@ -613,21 +613,25 @@ impl SkillCatalog {
         }
 
         // Update command index (entries lock released)
+        // Normalize: strip leading "/" and lowercase to match get_by_command() lookup.
         if let Some(ref cmd) = slash_cmd {
             let mut cmd_idx = self.command_index.write().unwrap_or_else(|p| {
                 tracing::error!("SkillCatalog lock poisoned — recovering");
                 p.into_inner()
             });
-            cmd_idx.insert(cmd.clone(), skill_id.clone());
+            let cmd_lower = cmd.strip_prefix('/').unwrap_or(cmd).to_lowercase();
+            cmd_idx.insert(cmd_lower, skill_id.clone());
         }
         // Update alias index (entries lock released)
+        // Normalize: strip leading "/" and lowercase to match get_by_command() lookup.
         if !aliases.is_empty() {
             let mut alias_idx = self.alias_index.write().unwrap_or_else(|p| {
                 tracing::error!("SkillCatalog lock poisoned — recovering");
                 p.into_inner()
             });
             for alias in &aliases {
-                alias_idx.insert(alias.clone(), skill_id.clone());
+                let alias_lower = alias.strip_prefix('/').unwrap_or(alias).to_lowercase();
+                alias_idx.insert(alias_lower, skill_id.clone());
             }
         }
         self.invalidate_summary_cache();

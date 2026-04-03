@@ -589,3 +589,108 @@ async fn test_concurrent_register_plugin_skill() {
         );
     }
 }
+
+// ===========================================================================
+// Task 14: Plugin skill registration lifecycle test
+// ===========================================================================
+
+#[tokio::test]
+async fn test_plugin_skill_registration_lifecycle() {
+    use openalpaca_api::plugin_traits::{PluginSkillExecutor, ToolCallbackExecutor};
+
+    struct MockSkillExecutor {
+        id: String,
+    }
+    #[async_trait::async_trait]
+    impl PluginSkillExecutor for MockSkillExecutor {
+        async fn invoke(
+            &self,
+            _q: &str,
+            _c: &serde_json::Value,
+            _t: &dyn ToolCallbackExecutor,
+        ) -> Result<String, String> {
+            Ok("ok".into())
+        }
+        fn plugin_id(&self) -> &str {
+            "test"
+        }
+        fn skill_id(&self) -> &str {
+            &self.id
+        }
+    }
+
+    let catalog = SkillCatalog::new();
+
+    // Register a plugin skill with slash command "/plugtest" and alias "/pt"
+    let frontmatter = crate::middleware::skill::SkillFrontmatter {
+        name: "Plugin Test Skill".to_string(),
+        description: "A test plugin skill for lifecycle verification".to_string(),
+        invoke: crate::middleware::skill::InvokeConfig {
+            slash: Some("/plugtest".to_string()),
+            aliases: vec!["/pt".to_string()],
+            ..Default::default()
+        },
+        routing: crate::middleware::skill::RoutingConfig {
+            intent: vec!["test.*plugin".to_string()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let executor = Arc::new(MockSkillExecutor {
+        id: "plugtest".to_string(),
+    });
+    catalog.register_plugin_skill(
+        "plugtest".to_string(),
+        frontmatter,
+        executor,
+        "test-plugin".to_string(),
+    );
+
+    // Verify: get("plugtest") returns Some
+    let entry = catalog.get("plugtest");
+    assert!(entry.is_some(), "get('plugtest') should return Some");
+    assert_eq!(entry.unwrap().frontmatter.name, "Plugin Test Skill");
+
+    // Verify: get_by_command("plugtest") returns Some
+    let by_cmd = catalog.get_by_command("plugtest");
+    assert!(
+        by_cmd.is_some(),
+        "get_by_command('plugtest') should return Some"
+    );
+
+    // Verify: get_by_command("pt") returns Some (alias)
+    let by_alias = catalog.get_by_command("pt");
+    assert!(
+        by_alias.is_some(),
+        "get_by_command('pt') should return Some (alias)"
+    );
+
+    // Verify: match_triggers("test plugin") contains "plugtest"
+    let matches = catalog.match_triggers("test plugin");
+    assert!(
+        matches.contains(&"plugtest".to_string()),
+        "match_triggers should find 'plugtest', got: {:?}",
+        matches
+    );
+
+    // Verify: load_full("plugtest") returns synthetic doc with description as body
+    let doc = catalog
+        .load_full("plugtest")
+        .expect("load_full should succeed for plugin skill");
+    assert_eq!(doc.frontmatter.name, "Plugin Test Skill");
+    assert_eq!(
+        doc.body,
+        "A test plugin skill for lifecycle verification",
+        "Plugin skill load_full body should be the description"
+    );
+
+    // Remove: catalog.remove("plugtest")
+    catalog.remove("plugtest");
+
+    // Verify: get("plugtest") returns None
+    assert!(
+        catalog.get("plugtest").is_none(),
+        "get('plugtest') should return None after removal"
+    );
+    assert_eq!(catalog.count(), 0);
+}
