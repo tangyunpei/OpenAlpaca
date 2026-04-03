@@ -513,7 +513,8 @@ impl SkillCatalog {
                 sections: HashMap::new(),
             });
         }
-        let path = entry.skill_md_path.as_ref().unwrap();
+        let path = entry.skill_md_path.as_ref()
+            .expect("file-based skill must have skill_md_path");
 
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
@@ -585,18 +586,27 @@ impl SkillCatalog {
 
         // Insert entry under entries lock, then release before acquiring index locks
         {
-            let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
+            let mut entries = self.entries.write().unwrap_or_else(|p| {
+                tracing::error!("SkillCatalog lock poisoned — recovering");
+                p.into_inner()
+            });
             entries.insert(skill_id.clone(), entry);
         }
 
         // Update command index (entries lock released)
         if let Some(ref cmd) = slash_cmd {
-            let mut cmd_idx = self.command_index.write().unwrap_or_else(|p| p.into_inner());
+            let mut cmd_idx = self.command_index.write().unwrap_or_else(|p| {
+                tracing::error!("SkillCatalog lock poisoned — recovering");
+                p.into_inner()
+            });
             cmd_idx.insert(cmd.clone(), skill_id.clone());
         }
         // Update alias index (entries lock released)
         if !aliases.is_empty() {
-            let mut alias_idx = self.alias_index.write().unwrap_or_else(|p| p.into_inner());
+            let mut alias_idx = self.alias_index.write().unwrap_or_else(|p| {
+                tracing::error!("SkillCatalog lock poisoned — recovering");
+                p.into_inner()
+            });
             for alias in &aliases {
                 alias_idx.insert(alias.clone(), skill_id.clone());
             }
@@ -727,7 +737,10 @@ impl SkillCatalog {
         let entries = self
             .entries
             .read()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(|p| {
+                tracing::error!("SkillCatalog lock poisoned — recovering");
+                p.into_inner()
+            });
         let mut errors = Vec::new();
 
         // Phase 1: Check existence of all dependency references
@@ -812,7 +825,10 @@ impl SkillCatalog {
             let mut validation_errors = self
                 .validation_errors
                 .write()
-                .unwrap_or_else(|p| p.into_inner());
+                .unwrap_or_else(|p| {
+                    tracing::error!("SkillCatalog lock poisoned — recovering");
+                    p.into_inner()
+                });
             validation_errors.extend(errors.clone());
         }
 
