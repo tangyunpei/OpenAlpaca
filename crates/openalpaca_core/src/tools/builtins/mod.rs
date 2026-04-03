@@ -196,8 +196,11 @@ impl BuiltInTool for WorkspaceWriteTool {
                     attempt + 1,
                     MAX_RETRIES
                 );
-                // Brief async backoff to reduce collision probability
-                tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
+                // Jittered backoff to reduce collision probability.
+                // Simple deterministic jitter using attempt number as seed (no rand crate needed).
+                let base_ms = 10u64 * (1u64 << attempt.min(4)); // 10, 20, 40, 80, 160
+                let jitter = (attempt as u64 * 7 + 3) % (base_ms / 4).max(1); // deterministic jitter
+                tokio::time::sleep(std::time::Duration::from_millis(base_ms + jitter)).await;
             }
         }
 
@@ -328,7 +331,8 @@ pub fn workspace_tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "content": {
                         "type": "string",
-                        "description": "The content to store as a UTF-8 string (max 32KB)"
+                        "description": "The content to store as a UTF-8 string (max 32KB)",
+                        "maxLength": 32768
                     },
                     "entry_type": {
                         "type": "string",
@@ -436,10 +440,18 @@ impl BuiltInTool for ScriptToolBuiltIn {
         .map_err(|_| format!("Script timed out after {}s", self.timeout_secs))?
         .map_err(|e| format!("Failed to execute script: {}", e))?;
 
+        // Cap output size to prevent memory pressure from scripts producing
+        // unbounded stdout/stderr, matching the command backend limit.
+        const MAX_SCRIPT_OUTPUT_BYTES: usize = 512 * 1024; // 512 KB
         if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            let stdout = String::from_utf8_lossy(
+                &output.stdout[..output.stdout.len().min(MAX_SCRIPT_OUTPUT_BYTES)],
+            );
+            Ok(stdout.to_string())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = String::from_utf8_lossy(
+                &output.stderr[..output.stderr.len().min(MAX_SCRIPT_OUTPUT_BYTES)],
+            );
             Err(format!(
                 "Script failed (exit {}): {}",
                 output.status.code().unwrap_or(-1),
