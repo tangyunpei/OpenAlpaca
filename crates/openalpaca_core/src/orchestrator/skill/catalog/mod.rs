@@ -275,7 +275,10 @@ impl SkillCatalog {
         let (old_slash_cmd, old_aliases, new_slash_cmd, new_aliases, conflict_msg) = {
             let mut entries_guard = match self.entries.write() {
                 Ok(g) => g,
-                Err(_) => return Err("entries lock poisoned".to_string()),
+                Err(_) => {
+                    tracing::error!(skill = %key, "Failed to acquire entries write lock — skill not loaded");
+                    return Err("entries lock poisoned".to_string());
+                }
             };
 
             // Collect old entry's index data for cleanup
@@ -392,21 +395,21 @@ impl SkillCatalog {
     /// Checks the primary command index first, then the alias index.
     pub fn get_by_command(&self, command: &str) -> Option<SkillEntry> {
         let cmd_lower = command.to_lowercase();
-        // Try primary command index
-        let skill_id = {
-            let guard = self.command_index.read().ok()?;
-            guard.get(&cmd_lower).cloned()
+        // Snapshot both indices in one scope to avoid stale results from
+        // concurrent mutations between the two reads.
+        let (cmd_id, alias_id) = {
+            let cmd_guard = self.command_index.read().ok()?;
+            let alias_guard = self.alias_index.read().ok()?;
+            (
+                cmd_guard.get(&cmd_lower).cloned(),
+                alias_guard.get(&cmd_lower).cloned(),
+            )
         };
-        if let Some(id) = skill_id
-            && let Some(entry) = self.get_by_id(&id)
-        {
-            return Some(entry);
+        if let Some(id) = cmd_id {
+            if let Some(entry) = self.get_by_id(&id) {
+                return Some(entry);
+            }
         }
-        // Try alias index
-        let alias_id = {
-            let guard = self.alias_index.read().ok()?;
-            guard.get(&cmd_lower).cloned()
-        };
         if let Some(id) = alias_id {
             return self.get_by_id(&id);
         }
@@ -425,7 +428,10 @@ impl SkillCatalog {
     pub fn match_triggers(&self, text: &str) -> Vec<String> {
         let guard = match self.entries.read() {
             Ok(g) => g,
-            Err(_) => return Vec::new(),
+            Err(_) => {
+                tracing::error!("SkillCatalog entries lock poisoned in match_triggers");
+                return Vec::new();
+            }
         };
 
         let mut matches: Vec<(String, usize)> = Vec::new();
@@ -624,10 +630,10 @@ impl SkillCatalog {
                 Ok(re) => Some(re),
                 Err(e) => {
                     tracing::warn!(
-                        "SkillCatalog: invalid trigger pattern '{}' in {}: {}",
-                        pattern,
-                        frontmatter.name,
-                        e
+                        skill = %frontmatter.name,
+                        pattern = %pattern,
+                        error = %e,
+                        "Skill trigger pattern failed to compile — skipping"
                     );
                     None
                 }
