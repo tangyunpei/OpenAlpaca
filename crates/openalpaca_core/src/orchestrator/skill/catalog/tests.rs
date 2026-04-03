@@ -478,3 +478,114 @@ fn test_scope_field_preserved() {
     let entry = catalog.get("code-review").unwrap();
     assert_eq!(entry.scope, SkillScope::User);
 }
+
+// ===========================================================================
+// Task 13: SkillCatalog concurrent access tests
+// ===========================================================================
+
+#[tokio::test]
+async fn test_concurrent_match_triggers() {
+    let tmp = TempDir::new().unwrap();
+
+    // Create 5 skill directories with trigger patterns
+    for i in 0..5 {
+        let skill_md = format!(
+            r#"---
+name: "Skill {i}"
+description: "Skill number {i}"
+trigger_patterns:
+  - "query.*{i}"
+---
+
+## Instructions
+
+Do something for skill {i}.
+"#
+        );
+        create_skill_dir(tmp.path(), &format!("skill-{i}"), &skill_md);
+    }
+
+    let catalog = Arc::new(SkillCatalog::new());
+    catalog.scan_directory(tmp.path(), SkillScope::Project);
+    assert_eq!(catalog.count(), 5);
+
+    // Spawn 10 tasks calling match_triggers concurrently
+    let mut handles = Vec::new();
+    for _ in 0..10 {
+        let cat = catalog.clone();
+        handles.push(tokio::spawn(async move {
+            let _ = cat.match_triggers("query about 2");
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap();
+    }
+    // Test completes without panics — concurrent reads are safe
+}
+
+#[tokio::test]
+async fn test_concurrent_register_plugin_skill() {
+    use openalpaca_api::plugin_traits::{PluginSkillExecutor, ToolCallbackExecutor};
+
+    struct MockSkillExecutor {
+        id: String,
+    }
+    #[async_trait::async_trait]
+    impl PluginSkillExecutor for MockSkillExecutor {
+        async fn invoke(
+            &self,
+            _q: &str,
+            _c: &serde_json::Value,
+            _t: &dyn ToolCallbackExecutor,
+        ) -> Result<String, String> {
+            Ok("ok".into())
+        }
+        fn plugin_id(&self) -> &str {
+            "test"
+        }
+        fn skill_id(&self) -> &str {
+            &self.id
+        }
+    }
+
+    let catalog = Arc::new(SkillCatalog::new());
+    let mut handles = Vec::new();
+
+    // Spawn 5 tasks each registering a different plugin skill
+    for i in 0..5 {
+        let cat = catalog.clone();
+        handles.push(tokio::spawn(async move {
+            let skill_id = format!("plugin-skill-{i}");
+            let frontmatter = crate::middleware::skill::SkillFrontmatter {
+                name: format!("Plugin Skill {i}"),
+                description: format!("Description for plugin skill {i}"),
+                ..Default::default()
+            };
+            let executor = Arc::new(MockSkillExecutor {
+                id: skill_id.clone(),
+            });
+            cat.register_plugin_skill(
+                skill_id,
+                frontmatter,
+                executor,
+                "test-plugin".to_string(),
+            );
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    // Verify all 5 exist
+    assert_eq!(catalog.count(), 5);
+    for i in 0..5 {
+        let entry = catalog.get(&format!("plugin-skill-{i}"));
+        assert!(
+            entry.is_some(),
+            "plugin-skill-{} should exist in catalog",
+            i
+        );
+    }
+}
