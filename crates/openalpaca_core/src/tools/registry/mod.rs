@@ -489,23 +489,34 @@ fn validate_tool_arguments(
         }
     }
 
-    // Check field types against schema properties
+    // Check field types and enum constraints against schema properties
     if let (Some(properties), Some(obj)) = (
         schema.get("properties").and_then(|p| p.as_object()),
         arguments.as_object(),
     ) {
         for (key, value) in obj {
-            if let Some(prop_schema) = properties.get(key)
-                && let Some(expected_type) = prop_schema.get("type").and_then(|t| t.as_str())
-                && !json_value_matches_type(value, expected_type)
-            {
-                return Err(format!(
-                    "Tool '{}': parameter '{}' should be {}, got {}",
-                    definition.name,
-                    key,
-                    expected_type,
-                    json_type_name(value)
-                ));
+            if let Some(prop_schema) = properties.get(key) {
+                // Type check
+                if let Some(expected_type) = prop_schema.get("type").and_then(|t| t.as_str())
+                    && !json_value_matches_type(value, expected_type)
+                {
+                    return Err(format!(
+                        "Tool '{}': parameter '{}' should be {}, got {}",
+                        definition.name,
+                        key,
+                        expected_type,
+                        json_type_name(value)
+                    ));
+                }
+                // Enum check
+                if let Some(enum_values) = prop_schema.get("enum").and_then(|e| e.as_array()) {
+                    if !enum_values.contains(value) {
+                        return Err(format!(
+                            "Tool '{}': parameter '{}' value {} not in allowed values",
+                            definition.name, key, value
+                        ));
+                    }
+                }
             }
         }
     }
@@ -541,7 +552,10 @@ fn json_value_matches_type(value: &serde_json::Value, expected: &str) -> bool {
         "array" => value.is_array(),
         "object" => value.is_object(),
         "null" => value.is_null(),
-        _ => true, // Unknown type — don't block
+        _ => {
+            tracing::debug!(expected_type = expected, "Unknown JSON Schema type — rejecting");
+            false
+        }
     }
 }
 
