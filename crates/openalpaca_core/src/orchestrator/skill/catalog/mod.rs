@@ -119,6 +119,11 @@ impl SkillCatalog {
     /// as a skill. Only the YAML frontmatter is parsed (Level 1).
     /// Returns the count of skills successfully loaded.
     pub fn scan_directory(&self, dir: &Path, scope: SkillScope) -> usize {
+        // Clear validation errors from previous scan
+        if let Ok(mut errors) = self.validation_errors.write() {
+            errors.clear();
+        }
+
         let read_dir = match std::fs::read_dir(dir) {
             Ok(rd) => rd,
             Err(e) => {
@@ -201,7 +206,9 @@ impl SkillCatalog {
             );
             tracing::warn!("SkillCatalog: {}", msg);
             if let Ok(mut errors) = self.validation_errors.write() {
-                errors.push(msg);
+                if errors.len() < 100 {
+                    errors.push(msg);
+                }
             }
         }
         if !frontmatter.tools.defaults.is_empty() {
@@ -212,7 +219,9 @@ impl SkillCatalog {
             );
             tracing::warn!("SkillCatalog: {}", msg);
             if let Ok(mut errors) = self.validation_errors.write() {
-                errors.push(msg);
+                if errors.len() < 100 {
+                    errors.push(msg);
+                }
             }
         }
 
@@ -235,7 +244,9 @@ impl SkillCatalog {
             );
             tracing::warn!("SkillCatalog: {}", msg);
             if let Ok(mut errors) = self.validation_errors.write() {
-                errors.push(msg);
+                if errors.len() < 100 {
+                    errors.push(msg);
+                }
             }
         }
 
@@ -325,7 +336,9 @@ impl SkillCatalog {
         }
         if let Some(msg) = conflict_msg_actual {
             if let Ok(mut errors) = self.validation_errors.write() {
-                errors.push(msg);
+                if errors.len() < 100 {
+                    errors.push(msg);
+                }
             }
         }
 
@@ -809,8 +822,28 @@ impl SkillCatalog {
 
                 match color.get(dep_key) {
                     Some(Color::Gray) => {
-                        // Back edge — cycle found
-                        let msg = format!("Cycle detected: '{}' -> '{}'", node, dep);
+                        // Back edge — cycle found. Build full cycle path from
+                        // the stack: find where dep_key first appears and trace
+                        // through to the current node.
+                        let mut cycle_path = Vec::new();
+                        let mut in_cycle = false;
+                        for (stack_node, _) in &stack {
+                            if *stack_node == dep_key {
+                                in_cycle = true;
+                            }
+                            if in_cycle {
+                                cycle_path.push(*stack_node);
+                            }
+                        }
+                        cycle_path.push(dep_key); // close the cycle
+                        let msg = format!(
+                            "Cycle detected: {}",
+                            cycle_path
+                                .iter()
+                                .map(|s| format!("'{}'", s))
+                                .collect::<Vec<_>>()
+                                .join(" -> ")
+                        );
                         if reported_cycles.insert(msg.clone()) {
                             errors.push(msg);
                         }
@@ -835,7 +868,8 @@ impl SkillCatalog {
                     tracing::error!("SkillCatalog lock poisoned — recovering");
                     p.into_inner()
                 });
-            validation_errors.extend(errors.clone());
+            let remaining = 100usize.saturating_sub(validation_errors.len());
+            validation_errors.extend(errors.iter().take(remaining).cloned());
         }
 
         errors

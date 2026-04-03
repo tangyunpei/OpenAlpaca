@@ -70,6 +70,9 @@ fn default_keyword_weight() -> f64 {
 fn default_recency_weight() -> f64 {
     0.2
 }
+fn default_negative_penalty() -> f64 {
+    0.6
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -84,6 +87,9 @@ pub struct ScoreWeights {
     pub recency_weight: f64,
     #[serde(default)]
     pub health_weight: f64,
+    /// Penalty applied when a negative keyword matches. Default: 0.6.
+    #[serde(default = "default_negative_penalty")]
+    pub negative_penalty: f64,
 }
 
 impl Default for ScoreWeights {
@@ -94,6 +100,7 @@ impl Default for ScoreWeights {
             keyword_weight: default_keyword_weight(),
             recency_weight: default_recency_weight(),
             health_weight: 0.0,
+            negative_penalty: default_negative_penalty(),
         }
     }
 }

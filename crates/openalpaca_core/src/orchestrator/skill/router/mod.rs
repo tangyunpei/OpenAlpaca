@@ -41,6 +41,8 @@ pub struct RouteScore {
     pub keyword_ratio: f64,
     pub recency_bonus: f64,
     pub negative_hit: bool,
+    /// DEPRECATED: Always 0.0. Health-based scoring was never implemented.
+    /// Kept for serialization backward compatibility; will be removed in a future release.
     pub health_bonus: f64,
 }
 
@@ -55,7 +57,6 @@ pub struct SkillRouter {
 }
 
 const DEFAULT_RECENCY_WINDOW: usize = 10;
-const NEGATIVE_PENALTY: f64 = 0.6;
 
 impl SkillRouter {
     pub fn new(auto_select_threshold: f64, suggest_threshold: f64) -> Self {
@@ -140,7 +141,11 @@ impl SkillRouter {
                 }
                 + keyword_ratio * weights.keyword_weight
                 + recency_bonus * weights.recency_weight
-                - if negative_hit { NEGATIVE_PENALTY } else { 0.0 };
+                - if negative_hit {
+                    weights.negative_penalty
+                } else {
+                    0.0
+                };
 
             scores.push(RouteScore {
                 skill_id: skill_id.clone(),
