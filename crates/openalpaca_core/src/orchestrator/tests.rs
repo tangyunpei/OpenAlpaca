@@ -719,7 +719,7 @@ fn make_orchestrator_with_tools_and_llm(
 ) -> Orchestrator {
     let registry = ToolRegistry::default();
     for name in tool_names {
-        registry.register(make_mock_tool(name));
+        registry.register(make_mock_tool(name)).unwrap();
     }
     let registry = Arc::new(registry);
     let ctx = Arc::new(SharedContext::new());

@@ -565,7 +565,7 @@ async fn test_pipeline_non_singleton_workspace_artifact_count() {
         Some(db.clone()), None, None, None, None,
     );
     for t in ws_tools {
-        registry.register(t);
+        registry.register(t).unwrap();
     }
     let tool_registry = std::sync::Arc::new(registry);
     let sandbox = std::sync::Arc::new(

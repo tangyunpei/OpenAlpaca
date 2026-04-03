@@ -299,7 +299,7 @@ async fn test_sandbox_execution() {
         backend: ToolBackend::BuiltIn(std::sync::Arc::new(TestTool)),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
-    });
+    }).unwrap();
     let sandbox =
         SandboxManager::with_defaults(std::sync::Arc::new(registry), EventBus::default());
     let policy = SandboxPolicy {
@@ -369,7 +369,7 @@ async fn test_sandbox_denied_tool() {
         backend: ToolBackend::BuiltIn(std::sync::Arc::new(TestTool)),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
-    });
+    }).unwrap();
     let sandbox =
         SandboxManager::with_defaults(std::sync::Arc::new(registry), EventBus::default());
     let policy = SandboxPolicy {
@@ -544,7 +544,7 @@ async fn test_cancellation_during_tool_execution() {
         backend: ToolBackend::BuiltIn(std::sync::Arc::new(cancelling_tool)),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
-    });
+    }).unwrap();
     let sandbox =
         SandboxManager::with_defaults(std::sync::Arc::new(registry), EventBus::default());
     let policy = SandboxPolicy {

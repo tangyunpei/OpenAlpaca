@@ -48,7 +48,7 @@ fn make_tool(name: &str, response: &str) -> RegisteredTool {
 #[test]
 fn test_register_and_lookup() {
     let registry = ToolRegistry::default();
-    registry.register(make_tool("test_tool", "ok"));
+    registry.register(make_tool("test_tool", "ok")).unwrap();
 
     assert!(registry.get("test_tool").is_some());
     assert!(registry.get("nonexistent").is_none());
@@ -58,7 +58,7 @@ fn test_register_and_lookup() {
 #[tokio::test]
 async fn test_execute_builtin() {
     let registry = ToolRegistry::default();
-    registry.register(make_tool("test_tool", "hello"));
+    registry.register(make_tool("test_tool", "hello")).unwrap();
 
     let result = registry.execute("test_tool", &serde_json::json!({})).await;
     assert!(result.is_ok());
@@ -78,8 +78,8 @@ async fn test_execute_unknown_tool() {
 #[test]
 fn test_registered_tool_names() {
     let registry = ToolRegistry::default();
-    registry.register(make_tool("web_search", "results"));
-    registry.register(make_tool("summarize", "summary"));
+    registry.register(make_tool("web_search", "results")).unwrap();
+    registry.register(make_tool("summarize", "summary")).unwrap();
 
     let names = registry.registered_tool_names();
     assert_eq!(names.len(), 2);
@@ -90,8 +90,8 @@ fn test_registered_tool_names() {
 #[test]
 fn test_command_backend_tool_names_empty_for_builtins() {
     let registry = ToolRegistry::default();
-    registry.register(make_tool("web_search", "results"));
-    registry.register(make_tool("summarize", "summary"));
+    registry.register(make_tool("web_search", "results")).unwrap();
+    registry.register(make_tool("summarize", "summary")).unwrap();
 
     let cmd_tools = registry.command_backend_tool_names();
     assert!(
@@ -104,7 +104,7 @@ fn test_command_backend_tool_names_empty_for_builtins() {
 fn test_command_backend_tool_names_returns_command_tools() {
     let registry = ToolRegistry::default();
     // Register a built-in tool
-    registry.register(make_tool("web_search", "results"));
+    registry.register(make_tool("web_search", "results")).unwrap();
     // Register a command-backend tool
     registry.register(RegisteredTool {
         definition: ToolDefinition {
@@ -121,7 +121,7 @@ fn test_command_backend_tool_names_returns_command_tools() {
         },
         provides_capabilities: vec![],
         exempt_from_timeout: false,
-    });
+    }).unwrap();
 
     let cmd_tools = registry.command_backend_tool_names();
     assert_eq!(cmd_tools.len(), 1);
@@ -148,7 +148,7 @@ async fn test_execute_http_ssrf_blocks_private_ip() {
         },
         provides_capabilities: vec![],
         exempt_from_timeout: false,
-    });
+    }).unwrap();
 
     let result = registry
         .execute("internal_api", &serde_json::json!({}))
@@ -179,7 +179,7 @@ async fn test_execute_http_ssrf_blocks_localhost() {
         },
         provides_capabilities: vec![],
         exempt_from_timeout: false,
-    });
+    }).unwrap();
 
     let result = registry.execute("local_api", &serde_json::json!({})).await;
     assert!(result.is_err());
@@ -216,7 +216,7 @@ async fn test_http_unsubstituted_placeholder_detected() {
         },
         provides_capabilities: vec![],
         exempt_from_timeout: false,
-    });
+    }).unwrap();
 
     // Only provide "city" but not "units" — {units} should be detected
     let result = registry
@@ -261,7 +261,7 @@ async fn test_http_all_placeholders_substituted_passes() {
         },
         provides_capabilities: vec![],
         exempt_from_timeout: false,
-    });
+    }).unwrap();
 
     // This will pass placeholder check but fail on the actual HTTP request
     // (network error), which is expected — we're just checking that the
@@ -302,7 +302,7 @@ async fn test_schema_missing_required_field() {
         })),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
-    });
+    }).unwrap();
 
     let result = registry.execute("search", &serde_json::json!({})).await;
     assert!(result.is_err());
@@ -337,7 +337,7 @@ async fn test_schema_wrong_type() {
         })),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
-    });
+    }).unwrap();
 
     // limit should be integer, but we pass a string
     let result = registry
@@ -378,7 +378,7 @@ async fn test_schema_valid_args_pass() {
         })),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
-    });
+    }).unwrap();
 
     let result = registry
         .execute("search", &serde_json::json!({"query": "test", "limit": 5}))
@@ -403,7 +403,7 @@ async fn test_schema_non_object_args_rejected() {
         })),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
-    });
+    }).unwrap();
 
     let result = registry
         .execute("search", &serde_json::json!("not an object"))
@@ -439,7 +439,7 @@ async fn test_command_unsubstituted_placeholder_detected() {
         },
         provides_capabilities: vec![],
         exempt_from_timeout: false,
-    });
+    }).unwrap();
 
     // Only provide "count" but not "branch" — {branch} should be detected
     let result = registry
@@ -483,7 +483,7 @@ async fn test_command_all_placeholders_substituted_runs() {
         },
         provides_capabilities: vec![],
         exempt_from_timeout: false,
-    });
+    }).unwrap();
 
     let result = registry
         .execute("echo_tool", &serde_json::json!({"msg": "hello"}))
@@ -511,7 +511,7 @@ async fn test_registry_execute_with_context_routes_to_builtin() {
         })),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
-    });
+    }).unwrap();
 
     let ctx = super::ToolContext::default();
     let result = registry
@@ -652,7 +652,7 @@ async fn test_workspace_read_requires_task_id() {
 
     let registry = ToolRegistry::default();
     for tool in builtin_tools(Some(db), None, None, None, None) {
-        registry.register(tool);
+        registry.register(tool).unwrap();
     }
 
     let ctx = super::ToolContext {
@@ -676,8 +676,8 @@ async fn test_workspace_read_requires_task_id() {
 #[test]
 fn test_tools_for_capabilities_basic() {
     let registry = ToolRegistry::default();
-    registry.register(make_tool_with_caps("file_read", vec!["file_read"]));
-    registry.register(make_tool_with_caps("web_search", vec!["web_access"]));
+    registry.register(make_tool_with_caps("file_read", vec!["file_read"])).unwrap();
+    registry.register(make_tool_with_caps("web_search", vec!["web_access"])).unwrap();
 
     let result = registry.tools_for_capabilities(&["file_read".to_string()]);
     assert_eq!(result.len(), 1);
@@ -687,7 +687,7 @@ fn test_tools_for_capabilities_basic() {
 #[test]
 fn test_tools_for_capabilities_multi_capability_tool() {
     let registry = ToolRegistry::default();
-    registry.register(make_tool_with_caps("web_fetch", vec!["web_access"]));
+    registry.register(make_tool_with_caps("web_fetch", vec!["web_access"])).unwrap();
 
     let result = registry.tools_for_capabilities(&["web_access".to_string()]);
     assert_eq!(result.len(), 1);
@@ -700,7 +700,7 @@ fn test_tools_for_capabilities_multi_capability_tool() {
 #[test]
 fn test_tools_for_capabilities_empty_returns_empty() {
     let registry = ToolRegistry::default();
-    registry.register(make_tool_with_caps("file_read", vec!["file_read"]));
+    registry.register(make_tool_with_caps("file_read", vec!["file_read"])).unwrap();
 
     let result = registry.tools_for_capabilities(&[]);
     assert!(result.is_empty());
@@ -709,7 +709,7 @@ fn test_tools_for_capabilities_empty_returns_empty() {
 #[test]
 fn test_tools_for_capabilities_no_capability_tools_excluded() {
     let registry = ToolRegistry::default();
-    registry.register(make_tool_with_caps("orphan_tool", vec![]));
+    registry.register(make_tool_with_caps("orphan_tool", vec![])).unwrap();
 
     let result = registry.tools_for_capabilities(&["file_read".to_string()]);
     assert!(result.is_empty());
@@ -718,9 +718,9 @@ fn test_tools_for_capabilities_no_capability_tools_excluded() {
 #[test]
 fn test_tools_for_capabilities_with_deny_basic() {
     let registry = ToolRegistry::default();
-    registry.register(make_tool_with_caps("file_read", vec!["file_read"]));
-    registry.register(make_tool_with_caps("web_search", vec!["web_access"]));
-    registry.register(make_tool_with_caps("shell", vec!["shell_execute"]));
+    registry.register(make_tool_with_caps("file_read", vec!["file_read"])).unwrap();
+    registry.register(make_tool_with_caps("web_search", vec!["web_access"])).unwrap();
+    registry.register(make_tool_with_caps("shell", vec!["shell_execute"])).unwrap();
 
     let result = registry.tools_for_capabilities_with_deny(
         &["file_read".to_string(), "web_access".to_string()],
@@ -733,8 +733,8 @@ fn test_tools_for_capabilities_with_deny_basic() {
 #[test]
 fn test_tools_for_capabilities_with_deny_excludes_any_denied() {
     let registry = ToolRegistry::default();
-    registry.register(make_tool_with_caps("file_rw", vec!["file_read", "file_write"]));
-    registry.register(make_tool_with_caps("reader", vec!["file_read"]));
+    registry.register(make_tool_with_caps("file_rw", vec!["file_read", "file_write"])).unwrap();
+    registry.register(make_tool_with_caps("reader", vec!["file_read"])).unwrap();
 
     let result = registry.tools_for_capabilities_with_deny(
         &["file_read".to_string()],

@@ -701,14 +701,24 @@ impl PluginManager {
                 exempt_from_timeout: false,
             };
 
-            self.tool_registry.register(registered_tool);
-            registered.push(namespaced_name.clone());
-
-            debug!(
-                plugin = plugin_name,
-                tool = %namespaced_name,
-                "registered plugin tool"
-            );
+            match self.tool_registry.register(registered_tool) {
+                Ok(()) => {
+                    registered.push(namespaced_name.clone());
+                    debug!(
+                        plugin = plugin_name,
+                        tool = %namespaced_name,
+                        "registered plugin tool"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        plugin = plugin_name,
+                        tool = %namespaced_name,
+                        error = %e,
+                        "failed to register plugin tool — skipping"
+                    );
+                }
+            }
         }
 
         info!(

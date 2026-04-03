@@ -49,7 +49,8 @@ pub(super) fn build_tool_registry(
         workspace_root,
         Some(connector_send_lock.clone()),
     ) {
-        tool_registry.register(tool);
+        // Built-in tools have known-good names — unwrap is safe.
+        tool_registry.register(tool).unwrap();
     }
 
     // Load user tools from config/tools/*.toml
@@ -78,21 +79,27 @@ pub(super) fn build_tool_registry(
         "send",
     ];
     for tool in openalpaca_core::tools::config::load_tools_from_dir(&tools_config_dir) {
-        if protected_builtins.contains(&tool.definition.name.as_str()) {
+        let name = tool.definition.name.clone();
+        if protected_builtins.contains(&name.as_str()) {
             warn!(
                 "Custom tool '{}' would override a security-critical built-in — skipping",
-                tool.definition.name
+                name
             );
             continue;
         }
-        if tool_registry.get(&tool.definition.name).is_some() {
+        if tool_registry.get(&name).is_some() {
             warn!(
                 "Custom tool '{}' conflicts with an existing tool name and will override it",
-                tool.definition.name
+                name
             );
         }
-        info!("Registered custom tool: {}", tool.definition.name);
-        tool_registry.register(tool);
+        match tool_registry.register(tool) {
+            Ok(()) => info!("Registered custom tool: {}", name),
+            Err(e) => {
+                warn!("Custom tool '{}' failed validation: {} — skipping", name, e);
+                continue;
+            }
+        }
     }
     info!("Tool registry: {} tools loaded", tool_registry.count());
 

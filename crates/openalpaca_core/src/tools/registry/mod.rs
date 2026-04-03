@@ -115,8 +115,25 @@ impl ToolRegistry {
     }
 
     /// Register a tool. Safe to call at any time, including after wrapping in Arc.
-    pub fn register(&self, tool: RegisteredTool) {
-        self.tools.insert(tool.definition.name.clone(), tool);
+    ///
+    /// Returns `Err` if the tool name is empty, exceeds 256 characters, or
+    /// contains null bytes.
+    pub fn register(&self, tool: RegisteredTool) -> Result<(), String> {
+        let name = &tool.definition.name;
+        if name.is_empty() {
+            return Err("Tool name cannot be empty".to_string());
+        }
+        if name.len() > 256 {
+            return Err(format!(
+                "Tool name '{}...' exceeds 256 char limit",
+                &name[..32.min(name.len())]
+            ));
+        }
+        if name.contains('\0') {
+            return Err("Tool name cannot contain null bytes".to_string());
+        }
+        self.tools.insert(name.clone(), tool);
+        Ok(())
     }
 
     /// Remove a tool by name. Returns true if the tool existed.

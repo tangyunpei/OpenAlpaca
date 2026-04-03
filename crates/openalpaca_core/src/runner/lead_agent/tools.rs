@@ -813,30 +813,31 @@ pub fn register_coordination_tools(
     check_def: openalpaca_llm::ToolDefinition,
     wait_def: openalpaca_llm::ToolDefinition,
 ) {
+    // These are known-good builtin tool definitions — unwrap is safe.
     registry.register(RegisteredTool {
         definition: spawn_def,
         backend: ToolBackend::BuiltIn(spawn_tool),
         provides_capabilities: vec!["orchestration".to_string()],
         exempt_from_timeout: false,
-    });
+    }).unwrap();
     if let (Some(batch), Some(def)) = (batch_spawn_tool, batch_def) {
         registry.register(RegisteredTool {
             definition: def,
             backend: ToolBackend::BuiltIn(batch),
             provides_capabilities: vec!["orchestration".to_string()],
             exempt_from_timeout: false,
-        });
+        }).unwrap();
     }
     registry.register(RegisteredTool {
         definition: check_def,
         backend: ToolBackend::BuiltIn(check_status_tool),
         provides_capabilities: vec!["orchestration".to_string()],
         exempt_from_timeout: true,
-    });
+    }).unwrap();
     registry.register(RegisteredTool {
         definition: wait_def,
         backend: ToolBackend::BuiltIn(wait_tool),
         provides_capabilities: vec!["orchestration".to_string()],
         exempt_from_timeout: true,
-    });
+    }).unwrap();
 }
