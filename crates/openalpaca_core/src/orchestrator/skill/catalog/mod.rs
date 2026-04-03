@@ -270,17 +270,41 @@ impl SkillCatalog {
             source: SkillSource::FileBased,
         };
 
-        // Insert entry and command/alias indices
-        if let Ok(mut entries) = self.entries.write() {
-            // If overriding an existing entry, clean up its old command/alias index entries
-            if let Some(old_entry) = entries.get(&key) {
-                self.remove_index_entries_for(old_entry);
-            }
+        // Collect old index data and insert entry under entries lock,
+        // then release entries lock before acquiring index locks to avoid deadlock.
+        let (old_slash_cmd, old_aliases, new_slash_cmd, new_aliases, conflict_msg) = {
+            let mut entries_guard = match self.entries.write() {
+                Ok(g) => g,
+                Err(_) => return Err("entries lock poisoned".to_string()),
+            };
 
-            // Build command index from effective_slash_command
-            if let Some(ref cmd) = entry.frontmatter.effective_slash_command()
-                && let Ok(mut idx) = self.command_index.write()
-            {
+            // Collect old entry's index data for cleanup
+            let (old_slash, old_als) = if let Some(old_entry) = entries_guard.get(&key) {
+                (
+                    old_entry.frontmatter.effective_slash_command(),
+                    old_entry.frontmatter.invoke.aliases.clone(),
+                )
+            } else {
+                (None, Vec::new())
+            };
+
+            // Collect new entry's index data
+            let new_slash = entry.frontmatter.effective_slash_command();
+            let new_als = entry.frontmatter.invoke.aliases.clone();
+
+            entries_guard.insert(key.clone(), entry);
+
+            // entries_guard is dropped here (end of block)
+            (old_slash, old_als, new_slash, new_als, None::<String>)
+        };
+
+        // Remove old index entries (entries lock released)
+        self.remove_index_entries(old_slash_cmd.as_deref(), &old_aliases);
+
+        // Build command index from effective_slash_command (entries lock released)
+        let mut conflict_msg_actual = conflict_msg;
+        if let Some(ref cmd) = new_slash_cmd {
+            if let Ok(mut idx) = self.command_index.write() {
                 let cmd_lower = cmd.to_lowercase();
                 // Check for slash command conflicts
                 if let Some(existing_key) = idx.get(&cmd_lower)
@@ -291,22 +315,23 @@ impl SkillCatalog {
                         cmd, key, existing_key
                     );
                     tracing::warn!("SkillCatalog: {}", msg);
-                    if let Ok(mut errors) = self.validation_errors.write() {
-                        errors.push(msg);
-                    }
+                    conflict_msg_actual = Some(msg);
                 }
                 idx.insert(cmd_lower, key.clone());
             }
-
-            // Build alias index
-            if let Ok(mut alias_idx) = self.alias_index.write() {
-                for alias in &entry.frontmatter.invoke.aliases {
-                    let alias_lower = alias.strip_prefix('/').unwrap_or(alias).to_lowercase();
-                    alias_idx.insert(alias_lower, key.clone());
-                }
+        }
+        if let Some(msg) = conflict_msg_actual {
+            if let Ok(mut errors) = self.validation_errors.write() {
+                errors.push(msg);
             }
+        }
 
-            entries.insert(key.clone(), entry);
+        // Build alias index (entries lock released)
+        if let Ok(mut alias_idx) = self.alias_index.write() {
+            for alias in &new_aliases {
+                let alias_lower = alias.strip_prefix('/').unwrap_or(alias).to_lowercase();
+                alias_idx.insert(alias_lower, key.clone());
+            }
         }
 
         // Emit lifecycle event
@@ -327,16 +352,18 @@ impl SkillCatalog {
         Ok(())
     }
 
-    /// Remove command_index and alias_index entries for a given skill entry.
-    /// Must be called while entries write lock is held externally (caller responsibility).
-    fn remove_index_entries_for(&self, entry: &SkillEntry) {
-        if let Some(ref cmd) = entry.frontmatter.effective_slash_command()
-            && let Ok(mut idx) = self.command_index.write()
-        {
-            idx.remove(&cmd.to_lowercase());
+    /// Remove command_index and alias_index entries for a skill's frontmatter data.
+    ///
+    /// Accepts extracted frontmatter fields so that the entries lock does NOT need
+    /// to be held while the index locks are acquired, preventing deadlocks.
+    fn remove_index_entries(&self, slash_cmd: Option<&str>, aliases: &[String]) {
+        if let Some(cmd) = slash_cmd {
+            if let Ok(mut idx) = self.command_index.write() {
+                idx.remove(&cmd.to_lowercase());
+            }
         }
         if let Ok(mut alias_idx) = self.alias_index.write() {
-            for alias in &entry.frontmatter.invoke.aliases {
+            for alias in aliases {
                 let alias_lower = alias.strip_prefix('/').unwrap_or(alias).to_lowercase();
                 alias_idx.remove(&alias_lower);
             }
@@ -498,7 +525,8 @@ impl SkillCatalog {
     /// Remove a skill from the catalog by ID or name.
     pub fn remove(&self, name: &str) {
         let key = name.to_lowercase();
-        if let Ok(mut entries) = self.entries.write() {
+        // Extract frontmatter data under entries lock, then release before acquiring index locks.
+        let removed_data = if let Ok(mut entries) = self.entries.write() {
             // Find the actual key — try direct ID, then search by name
             let actual_key = if entries.contains_key(&key) {
                 Some(key.clone())
@@ -510,12 +538,24 @@ impl SkillCatalog {
             };
 
             if let Some(ref actual) = actual_key {
-                // Clean up index entries before removing
-                if let Some(entry) = entries.get(actual) {
-                    self.remove_index_entries_for(entry);
-                }
+                let data = entries.get(actual).map(|entry| {
+                    (
+                        entry.frontmatter.effective_slash_command(),
+                        entry.frontmatter.invoke.aliases.clone(),
+                    )
+                });
                 entries.remove(actual);
+                data
+            } else {
+                None
             }
+        } else {
+            None
+        };
+
+        // Clean up index entries after releasing entries lock
+        if let Some((slash_cmd, aliases)) = removed_data {
+            self.remove_index_entries(slash_cmd.as_deref(), &aliases);
         }
         self.invalidate_summary_cache();
     }
@@ -532,25 +572,35 @@ impl SkillCatalog {
         plugin_id: String,
     ) {
         let compiled = Self::compile_triggers(&frontmatter);
+        let slash_cmd = frontmatter.invoke.slash.clone();
+        let aliases = frontmatter.invoke.aliases.clone();
         let entry = SkillEntry {
-            frontmatter: frontmatter.clone(),
+            frontmatter,
             skill_md_path: None,
             skill_dir: None,
             compiled_triggers: compiled,
             scope: SkillScope::User,
             source: SkillSource::Plugin { plugin_id, executor },
         };
-        let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
-        // Update command index
-        if let Some(ref cmd) = frontmatter.invoke.slash {
+
+        // Insert entry under entries lock, then release before acquiring index locks
+        {
+            let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
+            entries.insert(skill_id.clone(), entry);
+        }
+
+        // Update command index (entries lock released)
+        if let Some(ref cmd) = slash_cmd {
             let mut cmd_idx = self.command_index.write().unwrap_or_else(|p| p.into_inner());
             cmd_idx.insert(cmd.clone(), skill_id.clone());
         }
-        for alias in &frontmatter.invoke.aliases {
+        // Update alias index (entries lock released)
+        if !aliases.is_empty() {
             let mut alias_idx = self.alias_index.write().unwrap_or_else(|p| p.into_inner());
-            alias_idx.insert(alias.clone(), skill_id.clone());
+            for alias in &aliases {
+                alias_idx.insert(alias.clone(), skill_id.clone());
+            }
         }
-        entries.insert(skill_id, entry);
         self.invalidate_summary_cache();
     }
 
