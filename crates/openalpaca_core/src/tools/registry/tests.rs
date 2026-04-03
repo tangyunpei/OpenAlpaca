@@ -817,3 +817,189 @@ async fn test_concurrent_register_and_remove() {
     }
     assert_eq!(registry.count(), 25);
 }
+
+// ===========================================================================
+// Task 12: Plugin backend + validation edge case tests
+// ===========================================================================
+
+fn make_tool_with_name(name: &str) -> RegisteredTool {
+    RegisteredTool {
+        definition: ToolDefinition {
+            name: name.to_string(),
+            description: "stub".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+            strict: None,
+            input_examples: None,
+        },
+        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+            response: "ok".to_string(),
+        })),
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
+    }
+}
+
+#[tokio::test]
+async fn test_plugin_backend_execution() {
+    struct MockPluginExecutor;
+    #[async_trait]
+    impl openalpaca_api::plugin_traits::PluginToolExecutor for MockPluginExecutor {
+        async fn execute(
+            &self,
+            tool_name: &str,
+            _args: &serde_json::Value,
+        ) -> Result<String, String> {
+            Ok(format!("plugin: {tool_name}"))
+        }
+        fn plugin_id(&self) -> &str {
+            "test"
+        }
+    }
+
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: ToolDefinition {
+                name: "test::echo".into(),
+                description: "".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Plugin(Arc::new(MockPluginExecutor)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+        })
+        .unwrap();
+
+    let result = registry
+        .execute("test::echo", &serde_json::json!({}))
+        .await;
+    assert_eq!(result.unwrap(), "plugin: test::echo");
+}
+
+#[test]
+fn test_tool_name_validation() {
+    let registry = ToolRegistry::default();
+    // Empty name
+    assert!(registry.register(make_tool_with_name("")).is_err());
+    // Null byte
+    assert!(registry.register(make_tool_with_name("bad\0name")).is_err());
+    // Too long (300 chars exceeds 256 limit)
+    assert!(registry.register(make_tool_with_name(&"x".repeat(300))).is_err());
+    // Valid name
+    assert!(registry.register(make_tool_with_name("good_tool")).is_ok());
+}
+
+#[tokio::test]
+async fn test_unknown_type_rejected_via_validation() {
+    // json_value_matches_type is private, so we test it indirectly through
+    // validate_tool_arguments by using a schema with a typo in the type field.
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: ToolDefinition {
+                name: "typo_schema".to_string(),
+                description: "Tool with typo type".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "strign"}
+                    }
+                }),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+                response: "ok".to_string(),
+            })),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+        })
+        .unwrap();
+
+    // "hello" is a valid string, but schema says type is "strign" (typo)
+    // json_value_matches_type returns false for unknown types -> validation fails
+    let result = registry
+        .execute("typo_schema", &serde_json::json!({"name": "hello"}))
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("should be strign"),
+        "Expected type mismatch error for typo type, got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_enum_validation_valid_value() {
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: ToolDefinition {
+                name: "color_picker".to_string(),
+                description: "Pick a color".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "color": {"type": "string", "enum": ["red", "blue"]}
+                    },
+                    "required": ["color"]
+                }),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+                response: "ok".to_string(),
+            })),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+        })
+        .unwrap();
+
+    // Valid enum value
+    let result = registry
+        .execute("color_picker", &serde_json::json!({"color": "red"}))
+        .await;
+    assert!(result.is_ok(), "Valid enum value should pass, got: {:?}", result);
+}
+
+#[tokio::test]
+async fn test_enum_validation_invalid_value() {
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: ToolDefinition {
+                name: "color_picker2".to_string(),
+                description: "Pick a color".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "color": {"type": "string", "enum": ["red", "blue"]}
+                    },
+                    "required": ["color"]
+                }),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+                response: "ok".to_string(),
+            })),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+        })
+        .unwrap();
+
+    // Invalid enum value
+    let result = registry
+        .execute("color_picker2", &serde_json::json!({"color": "green"}))
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("not in allowed values"),
+        "Expected enum validation error, got: {}",
+        err
+    );
+}
