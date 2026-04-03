@@ -214,6 +214,11 @@ impl ToolRegistry {
                 implementation.execute_with_context(arguments, ctx).await
             }
             ToolBackend::Http { .. } | ToolBackend::Command { .. } | ToolBackend::Plugin(_) => {
+                tracing::trace!(
+                    tool_name,
+                    agent_id = ?ctx.agent_id,
+                    "Tool context discarded (non-BuiltIn backend)"
+                );
                 self.execute(tool_name, arguments).await
             }
         }

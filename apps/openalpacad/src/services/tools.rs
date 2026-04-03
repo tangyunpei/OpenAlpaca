@@ -55,34 +55,29 @@ pub(super) fn build_tool_registry(
 
     // Load user tools from config/tools/*.toml
     let tools_config_dir = config_base_dir.join("tools");
-    // Security-critical tool names that TOML configs must not override.
-    // Includes both registry-registered built-ins and runtime-injected tools
+
+    // Collect names of all registered built-in tools dynamically
+    let builtin_names: std::collections::HashSet<String> = tool_registry
+        .registered_tool_names()
+        .into_iter()
+        .collect();
+
+    // Runtime-injected tools not in the registry but still protected
     // (e.g., spawn_subagent and its variants are provided by LeadAgentToolExecutor
     // at runtime, not the global registry, but must still be protected from
     // TOML name collisions).
-    let protected_builtins: &[&str] = &[
-        // Registry built-ins
-        "update_persona",
-        "shell_execute",
-        "file_read",
-        "file_write",
-        "memory_search",
-        // ContextualToolExecutor runtime tools
-        "workspace_read",
-        "workspace_write",
-        // LeadAgentToolExecutor runtime tools
+    let runtime_protected: std::collections::HashSet<&str> = [
         "spawn_subagent",
         "spawn_subagents_batch",
         "check_subagent_status",
         "wait_for_subagents",
-        // Connector tools
-        "send",
-    ];
+    ].into_iter().collect();
+
     for tool in openalpaca_core::tools::config::load_tools_from_dir(&tools_config_dir) {
         let name = tool.definition.name.clone();
-        if protected_builtins.contains(&name.as_str()) {
+        if builtin_names.contains(name.as_str()) || runtime_protected.contains(name.as_str()) {
             warn!(
-                "Custom tool '{}' would override a security-critical built-in — skipping",
+                "Custom tool '{}' would override a protected tool — skipping",
                 name
             );
             continue;
