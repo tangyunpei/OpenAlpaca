@@ -13,7 +13,7 @@ use openalpaca_storage::{OutcomeKind, TaskStatus};
 use uuid::Uuid;
 
 fn make_tool_registry() -> Arc<ToolRegistry> {
-    Arc::new(ToolRegistry::new())
+    Arc::new(ToolRegistry::default())
 }
 
 fn make_security_gate(bus: &EventBus) -> Arc<SecurityGate> {
@@ -717,7 +717,7 @@ fn make_orchestrator_with_tools_and_llm(
     router: Arc<LlmRouter>,
     tool_names: &[&str],
 ) -> Orchestrator {
-    let registry = ToolRegistry::new();
+    let registry = ToolRegistry::default();
     for name in tool_names {
         registry.register(make_mock_tool(name));
     }

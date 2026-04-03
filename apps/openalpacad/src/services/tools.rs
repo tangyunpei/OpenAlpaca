@@ -21,8 +21,9 @@ pub(super) fn build_tool_registry(
     bus: &EventBus,
     daemon_config: &Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
     web_search_config: &Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
-) -> (Arc<openalpaca_core::tools::ToolRegistry>, ConnectorSendLock) {
-    let tool_registry = openalpaca_core::tools::ToolRegistry::new();
+) -> anyhow::Result<(Arc<openalpaca_core::tools::ToolRegistry>, ConnectorSendLock)> {
+    let tool_registry = openalpaca_core::tools::ToolRegistry::new()
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     // Register built-in tools (including update_persona)
     let persona_ctx = PersonaToolContext {
@@ -99,5 +100,5 @@ pub(super) fn build_tool_registry(
         tracing::error!("update_persona tool failed to register — persona updates will not work");
     }
 
-    (Arc::new(tool_registry), connector_send_lock)
+    Ok((Arc::new(tool_registry), connector_send_lock))
 }

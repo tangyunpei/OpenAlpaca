@@ -70,6 +70,8 @@ pub struct ToolRegistry {
 }
 
 impl Clone for ToolRegistry {
+    /// NOTE: Not atomic. Concurrent register/remove during clone may produce
+    /// an incomplete snapshot. Use Arc::clone() for shared access instead.
     fn clone(&self) -> Self {
         let new_tools = DashMap::new();
         for entry in self.tools.iter() {
@@ -84,12 +86,12 @@ impl Clone for ToolRegistry {
 
 impl Default for ToolRegistry {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("HTTP client creation should not fail with default config")
     }
 }
 
 impl ToolRegistry {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, String> {
         let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= 10 {
                 attempt.error("too many redirects")
@@ -104,12 +106,12 @@ impl ToolRegistry {
         let http_client = reqwest::Client::builder()
             .redirect(redirect_policy)
             .build()
-            .expect("Failed to create shared HTTP client");
+            .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
-        Self {
+        Ok(Self {
             tools: DashMap::new(),
             http_client,
-        }
+        })
     }
 
     /// Register a tool. Safe to call at any time, including after wrapping in Arc.

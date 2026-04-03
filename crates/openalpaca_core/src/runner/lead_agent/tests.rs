@@ -16,7 +16,7 @@ fn test_lead_agent_registry_contains_coordination_tools() {
         }
     }
 
-    let registry = ToolRegistry::new();
+    let registry = ToolRegistry::default();
     registry.register(RegisteredTool {
         definition: ToolDefinition {
             name: "web_search".to_string(),
@@ -41,7 +41,7 @@ fn test_lead_agent_registry_contains_coordination_tools() {
             )),
             "test-model".to_string(),
         )),
-        Arc::new(ToolRegistry::new()),
+        Arc::new(ToolRegistry::default()),
         Arc::new(SharedContext::new()),
         EventBus::default(),
         None,
@@ -350,7 +350,7 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
             )),
             "test-model".to_string(),
         )),
-        Arc::new(ToolRegistry::new()),
+        Arc::new(ToolRegistry::default()),
         Arc::new(SharedContext::new()),
         EventBus::default(),
         None,
@@ -372,7 +372,7 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
     });
     let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
 
-    let registry = ToolRegistry::new();
+    let registry = ToolRegistry::default();
     register_coordination_tools(
         &registry,
         spawn_tool,
@@ -405,7 +405,7 @@ fn test_batch_spawn_tool_present_when_enabled() {
             )),
             "test-model".to_string(),
         )),
-        Arc::new(ToolRegistry::new()),
+        Arc::new(ToolRegistry::default()),
         Arc::new(SharedContext::new()),
         EventBus::default(),
         None,
@@ -428,7 +428,7 @@ fn test_batch_spawn_tool_present_when_enabled() {
     });
     let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
 
-    let registry = ToolRegistry::new();
+    let registry = ToolRegistry::default();
     register_coordination_tools(
         &registry,
         spawn_tool,
@@ -459,7 +459,7 @@ async fn test_batch_spawn_empty_array_error() {
             )),
             "test-model".to_string(),
         )),
-        Arc::new(ToolRegistry::new()),
+        Arc::new(ToolRegistry::default()),
         Arc::new(SharedContext::new()),
         EventBus::default(),
         None,
@@ -498,7 +498,7 @@ async fn test_batch_spawn_exceeds_max_error() {
             )),
             "test-model".to_string(),
         )),
-        Arc::new(ToolRegistry::new()),
+        Arc::new(ToolRegistry::default()),
         Arc::new(SharedContext::new()),
         EventBus::default(),
         None,
@@ -540,7 +540,7 @@ fn test_lead_agent_registry_exposes_command_backend_tools() {
     // them as shell-like tools.
     use crate::tools::registry::{RegisteredTool, ToolBackend};
 
-    let registry = ToolRegistry::new();
+    let registry = ToolRegistry::default();
     // Register a command-backend tool
     registry.register(RegisteredTool {
         definition: ToolDefinition {

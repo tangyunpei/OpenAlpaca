@@ -287,7 +287,7 @@ async fn test_sandbox_execution() {
         }
     }
 
-    let registry = ToolRegistry::new();
+    let registry = ToolRegistry::default();
     registry.register(RegisteredTool {
         definition: openalpaca_llm::ToolDefinition {
             name: "search".to_string(),
@@ -357,7 +357,7 @@ async fn test_sandbox_denied_tool() {
         }
     }
 
-    let registry = ToolRegistry::new();
+    let registry = ToolRegistry::default();
     registry.register(RegisteredTool {
         definition: openalpaca_llm::ToolDefinition {
             name: "search".to_string(),
@@ -532,7 +532,7 @@ async fn test_cancellation_during_tool_execution() {
     let cancelling_tool = CancellingTool {
         token: token.clone(),
     };
-    let registry = ToolRegistry::new();
+    let registry = ToolRegistry::default();
     registry.register(RegisteredTool {
         definition: openalpaca_llm::ToolDefinition {
             name: "search".to_string(),

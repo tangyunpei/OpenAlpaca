@@ -294,7 +294,7 @@ async fn test_execute_dag_empty_returns_all_completed() {
         openalpaca_llm::ProviderType::Anthropic,
         "mock-model".to_string(),
     ));
-    let tool_registry = Arc::new(crate::tools::ToolRegistry::new());
+    let tool_registry = Arc::new(crate::tools::ToolRegistry::default());
 
     let result = execute_dag(
         &mut dag,
@@ -344,7 +344,7 @@ async fn test_execute_dag_cancellation_before_start() {
         openalpaca_llm::ProviderType::Anthropic,
         "mock-model".to_string(),
     ));
-    let tool_registry = Arc::new(crate::tools::ToolRegistry::new());
+    let tool_registry = Arc::new(crate::tools::ToolRegistry::default());
 
     // Pre-cancel before execution
     let token = CancellationToken::new();

@@ -16,7 +16,7 @@ fn setup_with_config(agents: Vec<SubAgent>, config: DaemonConfig) -> TaskDispatc
     }
     let lane_mgr = Arc::new(LaneManager::new());
     let bus = EventBus::default();
-    let tool_registry = Arc::new(crate::tools::ToolRegistry::new());
+    let tool_registry = Arc::new(crate::tools::ToolRegistry::default());
     let sandbox = Arc::new(crate::security::sandbox::SandboxManager::with_defaults(
         tool_registry.clone(),
         bus.clone(),
@@ -560,7 +560,7 @@ async fn test_pipeline_non_singleton_workspace_artifact_count() {
     let mut rx = bus.subscribe();
 
     // Build a registry with workspace tools so workspace_write is available
-    let registry = crate::tools::ToolRegistry::new();
+    let registry = crate::tools::ToolRegistry::default();
     let ws_tools = crate::tools::builtins::builtin_tools(
         Some(db.clone()), None, None, None, None,
     );
@@ -989,7 +989,7 @@ async fn test_pipeline_text_only_no_artifacts_e2e() {
     let bus = crate::bus::EventBus::default();
     let mut rx = bus.subscribe();
 
-    let tool_registry = std::sync::Arc::new(crate::tools::ToolRegistry::new());
+    let tool_registry = std::sync::Arc::new(crate::tools::ToolRegistry::default());
     let sandbox = std::sync::Arc::new(
         crate::security::sandbox::SandboxManager::with_defaults(tool_registry.clone(), bus.clone()),
     );

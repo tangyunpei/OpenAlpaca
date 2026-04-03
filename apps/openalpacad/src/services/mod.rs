@@ -135,7 +135,7 @@ pub async fn initialize_services(
         bus,
         daemon_config,
         &web_search_config,
-    );
+    )?;
 
     // Build security chain
     let sandbox_manager = Arc::new(openalpaca_core::security::sandbox::SandboxManager::new(

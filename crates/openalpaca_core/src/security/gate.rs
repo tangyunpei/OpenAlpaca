@@ -50,7 +50,7 @@ mod tests {
     use crate::tools::ToolRegistry;
 
     fn make_gate() -> SecurityGate {
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = Arc::new(ToolRegistry::default());
         let sandbox = Arc::new(SandboxManager::with_defaults(
             registry,
             EventBus::default(),
