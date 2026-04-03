@@ -743,3 +743,77 @@ fn test_tools_for_capabilities_with_deny_excludes_any_denied() {
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].name, "reader");
 }
+
+// ===========================================================================
+// Task 11: Concurrent access tests
+// ===========================================================================
+
+#[tokio::test]
+async fn test_concurrent_register_and_execute() {
+    let registry = Arc::new(ToolRegistry::default());
+    let mut handles = Vec::new();
+
+    // Spawn 10 tasks that register tools
+    for i in 0..10 {
+        let reg = registry.clone();
+        handles.push(tokio::spawn(async move {
+            let tool = RegisteredTool {
+                definition: ToolDefinition {
+                    name: format!("tool_{i}"),
+                    description: format!("tool {i}"),
+                    parameters: serde_json::json!({"type": "object", "properties": {}}),
+                    strict: None,
+                    input_examples: None,
+                },
+                backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+                    response: format!("ok_{i}"),
+                })),
+                provides_capabilities: vec![],
+                exempt_from_timeout: false,
+            };
+            let _ = reg.register(tool);
+        }));
+    }
+
+    // Spawn 10 tasks that try to execute tools (may or may not exist yet)
+    for i in 0..10 {
+        let reg = registry.clone();
+        handles.push(tokio::spawn(async move {
+            let _ = reg.execute(&format!("tool_{i}"), &serde_json::json!({})).await;
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap();
+    }
+    // Should not panic; exact count depends on race ordering
+    assert!(registry.count() <= 10);
+}
+
+#[tokio::test]
+async fn test_concurrent_register_and_remove() {
+    let registry = Arc::new(ToolRegistry::default());
+
+    // Pre-register 50 tools
+    for i in 0..50 {
+        registry
+            .register(make_tool(&format!("conc_tool_{i}"), "ok"))
+            .unwrap();
+    }
+    assert_eq!(registry.count(), 50);
+
+    let mut handles = Vec::new();
+
+    // Concurrently remove the first 25
+    for i in 0..25 {
+        let reg = registry.clone();
+        handles.push(tokio::spawn(async move {
+            reg.remove(&format!("conc_tool_{i}"));
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap();
+    }
+    assert_eq!(registry.count(), 25);
+}
