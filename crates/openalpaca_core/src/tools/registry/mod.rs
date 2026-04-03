@@ -66,6 +66,7 @@ pub struct RegisteredTool {
 /// (e.g. when plugins load/unload) without requiring `&mut self`.
 pub struct ToolRegistry {
     tools: DashMap<String, RegisteredTool>,
+    capability_index: DashMap<String, Vec<String>>, // capability → tool names
     http_client: reqwest::Client,
 }
 
@@ -77,8 +78,13 @@ impl Clone for ToolRegistry {
         for entry in self.tools.iter() {
             new_tools.insert(entry.key().clone(), entry.value().clone());
         }
+        let new_cap_index = DashMap::new();
+        for entry in self.capability_index.iter() {
+            new_cap_index.insert(entry.key().clone(), entry.value().clone());
+        }
         Self {
             tools: new_tools,
+            capability_index: new_cap_index,
             http_client: self.http_client.clone(),
         }
     }
@@ -110,6 +116,7 @@ impl ToolRegistry {
 
         Ok(Self {
             tools: DashMap::new(),
+            capability_index: DashMap::new(),
             http_client,
         })
     }
@@ -132,13 +139,28 @@ impl ToolRegistry {
         if name.contains('\0') {
             return Err("Tool name cannot contain null bytes".to_string());
         }
+        for cap in &tool.provides_capabilities {
+            self.capability_index
+                .entry(cap.clone())
+                .or_default()
+                .push(tool.definition.name.clone());
+        }
         self.tools.insert(name.clone(), tool);
         Ok(())
     }
 
     /// Remove a tool by name. Returns true if the tool existed.
     pub fn remove(&self, name: &str) -> bool {
-        self.tools.remove(name).is_some()
+        if let Some((_, tool)) = self.tools.remove(name) {
+            for cap in &tool.provides_capabilities {
+                if let Some(mut names) = self.capability_index.get_mut(cap) {
+                    names.retain(|n| n != name);
+                }
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// Look up a tool by name. Returns a clone because DashMap guards
@@ -244,24 +266,35 @@ impl ToolRegistry {
 
     /// Returns tool definitions for all tools whose `provides_capabilities`
     /// intersects with the requested capabilities. Empty capabilities returns empty.
+    ///
+    /// Uses the inverted capability index for O(capabilities * tools_per_cap) lookup
+    /// instead of scanning all registered tools.
     pub fn tools_for_capabilities(&self, capabilities: &[String]) -> Vec<ToolDefinition> {
         if capabilities.is_empty() {
             return vec![];
         }
-        self.tools
-            .iter()
-            .filter(|entry| {
-                entry.value().provides_capabilities
-                    .iter()
-                    .any(|cap| capabilities.contains(cap))
-            })
-            .map(|entry| entry.value().definition.clone())
-            .collect()
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        for cap in capabilities {
+            if let Some(names) = self.capability_index.get(cap) {
+                for name in names.value() {
+                    if seen.insert(name.clone()) {
+                        if let Some(tool) = self.tools.get(name) {
+                            result.push(tool.definition.clone());
+                        }
+                    }
+                }
+            }
+        }
+        result
     }
 
     /// Returns tool definitions for all tools whose `provides_capabilities`
     /// intersects with the requested capabilities, excluding tools that provide
     /// any denied capability.
+    ///
+    /// Uses the inverted capability index for efficient lookup, then filters
+    /// out tools that provide any denied capability.
     pub fn tools_for_capabilities_with_deny(
         &self,
         capabilities: &[String],
@@ -270,20 +303,26 @@ impl ToolRegistry {
         if capabilities.is_empty() {
             return vec![];
         }
-        self.tools
-            .iter()
-            .filter(|entry| {
-                entry.value().provides_capabilities
-                    .iter()
-                    .any(|cap| capabilities.contains(cap))
-            })
-            .filter(|entry| {
-                !entry.value().provides_capabilities
-                    .iter()
-                    .any(|cap| denied.contains(cap))
-            })
-            .map(|entry| entry.value().definition.clone())
-            .collect()
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        for cap in capabilities {
+            if let Some(names) = self.capability_index.get(cap) {
+                for name in names.value() {
+                    if seen.insert(name.clone()) {
+                        if let Some(tool) = self.tools.get(name) {
+                            let has_denied = tool
+                                .provides_capabilities
+                                .iter()
+                                .any(|c| denied.contains(c));
+                            if !has_denied {
+                                result.push(tool.definition.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        result
     }
 
     /// Return the names of tools that use command backends (i.e., execute via shell).
