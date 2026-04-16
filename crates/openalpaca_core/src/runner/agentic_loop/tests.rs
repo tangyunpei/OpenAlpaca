@@ -3,6 +3,10 @@ use async_trait::async_trait;
 use openalpaca_llm::{ChatResponse, LlmError, LlmRouter, ProviderType, Usage};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::orchestrator::skill::constraints::*;
+use crate::runner::LoopCostAccumulator;
+use crate::tools::registry::ToolContext;
+
 /// Mock provider for testing the agentic loop.
 struct MockProvider {
     responses: Vec<Result<ChatResponse, LlmError>>,
@@ -1170,4 +1174,98 @@ async fn test_agentic_loop_routed_respects_max_rounds() {
 
     assert_eq!(result.finish_reason, LoopFinishReason::MaxRounds);
     assert_eq!(result.rounds_used, 3);
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests: nested skill coherence (cost, context, constraints)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_nested_cost_accumulator_aggregation() {
+    let acc = LoopCostAccumulator::new();
+    let child_acc = acc.clone();
+
+    acc.add_usd(0.30);
+    assert!((acc.total_usd() - 0.30).abs() < 0.000_01);
+
+    child_acc.add_usd(0.20);
+
+    // Both see $0.50 aggregate
+    assert!((acc.total_usd() - 0.50).abs() < 0.000_01);
+    assert!((child_acc.total_usd() - 0.50).abs() < 0.000_01);
+}
+
+#[test]
+fn test_nested_budget_remaining_calculation() {
+    let parent_max_cost = 1.0;
+    let acc = LoopCostAccumulator::new();
+
+    acc.add_usd(0.80);
+    let remaining = (parent_max_cost - acc.total_usd()).max(0.0);
+    assert!((remaining - 0.20).abs() < 0.000_01);
+
+    acc.add_usd(0.25);
+    let remaining = (parent_max_cost - acc.total_usd()).max(0.0);
+    assert_eq!(remaining, 0.0); // clamped to 0
+}
+
+#[test]
+fn test_nested_skill_context_inheritance() {
+    let parent_ctx = ToolContext {
+        agent_id: Some("agent-1".into()),
+        task_id: Some("task-1".into()),
+        owner_id: Some("user-1".into()),
+        workspace_id: Some("ws-1".into()),
+        skill_stack: vec![],
+        effective_constraints: None,
+    };
+
+    let child_ctx = parent_ctx.with_skill_pushed("skill-A");
+    assert_eq!(child_ctx.agent_id, Some("agent-1".into()));
+    assert_eq!(child_ctx.task_id, Some("task-1".into()));
+    assert_eq!(child_ctx.skill_stack, vec!["skill-A".to_string()]);
+
+    let grandchild_ctx = child_ctx.with_skill_pushed("skill-B");
+    assert_eq!(grandchild_ctx.skill_stack, vec!["skill-A".to_string(), "skill-B".to_string()]);
+    assert_eq!(grandchild_ctx.owner_id, Some("user-1".into()));
+}
+
+#[test]
+fn test_three_level_nesting_integration() {
+    // Cost: shared across 3 levels
+    let acc = LoopCostAccumulator::new();
+
+    // Level 1: root
+    let ctx_l1 = ToolContext::default().with_skill_pushed("A");
+    acc.add_usd(0.10);
+
+    // Level 2: A -> B
+    let ctx_l2 = ctx_l1.with_skill_pushed("B");
+    let acc_l2 = acc.clone();
+    acc_l2.add_usd(0.20);
+
+    // Level 3: A -> B -> C
+    let ctx_l3 = ctx_l2.with_skill_pushed("C");
+    let acc_l3 = acc.clone();
+    acc_l3.add_usd(0.30);
+
+    // Verify skill_stack
+    assert_eq!(ctx_l3.skill_stack, vec!["A", "B", "C"]);
+
+    // Verify cost aggregation: 0.10 + 0.20 + 0.30 = 0.60
+    assert!((acc.total_usd() - 0.60).abs() < 0.000_01);
+    assert!((acc_l3.total_usd() - 0.60).abs() < 0.000_01);
+
+    // Constraints compose across chain
+    let c1 = EffectiveToolSet {
+        denied: ["tool_x".into()].into_iter().collect(),
+        source_chain: vec!["A".into()],
+        ..Default::default()
+    };
+    let c2 = compose_constraints(&c1, None, &["tool_y".into()], &[], "B").unwrap();
+    let c3 = compose_constraints(&c2, None, &[], &[], "C").unwrap();
+
+    assert!(c3.denied.contains("tool_x"));
+    assert!(c3.denied.contains("tool_y"));
+    assert_eq!(c3.source_chain, vec!["A", "B", "C"]);
 }
