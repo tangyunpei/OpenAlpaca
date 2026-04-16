@@ -1,4 +1,7 @@
 mod backend;
+mod cost;
+
+pub use cost::LoopCostAccumulator;
 mod config;
 mod context;
 mod tool_helpers;
