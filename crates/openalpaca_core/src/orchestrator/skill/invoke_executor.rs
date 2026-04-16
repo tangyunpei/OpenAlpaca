@@ -198,6 +198,35 @@ impl SkillInvocationToolExecutor {
         // Filter tool definitions by composed constraints
         tool_defs = filter_tools_by_constraints(&tool_defs, &child_constraints);
 
+        // Build child tool context: inherit parent's identity, push skill stack
+        let mut child_tool_ctx = self
+            .parent_tool_context
+            .as_ref()
+            .cloned()
+            .unwrap_or_default()
+            .with_skill_pushed(skill_id);
+        child_tool_ctx.effective_constraints = Some(child_constraints);
+
+        // Cost budget: pass remaining as child's max_cost
+        let cost_acc = self.cost_accumulator.clone().unwrap_or_default();
+        let remaining = (self.parent_max_cost - cost_acc.total_usd()).max(0.0);
+        if remaining <= 0.0 {
+            return Err(format!(
+                "budget exhausted (${:.4}/${:.2} spent) — cannot invoke skill '{}'",
+                cost_acc.total_usd(),
+                self.parent_max_cost,
+                skill_id
+            ));
+        }
+
+        tracing::info!(
+            parent_skill = ?self.call_stack.last(),
+            child_skill = skill_id,
+            remaining_budget = %remaining,
+            stack_depth = child_tool_ctx.skill_stack.len(),
+            "Nested skill invocation"
+        );
+
         // Build per-invocation registry clone with script tools and nested invoke_skill backends
         let needs_clone = !skill_doc.frontmatter.scripts.is_empty()
             || !skill_doc.frontmatter.depends_on.is_empty();
@@ -229,9 +258,9 @@ impl SkillInvocationToolExecutor {
                     child_stack,
                     self.max_depth,
                     self.cancel_token.clone(),
-                    self.cost_accumulator.clone(),
-                    self.parent_tool_context.clone(),
-                    self.parent_max_cost,
+                    Some(cost_acc.clone()),
+                    Some(child_tool_ctx.clone()),
+                    remaining,
                 ));
                 for dep_id in &skill_doc.frontmatter.depends_on {
                     if self.catalog.get(dep_id).is_some() {
@@ -279,35 +308,6 @@ impl SkillInvocationToolExecutor {
             ChatMessage::system(&system_prompt),
             ChatMessage::user(query),
         ];
-
-        // Build child tool context: inherit parent's identity, push skill stack
-        let mut child_tool_ctx = self
-            .parent_tool_context
-            .as_ref()
-            .cloned()
-            .unwrap_or_default()
-            .with_skill_pushed(skill_id);
-        child_tool_ctx.effective_constraints = Some(child_constraints);
-
-        tracing::info!(
-            parent_skill = ?self.call_stack.last(),
-            child_skill = skill_id,
-            remaining_budget = %(self.parent_max_cost - self.cost_accumulator.as_ref().map_or(0.0, |a| a.total_usd())),
-            stack_depth = child_tool_ctx.skill_stack.len(),
-            "Nested skill invocation"
-        );
-
-        // Cost budget: pass remaining as child's max_cost
-        let cost_acc = self.cost_accumulator.clone().unwrap_or_default();
-        let remaining = (self.parent_max_cost - cost_acc.total_usd()).max(0.0);
-        if remaining <= 0.0 {
-            return Err(format!(
-                "budget exhausted (${:.4}/${:.2} spent) — cannot invoke skill '{}'",
-                cost_acc.total_usd(),
-                self.parent_max_cost,
-                skill_id
-            ));
-        }
 
         let mut config = LoopConfig {
             max_rounds: 10,
