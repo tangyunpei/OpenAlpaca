@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod constraints;
 pub mod invoke_executor;
 pub mod matcher;
 pub mod router;
