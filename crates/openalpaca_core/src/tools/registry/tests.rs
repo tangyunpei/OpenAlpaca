@@ -545,6 +545,7 @@ async fn test_execute_with_context_defaults_to_execute() {
         task_id: None,
         owner_id: None,
         workspace_id: None,
+        skill_stack: vec![],
     };
     let args = serde_json::json!({"key": "value"});
     let result = tool.execute_with_context(&args, &ctx).await.unwrap();
@@ -816,6 +817,54 @@ async fn test_concurrent_register_and_remove() {
         h.await.unwrap();
     }
     assert_eq!(registry.count(), 25);
+}
+
+// ===========================================================================
+// ToolContext skill_stack tests
+// ===========================================================================
+
+#[test]
+fn test_tool_context_default_empty_stack() {
+    let ctx = ToolContext::default();
+    assert!(ctx.skill_stack.is_empty());
+}
+
+#[test]
+fn test_tool_context_push_skill() {
+    let ctx = ToolContext {
+        agent_id: Some("agent-1".into()),
+        task_id: Some("task-1".into()),
+        owner_id: Some("owner-1".into()),
+        workspace_id: Some("ws-1".into()),
+        skill_stack: vec![],
+    };
+    let child = ctx.with_skill_pushed("skill-A");
+
+    // Original unchanged
+    assert!(ctx.skill_stack.is_empty());
+
+    // Child has the pushed skill
+    assert_eq!(child.skill_stack, vec!["skill-A".to_string()]);
+
+    // All other fields preserved
+    assert_eq!(child.agent_id, Some("agent-1".into()));
+    assert_eq!(child.task_id, Some("task-1".into()));
+    assert_eq!(child.owner_id, Some("owner-1".into()));
+    assert_eq!(child.workspace_id, Some("ws-1".into()));
+}
+
+#[test]
+fn test_tool_context_push_skill_chain() {
+    let root = ToolContext::default();
+    let level1 = root.with_skill_pushed("A");
+    let level2 = level1.with_skill_pushed("B");
+    let level3 = level2.with_skill_pushed("C");
+
+    assert_eq!(level3.skill_stack, vec![
+        "A".to_string(),
+        "B".to_string(),
+        "C".to_string(),
+    ]);
 }
 
 // ===========================================================================

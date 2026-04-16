@@ -172,6 +172,7 @@ pub async fn run_lead_agent(
         task_id: Some(task_id.to_string()),
         owner_id: Some(created_by.to_string()),
         workspace_id: workspace_id.clone(),
+        skill_stack: vec![],
     };
 
     // Build a per-request ToolRegistry containing the base tools plus

@@ -12,6 +12,17 @@ pub struct ToolContext {
     pub task_id: Option<String>,
     pub owner_id: Option<String>,
     pub workspace_id: Option<String>,
+    /// Skill invocation chain, oldest first. Empty at top level.
+    pub skill_stack: Vec<String>,
+}
+
+impl ToolContext {
+    /// Clone this context and append a skill ID to the call stack.
+    pub fn with_skill_pushed(&self, skill_id: impl Into<String>) -> Self {
+        let mut next = self.clone();
+        next.skill_stack.push(skill_id.into());
+        next
+    }
 }
 
 /// Backend that executes a tool's logic.
