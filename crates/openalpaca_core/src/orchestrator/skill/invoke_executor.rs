@@ -1,6 +1,7 @@
 use crate::bus::EventBus;
 use crate::orchestrator::skill::catalog::SkillCatalog;
-use crate::runner::{LoopConfig, run_agentic_loop_routed};
+use crate::orchestrator::skill::constraints::{compose_constraints, filter_tools_by_constraints, MAX_SKILL_STACK_DEPTH};
+use crate::runner::{LoopConfig, LoopCostAccumulator, run_agentic_loop_routed};
 use crate::security::sandbox::SandboxManager;
 use crate::tools::builtins::ScriptToolBuiltIn;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext, ToolRegistry};
@@ -20,6 +21,9 @@ pub struct SkillInvocationToolExecutor {
     pub call_stack: Vec<String>,
     pub max_depth: usize,
     pub cancel_token: Option<CancellationToken>,
+    pub cost_accumulator: Option<LoopCostAccumulator>,
+    pub parent_tool_context: Option<ToolContext>,
+    pub parent_max_cost: f64,
 }
 
 impl SkillInvocationToolExecutor {
@@ -31,6 +35,9 @@ impl SkillInvocationToolExecutor {
         call_stack: Vec<String>,
         max_depth: usize,
         cancel_token: Option<CancellationToken>,
+        cost_accumulator: Option<LoopCostAccumulator>,
+        parent_tool_context: Option<ToolContext>,
+        parent_max_cost: f64,
     ) -> Self {
         Self {
             catalog,
@@ -40,6 +47,9 @@ impl SkillInvocationToolExecutor {
             call_stack,
             max_depth,
             cancel_token,
+            cost_accumulator,
+            parent_tool_context,
+            parent_max_cost,
         }
     }
 
@@ -71,6 +81,21 @@ impl SkillInvocationToolExecutor {
             return Err(format!(
                 "Circular skill invocation detected: '{}' already in call stack {:?}",
                 skill_id, self.call_stack
+            ));
+        }
+
+        // Skill stack depth guard (from parent ToolContext)
+        let skill_stack = self
+            .parent_tool_context
+            .as_ref()
+            .map(|c| c.skill_stack.clone())
+            .unwrap_or_default();
+        if skill_stack.len() >= MAX_SKILL_STACK_DEPTH {
+            return Err(format!(
+                "skill invocation depth {} exceeds max {} — possible cycle: {}",
+                skill_stack.len(),
+                MAX_SKILL_STACK_DEPTH,
+                skill_stack.join(" -> "),
             ));
         }
 
@@ -138,6 +163,41 @@ impl SkillInvocationToolExecutor {
             }
         }
 
+        // Compose tool constraints: parent's constraints bound the child
+        let parent_constraints = self
+            .parent_tool_context
+            .as_ref()
+            .and_then(|c| c.effective_constraints.clone())
+            .unwrap_or_default();
+
+        let child_requires: Vec<String> = skill_doc.frontmatter.requires_capabilities.clone();
+        let child_allow = if skill_doc.frontmatter.tools.allow.is_empty() {
+            None
+        } else {
+            Some(skill_doc.frontmatter.tools.allow.as_slice())
+        };
+        let child_constraints = compose_constraints(
+            &parent_constraints,
+            child_allow,
+            &skill_doc.frontmatter.tools.deny,
+            &child_requires,
+            skill_id,
+        )
+        .map_err(|e| {
+            let stack_str = skill_stack.join(" -> ");
+            tracing::warn!(
+                skill_id = skill_id,
+                tool = %e.tool,
+                denied_by = %e.denied_by,
+                skill_stack = %stack_str,
+                "Constraint conflict in nested skill invocation"
+            );
+            format!("{} (skill stack: {})", e, stack_str)
+        })?;
+
+        // Filter tool definitions by composed constraints
+        tool_defs = filter_tools_by_constraints(&tool_defs, &child_constraints);
+
         // Build per-invocation registry clone with script tools and nested invoke_skill backends
         let needs_clone = !skill_doc.frontmatter.scripts.is_empty()
             || !skill_doc.frontmatter.depends_on.is_empty();
@@ -169,6 +229,9 @@ impl SkillInvocationToolExecutor {
                     child_stack,
                     self.max_depth,
                     self.cancel_token.clone(),
+                    self.cost_accumulator.clone(),
+                    self.parent_tool_context.clone(),
+                    self.parent_max_cost,
                 ));
                 for dep_id in &skill_doc.frontmatter.depends_on {
                     if self.catalog.get(dep_id).is_some() {
@@ -217,15 +280,44 @@ impl SkillInvocationToolExecutor {
             ChatMessage::user(query),
         ];
 
+        // Build child tool context: inherit parent's identity, push skill stack
+        let mut child_tool_ctx = self
+            .parent_tool_context
+            .as_ref()
+            .cloned()
+            .unwrap_or_default()
+            .with_skill_pushed(skill_id);
+        child_tool_ctx.effective_constraints = Some(child_constraints);
+
+        tracing::info!(
+            parent_skill = ?self.call_stack.last(),
+            child_skill = skill_id,
+            remaining_budget = %(self.parent_max_cost - self.cost_accumulator.as_ref().map_or(0.0, |a| a.total_usd())),
+            stack_depth = child_tool_ctx.skill_stack.len(),
+            "Nested skill invocation"
+        );
+
+        // Cost budget: pass remaining as child's max_cost
+        let cost_acc = self.cost_accumulator.clone().unwrap_or_default();
+        let remaining = (self.parent_max_cost - cost_acc.total_usd()).max(0.0);
+        if remaining <= 0.0 {
+            return Err(format!(
+                "budget exhausted (${:.4}/${:.2} spent) — cannot invoke skill '{}'",
+                cost_acc.total_usd(),
+                self.parent_max_cost,
+                skill_id
+            ));
+        }
+
         let mut config = LoopConfig {
             max_rounds: 10,
+            max_cost: remaining,
             ..LoopConfig::default()
         };
         config.event_bus = Some(self.bus.clone());
 
         // Build per-invocation sandbox so nested skills can execute tools
         let sandbox = SandboxManager::with_defaults(registry, self.bus.clone());
-        let tool_ctx = ToolContext::default();
 
         let result = run_agentic_loop_routed(
             self.router.as_ref(),
@@ -234,12 +326,14 @@ impl SkillInvocationToolExecutor {
             &config,
             Some(&sandbox),
             &format!("skill:{}", skill_id),
-            None,  // sandbox_policy
-            None,  // task_id
-            None,  // context_budget
+            None, // sandbox_policy
+            self.parent_tool_context
+                .as_ref()
+                .and_then(|c| c.task_id.as_deref()), // propagate task_id
+            None, // context_budget
             self.cancel_token.clone(),
-            Some(&tool_ctx),
-            None,
+            Some(&child_tool_ctx),
+            Some(cost_acc.clone()), // shared accumulator
         )
         .await;
 

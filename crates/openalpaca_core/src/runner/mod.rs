@@ -3,7 +3,8 @@ pub mod dag_executor;
 pub mod lead_agent;
 
 pub use agentic_loop::{
-    LoopConfig, LoopFinishReason, LoopResult, run_agentic_loop, run_agentic_loop_routed,
+    LoopConfig, LoopCostAccumulator, LoopFinishReason, LoopResult, run_agentic_loop,
+    run_agentic_loop_routed,
 };
 pub(crate) use agentic_loop::{compress_context, estimate_messages_tokens};
 pub use dag_executor::{
