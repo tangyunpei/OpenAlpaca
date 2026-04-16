@@ -234,6 +234,7 @@ impl BuiltInTool for SpawnSubagentTool {
             owner_id: Some(self.created_by.clone()),
             workspace_id: self.workspace_id.clone(),
             skill_stack: vec![],
+            effective_constraints: None,
         };
         let mut sandbox = SandboxManager::with_defaults(self.tool_registry.clone(), self.bus.clone());
         if let Some(ref broker) = self.confirmation_broker {

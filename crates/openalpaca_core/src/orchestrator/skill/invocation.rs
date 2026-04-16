@@ -446,6 +446,7 @@ impl Orchestrator {
                 owner_id: owner_id.map(|s| s.to_string()),
                 workspace_id: scope_ctx.workspace_id.clone(),
                 skill_stack: vec![],
+                effective_constraints: None,
             };
             let needs_clone = !skill_doc.frontmatter.scripts.is_empty()
                 || !skill_doc.frontmatter.depends_on.is_empty();

@@ -546,6 +546,7 @@ async fn test_execute_with_context_defaults_to_execute() {
         owner_id: None,
         workspace_id: None,
         skill_stack: vec![],
+        effective_constraints: None,
     };
     let args = serde_json::json!({"key": "value"});
     let result = tool.execute_with_context(&args, &ctx).await.unwrap();
@@ -837,6 +838,7 @@ fn test_tool_context_push_skill() {
         owner_id: Some("owner-1".into()),
         workspace_id: Some("ws-1".into()),
         skill_stack: vec![],
+        effective_constraints: None,
     };
     let child = ctx.with_skill_pushed("skill-A");
 

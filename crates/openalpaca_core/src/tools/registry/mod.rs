@@ -4,6 +4,8 @@ use openalpaca_llm::ToolDefinition;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::orchestrator::skill::constraints::EffectiveToolSet;
+
 /// Per-invocation execution context passed to tools that need identity.
 /// Lightweight — no Arc deps, no DB handles. Just identity strings.
 #[derive(Debug, Clone, Default)]
@@ -14,6 +16,9 @@ pub struct ToolContext {
     pub workspace_id: Option<String>,
     /// Skill invocation chain, oldest first. Empty at top level.
     pub skill_stack: Vec<String>,
+    /// Effective tool constraints inherited from parent skill chain.
+    /// None at top level; Some when inside a nested skill invocation.
+    pub effective_constraints: Option<EffectiveToolSet>,
 }
 
 impl ToolContext {

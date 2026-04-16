@@ -99,6 +99,7 @@ pub(super) async fn execute_pipeline_step(
         owner_id: Some(pctx.created_by.clone()),
         workspace_id: pctx.workspace_id.clone(),
         skill_stack: vec![],
+        effective_constraints: None,
     };
     let mut per_request_sandbox =
         SandboxManager::with_defaults(pctx.tool_registry.clone(), pctx.bus.clone());

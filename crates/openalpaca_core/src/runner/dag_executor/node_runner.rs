@@ -32,6 +32,7 @@ pub(super) async fn execute_single_node(
         owner_id: Some(created_by.clone()),
         workspace_id,
         skill_stack: vec![],
+        effective_constraints: None,
     };
     let mut per_request_sandbox = SandboxManager::with_defaults(tool_registry.clone(), bus.clone());
     if let Some(broker) = confirmation_broker {
