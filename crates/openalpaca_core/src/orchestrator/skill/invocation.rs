@@ -445,7 +445,7 @@ impl Orchestrator {
                 task_id: None,
                 owner_id: owner_id.map(|s| s.to_string()),
                 workspace_id: scope_ctx.workspace_id.clone(),
-                skill_stack: vec![],
+                skill_stack: vec![skill_name.to_string()],
                 effective_constraints: None,
             };
             let needs_clone = !skill_doc.frontmatter.scripts.is_empty()
