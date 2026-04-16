@@ -647,6 +647,7 @@ pub(super) async fn execute_pipeline_step(
         Some(&context_budget),
         Some(pctx.cancel_token.clone()),
         Some(&tool_ctx),
+        None,
     )
     .await;
 

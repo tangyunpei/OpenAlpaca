@@ -239,6 +239,7 @@ impl SkillInvocationToolExecutor {
             None,  // context_budget
             self.cancel_token.clone(),
             Some(&tool_ctx),
+            None,
         )
         .await;
 

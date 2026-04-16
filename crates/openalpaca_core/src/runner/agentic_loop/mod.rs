@@ -129,6 +129,7 @@ pub async fn run_agentic_loop(
         context_budget,
         cancel_token,
         tool_context,
+        None,
     )
     .await
 }
@@ -147,6 +148,7 @@ pub async fn run_agentic_loop_routed(
     context_budget: Option<&crate::context_budget::ContextBudgetManager>,
     cancel_token: Option<CancellationToken>,
     tool_context: Option<&ToolContext>,
+    cost_accumulator: Option<LoopCostAccumulator>,
 ) -> LoopResult {
     let context = RequestContext {
         agent_id: Some(agent_id.to_string()),
@@ -163,6 +165,7 @@ pub async fn run_agentic_loop_routed(
         context_budget,
         cancel_token,
         tool_context,
+        cost_accumulator,
     )
     .await
 }
@@ -180,8 +183,10 @@ async fn run_agentic_loop_inner(
     context_budget: Option<&crate::context_budget::ContextBudgetManager>,
     cancel_token: Option<CancellationToken>,
     tool_context: Option<&ToolContext>,
+    cost_accumulator: Option<LoopCostAccumulator>,
 ) -> LoopResult {
     let mut state = LoopState::new();
+    let cost_acc = cost_accumulator.unwrap_or_default();
     let mut messages: Arc<Vec<ChatMessage>> = Arc::new(initial_messages);
     let tools_arc = Arc::new(tools);
     let mut known_token_count: u32 = estimate_messages_tokens(&messages);
@@ -250,8 +255,13 @@ async fn run_agentic_loop_inner(
         }
 
         // ── 3. Cost check (CostTracker for Router, local estimate for Direct) ──
-        let accumulated_cost = backend.task_cost(state.total_input, state.total_output).await;
-        state.last_cost = accumulated_cost;
+        let round_cost = backend.task_cost(state.total_input, state.total_output).await;
+        let cost_delta = (round_cost - state.last_cost).max(0.0);
+        if cost_delta > 0.0 {
+            cost_acc.add_usd(cost_delta);
+        }
+        state.last_cost = round_cost;
+        let accumulated_cost = cost_acc.total_usd();
         let cost_ratio = accumulated_cost / config.max_cost;
         if cost_ratio >= 0.8 && !state.cost_warning_emitted {
             state.cost_warning_emitted = true;

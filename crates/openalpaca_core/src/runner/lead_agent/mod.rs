@@ -401,6 +401,7 @@ pub async fn run_lead_agent(
         Some(&context_budget),
         cancel_token,
         Some(&tool_ctx),
+        None,
     )
     .await;
 

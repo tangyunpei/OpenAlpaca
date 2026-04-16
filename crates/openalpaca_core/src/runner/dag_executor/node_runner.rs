@@ -224,6 +224,7 @@ pub(super) async fn execute_single_node(
         Some(&context_budget),
         cancel_token,
         Some(&tool_ctx),
+        None,
     )
     .await;
 

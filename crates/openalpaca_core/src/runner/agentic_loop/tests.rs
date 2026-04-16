@@ -1025,6 +1025,7 @@ async fn test_agentic_loop_routed_completes() {
         None,    // context_budget
         None,    // cancel_token
         None,    // tool_context
+        None,    // cost_accumulator
     )
     .await;
 
@@ -1102,6 +1103,7 @@ async fn test_agentic_loop_routed_with_tool_calls() {
         None,
         None,
         None,
+        None, // cost_accumulator
     )
     .await;
 
@@ -1162,6 +1164,7 @@ async fn test_agentic_loop_routed_respects_max_rounds() {
         None,
         None,
         None,
+        None, // cost_accumulator
     )
     .await;
 

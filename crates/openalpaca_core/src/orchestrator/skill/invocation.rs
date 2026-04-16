@@ -537,6 +537,7 @@ impl Orchestrator {
                 Some(&budget), // context_budget
                 None,          // cancel_token — interactive skill calls are not cancellable
                 Some(&tool_ctx),
+                None,
             )
             .await;
             let latency_ms = call_start.elapsed().as_millis() as i64;

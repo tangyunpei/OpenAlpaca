@@ -361,6 +361,7 @@ impl BuiltInTool for SpawnSubagentTool {
                 None, // context_budget
                 child_token,
                 Some(&subagent_tool_ctx),
+                None,
             )
             .await;
 
