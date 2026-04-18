@@ -338,3 +338,333 @@ async fn test_confirmation_timeout() {
         err
     );
 }
+
+// ---------- Task 9: annotation-derived confirmation + approval cache ----------
+
+/// Build a registry that also has a tool with `destructive_hint=true`.
+fn make_registry_with_destructive() -> Arc<ToolRegistry> {
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "destructive_test".to_string(),
+                description: "destructive test tool".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: Some(openalpaca_mcp::ToolAnnotations {
+                destructive_hint: Some(true),
+                ..Default::default()
+            }),
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    // A non-destructive peer so we can verify selectivity.
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "safe_peer".to_string(),
+                description: "safe peer tool".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: Some(openalpaca_mcp::ToolAnnotations {
+                destructive_hint: Some(false),
+                ..Default::default()
+            }),
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    Arc::new(registry)
+}
+
+#[tokio::test]
+async fn annotation_derived_confirmation_prompts() {
+    use crate::security::confirmation::ApprovalScope;
+
+    let registry = make_registry_with_destructive();
+    let broker = Arc::new(ConfirmationBroker::new());
+    let mut sandbox = SandboxManager::new(
+        registry.clone(),
+        EventBus::default(),
+        &CircuitBreakerConfig::default(),
+    );
+    sandbox.set_confirmation_broker(broker.clone());
+
+    // Empty require_confirmation_for — should derive from annotations.
+    let policy = make_policy("agent1");
+    let tc = make_tool_call("destructive_test");
+    let ctx = make_ctx("agent1");
+
+    let sandbox = Arc::new(sandbox);
+    let sandbox_task = Arc::clone(&sandbox);
+    let exec_task = tokio::spawn(async move {
+        sandbox_task.execute_tool(&tc, &policy, &ctx).await
+    });
+
+    // Wait for broker to have a pending request.
+    let mut attempts = 0;
+    while broker.pending_count() == 0 && attempts < 50 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        attempts += 1;
+    }
+    assert!(
+        broker.pending_count() > 0,
+        "Broker should have received a request derived from destructive_hint annotation"
+    );
+
+    // Respond with approval + explicit TheseArgs scope.
+    let keys: Vec<String> = broker.pending_keys();
+    let req_id = keys.first().cloned().unwrap();
+    broker
+        .respond(
+            &req_id,
+            ConfirmationResponse {
+                approved: true,
+                approval_scope: Some(ApprovalScope::TheseArgs),
+            },
+        )
+        .unwrap();
+
+    let result = exec_task.await.unwrap();
+    assert!(result.is_ok(), "Tool should have executed: {result:?}");
+}
+
+#[tokio::test]
+async fn explicit_policy_overrides_annotations() {
+    // Tool has destructive_hint=true, but policy lists an *unrelated* tool in
+    // require_confirmation_for. Per Q1(C), the explicit policy wins — the
+    // destructive tool must NOT prompt.
+    let registry = make_registry_with_destructive();
+    let broker = Arc::new(ConfirmationBroker::new());
+    let mut sandbox = SandboxManager::new(
+        registry.clone(),
+        EventBus::default(),
+        &CircuitBreakerConfig::default(),
+    );
+    sandbox.set_confirmation_broker(broker.clone());
+
+    let mut policy = make_policy("agent1");
+    policy.require_confirmation_for = vec!["unrelated_tool".to_string()];
+
+    let tc = make_tool_call("destructive_test");
+    let ctx = make_ctx("agent1");
+
+    let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
+    assert!(
+        result.is_ok(),
+        "Execution should succeed without any prompt: {result:?}"
+    );
+    assert_eq!(
+        broker.pending_count(),
+        0,
+        "Broker must not receive a request when explicit policy excludes this tool"
+    );
+}
+
+#[tokio::test]
+async fn sandbox_cached_approval_skips_broker() {
+    use crate::security::confirmation::{hash_canonical_args, ApprovalScope};
+
+    let registry = make_registry_with_destructive();
+    let broker = Arc::new(ConfirmationBroker::new());
+    let mut sandbox = SandboxManager::new(
+        registry.clone(),
+        EventBus::default(),
+        &CircuitBreakerConfig::default(),
+    );
+    sandbox.set_confirmation_broker(broker.clone());
+
+    let tc = make_tool_call("destructive_test");
+    let ctx = make_ctx("agent1");
+    let policy = make_policy("agent1"); // empty require_confirmation_for → annotation-derived
+
+    // Pre-populate the cache: these exact args under TheseArgs.
+    let args_hash = hash_canonical_args(&tc.arguments);
+    sandbox
+        .approval_cache()
+        .record("destructive_test", args_hash, ApprovalScope::TheseArgs);
+
+    let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
+    assert!(
+        result.is_ok(),
+        "Cached approval should allow execution: {result:?}"
+    );
+    assert_eq!(
+        broker.pending_count(),
+        0,
+        "Broker must not receive a request when the invocation is cached"
+    );
+}
+
+#[tokio::test]
+async fn sandbox_records_on_user_approval() {
+    use crate::security::confirmation::{hash_canonical_args, ApprovalScope};
+
+    let registry = make_registry_with_destructive();
+    let broker = Arc::new(ConfirmationBroker::new());
+    let mut sandbox = SandboxManager::new(
+        registry.clone(),
+        EventBus::default(),
+        &CircuitBreakerConfig::default(),
+    );
+    sandbox.set_confirmation_broker(broker.clone());
+
+    let policy = make_policy("agent1");
+    let tc = make_tool_call("destructive_test");
+    let ctx = make_ctx("agent1");
+    let args_hash = hash_canonical_args(&tc.arguments);
+
+    let sandbox = Arc::new(sandbox);
+    let sandbox_task = Arc::clone(&sandbox);
+    let exec_task = tokio::spawn(async move {
+        sandbox_task.execute_tool(&tc, &policy, &ctx).await
+    });
+
+    // Wait for broker, then approve with TheseArgs scope.
+    let mut attempts = 0;
+    while broker.pending_count() == 0 && attempts < 50 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        attempts += 1;
+    }
+    let keys: Vec<String> = broker.pending_keys();
+    let req_id = keys.first().cloned().unwrap();
+    broker
+        .respond(
+            &req_id,
+            ConfirmationResponse {
+                approved: true,
+                approval_scope: Some(ApprovalScope::TheseArgs),
+            },
+        )
+        .unwrap();
+
+    let result = exec_task.await.unwrap();
+    assert!(result.is_ok(), "Tool should execute after approval: {result:?}");
+
+    // Cache should now have the (tool, args_hash) entry.
+    assert!(
+        sandbox.approval_cache().is_approved("destructive_test", args_hash),
+        "Approval cache should contain the approved invocation"
+    );
+}
+
+#[tokio::test]
+async fn sandbox_denial_does_not_record() {
+    use crate::security::confirmation::hash_canonical_args;
+
+    let registry = make_registry_with_destructive();
+    let broker = Arc::new(ConfirmationBroker::new());
+    let mut sandbox = SandboxManager::new(
+        registry.clone(),
+        EventBus::default(),
+        &CircuitBreakerConfig::default(),
+    );
+    sandbox.set_confirmation_broker(broker.clone());
+
+    let policy = make_policy("agent1");
+    let tc = make_tool_call("destructive_test");
+    let ctx = make_ctx("agent1");
+    let args_hash = hash_canonical_args(&tc.arguments);
+
+    let sandbox = Arc::new(sandbox);
+    let sandbox_task = Arc::clone(&sandbox);
+    let exec_task = tokio::spawn(async move {
+        sandbox_task.execute_tool(&tc, &policy, &ctx).await
+    });
+
+    let mut attempts = 0;
+    while broker.pending_count() == 0 && attempts < 50 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        attempts += 1;
+    }
+    let keys: Vec<String> = broker.pending_keys();
+    let req_id = keys.first().cloned().unwrap();
+    broker
+        .respond(
+            &req_id,
+            ConfirmationResponse {
+                approved: false,
+                approval_scope: None,
+            },
+        )
+        .unwrap();
+
+    let result = exec_task.await.unwrap();
+    assert!(result.is_err(), "Denied tool should fail");
+    assert!(
+        !sandbox.approval_cache().is_approved("destructive_test", args_hash),
+        "Denial must not populate the approval cache"
+    );
+}
+
+#[tokio::test]
+async fn sandbox_default_scope_when_response_missing_scope() {
+    use crate::security::confirmation::hash_canonical_args;
+
+    let registry = make_registry_with_destructive();
+    let broker = Arc::new(ConfirmationBroker::new());
+    let mut sandbox = SandboxManager::new(
+        registry.clone(),
+        EventBus::default(),
+        &CircuitBreakerConfig::default(),
+    );
+    sandbox.set_confirmation_broker(broker.clone());
+
+    let policy = make_policy("agent1");
+    let tc = make_tool_call("destructive_test");
+    let ctx = make_ctx("agent1");
+    let args_hash = hash_canonical_args(&tc.arguments);
+
+    let sandbox = Arc::new(sandbox);
+    let sandbox_task = Arc::clone(&sandbox);
+    let exec_task = tokio::spawn(async move {
+        sandbox_task.execute_tool(&tc, &policy, &ctx).await
+    });
+
+    let mut attempts = 0;
+    while broker.pending_count() == 0 && attempts < 50 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        attempts += 1;
+    }
+    let keys: Vec<String> = broker.pending_keys();
+    let req_id = keys.first().cloned().unwrap();
+    // approved=true but scope omitted — should default to TheseArgs (per-args entry).
+    broker
+        .respond(
+            &req_id,
+            ConfirmationResponse {
+                approved: true,
+                approval_scope: None,
+            },
+        )
+        .unwrap();
+
+    let result = exec_task.await.unwrap();
+    assert!(result.is_ok(), "Approval should allow execution: {result:?}");
+
+    // Exact args must be approved (TheseArgs default).
+    assert!(
+        sandbox.approval_cache().is_approved("destructive_test", args_hash),
+        "Default scope should produce a TheseArgs cache entry"
+    );
+    // Different args must NOT match (proves TheseArgs was used, not EntireTool).
+    assert!(
+        !sandbox
+            .approval_cache()
+            .is_approved("destructive_test", args_hash.wrapping_add(1)),
+        "Default TheseArgs scope must not behave like EntireTool"
+    );
+}

@@ -550,7 +550,14 @@ async fn test_pipeline_non_singleton_workspace_artifact_count() {
     // ── 3. Dispatcher with DB + router ───────────────────────────────
     let ctx = std::sync::Arc::new(crate::context::SharedContext::new());
     // Non-singleton agent (template_from_agent marks non-lead agents as singleton=false)
-    let agent = make_agent("researcher", vec!["web_search"]);
+    // Set a non-empty require_confirmation_for (unrelated tool) so the explicit
+    // policy wins over the annotation-derived confirmation set. Otherwise
+    // `workspace_write` — marked destructive_hint=true — would fail-closed in
+    // this non-interactive end-to-end test.
+    let mut agent = make_agent("researcher", vec!["web_search"]);
+    agent
+        .constraints
+        .require_confirmation_for = vec!["__noop_sentinel".to_string()];
     ctx.agent_registry
         .register_template(template_from_agent(&agent));
     // Register instance for skill matching (list_idle)

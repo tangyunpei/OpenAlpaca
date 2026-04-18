@@ -66,6 +66,10 @@ pub struct SandboxManager {
     /// When present, tools in `require_confirmation_for` pause and await user approval.
     /// When absent, those tools are fail-closed (blocked immediately).
     confirmation_broker: Option<Arc<ConfirmationBroker>>,
+    /// Session-scoped approval cache. Invocations pre-approved by the user
+    /// (scoped to args or to the whole tool) bypass the confirmation prompt.
+    /// Cleared on daemon restart.
+    approval_cache: crate::security::confirmation::ApprovalCache,
 }
 
 impl SandboxManager {
@@ -82,6 +86,7 @@ impl SandboxManager {
             circuit_breaker,
             db: None,
             confirmation_broker: None,
+            approval_cache: crate::security::confirmation::ApprovalCache::new(),
         }
     }
 
@@ -99,6 +104,7 @@ impl SandboxManager {
             circuit_breaker,
             db: Some(db),
             confirmation_broker: None,
+            approval_cache: crate::security::confirmation::ApprovalCache::new(),
         }
     }
 
@@ -160,13 +166,24 @@ impl SandboxManager {
             return Err(violation.to_string());
         }
 
-        // 3. Confirmation check — auto-approved, interactive, or fail-closed.
-        if policy
-            .require_confirmation_for
-            .iter()
-            .any(|t| t == &tool_call.name)
-        {
-            if policy.auto_approve {
+        // 3. Confirmation check — driven by effective set (annotations or policy).
+        //    An explicit non-empty `require_confirmation_for` wins over annotation
+        //    hints; otherwise we derive the set from `destructive_hint=true` tools.
+        let args_hash = crate::security::confirmation::hash_canonical_args(&tool_call.arguments);
+        let confirmation_set = effective_confirmation_set(policy, &self.registry);
+
+        if confirmation_set.iter().any(|t| t == &tool_call.name) {
+            // Check the approval cache first — a prior user approval (this session)
+            // can bypass the prompt when scoped to these args or the whole tool.
+            if self.approval_cache.is_approved(&tool_call.name, args_hash) {
+                tracing::debug!(
+                    agent_id,
+                    tool = %tool_call.name,
+                    args_hash,
+                    "Invocation pre-approved (cache hit)"
+                );
+                // Fall through to circuit breaker + execution.
+            } else if policy.auto_approve {
                 tracing::info!(
                     agent_id,
                     tool = %tool_call.name,
@@ -228,6 +245,13 @@ impl SandboxManager {
                 match tokio::time::timeout(timeout, rx).await {
                     Ok(Ok(resp)) if resp.approved => {
                         tracing::info!(agent_id, tool = %tool_call.name, "Tool approved by user");
+                        // Record the approval so subsequent invocations skip the prompt.
+                        // Default to TheseArgs (safest) when the caller omits a scope.
+                        let scope = resp.approval_scope.unwrap_or(
+                            crate::security::confirmation::ApprovalScope::TheseArgs,
+                        );
+                        self.approval_cache
+                            .record(&tool_call.name, args_hash, scope);
                         // Fall through to circuit breaker + execution
                     }
                     Ok(Ok(_)) => {
@@ -361,6 +385,37 @@ impl SandboxManager {
             timestamp: Utc::now(),
         });
     }
+
+    /// Access the session-scoped approval cache (tests only).
+    #[cfg(test)]
+    pub(crate) fn approval_cache(&self) -> &crate::security::confirmation::ApprovalCache {
+        &self.approval_cache
+    }
+}
+
+/// Compute the effective confirmation set for a policy.
+///
+/// - If `policy.require_confirmation_for` is non-empty, return it verbatim
+///   (explicit list wins per design spec Q1(C)).
+/// - Otherwise, derive from `destructive_hint=true` annotations on registered tools.
+pub(crate) fn effective_confirmation_set(
+    policy: &SandboxPolicy,
+    registry: &crate::tools::ToolRegistry,
+) -> Vec<String> {
+    if !policy.require_confirmation_for.is_empty() {
+        return policy.require_confirmation_for.clone();
+    }
+    registry
+        .iter_registered_tools()
+        .filter_map(|(name, reg)| {
+            let destructive = reg
+                .annotations
+                .as_ref()
+                .and_then(|a| a.destructive_hint)
+                .unwrap_or(false);
+            destructive.then(|| name.clone())
+        })
+        .collect()
 }
 
 #[cfg(test)]
