@@ -444,10 +444,12 @@ impl ToolRegistry {
                 for name in names.value() {
                     if seen.insert(name.clone()) {
                         if let Some(tool) = self.tools.get(name) {
-                            let has_denied = tool
-                                .provides_capabilities
-                                .iter()
-                                .any(|c| denied.contains(c));
+                            // Full capability set = string caps + virtual caps from all providers.
+                            let mut all_caps: Vec<String> = tool.provides_capabilities.clone();
+                            for provider in &self.capability_providers {
+                                all_caps.extend(provider.derive_capabilities(tool.value()));
+                            }
+                            let has_denied = all_caps.iter().any(|c| denied.contains(c));
                             if !has_denied {
                                 result.push(tool.definition.clone());
                             }
