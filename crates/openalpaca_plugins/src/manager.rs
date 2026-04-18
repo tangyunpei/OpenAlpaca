@@ -700,8 +700,8 @@ impl PluginManager {
                 provides_capabilities: manifest.capabilities.provides.clone(),
                 exempt_from_timeout: false,
                 annotations: None,
-                version: "0.0.0".to_string(),
-                author: format!("plugin:{}", plugin_name),
+                version: manifest.plugin.version.clone(),
+                author: format!("plugin:{}", manifest.plugin.name),
                 created_at: chrono::Utc::now(),
             };
 
