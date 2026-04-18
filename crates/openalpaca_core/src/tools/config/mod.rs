@@ -1,7 +1,9 @@
 pub mod annotations;
 pub use annotations::ToolAnnotationsConfig;
 
-use super::registry::{RegisteredTool, ToolBackend};
+use super::registry::{
+    validate_annotation_capability, RegisteredTool, ToolBackend, ANNOTATION_CAPABILITY_NAMES,
+};
 use openalpaca_llm::ToolDefinition;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -68,6 +70,15 @@ pub fn load_tools_from_file(path: &Path) -> Result<Vec<RegisteredTool>, String> 
         // Validate tool name is non-empty
         if tc.name.trim().is_empty() {
             return Err(format!("Tool in {} has empty name", path.display()));
+        }
+
+        // Validate any annotation: capabilities against the 8 known names.
+        // Non-prefixed capabilities pass through untouched. Custom providers
+        // registered at runtime are intentionally not considered here — TOML
+        // load time only knows the built-in names.
+        for cap in &tc.provides_capabilities {
+            validate_annotation_capability(cap, ANNOTATION_CAPABILITY_NAMES)
+                .map_err(|e| format!("{}: provides_capabilities: {e}", path.display()))?;
         }
 
         let backend = match tc.backend {

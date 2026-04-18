@@ -283,3 +283,47 @@ fn toml_with_annotations_block_populates() {
     assert_eq!(ann.read_only_hint, None);
     assert_eq!(ann.idempotent_hint, None);
 }
+
+// --- P3b Task 8: annotation capability validation in provides_capabilities ---
+
+#[test]
+fn toml_with_invalid_annotation_in_provides_capabilities_fails() {
+    let toml = r#"
+        [[tools]]
+        name = "my_tool"
+        description = "test"
+        parameters = { type = "object" }
+        provides_capabilities = ["annotation:redaonly"]
+        [tools.backend]
+        type = "http"
+        url = "https://example.com/"
+    "#;
+    let tmp = write_temp(toml);
+    let result = load_tools_from_file(tmp.path());
+    let err = match result {
+        Ok(_) => panic!("expected Err, got Ok"),
+        Err(e) => e,
+    };
+    assert!(err.contains("unknown annotation capability"));
+    assert!(err.contains("annotation:redaonly"));
+}
+
+#[test]
+fn toml_with_valid_annotation_in_provides_capabilities_loads() {
+    let toml = r#"
+        [[tools]]
+        name = "my_tool"
+        description = "test"
+        parameters = { type = "object" }
+        provides_capabilities = ["annotation:readonly"]
+        [tools.backend]
+        type = "http"
+        url = "https://example.com/"
+    "#;
+    let tmp = write_temp(toml);
+    let tools = load_tools_from_file(tmp.path()).unwrap();
+    assert_eq!(tools.len(), 1);
+    assert!(tools[0]
+        .provides_capabilities
+        .contains(&"annotation:readonly".to_string()));
+}
