@@ -4362,6 +4362,7 @@ dependencies = [
  "openalpaca_connectors",
  "openalpaca_core",
  "openalpaca_llm",
+ "openalpaca_mcp",
  "openalpaca_plugins",
  "openalpaca_storage",
  "openalpaca_wake",

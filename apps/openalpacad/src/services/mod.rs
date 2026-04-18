@@ -2,6 +2,7 @@
 
 mod agents;
 mod llm;
+mod mcp;
 mod tools;
 
 pub use llm::{flush_cost_tracker, restore_cost_tracker};

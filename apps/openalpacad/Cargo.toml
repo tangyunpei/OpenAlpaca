@@ -26,6 +26,7 @@ openalpaca_connectors = { workspace = true, features = ["telegram", "imessage", 
 openalpaca_api = { workspace = true }
 openalpaca_storage = { workspace = true }
 openalpaca_wake = { workspace = true }
+openalpaca_mcp = { path = "../../crates/openalpaca_mcp" }
 toml.workspace = true
 rand.workspace = true
 async-trait.workspace = true
