@@ -560,6 +560,7 @@ async fn async_main(
         web_search_config: svcs.web_search_config,
         confirmation_broker: Some(confirmation_broker),
         plugin_manager: Some(plugin_manager),
+        mcp_client_set: Arc::new(svcs.mcp_client_set),
     });
 
     let app = router::build_router(state);

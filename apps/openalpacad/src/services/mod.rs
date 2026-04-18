@@ -39,6 +39,8 @@ pub struct InitializedServices {
     /// Shared lock for the `send` tool's connector send provider.
     /// Populated post-construction in main.rs after the ConnectorSendBridge is created.
     pub connector_send_lock: ConnectorSendLock,
+    /// Holder for connected MCP clients. Owns Arc handles for daemon lifetime.
+    pub mcp_client_set: openalpaca_core::tools::mcp::McpClientSet,
 }
 
 /// Initialize all core services: agent templates, LLM router, tools, security, etc.
@@ -126,7 +128,7 @@ pub async fn initialize_services(
     let web_search_config = Arc::new(ArcSwap::from_pointee(web_search_cfg));
 
     // Build ToolRegistry
-    let (tool_registry, connector_send_lock, _mcp_client_set) = tools::build_tool_registry(
+    let (tool_registry, connector_send_lock, mcp_client_set) = tools::build_tool_registry(
         config_base_dir,
         db,
         &embedder,
@@ -194,5 +196,6 @@ pub async fn initialize_services(
         secret_store,
         web_search_config,
         connector_send_lock,
+        mcp_client_set,
     })
 }
