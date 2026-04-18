@@ -699,6 +699,7 @@ impl PluginManager {
                 backend: ToolBackend::Plugin(Arc::new(proxy)),
                 provides_capabilities: manifest.capabilities.provides.clone(),
                 exempt_from_timeout: false,
+                annotations: None,
             };
 
             match self.tool_registry.register(registered_tool) {
