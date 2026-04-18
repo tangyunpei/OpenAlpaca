@@ -822,6 +822,7 @@ pub fn register_coordination_tools(
         backend: ToolBackend::BuiltIn(spawn_tool),
         provides_capabilities: vec!["orchestration".to_string()],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
     if let (Some(batch), Some(def)) = (batch_spawn_tool, batch_def) {
         registry.register(RegisteredTool {
@@ -829,6 +830,7 @@ pub fn register_coordination_tools(
             backend: ToolBackend::BuiltIn(batch),
             provides_capabilities: vec!["orchestration".to_string()],
             exempt_from_timeout: false,
+            annotations: None,
         }).unwrap();
     }
     registry.register(RegisteredTool {
@@ -836,11 +838,13 @@ pub fn register_coordination_tools(
         backend: ToolBackend::BuiltIn(check_status_tool),
         provides_capabilities: vec!["orchestration".to_string()],
         exempt_from_timeout: true,
+        annotations: None,
     }).unwrap();
     registry.register(RegisteredTool {
         definition: wait_def,
         backend: ToolBackend::BuiltIn(wait_tool),
         provides_capabilities: vec!["orchestration".to_string()],
         exempt_from_timeout: true,
+        annotations: None,
     }).unwrap();
 }

@@ -242,6 +242,7 @@ impl SkillInvocationToolExecutor {
                         backend: ToolBackend::BuiltIn(Arc::new(tool)),
                         provides_capabilities: vec![],
                         exempt_from_timeout: false,
+                        annotations: None,
                     })?;
                 }
             }
@@ -288,6 +289,7 @@ impl SkillInvocationToolExecutor {
                             })),
                             provides_capabilities: vec![],
                             exempt_from_timeout: true,
+                            annotations: None,
                         })?;
                     }
                 }

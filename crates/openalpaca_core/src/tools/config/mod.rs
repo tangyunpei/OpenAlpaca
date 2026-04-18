@@ -114,6 +114,7 @@ pub fn load_tools_from_file(path: &Path) -> Result<Vec<RegisteredTool>, String> 
             backend,
             provides_capabilities: tc.provides_capabilities,
             exempt_from_timeout: false,
+            annotations: None,
         });
     }
 

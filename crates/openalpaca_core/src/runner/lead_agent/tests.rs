@@ -28,6 +28,7 @@ fn test_lead_agent_registry_contains_coordination_tools() {
         backend: ToolBackend::BuiltIn(Arc::new(NoopTool)),
         provides_capabilities: vec!["web_search".to_string()],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
 
     let tracker = Arc::new(SubagentTracker::new());
@@ -557,6 +558,7 @@ fn test_lead_agent_registry_exposes_command_backend_tools() {
         },
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
 
     let shell_tools = registry.command_backend_tool_names();

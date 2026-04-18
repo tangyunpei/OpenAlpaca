@@ -32,6 +32,7 @@ fn make_registry() -> Arc<ToolRegistry> {
         backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
     registry.register(RegisteredTool {
         definition: openalpaca_llm::ToolDefinition {
@@ -44,6 +45,7 @@ fn make_registry() -> Arc<ToolRegistry> {
         backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
     Arc::new(registry)
 }

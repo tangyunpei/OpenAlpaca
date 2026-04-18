@@ -262,6 +262,7 @@ pub fn builtin_tools(
             backend,
             provides_capabilities: cap,
             exempt_from_timeout: false,
+            annotations: None,
         });
     }
 

@@ -25,6 +25,7 @@ fn make_tool_with_caps(name: &str, caps: Vec<&str>) -> RegisteredTool {
         })),
         provides_capabilities: caps.into_iter().map(String::from).collect(),
         exempt_from_timeout: false,
+        annotations: None,
     }
 }
 
@@ -42,6 +43,7 @@ fn make_tool(name: &str, response: &str) -> RegisteredTool {
         })),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }
 }
 
@@ -121,6 +123,7 @@ fn test_command_backend_tool_names_returns_command_tools() {
         },
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
 
     let cmd_tools = registry.command_backend_tool_names();
@@ -148,6 +151,7 @@ async fn test_execute_http_ssrf_blocks_private_ip() {
         },
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
 
     let result = registry
@@ -179,6 +183,7 @@ async fn test_execute_http_ssrf_blocks_localhost() {
         },
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
 
     let result = registry.execute("local_api", &serde_json::json!({})).await;
@@ -216,6 +221,7 @@ async fn test_http_unsubstituted_placeholder_detected() {
         },
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
 
     // Only provide "city" but not "units" — {units} should be detected
@@ -261,6 +267,7 @@ async fn test_http_all_placeholders_substituted_passes() {
         },
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
 
     // This will pass placeholder check but fail on the actual HTTP request
@@ -302,6 +309,7 @@ async fn test_schema_missing_required_field() {
         })),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
 
     let result = registry.execute("search", &serde_json::json!({})).await;
@@ -337,6 +345,7 @@ async fn test_schema_wrong_type() {
         })),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
 
     // limit should be integer, but we pass a string
@@ -378,6 +387,7 @@ async fn test_schema_valid_args_pass() {
         })),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
 
     let result = registry
@@ -403,6 +413,7 @@ async fn test_schema_non_object_args_rejected() {
         })),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
 
     let result = registry
@@ -439,6 +450,7 @@ async fn test_command_unsubstituted_placeholder_detected() {
         },
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
 
     // Only provide "count" but not "branch" — {branch} should be detected
@@ -483,6 +495,7 @@ async fn test_command_all_placeholders_substituted_runs() {
         },
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
 
     let result = registry
@@ -511,6 +524,7 @@ async fn test_registry_execute_with_context_routes_to_builtin() {
         })),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }).unwrap();
 
     let ctx = super::ToolContext::default();
@@ -772,6 +786,7 @@ async fn test_concurrent_register_and_execute() {
                 })),
                 provides_capabilities: vec![],
                 exempt_from_timeout: false,
+                annotations: None,
             };
             let _ = reg.register(tool);
         }));
@@ -887,6 +902,7 @@ fn make_tool_with_name(name: &str) -> RegisteredTool {
         })),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
+        annotations: None,
     }
 }
 
@@ -920,6 +936,7 @@ async fn test_plugin_backend_execution() {
             backend: ToolBackend::Plugin(Arc::new(MockPluginExecutor)),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
+            annotations: None,
         })
         .unwrap();
 
@@ -966,6 +983,7 @@ async fn test_unknown_type_rejected_via_validation() {
             })),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
+            annotations: None,
         })
         .unwrap();
 
@@ -1006,6 +1024,7 @@ async fn test_enum_validation_valid_value() {
             })),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
+            annotations: None,
         })
         .unwrap();
 
@@ -1039,6 +1058,7 @@ async fn test_enum_validation_invalid_value() {
             })),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
+            annotations: None,
         })
         .unwrap();
 

@@ -46,6 +46,11 @@ pub enum ToolBackend {
         timeout_secs: u64,
     },
     Plugin(Arc<dyn openalpaca_api::plugin_traits::PluginToolExecutor>),
+    Mcp {
+        client: Arc<openalpaca_mcp::McpClient>,
+        remote_name: String,
+        server_name: String,
+    },
 }
 
 /// Trait for built-in tool implementations.
@@ -73,6 +78,10 @@ pub struct RegisteredTool {
     /// When true, SandboxManager skips the per-tool timeout for this tool.
     /// Used for coordination tools that manage their own timeouts.
     pub exempt_from_timeout: bool,
+    /// MCP tool annotations (destructiveHint, idempotentHint, etc.).
+    /// Populated for tools registered from MCP servers; `None` otherwise in P2.
+    /// P3 may populate for built-ins as part of destructive-tool enforcement.
+    pub annotations: Option<openalpaca_mcp::ToolAnnotations>,
 }
 
 /// Central registry mapping tool names to definitions and execution backends.
@@ -223,6 +232,10 @@ impl ToolRegistry {
                 timeout_secs,
             } => execute_command(command, args_template.as_deref(), *timeout_secs, arguments).await,
             ToolBackend::Plugin(executor) => executor.execute(tool_name, arguments).await,
+            ToolBackend::Mcp { .. } => {
+                // Real dispatch added in Task 6.
+                Err("MCP tool dispatch not yet wired (Task 6 of MCP P2)".to_string())
+            }
         }
     }
 
@@ -251,7 +264,10 @@ impl ToolRegistry {
             ToolBackend::BuiltIn(implementation) => {
                 implementation.execute_with_context(arguments, ctx).await
             }
-            ToolBackend::Http { .. } | ToolBackend::Command { .. } | ToolBackend::Plugin(_) => {
+            ToolBackend::Http { .. }
+            | ToolBackend::Command { .. }
+            | ToolBackend::Plugin(_)
+            | ToolBackend::Mcp { .. } => {
                 tracing::trace!(
                     tool_name,
                     agent_id = ?ctx.agent_id,
@@ -348,7 +364,7 @@ impl ToolRegistry {
             .iter()
             .filter_map(|entry| match &entry.value().backend {
                 ToolBackend::Command { .. } => Some(entry.key().clone()),
-                ToolBackend::BuiltIn(_) | ToolBackend::Http { .. } | ToolBackend::Plugin(_) => None,
+                ToolBackend::BuiltIn(_) | ToolBackend::Http { .. } | ToolBackend::Plugin(_) | ToolBackend::Mcp { .. } => None,
             })
             .collect()
     }
