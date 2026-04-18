@@ -8,6 +8,7 @@ members = [
     "crates/openalpaca_platform_macos",
     "crates/openalpaca_connectors",
     "crates/openalpaca_llm",
+    "crates/openalpaca_mcp",
     "crates/openalpaca_plugins",
     "apps/openalpacad",
     "apps/openalpaca",

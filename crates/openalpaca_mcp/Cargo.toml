@@ -1,0 +1,31 @@
+[package]
+name = "openalpaca_mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Enables MockTransport for downstream test consumers (P2).
+test-utils = []
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["process"] }
+tokio-util.workspace = true
+reqwest.workspace = true
+url.workspace = true
+
+# MCP SDK. Confirm the exact feature flag names after running `cargo add rmcp`.
+# Expected features: "client", "transport-child-process", "transport-streamable-http-client-reqwest".
+rmcp = { version = "0.16", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
