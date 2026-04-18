@@ -9,4 +9,5 @@ pub mod client_set;
 pub mod config;
 
 // Re-exports are added incrementally as each submodule lands (Tasks 2, 3, 5).
+pub use client_set::{McpClientSet, McpServerStatus, McpServerSummary};
 pub use config::{HttpAuthConfig, LoadError, McpConfig, McpDefaults, McpServerConfig};
