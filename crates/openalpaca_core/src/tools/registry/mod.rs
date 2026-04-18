@@ -129,6 +129,7 @@ pub struct ToolRegistry {
     tools: DashMap<String, RegisteredTool>,
     capability_index: DashMap<String, Vec<String>>, // capability → tool names
     http_client: reqwest::Client,
+    capability_providers: Vec<Arc<dyn capabilities::CapabilityProvider>>,
 }
 
 impl Clone for ToolRegistry {
@@ -147,6 +148,7 @@ impl Clone for ToolRegistry {
             tools: new_tools,
             capability_index: new_cap_index,
             http_client: self.http_client.clone(),
+            capability_providers: self.capability_providers.clone(),
         }
     }
 }
@@ -179,6 +181,7 @@ impl ToolRegistry {
             tools: DashMap::new(),
             capability_index: DashMap::new(),
             http_client,
+            capability_providers: capabilities::default_capability_providers(),
         })
     }
 
