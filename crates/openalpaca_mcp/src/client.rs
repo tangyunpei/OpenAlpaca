@@ -474,8 +474,7 @@ mod tests {
         let err = client
             .call_tool("any", serde_json::json!([1, 2, 3]), None)
             .await
-            .err()
-            .expect("expected error");
+            .expect_err("expected error");
         assert!(
             matches!(err, McpError::InvalidArguments(_)),
             "expected InvalidArguments, got {err:?}"
@@ -501,7 +500,7 @@ mod tests {
         });
         let client = McpClient { inner };
 
-        let err = client.list_tools(None).await.err().expect("expected error");
+        let err = client.list_tools(None).await.expect_err("expected error");
         // Accept either: pre-Task-11 returns TransportClosed; post-Task-11 returns
         // ReconnectExhausted(0) because max_attempts=0 means "don't retry at all".
         assert!(
@@ -528,8 +527,7 @@ mod tests {
         let err = client
             .list_tools(Some(&token))
             .await
-            .err()
-            .expect("expected error");
+            .expect_err("expected error");
         // Either Cancelled (if select chose cancel first) or TransportClosed (if service check ran first).
         // Biased select should prefer Cancelled.
         assert!(
@@ -557,7 +555,7 @@ mod tests {
             client.list_prompts(None).await.map(|_| ()),
             client.get_prompt("x", serde_json::json!({}), None).await.map(|_| ()),
         ] {
-            let err = result.err().expect("expected error");
+            let err = result.expect_err("expected error");
             assert!(
                 matches!(err, McpError::ServerInternal(_)),
                 "expected ServerInternal, got {err:?}"
@@ -602,7 +600,7 @@ mod tests {
         // Attempt 2: also fails.
         let _ = client.reconnect().await;
         // Attempt 3: exceeds max=2, should return ReconnectExhausted.
-        let err = client.reconnect().await.err().expect("expected error");
+        let err = client.reconnect().await.expect_err("expected error");
         assert!(
             matches!(err, McpError::ReconnectExhausted(2)),
             "unexpected error: {err:?}"

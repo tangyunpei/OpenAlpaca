@@ -108,8 +108,7 @@ async fn filesystem_call_tool_cancellation_returns_cancelled() {
             Some(&token),
         )
         .await
-        .err()
-        .expect("expected error");
+        .expect_err("expected error");
 
     assert!(
         matches!(err, McpError::Cancelled),
