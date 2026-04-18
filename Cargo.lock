@@ -4193,6 +4193,7 @@ dependencies = [
  "infer 0.16.0",
  "openalpaca_api",
  "openalpaca_llm",
+ "openalpaca_mcp",
  "openalpaca_storage",
  "regex",
  "reqwest 0.13.2",

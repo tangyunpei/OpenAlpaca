@@ -1,5 +1,6 @@
 pub mod builtins;
 pub mod config;
+pub mod mcp;
 pub mod platform;
 pub mod registry;
 pub mod url_validation;

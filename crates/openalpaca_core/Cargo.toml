@@ -32,6 +32,7 @@ urlencoding.workspace = true
 shell-escape.workspace = true
 openalpaca_api.workspace = true
 openalpaca_llm.workspace = true
+openalpaca_mcp = { path = "../openalpaca_mcp" }
 openalpaca_storage.workspace = true
 
 [dev-dependencies]
