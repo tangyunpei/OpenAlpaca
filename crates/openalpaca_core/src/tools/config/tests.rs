@@ -211,3 +211,75 @@ url = "https://api.example.com/data"
         "Custom tool with safe name should not be rejected"
     );
 }
+
+// --- P3 Task 4: version/author/annotations in user TOML ---
+
+use std::io::Write;
+use tempfile::NamedTempFile;
+
+fn write_temp(contents: &str) -> NamedTempFile {
+    let mut f = NamedTempFile::new().unwrap();
+    write!(f, "{contents}").unwrap();
+    f
+}
+
+#[test]
+fn toml_defaults_applied_when_missing() {
+    let toml = r#"
+        [[tools]]
+        name = "my_tool"
+        description = "test"
+        parameters = { type = "object" }
+        [tools.backend]
+        type = "http"
+        url = "https://example.com/"
+    "#;
+    let tmp = write_temp(toml);
+    let tools = load_tools_from_file(tmp.path()).unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].version, "0.0.0");
+    assert_eq!(tools[0].author, "user");
+    assert!(tools[0].annotations.is_none());
+}
+
+#[test]
+fn toml_explicit_version_and_author_preserved() {
+    let toml = r#"
+        [[tools]]
+        name = "my_tool"
+        description = "test"
+        parameters = { type = "object" }
+        version = "1.2.3"
+        author = "alice@example.com"
+        [tools.backend]
+        type = "http"
+        url = "https://example.com/"
+    "#;
+    let tmp = write_temp(toml);
+    let tools = load_tools_from_file(tmp.path()).unwrap();
+    assert_eq!(tools[0].version, "1.2.3");
+    assert_eq!(tools[0].author, "alice@example.com");
+}
+
+#[test]
+fn toml_with_annotations_block_populates() {
+    let toml = r#"
+        [[tools]]
+        name = "my_risky"
+        description = "test"
+        parameters = { type = "object" }
+        [tools.backend]
+        type = "command"
+        command = "echo"
+        [tools.annotations]
+        destructive_hint = true
+        open_world_hint = true
+    "#;
+    let tmp = write_temp(toml);
+    let tools = load_tools_from_file(tmp.path()).unwrap();
+    let ann = tools[0].annotations.as_ref().unwrap();
+    assert_eq!(ann.destructive_hint, Some(true));
+    assert_eq!(ann.open_world_hint, Some(true));
+    assert_eq!(ann.read_only_hint, None);
+    assert_eq!(ann.idempotent_hint, None);
+}

@@ -1,3 +1,6 @@
+pub mod annotations;
+pub use annotations::ToolAnnotationsConfig;
+
 use super::registry::{RegisteredTool, ToolBackend};
 use openalpaca_llm::ToolDefinition;
 use serde::Deserialize;
@@ -18,6 +21,20 @@ pub struct ToolConfig {
     pub backend: ToolBackendConfig,
     #[serde(default)]
     pub provides_capabilities: Vec<String>,
+    // NEW P3 fields:
+    #[serde(default = "default_tool_version")]
+    pub version: String,
+    #[serde(default = "default_tool_author")]
+    pub author: String,
+    #[serde(default)]
+    pub annotations: Option<ToolAnnotationsConfig>,
+}
+
+fn default_tool_version() -> String {
+    "0.0.0".into()
+}
+fn default_tool_author() -> String {
+    "user".into()
 }
 
 #[derive(Deserialize)]
@@ -114,9 +131,9 @@ pub fn load_tools_from_file(path: &Path) -> Result<Vec<RegisteredTool>, String> 
             backend,
             provides_capabilities: tc.provides_capabilities,
             exempt_from_timeout: false,
-            annotations: None,
-            version: "0.0.0".to_string(),
-            author: "user".to_string(),
+            annotations: tc.annotations.map(|a| a.into_mcp_annotations()),
+            version: tc.version,
+            author: tc.author,
             created_at: chrono::Utc::now(),
         });
     }
