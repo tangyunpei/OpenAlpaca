@@ -6,6 +6,7 @@ use crate::error::McpError;
 
 /// Connection state for an [`crate::McpClient`]. Stored under a `RwLock` in the inner.
 #[derive(Debug)]
+#[allow(dead_code)] // fields exposed via Debug for observability; read via match in reconnect paths
 pub(crate) enum ConnectionState {
     Connecting,
     Connected,

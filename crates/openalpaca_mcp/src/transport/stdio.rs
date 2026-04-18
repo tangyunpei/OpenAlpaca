@@ -78,8 +78,7 @@ impl Transport for StdioTransport {
 
         let child = TokioChildProcess::new(cmd).map_err(|e| {
             // TokioChildProcess::new returns an io::Error on spawn failure.
-            McpError::Transport(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            McpError::Transport(std::io::Error::other(
                 format!("failed to spawn MCP server '{}': {e}", self.command),
             ))
         })?;

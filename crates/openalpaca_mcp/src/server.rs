@@ -12,6 +12,7 @@ pub struct McpServer {
     _private: (),
 }
 
+#[allow(clippy::new_without_default)]
 impl McpServer {
     /// Panics in P1. Implemented in Phase 4 of the MCP roadmap.
     pub fn new() -> Self {

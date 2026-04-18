@@ -98,8 +98,7 @@ impl Transport for StreamableHttpTransport {
             .default_headers(headers)
             .build()
             .map_err(|e| {
-                McpError::Transport(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                McpError::Transport(std::io::Error::other(
                     format!("reqwest client build failed: {e}"),
                 ))
             })?;
