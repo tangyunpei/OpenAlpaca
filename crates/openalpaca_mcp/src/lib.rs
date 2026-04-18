@@ -22,6 +22,6 @@ pub use transport::{HttpAuth, StdioTransport, Transport, TransportKind};
 
 // Re-exports from rmcp — data types pass through unchanged.
 pub use rmcp::model::{
-    CallToolResult, Implementation, Prompt, PromptMessage, ProtocolVersion, Resource,
-    ResourceContents, Tool, ToolAnnotations,
+    CallToolResult, Content, Implementation, Prompt, PromptMessage, ProtocolVersion, RawContent,
+    Resource, ResourceContents, Tool, ToolAnnotations,
 };
