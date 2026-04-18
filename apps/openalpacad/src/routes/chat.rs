@@ -465,6 +465,7 @@ pub async fn confirm_tool(
         &request_id,
         openalpaca_core::security::confirmation::ConfirmationResponse {
             approved: body.approved,
+            approval_scope: None,
         },
     ) {
         Ok(()) => StatusCode::OK.into_response(),

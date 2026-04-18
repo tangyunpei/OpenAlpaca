@@ -253,7 +253,13 @@ async fn test_confirmation_approved_allows_execution() {
         let keys: Vec<String> = broker_clone.pending_keys();
         assert_eq!(keys.len(), 1);
         broker_clone
-            .respond(&keys[0], ConfirmationResponse { approved: true })
+            .respond(
+                &keys[0],
+                ConfirmationResponse {
+                    approved: true,
+                    approval_scope: None,
+                },
+            )
             .unwrap();
     });
 
@@ -280,7 +286,13 @@ async fn test_confirmation_denied_blocks_execution() {
         let keys: Vec<String> = broker_clone.pending_keys();
         assert_eq!(keys.len(), 1);
         broker_clone
-            .respond(&keys[0], ConfirmationResponse { approved: false })
+            .respond(
+                &keys[0],
+                ConfirmationResponse {
+                    approved: false,
+                    approval_scope: None,
+                },
+            )
             .unwrap();
     });
 

@@ -84,7 +84,13 @@ impl TelegramConnector {
                         "Denied. Tool execution has been cancelled.".to_string()
                     };
 
-                    match broker.respond(&request_id, ConfirmationResponse { approved }) {
+                    match broker.respond(
+                        &request_id,
+                        ConfirmationResponse {
+                            approved,
+                            approval_scope: None,
+                        },
+                    ) {
                         Ok(()) => {
                             info!(
                                 "Confirmation {} for request {} in chat {}",
