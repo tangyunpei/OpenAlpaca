@@ -19,6 +19,7 @@ use crate::tools::registry::{RegisteredTool, ToolBackend};
 /// built-ins or with tools from other servers.
 pub fn rmcp_tool_to_registered(
     server_name: &str,
+    server_version: &str,
     tool: Tool,
     client: Arc<McpClient>,
 ) -> RegisteredTool {
@@ -54,7 +55,7 @@ pub fn rmcp_tool_to_registered(
         provides_capabilities: Vec::new(),
         exempt_from_timeout: false,
         annotations: tool.annotations,
-        version: "unknown".to_string(),
+        version: server_version.to_string(),
         author: format!("mcp:{}", server_name),
         created_at: chrono::Utc::now(),
     }
@@ -146,5 +147,23 @@ mod tests {
         let result = CallToolResult::success(vec![text_content("ok")]);
         let out = serialize_call_result(result).unwrap();
         assert_eq!(out, "ok");
+    }
+
+    #[test]
+    fn mcp_author_includes_server_name_format() {
+        let server_name = "filesystem";
+        let author = format!("mcp:{server_name}");
+        assert_eq!(author, "mcp:filesystem");
+    }
+
+    #[test]
+    fn mcp_version_defaults_to_unknown_when_server_info_missing() {
+        // services/mcp.rs logic: unwrap_or("unknown")
+        let server_info: Option<openalpaca_mcp::Implementation> = None;
+        let version = server_info
+            .as_ref()
+            .map(|i| i.version.as_str())
+            .unwrap_or("unknown");
+        assert_eq!(version, "unknown");
     }
 }

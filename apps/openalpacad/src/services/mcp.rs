@@ -127,6 +127,10 @@ async fn connect_and_register_one(
 
     let server_info = client.server_info().cloned();
     let protocol_version = client.protocol_version().cloned();
+    let server_version = server_info
+        .as_ref()
+        .map(|i| i.version.as_str())
+        .unwrap_or("unknown");
 
     let tools = match client.list_tools(None).await {
         Ok(t) => t,
@@ -140,7 +144,12 @@ async fn connect_and_register_one(
     let mut registered_names = Vec::new();
     let mut skipped = 0;
     for tool in tools {
-        let reg = bridge::rmcp_tool_to_registered(server_name, tool, Arc::clone(&client));
+        let reg = bridge::rmcp_tool_to_registered(
+            server_name,
+            server_version,
+            tool,
+            Arc::clone(&client),
+        );
         let name = reg.definition.name.clone();
         match tool_registry.register(reg) {
             Ok(()) => registered_names.push(name),
