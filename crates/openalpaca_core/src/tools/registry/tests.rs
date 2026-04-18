@@ -1074,3 +1074,51 @@ async fn test_enum_validation_invalid_value() {
         err
     );
 }
+
+// ===========================================================================
+// P3: PermissionTier derivation tests
+// ===========================================================================
+
+#[test]
+fn permission_tier_destructive_returns_admin() {
+    let ann = openalpaca_mcp::ToolAnnotations {
+        destructive_hint: Some(true),
+        ..Default::default()
+    };
+    assert_eq!(permission_tier(Some(&ann)), PermissionTier::Admin);
+}
+
+#[test]
+fn permission_tier_readonly_returns_readonly() {
+    let ann = openalpaca_mcp::ToolAnnotations {
+        read_only_hint: Some(true),
+        destructive_hint: Some(false),
+        ..Default::default()
+    };
+    assert_eq!(permission_tier(Some(&ann)), PermissionTier::ReadOnly);
+}
+
+#[test]
+fn permission_tier_neither_returns_readwrite() {
+    let ann = openalpaca_mcp::ToolAnnotations {
+        destructive_hint: Some(false),
+        read_only_hint: Some(false),
+        ..Default::default()
+    };
+    assert_eq!(permission_tier(Some(&ann)), PermissionTier::ReadWrite);
+}
+
+#[test]
+fn permission_tier_none_annotations_returns_readwrite() {
+    assert_eq!(permission_tier(None), PermissionTier::ReadWrite);
+}
+
+#[test]
+fn permission_tier_destructive_takes_precedence_over_readonly() {
+    let ann = openalpaca_mcp::ToolAnnotations {
+        destructive_hint: Some(true),
+        read_only_hint: Some(true),
+        ..Default::default()
+    };
+    assert_eq!(permission_tier(Some(&ann)), PermissionTier::Admin);
+}

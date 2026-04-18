@@ -30,6 +30,28 @@ impl ToolContext {
     }
 }
 
+/// Coarse permission tier derived from MCP tool annotations.
+/// Used for introspection and policy decisions; not stored on RegisteredTool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionTier {
+    ReadOnly,
+    ReadWrite,
+    Admin,
+}
+
+/// Derive the permission tier from a tool's annotations.
+///
+/// - `destructive_hint = Some(true)` → Admin
+/// - `read_only_hint = Some(true)` → ReadOnly
+/// - otherwise (including None) → ReadWrite
+pub fn permission_tier(annotations: Option<&openalpaca_mcp::ToolAnnotations>) -> PermissionTier {
+    match annotations {
+        Some(a) if a.destructive_hint == Some(true) => PermissionTier::Admin,
+        Some(a) if a.read_only_hint == Some(true) => PermissionTier::ReadOnly,
+        _ => PermissionTier::ReadWrite,
+    }
+}
+
 /// Backend that executes a tool's logic.
 #[derive(Clone)]
 pub enum ToolBackend {
@@ -82,6 +104,14 @@ pub struct RegisteredTool {
     /// Populated for tools registered from MCP servers; `None` otherwise in P2.
     /// P3 may populate for built-ins as part of destructive-tool enforcement.
     pub annotations: Option<openalpaca_mcp::ToolAnnotations>,
+    /// Tool version string (e.g., "1.0.0"). Sourced from MCP `_meta.version`
+    /// when available; defaults to a registry-provided value otherwise.
+    pub version: String,
+    /// Author identifier (e.g., "built-in", "mcp:<server>", "plugin:<id>").
+    /// Used for audit trails and provenance display.
+    pub author: String,
+    /// Registration timestamp (UTC) — when this tool entered the registry.
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Central registry mapping tool names to definitions and execution backends.
@@ -320,6 +350,13 @@ impl ToolRegistry {
     /// List registered tool names.
     pub fn registered_tool_names(&self) -> Vec<String> {
         self.tools.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Iterate over registered tools. Snapshot-style — the DashMap iterator
+    /// guard is dropped per-entry via clone(), so the returned iterator
+    /// does not hold any lock across await points.
+    pub fn iter_registered_tools(&self) -> impl Iterator<Item = (String, RegisteredTool)> + '_ {
+        self.tools.iter().map(|e| (e.key().clone(), e.value().clone()))
     }
 
     /// Number of registered tools.
