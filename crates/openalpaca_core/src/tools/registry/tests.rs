@@ -1182,3 +1182,36 @@ fn permission_tier_destructive_takes_precedence_over_readonly() {
     };
     assert_eq!(permission_tier(Some(&ann)), PermissionTier::Admin);
 }
+
+#[test]
+fn iter_registered_tools_snapshots_state() {
+    let registry = ToolRegistry::new().unwrap();
+    let mut destructive = make_tool_with_caps("tool_a", vec![]);
+    destructive.annotations = Some(openalpaca_mcp::ToolAnnotations {
+        destructive_hint: Some(true),
+        ..Default::default()
+    });
+    let plain = make_tool_with_caps("tool_b", vec![]);
+
+    registry.register(destructive).unwrap();
+    registry.register(plain).unwrap();
+
+    let mut collected: Vec<_> = registry.iter_registered_tools().collect();
+    collected.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    assert_eq!(collected.len(), 2);
+    assert_eq!(collected[0].0, "tool_a");
+    assert_eq!(collected[1].0, "tool_b");
+
+    // Destructive annotation preserved.
+    let a_destructive = collected[0]
+        .1
+        .annotations
+        .as_ref()
+        .and_then(|a| a.destructive_hint)
+        .unwrap_or(false);
+    assert!(a_destructive);
+
+    // None annotation preserved.
+    assert!(collected[1].1.annotations.is_none());
+}
