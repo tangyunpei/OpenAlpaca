@@ -232,9 +232,27 @@ impl ToolRegistry {
                 timeout_secs,
             } => execute_command(command, args_template.as_deref(), *timeout_secs, arguments).await,
             ToolBackend::Plugin(executor) => executor.execute(tool_name, arguments).await,
-            ToolBackend::Mcp { .. } => {
-                // Real dispatch added in Task 6.
-                Err("MCP tool dispatch not yet wired (Task 6 of MCP P2)".to_string())
+            ToolBackend::Mcp { client, remote_name, server_name } => {
+                tracing::debug!(
+                    server = %server_name,
+                    remote_name = %remote_name,
+                    "MCP tool call (no context)"
+                );
+                match client.call_tool(remote_name, arguments.clone(), None).await {
+                    Ok(result) => crate::tools::mcp::bridge::serialize_call_result(result),
+                    Err(e) => {
+                        tracing::warn!(
+                            server = %server_name,
+                            remote_name = %remote_name,
+                            error_category = ?e.category(),
+                            error = %e,
+                            "MCP tool call failed"
+                        );
+                        Err(format!(
+                            "MCP server '{server_name}' tool '{remote_name}' failed: {e}"
+                        ))
+                    }
+                }
             }
         }
     }
@@ -264,10 +282,31 @@ impl ToolRegistry {
             ToolBackend::BuiltIn(implementation) => {
                 implementation.execute_with_context(arguments, ctx).await
             }
-            ToolBackend::Http { .. }
-            | ToolBackend::Command { .. }
-            | ToolBackend::Plugin(_)
-            | ToolBackend::Mcp { .. } => {
+            ToolBackend::Mcp { client, remote_name, server_name } => {
+                tracing::debug!(
+                    server = %server_name,
+                    remote_name = %remote_name,
+                    agent_id = ?ctx.agent_id,
+                    skill_stack = ?ctx.skill_stack,
+                    "MCP tool call"
+                );
+                match client.call_tool(remote_name, arguments.clone(), None).await {
+                    Ok(result) => crate::tools::mcp::bridge::serialize_call_result(result),
+                    Err(e) => {
+                        tracing::warn!(
+                            server = %server_name,
+                            remote_name = %remote_name,
+                            error_category = ?e.category(),
+                            error = %e,
+                            "MCP tool call failed"
+                        );
+                        Err(format!(
+                            "MCP server '{server_name}' tool '{remote_name}' failed: {e}"
+                        ))
+                    }
+                }
+            }
+            ToolBackend::Http { .. } | ToolBackend::Command { .. } | ToolBackend::Plugin(_) => {
                 tracing::trace!(
                     tool_name,
                     agent_id = ?ctx.agent_id,
