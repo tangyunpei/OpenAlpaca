@@ -151,18 +151,85 @@ impl McpClient {
         Ok(())
     }
 
+    /// Attempt to reconnect by rebuilding the transport and rerunning handshake.
+    /// Honours max_reconnect_attempts and backoff. On exhaustion, transitions to Failed.
+    pub(crate) async fn reconnect(&self) -> Result<(), McpError> {
+        use std::sync::atomic::Ordering;
+        use crate::lifecycle::{apply_jitter, backoff_for_attempt, ConnectionState, MAX_BACKOFF};
+
+        let attempt = self.inner.attempt_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let max = self.inner.config.max_reconnect_attempts;
+        if attempt > max {
+            let reason = McpError::ReconnectExhausted(max);
+            *self.inner.state.write().await = ConnectionState::Failed { reason: McpError::ReconnectExhausted(max) };
+            tracing::error!(
+                server_name = %self.inner.config.server_name,
+                attempts = max,
+                "MCP reconnect attempts exhausted"
+            );
+            return Err(reason);
+        }
+
+        // 10% deterministic jitter — uses attempt as a poor-person's jitter seed.
+        let rand_factor = ((attempt as f64 * 0.37).fract() * 2.0) - 1.0;
+        let base = backoff_for_attempt(attempt, self.inner.config.reconnect_backoff_ms, MAX_BACKOFF);
+        let delay = apply_jitter(base, rand_factor);
+
+        tracing::warn!(
+            server_name = %self.inner.config.server_name,
+            attempt,
+            delay_ms = delay.as_millis(),
+            "MCP reconnect scheduled"
+        );
+
+        // Drop the old service (if any) so its subprocess/HTTP connection is released.
+        if let Some(mut old) = self.inner.service.lock().await.take() {
+            let _ = old.close_with_timeout(Duration::from_secs(2)).await;
+        }
+        *self.inner.state.write().await = ConnectionState::Reconnecting {
+            attempt,
+            next_at: std::time::Instant::now() + delay,
+        };
+
+        tokio::time::sleep(delay).await;
+
+        // Re-handshake.
+        self.do_handshake().await?;
+        Ok(())
+    }
+
     /// List all tools the server exposes.
     pub async fn list_tools(
         &self,
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<Vec<rmcp::model::Tool>, McpError> {
-        let op = async {
-            let guard = self.inner.service.lock().await;
-            let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
-            let result = running.list_all_tools().await.map_err(McpError::from)?;
-            Ok::<_, McpError>(result)
-        };
-        with_cancel_and_timeout(op, cancel_token, self.inner.config.request_timeout).await
+        use std::sync::atomic::Ordering;
+        loop {
+            let op = async {
+                let guard = self.inner.service.lock().await;
+                let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
+                let result = running.list_all_tools().await.map_err(McpError::from)?;
+                Ok::<_, McpError>(result)
+            };
+            match with_cancel_and_timeout(op, cancel_token, self.inner.config.request_timeout).await {
+                Ok(tools) => {
+                    self.inner.attempt_counter.store(0, Ordering::Relaxed);
+                    return Ok(tools);
+                }
+                Err(e) if e.is_cancelled() => return Err(e),
+                Err(e) if e.is_retriable() => {
+                    tracing::warn!(
+                        server_name = %self.inner.config.server_name,
+                        operation = "list_tools",
+                        error = %e,
+                        "operation failed; triggering reconnect"
+                    );
+                    self.reconnect().await?;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Invoke a tool.
@@ -172,6 +239,7 @@ impl McpClient {
         arguments: serde_json::Value,
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<rmcp::model::CallToolResult, McpError> {
+        use std::sync::atomic::Ordering;
         let params = rmcp::model::CallToolRequestParams {
             meta: None,
             name: name.to_string().into(),
@@ -187,13 +255,36 @@ impl McpClient {
             task: None,
         };
 
-        let op = async {
-            let guard = self.inner.service.lock().await;
-            let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
-            let result = running.call_tool(params).await.map_err(McpError::from)?;
-            Ok::<_, McpError>(result)
-        };
-        with_cancel_and_timeout(op, cancel_token, self.inner.config.request_timeout).await
+        loop {
+            let op = {
+                let params = params.clone();
+                async move {
+                    let guard = self.inner.service.lock().await;
+                    let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
+                    let result = running.call_tool(params).await.map_err(McpError::from)?;
+                    Ok::<_, McpError>(result)
+                }
+            };
+            match with_cancel_and_timeout(op, cancel_token, self.inner.config.request_timeout).await {
+                Ok(result) => {
+                    self.inner.attempt_counter.store(0, Ordering::Relaxed);
+                    return Ok(result);
+                }
+                Err(e) if e.is_cancelled() => return Err(e),
+                Err(e) if e.is_retriable() => {
+                    tracing::warn!(
+                        server_name = %self.inner.config.server_name,
+                        operation = "call_tool",
+                        tool = %name,
+                        error = %e,
+                        "operation failed; triggering reconnect"
+                    );
+                    self.reconnect().await?;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// List resources exposed by the server. **P5 feature** — returns an error in P1.
@@ -473,5 +564,51 @@ mod tests {
             );
             assert!(err.to_string().contains("P5"), "msg should mention P5: {err}");
         }
+    }
+
+    #[tokio::test]
+    async fn reconnect_transitions_to_failed_after_max_attempts() {
+        // Construct a client that will always fail to reconnect (bad command).
+        let cfg = McpClientConfig {
+            server_name: "bad".into(),
+            transport: TransportKind::Stdio {
+                command: "/definitely/not/a/command/xyzzy".into(),
+                args: vec![],
+                env: Default::default(),
+                cwd: None,
+            },
+            client_info: Implementation {
+                name: "openalpaca-mcp-test".into(),
+                version: "0.1.0".into(),
+                ..Default::default()
+            },
+            request_timeout: Duration::from_secs(1),
+            max_reconnect_attempts: 2,
+            reconnect_backoff_ms: 10, // fast test
+        };
+
+        let inner = Arc::new(ClientInner {
+            config: cfg.clone(),
+            state: tokio::sync::RwLock::new(ConnectionState::Disconnected),
+            service: Mutex::new(None),
+            server_info: tokio::sync::OnceCell::new(),
+            protocol_version: tokio::sync::OnceCell::new(),
+            attempt_counter: AtomicU32::new(0),
+        });
+        let client = McpClient { inner };
+
+        // Attempt 1: should fail trying to spawn but stay below exhaustion.
+        let _ = client.reconnect().await;
+        // Attempt 2: also fails.
+        let _ = client.reconnect().await;
+        // Attempt 3: exceeds max=2, should return ReconnectExhausted.
+        let err = client.reconnect().await.err().expect("expected error");
+        assert!(
+            matches!(err, McpError::ReconnectExhausted(2)),
+            "unexpected error: {err:?}"
+        );
+        // State should be Failed.
+        let state = client.inner.state.read().await;
+        assert!(matches!(&*state, ConnectionState::Failed { .. }), "expected Failed state");
     }
 }
