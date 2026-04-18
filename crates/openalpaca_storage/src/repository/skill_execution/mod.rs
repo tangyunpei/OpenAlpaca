@@ -4,7 +4,19 @@ use crate::models::skill_execution::{SkillExecutionEntry, ToolExecutionEntry};
 use crate::models::skill_health::SkillHealthMetrics;
 use crate::Database;
 use anyhow::{Context, Result};
-use chrono::{NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
+
+/// Aggregate statistics for a tool computed from `tool_execution_log`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolInvocationStats {
+    /// Timestamp of the most recent invocation (UTC), or `None` if the tool
+    /// has never been logged.
+    pub last_invoked_at: Option<DateTime<Utc>>,
+    /// Total number of invocations recorded.
+    pub invocation_count: u64,
+    /// Number of invocations where `success = 0`.
+    pub error_count: u64,
+}
 
 /// Repository for skill/tool execution log operations.
 pub struct SkillExecutionRepository<'a> {
@@ -212,6 +224,63 @@ impl<'a> SkillExecutionRepository<'a> {
         })
     }
 
+    /// Aggregate stats for a single tool from `tool_execution_log`.
+    ///
+    /// If the tool has never been logged, returns
+    /// `ToolInvocationStats { last_invoked_at: None, invocation_count: 0,
+    /// error_count: 0 }`.
+    pub fn tool_stats(&self, tool_name: &str) -> Result<ToolInvocationStats> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT MAX(timestamp), COUNT(*), \
+                        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) \
+                 FROM tool_execution_log \
+                 WHERE tool_name = ?1",
+            )?;
+            let (ts_str, count, errors): (Option<String>, i64, Option<i64>) =
+                stmt.query_row(rusqlite::params![tool_name], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
+            Ok(ToolInvocationStats {
+                last_invoked_at: ts_str.as_deref().and_then(parse_datetime),
+                invocation_count: count.max(0) as u64,
+                error_count: errors.unwrap_or(0).max(0) as u64,
+            })
+        })
+    }
+
+    /// Aggregate stats for every tool in `tool_execution_log`, grouped by
+    /// `tool_name`.
+    pub fn tool_stats_all(&self) -> Result<Vec<(String, ToolInvocationStats)>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT tool_name, MAX(timestamp), COUNT(*), \
+                        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) \
+                 FROM tool_execution_log \
+                 GROUP BY tool_name",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let name: String = row.get(0)?;
+                let ts_str: Option<String> = row.get(1)?;
+                let count: i64 = row.get(2)?;
+                let errors: Option<i64> = row.get(3)?;
+                Ok((
+                    name,
+                    ToolInvocationStats {
+                        last_invoked_at: ts_str.as_deref().and_then(parse_datetime),
+                        invocation_count: count.max(0) as u64,
+                        error_count: errors.unwrap_or(0).max(0) as u64,
+                    },
+                ))
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+    }
+
     /// Delete old telemetry rows. Returns (skill_rows_deleted, tool_rows_deleted).
     pub fn cleanup_old(&self, skill_days: u32, tool_days: u32) -> Result<(usize, usize)> {
         self.db.with_connection(|conn| {
@@ -228,7 +297,7 @@ impl<'a> SkillExecutionRepository<'a> {
     }
 }
 
-fn parse_datetime(s: &str) -> Option<chrono::DateTime<Utc>> {
+fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
     NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
         .ok()
         .map(|ndt| ndt.and_utc())

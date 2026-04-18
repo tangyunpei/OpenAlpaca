@@ -29,6 +29,6 @@ pub use repository::{
     AgentRepository, ConfigRepository, ConversationRepository, EventLogRepository,
     FileAssetRepository, IdentityRepository, LlmUsageRepository, MemoryRepository,
     MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository,
-    SkillExecutionRepository, SubAgentRepository, TaskRepository,
+    SkillExecutionRepository, SubAgentRepository, TaskRepository, ToolInvocationStats,
 };
 pub use repository::llm_usage::LlmUsageDaily;
