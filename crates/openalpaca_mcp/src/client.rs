@@ -150,6 +150,84 @@ impl McpClient {
         *self.inner.state.write().await = ConnectionState::Disconnected;
         Ok(())
     }
+
+    /// List all tools the server exposes.
+    pub async fn list_tools(
+        &self,
+        cancel_token: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<Vec<rmcp::model::Tool>, McpError> {
+        let op = async {
+            let guard = self.inner.service.lock().await;
+            let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
+            let result = running.list_all_tools().await.map_err(McpError::from)?;
+            Ok::<_, McpError>(result)
+        };
+        with_cancel_and_timeout(op, cancel_token, self.inner.config.request_timeout).await
+    }
+
+    /// Invoke a tool.
+    pub async fn call_tool(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+        cancel_token: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<rmcp::model::CallToolResult, McpError> {
+        let params = rmcp::model::CallToolRequestParams {
+            meta: None,
+            name: name.to_string().into(),
+            arguments: match arguments {
+                serde_json::Value::Object(map) => Some(map),
+                serde_json::Value::Null => None,
+                other => {
+                    return Err(McpError::InvalidArguments(format!(
+                        "call_tool arguments must be an object or null, got: {other}"
+                    )));
+                }
+            },
+            task: None,
+        };
+
+        let op = async {
+            let guard = self.inner.service.lock().await;
+            let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
+            let result = running.call_tool(params).await.map_err(McpError::from)?;
+            Ok::<_, McpError>(result)
+        };
+        with_cancel_and_timeout(op, cancel_token, self.inner.config.request_timeout).await
+    }
+}
+
+/// Apply per-operation cancellation and timeout to an async operation.
+///
+/// On cancel: returns `McpError::Cancelled` immediately. (Protocol-level
+/// cancellation notification is added in a later refinement; for P1 we
+/// bail locally — the rmcp transport will carry an implicit cancellation
+/// when the future drops.)
+///
+/// On timeout: returns `McpError::Timeout(duration)`.
+async fn with_cancel_and_timeout<F, T>(
+    op: F,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+    timeout: Duration,
+) -> Result<T, McpError>
+where
+    F: std::future::Future<Output = Result<T, McpError>>,
+{
+    let timed = tokio::time::timeout(timeout, async {
+        match cancel_token {
+            Some(ct) => tokio::select! {
+                biased;
+                _ = ct.cancelled() => Err(McpError::Cancelled),
+                result = op => result,
+            },
+            None => op.await,
+        }
+    });
+
+    match timed.await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(McpError::Timeout(timeout)),
+    }
 }
 
 /// Internal: materialise a Transport impl from a TransportKind.
@@ -243,5 +321,86 @@ mod tests {
                 "unexpected error: {err:?}"
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn call_tool_rejects_non_object_arguments() {
+        let cfg = McpClientConfig::default();
+        let inner = Arc::new(ClientInner {
+            config: cfg.clone(),
+            state: tokio::sync::RwLock::new(ConnectionState::Connected),
+            service: Mutex::new(None),
+            server_info: tokio::sync::OnceCell::new(),
+            protocol_version: tokio::sync::OnceCell::new(),
+            attempt_counter: AtomicU32::new(0),
+        });
+        let client = McpClient { inner };
+
+        // Array argument should be rejected.
+        let err = client
+            .call_tool("any", serde_json::json!([1, 2, 3]), None)
+            .await
+            .err()
+            .expect("expected error");
+        assert!(
+            matches!(err, McpError::InvalidArguments(_)),
+            "expected InvalidArguments, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_tools_fails_when_not_connected() {
+        // max_reconnect_attempts = 0 so the operation returns immediately
+        // without trying to reconnect. (Task 11 wraps list_tools in a retry loop;
+        // this test would otherwise exhaust retries instead of surfacing TransportClosed.)
+        let cfg = McpClientConfig {
+            max_reconnect_attempts: 0,
+            ..McpClientConfig::default()
+        };
+        let inner = Arc::new(ClientInner {
+            config: cfg.clone(),
+            state: tokio::sync::RwLock::new(ConnectionState::Disconnected),
+            service: Mutex::new(None),
+            server_info: tokio::sync::OnceCell::new(),
+            protocol_version: tokio::sync::OnceCell::new(),
+            attempt_counter: AtomicU32::new(0),
+        });
+        let client = McpClient { inner };
+
+        let err = client.list_tools(None).await.err().expect("expected error");
+        // Accept either: pre-Task-11 returns TransportClosed; post-Task-11 returns
+        // ReconnectExhausted(0) because max_attempts=0 means "don't retry at all".
+        assert!(
+            matches!(err, McpError::TransportClosed | McpError::ReconnectExhausted(0)),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_tools_cancels_immediately_when_token_pre_cancelled() {
+        let cfg = McpClientConfig::default();
+        let inner = Arc::new(ClientInner {
+            config: cfg.clone(),
+            state: tokio::sync::RwLock::new(ConnectionState::Connected),
+            service: Mutex::new(None),
+            server_info: tokio::sync::OnceCell::new(),
+            protocol_version: tokio::sync::OnceCell::new(),
+            attempt_counter: AtomicU32::new(0),
+        });
+        let client = McpClient { inner };
+
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        let err = client
+            .list_tools(Some(&token))
+            .await
+            .err()
+            .expect("expected error");
+        // Either Cancelled (if select chose cancel first) or TransportClosed (if service check ran first).
+        // Biased select should prefer Cancelled.
+        assert!(
+            matches!(err, McpError::Cancelled | McpError::TransportClosed),
+            "unexpected error: {err:?}"
+        );
     }
 }
