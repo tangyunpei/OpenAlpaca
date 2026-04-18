@@ -33,6 +33,9 @@ fn make_registry() -> Arc<ToolRegistry> {
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
+        version: "test-0.0.0".into(),
+        author: "test".into(),
+        created_at: chrono::Utc::now(),
     }).unwrap();
     registry.register(RegisteredTool {
         definition: openalpaca_llm::ToolDefinition {
@@ -46,6 +49,9 @@ fn make_registry() -> Arc<ToolRegistry> {
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
+        version: "test-0.0.0".into(),
+        author: "test".into(),
+        created_at: chrono::Utc::now(),
     }).unwrap();
     Arc::new(registry)
 }

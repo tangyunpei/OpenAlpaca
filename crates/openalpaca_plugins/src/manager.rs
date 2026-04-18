@@ -700,6 +700,9 @@ impl PluginManager {
                 provides_capabilities: manifest.capabilities.provides.clone(),
                 exempt_from_timeout: false,
                 annotations: None,
+                version: "0.0.0".to_string(),
+                author: format!("plugin:{}", plugin_name),
+                created_at: chrono::Utc::now(),
             };
 
             match self.tool_registry.register(registered_tool) {

@@ -115,6 +115,9 @@ pub fn load_tools_from_file(path: &Path) -> Result<Vec<RegisteredTool>, String> 
             provides_capabilities: tc.provides_capabilities,
             exempt_from_timeout: false,
             annotations: None,
+            version: "0.0.0".to_string(),
+            author: "user".to_string(),
+            created_at: chrono::Utc::now(),
         });
     }
 

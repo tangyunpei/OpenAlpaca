@@ -243,6 +243,9 @@ impl SkillInvocationToolExecutor {
                         provides_capabilities: vec![],
                         exempt_from_timeout: false,
                         annotations: None,
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        author: format!("skill:{}", skill_id),
+                        created_at: chrono::Utc::now(),
                     })?;
                 }
             }
@@ -290,6 +293,9 @@ impl SkillInvocationToolExecutor {
                             provides_capabilities: vec![],
                             exempt_from_timeout: true,
                             annotations: None,
+                            version: env!("CARGO_PKG_VERSION").to_string(),
+                            author: format!("skill:{}", skill_id),
+                            created_at: chrono::Utc::now(),
                         })?;
                     }
                 }

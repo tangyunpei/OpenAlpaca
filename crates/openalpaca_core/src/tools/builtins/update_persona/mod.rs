@@ -250,6 +250,9 @@ pub(super) fn update_persona_tool(ctx: PersonaToolContext) -> RegisteredTool {
         provides_capabilities: vec!["persona_write".into()],
         exempt_from_timeout: false,
         annotations: None,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        author: "builtin".to_string(),
+        created_at: chrono::Utc::now(),
     }
 }
 

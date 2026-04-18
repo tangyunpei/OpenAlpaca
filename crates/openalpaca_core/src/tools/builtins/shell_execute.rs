@@ -93,5 +93,8 @@ pub(super) fn shell_execute_tool() -> RegisteredTool {
         provides_capabilities: vec!["shell_execute".into()],
         exempt_from_timeout: false,
         annotations: None,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        author: "builtin".to_string(),
+        created_at: chrono::Utc::now(),
     }
 }

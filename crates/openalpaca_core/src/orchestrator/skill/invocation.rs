@@ -461,6 +461,9 @@ impl Orchestrator {
                             provides_capabilities: vec![],
                             exempt_from_timeout: false,
                             annotations: None,
+                            version: env!("CARGO_PKG_VERSION").to_string(),
+                            author: format!("skill:{}", skill_name),
+                            created_at: chrono::Utc::now(),
                         })?;
                     }
                 }
@@ -511,6 +514,9 @@ impl Orchestrator {
                                 provides_capabilities: vec![],
                                 exempt_from_timeout: true, // nested skills manage own timeouts
                                 annotations: None,
+                                version: env!("CARGO_PKG_VERSION").to_string(),
+                                author: format!("skill:{}", skill_name),
+                                created_at: chrono::Utc::now(),
                             })?;
                         }
                     }

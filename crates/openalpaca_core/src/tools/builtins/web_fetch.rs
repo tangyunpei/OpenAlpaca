@@ -126,5 +126,8 @@ pub(super) fn web_fetch_tool() -> RegisteredTool {
         provides_capabilities: vec!["web_access".into()],
         exempt_from_timeout: false,
         annotations: None,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        author: "builtin".to_string(),
+        created_at: chrono::Utc::now(),
     }
 }

@@ -74,6 +74,9 @@ pub(super) fn file_read_tool(workspace_root: PathBuf) -> RegisteredTool {
         provides_capabilities: vec!["file_read".into()],
         exempt_from_timeout: false,
         annotations: None,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        author: "builtin".to_string(),
+        created_at: chrono::Utc::now(),
     }
 }
 
@@ -188,6 +191,9 @@ pub(super) fn file_write_tool(workspace_root: PathBuf) -> RegisteredTool {
         provides_capabilities: vec!["file_write".into()],
         exempt_from_timeout: false,
         annotations: None,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        author: "builtin".to_string(),
+        created_at: chrono::Utc::now(),
     }
 }
 

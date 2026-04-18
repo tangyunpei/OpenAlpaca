@@ -127,6 +127,9 @@ pub(super) fn web_search_tool(config: Arc<ArcSwap<WebSearchConfig>>) -> Register
         provides_capabilities: vec!["web_access".into()],
         exempt_from_timeout: false,
         annotations: None,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        author: "builtin".to_string(),
+        created_at: chrono::Utc::now(),
     }
 }
 

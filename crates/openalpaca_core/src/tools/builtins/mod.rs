@@ -263,6 +263,9 @@ pub fn builtin_tools(
             provides_capabilities: cap,
             exempt_from_timeout: false,
             annotations: None,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            author: "builtin".to_string(),
+            created_at: chrono::Utc::now(),
         });
     }
 

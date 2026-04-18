@@ -711,6 +711,9 @@ fn make_mock_tool(name: &str) -> RegisteredTool {
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
+        version: "test-0.0.0".into(),
+        author: "test".into(),
+        created_at: chrono::Utc::now(),
     }
 }
 

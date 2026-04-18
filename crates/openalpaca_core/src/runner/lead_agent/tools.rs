@@ -823,6 +823,9 @@ pub fn register_coordination_tools(
         provides_capabilities: vec!["orchestration".to_string()],
         exempt_from_timeout: false,
         annotations: None,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        author: "builtin".to_string(),
+        created_at: chrono::Utc::now(),
     }).unwrap();
     if let (Some(batch), Some(def)) = (batch_spawn_tool, batch_def) {
         registry.register(RegisteredTool {
@@ -831,6 +834,9 @@ pub fn register_coordination_tools(
             provides_capabilities: vec!["orchestration".to_string()],
             exempt_from_timeout: false,
             annotations: None,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            author: "builtin".to_string(),
+            created_at: chrono::Utc::now(),
         }).unwrap();
     }
     registry.register(RegisteredTool {
@@ -839,6 +845,9 @@ pub fn register_coordination_tools(
         provides_capabilities: vec!["orchestration".to_string()],
         exempt_from_timeout: true,
         annotations: None,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        author: "builtin".to_string(),
+        created_at: chrono::Utc::now(),
     }).unwrap();
     registry.register(RegisteredTool {
         definition: wait_def,
@@ -846,5 +855,8 @@ pub fn register_coordination_tools(
         provides_capabilities: vec!["orchestration".to_string()],
         exempt_from_timeout: true,
         annotations: None,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        author: "builtin".to_string(),
+        created_at: chrono::Utc::now(),
     }).unwrap();
 }

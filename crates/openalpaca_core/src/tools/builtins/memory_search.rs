@@ -164,5 +164,8 @@ pub(super) fn memory_search_tool(
         provides_capabilities: vec!["memory_read".into()],
         exempt_from_timeout: false,
         annotations: None,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        author: "builtin".to_string(),
+        created_at: chrono::Utc::now(),
     }
 }

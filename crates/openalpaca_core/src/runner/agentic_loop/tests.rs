@@ -304,6 +304,9 @@ async fn test_sandbox_execution() {
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
+        version: "test-0.0.0".into(),
+        author: "test".into(),
+        created_at: chrono::Utc::now(),
     }).unwrap();
     let sandbox =
         SandboxManager::with_defaults(std::sync::Arc::new(registry), EventBus::default());
@@ -375,6 +378,9 @@ async fn test_sandbox_denied_tool() {
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
+        version: "test-0.0.0".into(),
+        author: "test".into(),
+        created_at: chrono::Utc::now(),
     }).unwrap();
     let sandbox =
         SandboxManager::with_defaults(std::sync::Arc::new(registry), EventBus::default());
@@ -551,6 +557,9 @@ async fn test_cancellation_during_tool_execution() {
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
+        version: "test-0.0.0".into(),
+        author: "test".into(),
+        created_at: chrono::Utc::now(),
     }).unwrap();
     let sandbox =
         SandboxManager::with_defaults(std::sync::Arc::new(registry), EventBus::default());

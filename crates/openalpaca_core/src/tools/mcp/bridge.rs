@@ -54,6 +54,9 @@ pub fn rmcp_tool_to_registered(
         provides_capabilities: Vec::new(),
         exempt_from_timeout: false,
         annotations: tool.annotations,
+        version: "unknown".to_string(),
+        author: format!("mcp:{}", server_name),
+        created_at: chrono::Utc::now(),
     }
 }
 
