@@ -1277,3 +1277,179 @@ fn custom_provider_produces_virtual_caps_on_registered_tools() {
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name, "custom_target");
 }
+
+// ===========================================================================
+// Task 6: Integration tests for annotation resolution + deny semantics
+// ===========================================================================
+
+fn make_tool_with_annotations(
+    name: &str,
+    caps: Vec<&str>,
+    annotations: Option<openalpaca_mcp::ToolAnnotations>,
+) -> RegisteredTool {
+    let mut tool = make_tool_with_caps(name, caps);
+    tool.annotations = annotations;
+    tool
+}
+
+fn readonly_annotations() -> openalpaca_mcp::ToolAnnotations {
+    openalpaca_mcp::ToolAnnotations {
+        read_only_hint: Some(true),
+        destructive_hint: Some(false),
+        idempotent_hint: Some(true),
+        open_world_hint: Some(false),
+        ..Default::default()
+    }
+}
+
+fn destructive_annotations() -> openalpaca_mcp::ToolAnnotations {
+    openalpaca_mcp::ToolAnnotations {
+        read_only_hint: Some(false),
+        destructive_hint: Some(true),
+        idempotent_hint: Some(false),
+        open_world_hint: Some(true),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn tools_for_capabilities_resolves_annotation_readonly() {
+    let registry = ToolRegistry::new().unwrap();
+    registry.register(make_tool_with_annotations("readonly_a", vec![], Some(readonly_annotations()))).unwrap();
+    registry.register(make_tool_with_annotations("readonly_b", vec![], Some(readonly_annotations()))).unwrap();
+    registry.register(make_tool_with_annotations("destructive_a", vec![], Some(destructive_annotations()))).unwrap();
+
+    let tools = registry.tools_for_capabilities(&vec!["annotation:readonly".to_string()]);
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(tools.len(), 2);
+    assert!(names.contains(&"readonly_a"));
+    assert!(names.contains(&"readonly_b"));
+    assert!(!names.contains(&"destructive_a"));
+}
+
+#[test]
+fn tools_for_capabilities_mixed_string_and_annotation() {
+    let registry = ToolRegistry::new().unwrap();
+    registry.register(make_tool_with_annotations(
+        "file_reader",
+        vec!["file_read"],
+        Some(readonly_annotations()),
+    )).unwrap();
+    registry.register(make_tool_with_annotations("other_reader", vec![], Some(readonly_annotations()))).unwrap();
+
+    let tools = registry.tools_for_capabilities(&vec![
+        "file_read".to_string(),
+        "annotation:readonly".to_string(),
+    ]);
+    assert_eq!(tools.len(), 2);
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"file_reader"));
+    assert!(names.contains(&"other_reader"));
+}
+
+#[test]
+fn tools_for_capabilities_with_deny_annotation_destructive() {
+    let registry = ToolRegistry::new().unwrap();
+    registry.register(make_tool_with_annotations("readonly_a", vec![], Some(readonly_annotations()))).unwrap();
+    registry.register(make_tool_with_annotations("destructive_a", vec![], Some(destructive_annotations()))).unwrap();
+
+    let tools = registry.tools_for_capabilities_with_deny(
+        &vec!["annotation:readonly".to_string(), "annotation:destructive".to_string()],
+        &vec!["annotation:destructive".to_string()],
+    );
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(tools.len(), 1);
+    assert!(names.contains(&"readonly_a"));
+}
+
+#[test]
+fn deny_string_cap_excludes_annotation_matched_tool() {
+    let registry = ToolRegistry::new().unwrap();
+    registry.register(make_tool_with_annotations(
+        "file_reader",
+        vec!["file_read"],
+        Some(readonly_annotations()),
+    )).unwrap();
+
+    let tools = registry.tools_for_capabilities_with_deny(
+        &vec!["annotation:readonly".to_string()],
+        &vec!["file_read".to_string()],
+    );
+    assert_eq!(tools.len(), 0);
+}
+
+#[test]
+fn deny_annotation_cap_excludes_string_matched_tool() {
+    let registry = ToolRegistry::new().unwrap();
+    registry.register(make_tool_with_annotations(
+        "web_fetcher",
+        vec!["web_access"],
+        Some(destructive_annotations()),
+    )).unwrap();
+
+    let tools = registry.tools_for_capabilities_with_deny(
+        &vec!["web_access".to_string()],
+        &vec!["annotation:open_world".to_string()],
+    );
+    assert_eq!(tools.len(), 0);
+}
+
+#[test]
+fn non_destructive_inverse_matches_only_explicit_false() {
+    let registry = ToolRegistry::new().unwrap();
+    let ann_true = openalpaca_mcp::ToolAnnotations {
+        destructive_hint: Some(true),
+        ..Default::default()
+    };
+    let ann_false = openalpaca_mcp::ToolAnnotations {
+        destructive_hint: Some(false),
+        ..Default::default()
+    };
+    registry.register(make_tool_with_annotations("tool_a", vec![], Some(ann_false))).unwrap();
+    registry.register(make_tool_with_annotations("tool_b", vec![], None)).unwrap();
+    registry.register(make_tool_with_annotations("tool_c", vec![], Some(ann_true))).unwrap();
+
+    let tools = registry.tools_for_capabilities(&vec!["annotation:non_destructive".to_string()]);
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(tools.len(), 1);
+    assert!(names.contains(&"tool_a"));
+    assert!(!names.contains(&"tool_b"));
+    assert!(!names.contains(&"tool_c"));
+}
+
+#[test]
+fn register_populates_virtual_caps_in_index() {
+    let registry = ToolRegistry::new().unwrap();
+    registry.register(make_tool_with_annotations("destructive_tool", vec![], Some(destructive_annotations()))).unwrap();
+
+    let tools = registry.tools_for_capabilities(&vec!["annotation:destructive".to_string()]);
+    assert_eq!(tools.len(), 1);
+}
+
+#[test]
+fn remove_scrubs_virtual_caps_from_index() {
+    let registry = ToolRegistry::new().unwrap();
+    registry.register(make_tool_with_annotations("destructive_tool", vec![], Some(destructive_annotations()))).unwrap();
+
+    let before = registry.tools_for_capabilities(&vec!["annotation:destructive".to_string()]);
+    assert_eq!(before.len(), 1);
+
+    registry.remove("destructive_tool");
+
+    let after = registry.tools_for_capabilities(&vec!["annotation:destructive".to_string()]);
+    assert!(after.is_empty());
+}
+
+#[test]
+fn register_with_no_annotations_skips_virtual_caps() {
+    let registry = ToolRegistry::new().unwrap();
+    registry.register(make_tool_with_annotations("plain_tool", vec!["some_cap"], None)).unwrap();
+
+    let via_string = registry.tools_for_capabilities(&vec!["some_cap".to_string()]);
+    assert_eq!(via_string.len(), 1);
+
+    for name in ANNOTATION_CAPABILITY_NAMES {
+        let via_ann = registry.tools_for_capabilities(&vec![name.to_string()]);
+        assert!(via_ann.is_empty(), "{name} should not contain plain_tool");
+    }
+}
