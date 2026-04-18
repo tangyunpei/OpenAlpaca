@@ -385,6 +385,28 @@ impl ToolRegistry {
         self.tools.iter().map(|e| (e.key().clone(), e.value().clone()))
     }
 
+    /// Returns all virtual capability names known to registered providers.
+    /// Used by config validation.
+    pub fn known_virtual_capabilities(&self) -> Vec<&'static str> {
+        self.capability_providers
+            .iter()
+            .flat_map(|p| p.known_capability_names().iter().copied())
+            .collect()
+    }
+
+    /// Register an additional capability provider. Must be called BEFORE any
+    /// tools are registered — providers added after registration has started
+    /// do NOT retroactively index existing tools.
+    ///
+    /// This method takes `&mut self` intentionally — wrap the registry in `Arc`
+    /// only after all providers are installed at daemon boot.
+    pub fn register_capability_provider(
+        &mut self,
+        provider: Arc<dyn capabilities::CapabilityProvider>,
+    ) {
+        self.capability_providers.push(provider);
+    }
+
     /// Number of registered tools.
     pub fn count(&self) -> usize {
         self.tools.len()

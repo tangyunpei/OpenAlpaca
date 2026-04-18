@@ -1215,3 +1215,65 @@ fn iter_registered_tools_snapshots_state() {
     // None annotation preserved.
     assert!(collected[1].1.annotations.is_none());
 }
+
+#[test]
+fn known_virtual_capabilities_default_includes_all_8() {
+    let registry = ToolRegistry::new().unwrap();
+    let known = registry.known_virtual_capabilities();
+    assert_eq!(known.len(), 8);
+    for name in ANNOTATION_CAPABILITY_NAMES {
+        assert!(known.contains(name), "{name} should be in known list");
+    }
+}
+
+#[test]
+fn register_capability_provider_extends_known_names() {
+    use std::sync::Arc;
+    use super::capabilities::CapabilityProvider;
+
+    struct CustomProvider;
+    impl CapabilityProvider for CustomProvider {
+        fn derive_capabilities(&self, _: &RegisteredTool) -> Vec<String> {
+            vec!["annotation:custom".into()]
+        }
+        fn known_capability_names(&self) -> &'static [&'static str] {
+            &["annotation:custom"]
+        }
+    }
+
+    let mut registry = ToolRegistry::new().unwrap();
+    registry.register_capability_provider(Arc::new(CustomProvider));
+    let known = registry.known_virtual_capabilities();
+    assert!(known.contains(&"annotation:custom"));
+    assert_eq!(known.len(), 9);
+}
+
+#[test]
+fn custom_provider_produces_virtual_caps_on_registered_tools() {
+    use std::sync::Arc;
+    use super::capabilities::CapabilityProvider;
+
+    struct CustomProvider;
+    impl CapabilityProvider for CustomProvider {
+        fn derive_capabilities(&self, tool: &RegisteredTool) -> Vec<String> {
+            if tool.definition.name == "custom_target" {
+                vec!["annotation:custom".into()]
+            } else {
+                vec![]
+            }
+        }
+        fn known_capability_names(&self) -> &'static [&'static str] {
+            &["annotation:custom"]
+        }
+    }
+
+    let mut registry = ToolRegistry::new().unwrap();
+    registry.register_capability_provider(Arc::new(CustomProvider));
+
+    let tool = make_tool_with_caps("custom_target", vec![]);
+    registry.register(tool).unwrap();
+
+    let tools = registry.tools_for_capabilities(&vec!["annotation:custom".to_string()]);
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "custom_target");
+}
