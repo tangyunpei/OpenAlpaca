@@ -57,9 +57,6 @@ pub async fn initialize_services(
 ) -> Result<InitializedServices> {
     let shared_context = Arc::new(SharedContext::new());
 
-    // Load agent templates from .md files + legacy .toml files
-    agents::load_agent_templates(config_base_dir, db, &shared_context)?;
-
     // Initialize secret store
     let llm_config_path = config_base_dir.join("llm.toml");
     let (secret_store, keyring_available) = llm::initialize_secret_store(&llm_config_path);
@@ -140,6 +137,11 @@ pub async fn initialize_services(
         &web_search_config,
     )
     .await?;
+
+    // Load agent templates from .md files + legacy .toml files
+    // (deferred until the tool registry exists so annotation: capabilities
+    // in agent frontmatter can be validated against the known set.)
+    agents::load_agent_templates(config_base_dir, db, &shared_context, &tool_registry)?;
 
     // Build security chain
     let sandbox_manager = Arc::new(openalpaca_core::security::sandbox::SandboxManager::new(

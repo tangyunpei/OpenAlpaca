@@ -1,6 +1,7 @@
 //! Agent template loading from .md and legacy .toml config files.
 
 use openalpaca_core::context::SharedContext;
+use openalpaca_core::tools::registry::validate_annotation_capability;
 use openalpaca_storage::Database;
 use std::path::Path;
 use std::sync::Arc;
@@ -10,6 +11,7 @@ pub(super) fn load_agent_templates(
     config_base_dir: &Path,
     db: &Database,
     shared_context: &Arc<SharedContext>,
+    tool_registry: &Arc<openalpaca_core::tools::ToolRegistry>,
 ) -> anyhow::Result<()> {
     let config_dir = config_base_dir.join("agents");
     if !config_dir.exists() {
@@ -19,6 +21,8 @@ pub(super) fn load_agent_templates(
         Ok(e) => e,
         Err(_) => return Ok(()),
     };
+
+    let known = tool_registry.known_virtual_capabilities();
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -31,6 +35,24 @@ pub(super) fn load_agent_templates(
                     Ok(content) => {
                         match openalpaca_core::agent::template::parse_agent_markdown(&content) {
                             Ok(template) => {
+                                // Validate annotation: capabilities (hard-fail on unknown names).
+                                for cap in &template.frontmatter.capabilities {
+                                    validate_annotation_capability(cap, &known).map_err(|e| {
+                                        anyhow::anyhow!(
+                                            "{}: capabilities: {e}",
+                                            path.display()
+                                        )
+                                    })?;
+                                }
+                                for cap in &template.frontmatter.denied_capabilities {
+                                    validate_annotation_capability(cap, &known).map_err(|e| {
+                                        anyhow::anyhow!(
+                                            "{}: denied_capabilities: {e}",
+                                            path.display()
+                                        )
+                                    })?;
+                                }
+
                                 let template_id = template.frontmatter.id.clone();
                                 let is_singleton = template.frontmatter.singleton;
 
@@ -75,6 +97,56 @@ pub(super) fn load_agent_templates(
                     Ok(content) => {
                         match toml::from_str::<openalpaca_core::agent::AgentConfigFile>(&content) {
                             Ok(agent_config) => {
+                                // Validate annotation: capabilities from the TOML config
+                                // across both assigned/denied buckets and the constraints
+                                // allowed/denied fields.
+                                for cap in &agent_config.capabilities.assigned {
+                                    validate_annotation_capability(cap, &known).map_err(|e| {
+                                        anyhow::anyhow!(
+                                            "{}: capabilities.assigned: {e}",
+                                            path.display()
+                                        )
+                                    })?;
+                                }
+                                if let Some(denied) = &agent_config.capabilities.denied {
+                                    for cap in denied {
+                                        validate_annotation_capability(cap, &known).map_err(
+                                            |e| {
+                                                anyhow::anyhow!(
+                                                    "{}: capabilities.denied: {e}",
+                                                    path.display()
+                                                )
+                                            },
+                                        )?;
+                                    }
+                                }
+                                if let Some(c) = &agent_config.constraints {
+                                    if let Some(allowed) = &c.allowed_capabilities {
+                                        for cap in allowed {
+                                            validate_annotation_capability(cap, &known).map_err(
+                                                |e| {
+                                                    anyhow::anyhow!(
+                                                        "{}: constraints.allowed_capabilities: {e}",
+                                                        path.display()
+                                                    )
+                                                },
+                                            )?;
+                                        }
+                                    }
+                                    if let Some(denied) = &c.denied_capabilities {
+                                        for cap in denied {
+                                            validate_annotation_capability(cap, &known).map_err(
+                                                |e| {
+                                                    anyhow::anyhow!(
+                                                        "{}: constraints.denied_capabilities: {e}",
+                                                        path.display()
+                                                    )
+                                                },
+                                            )?;
+                                        }
+                                    }
+                                }
+
                                 // Register in-memory
                                 let subagent = agent_config.clone().into_subagent();
                                 shared_context.agent_registry.register(subagent);
