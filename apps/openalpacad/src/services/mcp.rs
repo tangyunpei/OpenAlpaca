@@ -1,10 +1,8 @@
 //! MCP server bootstrap: loads `config/mcp.toml`, connects to enabled servers
 //! with per-server timeouts, registers discovered tools into the tool registry.
 //!
-//! The entry point is [`register_mcp_servers`]; it is wired into
-//! `initialize_services` in the follow-up task (MCP P2 Task 8).
-
-#![allow(dead_code)]
+//! The entry point is [`register_mcp_servers`], wired into
+//! `build_tool_registry` during `initialize_services`.
 
 use std::path::Path;
 use std::sync::Arc;

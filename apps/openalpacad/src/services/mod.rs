@@ -126,7 +126,7 @@ pub async fn initialize_services(
     let web_search_config = Arc::new(ArcSwap::from_pointee(web_search_cfg));
 
     // Build ToolRegistry
-    let (tool_registry, connector_send_lock) = tools::build_tool_registry(
+    let (tool_registry, connector_send_lock, _mcp_client_set) = tools::build_tool_registry(
         config_base_dir,
         db,
         &embedder,
@@ -136,7 +136,8 @@ pub async fn initialize_services(
         bus,
         daemon_config,
         &web_search_config,
-    )?;
+    )
+    .await?;
 
     // Build security chain
     let sandbox_manager = Arc::new(openalpaca_core::security::sandbox::SandboxManager::new(
