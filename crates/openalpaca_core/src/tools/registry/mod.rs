@@ -6,6 +6,12 @@ use std::sync::Arc;
 
 use crate::orchestrator::skill::constraints::EffectiveToolSet;
 
+pub mod capabilities;
+pub use capabilities::{
+    annotation_capabilities, validate_annotation_capability, AnnotationCapabilityProvider,
+    CapabilityProvider, ANNOTATION_CAPABILITY_NAMES,
+};
+
 /// Per-invocation execution context passed to tools that need identity.
 /// Lightweight — no Arc deps, no DB handles. Just identity strings.
 #[derive(Debug, Clone, Default)]
