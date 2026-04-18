@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use openalpaca_llm::{ToolDefinition, WebSearchConfig};
 use std::sync::Arc;
 
+use super::annotations_for_builtin;
+
 struct WebSearchTool {
     config: Arc<ArcSwap<WebSearchConfig>>,
 }
@@ -126,7 +128,7 @@ pub(super) fn web_search_tool(config: Arc<ArcSwap<WebSearchConfig>>) -> Register
         backend: ToolBackend::BuiltIn(Arc::new(WebSearchTool { config })),
         provides_capabilities: vec!["web_access".into()],
         exempt_from_timeout: false,
-        annotations: None,
+        annotations: annotations_for_builtin("web_search"),
         version: env!("CARGO_PKG_VERSION").to_string(),
         author: "builtin".to_string(),
         created_at: chrono::Utc::now(),

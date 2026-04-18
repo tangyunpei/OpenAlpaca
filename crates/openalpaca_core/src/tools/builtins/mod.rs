@@ -258,11 +258,11 @@ pub fn builtin_tools(
             ToolBackend::BuiltIn(Arc::new(WorkspaceWriteTool { db: ws_db.clone() }))
         };
         tools.push(RegisteredTool {
+            annotations: annotations_for_builtin(&def.name),
             definition: def,
             backend,
             provides_capabilities: cap,
             exempt_from_timeout: false,
-            annotations: None,
             version: env!("CARGO_PKG_VERSION").to_string(),
             author: "builtin".to_string(),
             created_at: chrono::Utc::now(),
@@ -462,6 +462,58 @@ impl BuiltInTool for ScriptToolBuiltIn {
                 stderr.chars().take(500).collect::<String>()
             ))
         }
+    }
+}
+
+/// Return MCP-style annotations for a known built-in tool name.
+/// Returns `None` for unknown names; callers default to `None` (no special treatment).
+pub(crate) fn annotations_for_builtin(name: &str) -> Option<openalpaca_mcp::ToolAnnotations> {
+    match name {
+        "file_read" | "workspace_read" | "memory_search" => Some(read_only_annotations()),
+        "web_fetch" | "web_search" => Some(read_only_open_world_annotations()),
+        "file_write" | "workspace_write" | "update_persona" => Some(destructive_local_annotations()),
+        "shell_execute" | "send" => Some(destructive_open_world_annotations()),
+        _ => None,
+    }
+}
+
+fn read_only_annotations() -> openalpaca_mcp::ToolAnnotations {
+    openalpaca_mcp::ToolAnnotations {
+        destructive_hint: Some(false),
+        read_only_hint: Some(true),
+        idempotent_hint: Some(true),
+        open_world_hint: Some(false),
+        ..Default::default()
+    }
+}
+
+fn read_only_open_world_annotations() -> openalpaca_mcp::ToolAnnotations {
+    openalpaca_mcp::ToolAnnotations {
+        destructive_hint: Some(false),
+        read_only_hint: Some(true),
+        idempotent_hint: Some(true),
+        open_world_hint: Some(true),
+        ..Default::default()
+    }
+}
+
+fn destructive_local_annotations() -> openalpaca_mcp::ToolAnnotations {
+    openalpaca_mcp::ToolAnnotations {
+        destructive_hint: Some(true),
+        read_only_hint: Some(false),
+        idempotent_hint: Some(false),
+        open_world_hint: Some(false),
+        ..Default::default()
+    }
+}
+
+fn destructive_open_world_annotations() -> openalpaca_mcp::ToolAnnotations {
+    openalpaca_mcp::ToolAnnotations {
+        destructive_hint: Some(true),
+        read_only_hint: Some(false),
+        idempotent_hint: Some(false),
+        open_world_hint: Some(true),
+        ..Default::default()
     }
 }
 

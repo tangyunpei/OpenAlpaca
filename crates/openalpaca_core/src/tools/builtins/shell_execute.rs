@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use std::sync::Arc;
 
+use super::annotations_for_builtin;
+
 struct ShellExecuteTool;
 
 #[async_trait]
@@ -92,7 +94,7 @@ pub(super) fn shell_execute_tool() -> RegisteredTool {
         backend: ToolBackend::BuiltIn(Arc::new(ShellExecuteTool)),
         provides_capabilities: vec!["shell_execute".into()],
         exempt_from_timeout: false,
-        annotations: None,
+        annotations: annotations_for_builtin("shell_execute"),
         version: env!("CARGO_PKG_VERSION").to_string(),
         author: "builtin".to_string(),
         created_at: chrono::Utc::now(),

@@ -214,3 +214,54 @@ fn test_json_to_cli_args_non_object() {
     let args = json_to_cli_args(&serde_json::json!("not an object"));
     assert!(args.is_empty());
 }
+
+// --- annotations_for_builtin (P3) ---
+
+#[test]
+fn annotations_for_builtin_known_names() {
+    let names = [
+        "file_read", "file_write", "workspace_read", "workspace_write",
+        "memory_search", "send", "shell_execute", "update_persona",
+        "web_fetch", "web_search",
+    ];
+    for name in names {
+        assert!(
+            annotations_for_builtin(name).is_some(),
+            "builtin '{name}' should have annotations"
+        );
+    }
+}
+
+#[test]
+fn annotations_for_builtin_unknown_returns_none() {
+    assert!(annotations_for_builtin("nonsense").is_none());
+    assert!(annotations_for_builtin("").is_none());
+}
+
+#[test]
+fn annotations_for_builtin_destructive_tools_tagged() {
+    for name in ["file_write", "workspace_write", "shell_execute", "update_persona", "send"] {
+        let ann = annotations_for_builtin(name).unwrap();
+        assert_eq!(ann.destructive_hint, Some(true), "{name} should be destructive");
+    }
+}
+
+#[test]
+fn annotations_for_builtin_readonly_tools_tagged() {
+    for name in ["file_read", "workspace_read", "memory_search", "web_fetch", "web_search"] {
+        let ann = annotations_for_builtin(name).unwrap();
+        assert_eq!(ann.read_only_hint, Some(true), "{name} should be read_only");
+    }
+}
+
+#[test]
+fn annotations_for_builtin_open_world_correct() {
+    for name in ["web_fetch", "web_search", "shell_execute", "send"] {
+        let ann = annotations_for_builtin(name).unwrap();
+        assert_eq!(ann.open_world_hint, Some(true), "{name} should be open_world");
+    }
+    for name in ["file_read", "file_write", "workspace_read", "workspace_write", "memory_search", "update_persona"] {
+        let ann = annotations_for_builtin(name).unwrap();
+        assert_eq!(ann.open_world_hint, Some(false), "{name} should NOT be open_world");
+    }
+}

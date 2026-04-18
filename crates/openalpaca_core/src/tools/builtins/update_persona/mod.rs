@@ -4,6 +4,7 @@ mod soul;
 mod user;
 
 use crate::bus::EventBus;
+use crate::tools::builtins::annotations_for_builtin;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
@@ -249,7 +250,7 @@ pub(super) fn update_persona_tool(ctx: PersonaToolContext) -> RegisteredTool {
         backend: ToolBackend::BuiltIn(Arc::new(tool)),
         provides_capabilities: vec!["persona_write".into()],
         exempt_from_timeout: false,
-        annotations: None,
+        annotations: annotations_for_builtin("update_persona"),
         version: env!("CARGO_PKG_VERSION").to_string(),
         author: "builtin".to_string(),
         created_at: chrono::Utc::now(),

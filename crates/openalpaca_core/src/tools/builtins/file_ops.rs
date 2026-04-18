@@ -4,6 +4,7 @@ use openalpaca_llm::ToolDefinition;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use super::annotations_for_builtin;
 use super::helpers::{
     MAX_FILE_READ_SIZE, is_identity_path, is_soul_path, is_user_path, resolve_workspace_path,
     resolve_workspace_path_for_write, validate_workspace_path,
@@ -73,7 +74,7 @@ pub(super) fn file_read_tool(workspace_root: PathBuf) -> RegisteredTool {
         backend: ToolBackend::BuiltIn(Arc::new(FileReadTool { workspace_root })),
         provides_capabilities: vec!["file_read".into()],
         exempt_from_timeout: false,
-        annotations: None,
+        annotations: annotations_for_builtin("file_read"),
         version: env!("CARGO_PKG_VERSION").to_string(),
         author: "builtin".to_string(),
         created_at: chrono::Utc::now(),
@@ -190,7 +191,7 @@ pub(super) fn file_write_tool(workspace_root: PathBuf) -> RegisteredTool {
         backend: ToolBackend::BuiltIn(Arc::new(FileWriteTool { workspace_root })),
         provides_capabilities: vec!["file_write".into()],
         exempt_from_timeout: false,
-        annotations: None,
+        annotations: annotations_for_builtin("file_write"),
         version: env!("CARGO_PKG_VERSION").to_string(),
         author: "builtin".to_string(),
         created_at: chrono::Utc::now(),
