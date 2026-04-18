@@ -15,10 +15,9 @@ mod client;
 mod lifecycle;
 mod server;
 
-// TODO(P1): `server::McpServer` re-export becomes live when Task 10 lands.
 pub use client::{McpClient, McpClientConfig};
 pub use error::{ErrorCategory, McpError};
-// pub use server::McpServer;
+pub use server::McpServer;
 pub use transport::{HttpAuth, StdioTransport, Transport, TransportKind};
 
 // Re-exports from rmcp — data types pass through unchanged.
