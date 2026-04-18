@@ -15,10 +15,14 @@ mod client;
 mod lifecycle;
 mod server;
 
-pub use client::{McpClient, McpClientConfig};
+// TODO(P1): these re-exports become live as each symbol is filled in by later tasks.
+// - `client::{McpClient, McpClientConfig}` — implemented later in P1.
+// - `server::McpServer` — implemented later in P1.
+// - `transport::StreamableHttpTransport` — implemented in Task 5.
+// pub use client::{McpClient, McpClientConfig};
 pub use error::{ErrorCategory, McpError};
-pub use server::McpServer;
-pub use transport::{HttpAuth, StdioTransport, StreamableHttpTransport, Transport, TransportKind};
+// pub use server::McpServer;
+pub use transport::{HttpAuth, StdioTransport, Transport, TransportKind};
 
 // Re-exports from rmcp — data types pass through unchanged.
 pub use rmcp::model::{

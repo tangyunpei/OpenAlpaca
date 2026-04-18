@@ -11,7 +11,7 @@ use crate::error::McpError;
 mod stdio;
 mod http;
 
-pub use http::StreamableHttpTransport;
+// pub use http::StreamableHttpTransport; // implemented in Task 5.
 pub use stdio::StdioTransport;
 
 /// Abstraction over how bytes reach an MCP server.
