@@ -209,6 +209,15 @@ impl ToolRegistry {
                 .or_default()
                 .push(tool.definition.name.clone());
         }
+        // Index virtual capabilities from registered providers.
+        for provider in &self.capability_providers {
+            for cap in provider.derive_capabilities(&tool) {
+                self.capability_index
+                    .entry(cap)
+                    .or_default()
+                    .push(tool.definition.name.clone());
+            }
+        }
         self.tools.insert(name.clone(), tool);
         Ok(())
     }
@@ -219,6 +228,14 @@ impl ToolRegistry {
             for cap in &tool.provides_capabilities {
                 if let Some(mut names) = self.capability_index.get_mut(cap) {
                     names.retain(|n| n != name);
+                }
+            }
+            // Scrub virtual capabilities from registered providers.
+            for provider in &self.capability_providers {
+                for cap in provider.derive_capabilities(&tool) {
+                    if let Some(mut names) = self.capability_index.get_mut(&cap) {
+                        names.retain(|n| n != name);
+                    }
                 }
             }
             true
