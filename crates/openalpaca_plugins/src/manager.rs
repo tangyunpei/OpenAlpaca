@@ -14,7 +14,9 @@ use openalpaca_core::middleware::skill::{
     InvokeConfig, RoutingConfig, SkillFrontmatter,
 };
 use openalpaca_core::orchestrator::skill_catalog::SkillCatalog;
-use openalpaca_core::tools::registry::{RegisteredTool, ToolBackend};
+use openalpaca_core::tools::registry::{
+    CapabilityProvider, ProviderHandle, RegisteredTool, ToolBackend,
+};
 use openalpaca_core::tools::ToolRegistry;
 use openalpaca_llm::ToolDefinition;
 
@@ -64,6 +66,45 @@ impl fmt::Display for PluginStatus {
     }
 }
 
+// ── PluginCapabilityProvider ────────────────────────────────────────────
+
+/// A capability provider synthesized from a plugin's manifest-declared
+/// virtual capabilities. In-process; no RPC cost at lookup time.
+///
+/// Emits the declared caps for every tool whose `author` field matches
+/// `plugin:<plugin_name>` — i.e., every tool this plugin registered.
+pub(crate) struct PluginCapabilityProvider {
+    #[allow(dead_code)]
+    plugin_name: String,
+    author_prefix: String,
+    virtual_caps: Vec<String>,
+}
+
+impl PluginCapabilityProvider {
+    pub(crate) fn new(plugin_name: String, virtual_caps: Vec<String>) -> Self {
+        let author_prefix = format!("plugin:{}", plugin_name);
+        Self {
+            plugin_name,
+            author_prefix,
+            virtual_caps,
+        }
+    }
+}
+
+impl CapabilityProvider for PluginCapabilityProvider {
+    fn derive_capabilities(&self, tool: &RegisteredTool) -> Vec<String> {
+        if tool.author == self.author_prefix {
+            self.virtual_caps.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn known_capability_names(&self) -> Vec<String> {
+        self.virtual_caps.clone()
+    }
+}
+
 // ── PluginState ─────────────────────────────────────────────────────────
 
 /// Runtime state for a single loaded plugin.
@@ -80,6 +121,8 @@ pub struct PluginState {
     pub restart_count: u32,
     pub last_health: Option<Instant>,
     pub plugin_dir: PathBuf,
+    // NEW P3e:
+    pub capability_provider_handle: Option<ProviderHandle>,
 }
 
 // ── PluginInfo ──────────────────────────────────────────────────────
@@ -208,6 +251,7 @@ impl PluginManager {
                     restart_count: 0,
                     last_health: None,
                     plugin_dir: plugin_dir.to_path_buf(),
+                    capability_provider_handle: None,
                 },
             );
         }
@@ -542,6 +586,7 @@ impl PluginManager {
                     restart_count: 0,
                     last_health: None,
                     plugin_dir,
+                    capability_provider_handle: None,
                 },
             );
         }
@@ -965,5 +1010,87 @@ mod tests {
         assert!(json.is_object());
         assert_eq!(json["key"], "val");
         assert_eq!(json["arr"], serde_json::json!([1, 2]));
+    }
+}
+
+#[cfg(test)]
+mod p3e_provider_tests {
+    use super::*;
+    use openalpaca_core::tools::registry::{RegisteredTool, ToolBackend};
+    use openalpaca_llm::ToolDefinition;
+
+    fn mock_tool(name: &str, author: &str) -> RegisteredTool {
+        RegisteredTool {
+            definition: ToolDefinition {
+                name: name.to_string(),
+                description: "test".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Http {
+                method: "GET".into(),
+                url: "http://example.com".into(),
+                headers: Default::default(),
+                timeout_secs: 10,
+            },
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "0.0.0".into(),
+            author: author.to_string(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn plugin_provider_emits_caps_for_matching_author() {
+        let p = PluginCapabilityProvider::new(
+            "foo".to_string(),
+            vec!["annotation:test".to_string()],
+        );
+        let tool_match = mock_tool("x", "plugin:foo");
+        let tool_nomatch = mock_tool("y", "plugin:bar");
+        let tool_builtin = mock_tool("z", "builtin");
+
+        assert_eq!(
+            p.derive_capabilities(&tool_match),
+            vec!["annotation:test".to_string()]
+        );
+        assert!(p.derive_capabilities(&tool_nomatch).is_empty());
+        assert!(p.derive_capabilities(&tool_builtin).is_empty());
+    }
+
+    #[test]
+    fn plugin_provider_known_names_returns_declared_list() {
+        let p = PluginCapabilityProvider::new(
+            "foo".to_string(),
+            vec!["annotation:a".to_string(), "annotation:b".to_string()],
+        );
+        let names = p.known_capability_names();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"annotation:a".to_string()));
+        assert!(names.contains(&"annotation:b".to_string()));
+    }
+
+    #[test]
+    fn plugin_provider_with_empty_caps_is_noop() {
+        let p = PluginCapabilityProvider::new("foo".to_string(), vec![]);
+        let tool = mock_tool("x", "plugin:foo");
+        assert!(p.derive_capabilities(&tool).is_empty());
+        assert!(p.known_capability_names().is_empty());
+    }
+
+    #[test]
+    fn plugin_provider_handles_non_annotation_caps() {
+        let p = PluginCapabilityProvider::new(
+            "foo".to_string(),
+            vec!["plugin:mytag".to_string(), "annotation:safe".to_string()],
+        );
+        let tool = mock_tool("x", "plugin:foo");
+        let caps = p.derive_capabilities(&tool);
+        assert_eq!(caps.len(), 2);
+        assert!(caps.contains(&"plugin:mytag".to_string()));
+        assert!(caps.contains(&"annotation:safe".to_string()));
     }
 }
