@@ -9,7 +9,7 @@ use crate::orchestrator::skill::constraints::EffectiveToolSet;
 pub mod capabilities;
 pub use capabilities::{
     annotation_capabilities, validate_annotation_capability, AnnotationCapabilityProvider,
-    CapabilityProvider, ANNOTATION_CAPABILITY_NAMES,
+    CapabilityProvider, ProviderHandle, ANNOTATION_CAPABILITY_NAMES,
 };
 
 /// Per-invocation execution context passed to tools that need identity.

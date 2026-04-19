@@ -105,6 +105,20 @@ pub fn default_capability_providers() -> Vec<Arc<dyn CapabilityProvider>> {
     vec![Arc::new(AnnotationCapabilityProvider)]
 }
 
+/// Opaque identifier returned from `register_capability_provider`.
+///
+/// Used to reference a provider for removal via `remove_capability_provider`.
+/// Handles are process-unique and monotonically increasing. They do NOT
+/// survive daemon restarts — re-registering after restart returns a fresh handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProviderHandle(pub(crate) u64);
+
+impl std::fmt::Display for ProviderHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ProviderHandle({})", self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +225,32 @@ mod tests {
         for name in ANNOTATION_CAPABILITY_NAMES {
             assert!(err.contains(name), "error should mention {name}");
         }
+    }
+
+    #[test]
+    fn provider_handle_display_format() {
+        assert_eq!(ProviderHandle(42).to_string(), "ProviderHandle(42)");
+        assert_eq!(ProviderHandle(0).to_string(), "ProviderHandle(0)");
+    }
+
+    #[test]
+    fn provider_handles_are_comparable() {
+        use std::collections::HashSet;
+        let a = ProviderHandle(1);
+        let b = ProviderHandle(2);
+        let c = ProviderHandle(1);
+        assert_eq!(a, c);
+        assert_ne!(a, b);
+        let mut set = HashSet::new();
+        set.insert(a);
+        assert!(set.contains(&c));
+        assert!(!set.contains(&b));
+    }
+
+    #[test]
+    fn provider_handle_can_be_copied() {
+        let h = ProviderHandle(42);
+        let h2 = h;  // Copy
+        assert_eq!(h, h2);
     }
 }
