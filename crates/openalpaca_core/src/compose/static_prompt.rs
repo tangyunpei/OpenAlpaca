@@ -24,6 +24,7 @@ pub fn compute(input: &StaticPromptInput) -> StaticPromptOutput {
         StaticPromptMode::Default => build_default(input),
         StaticPromptMode::PlannerHierarchical => build_planner_hierarchical(input),
         StaticPromptMode::SocialMinimal => build_social_minimal(input),
+        StaticPromptMode::ReplannerHierarchical => build_replanner_hierarchical(input),
     }
 }
 
@@ -90,6 +91,7 @@ fn mode_tag(mode: StaticPromptMode) -> u8 {
         StaticPromptMode::Default => 0,
         StaticPromptMode::PlannerHierarchical => 1,
         StaticPromptMode::SocialMinimal => 2,
+        StaticPromptMode::ReplannerHierarchical => 3,
     }
 }
 
@@ -188,6 +190,85 @@ fn build_planner_hierarchical(input: &StaticPromptInput) -> StaticPromptOutput {
     StaticPromptOutput {
         system_message: Arc::<str>::from(system_message),
         section_registry: vec!["planner_hierarchical"],
+        fingerprint: compute_fingerprint(input),
+    }
+}
+
+fn build_replanner_hierarchical(input: &StaticPromptInput) -> StaticPromptOutput {
+    // Absorbs orchestrator/replanner/mod.rs:build_replan_prompt's format.
+    //
+    // Loader contract: `raw_blocks` arrives pre-serialized by the caller in
+    // this order with these `name` values:
+    //   "original_objective", "dag_state", "workspace" (optional), "context"
+    // Each block's content is already wrapped in its own XML tags and ends
+    // with "\n\n".
+    //
+    // The <available_agents> block comes from `planner_agents` (reused from
+    // PlannerHierarchical mode for cache-fingerprint meaningfulness).
+    //
+    // The static preamble and static response_format/rules block are emitted
+    // verbatim from this function — never from raw_blocks.
+
+    let mut prompt = String::from(
+        "You are a task replanner for OpenAlpaca. Evaluate whether the current \
+         execution plan is still on track or needs modification.\n\n",
+    );
+
+    // Caller-provided blocks in loader-defined order.
+    for block in &input.raw_blocks {
+        prompt.push_str(&block.content);
+    }
+
+    // Available agents (reuses planner_agents for cache meaningfulness).
+    prompt.push_str("<available_agents>\n");
+    let empty_agents: Arc<Vec<super::types::AgentConfig>> = Arc::new(Vec::new());
+    let agents = input.planner_agents.as_ref().unwrap_or(&empty_agents);
+    if agents.is_empty() {
+        prompt.push_str("No agents are currently available.\n");
+    } else {
+        for agent in agents.iter() {
+            let desc = agent.description.as_deref().unwrap_or("No description");
+            prompt.push_str(&format!(
+                "- ID: \"{}\", Name: \"{}\", Description: \"{}\"\n",
+                agent.id, agent.name, desc
+            ));
+        }
+    }
+    prompt.push_str("</available_agents>\n\n");
+
+    // Static response_format + rules (absorbed from build_replan_prompt
+    // orchestrator/replanner/mod.rs lines 184-210).
+    prompt.push_str(
+        r#"<response_format>
+Respond with ONLY a single JSON object. No markdown, no explanation, no other text.
+
+If the plan is on track:
+{"decision": "continue"}
+
+If the plan needs modification (replace remaining PENDING/READY nodes with new nodes):
+{"decision": "modify_dag", "dag": {"nodes": [
+  {"node_id": "new_1", "title": "...", "description": "...", "agent_id": "...", "agent_name": "...", "depends_on": [], "workspace_keys": [], "output_key": "..."},
+  ...
+]}}
+
+If the task should be abandoned:
+{"decision": "abort", "reason": "Explanation of why the task cannot be completed"}
+</response_format>
+
+<rules>
+- Prefer "continue" unless completed results clearly show the remaining plan is wrong
+- A "modify_dag" replaces only PENDING/READY/SKIPPED nodes; COMPLETED/RUNNING nodes are kept
+- New nodes in modify_dag can reference output_keys from already-completed nodes
+- Use exact agent_id values from the Available Agents list
+- 2-8 nodes max in modified DAG
+- Only abort if the task is fundamentally impossible given completed results
+</rules>
+"#,
+    );
+
+    StaticPromptOutput {
+        system_message: Arc::<str>::from(prompt),
+        section_registry: vec!["replanner_hierarchical"],
         fingerprint: compute_fingerprint(input),
     }
 }

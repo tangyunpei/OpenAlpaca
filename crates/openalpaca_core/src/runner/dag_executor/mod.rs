@@ -125,6 +125,7 @@ pub async fn execute_dag(
     workspace_id: Option<String>,
     connector_guidance: &str,
     confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
+    compose_engine: Arc<crate::compose::ComposeEngine>,
 ) -> DagExecutionResult {
     let start = Instant::now();
 
@@ -485,6 +486,7 @@ pub async fn execute_dag(
 
                         match Replanner::evaluate(
                             router.as_ref(),
+                            compose_engine.as_ref(),
                             dag,
                             &workspace,
                             task_description,

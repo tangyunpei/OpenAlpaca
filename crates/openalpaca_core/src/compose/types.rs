@@ -94,6 +94,12 @@ pub enum StaticPromptMode {
     Default,
     PlannerHierarchical,
     SocialMinimal,
+    /// Phase 4 Commit 2: Replanner's hierarchical system prompt. Structurally
+    /// different from `PlannerHierarchical` — the replanner takes DAG state +
+    /// workspace snapshot + original objective as loader-serialized
+    /// `raw_blocks`, and emits its own static preamble + response_format/rules
+    /// blocks from within Layer 2. See `static_prompt::build_replanner_hierarchical`.
+    ReplannerHierarchical,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,7 +231,14 @@ impl ComposeRequest {
             Self::SimpleQuery { .. } => (P::Default, S::Default, D::Default, H::Default),
             Self::Skill { .. } => (P::Default, S::Default, D::Default, H::Default),
             Self::Planner { .. } => (P::Minimal, S::PlannerHierarchical, D::Skip, H::Skip),
-            Self::Replanner { .. } => (P::Minimal, S::PlannerHierarchical, D::Skip, H::Skip),
+            // Replanner: History=Default (not Skip) so the canonical
+            // "Evaluate the current task progress…" current_user_turn is
+            // carried through to the final messages vec. The spec
+            // §Component 2 default-dispatch table lists
+            // (Minimal, PlannerHierarchical, Skip, Skip) — treat that as a
+            // spec errata; the replanner system prompt differs structurally
+            // from the planner's and needs its own mode.
+            Self::Replanner { .. } => (P::Minimal, S::ReplannerHierarchical, D::Skip, H::Default),
             Self::Social { .. } => (P::Minimal, S::SocialMinimal, D::Skip, H::Default),
             Self::PipelineStep { memory_block, .. } => (
                 P::Minimal,

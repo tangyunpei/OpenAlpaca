@@ -262,45 +262,8 @@ fn test_merge_rejects_unknown_agent() {
 }
 
 // ── build_replan_prompt tests ───────────────────────────────────
-
-#[test]
-fn test_prompt_includes_objective() {
-    let dag = TaskDag {
-        nodes: vec![make_node("n1", "agent-1", &[], DagNodeStatus::Completed)],
-    };
-    let workspace = TaskWorkspace::default();
-    let agents = make_agents();
-    let prompt = Replanner::build_replan_prompt(&dag, &workspace, "Write a report", &agents, 0);
-    assert!(prompt.contains("Write a report"));
-}
-
-#[test]
-fn test_prompt_includes_dag_state() {
-    let mut node = make_node("n1", "agent-1", &[], DagNodeStatus::Completed);
-    node.result_summary = Some("Found 5 articles".to_string());
-    let dag = TaskDag { nodes: vec![node] };
-    let workspace = TaskWorkspace::default();
-    let agents = make_agents();
-    let prompt = Replanner::build_replan_prompt(&dag, &workspace, "obj", &agents, 0);
-    assert!(prompt.contains("COMPLETED"));
-    assert!(prompt.contains("Found 5 articles"));
-}
-
-#[test]
-fn test_prompt_includes_agents() {
-    let dag = TaskDag { nodes: vec![] };
-    let workspace = TaskWorkspace::default();
-    let agents = make_agents();
-    let prompt = Replanner::build_replan_prompt(&dag, &workspace, "obj", &agents, 0);
-    assert!(prompt.contains("agent-1"));
-    assert!(prompt.contains("Agent One"));
-}
-
-#[test]
-fn test_prompt_includes_replan_count() {
-    let dag = TaskDag { nodes: vec![] };
-    let workspace = TaskWorkspace::default();
-    let agents = make_agents();
-    let prompt = Replanner::build_replan_prompt(&dag, &workspace, "obj", &agents, 2);
-    assert!(prompt.contains("Replans so far: 2"));
-}
+//
+// The `Replanner::build_replan_prompt` helper was deleted in Phase 4 Commit 2.
+// Its format is now absorbed into `compose::static_prompt::build_replanner_hierarchical`;
+// the byte-identical invariant is covered by
+// `compose::tests::test_golden_replanner_byte_identical`.

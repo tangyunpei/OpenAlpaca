@@ -2,8 +2,15 @@
 //! and decides whether to continue, modify the remaining DAG, or abort.
 
 use crate::agent::subagent::SubAgent;
+use crate::compose::{
+    ComposeEngine, ComposeOverrides, ComposeRequest, DynamicContextInput, DynamicContextMode,
+    HistoryInput, HistoryMode, PersonaInput, PersonaMode, PlanState, SectionPriority,
+    StaticPromptInput, StaticPromptMode, SummaryWrapMode, SystemBlock, WorkspaceSnapshot,
+};
+use crate::middleware::prompt::SystemPersona;
 use crate::orchestrator::task_planner::{DagNode, DagNodeStatus, TaskDag, extract_json_block};
 use crate::orchestrator::task_state::TaskWorkspace;
+use crate::prompt_ctx::{ContextBundle, ExecutionPath};
 use openalpaca_llm::{ChatMessage, LlmRouter, RequestContext, RouterRequest};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -57,31 +64,161 @@ impl Replanner {
     /// - `Continue` — plan is on track
     /// - `ModifyDag` — new DAG for remaining work
     /// - `Abort` — task cannot be completed
+    ///
+    /// Routes prompt assembly through the layered compose engine (Phase 4
+    /// Commit 2). The previous `build_replan_prompt` helper was absorbed into
+    /// `compose::static_prompt::build_replanner_hierarchical`; this method
+    /// serializes the structured inputs (DAG state, workspace, original
+    /// objective, replans_so_far) into `StaticPromptInput.raw_blocks` before
+    /// calling `compose_engine.compose(...)`.
     pub async fn evaluate(
         router: &LlmRouter,
+        compose_engine: &ComposeEngine,
         dag: &TaskDag,
         workspace: &TaskWorkspace,
         original_objective: &str,
         idle_agents: &[SubAgent],
         replans_so_far: usize,
     ) -> Result<ReplanDecision, String> {
-        let prompt = Self::build_replan_prompt(
-            dag,
-            workspace,
-            original_objective,
-            idle_agents,
-            replans_so_far,
-        );
+        // --- Render the DAG state block. ---
+        let mut dag_block = String::from("<dag_state>\n");
+        for node in &dag.nodes {
+            let status = match &node.status {
+                DagNodeStatus::Completed => {
+                    let summary = node.result_summary.as_deref().unwrap_or("(no summary)");
+                    let capped: String = summary.chars().take(200).collect();
+                    format!("COMPLETED — {}", capped)
+                }
+                DagNodeStatus::Failed => {
+                    let err = node.result_summary.as_deref().unwrap_or("(no error)");
+                    let capped: String = err.chars().take(200).collect();
+                    format!("FAILED — {}", capped)
+                }
+                DagNodeStatus::Skipped => "SKIPPED".to_string(),
+                DagNodeStatus::Running => "RUNNING".to_string(),
+                DagNodeStatus::Ready => "READY (waiting to run)".to_string(),
+                DagNodeStatus::Pending => "PENDING (dependencies not met)".to_string(),
+            };
+            dag_block.push_str(&format!(
+                "- [{}] \"{}\" (agent: {}) — {}\n",
+                node.node_id, node.title, node.agent_name, status
+            ));
+        }
+        dag_block.push_str("</dag_state>\n\n");
 
-        let messages = vec![
-            ChatMessage::system(&prompt),
-            ChatMessage::user(
+        // --- Render workspace block (only if non-empty). ---
+        let workspace_summary = workspace.format_for_prompt(&[]);
+
+        // --- Assemble raw_blocks in the loader-defined order:
+        //     "original_objective", "dag_state", "workspace" (optional), "context".
+        //     `build_replanner_hierarchical` emits them in raw_blocks iteration
+        //     order, so this ordering is load-bearing. ---
+        let mut raw_blocks: Vec<SystemBlock> = Vec::with_capacity(4);
+        raw_blocks.push(SystemBlock {
+            name: "original_objective",
+            content: Arc::<str>::from(format!(
+                "<original_objective>\n{}\n</original_objective>\n\n",
+                original_objective
+            )),
+            priority: SectionPriority::High,
+        });
+        raw_blocks.push(SystemBlock {
+            name: "dag_state",
+            content: Arc::<str>::from(dag_block),
+            priority: SectionPriority::High,
+        });
+        if !workspace_summary.is_empty() {
+            raw_blocks.push(SystemBlock {
+                name: "workspace",
+                content: Arc::<str>::from(format!(
+                    "<workspace>\n{}</workspace>\n\n",
+                    workspace_summary
+                )),
+                priority: SectionPriority::Normal,
+            });
+        }
+        raw_blocks.push(SystemBlock {
+            name: "context",
+            content: Arc::<str>::from(format!(
+                "<context>\nReplans so far: {} (be conservative — avoid unnecessary changes)\n</context>\n\n",
+                replans_so_far
+            )),
+            priority: SectionPriority::Normal,
+        });
+
+        // --- Persona: Minimal mode. The replanner doesn't surface persona in
+        //     the final prompt — `build_replanner_hierarchical` ignores
+        //     persona_output.blocks entirely — but the PersonaInput is still
+        //     required by Layer 1 so cache shape stays uniform. ---
+        let persona_input = PersonaInput {
+            system_persona: Arc::new(SystemPersona::default()),
+            user_document: Arc::new(None),
+            identity_document: Arc::new(None),
+            persona_version: 0,
+            mode: PersonaMode::Minimal,
+        };
+        let persona_output = Arc::new(crate::compose::persona::compute(&persona_input));
+
+        let static_prompt_input = StaticPromptInput {
+            persona_output,
+            agent_persona: None,
+            agent_config_fingerprint: [0u8; 32],
+            skill_block: None,
+            skills_catalog: None,
+            bootstrap: None,
+            tools: Arc::new(Vec::new()),
+            connector_status: Arc::new(Vec::new()),
+            send_tool_context: None,
+            message_source: None,
+            raw_blocks,
+            planner_agents: Some(Arc::new(idle_agents.to_vec())),
+            planner_protocol_v2: false,
+            mode: StaticPromptMode::ReplannerHierarchical,
+            model_window: 8192,
+        };
+
+        let dynamic_context_input = DynamicContextInput {
+            context_bundle: Arc::new(ContextBundle::empty()),
+            query: Arc::from(""),
+            memory_retrieval_hash: [0u8; 32],
+            path: ExecutionPath::SimpleQuery,
+            reserved_tokens: 0,
+            mode: DynamicContextMode::Skip,
+        };
+
+        let history_input = HistoryInput {
+            lane_tip_fingerprint: [0u8; 32],
+            summary: None,
+            summary_wrap_mode: SummaryWrapMode::Plain,
+            recent_messages: Arc::new(Vec::new()),
+            current_user_turn: Some(ChatMessage::user(
                 "Evaluate the current task progress and decide whether to continue, \
                  modify the plan, or abort.",
-            ),
-        ];
+            )),
+            mode: HistoryMode::Default,
+        };
 
-        let request = RouterRequest {
+        let request = ComposeRequest::Replanner {
+            current_plan: Arc::new(PlanState::default()),
+            workspace_snapshot: Arc::new(WorkspaceSnapshot::default()),
+            overrides: ComposeOverrides::default(),
+        };
+
+        let composed = compose_engine.compose(
+            &request,
+            persona_input,
+            static_prompt_input,
+            dynamic_context_input,
+            history_input,
+            8192,
+            Arc::new(Vec::new()),
+            None, // Replanner::evaluate has no EventBus handle in scope — ok.
+            None, // No per-lane cache for the replanner.
+        );
+
+        let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
+
+        let request_out = RouterRequest {
             model: None,
             messages: Arc::new(messages),
             tools: Arc::new(vec![]),
@@ -98,118 +235,11 @@ impl Replanner {
         };
 
         let response = router
-            .complete(request)
+            .complete(request_out)
             .await
             .map_err(|e| format!("Replanner LLM error: {e}"))?;
 
         Self::parse_decision(&response.content, idle_agents)
-    }
-
-    /// Build the system prompt for the replanner.
-    fn build_replan_prompt(
-        dag: &TaskDag,
-        workspace: &TaskWorkspace,
-        original_objective: &str,
-        idle_agents: &[SubAgent],
-        replans_so_far: usize,
-    ) -> String {
-        let mut prompt = String::from(
-            "You are a task replanner for OpenAlpaca. Evaluate whether the current \
-             execution plan is still on track or needs modification.\n\n",
-        );
-
-        // Original objective
-        prompt.push_str(&format!(
-            "<original_objective>\n{}\n</original_objective>\n\n",
-            original_objective
-        ));
-
-        // Current DAG state
-        prompt.push_str("<dag_state>\n");
-        for node in &dag.nodes {
-            let status = match &node.status {
-                DagNodeStatus::Completed => {
-                    let summary = node.result_summary.as_deref().unwrap_or("(no summary)");
-                    // Cap summary to 200 chars for prompt
-                    let capped: String = summary.chars().take(200).collect();
-                    format!("COMPLETED — {}", capped)
-                }
-                DagNodeStatus::Failed => {
-                    let err = node.result_summary.as_deref().unwrap_or("(no error)");
-                    let capped: String = err.chars().take(200).collect();
-                    format!("FAILED — {}", capped)
-                }
-                DagNodeStatus::Skipped => "SKIPPED".to_string(),
-                DagNodeStatus::Running => "RUNNING".to_string(),
-                DagNodeStatus::Ready => "READY (waiting to run)".to_string(),
-                DagNodeStatus::Pending => "PENDING (dependencies not met)".to_string(),
-            };
-            prompt.push_str(&format!(
-                "- [{}] \"{}\" (agent: {}) — {}\n",
-                node.node_id, node.title, node.agent_name, status
-            ));
-        }
-        prompt.push_str("</dag_state>\n\n");
-
-        // Workspace contents (summaries only)
-        let workspace_summary = workspace.format_for_prompt(&[]);
-        if !workspace_summary.is_empty() {
-            prompt.push_str("<workspace>\n");
-            prompt.push_str(&workspace_summary);
-            prompt.push_str("</workspace>\n\n");
-        }
-
-        // Available agents
-        prompt.push_str("<available_agents>\n");
-        if idle_agents.is_empty() {
-            prompt.push_str("No agents are currently available.\n");
-        } else {
-            for agent in idle_agents {
-                let desc = agent.description.as_deref().unwrap_or("No description");
-                prompt.push_str(&format!(
-                    "- ID: \"{}\", Name: \"{}\", Description: \"{}\"\n",
-                    agent.id, agent.name, desc
-                ));
-            }
-        }
-        prompt.push_str("</available_agents>\n\n");
-
-        // Context
-        prompt.push_str(&format!(
-            "<context>\nReplans so far: {} (be conservative — avoid unnecessary changes)\n</context>\n\n",
-            replans_so_far
-        ));
-
-        // Response format and rules
-        prompt.push_str(
-            r#"<response_format>
-Respond with ONLY a single JSON object. No markdown, no explanation, no other text.
-
-If the plan is on track:
-{"decision": "continue"}
-
-If the plan needs modification (replace remaining PENDING/READY nodes with new nodes):
-{"decision": "modify_dag", "dag": {"nodes": [
-  {"node_id": "new_1", "title": "...", "description": "...", "agent_id": "...", "agent_name": "...", "depends_on": [], "workspace_keys": [], "output_key": "..."},
-  ...
-]}}
-
-If the task should be abandoned:
-{"decision": "abort", "reason": "Explanation of why the task cannot be completed"}
-</response_format>
-
-<rules>
-- Prefer "continue" unless completed results clearly show the remaining plan is wrong
-- A "modify_dag" replaces only PENDING/READY/SKIPPED nodes; COMPLETED/RUNNING nodes are kept
-- New nodes in modify_dag can reference output_keys from already-completed nodes
-- Use exact agent_id values from the Available Agents list
-- 2-8 nodes max in modified DAG
-- Only abort if the task is fundamentally impossible given completed results
-</rules>
-"#,
-        );
-
-        prompt
     }
 
     /// Parse the LLM response into a ReplanDecision.

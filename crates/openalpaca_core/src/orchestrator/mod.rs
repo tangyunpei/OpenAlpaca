@@ -267,6 +267,11 @@ impl Orchestrator {
             ContextManager::noop()
         });
 
+        // Construct the compose engine once and share it between Orchestrator
+        // and TaskDispatcher so Layer 1 / Layer 2 caches are global across
+        // conversation + task execution paths.
+        let compose_engine = Arc::new(crate::compose::ComposeEngine::new(256));
+
         let task_dispatcher = TaskDispatcher::new(
             shared_context.clone(),
             lane_manager.clone(),
@@ -279,6 +284,7 @@ impl Orchestrator {
             daemon_config.clone(),
             connector_status.clone(),
             context_manager.clone(),
+            compose_engine.clone(),
         );
         let loop_config = {
             let mut lc = loop_config;
@@ -315,7 +321,7 @@ impl Orchestrator {
             confirmation_broker: Arc::new(RwLock::new(None)),
             context_manager,
             persona_version: Arc::new(AtomicU64::new(0)),
-            compose_engine: Arc::new(crate::compose::ComposeEngine::new(256)),
+            compose_engine,
         }
     }
 

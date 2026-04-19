@@ -37,6 +37,7 @@ impl TaskDispatcher {
         let daemon_config = self.daemon_config.clone();
         let connector_block = self.connector_guidance_block();
         let broker = self.confirmation_broker.read().ok().and_then(|g| g.clone());
+        let compose_engine = self.compose_engine.clone();
 
         // Create cancellation token for this task
         let cancel_token = CancellationToken::new();
@@ -107,6 +108,7 @@ impl TaskDispatcher {
                 workspace_id,
                 &connector_block,
                 broker,
+                compose_engine,
             )
             .await;
 

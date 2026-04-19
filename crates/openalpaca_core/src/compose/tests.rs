@@ -322,7 +322,9 @@ fn test_compose_request_default_modes_table() {
     assert_eq!(dc, D::Skip);
     assert!(matches!(h, H::Skip));
 
-    // Replanner: same modes as Planner.
+    // Replanner: Minimal + ReplannerHierarchical + Skip + Default.
+    // History=Default (not Skip) so the canonical "Evaluate..." current_user_turn
+    // flows through Layer 4 into the final messages vec. See Phase 4 Commit 2.
     let req = ComposeRequest::Replanner {
         current_plan: Arc::new(PlanState::default()),
         workspace_snapshot: Arc::new(WorkspaceSnapshot::default()),
@@ -330,9 +332,9 @@ fn test_compose_request_default_modes_table() {
     };
     let (p, sp, dc, h) = req.default_modes();
     assert_eq!(p, P::Minimal);
-    assert_eq!(sp, S::PlannerHierarchical);
+    assert_eq!(sp, S::ReplannerHierarchical);
     assert_eq!(dc, D::Skip);
-    assert!(matches!(h, H::Skip));
+    assert!(matches!(h, H::Default));
 
     // LeadAgent: Minimal + Default + Skip + Skip.
     let req = ComposeRequest::LeadAgent {
@@ -1663,4 +1665,231 @@ fn test_golden_social_fast_path_byte_identical() {
     assert_eq!(composed.messages[0].role, Role::System);
     assert_eq!(composed.messages.last().unwrap().role, Role::User);
     assert_eq!(composed.messages.last().unwrap().content, query);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Phase 4 Commit 2 — Replanner migration golden-output test
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Golden-output: asserts the migrated Replanner path produces a byte-identical
+/// system message to what the pre-migration `Replanner::build_replan_prompt`
+/// (orchestrator/replanner/mod.rs lines 109-213) would have produced.
+///
+/// Routing through `compose(ComposeRequest::Replanner{..})` with
+/// `PersonaMode::Minimal` + `StaticPromptMode::ReplannerHierarchical` +
+/// `DynamicContextMode::Skip` + `HistoryMode::Default` (carrying the
+/// canonical "Evaluate…" current_user_turn) must reproduce the pre-migration
+/// system prompt exactly.
+#[test]
+fn test_golden_replanner_byte_identical() {
+    use crate::agent::subagent::{
+        AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, SubAgent,
+    };
+    use openalpaca_llm::Role;
+
+    // Canned inputs mirroring build_replan_prompt signature.
+    let original_objective = "Process customer feedback into a report.";
+    let dag_nodes_text = "\
+- [node_1] \"Extract feedback\" (agent: parser) — COMPLETED — extracted 42 entries\n\
+- [node_2] \"Categorize feedback\" (agent: classifier) — RUNNING\n\
+- [node_3] \"Write report\" (agent: writer) — PENDING (dependencies not met)\n";
+    let workspace_summary = "feedback_entries: 42 items\n";
+    let replans_so_far: usize = 1;
+
+    let make_agent = |id: &str, name: &str, desc: &str| SubAgent {
+        id: id.to_string(),
+        template_id: id.to_string(),
+        name: name.to_string(),
+        description: Some(desc.to_string()),
+        icon: None,
+        status: AgentStatus::Idle,
+        current_task: None,
+        capabilities: vec![],
+        preset: AgentPreset::default(),
+        constraints: AgentConstraints::default(),
+        llm_config: AgentLlmConfig::default(),
+    };
+    let agents: Vec<SubAgent> = vec![
+        make_agent("parser", "Parser", "Parses raw text"),
+        make_agent("writer", "Writer", "Writes reports"),
+    ];
+
+    // === Expected system prompt (mirror of build_replan_prompt output) ===
+    let expected_system = {
+        let mut p = String::from(
+            "You are a task replanner for OpenAlpaca. Evaluate whether the current \
+             execution plan is still on track or needs modification.\n\n",
+        );
+        p.push_str(&format!(
+            "<original_objective>\n{}\n</original_objective>\n\n",
+            original_objective
+        ));
+        p.push_str("<dag_state>\n");
+        p.push_str(dag_nodes_text);
+        p.push_str("</dag_state>\n\n");
+        p.push_str("<workspace>\n");
+        p.push_str(workspace_summary);
+        p.push_str("</workspace>\n\n");
+        p.push_str(&format!(
+            "<context>\nReplans so far: {} (be conservative — avoid unnecessary changes)\n</context>\n\n",
+            replans_so_far
+        ));
+        p.push_str("<available_agents>\n");
+        for a in &agents {
+            let desc = a.description.as_deref().unwrap_or("No description");
+            p.push_str(&format!(
+                "- ID: \"{}\", Name: \"{}\", Description: \"{}\"\n",
+                a.id, a.name, desc
+            ));
+        }
+        p.push_str("</available_agents>\n\n");
+        p.push_str(
+            r#"<response_format>
+Respond with ONLY a single JSON object. No markdown, no explanation, no other text.
+
+If the plan is on track:
+{"decision": "continue"}
+
+If the plan needs modification (replace remaining PENDING/READY nodes with new nodes):
+{"decision": "modify_dag", "dag": {"nodes": [
+  {"node_id": "new_1", "title": "...", "description": "...", "agent_id": "...", "agent_name": "...", "depends_on": [], "workspace_keys": [], "output_key": "..."},
+  ...
+]}}
+
+If the task should be abandoned:
+{"decision": "abort", "reason": "Explanation of why the task cannot be completed"}
+</response_format>
+
+<rules>
+- Prefer "continue" unless completed results clearly show the remaining plan is wrong
+- A "modify_dag" replaces only PENDING/READY/SKIPPED nodes; COMPLETED/RUNNING nodes are kept
+- New nodes in modify_dag can reference output_keys from already-completed nodes
+- Use exact agent_id values from the Available Agents list
+- 2-8 nodes max in modified DAG
+- Only abort if the task is fundamentally impossible given completed results
+</rules>
+"#,
+        );
+        p
+    };
+
+    // === Via the engine ===
+    let engine = ComposeEngine::new(16);
+
+    let persona_input = PersonaInput {
+        system_persona: Arc::new(SystemPersona::default()),
+        user_document: Arc::new(None),
+        identity_document: Arc::new(Option::<IdentityDocument>::None),
+        persona_version: 0,
+        mode: PersonaMode::Minimal,
+    };
+    let persona_output = Arc::new(super::persona::compute(&persona_input));
+
+    let static_prompt_input = StaticPromptInput {
+        persona_output,
+        agent_persona: None,
+        agent_config_fingerprint: [0u8; 32],
+        skill_block: None,
+        skills_catalog: None,
+        bootstrap: None,
+        tools: Arc::new(Vec::new()),
+        connector_status: Arc::new(Vec::new()),
+        send_tool_context: None,
+        message_source: None,
+        raw_blocks: vec![
+            SystemBlock {
+                name: "original_objective",
+                content: Arc::<str>::from(format!(
+                    "<original_objective>\n{}\n</original_objective>\n\n",
+                    original_objective
+                )),
+                priority: SectionPriority::High,
+            },
+            SystemBlock {
+                name: "dag_state",
+                content: Arc::<str>::from(format!(
+                    "<dag_state>\n{}</dag_state>\n\n",
+                    dag_nodes_text
+                )),
+                priority: SectionPriority::High,
+            },
+            SystemBlock {
+                name: "workspace",
+                content: Arc::<str>::from(format!(
+                    "<workspace>\n{}</workspace>\n\n",
+                    workspace_summary
+                )),
+                priority: SectionPriority::Normal,
+            },
+            SystemBlock {
+                name: "context",
+                content: Arc::<str>::from(format!(
+                    "<context>\nReplans so far: {} (be conservative — avoid unnecessary changes)\n</context>\n\n",
+                    replans_so_far
+                )),
+                priority: SectionPriority::Normal,
+            },
+        ],
+        planner_agents: Some(Arc::new(agents.clone())),
+        planner_protocol_v2: false,
+        mode: StaticPromptMode::ReplannerHierarchical,
+        model_window: 8192,
+    };
+
+    let dynamic_context_input = DynamicContextInput {
+        context_bundle: Arc::new(ContextBundle::empty()),
+        query: Arc::from(""),
+        memory_retrieval_hash: [0u8; 32],
+        path: ExecutionPath::SimpleQuery,
+        reserved_tokens: 0,
+        mode: DynamicContextMode::Skip,
+    };
+
+    let history_input = HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        summary: None,
+        summary_wrap_mode: SummaryWrapMode::Plain,
+        recent_messages: Arc::new(Vec::new()),
+        current_user_turn: Some(ChatMessage::user(
+            "Evaluate the current task progress and decide whether to continue, \
+             modify the plan, or abort.",
+        )),
+        mode: HistoryMode::Default,
+    };
+
+    let request = ComposeRequest::Replanner {
+        current_plan: Arc::new(PlanState::default()),
+        workspace_snapshot: Arc::new(WorkspaceSnapshot::default()),
+        overrides: ComposeOverrides::default(),
+    };
+
+    let composed = engine.compose(
+        &request,
+        persona_input,
+        static_prompt_input,
+        dynamic_context_input,
+        history_input,
+        8192,
+        Arc::new(Vec::new()),
+        None,
+        None,
+    );
+
+    // Byte-identical assertion on the system message.
+    let system_msg = composed
+        .messages
+        .iter()
+        .find(|m| matches!(m.role, Role::System))
+        .expect("expected a system message");
+    assert_eq!(
+        system_msg.content, expected_system,
+        "Replanner migration produced non-byte-identical system prompt"
+    );
+
+    // User message carrying the canonical "Evaluate..." turn.
+    assert!(
+        composed.messages.iter().any(|m| matches!(m.role, Role::User)
+            && m.content.starts_with("Evaluate the current task progress")),
+        "Replanner migration must include the canonical 'Evaluate...' user turn"
+    );
 }

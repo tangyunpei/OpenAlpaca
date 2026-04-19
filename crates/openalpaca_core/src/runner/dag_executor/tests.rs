@@ -312,6 +312,7 @@ async fn test_execute_dag_empty_returns_all_completed() {
         None,        // workspace_id
         "",          // connector_guidance
         None,        // confirmation_broker
+        Arc::new(crate::compose::ComposeEngine::new(16)),
     )
     .await;
 
@@ -366,6 +367,7 @@ async fn test_execute_dag_cancellation_before_start() {
         None,
         "",
         None,
+        Arc::new(crate::compose::ComposeEngine::new(16)),
     )
     .await;
 

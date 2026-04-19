@@ -62,6 +62,9 @@ pub struct TaskDispatcher {
     pub(crate) confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
     /// Context manager for distilling parent context into sub-agent packages.
     pub(crate) context_manager: Arc<ContextManager>,
+    /// Layered compose engine. Shared with the owning `Orchestrator` so
+    /// prompt caches are global across conversation + task paths (Phase 4).
+    pub(crate) compose_engine: Arc<crate::compose::ComposeEngine>,
 }
 
 impl TaskDispatcher {
@@ -78,6 +81,7 @@ impl TaskDispatcher {
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
         connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
         context_manager: Arc<ContextManager>,
+        compose_engine: Arc<crate::compose::ComposeEngine>,
     ) -> Self {
         Self {
             shared_context,
@@ -94,6 +98,7 @@ impl TaskDispatcher {
             cached_connector_guidance: std::sync::Mutex::new((String::new(), Instant::now())),
             confirmation_broker: Arc::new(RwLock::new(None)),
             context_manager,
+            compose_engine,
         }
     }
 
