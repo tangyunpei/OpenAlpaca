@@ -109,7 +109,7 @@ impl LlmProvider for OllamaProvider {
         {
             // Standalone implementation (minimal OpenAI-compatible request)
             let url = format!("{}/chat/completions", self.base_url);
-            let messages: Vec<serde_json::Value> = request
+            let mut messages: Vec<serde_json::Value> = request
                 .messages
                 .iter()
                 .map(|m| {
@@ -122,6 +122,14 @@ impl LlmProvider for OllamaProvider {
                     serde_json::json!({ "role": role, "content": m.content })
                 })
                 .collect();
+
+            // Ephemeral system notice: append as tail system-role message (spec P0).
+            if let Some(ref notice) = request.ephemeral_system_notice {
+                messages.push(serde_json::json!({
+                    "role": "system",
+                    "content": notice,
+                }));
+            }
 
             let body = serde_json::json!({
                 "model": request.model.as_deref().unwrap_or(&self.model),
@@ -190,5 +198,39 @@ mod tests {
             Some("http://192.168.1.100:11434/v1".to_string()),
         );
         assert_eq!(provider.base_url(), "http://192.168.1.100:11434/v1");
+    }
+
+    /// Ollama delegates to the OpenAI provider's request builder when the
+    /// `openai` feature is enabled (the default in the workspace). Exercise
+    /// placement through that same builder: a tail system-role message carrying
+    /// the notice when `ephemeral_system_notice.is_some()`.
+    #[cfg(feature = "openai")]
+    #[test]
+    fn test_ollama_ephemeral_notice_placement() {
+        use crate::providers::openai::request::build_request_body;
+        use crate::types::{ChatMessage, ChatRequest};
+        use std::sync::Arc;
+
+        let request = ChatRequest {
+            messages: Arc::new(vec![
+                ChatMessage::system("real system"),
+                ChatMessage::user("hello"),
+            ]),
+            tools: Arc::new(vec![]),
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            enable_caching: false,
+            thinking: None,
+            context_management: None,
+            ephemeral_system_notice: Some("[budget_notice]\nollama path\n[/budget_notice]".to_string()),
+        };
+
+        let body = build_request_body("llama3", 1024, &request);
+        let messages = body["messages"].as_array().unwrap();
+        let last = messages.last().unwrap();
+        assert_eq!(last["role"], "system");
+        assert!(last["content"].as_str().unwrap().contains("budget_notice"));
     }
 }

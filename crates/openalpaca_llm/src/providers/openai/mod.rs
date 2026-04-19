@@ -1,4 +1,4 @@
-mod request;
+pub(crate) mod request;
 mod response;
 mod streaming;
 

@@ -293,6 +293,10 @@ pub struct ChatRequest {
     pub thinking: Option<ThinkingConfig>,
     /// Context management configuration (Anthropic only). Other providers ignore this.
     pub context_management: Option<crate::context_management::ContextManagement>,
+    /// Ephemeral system notice (e.g., budget pressure) injected into this
+    /// request only. Never persisted to conversation history. Providers
+    /// place it per their convention (spec P0).
+    pub ephemeral_system_notice: Option<String>,
 }
 
 #[derive(Debug, Clone)]

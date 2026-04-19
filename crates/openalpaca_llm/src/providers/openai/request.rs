@@ -85,7 +85,7 @@ pub(super) fn build_message_content(msg: &ChatMessage) -> serde_json::Value {
     serde_json::Value::Array(blocks)
 }
 
-pub(super) fn build_request_body(
+pub(crate) fn build_request_body(
     default_model: &str,
     default_max_tokens: u32,
     request: &ChatRequest,
@@ -93,7 +93,7 @@ pub(super) fn build_request_body(
     let model = request.model.as_deref().unwrap_or(default_model);
     let max_tokens = request.max_tokens.unwrap_or(default_max_tokens);
 
-    let messages: Vec<serde_json::Value> = request
+    let mut messages: Vec<serde_json::Value> = request
         .messages
         .iter()
         .map(|msg| {
@@ -138,6 +138,14 @@ pub(super) fn build_request_body(
             obj
         })
         .collect();
+
+    // Ephemeral system notice: append as tail system-role message (spec P0).
+    if let Some(ref notice) = request.ephemeral_system_notice {
+        messages.push(serde_json::json!({
+            "role": "system",
+            "content": notice,
+        }));
+    }
 
     let mut body = serde_json::json!({
         "model": model,

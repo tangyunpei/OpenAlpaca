@@ -463,6 +463,7 @@ async fn run_agentic_loop_inner(
                     config.stream_callback.as_ref(),
                     config.max_stream_duration,
                     context_management.clone(),
+                    None, // ephemeral_system_notice — Task 5 fills in the trigger.
                 ).instrument(llm_call_span.clone()) => result,
                 _ = token.cancelled() => {
                     tracing::info!(agent_id = agent_id, round = state.rounds + 1, "LLM call interrupted by cancellation");
@@ -482,6 +483,7 @@ async fn run_agentic_loop_inner(
                     config.stream_callback.as_ref(),
                     config.max_stream_duration,
                     context_management.clone(),
+                    None, // ephemeral_system_notice — Task 5 fills in the trigger.
                 )
                 .instrument(llm_call_span)
                 .await

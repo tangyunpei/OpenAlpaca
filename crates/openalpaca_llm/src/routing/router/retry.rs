@@ -65,6 +65,7 @@ impl LlmRouter {
                     enable_caching: request.enable_caching,
                     thinking: request.thinking.clone(),
                     context_management: request.context_management.clone(),
+                    ephemeral_system_notice: request.ephemeral_system_notice.clone(),
                 };
 
                 match entry

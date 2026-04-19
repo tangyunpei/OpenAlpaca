@@ -172,8 +172,23 @@ pub(super) fn build_request_body(
 
     if !system_text.is_empty() {
         // Base form — cache_control is applied in the consolidated caching
-        // block below when request.enable_caching is true.
-        body["system"] = serde_json::Value::String(system_text);
+        // block below when request.enable_caching is true. If an ephemeral
+        // system notice is present, emit a two-element array here; the
+        // caching block below mutates element [0] in-place to attach
+        // cache_control. The notice block never carries cache_control.
+        if let Some(ref notice) = request.ephemeral_system_notice {
+            body["system"] = serde_json::Value::Array(vec![
+                serde_json::json!({"type": "text", "text": system_text}),
+                serde_json::json!({"type": "text", "text": notice}),
+            ]);
+        } else {
+            body["system"] = serde_json::Value::String(system_text);
+        }
+    } else if let Some(ref notice) = request.ephemeral_system_notice {
+        // Edge: empty system_text but notice present.
+        body["system"] = serde_json::Value::Array(vec![
+            serde_json::json!({"type": "text", "text": notice}),
+        ]);
     }
 
     if let Some(temp) = request.temperature {
@@ -216,15 +231,32 @@ pub(super) fn build_request_body(
         let _span = tracing::info_span!("loop.step.cache_markers", breakpoints = 3).entered();
         tracing::trace!("cache_markers step entered");
 
-        // First breakpoint: system prompt.
+        // First breakpoint: system prompt. Attach cache_control to the first
+        // system block — when a notice is present, `body["system"]` is already
+        // an array whose element [0] is the cacheable system text and element
+        // [1] is the notice (must never carry cache_control).
         if body.get("system").is_some() {
             let system_value = body["system"].clone();
-            if let serde_json::Value::String(s) = system_value {
-                body["system"] = serde_json::json!([{
-                    "type": "text",
-                    "text": s,
-                    "cache_control": CacheControl::ephemeral(),
-                }]);
+            match system_value {
+                serde_json::Value::String(s) => {
+                    body["system"] = serde_json::json!([{
+                        "type": "text",
+                        "text": s,
+                        "cache_control": CacheControl::ephemeral(),
+                    }]);
+                }
+                serde_json::Value::Array(mut arr) => {
+                    if let Some(first) = arr.first_mut() {
+                        if let Some(obj) = first.as_object_mut() {
+                            obj.insert(
+                                "cache_control".to_string(),
+                                serde_json::json!(CacheControl::ephemeral()),
+                            );
+                        }
+                    }
+                    body["system"] = serde_json::Value::Array(arr);
+                }
+                _ => {}
             }
         }
 

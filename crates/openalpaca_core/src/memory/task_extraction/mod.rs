@@ -138,6 +138,7 @@ pub async fn extract_task_memories(
         thinking: None,
         context_management: None,
         fallback_models: Vec::new(),
+        ephemeral_system_notice: None,
     };
 
     // LLM call

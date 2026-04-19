@@ -94,6 +94,7 @@ pub(super) async fn update_summary_background(
         thinking: None,
         context_management: None,
         fallback_models: Vec::new(),
+        ephemeral_system_notice: None,
     };
 
     let call_start = std::time::Instant::now();

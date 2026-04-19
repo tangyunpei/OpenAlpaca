@@ -94,6 +94,7 @@ impl Replanner {
             thinking: None,
             context_management: None,
             fallback_models: Vec::new(),
+            ephemeral_system_notice: None,
         };
 
         let response = router

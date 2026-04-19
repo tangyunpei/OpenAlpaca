@@ -18,6 +18,7 @@ fn test_request_serialization() {
         enable_caching: false,
         thinking: None,
         context_management: None,
+        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -187,6 +188,7 @@ fn test_request_serialization_filters_empty_text_parts() {
         enable_caching: false,
         thinking: None,
         context_management: None,
+        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -216,6 +218,7 @@ fn test_request_serialization_empty_parts_get_placeholder() {
         enable_caching: false,
         thinking: None,
         context_management: None,
+        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -264,6 +267,7 @@ fn test_tool_with_strict_and_examples() {
         enable_caching: false,
         thinking: None,
         context_management: None,
+        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     let tools = body["tools"].as_array().unwrap();
@@ -291,6 +295,7 @@ fn test_tool_without_strict_no_extra_fields() {
         enable_caching: false,
         thinking: None,
         context_management: None,
+        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     let tools = body["tools"].as_array().unwrap();
@@ -314,6 +319,7 @@ fn test_system_prompt_caching_enabled() {
         enable_caching: true,
         thinking: None,
         context_management: None,
+        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     // System should be array with cache_control
@@ -337,6 +343,7 @@ fn test_system_prompt_caching_disabled() {
         enable_caching: false,
         thinking: None,
         context_management: None,
+        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     // System should be plain string
@@ -371,6 +378,7 @@ fn test_tool_caching_breakpoint() {
         enable_caching: true,
         thinking: None,
         context_management: None,
+        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     let tools = body["tools"].as_array().unwrap();
@@ -395,6 +403,7 @@ fn test_caching_with_empty_tools() {
         enable_caching: true,
         thinking: None,
         context_management: None,
+        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     // System should still have cache_control
@@ -417,6 +426,7 @@ fn test_thinking_enabled_serialization() {
         enable_caching: false,
         thinking: Some(ThinkingConfig::Enabled { budget_tokens: 2048 }),
         context_management: None,
+        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     assert_eq!(body["thinking"]["type"], "enabled");
@@ -438,6 +448,7 @@ fn test_thinking_disabled_keeps_temperature() {
         enable_caching: false,
         thinking: Some(ThinkingConfig::Disabled),
         context_management: None,
+        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     assert_eq!(body["thinking"]["type"], "disabled");
@@ -494,6 +505,7 @@ fn test_thinking_adaptive_serialization() {
         enable_caching: false,
         thinking: Some(ThinkingConfig::Adaptive),
         context_management: None,
+        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     assert_eq!(body["thinking"]["type"], "adaptive");
@@ -691,6 +703,7 @@ fn test_build_request_body_with_context_management() {
                 },
             ],
         }),
+        ephemeral_system_notice: None,
     };
 
     let body = request::build_request_body("claude-sonnet-4-20250514", 4096, &request);
@@ -713,6 +726,7 @@ fn test_build_request_body_without_context_management() {
         enable_caching: false,
         thinking: None,
         context_management: None,
+        ephemeral_system_notice: None,
     };
 
     let body = request::build_request_body("claude-sonnet-4-20250514", 4096, &request);
@@ -736,6 +750,7 @@ fn test_anthropic_last_message_has_cache_control_when_caching_enabled() {
         enable_caching: true,
         thinking: None,
         context_management: None,
+        ephemeral_system_notice: None,
     };
 
     let body = request::build_request_body("claude-test", 1024, &request);
@@ -765,6 +780,7 @@ fn test_anthropic_no_cache_control_when_caching_disabled() {
         enable_caching: false,
         thinking: None,
         context_management: None,
+        ephemeral_system_notice: None,
     };
 
     let body = request::build_request_body("claude-test", 1024, &request);
@@ -775,4 +791,96 @@ fn test_anthropic_no_cache_control_when_caching_disabled() {
         !last_str.contains("cache_control"),
         "no cache_control when enable_caching=false"
     );
+}
+
+#[test]
+fn test_anthropic_ephemeral_notice_placement() {
+    use crate::types::{ChatMessage, ChatRequest};
+    use std::sync::Arc;
+
+    let request = ChatRequest {
+        messages: Arc::new(vec![
+            ChatMessage::system("cached system"),
+            ChatMessage::user("hello"),
+        ]),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: true,
+        thinking: None,
+        context_management: None,
+        ephemeral_system_notice: Some("[budget_notice]\n80% used\n[/budget_notice]".to_string()),
+    };
+
+    let body = super::request::build_request_body("claude-test", 1024, &request);
+    let system = body["system"].as_array().expect("system must be an array when caching+notice");
+    assert_eq!(system.len(), 2, "expected cached block + notice block");
+
+    let cached = &system[0];
+    assert_eq!(cached["text"], "cached system");
+    assert_eq!(cached["cache_control"]["type"], "ephemeral");
+
+    let notice = &system[1];
+    assert!(notice["text"].as_str().unwrap().contains("budget_notice"));
+    assert!(
+        notice.get("cache_control").is_none(),
+        "notice block must NOT carry cache_control"
+    );
+}
+
+#[test]
+fn test_anthropic_ephemeral_notice_placement_caching_off() {
+    use crate::types::{ChatMessage, ChatRequest};
+    use std::sync::Arc;
+
+    let request = ChatRequest {
+        messages: Arc::new(vec![
+            ChatMessage::system("plain system"),
+            ChatMessage::user("hello"),
+        ]),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: None,
+        ephemeral_system_notice: Some("[notice]".to_string()),
+    };
+
+    let body = super::request::build_request_body("claude-test", 1024, &request);
+    let system = body["system"].as_array().expect("system must be an array when notice present");
+    assert_eq!(system.len(), 2);
+    assert_eq!(system[0]["text"], "plain system");
+    assert!(system[0].get("cache_control").is_none());
+    assert_eq!(system[1]["text"], "[notice]");
+    assert!(system[1].get("cache_control").is_none());
+}
+
+#[test]
+fn test_anthropic_ephemeral_notice_placement_empty_system() {
+    use crate::types::{ChatMessage, ChatRequest};
+    use std::sync::Arc;
+
+    let request = ChatRequest {
+        messages: Arc::new(vec![ChatMessage::user("hello")]),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: None,
+        ephemeral_system_notice: Some("[notice-only]".to_string()),
+    };
+
+    let body = super::request::build_request_body("claude-test", 1024, &request);
+    let system = body["system"].as_array().expect("notice-only should be a single-element array");
+    assert_eq!(system.len(), 1);
+    assert_eq!(system[0]["text"], "[notice-only]");
+    assert!(system[0].get("cache_control").is_none());
 }

@@ -41,6 +41,7 @@ impl<'a> LlmBackend<'a> {
         stream_callback: Option<&StreamCallback>,
         max_stream_duration: Duration,
         context_management: Option<ContextManagement>,
+        ephemeral_system_notice: Option<String>,
     ) -> Result<ChatResponse, LlmRouterError> {
         match self {
             LlmBackend::Direct { provider } => {
@@ -54,6 +55,7 @@ impl<'a> LlmBackend<'a> {
                     enable_caching,
                     thinking,
                     context_management,
+                    ephemeral_system_notice,
                 };
                 provider.chat(request).await.map_err(LlmRouterError::Llm)
             }
@@ -73,6 +75,7 @@ impl<'a> LlmBackend<'a> {
                         thinking: thinking.clone(),
                         context_management: context_management.clone(),
                         fallback_models: fallback_models.clone(),
+                        ephemeral_system_notice: ephemeral_system_notice.clone(),
                     };
                     match router.complete_streaming(stream_request).await {
                         Ok(stream) => {
@@ -142,6 +145,7 @@ impl<'a> LlmBackend<'a> {
                     thinking,
                     context_management,
                     fallback_models: fallback_models.clone(),
+                    ephemeral_system_notice,
                 };
                 router.complete(request).await
             }
@@ -247,6 +251,7 @@ impl<'a> crate::context_budget::compaction::MemoryExtractor for LlmBackend<'a> {
             thinking: None,
             context_management: None,
             fallback_models: Vec::new(),
+            ephemeral_system_notice: None,
         };
 
         let response = router.complete(request).await.map_err(|e| e.to_string())?;
@@ -330,6 +335,7 @@ impl<'a> crate::context_budget::compaction::Summarizer for LlmBackend<'a> {
             thinking: None,
             context_management: None,
             fallback_models: Vec::new(),
+            ephemeral_system_notice: None,
         };
 
         let response = router.complete(request).await.map_err(|e| e.to_string())?;

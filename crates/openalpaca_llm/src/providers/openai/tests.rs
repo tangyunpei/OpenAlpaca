@@ -18,6 +18,7 @@ fn test_request_format() {
         enable_caching: false,
         thinking: None,
         context_management: None,
+        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -135,6 +136,7 @@ fn test_request_serialization_filters_empty_text_parts() {
         enable_caching: false,
         thinking: None,
         context_management: None,
+        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -164,6 +166,7 @@ fn test_request_serialization_empty_parts_get_placeholder() {
         enable_caching: false,
         thinking: None,
         context_management: None,
+        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -206,6 +209,7 @@ fn test_openai_tool_strict_mode() {
         enable_caching: false,
         thinking: None,
         context_management: None,
+        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     let tools = body["tools"].as_array().unwrap();
@@ -402,6 +406,7 @@ fn test_openai_reasoning_effort_mapping() {
         enable_caching: false,
         thinking: Some(ThinkingConfig::Enabled { budget_tokens: 4096 }),
         context_management: None,
+        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     assert_eq!(body["reasoning_effort"], "high");
@@ -418,6 +423,7 @@ fn test_openai_reasoning_effort_mapping() {
         enable_caching: false,
         thinking: Some(ThinkingConfig::Adaptive),
         context_management: None,
+        ephemeral_system_notice: None,
     };
     let body2 = provider.build_request_body(&request2);
     assert_eq!(body2["reasoning_effort"], "medium");
@@ -433,6 +439,7 @@ fn test_openai_reasoning_effort_mapping() {
         enable_caching: false,
         thinking: Some(ThinkingConfig::Disabled),
         context_management: None,
+        ephemeral_system_notice: None,
     };
     let body3 = provider.build_request_body(&request3);
     assert!(body3.get("reasoning_effort").is_none() || body3["reasoning_effort"].is_null());
@@ -529,4 +536,32 @@ async fn test_openai_sse_reasoning_delta() {
     }
     assert_eq!(thinking_parts.join(""), "Let me think...");
     assert_eq!(text_parts.join(""), "The answer is 42.");
+}
+
+#[test]
+fn test_openai_ephemeral_notice_placement() {
+    use crate::types::{ChatMessage, ChatRequest};
+    use std::sync::Arc;
+
+    let request = ChatRequest {
+        messages: Arc::new(vec![
+            ChatMessage::system("real system"),
+            ChatMessage::user("hello"),
+        ]),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: None,
+        ephemeral_system_notice: Some("[budget_notice]\nwatch out\n[/budget_notice]".to_string()),
+    };
+
+    let body = super::request::build_request_body("gpt-test", 1024, &request);
+    let messages = body["messages"].as_array().unwrap();
+    let last = messages.last().unwrap();
+    assert_eq!(last["role"], "system");
+    assert!(last["content"].as_str().unwrap().contains("budget_notice"));
 }
