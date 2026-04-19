@@ -48,6 +48,19 @@ pub struct CapabilitiesSection {
     pub requires: Vec<String>,
     #[serde(default)]
     pub provides: Vec<String>,
+    // NEW P3e:
+    #[serde(default, rename = "virtual")]
+    pub virtual_: VirtualCapabilitiesSection,
+}
+
+/// Plugin-declared virtual capabilities (MCP P3e).
+///
+/// Every tool registered by this plugin gets these cap names added to its
+/// virtual-capability set via a synthesized `PluginCapabilityProvider`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct VirtualCapabilitiesSection {
+    #[serde(default)]
+    pub provides: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -180,5 +193,58 @@ description = "Rate limit"
         let provided = HashMap::new();
         let missing = manifest.missing_config_keys(&provided);
         assert_eq!(missing, vec!["api_key"]);
+    }
+}
+
+#[cfg(test)]
+mod p3e_tests {
+    use super::*;
+
+    fn parse_manifest(toml_text: &str) -> PluginManifest {
+        toml::from_str(toml_text).expect("parse manifest")
+    }
+
+    #[test]
+    fn manifest_without_virtual_section_defaults_empty() {
+        let toml = r#"
+            [plugin]
+            name = "test"
+            version = "1.0.0"
+            entry = "./bin"
+        "#;
+        let m = parse_manifest(toml);
+        assert!(m.capabilities.virtual_.provides.is_empty());
+    }
+
+    #[test]
+    fn manifest_with_virtual_provides_parses_correctly() {
+        let toml = r#"
+            [plugin]
+            name = "test"
+            version = "1.0.0"
+            entry = "./bin"
+
+            [capabilities.virtual]
+            provides = ["annotation:x", "plugin:y"]
+        "#;
+        let m = parse_manifest(toml);
+        assert_eq!(m.capabilities.virtual_.provides.len(), 2);
+        assert!(m.capabilities.virtual_.provides.contains(&"annotation:x".to_string()));
+        assert!(m.capabilities.virtual_.provides.contains(&"plugin:y".to_string()));
+    }
+
+    #[test]
+    fn manifest_virtual_empty_provides_list() {
+        let toml = r#"
+            [plugin]
+            name = "test"
+            version = "1.0.0"
+            entry = "./bin"
+
+            [capabilities.virtual]
+            provides = []
+        "#;
+        let m = parse_manifest(toml);
+        assert!(m.capabilities.virtual_.provides.is_empty());
     }
 }
