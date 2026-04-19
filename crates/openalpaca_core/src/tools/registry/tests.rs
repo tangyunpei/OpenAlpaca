@@ -1453,3 +1453,360 @@ fn register_with_no_annotations_skips_virtual_caps() {
         assert!(via_ann.is_empty(), "{name} should not contain plain_tool");
     }
 }
+
+// ===========================================================================
+// Task 4 (MCP P3d): Runtime provider lifecycle tests
+// ===========================================================================
+
+// Mock provider for lifecycle tests.
+#[allow(dead_code)]
+struct P3dMockProvider {
+    capability_name: &'static str,
+    target_tool_prefix: &'static str,
+    known_names: &'static [&'static str],
+}
+
+impl super::capabilities::CapabilityProvider for P3dMockProvider {
+    fn derive_capabilities(&self, tool: &RegisteredTool) -> Vec<String> {
+        if tool.definition.name.starts_with(self.target_tool_prefix) {
+            vec![self.capability_name.to_string()]
+        } else {
+            vec![]
+        }
+    }
+    fn known_capability_names(&self) -> &'static [&'static str] {
+        self.known_names
+    }
+}
+
+#[test]
+fn register_capability_provider_returns_valid_handle() {
+    let registry = ToolRegistry::new().unwrap();
+    let before = registry.provider_handles().len();
+    let handle = registry.register_capability_provider(Arc::new(P3dMockProvider {
+        capability_name: "annotation:custom_a",
+        target_tool_prefix: "a_",
+        known_names: &["annotation:custom_a"],
+    }));
+    let after = registry.provider_handles();
+    assert_eq!(after.len(), before + 1);
+    assert!(after.contains(&handle));
+}
+
+#[test]
+fn register_provider_retroactively_indexes_existing_tools() {
+    let registry = ToolRegistry::new().unwrap();
+    registry.register(make_tool_with_caps("a_target", vec![])).unwrap();
+
+    // No provider yet for annotation:custom_a.
+    let before = registry.tools_for_capabilities(&vec!["annotation:custom_a".to_string()]);
+    assert!(before.is_empty());
+
+    // Register a provider AFTER the tool exists.
+    let _handle = registry.register_capability_provider(Arc::new(P3dMockProvider {
+        capability_name: "annotation:custom_a",
+        target_tool_prefix: "a_",
+        known_names: &["annotation:custom_a"],
+    }));
+
+    // Retroactive rebuild — tool is now indexed.
+    let after = registry.tools_for_capabilities(&vec!["annotation:custom_a".to_string()]);
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].name, "a_target");
+}
+
+#[test]
+fn remove_capability_provider_unknown_handle_returns_false() {
+    let registry = ToolRegistry::new().unwrap();
+    assert!(!registry.remove_capability_provider(ProviderHandle(9999)));
+}
+
+#[test]
+fn remove_capability_provider_known_handle_returns_true() {
+    let registry = ToolRegistry::new().unwrap();
+    let handle = registry.register_capability_provider(Arc::new(P3dMockProvider {
+        capability_name: "annotation:custom_a",
+        target_tool_prefix: "a_",
+        known_names: &["annotation:custom_a"],
+    }));
+    assert!(registry.remove_capability_provider(handle));
+    assert!(!registry.provider_handles().contains(&handle));
+}
+
+#[test]
+fn remove_provider_scrubs_its_only_virtual_caps() {
+    let registry = ToolRegistry::new().unwrap();
+    registry.register(make_tool_with_caps("a_target", vec![])).unwrap();
+    let handle = registry.register_capability_provider(Arc::new(P3dMockProvider {
+        capability_name: "annotation:custom_a",
+        target_tool_prefix: "a_",
+        known_names: &["annotation:custom_a"],
+    }));
+
+    let before = registry.tools_for_capabilities(&vec!["annotation:custom_a".to_string()]);
+    assert_eq!(before.len(), 1);
+
+    registry.remove_capability_provider(handle);
+
+    let after = registry.tools_for_capabilities(&vec!["annotation:custom_a".to_string()]);
+    assert!(after.is_empty());
+}
+
+#[test]
+fn remove_provider_preserves_caps_from_other_providers() {
+    let registry = ToolRegistry::new().unwrap();
+    registry.register(make_tool_with_caps("a_target", vec![])).unwrap();
+
+    let h1 = registry.register_capability_provider(Arc::new(P3dMockProvider {
+        capability_name: "annotation:custom_shared",
+        target_tool_prefix: "a_",
+        known_names: &["annotation:custom_shared"],
+    }));
+    let h2 = registry.register_capability_provider(Arc::new(P3dMockProvider {
+        capability_name: "annotation:custom_shared",
+        target_tool_prefix: "a_",
+        known_names: &["annotation:custom_shared"],
+    }));
+
+    // Both providers emit the same cap for the same tool.
+    let before = registry.tools_for_capabilities(&vec!["annotation:custom_shared".to_string()]);
+    assert_eq!(before.len(), 1);
+
+    registry.remove_capability_provider(h1);
+
+    // Still resolves via remaining provider.
+    let after = registry.tools_for_capabilities(&vec!["annotation:custom_shared".to_string()]);
+    assert_eq!(after.len(), 1, "cap should still resolve via remaining provider");
+
+    registry.remove_capability_provider(h2);
+
+    let final_ = registry.tools_for_capabilities(&vec!["annotation:custom_shared".to_string()]);
+    assert!(final_.is_empty());
+}
+
+#[test]
+fn remove_default_annotation_provider_empties_known_list() {
+    let registry = ToolRegistry::new().unwrap();
+    let initial_handles = registry.provider_handles();
+    assert_eq!(initial_handles.len(), 1, "default provider should be registered");
+
+    let default_handle = initial_handles[0];
+    let removed = registry.remove_capability_provider(default_handle);
+    assert!(removed);
+
+    assert!(registry.known_virtual_capabilities().is_empty());
+}
+
+#[test]
+fn register_then_remove_then_register_cycle() {
+    let registry = ToolRegistry::new().unwrap();
+    registry.register(make_tool_with_caps("a_target", vec![])).unwrap();
+
+    // Cycle 1: register, verify, remove.
+    let h1 = registry.register_capability_provider(Arc::new(P3dMockProvider {
+        capability_name: "annotation:custom_a",
+        target_tool_prefix: "a_",
+        known_names: &["annotation:custom_a"],
+    }));
+    assert_eq!(
+        registry.tools_for_capabilities(&vec!["annotation:custom_a".to_string()]).len(),
+        1
+    );
+    registry.remove_capability_provider(h1);
+    assert!(
+        registry.tools_for_capabilities(&vec!["annotation:custom_a".to_string()]).is_empty()
+    );
+
+    // Cycle 2: register again (different handle), verify.
+    let h2 = registry.register_capability_provider(Arc::new(P3dMockProvider {
+        capability_name: "annotation:custom_a",
+        target_tool_prefix: "a_",
+        known_names: &["annotation:custom_a"],
+    }));
+    assert_ne!(h1, h2, "new registration should issue fresh handle");
+    assert_eq!(
+        registry.tools_for_capabilities(&vec!["annotation:custom_a".to_string()]).len(),
+        1
+    );
+}
+
+#[test]
+fn rebuild_preserves_string_capabilities() {
+    let registry = ToolRegistry::new().unwrap();
+    registry.register(make_tool_with_caps("tool_with_string_cap", vec!["file_read"])).unwrap();
+
+    let before = registry.tools_for_capabilities(&vec!["file_read".to_string()]);
+    assert_eq!(before.len(), 1);
+
+    // Register then remove a dummy provider (triggers rebuild).
+    let handle = registry.register_capability_provider(Arc::new(P3dMockProvider {
+        capability_name: "annotation:dummy",
+        target_tool_prefix: "nomatch_",
+        known_names: &["annotation:dummy"],
+    }));
+    registry.remove_capability_provider(handle);
+
+    let after = registry.tools_for_capabilities(&vec!["file_read".to_string()]);
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].name, "tool_with_string_cap");
+}
+
+#[test]
+fn concurrent_registers_return_distinct_handles() {
+    use std::sync::Arc as StdArc;
+    use std::thread;
+
+    let registry = StdArc::new(ToolRegistry::new().unwrap());
+    let handles: Vec<_> = (0..10)
+        .map(|_| {
+            let reg = StdArc::clone(&registry);
+            thread::spawn(move || {
+                reg.register_capability_provider(Arc::new(P3dMockProvider {
+                    capability_name: "annotation:concurrent",
+                    target_tool_prefix: "c_",
+                    known_names: &["annotation:concurrent"],
+                }))
+            })
+        })
+        .collect();
+
+    let collected: Vec<ProviderHandle> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    // All 10 handles should be distinct.
+    use std::collections::HashSet;
+    let as_set: HashSet<ProviderHandle> = collected.iter().copied().collect();
+    assert_eq!(as_set.len(), 10);
+}
+
+#[test]
+fn known_virtual_capabilities_reflects_current_providers() {
+    let registry = ToolRegistry::new().unwrap();
+    // Default provider contributes 8 names.
+    assert_eq!(registry.known_virtual_capabilities().len(), 8);
+
+    let handle = registry.register_capability_provider(Arc::new(P3dMockProvider {
+        capability_name: "annotation:custom_x",
+        target_tool_prefix: "x_",
+        known_names: &["annotation:custom_x"],
+    }));
+    assert_eq!(registry.known_virtual_capabilities().len(), 9);
+
+    registry.remove_capability_provider(handle);
+    assert_eq!(registry.known_virtual_capabilities().len(), 8);
+}
+
+// ===========================================================================
+// Task 4 (MCP P3d): Integration tests for provider lifecycle
+// ===========================================================================
+
+#[test]
+fn plugin_hot_reload_scenario() {
+    let registry = ToolRegistry::new().unwrap();
+    registry.register(make_tool_with_caps("plugin_helper", vec![])).unwrap();
+
+    // Phase 1: Register a "plugin provider."
+    let handle = registry.register_capability_provider(Arc::new(P3dMockProvider {
+        capability_name: "annotation:my_plugin",
+        target_tool_prefix: "plugin_",
+        known_names: &["annotation:my_plugin"],
+    }));
+
+    // Tool is under annotation:my_plugin.
+    let phase1 = registry.tools_for_capabilities(&vec!["annotation:my_plugin".to_string()]);
+    assert_eq!(phase1.len(), 1);
+
+    // Phase 2: Unload plugin → remove provider.
+    registry.remove_capability_provider(handle);
+
+    // Tool no longer under annotation:my_plugin.
+    let phase2 = registry.tools_for_capabilities(&vec!["annotation:my_plugin".to_string()]);
+    assert!(phase2.is_empty());
+
+    // Phase 3: Reload plugin → register provider again.
+    let _handle2 = registry.register_capability_provider(Arc::new(P3dMockProvider {
+        capability_name: "annotation:my_plugin",
+        target_tool_prefix: "plugin_",
+        known_names: &["annotation:my_plugin"],
+    }));
+
+    // Tool is back.
+    let phase3 = registry.tools_for_capabilities(&vec!["annotation:my_plugin".to_string()]);
+    assert_eq!(phase3.len(), 1);
+}
+
+#[test]
+fn concurrent_tool_register_during_provider_rebuild() {
+    use std::sync::Arc as StdArc;
+    use std::thread;
+
+    let registry = StdArc::new(ToolRegistry::new().unwrap());
+
+    // Thread A registers a provider (triggers rebuild).
+    let reg_a = StdArc::clone(&registry);
+    let thread_a = thread::spawn(move || {
+        reg_a.register_capability_provider(Arc::new(P3dMockProvider {
+            capability_name: "annotation:concurrent_test",
+            target_tool_prefix: "ct_",
+            known_names: &["annotation:concurrent_test"],
+        }))
+    });
+
+    // Thread B registers a tool concurrently.
+    let reg_b = StdArc::clone(&registry);
+    let thread_b = thread::spawn(move || {
+        reg_b.register(make_tool_with_caps("ct_target", vec![])).unwrap();
+    });
+
+    let _handle = thread_a.join().unwrap();
+    thread_b.join().unwrap();
+
+    // After both complete, the new tool's virtual caps should be indexed.
+    let result = registry.tools_for_capabilities(&vec!["annotation:concurrent_test".to_string()]);
+    assert_eq!(result.len(), 1, "tool registered concurrently should be indexed");
+    assert_eq!(result[0].name, "ct_target");
+}
+
+#[test]
+fn lookup_during_rebuild_eventually_sees_full_result() {
+    use std::sync::Arc as StdArc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    let registry = StdArc::new(ToolRegistry::new().unwrap());
+    registry.register(make_tool_with_caps("lookup_target", vec![])).unwrap();
+
+    let stop = StdArc::new(AtomicBool::new(false));
+    let stop_clone = StdArc::clone(&stop);
+
+    // Mutation thread: register/remove in a loop.
+    let reg_m = StdArc::clone(&registry);
+    let mutator = thread::spawn(move || {
+        for _ in 0..20 {
+            let h = reg_m.register_capability_provider(Arc::new(P3dMockProvider {
+                capability_name: "annotation:flicker",
+                target_tool_prefix: "lookup_",
+                known_names: &["annotation:flicker"],
+            }));
+            thread::sleep(Duration::from_micros(100));
+            reg_m.remove_capability_provider(h);
+            thread::sleep(Duration::from_micros(100));
+        }
+        stop_clone.store(true, Ordering::Relaxed);
+    });
+
+    // Polling thread: lookup in a tight loop.
+    let reg_p = StdArc::clone(&registry);
+    let poller = thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            let _ = reg_p.tools_for_capabilities(&vec!["annotation:flicker".to_string()]);
+        }
+    });
+
+    mutator.join().unwrap();
+    poller.join().unwrap();
+
+    // After mutation ends, last remove leaves empty state.
+    let final_ = registry.tools_for_capabilities(&vec!["annotation:flicker".to_string()]);
+    assert!(final_.is_empty(), "after final remove, lookup must be empty");
+}
