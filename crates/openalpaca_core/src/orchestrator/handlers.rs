@@ -641,6 +641,7 @@ impl Orchestrator {
             let bg_embedder = if needs_extraction { self.embedder.clone() } else { None };
             let bg_user_path = if needs_extraction { Some(self.user_path.clone()) } else { None };
             let bg_user_doc = if needs_extraction { Some(self.user_document.clone()) } else { None };
+            let bg_persona_version = if needs_extraction { Some(self.persona_version.clone()) } else { None };
             let bg_bus = if needs_extraction { Some(self.bus.clone()) } else { None };
             let bg_intent = if needs_extraction { Some(intent_source_content.to_string()) } else { None };
             let bg_owner = owner_id.map(|s| s.to_string());
@@ -663,12 +664,25 @@ impl Orchestrator {
                 let extract_fut = async {
                     if let (Some(response_text), Some(owner)) = (&bg_response, &bg_owner)
                         && let (Some(db), Some(router)) = (bg_db, bg_router)
-                        && let (Some(counter), Some(user_path), Some(user_doc), Some(bus), Some(intent)) =
-                            (bg_counter, bg_user_path, bg_user_doc, bg_bus, bg_intent)
+                        && let (
+                            Some(counter),
+                            Some(user_path),
+                            Some(user_doc),
+                            Some(persona_ver),
+                            Some(bus),
+                            Some(intent),
+                        ) = (
+                            bg_counter,
+                            bg_user_path,
+                            bg_user_doc,
+                            bg_persona_version,
+                            bg_bus,
+                            bg_intent,
+                        )
                     {
                         extract_user_traits_background(
                             db, router, bg_config, counter, bg_embedder,
-                            user_path, user_doc, bus,
+                            user_path, user_doc, persona_ver, bus,
                             bg_lane, intent, response_text.clone(), owner.clone(),
                         )
                         .await;

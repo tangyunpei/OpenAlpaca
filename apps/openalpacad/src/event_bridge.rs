@@ -520,6 +520,18 @@ pub fn spawn_event_bridge(
                         %request_id, %agent_id, ?sections, total_tokens, budget, sub_agent_window,
                         "Context package built for sub-agent"
                     );
+                }
+                // Compose-engine cache telemetry (spec section Component 4).
+                // Daemon-level side-effect sink is tracing-only for Phase 1.
+                openalpaca_core::events::SystemEvent::ComposeLayerCacheHit {
+                    ref layer, ref lane_id, ..
+                } => {
+                    tracing::debug!(?layer, ?lane_id, "Compose layer cache hit");
+                }
+                openalpaca_core::events::SystemEvent::ComposeLayerCacheMiss {
+                    ref layer, ref reason, ref lane_id, ..
+                } => {
+                    tracing::debug!(?layer, ?reason, ?lane_id, "Compose layer cache miss");
                 } // NO catch-all: compiler will flag any missing SystemEvent variant
             }
         }

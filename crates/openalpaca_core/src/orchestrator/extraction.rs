@@ -10,6 +10,7 @@ use openalpaca_storage::Database;
 use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Automatically extract user traits from a conversation turn.
@@ -28,6 +29,7 @@ pub(super) async fn extract_user_traits_background(
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     user_path: Arc<RwLock<Option<PathBuf>>>,
     user_document: Arc<RwLock<Option<UserDocument>>>,
+    persona_version: Arc<AtomicU64>,
     bus: EventBus,
     lane_key: String,
     user_message: String,
@@ -349,7 +351,14 @@ pub(super) async fn extract_user_traits_background(
 
     // Write profile-level patches to USER.md
     if !profile_patches.is_empty() {
-        apply_profile_patches(&user_path, &user_document, &bus, &profile_patches).await;
+        apply_profile_patches(
+            &user_path,
+            &user_document,
+            &persona_version,
+            &bus,
+            &profile_patches,
+        )
+        .await;
     }
 }
 
@@ -357,6 +366,7 @@ pub(super) async fn extract_user_traits_background(
 async fn apply_profile_patches(
     user_path: &Arc<RwLock<Option<PathBuf>>>,
     user_document: &Arc<RwLock<Option<UserDocument>>>,
+    persona_version: &Arc<AtomicU64>,
     bus: &EventBus,
     patches: &HashMap<String, serde_json::Value>,
 ) {
@@ -521,16 +531,24 @@ async fn apply_profile_patches(
 
     // Update in-memory document
     if let Ok(new_doc) = parse_user_markdown(&new_content) {
-        match user_document.write() {
-            Ok(mut guard) => {
-                *guard = Some(new_doc);
-            }
-            Err(poisoned) => {
-                tracing::warn!("User document lock poisoned during extraction update; recovering");
-                let mut guard = poisoned.into_inner();
-                *guard = Some(new_doc);
+        {
+            let lock = user_document.write();
+            match lock {
+                Ok(mut guard) => {
+                    *guard = Some(new_doc);
+                }
+                Err(poisoned) => {
+                    tracing::warn!(
+                        "User document lock poisoned during extraction update; recovering"
+                    );
+                    let mut guard = poisoned.into_inner();
+                    *guard = Some(new_doc);
+                }
             }
         }
+        // Bump persona version so Layer 1 memoization picks up the change
+        // (spec section Component 1). Bump AFTER the lock is released.
+        persona_version.fetch_add(1, Ordering::Relaxed);
     }
 
     // Publish event

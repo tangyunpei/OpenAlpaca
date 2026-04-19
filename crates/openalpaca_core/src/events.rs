@@ -417,4 +417,20 @@ pub enum SystemEvent {
         sub_agent_window: usize,
         timestamp: DateTime<Utc>,
     },
+    /// Emitted when a compose-engine layer retrieved its output from cache
+    /// (spec section Component 4).
+    ComposeLayerCacheHit {
+        layer: crate::compose::LayerId,
+        fingerprint: [u8; 32],
+        lane_id: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
+    /// Emitted when a compose-engine layer rebuilt its output (cache miss).
+    ComposeLayerCacheMiss {
+        layer: crate::compose::LayerId,
+        fingerprint: [u8; 32],
+        reason: crate::compose::MissReason,
+        lane_id: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
 }

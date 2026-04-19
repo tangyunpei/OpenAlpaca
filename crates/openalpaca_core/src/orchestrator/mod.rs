@@ -48,7 +48,7 @@ use dashmap::DashMap;
 use openalpaca_llm::{ChatMessage, LlmRouter, Role};
 use openalpaca_storage::{Database, Task};
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, RwLock};
 use uuid::Uuid;
 
@@ -160,6 +160,10 @@ pub struct Orchestrator {
     pub confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
     /// Context manager for resolving dynamic context (memory, user profile, etc.) via PromptBuilder.
     context_manager: Arc<ContextManager>,
+    /// Monotonic counter bumped on every persona-doc (SOUL / USER / IDENTITY)
+    /// hot reload. Fingerprint input for Layer 1 (Persona) memoization in
+    /// the layered compose engine (spec section Component 1).
+    pub persona_version: Arc<AtomicU64>,
 }
 
 /// Full conversation context for prompt building and summary update.
@@ -304,6 +308,7 @@ impl Orchestrator {
             llm_metadata_map: DashMap::new(),
             confirmation_broker: Arc::new(RwLock::new(None)),
             context_manager,
+            persona_version: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -327,30 +332,41 @@ impl Orchestrator {
 
     /// Replace the active user document (from USER.md reload or bootstrap).
     pub fn update_user_document(&self, doc: Option<UserDocument>) {
-        match self.user_document.write() {
-            Ok(mut guard) => {
-                *guard = doc;
-            }
-            Err(poisoned) => {
-                tracing::warn!("User document lock poisoned during update; recovering");
-                let mut guard = poisoned.into_inner();
-                *guard = doc;
+        {
+            let lock = self.user_document.write();
+            match lock {
+                Ok(mut guard) => {
+                    *guard = doc;
+                }
+                Err(poisoned) => {
+                    tracing::warn!("User document lock poisoned during update; recovering");
+                    let mut guard = poisoned.into_inner();
+                    *guard = doc;
+                }
             }
         }
+        // Bump after the lock is released so a reader that sees the new
+        // version is guaranteed to see the new content (spec Component 1).
+        self.persona_version
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn update_system_persona(&self, persona: SystemPersona) {
-        match self.system_persona.write() {
-            Ok(mut guard) => {
-                *guard = persona;
-            }
-            Err(poisoned) => {
-                tracing::warn!("System persona lock poisoned during update; recovering");
-                let mut guard = poisoned.into_inner();
-                *guard = persona;
+        {
+            let lock = self.system_persona.write();
+            match lock {
+                Ok(mut guard) => {
+                    *guard = persona;
+                }
+                Err(poisoned) => {
+                    tracing::warn!("System persona lock poisoned during update; recovering");
+                    let mut guard = poisoned.into_inner();
+                    *guard = persona;
+                }
             }
         }
-
+        self.persona_version
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Replace the active identity document (from IDENTITY.md reload or bootstrap).
@@ -362,7 +378,8 @@ impl Orchestrator {
         if let Some(ref identity) = doc
             && !identity.name.is_empty()
         {
-            match self.system_persona.write() {
+            let lock = self.system_persona.write();
+            match lock {
                 Ok(mut guard) => {
                     guard.name = identity.name.clone();
                 }
@@ -376,17 +393,21 @@ impl Orchestrator {
             }
         }
 
-        match self.identity_document.write() {
-            Ok(mut guard) => {
-                *guard = doc;
-            }
-            Err(poisoned) => {
-                tracing::warn!("Identity document lock poisoned during update; recovering");
-                let mut guard = poisoned.into_inner();
-                *guard = doc;
+        {
+            let lock = self.identity_document.write();
+            match lock {
+                Ok(mut guard) => {
+                    *guard = doc;
+                }
+                Err(poisoned) => {
+                    tracing::warn!("Identity document lock poisoned during update; recovering");
+                    let mut guard = poisoned.into_inner();
+                    *guard = doc;
+                }
             }
         }
-
+        self.persona_version
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Set the path to IDENTITY.md for writes.

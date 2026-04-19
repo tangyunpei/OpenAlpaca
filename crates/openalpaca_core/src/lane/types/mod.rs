@@ -31,12 +31,57 @@ pub enum LaneType {
     Task,
 }
 
+/// Per-lane tier-2 memoization slots for the layered compose engine
+/// (spec section Component 4). Layer 3 (dynamic context) and Layer 4
+/// (history) each get one slot, protected by an independent mutex so they
+/// do not serialize against each other within a single `compose()` call.
+///
+/// Phase 1: slots exist and are empty-initialized. Phase 3 wires the
+/// hit/miss flow inside the layer computations.
+pub struct LaneCaches {
+    pub dynamic_context: Mutex<
+        Option<(
+            crate::compose::DynamicContextFingerprint,
+            std::sync::Arc<crate::compose::DynamicContextOutput>,
+        )>,
+    >,
+    pub history: Mutex<
+        Option<(
+            crate::compose::HistoryFingerprint,
+            std::sync::Arc<crate::compose::HistoryOutput>,
+        )>,
+    >,
+}
+
+impl LaneCaches {
+    pub fn new() -> Self {
+        Self {
+            dynamic_context: Mutex::new(None),
+            history: Mutex::new(None),
+        }
+    }
+}
+
+impl Default for LaneCaches {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for LaneCaches {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaneCaches").finish_non_exhaustive()
+    }
+}
+
 /// A conversation lane: tracks an ongoing multi-turn conversation.
 pub struct ConversationLane {
     pub key: LaneKey,
     pub created_at: DateTime<Utc>,
     message_count: AtomicUsize,
     last_active_at: Mutex<DateTime<Utc>>,
+    /// Tier-2 per-lane caches for the compose engine (spec Component 4).
+    pub caches: LaneCaches,
 }
 
 impl std::fmt::Debug for ConversationLane {
@@ -45,7 +90,7 @@ impl std::fmt::Debug for ConversationLane {
             .field("key", &self.key)
             .field("created_at", &self.created_at)
             .field("message_count", &self.message_count.load(Ordering::Relaxed))
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -57,6 +102,7 @@ impl ConversationLane {
             created_at: now,
             message_count: AtomicUsize::new(0),
             last_active_at: Mutex::new(now),
+            caches: LaneCaches::new(),
         }
     }
 
