@@ -1,23 +1,22 @@
 //! OpenAlpaca wrapper around the `rmcp` Model Context Protocol SDK.
 //!
-//! Phase 1 (foundation) provides:
+//! **Client-only.** OpenAlpaca connects out to external MCP servers (Claude
+//! Desktop, third-party tool servers, etc.); it does not expose its own tools
+//! over MCP. Server mode (originally sketched as P4) is an explicit non-goal.
+//!
+//! Provides:
 //! - [`McpClient`] — connect to MCP servers, list/call tools, auto-reconnect.
 //! - [`Transport`] trait with stdio + streamable-HTTP implementations.
 //! - [`McpError`] with retry/cancellation helpers.
-//!
-//! Phases 2–5 build on top: registry wiring (P2), built-in tool annotations (P3),
-//! server mode (P4), resources & prompts (P5).
 
 pub mod error;
 pub mod transport;
 
 mod client;
 mod lifecycle;
-mod server;
 
 pub use client::{McpClient, McpClientConfig};
 pub use error::{ErrorCategory, McpError};
-pub use server::McpServer;
 pub use transport::{HttpAuth, StdioTransport, Transport, TransportKind};
 
 // Re-exports from rmcp — data types pass through unchanged.
