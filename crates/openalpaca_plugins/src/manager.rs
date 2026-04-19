@@ -430,6 +430,24 @@ impl PluginManager {
             }
         }
 
+        // P3e: if manifest declares virtual capabilities, register a PluginCapabilityProvider.
+        let provider_handle = if !manifest.capabilities.virtual_.provides.is_empty() {
+            let provider = PluginCapabilityProvider::new(
+                manifest.plugin.name.clone(),
+                manifest.capabilities.virtual_.provides.clone(),
+            );
+            let handle = self.tool_registry.register_capability_provider(Arc::new(provider));
+            tracing::info!(
+                plugin = %name,
+                handle = %handle,
+                cap_count = manifest.capabilities.virtual_.provides.len(),
+                "registered plugin capability provider"
+            );
+            Some(handle)
+        } else {
+            None
+        };
+
         // Step 8: Track state as Running
         {
             let mut plugins = self.plugins.write().await;
@@ -443,6 +461,7 @@ impl PluginManager {
                 state.registered_skills = registered_skills;
                 state.registered_agents = registered_agents;
                 state.last_health = Some(Instant::now());
+                state.capability_provider_handle = provider_handle;
             }
         }
 
@@ -456,6 +475,23 @@ impl PluginManager {
         let state = plugins.remove(name).ok_or_else(|| {
             PluginError::Unavailable(format!("plugin '{}' not found", name))
         })?;
+
+        // P3e: remove capability provider FIRST — triggers index rebuild before
+        // per-tool removals start. Ensures plugin virtual caps are scrubbed cleanly.
+        if let Some(handle) = state.capability_provider_handle {
+            let removed = self.tool_registry.remove_capability_provider(handle);
+            if removed {
+                tracing::debug!(
+                    plugin = name, handle = %handle,
+                    "removed plugin capability provider"
+                );
+            } else {
+                tracing::warn!(
+                    plugin = name, handle = %handle,
+                    "capability provider handle not found during unload"
+                );
+            }
+        }
 
         // Unregister all tools from the shared registry
         for tool_name in &state.registered_tools {
@@ -1092,5 +1128,106 @@ mod p3e_provider_tests {
         assert_eq!(caps.len(), 2);
         assert!(caps.contains(&"plugin:mytag".to_string()));
         assert!(caps.contains(&"annotation:safe".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod p3e_integration_tests {
+    use super::*;
+    use openalpaca_core::tools::registry::{RegisteredTool, ToolRegistry, ToolBackend};
+    use openalpaca_llm::ToolDefinition;
+    use std::sync::Arc;
+
+    fn mock_plugin_tool(name: &str, plugin_name: &str) -> RegisteredTool {
+        RegisteredTool {
+            definition: ToolDefinition {
+                name: name.to_string(),
+                description: "test".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Http {
+                method: "GET".into(),
+                url: "http://example.com".into(),
+                headers: Default::default(),
+                timeout_secs: 10,
+            },
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "0.0.0".into(),
+            author: format!("plugin:{}", plugin_name),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn plugin_provider_integrates_with_tool_registry() {
+        let registry = ToolRegistry::new().unwrap();
+        registry.register(mock_plugin_tool("foo_read", "myplugin")).unwrap();
+
+        let provider = PluginCapabilityProvider::new(
+            "myplugin".to_string(),
+            vec!["annotation:test_tag".to_string()],
+        );
+        let _handle = registry.register_capability_provider(Arc::new(provider));
+
+        let known = registry.known_virtual_capabilities();
+        assert!(known.iter().any(|k| k == "annotation:test_tag"));
+
+        let tools = registry.tools_for_capabilities(&vec!["annotation:test_tag".to_string()]);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "foo_read");
+    }
+
+    #[test]
+    fn plugin_provider_removal_scrubs_virtual_caps() {
+        let registry = ToolRegistry::new().unwrap();
+        registry.register(mock_plugin_tool("foo_read", "myplugin")).unwrap();
+
+        let provider = PluginCapabilityProvider::new(
+            "myplugin".to_string(),
+            vec!["annotation:test_tag".to_string()],
+        );
+        let handle = registry.register_capability_provider(Arc::new(provider));
+
+        let before = registry.tools_for_capabilities(&vec!["annotation:test_tag".to_string()]);
+        assert_eq!(before.len(), 1);
+
+        registry.remove_capability_provider(handle);
+
+        let after = registry.tools_for_capabilities(&vec!["annotation:test_tag".to_string()]);
+        assert!(after.is_empty());
+
+        // Tool itself still registered
+        assert!(registry.registered_tool_names().iter().any(|n| n == "foo_read"));
+
+        // Known virtual caps no longer includes the plugin's tag
+        let known = registry.known_virtual_capabilities();
+        assert!(!known.iter().any(|k| k == "annotation:test_tag"));
+    }
+
+    #[test]
+    fn plugin_provider_reload_issues_fresh_handle() {
+        let registry = ToolRegistry::new().unwrap();
+        registry.register(mock_plugin_tool("foo_read", "myplugin")).unwrap();
+
+        let provider1 = PluginCapabilityProvider::new(
+            "myplugin".to_string(),
+            vec!["annotation:test_tag".to_string()],
+        );
+        let h1 = registry.register_capability_provider(Arc::new(provider1));
+        registry.remove_capability_provider(h1);
+
+        let provider2 = PluginCapabilityProvider::new(
+            "myplugin".to_string(),
+            vec!["annotation:test_tag".to_string()],
+        );
+        let h2 = registry.register_capability_provider(Arc::new(provider2));
+        assert_ne!(h1, h2);
+
+        let tools = registry.tools_for_capabilities(&vec!["annotation:test_tag".to_string()]);
+        assert_eq!(tools.len(), 1);
     }
 }
