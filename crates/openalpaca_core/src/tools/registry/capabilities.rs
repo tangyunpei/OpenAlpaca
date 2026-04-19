@@ -56,12 +56,12 @@ pub fn annotation_capabilities(
 /// the known names. Non-prefixed strings are unaffected and always pass.
 pub fn validate_annotation_capability(
     cap: &str,
-    known: &[&'static str],
+    known: &[String],
 ) -> Result<(), String> {
     if !cap.starts_with("annotation:") {
         return Ok(());
     }
-    if known.contains(&cap) {
+    if known.iter().any(|k| k == cap) {
         return Ok(());
     }
     Err(format!(
@@ -81,8 +81,12 @@ pub trait CapabilityProvider: Send + Sync {
     fn derive_capabilities(&self, tool: &RegisteredTool) -> Vec<String>;
 
     /// Return the set of capability names this provider can produce, used
-    /// for agent-config validation. Must be a compile-time-fixed `&'static`.
-    fn known_capability_names(&self) -> &'static [&'static str];
+    /// for agent-config validation.
+    ///
+    /// Returns owned `Vec<String>` (changed from `&'static [&'static str]` in P3e)
+    /// to support providers whose name list is known only at runtime (e.g., plugin
+    /// providers loaded from manifest).
+    fn known_capability_names(&self) -> Vec<String>;
 }
 
 /// Built-in provider for the 8 MCP-derived annotation capabilities.
@@ -93,8 +97,11 @@ impl CapabilityProvider for AnnotationCapabilityProvider {
         annotation_capabilities(tool.annotations.as_ref())
     }
 
-    fn known_capability_names(&self) -> &'static [&'static str] {
+    fn known_capability_names(&self) -> Vec<String> {
         ANNOTATION_CAPABILITY_NAMES
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 }
 
@@ -178,18 +185,20 @@ mod tests {
 
     #[test]
     fn validate_passes_non_annotation_strings() {
-        let known = ANNOTATION_CAPABILITY_NAMES;
-        assert!(validate_annotation_capability("file_read", known).is_ok());
-        assert!(validate_annotation_capability("shell_execute", known).is_ok());
-        assert!(validate_annotation_capability("messaging", known).is_ok());
+        let known: Vec<String> = ANNOTATION_CAPABILITY_NAMES
+            .iter().map(|s| s.to_string()).collect();
+        assert!(validate_annotation_capability("file_read", &known).is_ok());
+        assert!(validate_annotation_capability("shell_execute", &known).is_ok());
+        assert!(validate_annotation_capability("messaging", &known).is_ok());
     }
 
     #[test]
     fn validate_passes_known_annotation_names() {
-        let known = ANNOTATION_CAPABILITY_NAMES;
+        let known: Vec<String> = ANNOTATION_CAPABILITY_NAMES
+            .iter().map(|s| s.to_string()).collect();
         for name in ANNOTATION_CAPABILITY_NAMES {
             assert!(
-                validate_annotation_capability(name, known).is_ok(),
+                validate_annotation_capability(name, &known).is_ok(),
                 "{name} should validate"
             );
         }
@@ -197,8 +206,9 @@ mod tests {
 
     #[test]
     fn validate_rejects_typo_in_annotation_name() {
-        let known = ANNOTATION_CAPABILITY_NAMES;
-        let err = validate_annotation_capability("annotation:redaonly", known).unwrap_err();
+        let known: Vec<String> = ANNOTATION_CAPABILITY_NAMES
+            .iter().map(|s| s.to_string()).collect();
+        let err = validate_annotation_capability("annotation:redaonly", &known).unwrap_err();
         assert!(err.contains("unknown annotation capability"));
         assert!(err.contains("annotation:redaonly"));
         assert!(err.contains("annotation:readonly"));
@@ -206,18 +216,38 @@ mod tests {
 
     #[test]
     fn validate_rejects_bare_prefix() {
-        let known = ANNOTATION_CAPABILITY_NAMES;
-        let err = validate_annotation_capability("annotation:", known).unwrap_err();
+        let known: Vec<String> = ANNOTATION_CAPABILITY_NAMES
+            .iter().map(|s| s.to_string()).collect();
+        let err = validate_annotation_capability("annotation:", &known).unwrap_err();
         assert!(err.contains("unknown annotation capability"));
     }
 
     #[test]
     fn validate_error_lists_all_known_names() {
-        let known = ANNOTATION_CAPABILITY_NAMES;
-        let err = validate_annotation_capability("annotation:foo", known).unwrap_err();
+        let known: Vec<String> = ANNOTATION_CAPABILITY_NAMES
+            .iter().map(|s| s.to_string()).collect();
+        let err = validate_annotation_capability("annotation:foo", &known).unwrap_err();
         for name in ANNOTATION_CAPABILITY_NAMES {
             assert!(err.contains(name), "error should mention {name}");
         }
+    }
+
+    #[test]
+    fn annotation_provider_known_names_returns_owned_vec() {
+        let p = AnnotationCapabilityProvider;
+        let names = p.known_capability_names();
+        assert_eq!(names.len(), 8);
+        for expected in ANNOTATION_CAPABILITY_NAMES {
+            assert!(names.iter().any(|n| n == expected), "{expected} missing");
+        }
+    }
+
+    #[test]
+    fn validate_annotation_capability_accepts_vec_string() {
+        let known: Vec<String> = vec!["annotation:foo".to_string(), "annotation:bar".to_string()];
+        assert!(validate_annotation_capability("annotation:foo", &known).is_ok());
+        assert!(validate_annotation_capability("annotation:unknown", &known).is_err());
+        assert!(validate_annotation_capability("file_read", &known).is_ok());  // not annotation: → pass
     }
 
     #[test]

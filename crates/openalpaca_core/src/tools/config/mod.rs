@@ -76,8 +76,12 @@ pub fn load_tools_from_file(path: &Path) -> Result<Vec<RegisteredTool>, String> 
         // Non-prefixed capabilities pass through untouched. Custom providers
         // registered at runtime are intentionally not considered here — TOML
         // load time only knows the built-in names.
+        let known: Vec<String> = ANNOTATION_CAPABILITY_NAMES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         for cap in &tc.provides_capabilities {
-            validate_annotation_capability(cap, ANNOTATION_CAPABILITY_NAMES)
+            validate_annotation_capability(cap, &known)
                 .map_err(|e| format!("{}: provides_capabilities: {e}", path.display()))?;
         }
 

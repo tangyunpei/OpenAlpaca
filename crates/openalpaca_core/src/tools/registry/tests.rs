@@ -1222,7 +1222,7 @@ fn known_virtual_capabilities_default_includes_all_8() {
     let known = registry.known_virtual_capabilities();
     assert_eq!(known.len(), 8);
     for name in ANNOTATION_CAPABILITY_NAMES {
-        assert!(known.contains(name), "{name} should be in known list");
+        assert!(known.iter().any(|k| k == name), "{name} should be in known list");
     }
 }
 
@@ -1236,15 +1236,15 @@ fn register_capability_provider_extends_known_names() {
         fn derive_capabilities(&self, _: &RegisteredTool) -> Vec<String> {
             vec!["annotation:custom".into()]
         }
-        fn known_capability_names(&self) -> &'static [&'static str] {
-            &["annotation:custom"]
+        fn known_capability_names(&self) -> Vec<String> {
+            vec!["annotation:custom".to_string()]
         }
     }
 
     let registry = ToolRegistry::new().unwrap();
     registry.register_capability_provider(Arc::new(CustomProvider));
     let known = registry.known_virtual_capabilities();
-    assert!(known.contains(&"annotation:custom"));
+    assert!(known.iter().any(|k| k == "annotation:custom"));
     assert_eq!(known.len(), 9);
 }
 
@@ -1262,8 +1262,8 @@ fn custom_provider_produces_virtual_caps_on_registered_tools() {
                 vec![]
             }
         }
-        fn known_capability_names(&self) -> &'static [&'static str] {
-            &["annotation:custom"]
+        fn known_capability_names(&self) -> Vec<String> {
+            vec!["annotation:custom".to_string()]
         }
     }
 
@@ -1474,8 +1474,8 @@ impl super::capabilities::CapabilityProvider for P3dMockProvider {
             vec![]
         }
     }
-    fn known_capability_names(&self) -> &'static [&'static str] {
-        self.known_names
+    fn known_capability_names(&self) -> Vec<String> {
+        self.known_names.iter().map(|s| s.to_string()).collect()
     }
 }
 

@@ -412,10 +412,10 @@ impl ToolRegistry {
 
     /// Returns all virtual capability names known to registered providers.
     /// Used by config validation.
-    pub fn known_virtual_capabilities(&self) -> Vec<&'static str> {
+    pub fn known_virtual_capabilities(&self) -> Vec<String> {
         self.capability_providers
             .iter()
-            .flat_map(|e| e.value().known_capability_names().iter().copied())
+            .flat_map(|e| e.value().known_capability_names().into_iter())
             .collect()
     }
 
