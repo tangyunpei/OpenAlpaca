@@ -164,6 +164,38 @@ pub(super) fn build_request_body(
         }
     }
 
+    // P1: Third cache breakpoint on the conversation tail. When caching is
+    // enabled and messages is non-empty, attach cache_control to the last
+    // message's last content block. This is the third of three breakpoints
+    // Anthropic reads (system + last tool + last message); Anthropic allows
+    // up to four.
+    if request.enable_caching && !messages.is_empty() {
+        if let Some(last_msg) = messages.last_mut() {
+            let content = &mut last_msg["content"];
+            match content {
+                serde_json::Value::String(s) => {
+                    let text = std::mem::take(s);
+                    *content = serde_json::json!([{
+                        "type": "text",
+                        "text": text,
+                        "cache_control": CacheControl::ephemeral(),
+                    }]);
+                }
+                serde_json::Value::Array(arr) => {
+                    if let Some(last_block) = arr.last_mut() {
+                        if let Some(obj) = last_block.as_object_mut() {
+                            obj.insert(
+                                "cache_control".to_string(),
+                                serde_json::json!(CacheControl::ephemeral()),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     let mut body = serde_json::json!({
         "model": model,
         "max_tokens": max_tokens,

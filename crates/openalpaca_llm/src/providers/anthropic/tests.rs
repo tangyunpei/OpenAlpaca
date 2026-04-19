@@ -718,3 +718,61 @@ fn test_build_request_body_without_context_management() {
     let body = request::build_request_body("claude-sonnet-4-20250514", 4096, &request);
     assert!(body.get("context_management").is_none());
 }
+
+#[test]
+fn test_anthropic_last_message_has_cache_control_when_caching_enabled() {
+    let request = ChatRequest {
+        messages: Arc::new(vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user("First user turn."),
+            ChatMessage::assistant("Assistant reply."),
+            ChatMessage::user("Second user turn."),
+        ]),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: true,
+        thinking: None,
+        context_management: None,
+    };
+
+    let body = request::build_request_body("claude-test", 1024, &request);
+    let messages = body["messages"].as_array().expect("messages array");
+    let last = messages.last().expect("at least one message");
+    let content = &last["content"];
+
+    let arr = content
+        .as_array()
+        .expect("last message content must be an array after P1 lands");
+    let last_block = arr.last().expect("at least one block");
+    assert_eq!(
+        last_block["cache_control"]["type"], "ephemeral",
+        "last message's last content block must carry cache_control: ephemeral"
+    );
+}
+
+#[test]
+fn test_anthropic_no_cache_control_when_caching_disabled() {
+    let request = ChatRequest {
+        messages: Arc::new(vec![ChatMessage::user("hello")]),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: None,
+    };
+
+    let body = request::build_request_body("claude-test", 1024, &request);
+    let messages = body["messages"].as_array().unwrap();
+    let last = messages.last().unwrap();
+    let last_str = serde_json::to_string(last).unwrap();
+    assert!(
+        !last_str.contains("cache_control"),
+        "no cache_control when enable_caching=false"
+    );
+}
