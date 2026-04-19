@@ -96,6 +96,7 @@ fn test_engine_produces_composed_request_for_all_fingerprints_wired() {
         200_000,
         Arc::new(vec![]),
         None,
+        None,
     );
 
     // Fingerprints should all be populated (non-zero arrays). Layer stubs
@@ -256,6 +257,7 @@ fn test_engine_runs_for_all_eight_variants_without_panic() {
             h_in,
             200_000,
             Arc::new(vec![]),
+            None,
             None,
         );
         assert_eq!(
@@ -653,6 +655,7 @@ fn test_compose_sets_memo_hits_on_second_call() {
         200_000,
         Arc::new(vec![]),
         None,
+        None,
     );
     assert!(
         !out1.layer_trace.memo_hits.persona,
@@ -672,6 +675,7 @@ fn test_compose_sets_memo_hits_on_second_call() {
         h_in2,
         200_000,
         Arc::new(vec![]),
+        None,
         None,
     );
     assert!(
@@ -710,28 +714,35 @@ fn test_compose_layer_cache_events_emitted() {
         200_000,
         Arc::new(vec![]),
         Some(&bus),
+        None,
     );
 
     let mut persona_miss = false;
     let mut static_miss = false;
-    // Drain what's buffered. Use try_recv so the test never hangs.
+    // Drain what's buffered. Use try_recv so the test never hangs. We only
+    // assert on L1/L2 here; Phase 3 also emits L3/L4 events, but this test
+    // passes `lane: None` so L3/L4 events are valid-but-not-the-focus.
     while let Ok(event) = rx.try_recv() {
         match event {
             SystemEvent::ComposeLayerCacheMiss { layer, .. } => match layer {
                 LayerId::Persona => persona_miss = true,
                 LayerId::StaticPrompt => static_miss = true,
-                _ => {}
+                LayerId::DynamicContext | LayerId::History => {}
             },
-            SystemEvent::ComposeLayerCacheHit { .. } => {
-                panic!("first call should not emit Hit events")
-            }
+            SystemEvent::ComposeLayerCacheHit { layer, .. } => match layer {
+                LayerId::Persona | LayerId::StaticPrompt => {
+                    panic!("first call should not emit an L1/L2 Hit event")
+                }
+                LayerId::DynamicContext | LayerId::History => {}
+            },
             _ => {}
         }
     }
     assert!(persona_miss, "first call should emit a Persona Miss");
     assert!(static_miss, "first call should emit a StaticPrompt Miss");
 
-    // Second call — expect 2 Hit events.
+    // Second call — expect 2 Hit events for L1/L2. L3/L4 still miss because
+    // this test passes `lane: None` (no per-lane cache).
     let (p_in, sp_in, dc_in, h_in) = empty_compose_inputs();
     let _ = engine.compose(
         &request,
@@ -742,6 +753,7 @@ fn test_compose_layer_cache_events_emitted() {
         200_000,
         Arc::new(vec![]),
         Some(&bus),
+        None,
     );
 
     let mut persona_hit = false;
@@ -751,11 +763,14 @@ fn test_compose_layer_cache_events_emitted() {
             SystemEvent::ComposeLayerCacheHit { layer, .. } => match layer {
                 LayerId::Persona => persona_hit = true,
                 LayerId::StaticPrompt => static_hit = true,
-                _ => {}
+                LayerId::DynamicContext | LayerId::History => {}
             },
-            SystemEvent::ComposeLayerCacheMiss { .. } => {
-                panic!("second call should not emit Miss events")
-            }
+            SystemEvent::ComposeLayerCacheMiss { layer, .. } => match layer {
+                LayerId::Persona | LayerId::StaticPrompt => {
+                    panic!("second call should not emit an L1/L2 Miss event")
+                }
+                LayerId::DynamicContext | LayerId::History => {}
+            },
             _ => {}
         }
     }
@@ -1053,4 +1068,425 @@ fn test_hash_opt_msg_none_vs_empty() {
     let none_fp = hash_opt_msg(&None);
     let empty_fp = hash_opt_msg(&Some(ChatMessage::user("")));
     assert_ne!(none_fp, empty_fp, "None and Some(empty) must not collide");
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Phase 3 Commit 2 — Per-lane cache + assembly trim integration tests
+// ──────────────────────────────────────────────────────────────────────────
+
+use crate::lane::{ConversationLane, LaneKey};
+
+#[test]
+fn test_per_lane_cache_hit_dynamic_context_on_same_turn() {
+    let engine = ComposeEngine::default();
+    let lane = ConversationLane::new(LaneKey::new("user", "cli"));
+
+    let input = make_dyn_ctx_input(DynamicContextMode::Default);
+
+    // First call: miss, populates the lane slot.
+    let out1 = engine.lookup_or_build_dynamic_context(&input, Some(&lane));
+    assert!(!out1.hit);
+
+    // Second call with identical fingerprint: hit.
+    let out2 = engine.lookup_or_build_dynamic_context(&input, Some(&lane));
+    assert!(out2.hit);
+    assert!(Arc::ptr_eq(&out1.output, &out2.output));
+}
+
+#[test]
+fn test_per_lane_cache_dynamic_context_skipped_when_lane_none() {
+    let engine = ComposeEngine::default();
+    let input = make_dyn_ctx_input(DynamicContextMode::Default);
+
+    // Without a lane, every call misses (no cache storage).
+    let out1 = engine.lookup_or_build_dynamic_context(&input, None);
+    assert!(!out1.hit);
+    let out2 = engine.lookup_or_build_dynamic_context(&input, None);
+    assert!(!out2.hit);
+}
+
+#[test]
+fn test_per_lane_cache_history_hit_on_same_turn() {
+    let engine = ComposeEngine::default();
+    let lane = ConversationLane::new(LaneKey::new("user", "cli"));
+
+    let input = make_history_input(HistoryMode::Default);
+    let out1 = engine.lookup_or_build_history(&input, Some(&lane));
+    assert!(!out1.hit);
+
+    let out2 = engine.lookup_or_build_history(&input, Some(&lane));
+    assert!(out2.hit);
+    assert!(Arc::ptr_eq(&out1.output, &out2.output));
+}
+
+#[test]
+fn test_per_lane_cache_history_bust_on_tip_advance() {
+    let engine = ComposeEngine::default();
+    let lane = ConversationLane::new(LaneKey::new("user", "cli"));
+
+    let mut input = make_history_input(HistoryMode::Default);
+    input.lane_tip_fingerprint = [1u8; 32];
+    let out1 = engine.lookup_or_build_history(&input, Some(&lane));
+    assert!(!out1.hit);
+
+    // Advance tip — fingerprint changes → miss.
+    input.lane_tip_fingerprint = [2u8; 32];
+    let out2 = engine.lookup_or_build_history(&input, Some(&lane));
+    assert!(!out2.hit);
+}
+
+#[test]
+fn test_compose_end_to_end_all_four_layers_memoized_on_second_call() {
+    let engine = ComposeEngine::default();
+    let lane = ConversationLane::new(LaneKey::new("user", "cli"));
+
+    let request = ComposeRequest::Social {
+        lane_key: "user:cli".to_string(),
+        query: "hi".to_string(),
+        overrides: ComposeOverrides::default(),
+    };
+
+    let (p_in, sp_in, dc_in, h_in) = empty_compose_inputs();
+    let out1 = engine.compose(
+        &request,
+        p_in,
+        sp_in,
+        dc_in,
+        h_in,
+        200_000,
+        Arc::new(vec![]),
+        None,
+        Some(&lane),
+    );
+    // First call: all 4 layers miss.
+    assert!(!out1.layer_trace.memo_hits.persona);
+    assert!(!out1.layer_trace.memo_hits.static_prompt);
+    assert!(!out1.layer_trace.memo_hits.dynamic_context);
+    assert!(!out1.layer_trace.memo_hits.history);
+
+    let (p_in, sp_in, dc_in, h_in) = empty_compose_inputs();
+    let out2 = engine.compose(
+        &request,
+        p_in,
+        sp_in,
+        dc_in,
+        h_in,
+        200_000,
+        Arc::new(vec![]),
+        None,
+        Some(&lane),
+    );
+    // Second call with identical lane + inputs: all 4 layers hit.
+    assert!(
+        out2.layer_trace.memo_hits.persona,
+        "second call persona must hit global cache"
+    );
+    assert!(
+        out2.layer_trace.memo_hits.static_prompt,
+        "second call static_prompt must hit global cache"
+    );
+    assert!(
+        out2.layer_trace.memo_hits.dynamic_context,
+        "second call dynamic_context must hit per-lane cache"
+    );
+    assert!(
+        out2.layer_trace.memo_hits.history,
+        "second call history must hit per-lane cache"
+    );
+}
+
+#[test]
+fn test_compose_lane_tip_advance_busts_only_history() {
+    let engine = ComposeEngine::default();
+    let lane = ConversationLane::new(LaneKey::new("user", "cli"));
+
+    let request = ComposeRequest::Social {
+        lane_key: "user:cli".to_string(),
+        query: "q".to_string(),
+        overrides: ComposeOverrides::default(),
+    };
+
+    // First compose — all miss.
+    let (p_in, sp_in, dc_in, mut h_in) = empty_compose_inputs();
+    h_in.lane_tip_fingerprint = [1u8; 32];
+    let _out1 = engine.compose(
+        &request,
+        p_in,
+        sp_in,
+        dc_in,
+        h_in,
+        200_000,
+        Arc::new(vec![]),
+        None,
+        Some(&lane),
+    );
+
+    // Second compose — bump lane tip; dynamic context unchanged.
+    let (p_in, sp_in, dc_in, mut h_in) = empty_compose_inputs();
+    h_in.lane_tip_fingerprint = [2u8; 32];
+    let out2 = engine.compose(
+        &request,
+        p_in,
+        sp_in,
+        dc_in,
+        h_in,
+        200_000,
+        Arc::new(vec![]),
+        None,
+        Some(&lane),
+    );
+    assert!(
+        out2.layer_trace.memo_hits.persona,
+        "persona still cached in global"
+    );
+    assert!(
+        out2.layer_trace.memo_hits.static_prompt,
+        "static_prompt still cached in global"
+    );
+    assert!(
+        out2.layer_trace.memo_hits.dynamic_context,
+        "dynamic_context unchanged on same lane — should still hit"
+    );
+    assert!(
+        !out2.layer_trace.memo_hits.history,
+        "lane_tip_fingerprint changed — history must miss"
+    );
+}
+
+#[test]
+fn test_compose_emits_four_cache_events_per_call() {
+    use crate::bus::EventBus;
+    use crate::events::SystemEvent;
+
+    let engine = ComposeEngine::default();
+    let lane = ConversationLane::new(LaneKey::new("user", "cli"));
+    let bus = EventBus::new(64);
+    let mut rx = bus.subscribe();
+
+    let request = ComposeRequest::Social {
+        lane_key: "user:cli".to_string(),
+        query: "q".to_string(),
+        overrides: ComposeOverrides::default(),
+    };
+    let (p_in, sp_in, dc_in, h_in) = empty_compose_inputs();
+    let _ = engine.compose(
+        &request,
+        p_in,
+        sp_in,
+        dc_in,
+        h_in,
+        200_000,
+        Arc::new(vec![]),
+        Some(&bus),
+        Some(&lane),
+    );
+
+    // Drain the bus and assert we saw one event per layer (all Miss on the
+    // first call).
+    let mut seen_persona = false;
+    let mut seen_static = false;
+    let mut seen_dyn = false;
+    let mut seen_hist = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            SystemEvent::ComposeLayerCacheMiss { layer, .. }
+            | SystemEvent::ComposeLayerCacheHit { layer, .. } => match layer {
+                LayerId::Persona => seen_persona = true,
+                LayerId::StaticPrompt => seen_static = true,
+                LayerId::DynamicContext => seen_dyn = true,
+                LayerId::History => seen_hist = true,
+            },
+            _ => {}
+        }
+    }
+    assert!(seen_persona, "compose should emit a Persona event");
+    assert!(seen_static, "compose should emit a StaticPrompt event");
+    assert!(seen_dyn, "compose should emit a DynamicContext event");
+    assert!(seen_hist, "compose should emit a History event");
+}
+
+#[test]
+fn test_assembly_budget_trim_drops_oldest_non_system_history() {
+    use super::assembly::{self, AssemblyInput};
+
+    // Build a history with enough messages to blow a tiny budget.
+    // Each "padded " message contributes ~(content.len()/4) tokens.
+    let big: String = "a".repeat(4000);
+    let history_messages: Vec<ChatMessage> = (0..4)
+        .map(|i| {
+            if i % 2 == 0 {
+                ChatMessage::user(&big)
+            } else {
+                ChatMessage::assistant(&big)
+            }
+        })
+        .collect();
+
+    let persona = PersonaOutput {
+        blocks: vec![],
+        fingerprint: [0u8; 32],
+    };
+    let static_prompt = StaticPromptOutput {
+        system_message: Arc::from("system"),
+        section_registry: vec!["system"],
+        fingerprint: [0u8; 32],
+    };
+    let dyn_ctx = DynamicContextOutput {
+        context_messages: vec![],
+        additional_system_blocks: vec![],
+        fingerprint: [0u8; 32],
+    };
+    let history = HistoryOutput {
+        messages: history_messages.clone(),
+        fingerprint: [0u8; 32],
+    };
+    let layer_trace = LayerTrace {
+        persona_mode: PersonaMode::Minimal,
+        static_prompt_mode: StaticPromptMode::Default,
+        dynamic_context_mode: DynamicContextMode::Skip,
+        history_mode: HistoryMode::Default,
+        memo_hits: LayerMemoHits::default(),
+    };
+
+    // Tiny model window — 2000 tokens, threshold = 1500. History alone
+    // contributes ~4000 tokens. Trimming must fire.
+    let out = assembly::compose(AssemblyInput {
+        persona: &persona,
+        static_prompt: &static_prompt,
+        dynamic_context: &dyn_ctx,
+        history: &history,
+        tools: Arc::new(vec![]),
+        model_window: 2000,
+        layer_trace,
+    });
+
+    assert!(
+        out.section_registry
+            .iter()
+            .any(|name| *name == "<trimmed:history>"),
+        "assembly should record a <trimmed:history> marker when trimming fires"
+    );
+    // Final message list must be shorter than (history_len + 1) — some
+    // non-system messages were dropped.
+    assert!(
+        out.messages.len() < history_messages.len() + 1,
+        "assembly should drop at least one history message when over budget"
+    );
+    // System message at index 0 is preserved.
+    assert_eq!(out.messages[0].role, Role::System);
+}
+
+#[test]
+fn test_assembly_budget_trim_preserves_system_message() {
+    use super::assembly::{self, AssemblyInput};
+
+    // Huge system prompt + a few history messages. Even when trimming fires,
+    // the system message at index 0 must survive.
+    let huge_sys: String = "s".repeat(20_000);
+    let big: String = "a".repeat(4000);
+    let history = HistoryOutput {
+        messages: vec![ChatMessage::user(&big), ChatMessage::assistant(&big)],
+        fingerprint: [0u8; 32],
+    };
+    let persona = PersonaOutput {
+        blocks: vec![],
+        fingerprint: [0u8; 32],
+    };
+    let static_prompt = StaticPromptOutput {
+        system_message: Arc::from(huge_sys.as_str()),
+        section_registry: vec!["system"],
+        fingerprint: [0u8; 32],
+    };
+    let dyn_ctx = DynamicContextOutput {
+        context_messages: vec![],
+        additional_system_blocks: vec![],
+        fingerprint: [0u8; 32],
+    };
+    let layer_trace = LayerTrace {
+        persona_mode: PersonaMode::Minimal,
+        static_prompt_mode: StaticPromptMode::Default,
+        dynamic_context_mode: DynamicContextMode::Skip,
+        history_mode: HistoryMode::Default,
+        memo_hits: LayerMemoHits::default(),
+    };
+
+    let out = assembly::compose(AssemblyInput {
+        persona: &persona,
+        static_prompt: &static_prompt,
+        dynamic_context: &dyn_ctx,
+        history: &history,
+        tools: Arc::new(vec![]),
+        model_window: 2000, // threshold 1500 — below sys prompt alone
+        layer_trace,
+    });
+
+    // Index 0 is still the system message (assembly never drops it).
+    assert_eq!(out.messages[0].role, Role::System);
+    // All remaining messages after trim must be system or not — assembly only
+    // drops non-system. Verify by iterating: at least one message survives and
+    // the first is System.
+    assert!(!out.messages.is_empty());
+}
+
+#[test]
+fn test_assembly_populates_per_layer_token_budget() {
+    use super::assembly::{self, AssemblyInput};
+
+    let persona = PersonaOutput {
+        blocks: vec![SystemBlock {
+            name: "system_persona",
+            content: Arc::from("persona content"),
+            priority: SectionPriority::Critical,
+        }],
+        fingerprint: [0u8; 32],
+    };
+    let static_prompt = StaticPromptOutput {
+        system_message: Arc::from("this is the static system message"),
+        section_registry: vec!["system"],
+        fingerprint: [0u8; 32],
+    };
+    let dyn_ctx = DynamicContextOutput {
+        context_messages: vec![ChatMessage::user("dynamic context message")],
+        additional_system_blocks: vec![],
+        fingerprint: [0u8; 32],
+    };
+    let history = HistoryOutput {
+        messages: vec![ChatMessage::user("history message")],
+        fingerprint: [0u8; 32],
+    };
+    let layer_trace = LayerTrace {
+        persona_mode: PersonaMode::Default,
+        static_prompt_mode: StaticPromptMode::Default,
+        dynamic_context_mode: DynamicContextMode::Default,
+        history_mode: HistoryMode::Default,
+        memo_hits: LayerMemoHits::default(),
+    };
+
+    let out = assembly::compose(AssemblyInput {
+        persona: &persona,
+        static_prompt: &static_prompt,
+        dynamic_context: &dyn_ctx,
+        history: &history,
+        tools: Arc::new(vec![]),
+        model_window: 200_000,
+        layer_trace,
+    });
+
+    assert!(
+        out.token_budget.static_prompt_tokens > 0,
+        "static_prompt_tokens should be populated"
+    );
+    assert!(
+        out.token_budget.persona_tokens > 0,
+        "persona_tokens should be populated from the persona blocks"
+    );
+    assert!(
+        out.token_budget.dynamic_context_tokens > 0,
+        "dynamic_context_tokens should cover context messages"
+    );
+    assert!(
+        out.token_budget.history_tokens > 0,
+        "history_tokens should cover history messages"
+    );
+    assert_eq!(out.token_budget.model_window, 200_000);
 }

@@ -189,19 +189,111 @@ impl ComposeEngine {
         }
     }
 
+    /// Per-lane cache lookup for Layer 3 (Dynamic Context). Tier-2 cache lives
+    /// on `ConversationLane.caches.dynamic_context` — a single-slot
+    /// `Mutex<Option<(Fingerprint, Arc<DynamicContextOutput>)>>` that holds the
+    /// most recent output for that lane. When `lane` is `None`, the layer is
+    /// computed fresh each call and never cached.
+    pub fn lookup_or_build_dynamic_context(
+        &self,
+        input: &DynamicContextInput,
+        lane: Option<&crate::lane::ConversationLane>,
+    ) -> CacheLookup<DynamicContextOutput> {
+        let fingerprint = dynamic_context::compute_fingerprint(input);
+
+        if let Some(lane) = lane {
+            let guard = lane
+                .caches
+                .dynamic_context
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some((cached_fp, cached_arc)) = guard.as_ref()
+                && *cached_fp == fingerprint
+            {
+                return CacheLookup {
+                    output: cached_arc.clone(),
+                    hit: true,
+                };
+            }
+        }
+
+        let built = dynamic_context::compute(input);
+        let arc = Arc::new(built);
+        if let Some(lane) = lane {
+            let mut guard = lane
+                .caches
+                .dynamic_context
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *guard = Some((fingerprint, arc.clone()));
+        }
+
+        CacheLookup {
+            output: arc,
+            hit: false,
+        }
+    }
+
+    /// Per-lane cache lookup for Layer 4 (Conversation History). Tier-2 cache
+    /// lives on `ConversationLane.caches.history`. See
+    /// `lookup_or_build_dynamic_context` for the flow shape — the two helpers
+    /// are intentionally symmetric.
+    pub fn lookup_or_build_history(
+        &self,
+        input: &HistoryInput,
+        lane: Option<&crate::lane::ConversationLane>,
+    ) -> CacheLookup<HistoryOutput> {
+        let fingerprint = history::compute_fingerprint(input);
+
+        if let Some(lane) = lane {
+            let guard = lane
+                .caches
+                .history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some((cached_fp, cached_arc)) = guard.as_ref()
+                && *cached_fp == fingerprint
+            {
+                return CacheLookup {
+                    output: cached_arc.clone(),
+                    hit: true,
+                };
+            }
+        }
+
+        let built = history::compute(input);
+        let arc = Arc::new(built);
+        if let Some(lane) = lane {
+            let mut guard = lane
+                .caches
+                .history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *guard = Some((fingerprint, arc.clone()));
+        }
+
+        CacheLookup {
+            output: arc,
+            hit: false,
+        }
+    }
+
     /// Runs all five layers and returns a typed `ComposedRequest`.
     ///
-    /// Phase 2: Layer 1 (Persona) and Layer 2 (Static Prompt) use the
-    /// global LRU cache via `lookup_or_build_*` helpers, and emit
-    /// `ComposeLayerCacheHit`/`Miss` events when `event_bus` is `Some`.
-    /// Layers 3 and 4 still use their Phase-1 stub implementations —
-    /// Phase 3 wires them to the per-lane cache on `ConversationLane`.
+    /// Phase 3: all four layer lookups are wired through their caches —
+    /// Layers 1+2 via the global LRU, Layers 3+4 via the per-lane caches on
+    /// `ConversationLane.caches`. Four `ComposeLayerCacheHit`/`Miss` events
+    /// are emitted when `event_bus` is `Some` (one per layer).
+    ///
+    /// When `lane` is `None`, Layers 3+4 are computed fresh each call and
+    /// never cached. Pre-existing tests from Phases 1+2 pass `None` for
+    /// this arg.
     ///
     /// The `&ComposeRequest` argument is retained for the routing layer
-    /// that Phase 3 will add; Phase 2 reads only its `lane_key()` for the
-    /// event `lane_id` field. The four layer inputs are passed in
-    /// explicitly because the loader layer (a later phase) will build
-    /// them from `ComposeRequest` + live orchestrator state.
+    /// that Phase 4+ migrations will consume; today it is read only for the
+    /// event `lane_id` field via `lane_key()`. The four layer inputs are
+    /// passed in explicitly because the loader layer (a later phase) will
+    /// build them from `ComposeRequest` + live orchestrator state.
     #[allow(clippy::too_many_arguments)]
     pub fn compose(
         &self,
@@ -213,6 +305,7 @@ impl ComposeEngine {
         model_window: u32,
         tools: Arc<Vec<openalpaca_llm::ToolDefinition>>,
         event_bus: Option<&crate::bus::EventBus>,
+        lane: Option<&crate::lane::ConversationLane>,
     ) -> ComposedRequest {
         let lane_id = request.lane_key().map(|s| s.to_string());
 
@@ -249,9 +342,27 @@ impl ComposeEngine {
             lane_id.clone(),
         );
 
-        // Layers 3, 4 — still stubs. Phase 3 wires per-lane memoization.
-        let dyn_out = dynamic_context::compute(&dynamic_context_input);
-        let hist_out = history::compute(&history_input);
+        // Layer 3 — Dynamic Context (per-lane cache).
+        let dynamic_result = self.lookup_or_build_dynamic_context(&dynamic_context_input, lane);
+        emit_cache_event(
+            event_bus,
+            LayerId::DynamicContext,
+            dynamic_result.output.fingerprint,
+            dynamic_result.hit,
+            MissReason::FirstBuild,
+            lane_id.clone(),
+        );
+
+        // Layer 4 — Conversation History (per-lane cache).
+        let history_result = self.lookup_or_build_history(&history_input, lane);
+        emit_cache_event(
+            event_bus,
+            LayerId::History,
+            history_result.output.fingerprint,
+            history_result.hit,
+            MissReason::FirstBuild,
+            lane_id.clone(),
+        );
 
         let layer_trace = LayerTrace {
             persona_mode,
@@ -261,16 +372,16 @@ impl ComposeEngine {
             memo_hits: LayerMemoHits {
                 persona: persona_result.hit,
                 static_prompt: static_result.hit,
-                dynamic_context: false,
-                history: false,
+                dynamic_context: dynamic_result.hit,
+                history: history_result.hit,
             },
         };
 
         assembly::compose(assembly::AssemblyInput {
             persona: &persona_result.output,
             static_prompt: &static_result.output,
-            dynamic_context: &dyn_out,
-            history: &hist_out,
+            dynamic_context: &dynamic_result.output,
+            history: &history_result.output,
             tools,
             model_window,
             layer_trace,
