@@ -1241,7 +1241,7 @@ fn register_capability_provider_extends_known_names() {
         }
     }
 
-    let mut registry = ToolRegistry::new().unwrap();
+    let registry = ToolRegistry::new().unwrap();
     registry.register_capability_provider(Arc::new(CustomProvider));
     let known = registry.known_virtual_capabilities();
     assert!(known.contains(&"annotation:custom"));
@@ -1267,7 +1267,7 @@ fn custom_provider_produces_virtual_caps_on_registered_tools() {
         }
     }
 
-    let mut registry = ToolRegistry::new().unwrap();
+    let registry = ToolRegistry::new().unwrap();
     registry.register_capability_provider(Arc::new(CustomProvider));
 
     let tool = make_tool_with_caps("custom_target", vec![]);

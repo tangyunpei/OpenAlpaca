@@ -5,8 +5,6 @@
 //! `CapabilityProvider` trait allows downstream code to declare additional
 //! virtual capabilities.
 
-use std::sync::Arc;
-
 use super::RegisteredTool;
 
 /// The 8 valid suffixes for the `annotation:` capability prefix
@@ -98,11 +96,6 @@ impl CapabilityProvider for AnnotationCapabilityProvider {
     fn known_capability_names(&self) -> &'static [&'static str] {
         ANNOTATION_CAPABILITY_NAMES
     }
-}
-
-/// Convenience: create the default provider stack used by `ToolRegistry::new()`.
-pub fn default_capability_providers() -> Vec<Arc<dyn CapabilityProvider>> {
-    vec![Arc::new(AnnotationCapabilityProvider)]
 }
 
 /// Opaque identifier returned from `register_capability_provider`.

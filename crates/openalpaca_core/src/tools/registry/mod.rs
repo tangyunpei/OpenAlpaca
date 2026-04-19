@@ -3,6 +3,7 @@ use dashmap::DashMap;
 use openalpaca_llm::ToolDefinition;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::orchestrator::skill::constraints::EffectiveToolSet;
 
@@ -129,26 +130,36 @@ pub struct ToolRegistry {
     tools: DashMap<String, RegisteredTool>,
     capability_index: DashMap<String, Vec<String>>, // capability → tool names
     http_client: reqwest::Client,
-    capability_providers: Vec<Arc<dyn capabilities::CapabilityProvider>>,
+    capability_providers: DashMap<ProviderHandle, Arc<dyn capabilities::CapabilityProvider>>,
+    next_provider_handle: AtomicU64,
+    provider_mutex: std::sync::Mutex<()>,
 }
 
 impl Clone for ToolRegistry {
     /// NOTE: Not atomic. Concurrent register/remove during clone may produce
     /// an incomplete snapshot. Use Arc::clone() for shared access instead.
     fn clone(&self) -> Self {
-        let new_tools = DashMap::new();
+        let tools = DashMap::new();
         for entry in self.tools.iter() {
-            new_tools.insert(entry.key().clone(), entry.value().clone());
+            tools.insert(entry.key().clone(), entry.value().clone());
         }
-        let new_cap_index = DashMap::new();
+        let capability_index = DashMap::new();
         for entry in self.capability_index.iter() {
-            new_cap_index.insert(entry.key().clone(), entry.value().clone());
+            capability_index.insert(entry.key().clone(), entry.value().clone());
+        }
+        let capability_providers = DashMap::new();
+        for entry in self.capability_providers.iter() {
+            capability_providers.insert(*entry.key(), entry.value().clone());
         }
         Self {
-            tools: new_tools,
-            capability_index: new_cap_index,
+            tools,
+            capability_index,
             http_client: self.http_client.clone(),
-            capability_providers: self.capability_providers.clone(),
+            capability_providers,
+            next_provider_handle: AtomicU64::new(
+                self.next_provider_handle.load(Ordering::Relaxed),
+            ),
+            provider_mutex: std::sync::Mutex::new(()),
         }
     }
 }
@@ -177,12 +188,20 @@ impl ToolRegistry {
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
-        Ok(Self {
+        let registry = Self {
             tools: DashMap::new(),
             capability_index: DashMap::new(),
             http_client,
-            capability_providers: capabilities::default_capability_providers(),
-        })
+            capability_providers: DashMap::new(),
+            next_provider_handle: AtomicU64::new(0),
+            provider_mutex: std::sync::Mutex::new(()),
+        };
+
+        // Install the default AnnotationCapabilityProvider.
+        // Handle is discarded — default provider is not externally tracked.
+        let _ = registry.register_capability_provider(Arc::new(AnnotationCapabilityProvider));
+
+        Ok(registry)
     }
 
     /// Register a tool. Safe to call at any time, including after wrapping in Arc.
@@ -203,15 +222,19 @@ impl ToolRegistry {
         if name.contains('\0') {
             return Err("Tool name cannot contain null bytes".to_string());
         }
+
+        let _guard = self.provider_mutex.lock().unwrap_or_else(|p| p.into_inner());
+
+        // String capabilities
         for cap in &tool.provides_capabilities {
             self.capability_index
                 .entry(cap.clone())
                 .or_default()
                 .push(tool.definition.name.clone());
         }
-        // Index virtual capabilities from registered providers.
-        for provider in &self.capability_providers {
-            for cap in provider.derive_capabilities(&tool) {
+        // Virtual capabilities from registered providers (DashMap iteration)
+        for provider_entry in self.capability_providers.iter() {
+            for cap in provider_entry.value().derive_capabilities(&tool) {
                 self.capability_index
                     .entry(cap)
                     .or_default()
@@ -225,14 +248,16 @@ impl ToolRegistry {
     /// Remove a tool by name. Returns true if the tool existed.
     pub fn remove(&self, name: &str) -> bool {
         if let Some((_, tool)) = self.tools.remove(name) {
+            let _guard = self.provider_mutex.lock().unwrap_or_else(|p| p.into_inner());
+
             for cap in &tool.provides_capabilities {
                 if let Some(mut names) = self.capability_index.get_mut(cap) {
                     names.retain(|n| n != name);
                 }
             }
             // Scrub virtual capabilities from registered providers.
-            for provider in &self.capability_providers {
-                for cap in provider.derive_capabilities(&tool) {
+            for provider_entry in self.capability_providers.iter() {
+                for cap in provider_entry.value().derive_capabilities(&tool) {
                     if let Some(mut names) = self.capability_index.get_mut(&cap) {
                         names.retain(|n| n != name);
                     }
@@ -390,21 +415,108 @@ impl ToolRegistry {
     pub fn known_virtual_capabilities(&self) -> Vec<&'static str> {
         self.capability_providers
             .iter()
-            .flat_map(|p| p.known_capability_names().iter().copied())
+            .flat_map(|e| e.value().known_capability_names().iter().copied())
             .collect()
     }
 
-    /// Register an additional capability provider. Must be called BEFORE any
-    /// tools are registered — providers added after registration has started
-    /// do NOT retroactively index existing tools.
+    /// Register a capability provider and return a handle for later removal.
     ///
-    /// This method takes `&mut self` intentionally — wrap the registry in `Arc`
-    /// only after all providers are installed at daemon boot.
+    /// Triggers a full rebuild of `capability_index` so tools registered
+    /// before this call also gain the new provider's virtual capabilities.
+    ///
+    /// Rebuild cost: O(tools × providers × caps_per_call). For realistic
+    /// deployments this is microseconds. Provider lifecycle events are
+    /// infrequent — not a hot path.
+    ///
+    /// Safe to call concurrently from any Arc<ToolRegistry> owner. Internal
+    /// serialization via `provider_mutex` prevents two rebuilds from racing.
     pub fn register_capability_provider(
-        &mut self,
+        &self,
         provider: Arc<dyn capabilities::CapabilityProvider>,
-    ) {
-        self.capability_providers.push(provider);
+    ) -> ProviderHandle {
+        let handle = ProviderHandle(self.next_provider_handle.fetch_add(1, Ordering::Relaxed));
+        let _guard = self.provider_mutex.lock().unwrap_or_else(|p| p.into_inner());
+
+        self.capability_providers.insert(handle, provider);
+        self.rebuild_virtual_capability_index();
+
+        tracing::info!(
+            handle = %handle,
+            total_providers = self.capability_providers.len(),
+            "registered capability provider"
+        );
+        handle
+    }
+
+    /// Remove a previously-registered capability provider by handle.
+    ///
+    /// Returns `true` if a provider with that handle existed and was removed,
+    /// `false` if the handle was unknown. Idempotent on unknown handles.
+    ///
+    /// Triggers a full rebuild of `capability_index`. Virtual capabilities
+    /// produced only by the removed provider are scrubbed. Entries produced
+    /// by other still-active providers remain.
+    pub fn remove_capability_provider(&self, handle: ProviderHandle) -> bool {
+        let _guard = self.provider_mutex.lock().unwrap_or_else(|p| p.into_inner());
+
+        let removed = self.capability_providers.remove(&handle).is_some();
+        if removed {
+            self.rebuild_virtual_capability_index();
+            tracing::info!(
+                handle = %handle,
+                total_providers = self.capability_providers.len(),
+                "removed capability provider"
+            );
+        } else {
+            tracing::debug!(handle = %handle, "remove on unknown provider handle");
+        }
+        removed
+    }
+
+    /// Return all currently-active provider handles, for introspection.
+    /// Order is not guaranteed.
+    pub fn provider_handles(&self) -> Vec<ProviderHandle> {
+        self.capability_providers
+            .iter()
+            .map(|e| *e.key())
+            .collect()
+    }
+
+    /// Clear and rebuild the capability_index from current state.
+    ///
+    /// MUST be called with provider_mutex held. Iterates every tool and
+    /// every active provider, accumulating entries into a fresh HashMap,
+    /// then replaces the index contents.
+    ///
+    /// Readers of capability_index during rebuild may observe a transient
+    /// empty-or-partial state (typically sub-millisecond). Acceptable for
+    /// infrequent provider lifecycle events.
+    fn rebuild_virtual_capability_index(&self) {
+        let mut new_index: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+
+        for entry in self.tools.iter() {
+            let tool_name = entry.key().clone();
+            let tool = entry.value();
+
+            // String capabilities from the tool itself.
+            for cap in &tool.provides_capabilities {
+                new_index.entry(cap.clone()).or_default().push(tool_name.clone());
+            }
+
+            // Virtual capabilities from all registered providers.
+            for provider_entry in self.capability_providers.iter() {
+                for cap in provider_entry.value().derive_capabilities(tool) {
+                    new_index.entry(cap).or_default().push(tool_name.clone());
+                }
+            }
+        }
+
+        // Swap in: clear existing entries, repopulate.
+        self.capability_index.clear();
+        for (k, v) in new_index {
+            self.capability_index.insert(k, v);
+        }
     }
 
     /// Number of registered tools.
@@ -468,8 +580,8 @@ impl ToolRegistry {
                         if let Some(tool) = self.tools.get(name) {
                             // Full capability set = string caps + virtual caps from all providers.
                             let mut all_caps: Vec<String> = tool.provides_capabilities.clone();
-                            for provider in &self.capability_providers {
-                                all_caps.extend(provider.derive_capabilities(tool.value()));
+                            for provider_entry in self.capability_providers.iter() {
+                                all_caps.extend(provider_entry.value().derive_capabilities(tool.value()));
                             }
                             let has_denied = all_caps.iter().any(|c| denied.contains(c));
                             if !has_denied {
