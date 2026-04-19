@@ -46,6 +46,7 @@ tokio = { version = "1.49.0", features = [
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+tracing-test = "0.2"
 
 # daemon api (server)
 axum = { version = "0.8.8", features = ["ws", "multipart"] }

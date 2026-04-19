@@ -29,6 +29,7 @@ use openalpaca_llm::ChatRequest;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 /// Maximum retries when LLM response is truncated due to max_tokens.
 const MAX_TOKENS_RETRIES: usize = 2;
@@ -233,25 +234,43 @@ async fn run_agentic_loop_inner(
 
     loop {
         // ── 1. Cancellation check ──────────────────────────────────
-        if let Some(ref token) = cancel_token
-            && token.is_cancelled()
         {
-            tracing::info!(
+            let _span = tracing::info_span!(
+                "loop.step.cancellation_check",
                 agent_id = agent_id,
-                rounds = state.rounds,
-                "Agentic loop cancelled"
-            );
-            return state.result(LoopFinishReason::Cancelled);
+                round = state.rounds,
+            )
+            .entered();
+            tracing::trace!("cancellation_check step entered");
+            if let Some(ref token) = cancel_token
+                && token.is_cancelled()
+            {
+                tracing::info!(
+                    agent_id = agent_id,
+                    rounds = state.rounds,
+                    "Agentic loop cancelled"
+                );
+                return state.result(LoopFinishReason::Cancelled);
+            }
         }
 
         // ── 2. Max rounds check ────────────────────────────────────
-        if state.rounds >= config.max_rounds {
-            tracing::info!(
+        {
+            let _span = tracing::info_span!(
+                "loop.step.max_rounds_check",
                 agent_id = agent_id,
-                rounds = state.rounds,
-                "Agentic loop exiting: max rounds reached"
-            );
-            return state.result(LoopFinishReason::MaxRounds);
+                round = state.rounds,
+            )
+            .entered();
+            tracing::trace!("max_rounds_check step entered");
+            if state.rounds >= config.max_rounds {
+                tracing::info!(
+                    agent_id = agent_id,
+                    rounds = state.rounds,
+                    "Agentic loop exiting: max rounds reached"
+                );
+                return state.result(LoopFinishReason::MaxRounds);
+            }
         }
 
         // ── 3. Cost check (CostTracker for Router, local estimate for Direct) ──
@@ -263,68 +282,96 @@ async fn run_agentic_loop_inner(
         state.last_cost = round_cost;
         let accumulated_cost = cost_acc.total_usd();
         let cost_ratio = accumulated_cost / config.max_cost;
-        if cost_ratio >= 0.8 && !state.cost_warning_emitted {
-            state.cost_warning_emitted = true;
-            let warning = format!(
-                "[system] Budget {:.0}% consumed (${:.4}/{:.2}). \
-                 Prioritize completing the current task efficiently.",
-                cost_ratio * 100.0,
-                accumulated_cost,
-                config.max_cost,
-            );
-            Arc::make_mut(&mut messages).push(ChatMessage::system(&warning));
-            tracing::info!(
-                agent_id,
-                cost_ratio,
-                accumulated_cost,
-                "Cost warning emitted at {:.0}%",
-                cost_ratio * 100.0,
-            );
-        }
-        if accumulated_cost > config.max_cost {
-            tracing::info!(
+        {
+            let _span = tracing::info_span!(
+                "loop.step.cost_check",
                 agent_id = agent_id,
-                rounds = state.rounds,
-                accumulated_cost,
-                "Agentic loop exiting: cost limit exceeded"
-            );
-            return state.result(LoopFinishReason::CostExceeded);
+                round = state.rounds,
+                cost_ratio = cost_ratio,
+                accumulated_cost = accumulated_cost,
+            )
+            .entered();
+            tracing::trace!("cost_check step entered");
+            if cost_ratio >= 0.8 && !state.cost_warning_emitted {
+                state.cost_warning_emitted = true;
+                let warning = format!(
+                    "[system] Budget {:.0}% consumed (${:.4}/{:.2}). \
+                     Prioritize completing the current task efficiently.",
+                    cost_ratio * 100.0,
+                    accumulated_cost,
+                    config.max_cost,
+                );
+                Arc::make_mut(&mut messages).push(ChatMessage::system(&warning));
+                tracing::info!(
+                    agent_id,
+                    cost_ratio,
+                    accumulated_cost,
+                    "Cost warning emitted at {:.0}%",
+                    cost_ratio * 100.0,
+                );
+            }
+            if accumulated_cost > config.max_cost {
+                tracing::info!(
+                    agent_id = agent_id,
+                    rounds = state.rounds,
+                    accumulated_cost,
+                    "Agentic loop exiting: cost limit exceeded"
+                );
+                return state.result(LoopFinishReason::CostExceeded);
+            }
         }
 
         // ── 4. Context compression (budget-aware) ──────────────────
+        let msg_tokens_estimate = estimate_messages_tokens(&messages) as usize;
+        let compaction_span = tracing::info_span!(
+            "loop.step.compaction",
+            agent_id = agent_id,
+            round = state.rounds,
+            msg_tokens = msg_tokens_estimate,
+        );
+        compaction_span.in_scope(|| {
+            tracing::trace!("compaction step entered");
+        });
         if let Some(budget) = context_budget {
-            let msg_tokens = estimate_messages_tokens(&messages) as usize;
+            let msg_tokens = msg_tokens_estimate;
             if budget.should_compact(msg_tokens) {
                 let messages_before = messages.len();
                 let tier = budget.compaction_tier(msg_tokens);
 
-                tracing::info!(
-                    agent_id = agent_id,
-                    msg_tokens,
-                    trigger = budget.compaction_trigger(),
-                    messages_before,
-                    ?tier,
-                    "Graduated compaction triggered"
-                );
+                compaction_span.in_scope(|| {
+                    tracing::info!(
+                        agent_id = agent_id,
+                        msg_tokens,
+                        trigger = budget.compaction_trigger(),
+                        messages_before,
+                        ?tier,
+                        "Graduated compaction triggered"
+                    );
+                });
 
                 let compactor = crate::prompt_ctx::compaction::GraduatedCompactor::new(
                     budget, &backend, &backend,
                 );
-                let report = compactor.compact(
-                    Arc::make_mut(&mut messages),
-                    config.context_tail_keep,
-                    cancel_token.clone(),
-                ).await;
+                let report = compactor
+                    .compact(
+                        Arc::make_mut(&mut messages),
+                        config.context_tail_keep,
+                        cancel_token.clone(),
+                    )
+                    .instrument(compaction_span.clone())
+                    .await;
 
-                tracing::info!(
-                    agent_id = agent_id,
-                    messages_before,
-                    messages_after = messages.len(),
-                    tiers_applied = ?report.tiers_applied,
-                    initial_tokens = report.initial_tokens,
-                    final_tokens = report.final_tokens,
-                    "Graduated compaction completed"
-                );
+                compaction_span.in_scope(|| {
+                    tracing::info!(
+                        agent_id = agent_id,
+                        messages_before,
+                        messages_after = messages.len(),
+                        tiers_applied = ?report.tiers_applied,
+                        initial_tokens = report.initial_tokens,
+                        final_tokens = report.final_tokens,
+                        "Graduated compaction completed"
+                    );
+                });
 
                 // Emit CompactionTriggered telemetry
                 if let Some(ref bus) = config.event_bus {
@@ -349,20 +396,60 @@ async fn run_agentic_loop_inner(
 
         let prev_msg_len = messages.len();
 
-        // ── 5. LLM call ───────────────────────────────────────────
-        let tool_choice = if state.rounds == 0 {
-            config.initial_tool_choice.clone()
-        } else {
-            None
+        // ── 5. Build request (pre-LLM-call assembly) ──────────────
+        let tool_choice = {
+            let _span = tracing::info_span!(
+                "loop.step.build_request",
+                agent_id = agent_id,
+                round = state.rounds,
+                messages_count = messages.len(),
+            )
+            .entered();
+            tracing::trace!("build_request step entered");
+
+            // ── 6. Pressure-layer ephemeral notice ─────────────────
+            // Placeholder for the not-yet-wired ephemeral context-pressure
+            // notice. Task 5 (P0b) will populate `notice` from a
+            // ContextPressureDetector; until then the span is only emitted
+            // when a notice is present (which is never in this commit).
+            #[allow(clippy::needless_late_init)]
+            let notice: Option<String> = None;
+            if let Some(ref n) = notice {
+                let _ps = tracing::info_span!(
+                    "loop.step.pressure_layer",
+                    agent_id = agent_id,
+                    round = state.rounds,
+                )
+                .entered();
+                tracing::trace!(notice_len = n.len(), "pressure_layer step entered");
+            }
+
+            let tc = if state.rounds == 0 {
+                config.initial_tool_choice.clone()
+            } else {
+                None
+            };
+
+            tracing::debug!(
+                agent_id = agent_id,
+                round = state.rounds + 1,
+                messages_count = messages.len(),
+                "LLM call starting"
+            );
+            tc
         };
 
-        tracing::debug!(
+        // ── 8. LLM call ───────────────────────────────────────────
+        let llm_call_span = tracing::info_span!(
+            "loop.step.llm_call",
             agent_id = agent_id,
             round = state.rounds + 1,
+            model = config.model.as_deref().unwrap_or("default"),
             messages_count = messages.len(),
-            "LLM call starting"
         );
-
+        llm_call_span.in_scope(|| {
+            tracing::trace!("llm_call step entered");
+        });
         let llm_result = if let Some(ref token) = cancel_token {
             tokio::select! {
                 result = backend.complete(
@@ -376,7 +463,7 @@ async fn run_agentic_loop_inner(
                     config.stream_callback.as_ref(),
                     config.max_stream_duration,
                     context_management.clone(),
-                ) => result,
+                ).instrument(llm_call_span.clone()) => result,
                 _ = token.cancelled() => {
                     tracing::info!(agent_id = agent_id, round = state.rounds + 1, "LLM call interrupted by cancellation");
                     return state.result(LoopFinishReason::Cancelled);
@@ -396,82 +483,104 @@ async fn run_agentic_loop_inner(
                     config.max_stream_duration,
                     context_management.clone(),
                 )
+                .instrument(llm_call_span)
                 .await
         };
 
-        // ── 6. Handle response ─────────────────────────────────────
+        // ── 9/10. Parse response / persist or execute tools ────────
         match llm_result {
             Ok(response) => {
                 consecutive_llm_errors = 0;
 
-                // Record usage first — the API call already happened, tokens
-                // were consumed regardless of whether we accept the response.
-                state.total_input += response.usage.input_tokens;
-                state.total_output += response.usage.output_tokens;
-                state.rounds += 1;
-                state.last_model = Some(response.model.clone());
-
-                // Model access check (Router only): the router may fallback to a
-                // different model than requested. Verify the agent is allowed to
-                // use the actual model.
-                if backend.supports_retry()
-                    && let Some(ref constraints) = config.agent_constraints
-                    && let Err(violation) = CapabilityManager::check_model_access(
-                        agent_id,
-                        &response.model,
-                        constraints,
-                    )
+                // ── 9. Response parse ──────────────────────────────
                 {
-                    tracing::warn!(
+                    let _span = tracing::info_span!(
+                        "loop.step.response_parse",
                         agent_id = agent_id,
+                        round = state.rounds,
+                    )
+                    .entered();
+                    tracing::trace!("response_parse step entered");
+
+                    // Record usage first — the API call already happened, tokens
+                    // were consumed regardless of whether we accept the response.
+                    state.total_input += response.usage.input_tokens;
+                    state.total_output += response.usage.output_tokens;
+                    state.rounds += 1;
+                    state.last_model = Some(response.model.clone());
+
+                    // Model access check (Router only): the router may fallback to a
+                    // different model than requested. Verify the agent is allowed to
+                    // use the actual model.
+                    if backend.supports_retry()
+                        && let Some(ref constraints) = config.agent_constraints
+                        && let Err(violation) = CapabilityManager::check_model_access(
+                            agent_id,
+                            &response.model,
+                            constraints,
+                        )
+                    {
+                        tracing::warn!(
+                            agent_id = agent_id,
+                            model = %response.model,
+                            "Model access denied at runtime: {}",
+                            violation,
+                        );
+                        return state.result(LoopFinishReason::Error(format!(
+                            "Model access denied: {}",
+                            violation
+                        )));
+                    }
+
+                    // Use actual input tokens as ground truth for our estimate
+                    if response.usage.input_tokens > 0 {
+                        known_token_count = response.usage.input_tokens;
+                    }
+
+                    tracing::debug!(
+                        agent_id = agent_id,
+                        round = state.rounds,
                         model = %response.model,
-                        "Model access denied at runtime: {}",
-                        violation,
+                        input_tokens = response.usage.input_tokens,
+                        output_tokens = response.usage.output_tokens,
+                        finish_reason = ?response.finish_reason,
+                        "LLM call completed"
                     );
-                    return state.result(LoopFinishReason::Error(format!(
-                        "Model access denied: {}",
-                        violation
-                    )));
+
+                    if response.usage.cache_read_input_tokens > 0 {
+                        tracing::debug!(
+                            agent_id = agent_id,
+                            round = state.rounds,
+                            cache_read_tokens = response.usage.cache_read_input_tokens,
+                            cache_creation_tokens = response.usage.cache_creation_input_tokens,
+                            "Prompt cache hit"
+                        );
+                    }
+
+                    if let Some(ref thinking_text) = response.thinking {
+                        tracing::debug!(
+                            agent_id = agent_id,
+                            round = state.rounds,
+                            thinking_len = thinking_text.len(),
+                            "Extended thinking produced"
+                        );
+                    }
+
+                    // Capture last content before any branching
+                    if !response.content.is_empty() {
+                        state.last_assistant_content = response.content.clone();
+                    }
                 }
 
-                // Use actual input tokens as ground truth for our estimate
-                if response.usage.input_tokens > 0 {
-                    known_token_count = response.usage.input_tokens;
-                }
-
-                tracing::debug!(
+                // ── 10. Persist or execute tools ──────────────────
+                let persist_span = tracing::info_span!(
+                    "loop.step.persist_or_tools",
                     agent_id = agent_id,
                     round = state.rounds,
-                    model = %response.model,
-                    input_tokens = response.usage.input_tokens,
-                    output_tokens = response.usage.output_tokens,
-                    finish_reason = ?response.finish_reason,
-                    "LLM call completed"
                 );
-
-                if response.usage.cache_read_input_tokens > 0 {
-                    tracing::debug!(
-                        agent_id = agent_id,
-                        round = state.rounds,
-                        cache_read_tokens = response.usage.cache_read_input_tokens,
-                        cache_creation_tokens = response.usage.cache_creation_input_tokens,
-                        "Prompt cache hit"
-                    );
-                }
-
-                if let Some(ref thinking_text) = response.thinking {
-                    tracing::debug!(
-                        agent_id = agent_id,
-                        round = state.rounds,
-                        thinking_len = thinking_text.len(),
-                        "Extended thinking produced"
-                    );
-                }
-
-                // Capture last content before any branching
-                if !response.content.is_empty() {
-                    state.last_assistant_content = response.content.clone();
-                }
+                persist_span.in_scope(|| {
+                    tracing::trace!("persist_or_tools step entered");
+                });
 
                 // ── Tool execution ─────────────────────────────────
                 // IMPORTANT: Thinking blocks are NOT included in conversation history.
@@ -502,21 +611,22 @@ async fn run_agentic_loop_inner(
                     let executable: Vec<_> = executable.into_iter().map(|(_, tc)| tc).collect();
                     let over_budget: Vec<_> = over_budget.into_iter().map(|(_, tc)| tc).collect();
 
-                    if sandbox.is_none() {
-                        tracing::warn!(
+                    persist_span.in_scope(|| {
+                        if sandbox.is_none() {
+                            tracing::warn!(
+                                agent_id = agent_id,
+                                round = state.rounds,
+                                tools = executable.len(),
+                                "Sandbox not configured — returning stub for tool calls (misconfiguration?)"
+                            );
+                        }
+                        tracing::debug!(
                             agent_id = agent_id,
                             round = state.rounds,
                             tools = executable.len(),
-                            "Sandbox not configured — returning stub for tool calls (misconfiguration?)"
+                            "Executing tools in parallel"
                         );
-                    }
-
-                    tracing::debug!(
-                        agent_id = agent_id,
-                        round = state.rounds,
-                        tools = executable.len(),
-                        "Executing tools in parallel"
-                    );
+                    });
 
                     let effective_ctx = tool_context.cloned().unwrap_or_else(|| ToolContext {
                         agent_id: Some(agent_id.to_string()),
@@ -541,35 +651,44 @@ async fn run_agentic_loop_inner(
                         }
                     });
 
-                    // Race tool execution against cancellation
+                    // Race tool execution against cancellation; instrument
+                    // the join_all future so events/spans inside tool
+                    // execution nest under persist_or_tools.
                     let results = if let Some(ref token) = cancel_token {
                         tokio::select! {
-                            results = futures_util::future::join_all(tool_futures) => results,
+                            results = futures_util::future::join_all(tool_futures)
+                                .instrument(persist_span.clone()) => results,
                             _ = token.cancelled() => {
-                                tracing::info!(
-                                    agent_id = agent_id,
-                                    round = state.rounds,
-                                    "Cancelled during parallel tool execution"
-                                );
+                                persist_span.in_scope(|| {
+                                    tracing::info!(
+                                        agent_id = agent_id,
+                                        round = state.rounds,
+                                        "Cancelled during parallel tool execution"
+                                    );
+                                });
                                 return state.result(LoopFinishReason::Cancelled);
                             }
                         }
                     } else {
-                        futures_util::future::join_all(tool_futures).await
+                        futures_util::future::join_all(tool_futures)
+                            .instrument(persist_span.clone())
+                            .await
                     };
 
                     // Collect results in order (join_all preserves input order)
                     for (tc, result_text) in executable.iter().zip(results.iter()) {
                         state.tool_calls_made += 1;
-                        tracing::debug!(
-                            agent_id = agent_id,
-                            round = state.rounds,
-                            tool = %tc.name,
-                            tool_call_number = state.tool_calls_made,
-                            success = !result_text.starts_with("[tool_error]"),
-                            result_len = result_text.len(),
-                            "Tool execution completed"
-                        );
+                        persist_span.in_scope(|| {
+                            tracing::debug!(
+                                agent_id = agent_id,
+                                round = state.rounds,
+                                tool = %tc.name,
+                                tool_call_number = state.tool_calls_made,
+                                success = !result_text.starts_with("[tool_error]"),
+                                result_len = result_text.len(),
+                                "Tool execution completed"
+                            );
+                        });
                         Arc::make_mut(&mut messages)
                             .push(ChatMessage::tool_result(&tc.id, result_text));
                     }
@@ -610,15 +729,19 @@ async fn run_agentic_loop_inner(
                             "Your previous response was truncated due to length limits. \
                              Continue from where you left off.",
                         ));
-                        tracing::warn!(
-                            agent_id,
-                            round = state.rounds,
-                            retry = state.max_tokens_retries,
-                            "MaxTokens hit — injecting continuation prompt"
-                        );
+                        persist_span.in_scope(|| {
+                            tracing::warn!(
+                                agent_id,
+                                round = state.rounds,
+                                retry = state.max_tokens_retries,
+                                "MaxTokens hit — injecting continuation prompt"
+                            );
+                        });
                         continue;
                     }
-                    tracing::warn!(agent_id, "MaxTokens retries exhausted, returning partial");
+                    persist_span.in_scope(|| {
+                        tracing::warn!(agent_id, "MaxTokens retries exhausted, returning partial");
+                    });
                     return state.result_with_content(
                         response.content,
                         LoopFinishReason::Truncated,
@@ -626,15 +749,17 @@ async fn run_agentic_loop_inner(
                 }
 
                 // No tool calls → done
-                tracing::info!(
-                    agent_id = agent_id,
-                    rounds = state.rounds,
-                    total_input_tokens = state.total_input,
-                    total_output_tokens = state.total_output,
-                    tool_calls = state.tool_calls_made,
-                    content_len = response.content.len(),
-                    "Agentic loop completed successfully"
-                );
+                persist_span.in_scope(|| {
+                    tracing::info!(
+                        agent_id = agent_id,
+                        rounds = state.rounds,
+                        total_input_tokens = state.total_input,
+                        total_output_tokens = state.total_output,
+                        tool_calls = state.tool_calls_made,
+                        content_len = response.content.len(),
+                        "Agentic loop completed successfully"
+                    );
+                });
                 return state.result_with_content(response.content, LoopFinishReason::Complete);
             }
 

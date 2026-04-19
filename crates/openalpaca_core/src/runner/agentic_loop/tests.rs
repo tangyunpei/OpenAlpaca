@@ -1281,3 +1281,104 @@ fn test_three_level_nesting_integration() {
     assert!(c3.denied.contains("tool_y"));
     assert_eq!(c3.source_chain, vec!["A", "B", "C"]);
 }
+
+// ---------------------------------------------------------------------------
+// P3 — ten loop-step trace spans
+// ---------------------------------------------------------------------------
+
+/// Minimal single-iteration invocation of `run_agentic_loop_routed` with a
+/// stub `LlmRouter` that returns a text-only response on the first call (so
+/// the loop exits after one iteration through the `Complete` finish branch).
+///
+/// Used by `test_ten_loop_step_spans_emitted` to verify that each inner-loop
+/// step emits its `tracing::info_span!` with the expected name.
+async fn run_minimal_loop_for_span_test() -> LoopResult {
+    // Reuse the MockRouterProvider pattern from earlier router tests.
+    let provider = Arc::new(MockRouterProvider::new(vec![Ok(ChatResponse {
+        content: "Done.".to_string(),
+        tool_calls: vec![],
+        model: "claude-sonnet-4-20250514".to_string(),
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::Stop,
+        thinking: None,
+        parts: None,
+    })]));
+
+    let router = LlmRouter::single_provider(
+        provider,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let messages = vec![ChatMessage::user("span test")];
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        // enable_caching = true so the Anthropic cache_markers span fires.
+        enable_caching: true,
+        thinking: None,
+        ..Default::default()
+    };
+
+    run_agentic_loop_routed(
+        &router,
+        messages,
+        vec![],
+        &config,
+        None, // sandbox
+        "test-agent",
+        None, // sandbox_policy
+        None, // task_id
+        None, // context_budget
+        None, // cancel_token
+        None, // tool_context
+        None, // cost_accumulator
+    )
+    .await
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn test_ten_loop_step_spans_emitted() {
+    let result = run_minimal_loop_for_span_test().await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+
+    // NOTES on omissions:
+    //
+    // * `loop.step.pressure_layer` — emitted conditionally on an ephemeral
+    //   context-pressure notice that is not wired up until Task 5 (P0b). Per
+    //   Tricky Bit 2 of the Task 3 spec, we emit it only when `notice.is_some()`
+    //   so it will not fire in this commit. Task 5 wires the notice in.
+    //
+    // * `loop.step.cache_markers` — lives inside
+    //   `openalpaca_llm::providers::anthropic::request::build_request_body`
+    //   (consolidated there as part of this commit). The MockRouterProvider
+    //   used here bypasses the Anthropic request builder, so the span never
+    //   fires in this integration path. Its existence and field values are
+    //   verified indirectly by the Anthropic provider tests that exercise
+    //   `enable_caching=true` (see `providers::anthropic::tests`), which
+    //   assert the resulting JSON carries cache_control on all three
+    //   breakpoints.
+    //
+    // We therefore assert the 8 core-loop spans that the routed loop emits
+    // directly; Task 5 will add `pressure_layer`.
+    for name in [
+        "loop.step.cancellation_check",
+        "loop.step.max_rounds_check",
+        "loop.step.cost_check",
+        "loop.step.compaction",
+        "loop.step.build_request",
+        "loop.step.llm_call",
+        "loop.step.response_parse",
+        "loop.step.persist_or_tools",
+    ] {
+        assert!(
+            logs_contain(name),
+            "expected span name {} to appear in trace output",
+            name
+        );
+    }
+}

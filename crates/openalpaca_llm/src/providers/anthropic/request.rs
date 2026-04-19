@@ -164,38 +164,6 @@ pub(super) fn build_request_body(
         }
     }
 
-    // P1: Third cache breakpoint on the conversation tail. When caching is
-    // enabled and messages is non-empty, attach cache_control to the last
-    // message's last content block. This is the third of three breakpoints
-    // Anthropic reads (system + last tool + last message); Anthropic allows
-    // up to four.
-    if request.enable_caching && !messages.is_empty() {
-        if let Some(last_msg) = messages.last_mut() {
-            let content = &mut last_msg["content"];
-            match content {
-                serde_json::Value::String(s) => {
-                    let text = std::mem::take(s);
-                    *content = serde_json::json!([{
-                        "type": "text",
-                        "text": text,
-                        "cache_control": CacheControl::ephemeral(),
-                    }]);
-                }
-                serde_json::Value::Array(arr) => {
-                    if let Some(last_block) = arr.last_mut() {
-                        if let Some(obj) = last_block.as_object_mut() {
-                            obj.insert(
-                                "cache_control".to_string(),
-                                serde_json::json!(CacheControl::ephemeral()),
-                            );
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
     let mut body = serde_json::json!({
         "model": model,
         "max_tokens": max_tokens,
@@ -203,15 +171,9 @@ pub(super) fn build_request_body(
     });
 
     if !system_text.is_empty() {
-        if request.enable_caching {
-            body["system"] = serde_json::json!([{
-                "type": "text",
-                "text": system_text,
-                "cache_control": CacheControl::ephemeral()
-            }]);
-        } else {
-            body["system"] = serde_json::Value::String(system_text);
-        }
+        // Base form — cache_control is applied in the consolidated caching
+        // block below when request.enable_caching is true.
+        body["system"] = serde_json::Value::String(system_text);
     }
 
     if let Some(temp) = request.temperature {
@@ -222,8 +184,7 @@ pub(super) fn build_request_body(
         let tools: Vec<serde_json::Value> = request
             .tools
             .iter()
-            .enumerate()
-            .map(|(i, t)| {
+            .map(|t| {
                 let mut tool = serde_json::json!({
                     "name": t.name,
                     "description": t.description,
@@ -231,10 +192,6 @@ pub(super) fn build_request_body(
                 });
                 if let Some(ref examples) = t.input_examples {
                     tool["input_examples"] = serde_json::json!(examples);
-                }
-                // Cache breakpoint on the last tool
-                if request.enable_caching && i == request.tools.len() - 1 {
-                    tool["cache_control"] = serde_json::json!(CacheControl::ephemeral());
                 }
                 tool
             })
@@ -247,6 +204,69 @@ pub(super) fn build_request_body(
                 ToolChoice::Any => serde_json::json!({"type": "any"}),
                 ToolChoice::Tool(name) => serde_json::json!({"type": "tool", "name": name}),
             };
+        }
+    }
+
+    // P1 + P3: Apply all three cache breakpoints (system + last tool + last
+    // message) under a single enclosing span. Anthropic reads up to four
+    // breakpoints per request; we use three. Consolidating the enable_caching
+    // check avoids repeating it three times and gives the `loop.step.cache_markers`
+    // span a clean entry/exit around the cache-application work.
+    if request.enable_caching {
+        let _span = tracing::info_span!("loop.step.cache_markers", breakpoints = 3).entered();
+        tracing::trace!("cache_markers step entered");
+
+        // First breakpoint: system prompt.
+        if body.get("system").is_some() {
+            let system_value = body["system"].clone();
+            if let serde_json::Value::String(s) = system_value {
+                body["system"] = serde_json::json!([{
+                    "type": "text",
+                    "text": s,
+                    "cache_control": CacheControl::ephemeral(),
+                }]);
+            }
+        }
+
+        // Second breakpoint: last tool in the list.
+        if let Some(serde_json::Value::Array(tools_arr)) = body.get_mut("tools") {
+            if let Some(last_tool) = tools_arr.last_mut() {
+                if let Some(obj) = last_tool.as_object_mut() {
+                    obj.insert(
+                        "cache_control".to_string(),
+                        serde_json::json!(CacheControl::ephemeral()),
+                    );
+                }
+            }
+        }
+
+        // Third breakpoint: conversation tail. Attach cache_control to the
+        // last message's last content block. (Introduced in P1 / Task 1.)
+        if let Some(serde_json::Value::Array(msgs_arr)) = body.get_mut("messages") {
+            if let Some(last_msg) = msgs_arr.last_mut() {
+                let content = &mut last_msg["content"];
+                match content {
+                    serde_json::Value::String(s) => {
+                        let text = std::mem::take(s);
+                        *content = serde_json::json!([{
+                            "type": "text",
+                            "text": text,
+                            "cache_control": CacheControl::ephemeral(),
+                        }]);
+                    }
+                    serde_json::Value::Array(arr) => {
+                        if let Some(last_block) = arr.last_mut() {
+                            if let Some(obj) = last_block.as_object_mut() {
+                                obj.insert(
+                                    "cache_control".to_string(),
+                                    serde_json::json!(CacheControl::ephemeral()),
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
