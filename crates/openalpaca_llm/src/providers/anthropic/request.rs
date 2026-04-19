@@ -170,6 +170,15 @@ pub(super) fn build_request_body(
         "messages": messages,
     });
 
+    // Invariant: cache_control is only ever attached to the cached system
+    // block. The ephemeral notice must NEVER carry cache_control. When the
+    // system array is notice-only (empty system_text + notice present), we
+    // must skip the Array arm of the caching block below — otherwise it would
+    // attach cache_control to arr[0], which IS the notice. Track that case
+    // with a local flag rather than pattern-matching content inside the
+    // caching block (which would be brittle).
+    let has_cacheable_system = !system_text.is_empty();
+
     if !system_text.is_empty() {
         // Base form — cache_control is applied in the consolidated caching
         // block below when request.enable_caching is true. If an ephemeral
@@ -185,7 +194,9 @@ pub(super) fn build_request_body(
             body["system"] = serde_json::Value::String(system_text);
         }
     } else if let Some(ref notice) = request.ephemeral_system_notice {
-        // Edge: empty system_text but notice present.
+        // Edge: empty system_text but notice present. arr[0] is the notice —
+        // the caching block's Array arm below must NOT attach cache_control
+        // here. Guarded by `has_cacheable_system == false`.
         body["system"] = serde_json::Value::Array(vec![
             serde_json::json!({"type": "text", "text": notice}),
         ]);
@@ -232,9 +243,12 @@ pub(super) fn build_request_body(
         tracing::trace!("cache_markers step entered");
 
         // First breakpoint: system prompt. Attach cache_control to the first
-        // system block — when a notice is present, `body["system"]` is already
-        // an array whose element [0] is the cacheable system text and element
-        // [1] is the notice (must never carry cache_control).
+        // system block — when a notice is present alongside real system text,
+        // `body["system"]` is already an array whose element [0] is the
+        // cacheable system text and element [1] is the notice (must never
+        // carry cache_control). In the notice-only edge case
+        // (has_cacheable_system == false), arr[0] IS the notice — skip the
+        // Array arm entirely so we don't mis-tag it.
         if body.get("system").is_some() {
             let system_value = body["system"].clone();
             match system_value {
@@ -245,7 +259,7 @@ pub(super) fn build_request_body(
                         "cache_control": CacheControl::ephemeral(),
                     }]);
                 }
-                serde_json::Value::Array(mut arr) => {
+                serde_json::Value::Array(mut arr) if has_cacheable_system => {
                     if let Some(first) = arr.first_mut() {
                         if let Some(obj) = first.as_object_mut() {
                             obj.insert(
@@ -256,6 +270,9 @@ pub(super) fn build_request_body(
                     }
                     body["system"] = serde_json::Value::Array(arr);
                 }
+                // Notice-only array (has_cacheable_system == false): leave
+                // body["system"] untouched — the notice must not carry
+                // cache_control.
                 _ => {}
             }
         }

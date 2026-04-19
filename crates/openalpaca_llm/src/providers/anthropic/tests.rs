@@ -884,3 +884,32 @@ fn test_anthropic_ephemeral_notice_placement_empty_system() {
     assert_eq!(system[0]["text"], "[notice-only]");
     assert!(system[0].get("cache_control").is_none());
 }
+
+#[test]
+fn test_anthropic_ephemeral_notice_placement_empty_system_with_caching() {
+    use crate::types::{ChatMessage, ChatRequest};
+    use std::sync::Arc;
+
+    let request = ChatRequest {
+        messages: Arc::new(vec![ChatMessage::user("hello")]),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: true,  // <-- the previously-broken case
+        thinking: None,
+        context_management: None,
+        ephemeral_system_notice: Some("[budget_notice]\n80% used\n[/budget_notice]".to_string()),
+    };
+
+    let body = super::request::build_request_body("claude-test", 1024, &request);
+    let system = body["system"].as_array().expect("system should be array when notice present");
+    assert_eq!(system.len(), 1, "empty system + notice => single-element array");
+    let only_block = &system[0];
+    assert!(only_block["text"].as_str().unwrap().contains("budget_notice"));
+    assert!(
+        only_block.get("cache_control").is_none(),
+        "notice-only system must NOT carry cache_control even when caching=true"
+    );
+}
