@@ -13,8 +13,9 @@ use super::types::{ConnectorSummary, SystemBlock};
 /// Maps `Role` to a stable byte tag for fingerprinting.
 ///
 /// `Role` does not implement `Copy` and is not `#[repr(u8)]`, so we hand-roll
-/// a canonical mapping here rather than using `as u8`.
-fn role_tag(role: &Role) -> u8 {
+/// a canonical mapping here rather than using `as u8`. Phase 2+ fingerprint
+/// helpers MUST use this helper; do not redefine.
+pub(crate) fn role_tag(role: &Role) -> u8 {
     match role {
         Role::System => 0,
         Role::User => 1,
@@ -25,23 +26,47 @@ fn role_tag(role: &Role) -> u8 {
 
 /// blake3 over length-prefixed tool names + descriptions + parameters (canonical JSON).
 /// Order-sensitive (different order => different hash).
+///
+/// Per spec section Component 1 Layer-2 fingerprint: the tool-set hash covers
+/// name, description, and `parameters` serialized to canonical JSON bytes,
+/// with a separator byte between adjacent tools so two tools cannot "bleed"
+/// into each other via concatenation collisions.
 pub fn hash_tool_set(tools: &[ToolDefinition]) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(&(tools.len() as u64).to_le_bytes());
     for tool in tools {
-        // Phase 1 stub: hash the name only. Phase 2 expands to description +
-        // parameters (canonical JSON) per spec.
         h.update(&(tool.name.len() as u64).to_le_bytes());
         h.update(tool.name.as_bytes());
+        h.update(&(tool.description.len() as u64).to_le_bytes());
+        h.update(tool.description.as_bytes());
+        // Serialize `parameters` (serde_json::Value) with serde_json::to_vec.
+        // On failure (e.g. a map with non-string keys, which Value disallows
+        // by construction), treat as empty bytes — still deterministic.
+        let params_bytes = serde_json::to_vec(&tool.parameters).unwrap_or_default();
+        h.update(&(params_bytes.len() as u64).to_le_bytes());
+        h.update(&params_bytes);
+        // Separator byte prevents name+description|params|name... collisions
+        // across adjacent tools.
+        h.update(&[0xff]);
     }
     h.finalize().into()
 }
 
-/// blake3 over a connector-status list. Phase 1 captures count only.
+/// blake3 over a connector-status list. Order-independent: statuses are sorted
+/// by `id` before hashing so two callers presenting the same set in a
+/// different order produce the same fingerprint.
 pub fn hash_connector_status(statuses: &[ConnectorSummary]) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
-    h.update(&(statuses.len() as u64).to_le_bytes());
-    // Phase 2 expands to per-status id + status + sendable bits.
+    let mut sorted: Vec<&ConnectorSummary> = statuses.iter().collect();
+    sorted.sort_by(|a, b| a.id.cmp(&b.id));
+    h.update(&(sorted.len() as u64).to_le_bytes());
+    for s in sorted {
+        h.update(&(s.id.len() as u64).to_le_bytes());
+        h.update(s.id.as_bytes());
+        h.update(&(s.status.len() as u64).to_le_bytes());
+        h.update(s.status.as_bytes());
+        h.update(&[s.sendable as u8]);
+    }
     h.finalize().into()
 }
 

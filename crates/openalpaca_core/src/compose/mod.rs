@@ -78,6 +78,15 @@ impl std::fmt::Debug for ComposeEngine {
     }
 }
 
+/// Result of a global-cache lookup. Carries both the `Arc`-shared output and
+/// a `hit` bit the caller uses to (a) populate `LayerTrace::memo_hits` and
+/// (b) decide whether to emit `ComposeLayerCacheHit` or `Miss`.
+#[derive(Debug, Clone)]
+pub struct CacheLookup<T> {
+    pub output: Arc<T>,
+    pub hit: bool,
+}
+
 impl ComposeEngine {
     pub fn new(global_cache_capacity: usize) -> Self {
         let capacity = NonZeroUsize::new(global_cache_capacity.max(1)).unwrap();
@@ -90,6 +99,52 @@ impl ComposeEngine {
     /// computations; Phase 1 exposes it for tests and future inspection.
     pub fn global_cache(&self) -> &Arc<Mutex<LruCache<GlobalCacheKey, Arc<GlobalCacheValue>>>> {
         &self.global_cache
+    }
+
+    /// Global-cache lookup for Layer 1 (Persona) outputs. Computes the cache
+    /// key from the input's fingerprint; on hit, returns an `Arc`-clone of
+    /// the cached output. On miss, runs `persona::compute` and inserts.
+    ///
+    /// `lane_id` is accepted for symmetry with the event-emission code path
+    /// but is ignored here (the persona layer has no lane-scoped state).
+    pub fn lookup_or_build_persona(
+        &self,
+        input: &PersonaInput,
+        _lane_id: Option<&str>,
+    ) -> CacheLookup<PersonaOutput> {
+        let fingerprint = persona::compute_fingerprint(input);
+        let key = GlobalCacheKey::Persona(fingerprint);
+
+        {
+            let mut cache = self
+                .global_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(value) = cache.get(&key)
+                && let GlobalCacheValue::Persona(arc) = value.as_ref()
+            {
+                return CacheLookup {
+                    output: arc.clone(),
+                    hit: true,
+                };
+            }
+        }
+
+        // Miss: compute and insert.
+        let built = persona::compute(input);
+        let arc = Arc::new(built);
+        {
+            let mut cache = self
+                .global_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            cache.put(key, Arc::new(GlobalCacheValue::Persona(arc.clone())));
+        }
+
+        CacheLookup {
+            output: arc,
+            hit: false,
+        }
     }
 
     /// Phase 1 stub: runs all five layers with stub outputs and returns a

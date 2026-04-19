@@ -338,3 +338,111 @@ fn test_compose_request_default_modes_table() {
     assert_eq!(dc, D::Skip);
     assert!(matches!(h, H::Skip));
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Phase 2 Commit 1 — Layer 1 (Persona) tests
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Build a minimal PersonaInput for Layer 1 tests. Populates all three docs
+/// in a way that Default/Minimal/Skip modes produce distinct block counts.
+fn make_persona_input(version: u64, mode: PersonaMode) -> PersonaInput {
+    // SystemPersona::default() has a non-empty base_instructions — good.
+    // Leave user_document and identity_document as None so only Default mode
+    // can conditionally add blocks; we use populated variants in another
+    // helper below to exercise the "more blocks" paths.
+    PersonaInput {
+        system_persona: Arc::new(SystemPersona::default()),
+        user_document: Arc::new(None),
+        identity_document: Arc::new(Option::<IdentityDocument>::None),
+        persona_version: version,
+        mode,
+    }
+}
+
+#[test]
+fn test_persona_layer_fingerprint_deterministic() {
+    let input_a = make_persona_input(1, PersonaMode::Default);
+    let input_b = make_persona_input(1, PersonaMode::Default);
+    let out_a = super::persona::compute(&input_a);
+    let out_b = super::persona::compute(&input_b);
+    assert_eq!(out_a.fingerprint, out_b.fingerprint);
+}
+
+#[test]
+fn test_persona_layer_fingerprint_busts_on_version_bump() {
+    let input_v1 = make_persona_input(1, PersonaMode::Default);
+    let input_v2 = make_persona_input(2, PersonaMode::Default);
+    let out_v1 = super::persona::compute(&input_v1);
+    let out_v2 = super::persona::compute(&input_v2);
+    assert_ne!(out_v1.fingerprint, out_v2.fingerprint);
+}
+
+#[test]
+fn test_persona_layer_fingerprint_busts_on_mode_change() {
+    let fp_default = super::persona::compute(&make_persona_input(1, PersonaMode::Default)).fingerprint;
+    let fp_minimal = super::persona::compute(&make_persona_input(1, PersonaMode::Minimal)).fingerprint;
+    let fp_skip = super::persona::compute(&make_persona_input(1, PersonaMode::Skip)).fingerprint;
+    assert_ne!(fp_default, fp_minimal);
+    assert_ne!(fp_default, fp_skip);
+    assert_ne!(fp_minimal, fp_skip);
+}
+
+#[test]
+fn test_persona_layer_default_mode_emits_blocks() {
+    // Default mode should emit at least the system_persona block
+    // (SystemPersona::default() has non-empty base_instructions).
+    let input = make_persona_input(1, PersonaMode::Default);
+    let out = super::persona::compute(&input);
+    assert!(
+        !out.blocks.is_empty(),
+        "Default mode should emit at least the system_persona block"
+    );
+    assert!(
+        out.blocks.iter().any(|b| b.name == "system_persona"),
+        "Default mode must emit a system_persona block"
+    );
+}
+
+#[test]
+fn test_persona_layer_minimal_mode_emits_only_system_persona() {
+    let out = super::persona::compute(&make_persona_input(1, PersonaMode::Minimal));
+    assert_eq!(out.blocks.len(), 1, "Minimal mode emits exactly 1 block");
+    assert_eq!(out.blocks[0].name, "system_persona");
+}
+
+#[test]
+fn test_persona_layer_skip_mode_emits_no_blocks() {
+    let input = make_persona_input(1, PersonaMode::Skip);
+    let out = super::persona::compute(&input);
+    assert!(out.blocks.is_empty(), "Skip mode should emit no blocks");
+}
+
+#[test]
+fn test_global_cache_persona_hit_on_second_call() {
+    let engine = ComposeEngine::default();
+    let input = make_persona_input(1, PersonaMode::Default);
+
+    // First call: miss — builds and inserts into cache.
+    let out1 = engine.lookup_or_build_persona(&input, None);
+    assert!(!out1.hit, "first call must be a miss");
+
+    // Second call with identical input: hit.
+    let out2 = engine.lookup_or_build_persona(&input, None);
+    assert!(out2.hit, "second call with identical input must be a hit");
+
+    // Outputs must be pointer-equal (same Arc<PersonaOutput>).
+    assert!(Arc::ptr_eq(&out1.output, &out2.output));
+}
+
+#[test]
+fn test_global_cache_persona_miss_on_version_bump() {
+    let engine = ComposeEngine::default();
+    let input_v1 = make_persona_input(1, PersonaMode::Default);
+    let input_v2 = make_persona_input(2, PersonaMode::Default);
+
+    let out1 = engine.lookup_or_build_persona(&input_v1, None);
+    assert!(!out1.hit);
+
+    let out2 = engine.lookup_or_build_persona(&input_v2, None);
+    assert!(!out2.hit, "different persona_version should miss cache");
+}
