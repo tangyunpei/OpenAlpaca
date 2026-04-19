@@ -138,7 +138,11 @@ pub(super) fn build_messages(
 }
 
 /// Build the hierarchical planning prompt with DAG support.
-pub(super) fn build_hierarchical_prompt(
+///
+/// Exposed as `pub(crate)` so Layer 2 of the compose engine can call it from
+/// `StaticPromptMode::PlannerHierarchical`. This helper is slated for deletion
+/// in Phase 4 once the planner migration lands.
+pub(crate) fn build_hierarchical_prompt(
     idle_agents: &[SubAgent],
     plan_protocol_v2: bool,
 ) -> String {

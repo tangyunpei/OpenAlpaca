@@ -11,6 +11,7 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use prompt::build_hierarchical_prompt;
 pub(crate) use response_parser::extract_json_block;
 pub use types::*;
 

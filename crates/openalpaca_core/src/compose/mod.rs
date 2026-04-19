@@ -147,42 +147,128 @@ impl ComposeEngine {
         }
     }
 
-    /// Phase 1 stub: runs all five layers with stub outputs and returns a
-    /// valid `ComposedRequest`. Phase 2 and Phase 3 replace the layer calls
-    /// with real work plus cache plumbing.
+    /// Global-cache lookup for Layer 2 (Static Prompt) outputs. Mirrors
+    /// `lookup_or_build_persona` but keys against the static-prompt
+    /// fingerprint variant.
+    pub fn lookup_or_build_static_prompt(
+        &self,
+        input: &StaticPromptInput,
+        _lane_id: Option<&str>,
+    ) -> CacheLookup<StaticPromptOutput> {
+        let fingerprint = static_prompt::compute_fingerprint(input);
+        let key = GlobalCacheKey::StaticPrompt(fingerprint);
+
+        {
+            let mut cache = self
+                .global_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(value) = cache.get(&key)
+                && let GlobalCacheValue::StaticPrompt(arc) = value.as_ref()
+            {
+                return CacheLookup {
+                    output: arc.clone(),
+                    hit: true,
+                };
+            }
+        }
+
+        let built = static_prompt::compute(input);
+        let arc = Arc::new(built);
+        {
+            let mut cache = self
+                .global_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            cache.put(key, Arc::new(GlobalCacheValue::StaticPrompt(arc.clone())));
+        }
+
+        CacheLookup {
+            output: arc,
+            hit: false,
+        }
+    }
+
+    /// Runs all five layers and returns a typed `ComposedRequest`.
     ///
-    /// The `&ComposeRequest` argument is retained (unused in Phase 1) so the
-    /// signature is stable once Phase 3 adds routing logic that consults the
-    /// variant. The four layer inputs are passed in explicitly because the
-    /// loader layer (a later phase) will build them from `ComposeRequest` +
-    /// live orchestrator state.
+    /// Phase 2: Layer 1 (Persona) and Layer 2 (Static Prompt) use the
+    /// global LRU cache via `lookup_or_build_*` helpers, and emit
+    /// `ComposeLayerCacheHit`/`Miss` events when `event_bus` is `Some`.
+    /// Layers 3 and 4 still use their Phase-1 stub implementations —
+    /// Phase 3 wires them to the per-lane cache on `ConversationLane`.
+    ///
+    /// The `&ComposeRequest` argument is retained for the routing layer
+    /// that Phase 3 will add; Phase 2 reads only its `lane_key()` for the
+    /// event `lane_id` field. The four layer inputs are passed in
+    /// explicitly because the loader layer (a later phase) will build
+    /// them from `ComposeRequest` + live orchestrator state.
     #[allow(clippy::too_many_arguments)]
     pub fn compose(
         &self,
-        _request: &ComposeRequest,
+        request: &ComposeRequest,
         persona_input: PersonaInput,
         static_prompt_input: StaticPromptInput,
         dynamic_context_input: DynamicContextInput,
         history_input: HistoryInput,
         model_window: u32,
         tools: Arc<Vec<openalpaca_llm::ToolDefinition>>,
+        event_bus: Option<&crate::bus::EventBus>,
     ) -> ComposedRequest {
-        let persona_out = persona::compute(&persona_input);
-        let static_out = static_prompt::compute(&static_prompt_input);
+        let lane_id = request.lane_key().map(|s| s.to_string());
+
+        // Capture modes up-front (the inputs are partially moved below).
+        let persona_mode = persona_input.mode;
+        let static_prompt_mode = static_prompt_input.mode;
+        let dynamic_context_mode = dynamic_context_input.mode;
+        let history_mode = history_input.mode.clone();
+
+        // Layer 1 — Persona.
+        let persona_result = self.lookup_or_build_persona(&persona_input, lane_id.as_deref());
+        emit_cache_event(
+            event_bus,
+            LayerId::Persona,
+            persona_result.output.fingerprint,
+            persona_result.hit,
+            MissReason::FirstBuild,
+            lane_id.clone(),
+        );
+
+        // Layer 2 — Static Prompt. Override the caller-supplied persona_output
+        // with the lookup result (may be pointer-equal on cache hit, so this
+        // is a no-op in the common case — but is necessary when the loader
+        // didn't pre-populate it).
+        let mut sp_input = static_prompt_input;
+        sp_input.persona_output = persona_result.output.clone();
+        let static_result = self.lookup_or_build_static_prompt(&sp_input, lane_id.as_deref());
+        emit_cache_event(
+            event_bus,
+            LayerId::StaticPrompt,
+            static_result.output.fingerprint,
+            static_result.hit,
+            MissReason::FirstBuild,
+            lane_id.clone(),
+        );
+
+        // Layers 3, 4 — still stubs. Phase 3 wires per-lane memoization.
         let dyn_out = dynamic_context::compute(&dynamic_context_input);
         let hist_out = history::compute(&history_input);
 
         let layer_trace = LayerTrace {
-            persona_mode: persona_input.mode,
-            static_prompt_mode: static_prompt_input.mode,
-            dynamic_context_mode: dynamic_context_input.mode,
-            history_mode: history_input.mode.clone(),
-            memo_hits: LayerMemoHits::default(),
+            persona_mode,
+            static_prompt_mode,
+            dynamic_context_mode,
+            history_mode,
+            memo_hits: LayerMemoHits {
+                persona: persona_result.hit,
+                static_prompt: static_result.hit,
+                dynamic_context: false,
+                history: false,
+            },
         };
 
         assembly::compose(assembly::AssemblyInput {
-            persona: &persona_out,
-            static_prompt: &static_out,
+            persona: &persona_result.output,
+            static_prompt: &static_result.output,
             dynamic_context: &dyn_out,
             history: &hist_out,
             tools,
@@ -190,6 +276,39 @@ impl ComposeEngine {
             layer_trace,
         })
     }
+}
+
+/// Publish a `ComposeLayerCacheHit` / `Miss` event to the bus if one is
+/// provided. No-op when `event_bus` is `None`.
+fn emit_cache_event(
+    event_bus: Option<&crate::bus::EventBus>,
+    layer: LayerId,
+    fingerprint: [u8; 32],
+    hit: bool,
+    reason: MissReason,
+    lane_id: Option<String>,
+) {
+    let Some(bus) = event_bus else {
+        return;
+    };
+    let timestamp = chrono::Utc::now();
+    let event = if hit {
+        crate::events::SystemEvent::ComposeLayerCacheHit {
+            layer,
+            fingerprint,
+            lane_id,
+            timestamp,
+        }
+    } else {
+        crate::events::SystemEvent::ComposeLayerCacheMiss {
+            layer,
+            fingerprint,
+            reason,
+            lane_id,
+            timestamp,
+        }
+    };
+    let _ = bus.publish(event);
 }
 
 impl Default for ComposeEngine {
