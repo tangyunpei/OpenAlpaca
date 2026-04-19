@@ -121,3 +121,9 @@ max_image_dimension = 8192
 orphan_grace_period_hours = 24
 processing_batch_size = 5
 processing_poll_interval_secs = 10
+
+[experimental]
+# Inject an ephemeral system notice into each LLM request when budget
+# pressure crosses 80% of cost or rounds. Helps the model self-throttle
+# instead of getting cut off mid-tool-call. Default off until validated.
+ephemeral_pressure_layer = false

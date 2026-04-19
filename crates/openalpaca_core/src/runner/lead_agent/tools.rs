@@ -252,6 +252,11 @@ impl BuiltInTool for SpawnSubagentTool {
                     agent.llm_config.model.as_deref(),
                 );
         loop_config.event_bus = Some(self.bus.clone());
+        loop_config.experimental_ephemeral_pressure = self
+            .daemon_config
+            .load()
+            .experimental
+            .ephemeral_pressure_layer;
 
         // 8. Build messages with context distillation via PromptBuilder
         let default_model = self.router.default_model();

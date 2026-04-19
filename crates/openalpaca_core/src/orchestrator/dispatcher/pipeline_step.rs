@@ -204,6 +204,11 @@ pub(super) async fn execute_pipeline_step(
         .compaction_model
         .clone();
     loop_config.event_bus = Some(pctx.bus.clone());
+    loop_config.experimental_ephemeral_pressure = pctx
+        .daemon_config
+        .load()
+        .experimental
+        .ephemeral_pressure_layer;
 
     // Instantiate ContextBudgetManager for budget-aware compaction
     let context_budget = {

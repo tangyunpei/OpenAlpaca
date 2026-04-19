@@ -336,13 +336,21 @@ async fn async_main(
     let web_search_config_for_reload = svcs.web_search_config.clone();
     let lane_manager = Arc::new(LaneManager::new());
 
+    let initial_loop_config = {
+        let cfg = daemon_config.load();
+        LoopConfig {
+            experimental_ephemeral_pressure: cfg.experimental.ephemeral_pressure_layer,
+            ..LoopConfig::default()
+        }
+    };
+
     let orchestrator = Arc::new(Orchestrator::new(
         svcs.shared_context.clone(),
         lane_manager.clone(),
         bus.clone(),
         initial_system_persona,
         svcs.llm_router,
-        LoopConfig::default(),
+        initial_loop_config,
         svcs.security_gate,
         svcs.tool_registry,
         Some(db.clone()),

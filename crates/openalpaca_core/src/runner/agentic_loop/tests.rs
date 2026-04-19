@@ -962,6 +962,15 @@ fn test_truncate_min_cut_guard_skips_distant_sentence() {
 struct MockRouterProvider {
     responses: Vec<Result<ChatResponse, LlmError>>,
     call_count: AtomicUsize,
+    /// Records the `ephemeral_system_notice` field from every incoming
+    /// `ChatRequest`. Exposed via `notices_seen()` for Task 5 (P0b) tests
+    /// that need to assert what the backend actually received.
+    notices: std::sync::Mutex<Vec<Option<String>>>,
+    /// Records the system-message count of the messages sent with each
+    /// `chat()` call. Used by Task 5 (P0b) to confirm the ephemeral
+    /// notice is not persisted into the conversation (i.e., the request
+    /// never carries more than the original single system prompt).
+    system_count_per_call: std::sync::Mutex<Vec<usize>>,
 }
 
 impl MockRouterProvider {
@@ -969,7 +978,27 @@ impl MockRouterProvider {
         Self {
             responses,
             call_count: AtomicUsize::new(0),
+            notices: std::sync::Mutex::new(Vec::new()),
+            system_count_per_call: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Snapshot the notices observed across all `chat()` calls so far.
+    #[allow(dead_code)]
+    fn notices_seen(&self) -> Vec<Option<String>> {
+        self.notices
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Snapshot the per-call count of system messages observed so far.
+    #[allow(dead_code)]
+    fn system_counts_seen(&self) -> Vec<usize> {
+        self.system_count_per_call
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 }
 
@@ -983,7 +1012,20 @@ impl LlmProvider for MockRouterProvider {
         true
     }
 
-    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        self.notices
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(request.ephemeral_system_notice.clone());
+        let system_count = request
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, openalpaca_llm::Role::System))
+            .count();
+        self.system_count_per_call
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(system_count);
         let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
         if idx < self.responses.len() {
             self.responses[idx].clone()
@@ -1381,4 +1423,169 @@ async fn test_ten_loop_step_spans_emitted() {
             name
         );
     }
+}
+
+// ─── Task 5 (P0b): ephemeral budget-pressure notice tests ────────────
+
+/// Shared fixture: build a router over a `MockRouterProvider` that always
+/// returns a cheap one-shot response, then drive `run_agentic_loop_routed`
+/// with a pre-seeded `LoopCostAccumulator` so cost-pressure can be
+/// simulated deterministically without depending on provider pricing.
+///
+/// Returns `(result, provider)` so callers can both inspect the final
+/// `LoopResult` (messages, finish reason) and pull `notices_seen()` off
+/// the mock to verify what the backend actually received.
+async fn run_loop_with_seeded_cost(
+    experimental_ephemeral_pressure: bool,
+    simulated_cost: f64,
+    max_cost: f64,
+) -> (LoopResult, Arc<MockRouterProvider>) {
+    let provider = Arc::new(MockRouterProvider::new(vec![Ok(ChatResponse {
+        content: "Done.".to_string(),
+        tool_calls: vec![],
+        model: "claude-sonnet-4-20250514".to_string(),
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::Stop,
+        thinking: None,
+        parts: None,
+    })]));
+
+    let router = LlmRouter::single_provider(
+        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    // Pre-seed the accumulator so iteration 1 sees the simulated cost at
+    // the top of the loop (before the LLM call happens).
+    let acc = LoopCostAccumulator::new();
+    acc.add_usd(simulated_cost);
+
+    let messages = vec![
+        ChatMessage::system("You are a helpful assistant."),
+        ChatMessage::user("hello"),
+    ];
+
+    let config = LoopConfig {
+        max_rounds: 5,
+        max_cost,
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        thinking: None,
+        experimental_ephemeral_pressure,
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        messages,
+        vec![],
+        &config,
+        None,
+        "test-agent",
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(acc),
+    )
+    .await;
+
+    (result, provider)
+}
+
+#[tokio::test]
+async fn test_ephemeral_notice_absent_when_flag_off() {
+    // Even though cost is at 90% of the budget, the flag is off — so the
+    // backend must see `ephemeral_system_notice = None`.
+    let (_result, provider) = run_loop_with_seeded_cost(
+        /* experimental_ephemeral_pressure = */ false,
+        /* simulated_cost = */ 0.009,
+        /* max_cost = */ 0.01,
+    )
+    .await;
+
+    let notices = provider.notices_seen();
+    assert!(
+        !notices.is_empty(),
+        "expected at least one chat() call, got none"
+    );
+    assert!(
+        notices.iter().all(|n| n.is_none()),
+        "flag off but backend saw a notice: {:?}",
+        notices
+    );
+}
+
+#[tokio::test]
+async fn test_ephemeral_notice_fires_over_cost_threshold() {
+    // Flag on, cost at 90% — the backend must see a notice containing the
+    // `[budget_notice]` envelope and the 90% cost figure.
+    let (_result, provider) = run_loop_with_seeded_cost(
+        /* experimental_ephemeral_pressure = */ true,
+        /* simulated_cost = */ 0.009,
+        /* max_cost = */ 0.01,
+    )
+    .await;
+
+    let notices = provider.notices_seen();
+    let first = notices
+        .into_iter()
+        .next()
+        .expect("expected at least one chat() call");
+    let notice = first.expect("flag on with cost at 90% — expected Some(notice)");
+    assert!(
+        notice.contains("[budget_notice]"),
+        "notice missing [budget_notice] envelope: {}",
+        notice
+    );
+    assert!(
+        notice.contains("90%") || notice.contains("90"),
+        "notice missing 90% cost figure: {}",
+        notice
+    );
+}
+
+#[tokio::test]
+async fn test_ephemeral_notice_not_persisted_in_messages() {
+    // Flag on, cost at 90%. The notice must ride on the ephemeral
+    // per-request field and never be appended to the persistent message
+    // list. We assert this by inspecting the `role_counts` of the
+    // messages the backend actually received: there must be exactly one
+    // System message (the original system prompt), NOT two (the original
+    // + a pushed notice, which is what the old broken append used to
+    // do).
+    let (result, provider) = run_loop_with_seeded_cost(
+        /* experimental_ephemeral_pressure = */ true,
+        /* simulated_cost = */ 0.009,
+        /* max_cost = */ 0.01,
+    )
+    .await;
+
+    assert_eq!(
+        result.finish_reason,
+        LoopFinishReason::Complete,
+        "unexpected finish reason: {:?}",
+        result.finish_reason
+    );
+
+    let system_counts = provider.system_counts_seen();
+    assert_eq!(
+        system_counts.len(),
+        1,
+        "expected exactly one chat() call, got {}",
+        system_counts.len()
+    );
+    assert_eq!(
+        system_counts[0], 1,
+        "expected exactly one system message in the persistent history \
+         (not 2 — the old broken append would have pushed a second one), \
+         got {}",
+        system_counts[0]
+    );
 }

@@ -45,7 +45,6 @@ struct LoopState {
     tool_calls_made: usize,
     last_assistant_content: String,
     last_model: Option<String>,
-    cost_warning_emitted: bool,
     max_tokens_retries: usize,
     last_cost: f64,
 }
@@ -60,7 +59,6 @@ impl LoopState {
             tool_calls_made: 0,
             last_assistant_content: String::new(),
             last_model: None,
-            cost_warning_emitted: false,
             max_tokens_retries: 0,
             last_cost: 0.0,
         }
@@ -292,24 +290,6 @@ async fn run_agentic_loop_inner(
             )
             .entered();
             tracing::trace!("cost_check step entered");
-            if cost_ratio >= 0.8 && !state.cost_warning_emitted {
-                state.cost_warning_emitted = true;
-                let warning = format!(
-                    "[system] Budget {:.0}% consumed (${:.4}/{:.2}). \
-                     Prioritize completing the current task efficiently.",
-                    cost_ratio * 100.0,
-                    accumulated_cost,
-                    config.max_cost,
-                );
-                Arc::make_mut(&mut messages).push(ChatMessage::system(&warning));
-                tracing::info!(
-                    agent_id,
-                    cost_ratio,
-                    accumulated_cost,
-                    "Cost warning emitted at {:.0}%",
-                    cost_ratio * 100.0,
-                );
-            }
             if accumulated_cost > config.max_cost {
                 tracing::info!(
                     agent_id = agent_id,
@@ -320,6 +300,37 @@ async fn run_agentic_loop_inner(
                 return state.result(LoopFinishReason::CostExceeded);
             }
         }
+
+        // ── Ephemeral budget-pressure notice (spec P0b) ────────────
+        // Stateless: recomputed every iteration, passed to `backend.complete`
+        // as `ephemeral_system_notice`, never appended to `messages`. Fires
+        // when either the cost ratio or rounds ratio reaches 0.8.
+        let ephemeral_notice = if config.experimental_ephemeral_pressure {
+            let rounds_ratio = (state.rounds as f64) / (config.max_rounds as f64).max(1.0);
+            let fire = cost_ratio.max(rounds_ratio) >= 0.8;
+            if fire {
+                let rp = (rounds_ratio * 100.0).round() as u32;
+                let cp = (cost_ratio * 100.0).round() as u32;
+                Some(format!(
+                    "[budget_notice]\n\
+                     Budget status: {}/{} rounds ({}%), ${:.2}/${:.2} spent ({}%).\n\
+                     Prefer concluding the current task over opening new tool calls. \
+                     If you need more than 2 additional tool calls to finish, \
+                     summarize the partial result instead.\n\
+                     [/budget_notice]",
+                    state.rounds,
+                    config.max_rounds,
+                    rp,
+                    accumulated_cost,
+                    config.max_cost,
+                    cp,
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // ── 4. Context compression (budget-aware) ──────────────────
         let msg_tokens_estimate = estimate_messages_tokens(&messages) as usize;
@@ -408,13 +419,10 @@ async fn run_agentic_loop_inner(
             tracing::trace!("build_request step entered");
 
             // ── 6. Pressure-layer ephemeral notice ─────────────────
-            // Placeholder for the not-yet-wired ephemeral context-pressure
-            // notice. Task 5 (P0b) will populate `notice` from a
-            // ContextPressureDetector; until then the span is only emitted
-            // when a notice is present (which is never in this commit).
-            #[allow(clippy::needless_late_init)]
-            let notice: Option<String> = None;
-            if let Some(ref n) = notice {
+            // `ephemeral_notice` is computed above (after the cost_check
+            // step). The span fires only when a notice is present, so the
+            // telemetry signal tracks real injections rather than no-ops.
+            if let Some(ref n) = ephemeral_notice {
                 let _ps = tracing::info_span!(
                     "loop.step.pressure_layer",
                     agent_id = agent_id,
@@ -463,7 +471,7 @@ async fn run_agentic_loop_inner(
                     config.stream_callback.as_ref(),
                     config.max_stream_duration,
                     context_management.clone(),
-                    None, // ephemeral_system_notice — Task 5 fills in the trigger.
+                    ephemeral_notice.clone(),
                 ).instrument(llm_call_span.clone()) => result,
                 _ = token.cancelled() => {
                     tracing::info!(agent_id = agent_id, round = state.rounds + 1, "LLM call interrupted by cancellation");
@@ -483,7 +491,7 @@ async fn run_agentic_loop_inner(
                     config.stream_callback.as_ref(),
                     config.max_stream_duration,
                     context_management.clone(),
-                    None, // ephemeral_system_notice — Task 5 fills in the trigger.
+                    ephemeral_notice.clone(),
                 )
                 .instrument(llm_call_span)
                 .await

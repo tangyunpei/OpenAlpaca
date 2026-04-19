@@ -19,6 +19,16 @@ pub use upload::*;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Experimental / opt-in features. Defaults to all-off until validated.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExperimentalConfig {
+    /// When true, inject an ephemeral system notice when budget pressure
+    /// reaches 80% of cost or rounds (spec P0). Default false until
+    /// validated in real use.
+    pub ephemeral_pressure_layer: bool,
+}
+
 /// Root config loaded from `config/daemon.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -30,6 +40,8 @@ pub struct DaemonConfig {
     pub server: ServerConfig,
     pub upload: UploadConfig,
     pub telemetry: TelemetryConfig,
+    #[serde(default)]
+    pub experimental: ExperimentalConfig,
 }
 
 /// Load daemon config from a TOML file. Returns defaults if file is missing or unparseable.

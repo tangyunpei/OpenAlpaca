@@ -59,6 +59,9 @@ pub struct LoopConfig {
     /// Optional event bus for emitting compaction telemetry.
     /// When set, the agentic loop publishes `CompactionTriggered` events.
     pub event_bus: Option<EventBus>,
+    /// When true, the loop injects an ephemeral system notice into each
+    /// request once cost or round ratios cross 0.8 (spec P0).
+    pub experimental_ephemeral_pressure: bool,
 }
 
 impl Clone for LoopConfig {
@@ -81,6 +84,7 @@ impl Clone for LoopConfig {
             max_stream_duration: self.max_stream_duration,
             compaction_model: self.compaction_model.clone(),
             event_bus: self.event_bus.clone(),
+            experimental_ephemeral_pressure: self.experimental_ephemeral_pressure,
         }
     }
 }
@@ -101,6 +105,10 @@ impl std::fmt::Debug for LoopConfig {
             .field("max_stream_duration", &self.max_stream_duration)
             .field("compaction_model", &self.compaction_model)
             .field("event_bus", &self.event_bus.is_some())
+            .field(
+                "experimental_ephemeral_pressure",
+                &self.experimental_ephemeral_pressure,
+            )
             .finish()
     }
 }
@@ -125,6 +133,7 @@ impl Default for LoopConfig {
             max_stream_duration: Duration::from_secs(600),
             compaction_model: None,
             event_bus: None,
+            experimental_ephemeral_pressure: false,
         }
     }
 }
@@ -184,6 +193,7 @@ impl LoopConfig {
             max_stream_duration: Duration::from_secs(600),
             compaction_model: None,
             event_bus: None,
+            experimental_ephemeral_pressure: false,
         }
     }
 
