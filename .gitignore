@@ -90,12 +90,14 @@ apps/openalpaca-gui/src-tauri/gen/
 # Markdown Documentation (Except Manuals)
 # ============================================
 *.md
+!CLAUDE.md
 !docs/CLI_Manual.md
 !docs/GUI_Manual.md
 !docs/Daemon_Manual.md
 !docs/Installation_Manual.md
 !docs/QuickStart_Manual.md
 !docs/Skill_Template_Reference.md
+!docs/agent-loop.md
 !docs/tools/*.md
 !docs/api/*
 !docs/plans/Unified_Memory_System.md
