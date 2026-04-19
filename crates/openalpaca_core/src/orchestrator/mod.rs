@@ -164,6 +164,12 @@ pub struct Orchestrator {
     /// hot reload. Fingerprint input for Layer 1 (Persona) memoization in
     /// the layered compose engine (spec section Component 1).
     pub persona_version: Arc<AtomicU64>,
+    /// Layered compose engine. Owns the tier-1 global LRU cache for Layer 1
+    /// (Persona) and Layer 2 (Static Prompt) outputs; tier-2 per-lane caches
+    /// live on `ConversationLane.caches`. Phase 4 migrations route their
+    /// prompt assembly through `compose_engine.compose(...)` instead of the
+    /// inline `format!`/`PromptBuilder` call sites.
+    pub compose_engine: Arc<crate::compose::ComposeEngine>,
 }
 
 /// Full conversation context for prompt building and summary update.
@@ -309,6 +315,7 @@ impl Orchestrator {
             confirmation_broker: Arc::new(RwLock::new(None)),
             context_manager,
             persona_version: Arc::new(AtomicU64::new(0)),
+            compose_engine: Arc::new(crate::compose::ComposeEngine::new(256)),
         }
     }
 

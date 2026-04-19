@@ -1490,3 +1490,177 @@ fn test_assembly_populates_per_layer_token_budget() {
     );
     assert_eq!(out.token_budget.model_window, 200_000);
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Phase 4 Commit 1 — Social fast path migration golden-output test
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Golden-output: asserts the migrated Social path produces byte-identical
+/// `ComposedRequest.messages` to what the pre-migration inline `format!`
+/// at `simple_query_handler.rs:520-528` would have produced.
+///
+/// The pre-migration code was:
+///
+/// ```ignore
+/// let system_prompt = format!(
+///     "<system_instructions>\n{}\n</system_instructions>\n\n\
+///      <agent_role>\nRole: Assistant\nTone: Concise and professional\n</agent_role>",
+///     system_persona.base_instructions
+/// );
+///
+/// let mut messages = Vec::with_capacity(2 + ctx.recent_messages.len());
+/// messages.push(ChatMessage::system(&system_prompt));
+/// messages.extend(ctx.recent_messages.iter().cloned());
+/// messages.push(ChatMessage::user(query));
+/// ```
+///
+/// Routing through `compose(ComposeRequest::Social{..})` with
+/// `PersonaMode::Minimal` + `StaticPromptMode::SocialMinimal` +
+/// `DynamicContextMode::Skip` + `HistoryMode::Default` (and no summary) must
+/// produce the identical message sequence.
+#[test]
+fn test_golden_social_fast_path_byte_identical() {
+    use openalpaca_llm::Role;
+    use std::num::NonZeroUsize;
+
+    // Canned SystemPersona mimicking production content.
+    let system_persona = Arc::new(SystemPersona {
+        base_instructions: "You are OpenAlpaca, a helpful assistant.".to_string(),
+        ..SystemPersona::default()
+    });
+
+    // Canned recent_messages.
+    let recent = vec![
+        ChatMessage::user("previous turn"),
+        ChatMessage::assistant("previous reply"),
+    ];
+    let query = "thanks!";
+
+    // === Pre-migration reference string (copied verbatim from the
+    //     production inline format! at simple_query_handler.rs:520-523) ===
+    let expected_system = format!(
+        "<system_instructions>\n{}\n</system_instructions>\n\n\
+         <agent_role>\nRole: Assistant\nTone: Concise and professional\n</agent_role>",
+        system_persona.base_instructions
+    );
+
+    // === Reference messages vec (matches simple_query_handler.rs:525-528) ===
+    let mut expected_messages: Vec<ChatMessage> = Vec::with_capacity(2 + recent.len());
+    expected_messages.push(ChatMessage::system(&expected_system));
+    expected_messages.extend(recent.iter().cloned());
+    expected_messages.push(ChatMessage::user(query));
+
+    // === Via the engine ===
+    let engine = ComposeEngine::new(NonZeroUsize::new(16).unwrap().get());
+
+    let persona_input = PersonaInput {
+        system_persona: system_persona.clone(),
+        user_document: Arc::new(None),
+        identity_document: Arc::new(Option::<IdentityDocument>::None),
+        persona_version: 0,
+        mode: PersonaMode::Minimal,
+    };
+
+    // Minimal mode places SystemPersona.base_instructions as the first block's
+    // content. Pre-compute here so StaticPromptInput has the real Arc; compose()
+    // will overwrite with the cache-hit Arc on subsequent calls.
+    let persona_output = Arc::new(super::persona::compute(&persona_input));
+
+    let static_prompt_input = StaticPromptInput {
+        persona_output,
+        agent_persona: None,
+        agent_config_fingerprint: [0u8; 32],
+        skill_block: None,
+        skills_catalog: None,
+        bootstrap: None,
+        tools: Arc::new(Vec::<ToolDefinition>::new()),
+        connector_status: Arc::new(Vec::new()),
+        send_tool_context: None,
+        message_source: None,
+        raw_blocks: Vec::new(),
+        planner_agents: None,
+        planner_protocol_v2: false,
+        mode: StaticPromptMode::SocialMinimal,
+        model_window: 8192,
+    };
+
+    let dynamic_context_input = DynamicContextInput {
+        context_bundle: Arc::new(ContextBundle::empty()),
+        query: Arc::from(query),
+        memory_retrieval_hash: [0u8; 32],
+        path: ExecutionPath::SimpleQuery,
+        reserved_tokens: 0,
+        mode: DynamicContextMode::Skip,
+    };
+
+    let history_input = HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        summary: None,
+        summary_wrap_mode: SummaryWrapMode::Plain,
+        recent_messages: Arc::new(recent.clone()),
+        current_user_turn: Some(ChatMessage::user(query)),
+        mode: HistoryMode::Default,
+    };
+
+    let request = ComposeRequest::Social {
+        lane_key: "social_lane".to_string(),
+        query: query.to_string(),
+        overrides: ComposeOverrides::default(),
+    };
+
+    let composed = engine.compose(
+        &request,
+        persona_input,
+        static_prompt_input,
+        dynamic_context_input,
+        history_input,
+        8192,
+        Arc::new(Vec::new()),
+        None,
+        None,
+    );
+
+    // Byte-identical assertion. `ChatMessage` does not derive `PartialEq`, so
+    // compare role + content field-by-field. The Social fast path never
+    // populates parts/tool_calls/tool_call_id, and neither does the compose
+    // output for this request shape — a role+content match is sufficient.
+    assert_eq!(
+        composed.messages.len(),
+        expected_messages.len(),
+        "Social migration produced wrong message count: got {} vs expected {}",
+        composed.messages.len(),
+        expected_messages.len()
+    );
+    for (idx, (got, expected)) in composed
+        .messages
+        .iter()
+        .zip(expected_messages.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            got.role, expected.role,
+            "message {idx} role mismatch: got {:?} expected {:?}",
+            got.role, expected.role
+        );
+        assert_eq!(
+            got.content, expected.content,
+            "message {idx} content mismatch"
+        );
+        // Sanity: Social path never populates these.
+        assert!(got.parts.is_none(), "message {idx} parts should be None");
+        assert!(
+            got.tool_calls.is_none(),
+            "message {idx} tool_calls should be None"
+        );
+        assert!(
+            got.tool_call_id.is_none(),
+            "message {idx} tool_call_id should be None"
+        );
+    }
+
+    // Explicit check: first message is the system prompt, last is the current
+    // user turn.
+    assert_eq!(composed.messages[0].role, Role::System);
+    assert_eq!(composed.messages.last().unwrap().role, Role::User);
+    assert_eq!(composed.messages.last().unwrap().content, query);
+}

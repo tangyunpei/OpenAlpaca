@@ -9,7 +9,7 @@
 
 mod assembly;
 pub mod fingerprint;
-mod persona;
+pub mod persona;
 mod static_prompt;
 mod dynamic_context;
 mod history;

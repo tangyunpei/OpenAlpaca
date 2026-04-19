@@ -1,5 +1,7 @@
 //! Simple query and social query handlers for the orchestrator.
 
+use std::sync::Arc;
+
 use super::{apply_send_keepalive, resolve_send_tool_choice, sanitize_parts_for_dispatch};
 use crate::events::SystemEvent;
 use crate::memory::scope_context::MemoryScopeContext;
@@ -516,16 +518,98 @@ impl Orchestrator {
                 poisoned.into_inner().clone()
             }
         };
-        // Inline prompt for this trivial 1-round, 0-tool social path.
-        let system_prompt = format!(
-            "<system_instructions>\n{}\n</system_instructions>\n\n<agent_role>\nRole: Assistant\nTone: Concise and professional\n</agent_role>",
-            system_persona.base_instructions
+
+        // Route system-prompt + message-list assembly through the layered
+        // compose engine (Phase 4 Commit 1 — Social fast path migration).
+        // `PersonaMode::Minimal` + `StaticPromptMode::SocialMinimal` +
+        // `DynamicContextMode::Skip` + `HistoryMode::Default` reproduce the
+        // pre-migration inline `format!` output byte-identically. See the
+        // `test_golden_social_fast_path_byte_identical` test in
+        // `compose/tests.rs` for the byte-identical invariant.
+        use crate::compose::{
+            ComposeOverrides, ComposeRequest, DynamicContextInput, DynamicContextMode,
+            HistoryInput, HistoryMode, PersonaInput, PersonaMode, StaticPromptInput,
+            StaticPromptMode, SummaryWrapMode,
+        };
+        use crate::prompt_ctx::{ContextBundle, ExecutionPath};
+
+        let persona_input = PersonaInput {
+            system_persona: Arc::new(system_persona),
+            // Social path doesn't carry user/identity docs.
+            user_document: Arc::new(None),
+            identity_document: Arc::new(None),
+            persona_version: self
+                .persona_version
+                .load(std::sync::atomic::Ordering::Relaxed),
+            mode: PersonaMode::Minimal,
+        };
+
+        // Pre-compute the persona output so StaticPromptInput has a real Arc;
+        // `compose()` will replace it with its cache-hit Arc on subsequent
+        // calls. Initial insertion still hits the cache on this first call
+        // within `compose()` itself.
+        let persona_output = Arc::new(crate::compose::persona::compute(&persona_input));
+
+        let static_prompt_input = StaticPromptInput {
+            persona_output,
+            agent_persona: None,
+            agent_config_fingerprint: [0u8; 32],
+            skill_block: None,
+            skills_catalog: None,
+            bootstrap: None,
+            tools: Arc::new(Vec::new()),
+            connector_status: Arc::new(Vec::new()),
+            send_tool_context: None,
+            message_source: None,
+            raw_blocks: Vec::new(),
+            planner_agents: None,
+            planner_protocol_v2: false,
+            mode: StaticPromptMode::SocialMinimal,
+            model_window: 8192,
+        };
+
+        let dynamic_context_input = DynamicContextInput {
+            context_bundle: Arc::new(ContextBundle::empty()),
+            query: Arc::from(query),
+            memory_retrieval_hash: [0u8; 32],
+            path: ExecutionPath::SimpleQuery,
+            reserved_tokens: 0,
+            mode: DynamicContextMode::Skip,
+        };
+
+        let history_input = HistoryInput {
+            lane_tip_fingerprint: [0u8; 32],
+            summary: None,
+            summary_wrap_mode: SummaryWrapMode::Plain,
+            recent_messages: Arc::new(ctx.recent_messages.clone()),
+            current_user_turn: Some(ChatMessage::user(query)),
+            mode: HistoryMode::Default,
+        };
+
+        let request = ComposeRequest::Social {
+            // `lane_key` on `ComposeRequest::Social` is informational only; the
+            // engine uses it for telemetry, not for cache behaviour. The
+            // real per-lane context is passed via the trailing `lane:
+            // Option<&ConversationLane>` arg, which this social path leaves
+            // `None` (no lane handle plumbed into `handle_social_query`).
+            lane_key: "social".to_string(),
+            query: query.to_string(),
+            overrides: ComposeOverrides::default(),
+        };
+
+        let composed = self.compose_engine.compose(
+            &request,
+            persona_input,
+            static_prompt_input,
+            dynamic_context_input,
+            history_input,
+            8192,
+            Arc::new(Vec::new()),
+            Some(&self.bus),
+            None,
         );
 
-        let mut messages = Vec::with_capacity(2 + ctx.recent_messages.len());
-        messages.push(ChatMessage::system(&system_prompt));
-        messages.extend(ctx.recent_messages.iter().cloned());
-        messages.push(ChatMessage::user(query));
+        let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
 
         let config = LoopConfig {
             max_rounds: 1,
