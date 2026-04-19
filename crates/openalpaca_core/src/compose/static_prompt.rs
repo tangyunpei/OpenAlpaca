@@ -208,14 +208,24 @@ fn build_replanner_hierarchical(input: &StaticPromptInput) -> StaticPromptOutput
     //
     // The static preamble and static response_format/rules block are emitted
     // verbatim from this function — never from raw_blocks.
+    //
+    // Pre-migration emission order (from the deleted `build_replan_prompt`):
+    //   preamble, objective, dag_state, workspace (optional),
+    //   <available_agents>, <context>, <response_format>+<rules>.
+    // We preserve that order by splitting the raw_blocks iteration: first pass
+    // emits every block EXCEPT the one named "context", then <available_agents>,
+    // then the "context" block last.
 
     let mut prompt = String::from(
         "You are a task replanner for OpenAlpaca. Evaluate whether the current \
          execution plan is still on track or needs modification.\n\n",
     );
 
-    // Caller-provided blocks in loader-defined order.
-    for block in &input.raw_blocks {
+    // Caller-provided blocks in loader-defined order — EXCEPT the "context"
+    // block, which pre-migration emitted AFTER <available_agents>. Rendering
+    // it here preserves byte-identical order vs the pre-migration
+    // `build_replan_prompt`.
+    for block in input.raw_blocks.iter().filter(|b| b.name != "context") {
         prompt.push_str(&block.content);
     }
 
@@ -235,6 +245,11 @@ fn build_replanner_hierarchical(input: &StaticPromptInput) -> StaticPromptOutput
         }
     }
     prompt.push_str("</available_agents>\n\n");
+
+    // Context block last — pre-migration emitted this AFTER <available_agents>.
+    if let Some(ctx_block) = input.raw_blocks.iter().find(|b| b.name == "context") {
+        prompt.push_str(&ctx_block.content);
+    }
 
     // Static response_format + rules (absorbed from build_replan_prompt
     // orchestrator/replanner/mod.rs lines 184-210).

@@ -1730,10 +1730,10 @@ fn test_golden_replanner_byte_identical() {
         p.push_str("<workspace>\n");
         p.push_str(workspace_summary);
         p.push_str("</workspace>\n\n");
-        p.push_str(&format!(
-            "<context>\nReplans so far: {} (be conservative — avoid unnecessary changes)\n</context>\n\n",
-            replans_so_far
-        ));
+        // Pre-migration `build_replan_prompt` emitted <available_agents>
+        // BEFORE <context> — mirror that exact order here so the fixture
+        // validates byte-identical preservation (not just internal
+        // consistency).
         p.push_str("<available_agents>\n");
         for a in &agents {
             let desc = a.description.as_deref().unwrap_or("No description");
@@ -1743,6 +1743,10 @@ fn test_golden_replanner_byte_identical() {
             ));
         }
         p.push_str("</available_agents>\n\n");
+        p.push_str(&format!(
+            "<context>\nReplans so far: {} (be conservative — avoid unnecessary changes)\n</context>\n\n",
+            replans_so_far
+        ));
         p.push_str(
             r#"<response_format>
 Respond with ONLY a single JSON object. No markdown, no explanation, no other text.
