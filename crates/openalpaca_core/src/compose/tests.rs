@@ -552,18 +552,18 @@ fn test_static_prompt_layer_planner_hierarchical_mode() {
         PersonaMode::Minimal,
     )));
     let mut input = make_static_prompt_input(persona_out, StaticPromptMode::PlannerHierarchical);
-    // Planner mode calls task_planner::prompt::build_hierarchical_prompt,
-    // which takes a list of idle agents — populate via the new planner_agents
-    // field.
+    // PlannerHierarchical mode reads `planner_agents` for the `<agents>`
+    // block — populate with an empty list here (the golden tests cover
+    // populated lists end-to-end).
     input.planner_agents = Some(Arc::new(vec![]));
     let out = super::static_prompt::compute(&input);
-    // Must produce a non-empty system message (specific structure asserted
-    // in the Phase 4 Planner migration golden test).
+    // Must produce a non-empty system message (byte-identical structure is
+    // asserted by test_golden_planner_byte_identical_protocol_v1/v2).
     assert!(
         !out.system_message.is_empty(),
         "PlannerHierarchical mode should produce a non-empty system message"
     );
-    // build_hierarchical_prompt always opens with "You are a task planner".
+    // Planner system prompt always opens with "You are a task planner".
     assert!(
         out.system_message.contains("task planner"),
         "PlannerHierarchical output should match the existing planner prompt structure"
@@ -1895,5 +1895,370 @@ If the task should be abandoned:
         composed.messages.iter().any(|m| matches!(m.role, Role::User)
             && m.content.starts_with("Evaluate the current task progress")),
         "Replanner migration must include the canonical 'Evaluate...' user turn"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Phase 4 Commit 3 — Planner migration golden-output tests
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Build the pre-migration planner system prompt as it was produced by the
+/// now-deleted `task_planner::prompt::build_hierarchical_prompt(&agents, v2)`.
+/// Kept inline in this test module so the Phase 4 Commit 3 migration is
+/// asserted byte-for-byte against the old helper's output.
+///
+/// The two r#"..."# blocks below are pasted verbatim from the pre-migration
+/// helper (task_planner/prompt.rs:156-263). Any future edit to the Planner
+/// prompt must update this fixture too.
+fn expected_planner_system_message(
+    agents: &[crate::agent::subagent::SubAgent],
+    plan_protocol_v2: bool,
+) -> String {
+    let mut prompt = String::from(
+        "You are a task planner for OpenAlpaca. Classify the user message and, \
+         for complex tasks, decompose into a DAG of sub-tasks.\n\n",
+    );
+
+    // Mirror format_agent_list (pre-migration task_planner/prompt.rs:10-36).
+    prompt.push_str("<agents>\n");
+    if agents.is_empty() {
+        prompt.push_str("No agents are currently available.\n");
+    } else {
+        for agent in agents.iter() {
+            let desc = agent.description.as_deref().unwrap_or("No description");
+            let capabilities_str: Vec<String> = agent
+                .capabilities
+                .iter()
+                .map(|s| format!("{} ({:.1})", s.name, s.proficiency))
+                .collect();
+            prompt.push_str(&format!(
+                "<agent id=\"{}\" name=\"{}\">\n{}\nCapabilities: {}\n</agent>\n",
+                agent.id,
+                agent.name,
+                desc,
+                if capabilities_str.is_empty() {
+                    "none".to_string()
+                } else {
+                    capabilities_str.join(", ")
+                }
+            ));
+        }
+    }
+    prompt.push_str("</agents>\n");
+
+    prompt.push_str(
+        r#"
+<instructions>
+Classify the user's message into one of two categories:
+- "simple_query": greetings, short questions, casual conversation, or anything answerable directly without agent work.
+- "complex_task": multi-step tasks that require one or more agents to execute.
+
+Think step-by-step before producing your JSON response:
+1. Is this a simple greeting, question, or chat message? If yes, classify as "simple_query".
+2. If it is a task, are all steps known upfront and predictable, or is it exploratory/dynamic?
+3. Which available agents have the right skills for the task?
+4. Write your reasoning into the "reasoning" field, then produce the JSON.
+
+For complex tasks, choose exactly one execution strategy:
+- Set "use_lead_agent": true when the task is genuinely exploratory, requires iterative refinement, or when the number of steps cannot be determined (e.g. debugging, open-ended research, creative exploration).
+- Provide a "dag" with nodes when steps are enumerable upfront (even if partially dependent). Use DAG when multiple independent sub-tasks are visible in the user's message.
+- Choose lead agent when the task is genuinely exploratory, adaptive, or requires iterative refinement. If the steps are clear, prefer DAG.
+
+When choosing an execution strategy:
+- lead_agent: Task is exploratory, adaptive, or requires iterative refinement.
+- dag: 2+ steps known upfront; some steps can run in parallel.
+- pipeline (assignments array): Steps are known upfront AND strictly sequential with no parallelism.
+</instructions>
+
+<examples>
+Example 1 — Simple query:
+User: "Hello, how are you?"
+{"classification": "simple_query", "title": null, "assignments": [], "reasoning": "This is a greeting, not a task.", "dag": null, "use_lead_agent": false}
+
+Example 2 — Complex task with lead agent (exploratory):
+User: "Research the best caching strategy for our REST API and recommend one."
+{"classification": "complex_task", "title": "Research API caching strategies", "assignments": [], "reasoning": "This is an open-ended research task. The user wants evaluation of options, which requires iterative exploration. Using lead agent.", "dag": null, "use_lead_agent": true}
+
+Example 3 — Complex task with DAG (predictable steps):
+User: "Translate this document into French, Spanish, and German."
+{"classification": "complex_task", "title": "Translate document into 3 languages", "assignments": [], "reasoning": "All three translations are known upfront and independent. Using a DAG with parallel nodes.", "dag": {"nodes": [
+  {"node_id": "node_1", "title": "Translate to French", "description": "Translate the document into French.", "agent_id": "translator-01", "agent_name": "Translator", "depends_on": [], "workspace_keys": [], "output_key": "french_translation"},
+  {"node_id": "node_2", "title": "Translate to Spanish", "description": "Translate the document into Spanish.", "agent_id": "translator-01", "agent_name": "Translator", "depends_on": [], "workspace_keys": [], "output_key": "spanish_translation"},
+  {"node_id": "node_3", "title": "Translate to German", "description": "Translate the document into German.", "agent_id": "translator-01", "agent_name": "Translator", "depends_on": [], "workspace_keys": [], "output_key": "german_translation"}
+]}, "use_lead_agent": false}
+
+Example 4 — Complex task with DAG (sequential dependencies):
+User: "Read the report, summarize key findings, then send the summary to the team."
+{"classification": "complex_task", "title": "Read, summarize, and send report", "assignments": [], "reasoning": "Three steps with sequential dependencies: read → summarize → send. Using DAG with dependency edges.", "dag": {"nodes": [
+  {"node_id": "n1", "title": "Read report", "description": "Read and extract content from the report.", "agent_id": "general-agent-01", "agent_name": "General Agent", "depends_on": [], "workspace_keys": [], "output_key": "report_content"},
+  {"node_id": "n2", "title": "Summarize findings", "description": "Summarize the key findings from the report.", "agent_id": "general-agent-01", "agent_name": "General Agent", "depends_on": ["n1"], "workspace_keys": ["report_content"], "output_key": "summary"},
+  {"node_id": "n3", "title": "Send summary", "description": "Send the summary to the team.", "agent_id": "general-agent-01", "agent_name": "General Agent", "depends_on": ["n2"], "workspace_keys": ["summary"]}
+]}, "use_lead_agent": false}
+
+Example 5 — Sequential pipeline (strict linear dependency, no parallelism):
+User: "Read the data file, analyze the trends, and write a report."
+{"classification": "complex_task", "title": "Analyze data and write report", "assignments": [
+  {"agent_id": "general-agent-01", "agent_name": "General Agent", "role_description": "Read and parse the data file", "matched_skills": ["file_read"]},
+  {"agent_id": "general-agent-01", "agent_name": "General Agent", "role_description": "Analyze trends in the data", "matched_skills": ["analysis"]},
+  {"agent_id": "general-agent-01", "agent_name": "General Agent", "role_description": "Write the final report", "matched_skills": ["text_generate"]}
+], "reasoning": "Strict linear pipeline: each step depends on the previous. No parallelism opportunity.", "dag": null, "use_lead_agent": false}
+
+</examples>
+
+<critical>
+IMPORTANT: Regardless of the language of the user's message, you MUST ALWAYS respond with
+ONLY a valid JSON object. Never reply conversationally. Never respond in the user's language.
+Your ENTIRE output must be a single JSON object starting with '{' and ending with '}'.
+</critical>
+
+<format>
+Respond with ONLY a single JSON object. No markdown fences, no explanation, no other text.
+
+JSON schema:
+{"classification": "simple_query" | "complex_task", "title": string | null, "assignments": [], "reasoning": "...", "dag": null | {"nodes": [...]}, "use_lead_agent": boolean}
+
+When "classification" is "complex_task", you MUST provide exactly one execution path:
+1. "use_lead_agent": true (with "dag": null) — for exploratory or dynamic tasks
+2. "dag" with 2-8 nodes (with "use_lead_agent": false) — for fully predictable tasks
+Do NOT set both "use_lead_agent": true and "dag" simultaneously.
+Returning "complex_task" with no DAG and use_lead_agent=false is INVALID.
+</format>
+
+<rules>
+DAG construction rules:
+- Each node is a sub-task assigned to one agent (use exact agent_id values from the agents list)
+- "depends_on": list of node_ids that must complete before this node starts
+- Nodes with no shared dependencies run in parallel — express parallelism for independent tasks
+- "workspace_keys": workspace entries this node reads (from other nodes' output_key)
+- "output_key": workspace key where this node writes its result
+- 2-8 nodes maximum
+- Decompose into distinct stages that require different skills
+</rules>
+"#,
+    );
+
+    if plan_protocol_v2 {
+        prompt.push_str(
+            r#"
+
+<v2_protocol>
+Additional optional fields (v2 protocol):
+- "execution_mode": "lead_agent" | "dag" | "pipeline" — explicit execution path.
+  When set, this takes priority over use_lead_agent/dag inference.
+- "predictability_score": 0.0-1.0 — your confidence that all task steps are known upfront.
+  0.0 = fully exploratory, 1.0 = fully predictable.
+
+When you include "execution_mode", you SHOULD also set "predictability_score".
+Example:
+{"classification": "complex_task", "title": "Batch process items", "assignments": [], "reasoning": "...", "dag": {...}, "use_lead_agent": false, "execution_mode": "dag", "predictability_score": 0.9}
+</v2_protocol>
+"#,
+        );
+    }
+
+    prompt
+}
+
+/// Canned SubAgent fixture for the planner golden tests. Mirrors the pattern
+/// used by the Replanner golden test above.
+fn make_planner_test_agent(
+    id: &str,
+    name: &str,
+    desc: &str,
+    caps: Vec<(&str, f32)>,
+) -> crate::agent::subagent::SubAgent {
+    use crate::agent::subagent::{
+        AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Capability, SubAgent,
+    };
+    SubAgent {
+        id: id.to_string(),
+        template_id: id.to_string(),
+        name: name.to_string(),
+        description: Some(desc.to_string()),
+        icon: None,
+        status: AgentStatus::Idle,
+        current_task: None,
+        capabilities: caps
+            .into_iter()
+            .map(|(n, p)| Capability {
+                name: n.to_string(),
+                category: "test".to_string(),
+                proficiency: p,
+            })
+            .collect(),
+        preset: AgentPreset::default(),
+        constraints: AgentConstraints::default(),
+        llm_config: AgentLlmConfig::default(),
+    }
+}
+
+/// Shared setup for both planner golden tests: builds `ComposeRequest::Planner`
+/// + the four layer inputs, invokes `compose()`, and returns the composed
+///   messages. Factoring this out keeps the v1/v2 tests DRY.
+fn run_planner_compose(
+    agents: &[crate::agent::subagent::SubAgent],
+    user_message: &str,
+    plan_protocol_v2: bool,
+) -> ComposedRequest {
+    use crate::prompt_ctx::AgentSummary;
+    use openalpaca_llm::ChatMessage;
+
+    let engine = ComposeEngine::new(16);
+
+    let persona_input = PersonaInput {
+        system_persona: Arc::new(SystemPersona::default()),
+        user_document: Arc::new(None),
+        identity_document: Arc::new(Option::<IdentityDocument>::None),
+        persona_version: 0,
+        mode: PersonaMode::Minimal,
+    };
+    let persona_output = Arc::new(super::persona::compute(&persona_input));
+
+    let static_prompt_input = StaticPromptInput {
+        persona_output,
+        agent_persona: None,
+        agent_config_fingerprint: [0u8; 32],
+        skill_block: None,
+        skills_catalog: None,
+        bootstrap: None,
+        tools: Arc::new(Vec::new()),
+        connector_status: Arc::new(Vec::new()),
+        send_tool_context: None,
+        message_source: None,
+        raw_blocks: Vec::new(),
+        planner_agents: Some(Arc::new(agents.to_vec())),
+        planner_protocol_v2: plan_protocol_v2,
+        mode: StaticPromptMode::PlannerHierarchical,
+        model_window: 8192,
+    };
+
+    let dynamic_context_input = DynamicContextInput {
+        context_bundle: Arc::new(ContextBundle::empty()),
+        query: Arc::from(user_message),
+        memory_retrieval_hash: [0u8; 32],
+        path: ExecutionPath::SimpleQuery,
+        reserved_tokens: 0,
+        mode: DynamicContextMode::Skip,
+    };
+
+    let history_input = HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        summary: None,
+        summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
+        recent_messages: Arc::new(Vec::new()),
+        current_user_turn: Some(ChatMessage::user(user_message)),
+        mode: HistoryMode::Default,
+    };
+
+    let request = ComposeRequest::Planner {
+        idle_agents: Arc::new(
+            agents
+                .iter()
+                .map(|a| AgentSummary {
+                    name: a.name.clone(),
+                    role: a.description.clone().unwrap_or_default(),
+                    step: 0,
+                })
+                .collect(),
+        ),
+        user_message: user_message.to_string(),
+        active_tasks_block: None,
+        overrides: ComposeOverrides::default(),
+    };
+
+    engine.compose(
+        &request,
+        persona_input,
+        static_prompt_input,
+        dynamic_context_input,
+        history_input,
+        8192,
+        Arc::new(Vec::new()),
+        None,
+        None,
+    )
+}
+
+/// Golden-output: asserts the migrated Planner path (via
+/// `compose(ComposeRequest::Planner{..})`) produces a byte-identical system
+/// message to what the now-deleted
+/// `task_planner::prompt::build_hierarchical_prompt(&agents, false)` would
+/// have produced, for a representative set of agents.
+#[test]
+fn test_golden_planner_byte_identical_protocol_v1() {
+    use openalpaca_llm::Role;
+
+    let agents = vec![
+        make_planner_test_agent(
+            "parser",
+            "Parser",
+            "Parses structured data.",
+            vec![("parse_json", 0.9)],
+        ),
+        make_planner_test_agent("writer", "Writer", "Writes reports.", vec![]),
+    ];
+    let user_message = "Translate this document into French, Spanish, and German.";
+
+    let expected_system = expected_planner_system_message(&agents, false);
+
+    let composed = run_planner_compose(&agents, user_message, false);
+
+    let system_msg = composed
+        .messages
+        .iter()
+        .find(|m| matches!(m.role, Role::System))
+        .expect("expected system message");
+    assert_eq!(
+        system_msg.content, expected_system,
+        "Planner migration produced non-byte-identical system prompt for plan_protocol_v2=false"
+    );
+
+    // And the user turn is preserved verbatim.
+    let user_turns: Vec<_> = composed
+        .messages
+        .iter()
+        .filter(|m| matches!(m.role, Role::User))
+        .collect();
+    assert_eq!(user_turns.len(), 1);
+    assert_eq!(user_turns[0].content, user_message);
+}
+
+/// Same as `test_golden_planner_byte_identical_protocol_v1` but with
+/// `planner_protocol_v2 = true`. Expected output has the
+/// `<v2_protocol>...</v2_protocol>` trailer appended.
+#[test]
+fn test_golden_planner_byte_identical_protocol_v2() {
+    use openalpaca_llm::Role;
+
+    let agents = vec![make_planner_test_agent(
+        "solo",
+        "Solo",
+        "Handles everything.",
+        vec![("generalist", 0.7)],
+    )];
+    let user_message = "Please batch-process these items: A, B, C.";
+
+    let expected_system = expected_planner_system_message(&agents, true);
+
+    let composed = run_planner_compose(&agents, user_message, true);
+
+    let system_msg = composed
+        .messages
+        .iter()
+        .find(|m| matches!(m.role, Role::System))
+        .expect("expected system message");
+    assert_eq!(
+        system_msg.content, expected_system,
+        "Planner migration produced non-byte-identical system prompt for plan_protocol_v2=true"
+    );
+
+    // The v2 trailer must be present in the migrated output.
+    assert!(
+        system_msg.content.contains("<v2_protocol>"),
+        "v2_protocol trailer missing in planner_protocol_v2=true output"
+    );
+    assert!(
+        system_msg.content.contains("predictability_score"),
+        "predictability_score missing in planner_protocol_v2=true output"
     );
 }

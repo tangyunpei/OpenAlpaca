@@ -271,6 +271,7 @@ impl Orchestrator {
                             let planner_start = Instant::now();
                             let plan_result = TaskPlanner::plan_hierarchical(
                                 router,
+                                self.compose_engine.as_ref(),
                                 &model_input_content,
                                 &idle_agents,
                                 &ctx.recent_messages,
@@ -442,6 +443,7 @@ impl Orchestrator {
             let planner_start = Instant::now();
             let plan_result = TaskPlanner::plan_hierarchical(
                 router,
+                self.compose_engine.as_ref(),
                 &model_input_content,
                 &idle_agents,
                 &ctx.recent_messages,

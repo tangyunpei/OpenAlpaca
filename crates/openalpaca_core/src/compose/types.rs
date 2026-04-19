@@ -318,13 +318,13 @@ pub struct StaticPromptInput {
     pub raw_blocks: Vec<SystemBlock>,
     pub mode: StaticPromptMode,
     pub model_window: u32,
-    /// Planner-mode inputs (backward-compat addition for
-    /// `StaticPromptMode::PlannerHierarchical`; ignored by other modes).
+    /// Planner-mode inputs (addition for `StaticPromptMode::PlannerHierarchical`
+    /// and `StaticPromptMode::ReplannerHierarchical`; ignored by other modes).
     ///
-    /// The real `orchestrator::task_planner::prompt::build_hierarchical_prompt`
-    /// takes `(&[SubAgent], bool)` — it does not consume the persona output or
-    /// raw_blocks. These two optional fields plumb those inputs through so
-    /// Layer 2 can call it unchanged.
+    /// Supplies the `<agents>` / `<available_agents>` block's agent list for
+    /// Layer 2's `build_planner_hierarchical` and `build_replanner_hierarchical`
+    /// — the Planner system prompt does not consume persona output or
+    /// raw_blocks, so the agent list is plumbed through via this field.
     #[doc(hidden)]
     pub planner_agents: Option<Arc<Vec<AgentConfig>>>,
     /// Planner v2 protocol flag (see `PlannerLimits.plan_protocol_v2_enabled`).

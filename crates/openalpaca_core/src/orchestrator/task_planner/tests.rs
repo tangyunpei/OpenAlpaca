@@ -527,46 +527,13 @@ fn test_dag_fail_node_caps_error() {
     assert_eq!(dag.nodes[0].result_summary.as_ref().unwrap().len(), 500);
 }
 
-#[test]
-fn test_build_hierarchical_prompt_with_agents() {
-    let agents = vec![make_agent("a1")];
-    let prompt = TaskPlanner::build_hierarchical_prompt(&agents, false);
-    assert!(prompt.contains("a1"));
-    // XML structure tags
-    assert!(prompt.contains("<agents>"));
-    assert!(prompt.contains("<instructions>"));
-    assert!(prompt.contains("<examples>"));
-    assert!(prompt.contains("<format>"));
-    assert!(prompt.contains("<rules>"));
-    // DAG fields still referenced
-    assert!(prompt.contains("depends_on"));
-    assert!(prompt.contains("workspace_keys"));
-    // Concrete few-shot examples present
-    assert!(prompt.contains("Translate"));
-    assert!(prompt.contains("Research"));
-    // "Grey area" example was removed in prompt cleanup (Step 4)
-    assert!(prompt.contains("Do NOT set both"));
-}
-
-#[test]
-fn test_build_hierarchical_prompt_no_agents() {
-    let prompt = TaskPlanner::build_hierarchical_prompt(&[], false);
-    assert!(prompt.contains("No agents are currently available"));
-}
-
-#[test]
-fn test_prompt_includes_v2_fields_when_enabled() {
-    let prompt = TaskPlanner::build_hierarchical_prompt(&[], true);
-    assert!(prompt.contains("execution_mode"));
-    assert!(prompt.contains("predictability_score"));
-    assert!(prompt.contains("v2_protocol"));
-}
-
-#[test]
-fn test_prompt_excludes_v2_fields_when_disabled() {
-    let prompt = TaskPlanner::build_hierarchical_prompt(&[], false);
-    assert!(!prompt.contains("v2_protocol"));
-}
+// Phase 4 Commit 3 migration: substring assertions on the Planner system
+// prompt (formerly `test_build_hierarchical_prompt_with_agents`,
+// `_no_agents`, `test_prompt_includes_v2_fields_when_enabled`, and
+// `test_prompt_excludes_v2_fields_when_disabled`) are now subsumed by the
+// byte-identical golden tests in `compose::tests`:
+//   - `test_golden_planner_byte_identical_protocol_v1`
+//   - `test_golden_planner_byte_identical_protocol_v2`
 
 #[test]
 fn test_taskplan_old_json_compat() {
@@ -978,66 +945,16 @@ fn test_critical_path_disabled_uses_original_order() {
     assert_eq!(normal_ids, prio_ids);
 }
 
-// ── build_messages prompt-injection hardening tests ────────────────
-
-#[test]
-fn test_build_messages_untrusted_context_uses_user_role() {
-    let system_prompt = "You are the planner.";
-    let user_msg = "Build me a web scraper";
-    let summary = "User previously asked about Rust";
-    let tasks_block = "### ACTIVE TASKS ###\n- [abc12345] Fix bug (in_progress)";
-
-    let msgs = build_messages(
-        system_prompt,
-        user_msg,
-        &[],
-        Some(summary),
-        Some(tasks_block),
-    );
-
-    // First message must be the system policy prompt
-    assert_eq!(msgs[0].role, openalpaca_llm::Role::System);
-    assert_eq!(msgs[0].content, system_prompt);
-
-    // Session summary and active tasks must be User role, not System
-    assert_eq!(
-        msgs[1].role,
-        openalpaca_llm::Role::User,
-        "Summary should be user role"
-    );
-    assert_eq!(
-        msgs[2].role,
-        openalpaca_llm::Role::User,
-        "Tasks should be user role"
-    );
-
-    // Both must contain the untrusted-context framing
-    assert!(
-        msgs[1].content.contains("context_data"),
-        "Summary should be wrapped in <context_data>"
-    );
-    assert!(
-        msgs[1].content.contains("NOT instructions"),
-        "Summary should contain injection guard"
-    );
-    assert!(
-        msgs[2].content.contains("context_data"),
-        "Tasks should be wrapped in <context_data>"
-    );
-
-    // Final message is the user query
-    let last = msgs.last().unwrap();
-    assert_eq!(last.role, openalpaca_llm::Role::User);
-    assert_eq!(last.content, user_msg);
-}
-
-#[test]
-fn test_build_messages_no_context_only_system_and_user() {
-    let msgs = build_messages("System prompt.", "Hello", &[], None, None);
-    assert_eq!(msgs.len(), 2);
-    assert_eq!(msgs[0].role, openalpaca_llm::Role::System);
-    assert_eq!(msgs[1].role, openalpaca_llm::Role::User);
-}
+// Phase 4 Commit 3 migration: the `build_messages` prompt-injection hardening
+// tests (formerly `test_build_messages_untrusted_context_uses_user_role` and
+// `test_build_messages_no_context_only_system_and_user`) are now subsumed by
+// the compose engine's Layer 4 tests + the planner byte-identical golden
+// tests in `compose::tests`. The `wrap_untrusted_context` + user-role
+// placement for `session_summary` and `active_tasks_block` is enforced via
+// `HistoryInput.summary_wrap_mode = UntrustedWrap` and the `ChatMessage::user`
+// construction in `TaskPlanner::plan_hierarchical` respectively; regression
+// coverage lives in `compose::tests` (Layer 4 summary wrapping) +
+// `compose::tests::test_golden_planner_byte_identical_protocol_v1`.
 
 // ── Phase P2: has_predictable_structure new patterns ─────────
 
@@ -1069,44 +986,11 @@ fn test_predictable_structure_short_conj_list_no_match() {
 
 // ── Phase P2: Prompt content tests ───────────────────────────
 
-#[test]
-fn test_prompt_includes_dag_dependency_example() {
-    let prompt = TaskPlanner::build_hierarchical_prompt(&[], false);
-    assert!(
-        prompt.contains("Example 4"),
-        "Prompt should include DAG dependency example"
-    );
-    assert!(
-        prompt.contains("Read, summarize, and send report"),
-        "Prompt should include DAG sequential dependency example"
-    );
-}
-
-#[test]
-fn test_prompt_includes_pipeline_example() {
-    let prompt = TaskPlanner::build_hierarchical_prompt(&[], false);
-    assert!(
-        prompt.contains("Example 5"),
-        "Prompt should include pipeline example"
-    );
-    assert!(
-        prompt.contains("Strict linear pipeline"),
-        "Prompt should include pipeline reasoning"
-    );
-}
-
-#[test]
-fn test_prompt_includes_execution_strategy_guide() {
-    let prompt = TaskPlanner::build_hierarchical_prompt(&[], false);
-    assert!(
-        prompt.contains("pipeline (assignments array)"),
-        "Prompt should include execution strategy guide"
-    );
-    assert!(
-        prompt.contains("If the steps are clear, prefer DAG"),
-        "Prompt should nudge toward DAG for predictable tasks"
-    );
-}
+// Phase 4 Commit 3 migration: substring assertions on the Planner system
+// prompt (formerly `test_prompt_includes_dag_dependency_example`,
+// `test_prompt_includes_pipeline_example`,
+// `test_prompt_includes_execution_strategy_guide`) are now subsumed by the
+// byte-identical golden tests in `compose::tests`.
 
 // ── Phase P2: DAG salvage tests ──────────────────────────────
 
