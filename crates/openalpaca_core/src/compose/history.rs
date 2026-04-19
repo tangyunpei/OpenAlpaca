@@ -1,26 +1,101 @@
-//! Layer 4 — Conversation History (Phase 1 stub).
+//! Layer 4 — Conversation History.
 //!
-//! Real implementation lands in Phase 3 (absorbs `build_context`). This stub
-//! returns an empty output with a fingerprint derived from the
-//! `lane_tip_fingerprint` so engine cache plumbing differentiates cache
-//! entries across conversation turns.
+//! Assembles the per-turn messages: summary (if any) + recent_messages +
+//! current user turn. Supports three modes:
+//!
+//! - `Default` — summary (optionally wrapped) + recent history + current turn.
+//! - `Skip`    — empty output (used by planner / replanner / pipeline N>0 /
+//!   dag / lead-agent paths).
+//! - `FirstStepOnly { memory_block }` — a single user message carrying the
+//!   retrieved memory block (used by pipeline step 0 per the spec).
+//!
+//! Fingerprint covers:
+//! `blake3(lane_tip_fingerprint || hash_opt_arc_str(summary) || summary_wrap_mode_tag
+//!  || hash_opt_msg(current_user_turn) || mode_tag)` with the `FirstStepOnly`
+//! memory block hashed in when present.
 
-use super::types::{HistoryInput, HistoryMode, HistoryOutput};
+use openalpaca_llm::ChatMessage;
 
-fn mode_tag(mode: &HistoryMode) -> u8 {
-    match mode {
+use super::fingerprint::{hash_opt_arc_str, hash_opt_msg};
+use super::types::{HistoryInput, HistoryMode, HistoryOutput, SummaryWrapMode};
+
+pub fn compute(input: &HistoryInput) -> HistoryOutput {
+    let fingerprint = compute_fingerprint(input);
+
+    let messages = match &input.mode {
+        HistoryMode::Skip => Vec::new(),
+        HistoryMode::Default => build_default(input),
+        HistoryMode::FirstStepOnly { memory_block } => {
+            vec![ChatMessage::user(memory_block.as_ref())]
+        }
+    };
+
+    HistoryOutput {
+        messages,
+        fingerprint,
+    }
+}
+
+fn build_default(input: &HistoryInput) -> Vec<ChatMessage> {
+    let mut messages: Vec<ChatMessage> = Vec::with_capacity(input.recent_messages.len() + 2);
+
+    // 1. Summary (optional) — wrapped per summary_wrap_mode. The untrusted
+    //    path reuses the same `wrap_untrusted_context` envelope the live
+    //    orchestrator uses so Phase 4's Social/Skill migrations can route
+    //    through compose without shape drift.
+    if let Some(ref summary) = input.summary {
+        let content = match input.summary_wrap_mode {
+            SummaryWrapMode::UntrustedWrap => crate::orchestrator::wrap_untrusted_context(
+                summary.as_ref(),
+                "session_summary",
+                "user_derived",
+            ),
+            SummaryWrapMode::Plain => summary.as_ref().to_string(),
+        };
+        messages.push(ChatMessage::user(&content));
+    }
+
+    // 2. Recent messages (already shaped by the caller; Layer 4 preserves order).
+    messages.extend(input.recent_messages.iter().cloned());
+
+    // 3. Current user turn (if present).
+    if let Some(ref turn) = input.current_user_turn {
+        messages.push(turn.clone());
+    }
+
+    messages
+}
+
+/// Public fingerprint helper used by `ComposeEngine::lookup_or_build_history`
+/// to compute the cache key before the output is built.
+pub(super) fn compute_fingerprint(input: &HistoryInput) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(&input.lane_tip_fingerprint);
+    h.update(&hash_opt_arc_str(&input.summary));
+    h.update(&[summary_wrap_mode_tag(input.summary_wrap_mode)]);
+    h.update(&hash_opt_msg(&input.current_user_turn));
+    h.update(&[mode_tag(&input.mode)]);
+    // `FirstStepOnly` carries a memory_block whose bytes change the output;
+    // hash it so two FirstStepOnly invocations with different memory_blocks
+    // produce different fingerprints.
+    if let HistoryMode::FirstStepOnly { memory_block } = &input.mode {
+        h.update(&(memory_block.len() as u64).to_le_bytes());
+        h.update(memory_block.as_bytes());
+    }
+    h.finalize().into()
+}
+
+fn mode_tag(m: &HistoryMode) -> u8 {
+    match m {
         HistoryMode::Default => 0,
         HistoryMode::Skip => 1,
         HistoryMode::FirstStepOnly { .. } => 2,
     }
 }
 
-pub fn compute(input: &HistoryInput) -> HistoryOutput {
-    let mut h = blake3::Hasher::new();
-    h.update(&input.lane_tip_fingerprint);
-    h.update(&[mode_tag(&input.mode)]);
-    HistoryOutput {
-        messages: Vec::new(),
-        fingerprint: h.finalize().into(),
+fn summary_wrap_mode_tag(m: SummaryWrapMode) -> u8 {
+    match m {
+        SummaryWrapMode::UntrustedWrap => 0,
+        SummaryWrapMode::Plain => 1,
     }
 }

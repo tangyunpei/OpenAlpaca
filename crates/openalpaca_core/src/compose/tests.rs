@@ -762,3 +762,295 @@ fn test_compose_layer_cache_events_emitted() {
     assert!(persona_hit, "second call should emit a Persona Hit");
     assert!(static_hit, "second call should emit a StaticPrompt Hit");
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Phase 3 Commit 1 — Layer 3 (Dynamic Context) + Layer 4 (History) tests
+// ──────────────────────────────────────────────────────────────────────────
+
+use crate::prompt_ctx::{
+    ContextKey, ContextKind, ContextSection, InjectionMode, TrustLevel,
+};
+use openalpaca_llm::{ChatMessage, Role};
+
+fn make_dyn_ctx_input(mode: DynamicContextMode) -> DynamicContextInput {
+    DynamicContextInput {
+        query: Arc::from("test query"),
+        path: ExecutionPath::SimpleQuery,
+        reserved_tokens: 1000,
+        memory_retrieval_hash: [0u8; 32],
+        context_bundle: Arc::new(ContextBundle::empty()),
+        mode,
+    }
+}
+
+fn make_history_input(mode: HistoryMode) -> HistoryInput {
+    HistoryInput {
+        summary: None,
+        summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
+        recent_messages: Arc::new(vec![]),
+        current_user_turn: None,
+        lane_tip_fingerprint: [0u8; 32],
+        mode,
+    }
+}
+
+/// Construct a minimal `ContextBundle` with one UserMessage-mode section
+/// (memory) and one SystemMessage-mode section (user profile). Exercises
+/// both Layer 3 output paths (context_messages + additional_system_blocks).
+fn make_test_bundle_with_memory_section() -> ContextBundle {
+    ContextBundle {
+        sections: vec![
+            ContextSection {
+                source: "memory",
+                kind: ContextKind::Memory,
+                content: "retrieved memory snippet".to_string(),
+                token_estimate: 10,
+                priority: SectionPriority::Normal,
+                relevance: 0.8,
+                key: ContextKey::Memory(42),
+                injection: InjectionMode::UserMessage {
+                    tag: "memory".to_string(),
+                    trust: TrustLevel::Untrusted,
+                },
+            },
+            ContextSection {
+                source: "user_profile",
+                kind: ContextKind::UserProfile,
+                content: "user likes rust".to_string(),
+                token_estimate: 5,
+                priority: SectionPriority::High,
+                relevance: 1.0,
+                key: ContextKey::UserProfile,
+                injection: InjectionMode::SystemMessage,
+            },
+        ],
+        total_tokens: 15,
+        available_budget: 10_000,
+    }
+}
+
+#[test]
+fn test_dynamic_context_layer_skip_mode_returns_empty() {
+    let input = make_dyn_ctx_input(DynamicContextMode::Skip);
+    let out = super::dynamic_context::compute(&input);
+    assert!(out.context_messages.is_empty());
+    assert!(out.additional_system_blocks.is_empty());
+}
+
+#[test]
+fn test_dynamic_context_layer_fingerprint_deterministic() {
+    let a = super::dynamic_context::compute(&make_dyn_ctx_input(DynamicContextMode::Default));
+    let b = super::dynamic_context::compute(&make_dyn_ctx_input(DynamicContextMode::Default));
+    assert_eq!(a.fingerprint, b.fingerprint);
+}
+
+#[test]
+fn test_dynamic_context_layer_fingerprint_busts_on_query_change() {
+    let mut a_input = make_dyn_ctx_input(DynamicContextMode::Default);
+    a_input.query = Arc::from("query A");
+    let mut b_input = make_dyn_ctx_input(DynamicContextMode::Default);
+    b_input.query = Arc::from("query B");
+    assert_ne!(
+        super::dynamic_context::compute(&a_input).fingerprint,
+        super::dynamic_context::compute(&b_input).fingerprint,
+    );
+}
+
+#[test]
+fn test_dynamic_context_layer_fingerprint_busts_on_memory_change() {
+    let mut a = make_dyn_ctx_input(DynamicContextMode::Default);
+    a.memory_retrieval_hash = [1u8; 32];
+    let mut b = make_dyn_ctx_input(DynamicContextMode::Default);
+    b.memory_retrieval_hash = [2u8; 32];
+    assert_ne!(
+        super::dynamic_context::compute(&a).fingerprint,
+        super::dynamic_context::compute(&b).fingerprint,
+    );
+}
+
+#[test]
+fn test_dynamic_context_layer_fingerprint_busts_on_mode_change() {
+    let fp_default =
+        super::dynamic_context::compute(&make_dyn_ctx_input(DynamicContextMode::Default))
+            .fingerprint;
+    let fp_skip =
+        super::dynamic_context::compute(&make_dyn_ctx_input(DynamicContextMode::Skip)).fingerprint;
+    assert_ne!(fp_default, fp_skip);
+}
+
+#[test]
+fn test_dynamic_context_layer_default_mode_emits_bundle_messages() {
+    let mut input = make_dyn_ctx_input(DynamicContextMode::Default);
+    input.context_bundle = Arc::new(make_test_bundle_with_memory_section());
+    let out = super::dynamic_context::compute(&input);
+    // Bundle has 1 UserMessage section and 1 SystemMessage section.
+    // Layer 3 should produce at least one in each collection.
+    assert!(
+        !out.context_messages.is_empty(),
+        "UserMessage-mode section should produce a context message"
+    );
+    assert!(
+        !out.additional_system_blocks.is_empty(),
+        "SystemMessage-mode section should produce an additional system block"
+    );
+}
+
+#[test]
+fn test_dynamic_context_layer_default_untrusted_wraps_content() {
+    // UserMessage { trust: Untrusted } should pass through wrap_untrusted_context
+    // before becoming a ChatMessage.
+    let mut input = make_dyn_ctx_input(DynamicContextMode::Default);
+    input.context_bundle = Arc::new(make_test_bundle_with_memory_section());
+    let out = super::dynamic_context::compute(&input);
+    let memory_msg = out
+        .context_messages
+        .iter()
+        .find(|m| m.content.contains("retrieved memory snippet"))
+        .expect("should have a message mentioning the memory content");
+    assert!(
+        memory_msg.content.contains("<context_data"),
+        "untrusted content should be wrapped in <context_data> envelope"
+    );
+}
+
+#[test]
+fn test_history_layer_skip_mode_empty() {
+    let input = make_history_input(HistoryMode::Skip);
+    let out = super::history::compute(&input);
+    assert!(out.messages.is_empty());
+}
+
+#[test]
+fn test_history_layer_default_mode_assembles_summary_then_recent_then_current() {
+    let mut input = make_history_input(HistoryMode::Default);
+    input.summary = Some(Arc::from("prior summary"));
+    input.recent_messages = Arc::new(vec![
+        ChatMessage::user("old user msg"),
+        ChatMessage::assistant("old assistant reply"),
+    ]);
+    input.current_user_turn = Some(ChatMessage::user("current turn"));
+
+    let out = super::history::compute(&input);
+
+    // Expect 4 messages: summary-as-user, old user, old assistant, current user.
+    assert_eq!(out.messages.len(), 4);
+    // First is the summary (possibly wrapped).
+    assert!(matches!(out.messages[0].role, Role::User));
+    // Middle is recent history.
+    assert_eq!(out.messages[1].content, "old user msg");
+    assert_eq!(out.messages[2].content, "old assistant reply");
+    // Last is the current turn.
+    assert_eq!(out.messages.last().unwrap().content, "current turn");
+}
+
+#[test]
+fn test_history_layer_default_mode_untrusted_summary_is_wrapped() {
+    let mut input = make_history_input(HistoryMode::Default);
+    input.summary = Some(Arc::from("prior summary"));
+    input.summary_wrap_mode = SummaryWrapMode::UntrustedWrap;
+    let out = super::history::compute(&input);
+    assert_eq!(out.messages.len(), 1);
+    assert!(
+        out.messages[0].content.contains("<context_data"),
+        "UntrustedWrap should wrap the summary in <context_data>"
+    );
+}
+
+#[test]
+fn test_history_layer_default_mode_plain_summary_is_not_wrapped() {
+    let mut input = make_history_input(HistoryMode::Default);
+    input.summary = Some(Arc::from("prior summary"));
+    input.summary_wrap_mode = SummaryWrapMode::Plain;
+    let out = super::history::compute(&input);
+    assert_eq!(out.messages.len(), 1);
+    assert_eq!(out.messages[0].content, "prior summary");
+}
+
+#[test]
+fn test_history_layer_first_step_only_mode_emits_memory_user_message() {
+    let memory_block: Arc<str> = Arc::from("retrieved memory block");
+    let input = HistoryInput {
+        summary: None,
+        summary_wrap_mode: SummaryWrapMode::Plain,
+        recent_messages: Arc::new(vec![]),
+        current_user_turn: None,
+        lane_tip_fingerprint: [0u8; 32],
+        mode: HistoryMode::FirstStepOnly {
+            memory_block: memory_block.clone(),
+        },
+    };
+    let out = super::history::compute(&input);
+    assert_eq!(out.messages.len(), 1);
+    assert!(matches!(out.messages[0].role, Role::User));
+    assert_eq!(out.messages[0].content, "retrieved memory block");
+}
+
+#[test]
+fn test_history_layer_fingerprint_busts_on_lane_tip_advance() {
+    let mut a = make_history_input(HistoryMode::Default);
+    a.lane_tip_fingerprint = [1u8; 32];
+    let mut b = make_history_input(HistoryMode::Default);
+    b.lane_tip_fingerprint = [2u8; 32];
+    assert_ne!(
+        super::history::compute(&a).fingerprint,
+        super::history::compute(&b).fingerprint
+    );
+}
+
+#[test]
+fn test_history_layer_fingerprint_busts_on_current_turn_change() {
+    let mut a = make_history_input(HistoryMode::Default);
+    a.current_user_turn = Some(ChatMessage::user("A"));
+    let mut b = make_history_input(HistoryMode::Default);
+    b.current_user_turn = Some(ChatMessage::user("B"));
+    assert_ne!(
+        super::history::compute(&a).fingerprint,
+        super::history::compute(&b).fingerprint
+    );
+}
+
+#[test]
+fn test_history_layer_fingerprint_busts_on_summary_change() {
+    let mut a = make_history_input(HistoryMode::Default);
+    a.summary = Some(Arc::from("summary A"));
+    let mut b = make_history_input(HistoryMode::Default);
+    b.summary = Some(Arc::from("summary B"));
+    assert_ne!(
+        super::history::compute(&a).fingerprint,
+        super::history::compute(&b).fingerprint
+    );
+}
+
+#[test]
+fn test_history_layer_fingerprint_deterministic() {
+    let a = make_history_input(HistoryMode::Default);
+    let b = make_history_input(HistoryMode::Default);
+    assert_eq!(
+        super::history::compute(&a).fingerprint,
+        super::history::compute(&b).fingerprint
+    );
+}
+
+#[test]
+fn test_hash_opt_msg_distinguishes_text_from_parts() {
+    use super::fingerprint::hash_opt_msg;
+    use openalpaca_llm::ContentPart;
+    // Two messages with same content but one has parts populated — fingerprint
+    // must differ so the history cache busts on multimodal content changes.
+    let msg_text = ChatMessage::user("hello");
+    let mut msg_parts = ChatMessage::user("hello");
+    msg_parts.parts = Some(vec![ContentPart::Text {
+        text: "hello".to_string(),
+    }]);
+    let fp_text = hash_opt_msg(&Some(msg_text));
+    let fp_parts = hash_opt_msg(&Some(msg_parts));
+    assert_ne!(fp_text, fp_parts);
+}
+
+#[test]
+fn test_hash_opt_msg_none_vs_empty() {
+    use super::fingerprint::hash_opt_msg;
+    let none_fp = hash_opt_msg(&None);
+    let empty_fp = hash_opt_msg(&Some(ChatMessage::user("")));
+    assert_ne!(none_fp, empty_fp, "None and Some(empty) must not collide");
+}
