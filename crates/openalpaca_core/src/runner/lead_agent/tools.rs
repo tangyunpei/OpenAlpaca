@@ -2,11 +2,18 @@ use super::guard::AgentBusyGuard;
 use super::tracker::{SubagentStatus, SubagentTracker};
 use crate::agent::template::AgentTemplate;
 use crate::bus::EventBus;
+use crate::compose::{
+    ComposeOverrides, ComposeRequest, DynamicContextInput, DynamicContextMode, HistoryInput,
+    HistoryMode, PersonaInput, PersonaMode, StaticPromptInput, StaticPromptMode, SummaryWrapMode,
+    SystemBlock,
+};
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
 use crate::events::SystemEvent;
+use crate::middleware::prompt::{format_tool_guidance, SystemPersona};
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
+use crate::prompt_ctx::{ExecutionPath, SectionPriority};
 use crate::runner::{LoopConfig, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
@@ -70,6 +77,10 @@ pub struct SpawnSubagentTool {
     context_manager: Arc<ContextManager>,
     /// Parent context bundle (resolved once, shared across spawns).
     parent_bundle: Arc<ContextBundle>,
+    /// Layered compose engine. Phase 6 Commit 3: routes subagent
+    /// system-prompt + message-list assembly through `ComposeEngine::compose`
+    /// with `PersonaMode::Skip` + `StaticPromptMode::SubagentMinimal`.
+    compose_engine: Arc<crate::compose::ComposeEngine>,
 }
 
 impl SpawnSubagentTool {
@@ -92,6 +103,7 @@ impl SpawnSubagentTool {
         confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
         context_manager: Arc<ContextManager>,
         parent_bundle: Arc<ContextBundle>,
+        compose_engine: Arc<crate::compose::ComposeEngine>,
     ) -> Self {
         let prompt_template = "\
             <identity>\n{PERSONA}\n</identity>\n\n\
@@ -131,6 +143,7 @@ impl SpawnSubagentTool {
             confirmation_broker,
             context_manager,
             parent_bundle,
+            compose_engine,
         }
     }
 
@@ -277,42 +290,125 @@ impl BuiltInTool for SpawnSubagentTool {
         );
         let bundle = context_package.to_bundle();
 
-        // Build prompt via PromptBuilder
-        let builder = crate::prompt::PromptBuilder::new(model_window);
-        let builder = builder
-            .raw_system_block(
-                "agent_identity",
-                &format!("<identity>\n{}\n</identity>", agent.preset.persona),
-                crate::prompt_ctx::SectionPriority::High,
-            )
-            .raw_system_block(
-                "scope",
-                "<scope>\nYou are a subagent working on a single objective assigned by a lead agent. \
-                 Focus exclusively on your assigned objective. Do not attempt work outside your scope.\n</scope>",
-                crate::prompt_ctx::SectionPriority::Normal,
-            )
-            .raw_system_block(
-                "output_format",
-                "<output-format>\nProvide a clear, complete result. Start with a brief summary of what you accomplished, \
+        // ── Phase 6 Commit 3: route system-prompt + message-list assembly
+        // through the layered compose engine. `PersonaMode::Skip` +
+        // `StaticPromptMode::SubagentMinimal` (raw-blocks-only) +
+        // `DynamicContextMode::Default` (bundle → context messages) +
+        // `HistoryMode::Default` (objective → current_user_turn) reproduces
+        // the pre-migration PromptBuilder chain byte-identically. See
+        // `test_golden_lead_agent_spawn_subagent_byte_identical` for the
+        // invariant.
+        let identity_block = format!("<identity>\n{}\n</identity>", agent.preset.persona);
+        let scope_block = "<scope>\nYou are a subagent working on a single objective assigned by a lead agent. \
+                 Focus exclusively on your assigned objective. Do not attempt work outside your scope.\n</scope>";
+        let output_block = "<output-format>\nProvide a clear, complete result. Start with a brief summary of what you accomplished, \
                  followed by the detailed output. The lead agent will use your result to synthesize a \
-                 final response, so be thorough and specific.\n</output-format>",
-                crate::prompt_ctx::SectionPriority::Normal,
-            )
-            .raw_system_block(
-                "constraints",
-                "<constraints>\nYou operate independently — you cannot communicate with other subagents directly. \
-                 Use workspace_read and workspace_write tools to access or share data across agents.\n</constraints>",
-                crate::prompt_ctx::SectionPriority::Normal,
-            )
-            .tools(&tools)
-            .context_bundle(&bundle);
+                 final response, so be thorough and specific.\n</output-format>";
+        let constraints_block = "<constraints>\nYou operate independently — you cannot communicate with other subagents directly. \
+                 Use workspace_read and workspace_write tools to access or share data across agents.\n</constraints>";
 
-        let built = builder.build();
+        let mut raw_blocks: Vec<SystemBlock> = Vec::with_capacity(5);
+        raw_blocks.push(SystemBlock {
+            name: "agent_identity",
+            content: Arc::<str>::from(identity_block),
+            priority: SectionPriority::High,
+        });
+        raw_blocks.push(SystemBlock {
+            name: "scope",
+            content: Arc::<str>::from(scope_block.to_string()),
+            priority: SectionPriority::Normal,
+        });
+        raw_blocks.push(SystemBlock {
+            name: "output_format",
+            content: Arc::<str>::from(output_block.to_string()),
+            priority: SectionPriority::Normal,
+        });
+        raw_blocks.push(SystemBlock {
+            name: "constraints",
+            content: Arc::<str>::from(constraints_block.to_string()),
+            priority: SectionPriority::Normal,
+        });
+        let tools_rendered = format_tool_guidance(&tools);
+        if !tools_rendered.is_empty() {
+            raw_blocks.push(SystemBlock {
+                name: "tools",
+                content: Arc::<str>::from(tools_rendered),
+                priority: SectionPriority::Normal,
+            });
+        }
 
-        // Build messages from PromptBuilder output
-        let mut messages = vec![ChatMessage::system(&built.system_message)];
-        messages.extend(built.context_messages);
-        messages.push(ChatMessage::user(objective));
+        let persona_input = PersonaInput {
+            system_persona: Arc::new(SystemPersona::default()),
+            user_document: Arc::new(None),
+            identity_document: Arc::new(None),
+            persona_version: 0,
+            mode: PersonaMode::Skip,
+        };
+        let persona_output = Arc::new(crate::compose::persona::compute(&persona_input));
+
+        let tools_arc: Arc<Vec<ToolDefinition>> = Arc::new(tools.clone());
+
+        let static_prompt_input = StaticPromptInput {
+            persona_output,
+            agent_persona: None,
+            agent_config_fingerprint: [0u8; 32],
+            skill_block: None,
+            skills_catalog: None,
+            bootstrap: None,
+            tools: tools_arc.clone(),
+            connector_status: Arc::new(Vec::new()),
+            send_tool_context: None,
+            message_source: None,
+            raw_blocks,
+            planner_agents: None,
+            planner_protocol_v2: false,
+            mode: StaticPromptMode::SubagentMinimal,
+            model_window: model_window as u32,
+        };
+
+        // Bundle routes through Layer 3 (DynamicContextMode::Default) — same
+        // routing as PromptBuilder::context_bundle.
+        let dynamic_context_input = DynamicContextInput {
+            context_bundle: Arc::new(bundle),
+            query: Arc::from(objective),
+            memory_retrieval_hash: [0u8; 32],
+            path: ExecutionPath::LeadAgent,
+            reserved_tokens: 0,
+            mode: DynamicContextMode::Default,
+        };
+
+        // objective → current_user_turn (no summary, no recent history).
+        let history_input = HistoryInput {
+            lane_tip_fingerprint: [0u8; 32],
+            summary: None,
+            summary_wrap_mode: SummaryWrapMode::Plain,
+            recent_messages: Arc::new(Vec::new()),
+            current_user_turn: Some(ChatMessage::user(objective)),
+            mode: HistoryMode::Default,
+        };
+
+        let compose_request = ComposeRequest::DagNode {
+            agent: Arc::new(agent.clone()),
+            assignment: Arc::<str>::from(objective.to_string()),
+            workspace_context: Arc::<str>::from(""),
+            tools: tools_arc.clone(),
+            overrides: ComposeOverrides::default(),
+        };
+
+        let composed = self.compose_engine.compose(
+            &compose_request,
+            persona_input,
+            static_prompt_input,
+            dynamic_context_input,
+            history_input,
+            model_window as u32,
+            tools_arc.clone(),
+            Some(&self.bus),
+            None, // spawned subagents have no natural lane key.
+        );
+
+        // Clone out of the Arc — run_agentic_loop_routed needs Vec<ChatMessage>.
+        let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
 
         let mut sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
         if self.daemon_config.load().security.auto_approve_confirmations {

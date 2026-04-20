@@ -87,6 +87,7 @@ pub async fn run_lead_agent(
     connector_guidance: &str,
     confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
     context_manager: Arc<ContextManager>,
+    compose_engine: Arc<crate::compose::ComposeEngine>,
 ) -> LeadAgentResult {
     tracing::info!(
         lead_agent = %lead_agent.id,
@@ -158,6 +159,7 @@ pub async fn run_lead_agent(
         confirmation_broker.clone(),
         context_manager,
         parent_bundle,
+        compose_engine.clone(),
     ));
 
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
@@ -213,8 +215,11 @@ pub async fn run_lead_agent(
     }
 
     // 6. Build system prompt from templates
-    let system_prompt =
-        build_lead_agent_prompt_from_templates(&lead_agent.preset.persona, &worker_templates);
+    let system_prompt = build_lead_agent_prompt_from_templates(
+        compose_engine.as_ref(),
+        &lead_agent.preset.persona,
+        &worker_templates,
+    );
     let tool_guidance = format_tool_guidance(&tools);
     let connector_suffix = if !connector_guidance.is_empty() {
         format!("\n{}", connector_guidance)

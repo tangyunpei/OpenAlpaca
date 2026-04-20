@@ -187,6 +187,7 @@ impl TaskDispatcher {
         let connector_block = self.connector_guidance_block();
         let broker = self.confirmation_broker.read().ok().and_then(|g| g.clone());
         let context_manager = self.context_manager.clone();
+        let compose_engine = self.compose_engine.clone();
 
         // Create cancellation token for this task
         let cancel_token = CancellationToken::new();
@@ -249,6 +250,7 @@ impl TaskDispatcher {
                 &connector_block,
                 broker,
                 context_manager,
+                compose_engine,
             )
             .await;
 

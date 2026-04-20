@@ -3700,3 +3700,568 @@ fn test_golden_dag_node_byte_identical() {
     assert_eq!(second_to_last.role, Role::User);
     assert_eq!(second_to_last.content, task_description);
 }
+
+/// Phase 6 Commit 3 — Lead Agent (build_lead_agent_prompt_from_templates) golden fixture.
+///
+/// Asserts byte-identical system message content between:
+///   (a) pre-migration `PromptBuilder` chain at
+///       `runner/lead_agent/prompt.rs:12-138` and
+///   (b) migrated `ComposeEngine::compose(ComposeRequest::LeadAgent{...})` with
+///       `PersonaMode::Skip` + `StaticPromptMode::SubagentMinimal` +
+///       `DynamicContextMode::Skip` + `HistoryMode::Skip`.
+///
+/// `build_lead_agent_prompt_from_templates` returns ONLY the system prompt
+/// string; the caller at `runner/lead_agent/mod.rs:217` then concatenates
+/// `format_tool_guidance` + `connector_suffix` inline before building the
+/// message vec. The migration therefore only needs to preserve the system
+/// message content emitted by the 8 raw_blocks — no tools, no connector
+/// guidance, no context bundle, no history flow through this call site.
+#[test]
+fn test_golden_lead_agent_byte_identical() {
+    use crate::agent::template::{AgentSource, AgentTemplate, AgentTemplateFrontmatter};
+    use crate::prompt::PromptBuilder;
+    use openalpaca_llm::Role;
+    use std::collections::HashMap;
+    use crate::prompt_ctx::SectionPriority;
+
+    // ── Canned Lead Agent scene. Mirrors the pre-migration arguments at
+    //    runner/lead_agent/prompt.rs:12-138 + runner/lead_agent/mod.rs:217. ──
+    let base_persona = "I am a Lead Agent persona for the golden test.";
+    let model_window: usize = 200_000;
+
+    // Two worker-agent templates so `<agents>` block is non-empty.
+    let templates = vec![
+        AgentTemplate {
+            frontmatter: AgentTemplateFrontmatter {
+                id: "researcher".to_string(),
+                name: "Researcher".to_string(),
+                description: "Does research and fact-finding.".to_string(),
+                icon: None,
+                singleton: false,
+                capabilities: vec!["web_search".to_string(), "read_docs".to_string()],
+                denied_capabilities: vec![],
+                temperature: 0.5,
+                verbosity: "normal".to_string(),
+                model: None,
+                fallback_models: vec![],
+                max_tool_calls: None,
+                timeout_seconds: None,
+                max_cost_per_task: None,
+                max_rounds: None,
+                require_confirmation_for: vec![],
+            },
+            body: String::new(),
+            sections: HashMap::new(),
+            source: AgentSource::default(),
+        },
+        AgentTemplate {
+            frontmatter: AgentTemplateFrontmatter {
+                id: "coder".to_string(),
+                name: "Coder".to_string(),
+                description: "Writes production Rust.".to_string(),
+                icon: None,
+                singleton: false,
+                capabilities: vec![],
+                denied_capabilities: vec![],
+                temperature: 0.5,
+                verbosity: "normal".to_string(),
+                model: None,
+                fallback_models: vec![],
+                max_tool_calls: None,
+                timeout_seconds: None,
+                max_cost_per_task: None,
+                max_rounds: None,
+                require_confirmation_for: vec![],
+            },
+            body: String::new(),
+            sections: HashMap::new(),
+            source: AgentSource::default(),
+        },
+    ];
+
+    // ── Pre-migration reference: PromptBuilder chain at prompt.rs:41-135. ──
+    // Rebuild the `<agents>` block the same way `build_lead_agent_prompt_from_templates`
+    // does — including the `capabilities=[...]` rendering.
+    let mut agents_block = String::from("<agents>\n");
+    for t in &templates {
+        let fm = &t.frontmatter;
+        let capabilities_str = if fm.capabilities.is_empty() {
+            "none".to_string()
+        } else {
+            fm.capabilities.join(", ")
+        };
+        agents_block.push_str(&format!(
+            "- id=\"{}\" name=\"{}\" capabilities=[{}]: {}\n",
+            fm.id, fm.name, capabilities_str, fm.description
+        ));
+    }
+    agents_block.push_str("</agents>");
+
+    // Copy the 5 other raw_block string constants VERBATIM from
+    // runner/lead_agent/prompt.rs:46-134.
+    let role_text = "<role>\n\
+         You are a Lead Agent orchestrating a complex task. You are responsible for analyzing \
+         the user's request, decomposing it into sub-objectives, delegating work to specialized \
+         subagents, and synthesizing their results into a final response.\n\
+         Do not attempt to perform specialized work (coding, research, analysis) yourself when \
+         a suitable subagent is available. Your value is in orchestration and synthesis.\n\
+         </role>";
+    let workflow_text = "<workflow>\n\
+         Step 1: Analyze the user's request. Identify the core goal and any constraints.\n\
+         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent.\n\
+         Step 3: Spawn ALL subagents for independent objectives in a single round. Match each \
+         sub-objective to the best agent by skills. Spawning is always immediate — the system \
+         automatically manages execution ordering based on available LLM capacity. Subagents may \
+         be queued if capacity is limited — this is handled automatically and transparently.\n\
+         Step 4: Collect results. Call wait_for_subagents to block until all complete (including \
+         queued ones), or check_subagent_status for individual progress.\n\
+         Step 5: Evaluate and iterate. If a subagent failed or produced incomplete results, \
+         retry with an adjusted objective or a different agent.\n\
+         Step 6: Synthesize. Combine all subagent outputs into a coherent final response \
+         that directly addresses the user's original request.\n\
+         </workflow>";
+    let delegation_text = "<delegation-criteria>\n\
+         Spawn subagents when:\n\
+         - Tasks can run in parallel (e.g., research + implementation are independent)\n\
+         - Tasks require isolated context or specialized skills\n\
+         - Tasks involve independent workstreams that do not need shared state\n\n\
+         Work directly (do NOT spawn) when:\n\
+         - The task is simple enough to answer from your own knowledge\n\
+         - You are synthesizing, summarizing, or formatting existing results\n\
+         - The task requires maintaining context across sequential steps that one agent handles best\n\
+         </delegation-criteria>";
+    let tool_patterns_text = "<tools>\n\
+         spawn_subagent: Spawning is always immediate — returns a run_id instantly. The system \
+         automatically queues execution if LLM capacity is limited. Spawn all independent \
+         objectives in a single round before waiting — this is the preferred pattern.\n\
+         spawn_subagents_batch: When spawning 3+ independent subagents, use spawn_subagents_batch \
+         for parallel spawning instead of individual spawn_subagent calls. This is more efficient \
+         and reduces round-trips.\n\
+         check_subagent_status: Poll a single subagent by run_id. Shows whether the subagent is \
+         queued, running, completed, or failed.\n\
+         wait_for_subagents: Block until ALL spawned subagents finish, including any that are \
+         queued for execution. Returns a summary of all results. Call this after spawning all \
+         subagents.\n\
+         workspace_read / workspace_write: Share context between subagents. Write setup data before spawning; \
+         read results after completion.\n\
+         </tools>";
+    let failure_recovery_text = "<failure-recovery>\n\
+         If a subagent fails:\n\
+         1. Read the error message to understand the failure type.\n\
+         2. If the objective was too broad, split it into smaller sub-objectives and retry.\n\
+         3. If the agent lacked the right skills, try a different agent.\n\
+         4. If repeated failures occur, complete that sub-objective directly yourself.\n\
+         5. Never silently drop a failed sub-objective — always report what succeeded and what did not.\n\
+         </failure-recovery>";
+    let output_expectations_text = "<output>\n\
+         Your final response must directly address the user's original request. \
+         Synthesize all subagent results into a single coherent answer. \
+         Do not simply list raw subagent outputs — integrate, summarize, and resolve any conflicts.\n\
+         </output>";
+
+    let built = PromptBuilder::new(model_window)
+        .raw_system_block("lead_persona", base_persona, SectionPriority::Critical)
+        .raw_system_block("lead_role", role_text, SectionPriority::Critical)
+        .raw_system_block("agents_catalog", &agents_block, SectionPriority::High)
+        .raw_system_block("workflow", workflow_text, SectionPriority::High)
+        .raw_system_block("delegation_criteria", delegation_text, SectionPriority::Normal)
+        .raw_system_block("tool_patterns", tool_patterns_text, SectionPriority::Normal)
+        .raw_system_block("failure_recovery", failure_recovery_text, SectionPriority::Normal)
+        .raw_system_block(
+            "output_expectations",
+            output_expectations_text,
+            SectionPriority::Normal,
+        )
+        .build();
+    let expected_system = built.system_message.clone();
+
+    // ── Via the engine: PersonaMode::Skip + StaticPromptMode::SubagentMinimal. ──
+    //
+    // The 8 raw_blocks go through StaticPromptInput.raw_blocks in canonical
+    // registration order. No tools, no connector_guidance, no context_bundle,
+    // no history are threaded through — build_lead_agent_prompt_from_templates
+    // returns only the system prompt string.
+    let engine = ComposeEngine::new(16);
+
+    let raw_blocks_for_engine: Vec<SystemBlock> = vec![
+        SystemBlock {
+            name: "lead_persona",
+            content: Arc::<str>::from(base_persona.to_string()),
+            priority: SectionPriority::Critical,
+        },
+        SystemBlock {
+            name: "lead_role",
+            content: Arc::<str>::from(role_text.to_string()),
+            priority: SectionPriority::Critical,
+        },
+        SystemBlock {
+            name: "agents_catalog",
+            content: Arc::<str>::from(agents_block.clone()),
+            priority: SectionPriority::High,
+        },
+        SystemBlock {
+            name: "workflow",
+            content: Arc::<str>::from(workflow_text.to_string()),
+            priority: SectionPriority::High,
+        },
+        SystemBlock {
+            name: "delegation_criteria",
+            content: Arc::<str>::from(delegation_text.to_string()),
+            priority: SectionPriority::Normal,
+        },
+        SystemBlock {
+            name: "tool_patterns",
+            content: Arc::<str>::from(tool_patterns_text.to_string()),
+            priority: SectionPriority::Normal,
+        },
+        SystemBlock {
+            name: "failure_recovery",
+            content: Arc::<str>::from(failure_recovery_text.to_string()),
+            priority: SectionPriority::Normal,
+        },
+        SystemBlock {
+            name: "output_expectations",
+            content: Arc::<str>::from(output_expectations_text.to_string()),
+            priority: SectionPriority::Normal,
+        },
+    ];
+
+    let persona_input = PersonaInput {
+        system_persona: Arc::new(SystemPersona::default()),
+        user_document: Arc::new(None),
+        identity_document: Arc::new(None),
+        persona_version: 0,
+        mode: PersonaMode::Skip,
+    };
+    let persona_output = Arc::new(super::persona::compute(&persona_input));
+
+    let static_prompt_input = StaticPromptInput {
+        persona_output,
+        agent_persona: None,
+        agent_config_fingerprint: [0u8; 32],
+        skill_block: None,
+        skills_catalog: None,
+        bootstrap: None,
+        tools: Arc::new(Vec::new()),
+        connector_status: Arc::new(Vec::new()),
+        send_tool_context: None,
+        message_source: None,
+        raw_blocks: raw_blocks_for_engine,
+        planner_agents: None,
+        planner_protocol_v2: false,
+        mode: StaticPromptMode::SubagentMinimal,
+        model_window: model_window as u32,
+    };
+
+    // No context bundle, no history — build_lead_agent_prompt_from_templates
+    // returns ONLY the system prompt string.
+    let dynamic_context_input = DynamicContextInput {
+        context_bundle: Arc::new(ContextBundle::empty()),
+        query: Arc::from(""),
+        memory_retrieval_hash: [0u8; 32],
+        path: ExecutionPath::LeadAgent,
+        reserved_tokens: 0,
+        mode: DynamicContextMode::Skip,
+    };
+
+    let history_input = HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        summary: None,
+        summary_wrap_mode: SummaryWrapMode::Plain,
+        recent_messages: Arc::new(Vec::new()),
+        current_user_turn: None,
+        mode: HistoryMode::Skip,
+    };
+
+    let request = ComposeRequest::LeadAgent {
+        base_persona: Arc::<str>::from(base_persona.to_string()),
+        agents_catalog: Arc::<str>::from(agents_block.clone()),
+        objective: Arc::<str>::from(""),
+        overrides: ComposeOverrides::default(),
+    };
+
+    let composed = engine.compose(
+        &request,
+        persona_input,
+        static_prompt_input,
+        dynamic_context_input,
+        history_input,
+        model_window as u32,
+        Arc::new(Vec::new()),
+        None,
+        None,
+    );
+
+    // ── Byte-identical assertion on system message content. ─────────────
+    assert_eq!(
+        composed.messages.len(),
+        1,
+        "Lead Agent prompt should yield exactly 1 system message (got {} messages)",
+        composed.messages.len()
+    );
+    assert_eq!(composed.messages[0].role, Role::System);
+    assert_eq!(
+        composed.messages[0].content, expected_system,
+        "Lead Agent migration system_message mismatch:\n--- GOT ---\n{}\n--- EXPECTED ---\n{}\n",
+        composed.messages[0].content, expected_system
+    );
+}
+
+/// Phase 6 Commit 3 — Lead Agent spawn_subagent tool golden fixture.
+///
+/// Asserts byte-identical `ComposedRequest.messages` between:
+///   (a) pre-migration `PromptBuilder` chain at
+///       `runner/lead_agent/tools.rs:280-315` and
+///   (b) migrated `ComposeEngine::compose(ComposeRequest::DagNode{...})` with
+///       `PersonaMode::Skip` + `StaticPromptMode::SubagentMinimal` +
+///       `DynamicContextMode::Default` + `HistoryMode::Default`.
+///
+/// Scene mirrors the pre-migration `SpawnSubagentTool::execute` path:
+///   - 4 raw_blocks (agent_identity, scope, output_format, constraints)
+///   - `.tools(&tools)` — pre-rendered via format_tool_guidance
+///   - `.context_bundle(&bundle)` — emits via Layer 3
+///   - messages vec = [system, ...context_messages, user(objective)]
+///
+/// The pre-migration call path reuses `ComposeRequest::DagNode` because the
+/// shape is a perfect match: raw_blocks + tools + context_bundle + objective
+/// as the current user turn.
+#[test]
+fn test_golden_lead_agent_spawn_subagent_byte_identical() {
+    use crate::middleware::prompt::format_tool_guidance;
+    use crate::prompt::PromptBuilder;
+    use crate::prompt_ctx::package::{PackageSection, PackageSectionKind};
+    use openalpaca_llm::Role;
+
+    // ── Canned spawn_subagent scene. Mirrors the pre-migration arguments
+    //    at runner/lead_agent/tools.rs:280-315. ─────────────────────────
+    let agent_persona_text = "I am a subagent test persona.";
+    let objective = "Gather facts about the target system.";
+    let model_window: usize = 200_000;
+
+    // Canned tool set — `resolve_agent_tools` result.
+    let tool_defs: Vec<ToolDefinition> = vec![ToolDefinition {
+        name: "memory_search".to_string(),
+        description: "Search user memories".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": { "query": { "type": "string" } }
+        }),
+        strict: None,
+        input_examples: None,
+    }];
+
+    // Canned ContextPackage — simulates `context_manager.distill(...)` output.
+    // One WorkspaceArtifact section → routed as UserMessage Untrusted.
+    let workspace_content = "Shared notes about target system.";
+    let package_sections = vec![PackageSection {
+        kind: PackageSectionKind::WorkspaceArtifact,
+        content: workspace_content.to_string(),
+        token_estimate: workspace_content.len() / 4,
+        priority: SectionPriority::Normal,
+    }];
+    let context_package = crate::prompt_ctx::ContextPackage {
+        sections: package_sections,
+        total_tokens: workspace_content.len() / 4,
+        budget: 0,
+        sub_agent_window: model_window,
+    };
+    let bundle = context_package.to_bundle();
+
+    // ── Pre-migration reference: PromptBuilder chain at tools.rs:281-310. ──
+    let identity_block = format!("<identity>\n{}\n</identity>", agent_persona_text);
+    let scope_block = "<scope>\nYou are a subagent working on a single objective assigned by a lead agent. \
+                 Focus exclusively on your assigned objective. Do not attempt work outside your scope.\n</scope>";
+    let output_block = "<output-format>\nProvide a clear, complete result. Start with a brief summary of what you accomplished, \
+                 followed by the detailed output. The lead agent will use your result to synthesize a \
+                 final response, so be thorough and specific.\n</output-format>";
+    let constraints_block = "<constraints>\nYou operate independently — you cannot communicate with other subagents directly. \
+                 Use workspace_read and workspace_write tools to access or share data across agents.\n</constraints>";
+
+    let built = PromptBuilder::new(model_window)
+        .raw_system_block("agent_identity", &identity_block, SectionPriority::High)
+        .raw_system_block("scope", scope_block, SectionPriority::Normal)
+        .raw_system_block("output_format", output_block, SectionPriority::Normal)
+        .raw_system_block("constraints", constraints_block, SectionPriority::Normal)
+        .tools(&tool_defs)
+        .context_bundle(&bundle)
+        .build();
+    let expected_system = built.system_message.clone();
+
+    // Pre-migration messages vec at tools.rs:312-315:
+    //   [system, ...context_messages (from context_bundle), user(objective)]
+    let mut expected_messages: Vec<ChatMessage> =
+        Vec::with_capacity(1 + built.context_messages.len() + 1);
+    expected_messages.push(ChatMessage::system(&expected_system));
+    expected_messages.extend(built.context_messages.iter().cloned());
+    expected_messages.push(ChatMessage::user(objective));
+
+    // ── Via the engine: PersonaMode::Skip + StaticPromptMode::SubagentMinimal. ──
+    //
+    // Caller pre-renders tools via `format_tool_guidance(...)` and pushes the
+    // result as raw_block "tools". The bundle routes through Layer 3
+    // (DynamicContextMode::Default). Objective is the current_user_turn.
+    let engine = ComposeEngine::new(16);
+
+    let tools_rendered = format_tool_guidance(&tool_defs);
+    let raw_blocks_for_engine: Vec<SystemBlock> = vec![
+        SystemBlock {
+            name: "agent_identity",
+            content: Arc::<str>::from(identity_block.clone()),
+            priority: SectionPriority::High,
+        },
+        SystemBlock {
+            name: "scope",
+            content: Arc::<str>::from(scope_block.to_string()),
+            priority: SectionPriority::Normal,
+        },
+        SystemBlock {
+            name: "output_format",
+            content: Arc::<str>::from(output_block.to_string()),
+            priority: SectionPriority::Normal,
+        },
+        SystemBlock {
+            name: "constraints",
+            content: Arc::<str>::from(constraints_block.to_string()),
+            priority: SectionPriority::Normal,
+        },
+        SystemBlock {
+            name: "tools",
+            content: Arc::<str>::from(tools_rendered),
+            priority: SectionPriority::Normal,
+        },
+    ];
+
+    // Canned SubAgent for the request variant. spawn_subagent uses
+    // ComposeRequest::DagNode (shape-equivalent: raw_blocks + tools + bundle).
+    use crate::agent::subagent::{
+        AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, SubAgent,
+    };
+    let agent = Arc::new(SubAgent {
+        id: "spawn-subagent-test-01".to_string(),
+        template_id: "spawn-subagent-test".to_string(),
+        name: "Spawn Subagent Test".to_string(),
+        description: None,
+        icon: None,
+        status: AgentStatus::Idle,
+        current_task: None,
+        capabilities: vec![],
+        preset: AgentPreset {
+            persona: agent_persona_text.to_string(),
+            ..AgentPreset::default()
+        },
+        constraints: AgentConstraints::default(),
+        llm_config: AgentLlmConfig::default(),
+    });
+
+    let persona_input = PersonaInput {
+        system_persona: Arc::new(SystemPersona::default()),
+        user_document: Arc::new(None),
+        identity_document: Arc::new(None),
+        persona_version: 0,
+        mode: PersonaMode::Skip,
+    };
+    let persona_output = Arc::new(super::persona::compute(&persona_input));
+
+    let static_prompt_input = StaticPromptInput {
+        persona_output,
+        agent_persona: None,
+        agent_config_fingerprint: [0u8; 32],
+        skill_block: None,
+        skills_catalog: None,
+        bootstrap: None,
+        tools: Arc::new(tool_defs.clone()),
+        connector_status: Arc::new(Vec::new()),
+        send_tool_context: None,
+        message_source: None,
+        raw_blocks: raw_blocks_for_engine,
+        planner_agents: None,
+        planner_protocol_v2: false,
+        mode: StaticPromptMode::SubagentMinimal,
+        model_window: model_window as u32,
+    };
+
+    // Bundle flows through Layer 3 (DynamicContextMode::Default) — same
+    // routing as PromptBuilder::context_bundle.
+    let dynamic_context_input = DynamicContextInput {
+        context_bundle: Arc::new(bundle),
+        query: Arc::from(objective),
+        memory_retrieval_hash: [0u8; 32],
+        path: ExecutionPath::LeadAgent,
+        reserved_tokens: 0,
+        mode: DynamicContextMode::Default,
+    };
+
+    // objective → current_user_turn; no summary/recent.
+    let history_input = HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        summary: None,
+        summary_wrap_mode: SummaryWrapMode::Plain,
+        recent_messages: Arc::new(Vec::new()),
+        current_user_turn: Some(ChatMessage::user(objective)),
+        mode: HistoryMode::Default,
+    };
+
+    let request = ComposeRequest::DagNode {
+        agent: agent.clone(),
+        assignment: Arc::<str>::from(objective.to_string()),
+        workspace_context: Arc::<str>::from(""),
+        tools: Arc::new(tool_defs.clone()),
+        overrides: ComposeOverrides::default(),
+    };
+
+    let composed = engine.compose(
+        &request,
+        persona_input,
+        static_prompt_input,
+        dynamic_context_input,
+        history_input,
+        model_window as u32,
+        Arc::new(tool_defs.clone()),
+        None,
+        None,
+    );
+
+    // ── Byte-identical assertion. ───────────────────────────────────────
+    assert_eq!(
+        composed.messages.len(),
+        expected_messages.len(),
+        "spawn_subagent migration produced wrong message count: got {} vs expected {}",
+        composed.messages.len(),
+        expected_messages.len()
+    );
+    for (idx, (got, expected)) in composed
+        .messages
+        .iter()
+        .zip(expected_messages.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            got.role, expected.role,
+            "message {idx} role mismatch: got {:?} expected {:?}",
+            got.role, expected.role
+        );
+        assert_eq!(
+            got.content, expected.content,
+            "message {idx} content mismatch:\n--- GOT ---\n{}\n--- EXPECTED ---\n{}\n",
+            got.content, expected.content
+        );
+        assert!(
+            got.parts.is_none(),
+            "message {idx} got parts should be None"
+        );
+        assert!(
+            got.tool_calls.is_none(),
+            "message {idx} got tool_calls should be None"
+        );
+        assert_eq!(
+            got.tool_call_id, expected.tool_call_id,
+            "message {idx} tool_call_id mismatch"
+        );
+    }
+
+    // Sanity: first message is system, last is user(objective).
+    assert_eq!(composed.messages[0].role, Role::System);
+    let last = composed.messages.last().unwrap();
+    assert_eq!(last.role, Role::User);
+    assert_eq!(last.content, objective);
+}

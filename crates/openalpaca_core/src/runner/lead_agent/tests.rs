@@ -61,6 +61,7 @@ fn test_lead_agent_registry_contains_coordination_tools() {
         None,
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
     ));
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
@@ -370,6 +371,7 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
         None,
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
     ));
     let check_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
@@ -425,6 +427,7 @@ fn test_batch_spawn_tool_present_when_enabled() {
         None,
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
     ));
     let batch_tool = Some(Arc::new(SpawnSubagentsBatchTool::new(spawn_tool.clone())));
     let check_tool = Arc::new(CheckSubagentStatusTool {
@@ -479,6 +482,7 @@ async fn test_batch_spawn_empty_array_error() {
         None, // confirmation_broker
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
     ));
     let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
 
@@ -518,6 +522,7 @@ async fn test_batch_spawn_exceeds_max_error() {
         None, // confirmation_broker
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
     ));
     let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
 
@@ -579,7 +584,8 @@ fn test_lead_agent_registry_exposes_command_backend_tools() {
 
 #[test]
 fn test_lead_agent_prompt_includes_batch_spawn_instruction() {
-    let prompt = build_lead_agent_prompt_from_templates("Test persona", &[]);
+    let engine = crate::compose::ComposeEngine::new(16);
+    let prompt = build_lead_agent_prompt_from_templates(&engine, "Test persona", &[]);
     assert!(
         prompt.contains("spawn_subagents_batch"),
         "Lead agent prompt should mention spawn_subagents_batch tool"
