@@ -330,6 +330,10 @@ pub struct PersonaInput {
     /// `daemon.orchestrator.prompt_budgets.identity_budget`. `None` defers
     /// to the helper's internal default (300 chars).
     pub identity_budget: Option<usize>,
+    /// Per-caller truncation budget for the user document block, sourced from
+    /// `daemon.orchestrator.prompt_budgets.user_profile_budget`. `None` defers
+    /// to the helper's internal default.
+    pub user_budget: Option<usize>,
 }
 
 #[derive(Debug, Clone)]

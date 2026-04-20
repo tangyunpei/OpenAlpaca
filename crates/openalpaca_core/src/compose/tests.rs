@@ -28,6 +28,7 @@ fn empty_compose_inputs() -> (
         persona_version: 0,
         mode: PersonaMode::Default,
         identity_budget: None,
+        user_budget: None,
     };
 
     // Layer 1 stub needs only persona_version + mode to compute a fingerprint;
@@ -429,6 +430,7 @@ fn make_persona_input(version: u64, mode: PersonaMode) -> PersonaInput {
         persona_version: version,
         mode,
         identity_budget: None,
+        user_budget: None,
     }
 }
 
@@ -458,6 +460,60 @@ fn test_persona_layer_fingerprint_busts_on_mode_change() {
     assert_ne!(fp_default, fp_minimal);
     assert_ne!(fp_default, fp_skip);
     assert_ne!(fp_minimal, fp_skip);
+}
+
+#[test]
+fn test_persona_fingerprint_busts_on_user_budget_change() {
+    // Construct two PersonaInputs that differ only by user_budget.
+    let a = PersonaInput {
+        system_persona: Arc::new(SystemPersona::default()),
+        user_document: Arc::new(None),
+        identity_document: Arc::new(Option::<IdentityDocument>::None),
+        persona_version: 0,
+        mode: PersonaMode::Default,
+        identity_budget: None,
+        user_budget: Some(500),
+    };
+    let b = PersonaInput {
+        system_persona: Arc::new(SystemPersona::default()),
+        user_document: Arc::new(None),
+        identity_document: Arc::new(Option::<IdentityDocument>::None),
+        persona_version: 0,
+        mode: PersonaMode::Default,
+        identity_budget: None,
+        user_budget: Some(800),
+    };
+    assert_ne!(
+        super::persona::compute_fingerprint(&a),
+        super::persona::compute_fingerprint(&b),
+        "user_budget changes must bust the Layer 1 fingerprint"
+    );
+}
+
+#[test]
+fn test_persona_fingerprint_busts_on_identity_budget_change() {
+    let a = PersonaInput {
+        system_persona: Arc::new(SystemPersona::default()),
+        user_document: Arc::new(None),
+        identity_document: Arc::new(Option::<IdentityDocument>::None),
+        persona_version: 0,
+        mode: PersonaMode::Default,
+        identity_budget: Some(300),
+        user_budget: None,
+    };
+    let b = PersonaInput {
+        system_persona: Arc::new(SystemPersona::default()),
+        user_document: Arc::new(None),
+        identity_document: Arc::new(Option::<IdentityDocument>::None),
+        persona_version: 0,
+        mode: PersonaMode::Default,
+        identity_budget: Some(500),
+        user_budget: None,
+    };
+    assert_ne!(
+        super::persona::compute_fingerprint(&a),
+        super::persona::compute_fingerprint(&b),
+    );
 }
 
 #[test]
@@ -1624,6 +1680,7 @@ fn test_golden_social_fast_path_byte_identical() {
         persona_version: 0,
         mode: PersonaMode::Minimal,
         identity_budget: None,
+        user_budget: None,
     };
 
     // Minimal mode places SystemPersona.base_instructions as the first block's
@@ -1850,6 +1907,7 @@ If the task should be abandoned:
         persona_version: 0,
         mode: PersonaMode::Minimal,
         identity_budget: None,
+        user_budget: None,
     };
     let persona_output = Arc::new(super::persona::compute(&persona_input));
 
@@ -2176,6 +2234,7 @@ fn run_planner_compose(
         persona_version: 0,
         mode: PersonaMode::Minimal,
         identity_budget: None,
+        user_budget: None,
     };
     let persona_output = Arc::new(super::persona::compute(&persona_input));
 
@@ -2430,6 +2489,7 @@ fn test_golden_skill_invocation_byte_identical() {
         persona_version: 0,
         mode: PersonaMode::Default,
         identity_budget: None,
+        user_budget: None,
     };
     // Pre-compute so StaticPromptInput has a real Arc; compose() will overwrite
     // on cache hit.
@@ -2663,6 +2723,7 @@ fn test_golden_simple_query_text_only_byte_identical() {
         persona_version: 0,
         mode: PersonaMode::Default,
         identity_budget: None,
+        user_budget: None,
     };
     // Pre-compute so StaticPromptInput has a real Arc; compose() will overwrite
     // on cache hit.
@@ -2879,6 +2940,7 @@ fn test_golden_simple_query_multimodal_byte_identical() {
         persona_version: 0,
         mode: PersonaMode::Default,
         identity_budget: None,
+        user_budget: None,
     };
     let persona_output = Arc::new(super::persona::compute(&persona_input));
 
@@ -3290,6 +3352,7 @@ fn test_golden_pipeline_step_byte_identical() {
         persona_version: 0,
         mode: PersonaMode::Skip,
         identity_budget: None,
+        user_budget: None,
     };
     let persona_output = Arc::new(super::persona::compute(&persona_input));
 
@@ -3598,6 +3661,7 @@ fn test_golden_dag_node_byte_identical() {
         persona_version: 0,
         mode: PersonaMode::Skip,
         identity_budget: None,
+        user_budget: None,
     };
     let persona_output = Arc::new(super::persona::compute(&persona_input));
 
@@ -3943,6 +4007,7 @@ fn test_golden_lead_agent_byte_identical() {
         persona_version: 0,
         mode: PersonaMode::Skip,
         identity_budget: None,
+        user_budget: None,
     };
     let persona_output = Arc::new(super::persona::compute(&persona_input));
 
@@ -4171,6 +4236,7 @@ fn test_golden_lead_agent_spawn_subagent_byte_identical() {
         persona_version: 0,
         mode: PersonaMode::Skip,
         identity_budget: None,
+        user_budget: None,
     };
     let persona_output = Arc::new(super::persona::compute(&persona_input));
 

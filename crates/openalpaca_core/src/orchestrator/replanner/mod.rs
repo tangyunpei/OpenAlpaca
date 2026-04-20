@@ -157,6 +157,7 @@ impl Replanner {
             persona_version: 0,
             mode: PersonaMode::Minimal,
             identity_budget: None,
+            user_budget: None,
         };
         let persona_output = Arc::new(crate::compose::persona::compute(&persona_input));
 

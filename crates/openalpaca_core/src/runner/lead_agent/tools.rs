@@ -344,6 +344,7 @@ impl BuiltInTool for SpawnSubagentTool {
             persona_version: 0,
             mode: PersonaMode::Skip,
             identity_budget: None,
+            user_budget: None,
         };
         let persona_output = Arc::new(crate::compose::persona::compute(&persona_input));
 

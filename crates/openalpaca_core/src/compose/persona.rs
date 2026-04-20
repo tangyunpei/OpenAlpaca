@@ -59,6 +59,13 @@ pub(super) fn compute_fingerprint(input: &PersonaInput) -> [u8; 32] {
             h.update(&(n as u64).to_le_bytes())
         }
     };
+    match input.user_budget {
+        None => h.update(&[0u8]),
+        Some(n) => {
+            h.update(&[1u8]);
+            h.update(&(n as u64).to_le_bytes())
+        }
+    };
     h.finalize().into()
 }
 
@@ -73,7 +80,7 @@ fn build_default(input: &PersonaInput) -> Vec<SystemBlock> {
 
     // User document block (if present and has content).
     if let Some(ref user_doc) = *input.user_document
-        && let Some(block) = user_document_block(user_doc)
+        && let Some(block) = user_document_block(user_doc, input.user_budget)
     {
         blocks.push(block);
     }
@@ -134,11 +141,8 @@ fn system_persona_block_full(persona: &SystemPersona) -> SystemBlock {
     }
 }
 
-fn user_document_block(doc: &UserDocument) -> Option<SystemBlock> {
-    // `user_to_prompt_block` is the real helper name (plan doc used an older
-    // name); accepts an `Option<usize>` budget, we pass None to defer trimming
-    // to Layer 2's PromptBuilder.
-    let rendered = crate::middleware::user::user_to_prompt_block(doc, None);
+fn user_document_block(doc: &UserDocument, budget: Option<usize>) -> Option<SystemBlock> {
+    let rendered = crate::middleware::user::user_to_prompt_block(doc, budget);
     if rendered.is_empty() {
         None
     } else {

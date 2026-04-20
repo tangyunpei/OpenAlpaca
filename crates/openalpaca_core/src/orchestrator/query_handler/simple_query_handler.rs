@@ -68,9 +68,10 @@ impl Orchestrator {
             tone: "Concise and professional".to_string(),
             domain_knowledge: vec![],
         };
-        // Identity block is derived by Layer 1 Default from
+        // Identity + user blocks are derived by Layer 1 Default from
         // `PersonaInput.identity_document` + `PersonaInput.identity_budget`
-        // (sourced from `daemon.orchestrator.prompt_budgets.identity_budget`).
+        // and `PersonaInput.user_document` + `PersonaInput.user_budget`.
+        // Both budgets sourced from `daemon.orchestrator.prompt_budgets`.
         let bootstrap_block = if let Ok(guard) = self.bootstrap_document.read()
             && let Some(ref doc) = *guard
         {
@@ -210,6 +211,13 @@ impl Orchestrator {
                     .orchestrator
                     .prompt_budgets
                     .identity_budget,
+            ),
+            user_budget: Some(
+                self.daemon_config
+                    .load()
+                    .orchestrator
+                    .prompt_budgets
+                    .user_profile_budget,
             ),
         };
         let persona_output = Arc::new(crate::compose::persona::compute(&persona_input));
@@ -654,6 +662,7 @@ impl Orchestrator {
                 .load(std::sync::atomic::Ordering::Relaxed),
             mode: PersonaMode::Minimal,
             identity_budget: None,
+            user_budget: None,
         };
 
         // Pre-compute the persona output so StaticPromptInput has a real Arc;
