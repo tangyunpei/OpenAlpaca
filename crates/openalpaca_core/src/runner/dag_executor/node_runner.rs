@@ -2,6 +2,14 @@
 
 use super::*;
 
+use crate::compose::{
+    ComposeOverrides, ComposeRequest, DynamicContextInput, DynamicContextMode, HistoryInput,
+    HistoryMode, PersonaInput, PersonaMode, StaticPromptInput, StaticPromptMode, SummaryWrapMode,
+    SystemBlock,
+};
+use crate::middleware::prompt::{SystemPersona, format_tool_guidance};
+use crate::prompt_ctx::{ContextBundle, ExecutionPath, SectionPriority};
+
 /// Execute a single DAG node: build context, run agentic loop, return result.
 /// All parameters are owned because this runs inside a spawned task.
 #[allow(clippy::too_many_arguments)]
@@ -22,6 +30,7 @@ pub(super) async fn execute_single_node(
     connector_guidance: String,
     workspace_snapshot: Arc<Option<TaskState>>,
     confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
+    compose_engine: Arc<crate::compose::ComposeEngine>,
 ) -> NodeResult {
     let agent_id = agent.id.clone();
 
@@ -75,7 +84,18 @@ pub(super) async fn execute_single_node(
     // Resolve tools via shared helper
     let tools = crate::tools::resolve_agent_tools(&agent, &tool_registry);
 
-    // Build prompt via PromptBuilder
+    // ── Phase 6 Commit 2: route system-prompt + message-list assembly through
+    // the layered compose engine. `PersonaMode::Skip` +
+    // `StaticPromptMode::SubagentMinimal` (raw-blocks-only) +
+    // `DynamicContextMode::Default` (empty bundle → zero messages) +
+    // `HistoryMode::Default` reproduces the pre-migration PromptBuilder chain
+    // byte-identically. See `test_golden_dag_node_byte_identical` in
+    // `compose/tests.rs` for the invariant.
+    //
+    // Pre-migration (node_runner.rs:85-215) did NOT call `.context_bundle()`,
+    // so there is no `ContextPackage` routed through Layer 3 — the
+    // ContextPackage below is purely for telemetry. `ContextPackageBuilt` is
+    // still emitted unchanged so downstream observability matches pre-migration.
     let model_window = context_budget.model_context_window();
     let identity_block = format!("<identity>\n{}\n</identity>", agent.preset.persona);
     let assignment_block = format!(
@@ -94,45 +114,35 @@ pub(super) async fn execute_single_node(
         String::new()
     };
 
-    let mut builder = crate::prompt::PromptBuilder::new(model_window);
-    builder = builder
-        .raw_system_block("agent_identity", &identity_block, crate::prompt_ctx::SectionPriority::High)
-        .raw_system_block("assignment", &assignment_block, crate::prompt_ctx::SectionPriority::Critical)
-        .raw_system_block("scope", scope_block, crate::prompt_ctx::SectionPriority::Normal)
-        .raw_system_block("output_format", output_block, crate::prompt_ctx::SectionPriority::Normal)
-        .tools(&tools);
+    // Resolve workspace context (used for both the telemetry ContextPackage
+    // and the post-compose user-message injection below). Uses pre-loaded
+    // snapshot (Opt-7c) to avoid redundant DB reads per node.
+    let workspace_context = if let Some(ref state) = *workspace_snapshot {
+        state.workspace.format_for_prompt(&node.workspace_keys)
+    } else {
+        super::progress::load_workspace_context(&task_id, &db, &node.workspace_keys)
+    };
 
-    if !connector_suffix.is_empty() {
-        builder = builder.raw_system_block("connector_guidance", &connector_suffix, crate::prompt_ctx::SectionPriority::Normal);
-    }
-
-    // Context package: workspace artifacts for telemetry
+    // Context package: workspace artifacts for telemetry. Keep ContextPackageBuilt
+    // emission unchanged — this is purely observability.
     {
-        // Build workspace artifact content
-        let ws_ctx = if let Some(ref state) = *workspace_snapshot {
-            state.workspace.format_for_prompt(&node.workspace_keys)
-        } else {
-            String::new()
-        };
-
-        // Build a minimal ContextPackage for telemetry
         let mut package_sections = Vec::new();
-        if !ws_ctx.is_empty() {
+        if !workspace_context.is_empty() {
             package_sections.push(crate::prompt_ctx::PackageSection {
                 kind: crate::prompt_ctx::PackageSectionKind::WorkspaceArtifact,
-                content: ws_ctx.clone(),
-                token_estimate: ws_ctx.len() / 4,
-                priority: crate::prompt_ctx::SectionPriority::Normal,
+                content: workspace_context.clone(),
+                token_estimate: workspace_context.len() / 4,
+                priority: SectionPriority::Normal,
             });
         }
 
         let total_tokens: usize = package_sections.iter().map(|s| s.token_estimate).sum();
 
-        // Emit telemetry with new schema
         bus.publish(crate::events::SystemEvent::ContextPackageBuilt {
             request_id: uuid::Uuid::new_v4(),
             agent_id: agent.id.clone(),
-            sections: package_sections.iter()
+            sections: package_sections
+                .iter()
                 .map(|s| (s.kind.source_name().to_string(), s.token_estimate))
                 .collect(),
             total_tokens,
@@ -140,12 +150,143 @@ pub(super) async fn execute_single_node(
             sub_agent_window: model_window,
             timestamp: chrono::Utc::now(),
         });
-
-        // Workspace context is injected as a user message below (lines 165+),
-        // not in the system prompt, to keep it in the untrusted zone.
     }
 
-    let built = builder.build();
+    // raw_blocks replicate the pre-migration `.raw_system_block(...)` / `.tools()` /
+    // `.raw_system_block("connector_guidance", ...)` order at node_runner.rs:97-107.
+    // Tools are pre-rendered via format_tool_guidance (same helper
+    // PromptBuilder::tools calls internally) and pushed as a raw_block named
+    // "tools". Connector suffix — already prefixed with "\n" by the branch
+    // above — is pushed as a raw_block named "connector_guidance" only when
+    // non-empty.
+    let mut raw_blocks: Vec<SystemBlock> = Vec::with_capacity(6);
+    raw_blocks.push(SystemBlock {
+        name: "agent_identity",
+        content: Arc::<str>::from(identity_block),
+        priority: SectionPriority::High,
+    });
+    raw_blocks.push(SystemBlock {
+        name: "assignment",
+        content: Arc::<str>::from(assignment_block.clone()),
+        priority: SectionPriority::Critical,
+    });
+    raw_blocks.push(SystemBlock {
+        name: "scope",
+        content: Arc::<str>::from(scope_block.to_string()),
+        priority: SectionPriority::Normal,
+    });
+    raw_blocks.push(SystemBlock {
+        name: "output_format",
+        content: Arc::<str>::from(output_block.to_string()),
+        priority: SectionPriority::Normal,
+    });
+    let tools_rendered = format_tool_guidance(&tools);
+    if !tools_rendered.is_empty() {
+        raw_blocks.push(SystemBlock {
+            name: "tools",
+            content: Arc::<str>::from(tools_rendered),
+            priority: SectionPriority::Normal,
+        });
+    }
+    if !connector_suffix.is_empty() {
+        raw_blocks.push(SystemBlock {
+            name: "connector_guidance",
+            content: Arc::<str>::from(connector_suffix),
+            priority: SectionPriority::Normal,
+        });
+    }
+
+    let persona_input = PersonaInput {
+        system_persona: Arc::new(SystemPersona::default()),
+        user_document: Arc::new(None),
+        identity_document: Arc::new(None),
+        persona_version: 0,
+        mode: PersonaMode::Skip,
+    };
+    let persona_output = Arc::new(crate::compose::persona::compute(&persona_input));
+
+    let tools_arc: Arc<Vec<openalpaca_llm::ToolDefinition>> = Arc::new(tools.clone());
+
+    let static_prompt_input = StaticPromptInput {
+        persona_output,
+        agent_persona: None,
+        agent_config_fingerprint: [0u8; 32],
+        skill_block: None,
+        skills_catalog: None,
+        bootstrap: None,
+        tools: tools_arc.clone(),
+        connector_status: Arc::new(Vec::new()),
+        send_tool_context: None,
+        message_source: None,
+        raw_blocks,
+        planner_agents: None,
+        planner_protocol_v2: false,
+        mode: StaticPromptMode::SubagentMinimal,
+        model_window: model_window as u32,
+    };
+
+    // DAG Node pre-migration never calls `.context_bundle()`, so Layer 3
+    // receives an empty bundle and emits no messages/blocks.
+    let dynamic_context_input = DynamicContextInput {
+        context_bundle: Arc::new(ContextBundle::empty()),
+        query: Arc::from(task_description.as_str()),
+        memory_retrieval_hash: [0u8; 32],
+        path: ExecutionPath::DagNode {
+            node_id: node.node_id.clone(),
+        },
+        reserved_tokens: 0,
+        mode: DynamicContextMode::Default,
+    };
+
+    // Pre-migration messages vec at node_runner.rs:193-215:
+    //   [system, user(task_description), user(<workspace>...</workspace>)]
+    // Mapped to HistoryMode::Default:
+    //   - recent_messages[0] = user(task_description)
+    //   - current_user_turn = Some(user(workspace wrap)) when workspace is non-empty
+    let workspace_wrapped = if !workspace_context.is_empty() {
+        Some(format!(
+            "<workspace>\n\
+             The following entries contain results from upstream sub-tasks. \
+             Use this data to complete your assignment. You can also call \
+             workspace_read and workspace_write to access or update entries.\n\n\
+             {}\n\
+             </workspace>",
+            workspace_context
+        ))
+    } else {
+        None
+    };
+
+    let history_input = HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        summary: None,
+        summary_wrap_mode: SummaryWrapMode::Plain,
+        recent_messages: Arc::new(vec![ChatMessage::user(&task_description)]),
+        current_user_turn: workspace_wrapped
+            .as_deref()
+            .map(ChatMessage::user),
+        mode: HistoryMode::Default,
+    };
+
+    let compose_request = ComposeRequest::DagNode {
+        agent: Arc::new(agent.clone()),
+        assignment: Arc::<str>::from(assignment_block),
+        workspace_context: Arc::<str>::from(workspace_context.as_str()),
+        tools: tools_arc.clone(),
+        overrides: ComposeOverrides::default(),
+    };
+
+    let composed = compose_engine.compose(
+        &compose_request,
+        persona_input,
+        static_prompt_input,
+        dynamic_context_input,
+        history_input,
+        model_window as u32,
+        tools_arc.clone(),
+        Some(&bus),
+        None, // lane: DAG nodes have no natural lane key (per-lane cache deferred).
+    );
 
     // --- Context Budget Telemetry ---
     {
@@ -158,7 +299,13 @@ pub(super) async fn execute_single_node(
                 model_window,
                 &daemon_config.load().execution.context,
             );
-        budget_snapshot.register_section("system_prompt", built.total_prompt_tokens);
+        // Register the static-prompt tokens under `system_prompt` to preserve
+        // the pre-migration budget accounting (pre-migration
+        // `built.total_prompt_tokens` summed all registered sections; DAG Node
+        // pre-migration only registered raw_system_blocks + tools, all of
+        // which now live inside Layer 2's system_message).
+        let system_prompt_tokens = composed.token_budget.static_prompt_tokens as usize;
+        budget_snapshot.register_section("system_prompt", system_prompt_tokens);
         budget_snapshot.register_section("tools", tools.len() * 200);
 
         tracing::debug!(
@@ -187,32 +334,10 @@ pub(super) async fn execute_single_node(
         });
     }
 
-    let system_prompt = built.system_message;
-
-    // Build messages: system + task + workspace context for this node
-    let mut messages = vec![
-        ChatMessage::system(&system_prompt),
-        ChatMessage::user(&task_description),
-    ];
-
-    // Inject workspace entries that this node depends on.
-    // Uses pre-loaded snapshot (Opt-7c) to avoid redundant DB reads per node.
-    let workspace_context = if let Some(ref state) = *workspace_snapshot {
-        state.workspace.format_for_prompt(&node.workspace_keys)
-    } else {
-        super::progress::load_workspace_context(&task_id, &db, &node.workspace_keys)
-    };
-    if !workspace_context.is_empty() {
-        messages.push(ChatMessage::user(&format!(
-            "<workspace>\n\
-             The following entries contain results from upstream sub-tasks. \
-             Use this data to complete your assignment. You can also call \
-             workspace_read and workspace_write to access or update entries.\n\n\
-             {}\n\
-             </workspace>",
-            workspace_context
-        )));
-    }
+    // The compose engine's Arc'd messages vec: owned by ComposedRequest. Clone
+    // the contents out because `run_agentic_loop_routed` needs `Vec<ChatMessage>`
+    // (and will mutate the vec during the agentic loop).
+    let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
 
     // Run agentic loop
     let agent_start = Instant::now();

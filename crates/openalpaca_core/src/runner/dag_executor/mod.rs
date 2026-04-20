@@ -334,6 +334,7 @@ pub async fn execute_dag(
             let connector_guidance_clone = connector_guidance.to_string();
             let ws_snapshot = workspace_snapshot.clone();
             let broker_clone = confirmation_broker.clone();
+            let compose_engine_clone = compose_engine.clone();
             join_set.spawn(async move {
                 execute_single_node(
                     node_snapshot,
@@ -352,6 +353,7 @@ pub async fn execute_dag(
                     connector_guidance_clone,
                     ws_snapshot,
                     broker_clone,
+                    compose_engine_clone,
                 )
                 .await
             });

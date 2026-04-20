@@ -3400,3 +3400,303 @@ fn test_golden_pipeline_step_byte_identical() {
     assert_eq!(second_to_last.role, Role::User);
     assert_eq!(second_to_last.content, memory_block_text);
 }
+
+/// Phase 6 Commit 2 — DAG Node golden fixture.
+///
+/// Asserts byte-identical `ComposedRequest.messages` between:
+///   (a) pre-migration `PromptBuilder` chain at
+///       `runner/dag_executor/node_runner.rs:85-215` and
+///   (b) migrated `ComposeEngine::compose(ComposeRequest::DagNode{...})` with
+///       `PersonaMode::Skip` + `StaticPromptMode::SubagentMinimal` +
+///       `DynamicContextMode::Default` + `HistoryMode::Default`.
+///
+/// Scene mirrors the pre-migration DAG node with a non-empty
+/// `connector_suffix`, a non-empty tool list, and a non-empty
+/// `workspace_context`. Includes:
+///   - `agent_identity`, `assignment`, `scope`, `output_format` raw_blocks
+///   - Pre-rendered tools via `format_tool_guidance(...)` — pushed as a
+///     raw_block named "tools" at the same position `.tools(...)` would have
+///     placed it in the pre-migration fluent chain.
+///   - Non-empty `connector_suffix` → emitted as a raw_block named
+///     "connector_guidance".
+///   - No `ContextPackage` routing through Layer 3 — DAG Node pre-migration
+///     NEVER calls `.context_bundle()`, so the bundle fed to Layer 3 is
+///     empty and emits zero messages/blocks.
+///   - `task_description` (the overall task description, NOT the node
+///     description) arrives as `HistoryInput.recent_messages[0]`.
+///   - `workspace_context` (if non-empty) arrives as
+///     `HistoryInput.current_user_turn` wrapped in the pre-migration
+///     `<workspace>...</workspace>` envelope. Pre-migration injected it as
+///     a plain user message (NOT through `wrap_untrusted_context`), so the
+///     migration preserves that placement by constructing the wrapped string
+///     loader-side and passing it as a plain `ChatMessage::user` on the
+///     history input.
+#[test]
+fn test_golden_dag_node_byte_identical() {
+    use crate::middleware::prompt::format_tool_guidance;
+    use crate::prompt::PromptBuilder;
+    use openalpaca_llm::Role;
+
+    // ── Canned DAG-node scene. Mirrors the pre-migration arguments at
+    //    runner/dag_executor/node_runner.rs:78-95 + 109-116 + 192-215. ─────
+    let agent_persona_text = "I am a DAG node test agent persona.";
+    let node_title = "ingest-data";
+    let node_description = "Ingest the raw CSV and produce a cleaned row stream.";
+    let task_description =
+        "Analyze all sales data for Q1 and deliver an exception report.";
+    let workspace_context_text =
+        "## Shared Workspace\n\n### [q1_sales.csv] (by planner, type: Context)\ncol_a,col_b\n1,2\n\n";
+    let connector_guidance_text =
+        "<connector_status>\n- discord: active\n</connector_status>";
+    let model_window: usize = 200_000;
+
+    // Canned tool definitions (same single tool as Pipeline golden test).
+    let tool_defs: Vec<ToolDefinition> = vec![ToolDefinition {
+        name: "workspace_read".to_string(),
+        description: "Read a workspace entry by key".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": { "key": { "type": "string" } }
+        }),
+        strict: None,
+        input_examples: None,
+    }];
+
+    // ── Pre-migration reference: PromptBuilder chain at node_runner.rs:97-107. ──
+    let identity_block = format!("<identity>\n{}\n</identity>", agent_persona_text);
+    let assignment_block = format!(
+        "<assignment>\nSub-task: {}\nDescription: {}\n</assignment>",
+        node_title, node_description,
+    );
+    let scope_block = "<scope>\nYou are responsible for completing only the sub-task described above. \
+        Do not attempt work outside your assignment. Your output will be stored \
+        in the workspace for downstream nodes that depend on your results.\n</scope>";
+    let output_block = "<output-format>\nProvide a complete, self-contained result for your sub-task. Other agents \
+        will consume your output, so be specific and include all relevant details.\n</output-format>";
+
+    // Pre-migration constructs `connector_suffix` as "\n" + connector_guidance
+    // when the guidance is non-empty (see node_runner.rs:91-95). This only
+    // occurs when connector_guidance is non-empty; otherwise the raw_block is
+    // skipped entirely.
+    let connector_suffix = format!("\n{}", connector_guidance_text);
+
+    let built = PromptBuilder::new(model_window)
+        .raw_system_block("agent_identity", &identity_block, SectionPriority::High)
+        .raw_system_block("assignment", &assignment_block, SectionPriority::Critical)
+        .raw_system_block("scope", scope_block, SectionPriority::Normal)
+        .raw_system_block("output_format", output_block, SectionPriority::Normal)
+        .tools(&tool_defs)
+        .raw_system_block(
+            "connector_guidance",
+            &connector_suffix,
+            SectionPriority::Normal,
+        )
+        .build();
+    let expected_system = built.system_message.clone();
+
+    // Pre-migration messages vec at node_runner.rs:193-215:
+    //   [system, user(task_description), user(<workspace>...</workspace>)]
+    // `built.context_messages` is empty because pre-migration DAG Node does
+    // NOT call `.context_bundle()`.
+    let workspace_wrapped = format!(
+        "<workspace>\n\
+         The following entries contain results from upstream sub-tasks. \
+         Use this data to complete your assignment. You can also call \
+         workspace_read and workspace_write to access or update entries.\n\n\
+         {}\n\
+         </workspace>",
+        workspace_context_text
+    );
+    let mut expected_messages: Vec<ChatMessage> =
+        Vec::with_capacity(1 + built.context_messages.len() + 2);
+    expected_messages.push(ChatMessage::system(&expected_system));
+    expected_messages.extend(built.context_messages.iter().cloned());
+    expected_messages.push(ChatMessage::user(task_description));
+    expected_messages.push(ChatMessage::user(&workspace_wrapped));
+
+    // ── Via the engine: PersonaMode::Skip + StaticPromptMode::SubagentMinimal. ──
+    //
+    // Caller pre-renders tools via `format_tool_guidance(...)` and pushes the
+    // result as raw_block "tools". Connector suffix is pushed as raw_block
+    // "connector_guidance". The bundle fed to Layer 3 is empty (DAG Node has
+    // no ContextPackage) so `DynamicContextMode::Default` emits nothing.
+    //
+    // `HistoryMode::Default` order: summary (None) → recent_messages →
+    // current_user_turn. To match pre-migration byte-identically we put:
+    //   - task_description → recent_messages[0]
+    //   - workspace_wrapped → current_user_turn (when ws non-empty)
+    let engine = ComposeEngine::new(16);
+
+    let tools_rendered = format_tool_guidance(&tool_defs);
+    let raw_blocks_for_engine: Vec<SystemBlock> = vec![
+        SystemBlock {
+            name: "agent_identity",
+            content: Arc::<str>::from(identity_block.clone()),
+            priority: SectionPriority::High,
+        },
+        SystemBlock {
+            name: "assignment",
+            content: Arc::<str>::from(assignment_block.clone()),
+            priority: SectionPriority::Critical,
+        },
+        SystemBlock {
+            name: "scope",
+            content: Arc::<str>::from(scope_block.to_string()),
+            priority: SectionPriority::Normal,
+        },
+        SystemBlock {
+            name: "output_format",
+            content: Arc::<str>::from(output_block.to_string()),
+            priority: SectionPriority::Normal,
+        },
+        SystemBlock {
+            name: "tools",
+            content: Arc::<str>::from(tools_rendered),
+            priority: SectionPriority::Normal,
+        },
+        SystemBlock {
+            name: "connector_guidance",
+            content: Arc::<str>::from(connector_suffix.clone()),
+            priority: SectionPriority::Normal,
+        },
+    ];
+
+    // Canned SubAgent for the request variant.
+    use crate::agent::subagent::{
+        AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, SubAgent,
+    };
+    let agent = Arc::new(SubAgent {
+        id: "dag-test-agent-01".to_string(),
+        template_id: "dag-test-agent".to_string(),
+        name: "DAG Test Agent".to_string(),
+        description: None,
+        icon: None,
+        status: AgentStatus::Idle,
+        current_task: None,
+        capabilities: vec![],
+        preset: AgentPreset {
+            persona: agent_persona_text.to_string(),
+            ..AgentPreset::default()
+        },
+        constraints: AgentConstraints::default(),
+        llm_config: AgentLlmConfig::default(),
+    });
+
+    let persona_input = PersonaInput {
+        system_persona: Arc::new(SystemPersona::default()),
+        user_document: Arc::new(None),
+        identity_document: Arc::new(None),
+        persona_version: 0,
+        mode: PersonaMode::Skip,
+    };
+    let persona_output = Arc::new(super::persona::compute(&persona_input));
+
+    let static_prompt_input = StaticPromptInput {
+        persona_output,
+        agent_persona: None,
+        agent_config_fingerprint: [0u8; 32],
+        skill_block: None,
+        skills_catalog: None,
+        bootstrap: None,
+        tools: Arc::new(tool_defs.clone()),
+        connector_status: Arc::new(Vec::new()),
+        send_tool_context: None,
+        message_source: None,
+        raw_blocks: raw_blocks_for_engine,
+        planner_agents: None,
+        planner_protocol_v2: false,
+        mode: StaticPromptMode::SubagentMinimal,
+        model_window: model_window as u32,
+    };
+
+    // Empty bundle — DAG Node has no ContextPackage flowing through Layer 3.
+    let dynamic_context_input = DynamicContextInput {
+        context_bundle: Arc::new(ContextBundle::empty()),
+        query: Arc::from(task_description),
+        memory_retrieval_hash: [0u8; 32],
+        path: ExecutionPath::DagNode {
+            node_id: "node_1".to_string(),
+        },
+        reserved_tokens: 0,
+        mode: DynamicContextMode::Default,
+    };
+
+    // task_description → recent_messages[0]; workspace_wrapped → current_user_turn.
+    let history_input = HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        summary: None,
+        summary_wrap_mode: SummaryWrapMode::Plain,
+        recent_messages: Arc::new(vec![ChatMessage::user(task_description)]),
+        current_user_turn: Some(ChatMessage::user(&workspace_wrapped)),
+        mode: HistoryMode::Default,
+    };
+
+    let request = ComposeRequest::DagNode {
+        agent: agent.clone(),
+        assignment: Arc::<str>::from(assignment_block.clone()),
+        workspace_context: Arc::<str>::from(workspace_context_text),
+        tools: Arc::new(tool_defs.clone()),
+        overrides: ComposeOverrides::default(),
+    };
+
+    let composed = engine.compose(
+        &request,
+        persona_input,
+        static_prompt_input,
+        dynamic_context_input,
+        history_input,
+        model_window as u32,
+        Arc::new(tool_defs.clone()),
+        None,
+        None,
+    );
+
+    // ── Byte-identical assertion. ───────────────────────────────────────
+    assert_eq!(
+        composed.messages.len(),
+        expected_messages.len(),
+        "DAG Node migration produced wrong message count: got {} vs expected {}",
+        composed.messages.len(),
+        expected_messages.len()
+    );
+    for (idx, (got, expected)) in composed
+        .messages
+        .iter()
+        .zip(expected_messages.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            got.role, expected.role,
+            "message {idx} role mismatch: got {:?} expected {:?}",
+            got.role, expected.role
+        );
+        assert_eq!(
+            got.content, expected.content,
+            "message {idx} content mismatch:\n--- GOT ---\n{}\n--- EXPECTED ---\n{}\n",
+            got.content, expected.content
+        );
+        assert!(
+            got.parts.is_none(),
+            "message {idx} got parts should be None"
+        );
+        assert!(
+            got.tool_calls.is_none(),
+            "message {idx} got tool_calls should be None"
+        );
+        assert_eq!(
+            got.tool_call_id, expected.tool_call_id,
+            "message {idx} tool_call_id mismatch"
+        );
+    }
+
+    // Sanity: first message is system, last is the workspace-wrapped user
+    // message, and the task_description lives at the index just before the
+    // workspace wrap.
+    assert_eq!(composed.messages[0].role, Role::System);
+    let last = composed.messages.last().unwrap();
+    assert_eq!(last.role, Role::User);
+    assert_eq!(last.content, workspace_wrapped);
+    let second_to_last = &composed.messages[composed.messages.len() - 2];
+    assert_eq!(second_to_last.role, Role::User);
+    assert_eq!(second_to_last.content, task_description);
+}
