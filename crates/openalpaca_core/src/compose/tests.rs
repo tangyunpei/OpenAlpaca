@@ -2488,3 +2488,456 @@ fn test_golden_skill_invocation_byte_identical() {
     assert_eq!(composed.messages.last().unwrap().role, Role::User);
     assert_eq!(composed.messages.last().unwrap().content, query);
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Phase 5 Commit 2 — SimpleQuery migration golden-output tests
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Golden-output: asserts the migrated SimpleQuery path (text-only) produces
+/// byte-identical `ComposedRequest.messages` to what the pre-migration
+/// `PromptBuilder` chain + manual message construction at
+/// `orchestrator/query_handler/simple_query_handler.rs:196-307` would have
+/// produced.
+///
+/// Routing through `compose(ComposeRequest::SimpleQuery{..})` with
+/// `PersonaMode::Default` + `StaticPromptMode::Default` +
+/// `DynamicContextMode::Default` (empty bundle) + `HistoryMode::Default` must
+/// produce the identical message sequence.
+///
+/// The scenario exercises the common "simple" SimpleQuery invocation shape:
+/// canned persona + agent_persona, empty identity + bootstrap, non-empty
+/// skills_catalog, a single non-send tool, empty connector_status, no session
+/// summary, and two recent messages. Since there's no `send` tool, the
+/// `send_context` and `send_rules` blocks are NOT emitted.
+#[test]
+fn test_golden_simple_query_text_only_byte_identical() {
+    use crate::prompt::PromptBuilder;
+    use openalpaca_llm::{ChatMessage, Role};
+
+    // ── Canned inputs mirroring the SimpleQuery pre-migration scene. ──
+    let system_persona_val = SystemPersona {
+        name: "OpenAlpaca".to_string(),
+        core_values: vec![
+            "Act as the user's trusted local AI agent".to_string(),
+            "Provide structured output when asked".to_string(),
+        ],
+        safety_rules: vec![
+            "Confirm before destructive actions".to_string(),
+        ],
+        base_instructions: "You are OpenAlpaca, a helpful local assistant.".to_string(),
+    };
+    let agent_persona_val = AgentPersona {
+        role: "Assistant".to_string(),
+        tone: "Concise and professional".to_string(),
+        domain_knowledge: vec![],
+    };
+    let identity_block = ""; // No identity document.
+    let bootstrap_block = ""; // No bootstrap document.
+    let skills_catalog_str = "<skills_catalog>\n- some_skill\n</skills_catalog>";
+    let source_text = "cli";
+    let query = "hello world";
+    let recent = vec![
+        ChatMessage::user("previous turn"),
+        ChatMessage::assistant("previous reply"),
+    ];
+    let tool_defs: Vec<ToolDefinition> = vec![ToolDefinition {
+        name: "demo_tool".to_string(),
+        description: "a demo tool".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "arg": { "type": "string" }
+            }
+        }),
+        strict: None,
+        input_examples: None,
+    }];
+    let model_window: usize = 200_000;
+
+    // ── Reference: reconstruct pre-migration PromptBuilder chain. ──
+    //
+    // Matches orchestrator/query_handler/simple_query_handler.rs:196-248 for
+    // the "no connectors, no send tool, empty identity, empty bootstrap,
+    // non-empty skills_catalog" shape:
+    //
+    //   system_persona -> agent_persona -> identity -> bootstrap ->
+    //   skills_catalog -> tools -> message_source -> context_bundle(empty).
+    //
+    // Conditionals omitted (no-send-tool path): connector_guidance, send_context,
+    // send_rules.
+    let built = PromptBuilder::new(model_window)
+        .system_persona(&system_persona_val)
+        .agent_persona(&agent_persona_val)
+        .identity(identity_block)
+        .bootstrap(bootstrap_block)
+        .skills_catalog(skills_catalog_str)
+        .tools(&tool_defs)
+        .message_source(source_text)
+        .context_bundle(&ContextBundle::empty())
+        .build();
+    let expected_system = built.system_message.clone();
+
+    // Reference messages: [system, ...built.context_messages, ...recent, user(query)].
+    // No summary in this scenario → skip.
+    let mut expected_messages: Vec<ChatMessage> =
+        Vec::with_capacity(1 + built.context_messages.len() + recent.len() + 1);
+    expected_messages.push(ChatMessage::system(&expected_system));
+    expected_messages.extend(built.context_messages.iter().cloned());
+    expected_messages.extend(recent.iter().cloned());
+    expected_messages.push(ChatMessage::user(query));
+
+    // ── Via the engine: PersonaMode::Default + StaticPromptMode::Default. ──
+    let engine = ComposeEngine::new(16);
+
+    let persona_input = PersonaInput {
+        system_persona: Arc::new(system_persona_val.clone()),
+        // No user/identity documents for this golden scenario.
+        user_document: Arc::new(None),
+        identity_document: Arc::new(None),
+        persona_version: 0,
+        mode: PersonaMode::Default,
+    };
+    // Pre-compute so StaticPromptInput has a real Arc; compose() will overwrite
+    // on cache hit.
+    let persona_output = Arc::new(super::persona::compute(&persona_input));
+
+    let static_prompt_input = StaticPromptInput {
+        persona_output,
+        agent_persona: Some(Arc::new(agent_persona_val.clone())),
+        agent_config_fingerprint: [0u8; 32],
+        skill_block: None,
+        skills_catalog: Some(Arc::<str>::from(skills_catalog_str)),
+        bootstrap: None,
+        tools: Arc::new(tool_defs.clone()),
+        connector_status: Arc::new(Vec::new()),
+        send_tool_context: None,
+        message_source: Some(Arc::<str>::from(source_text)),
+        raw_blocks: Vec::new(),
+        planner_agents: None,
+        planner_protocol_v2: false,
+        mode: StaticPromptMode::Default,
+        model_window: model_window as u32,
+    };
+
+    let dynamic_context_input = DynamicContextInput {
+        context_bundle: Arc::new(ContextBundle::empty()),
+        query: Arc::from(query),
+        memory_retrieval_hash: [0u8; 32],
+        path: ExecutionPath::SimpleQuery,
+        reserved_tokens: 0,
+        mode: DynamicContextMode::Default,
+    };
+
+    let history_input = HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        summary: None,
+        summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
+        recent_messages: Arc::new(recent.clone()),
+        current_user_turn: Some(ChatMessage::user(query)),
+        mode: HistoryMode::Default,
+    };
+
+    let request = ComposeRequest::SimpleQuery {
+        lane_key: "simple_lane".to_string(),
+        agent_persona: Arc::new(agent_persona_val.clone()),
+        query: query.to_string(),
+        current_parts: None,
+        message_source: Arc::<str>::from(source_text),
+        overrides: ComposeOverrides::default(),
+    };
+
+    let composed = engine.compose(
+        &request,
+        persona_input,
+        static_prompt_input,
+        dynamic_context_input,
+        history_input,
+        model_window as u32,
+        Arc::new(tool_defs.clone()),
+        None,
+        None,
+    );
+
+    // ── Byte-identical assertion (field-by-field; ChatMessage lacks PartialEq). ──
+    assert_eq!(
+        composed.messages.len(),
+        expected_messages.len(),
+        "SimpleQuery migration produced wrong message count: got {} vs expected {}",
+        composed.messages.len(),
+        expected_messages.len()
+    );
+    for (idx, (got, expected)) in composed
+        .messages
+        .iter()
+        .zip(expected_messages.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            got.role, expected.role,
+            "message {idx} role mismatch: got {:?} expected {:?}",
+            got.role, expected.role
+        );
+        assert_eq!(
+            got.content, expected.content,
+            "message {idx} content mismatch:\n--- GOT ---\n{}\n--- EXPECTED ---\n{}\n",
+            got.content, expected.content
+        );
+        // ContentPart doesn't derive PartialEq — assert both sides are None
+        // (no multimodal content in this text-only scenario).
+        assert!(
+            got.parts.is_none(),
+            "message {idx} got parts should be None"
+        );
+        assert!(
+            expected.parts.is_none(),
+            "message {idx} expected parts should be None"
+        );
+        // Same for tool_calls (no ToolCall PartialEq derive).
+        assert!(
+            got.tool_calls.is_none(),
+            "message {idx} got tool_calls should be None"
+        );
+        assert!(
+            expected.tool_calls.is_none(),
+            "message {idx} expected tool_calls should be None"
+        );
+        assert_eq!(
+            got.tool_call_id, expected.tool_call_id,
+            "message {idx} tool_call_id mismatch"
+        );
+    }
+
+    // Sanity: first message is the system prompt, last is the current user turn.
+    assert_eq!(composed.messages[0].role, Role::System);
+    assert_eq!(composed.messages.last().unwrap().role, Role::User);
+    assert_eq!(composed.messages.last().unwrap().content, query);
+}
+
+/// Golden-output: asserts the migrated SimpleQuery path (multimodal) produces
+/// byte-identical `ComposedRequest.messages` for the aggregation logic of
+/// Layer 4. Specifically: when `current_parts = Some(...)`, the final user
+/// message in the composed output has `parts = Some(pre_adapted_parts)`.
+///
+/// Layer 4 remains pure. Per the migration plan, `adapt_parts_for_model` runs
+/// loader-side BEFORE compose() is invoked, so in this golden test we simulate
+/// that by passing the parts through as-is (identity adapter) — the
+/// byte-identical assertion covers only Layer 4's aggregation of
+/// `HistoryInput.current_user_turn` into the final messages vec, NOT the
+/// adapter's transformation logic (which is covered by the orchestrator
+/// integration tests at `orchestrator/tests.rs:1057`).
+#[test]
+fn test_golden_simple_query_multimodal_byte_identical() {
+    use crate::prompt::PromptBuilder;
+    use openalpaca_llm::{ChatMessage, ContentPart, ImageSource, Role};
+
+    // ── Canned inputs mirroring the SimpleQuery pre-migration scene. ──
+    let system_persona_val = SystemPersona {
+        name: "OpenAlpaca".to_string(),
+        core_values: vec![
+            "Act as the user's trusted local AI agent".to_string(),
+        ],
+        safety_rules: vec![
+            "Confirm before destructive actions".to_string(),
+        ],
+        base_instructions: "You are OpenAlpaca, a helpful local assistant.".to_string(),
+    };
+    let agent_persona_val = AgentPersona {
+        role: "Assistant".to_string(),
+        tone: "Concise and professional".to_string(),
+        domain_knowledge: vec![],
+    };
+    let identity_block = "";
+    let bootstrap_block = "";
+    let skills_catalog_str = "<skills_catalog>\n- some_skill\n</skills_catalog>";
+    let source_text = "cli";
+    let query = "hello";
+    let recent = vec![
+        ChatMessage::user("previous turn"),
+        ChatMessage::assistant("previous reply"),
+    ];
+    let tool_defs: Vec<ToolDefinition> = vec![];
+    let model_window: usize = 200_000;
+
+    // Multimodal parts (the loader would `sanitize_parts_for_dispatch` +
+    // `adapt_parts_for_model` these before passing to compose; for this golden
+    // we simulate an identity adapter so we can compare Layer 4's aggregation
+    // byte-identically against what the pre-migration code produced for the
+    // same pre-adapted input).
+    let adapted_parts: Vec<ContentPart> = vec![
+        ContentPart::Text { text: "hello".to_string() },
+        ContentPart::Image {
+            source: ImageSource::Url {
+                url: "https://example.com/img.png".to_string(),
+            },
+            detail: None,
+        },
+    ];
+
+    // ── Reference: reconstruct pre-migration PromptBuilder chain + manual
+    // message construction. ──
+    //
+    // Matches orchestrator/query_handler/simple_query_handler.rs:259-307 for
+    // the multimodal branch:
+    //   messages.push(system)
+    //   messages.extend(built.context_messages)
+    //   (no summary)
+    //   messages.extend(adapted_recent)
+    //   messages.push(ChatMessage::user_with_parts(adapted_parts))
+    let built = PromptBuilder::new(model_window)
+        .system_persona(&system_persona_val)
+        .agent_persona(&agent_persona_val)
+        .identity(identity_block)
+        .bootstrap(bootstrap_block)
+        .skills_catalog(skills_catalog_str)
+        // No tools in this scenario.
+        .message_source(source_text)
+        .context_bundle(&ContextBundle::empty())
+        .build();
+    let expected_system = built.system_message.clone();
+
+    let mut expected_messages: Vec<ChatMessage> =
+        Vec::with_capacity(1 + built.context_messages.len() + recent.len() + 1);
+    expected_messages.push(ChatMessage::system(&expected_system));
+    expected_messages.extend(built.context_messages.iter().cloned());
+    expected_messages.extend(recent.iter().cloned());
+    expected_messages.push(ChatMessage::user_with_parts(adapted_parts.clone()));
+
+    // ── Via the engine ──
+    let engine = ComposeEngine::new(16);
+
+    let persona_input = PersonaInput {
+        system_persona: Arc::new(system_persona_val.clone()),
+        user_document: Arc::new(None),
+        identity_document: Arc::new(None),
+        persona_version: 0,
+        mode: PersonaMode::Default,
+    };
+    let persona_output = Arc::new(super::persona::compute(&persona_input));
+
+    let static_prompt_input = StaticPromptInput {
+        persona_output,
+        agent_persona: Some(Arc::new(agent_persona_val.clone())),
+        agent_config_fingerprint: [0u8; 32],
+        skill_block: None,
+        skills_catalog: Some(Arc::<str>::from(skills_catalog_str)),
+        bootstrap: None,
+        tools: Arc::new(tool_defs.clone()),
+        connector_status: Arc::new(Vec::new()),
+        send_tool_context: None,
+        message_source: Some(Arc::<str>::from(source_text)),
+        raw_blocks: Vec::new(),
+        planner_agents: None,
+        planner_protocol_v2: false,
+        mode: StaticPromptMode::Default,
+        model_window: model_window as u32,
+    };
+
+    let dynamic_context_input = DynamicContextInput {
+        context_bundle: Arc::new(ContextBundle::empty()),
+        query: Arc::from(query),
+        memory_retrieval_hash: [0u8; 32],
+        path: ExecutionPath::SimpleQuery,
+        reserved_tokens: 0,
+        mode: DynamicContextMode::Default,
+    };
+
+    // The key test: current_user_turn uses `user_with_parts(...)` so Layer 4
+    // carries the multimodal `parts` through byte-identically to the final
+    // message.
+    let history_input = HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        summary: None,
+        summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
+        recent_messages: Arc::new(recent.clone()),
+        current_user_turn: Some(ChatMessage::user_with_parts(adapted_parts.clone())),
+        mode: HistoryMode::Default,
+    };
+
+    let request = ComposeRequest::SimpleQuery {
+        lane_key: "simple_lane".to_string(),
+        agent_persona: Arc::new(agent_persona_val.clone()),
+        query: query.to_string(),
+        current_parts: Some(adapted_parts.clone()),
+        message_source: Arc::<str>::from(source_text),
+        overrides: ComposeOverrides::default(),
+    };
+
+    let composed = engine.compose(
+        &request,
+        persona_input,
+        static_prompt_input,
+        dynamic_context_input,
+        history_input,
+        model_window as u32,
+        Arc::new(tool_defs.clone()),
+        None,
+        None,
+    );
+
+    // ── Byte-identical assertion (field-by-field) ──
+    assert_eq!(
+        composed.messages.len(),
+        expected_messages.len(),
+        "SimpleQuery multimodal migration produced wrong message count: got {} vs expected {}",
+        composed.messages.len(),
+        expected_messages.len()
+    );
+    for (idx, (got, expected)) in composed
+        .messages
+        .iter()
+        .zip(expected_messages.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            got.role, expected.role,
+            "message {idx} role mismatch: got {:?} expected {:?}",
+            got.role, expected.role
+        );
+        assert_eq!(
+            got.content, expected.content,
+            "message {idx} content mismatch:\n--- GOT ---\n{}\n--- EXPECTED ---\n{}\n",
+            got.content, expected.content
+        );
+        assert_eq!(
+            got.parts.is_some(),
+            expected.parts.is_some(),
+            "message {idx} parts presence mismatch"
+        );
+        assert!(
+            got.tool_calls.is_none(),
+            "message {idx} got tool_calls should be None"
+        );
+        assert!(
+            expected.tool_calls.is_none(),
+            "message {idx} expected tool_calls should be None"
+        );
+        assert_eq!(
+            got.tool_call_id, expected.tool_call_id,
+            "message {idx} tool_call_id mismatch"
+        );
+    }
+
+    // Explicit check: last message carries the pre-adapted parts.
+    let last = composed.messages.last().unwrap();
+    assert_eq!(last.role, Role::User);
+    let last_parts = last.parts.as_ref().expect("last message must have parts");
+    assert_eq!(last_parts.len(), adapted_parts.len());
+    // First part is text "hello"
+    match &last_parts[0] {
+        ContentPart::Text { text } => assert_eq!(text, "hello"),
+        other => panic!("expected Text part, got {:?}", other),
+    }
+    // Second part is image URL
+    match &last_parts[1] {
+        ContentPart::Image { source, detail } => {
+            match source {
+                ImageSource::Url { url } => assert_eq!(url, "https://example.com/img.png"),
+                other => panic!("expected Url source, got {:?}", other),
+            }
+            assert!(detail.is_none());
+        }
+        other => panic!("expected Image part, got {:?}", other),
+    }
+    // Sanity: first message is the system prompt.
+    assert_eq!(composed.messages[0].role, Role::System);
+}
