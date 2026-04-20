@@ -55,8 +55,11 @@ pub(super) fn compute_fingerprint(input: &PersonaInput) -> [u8; 32] {
 fn build_default(input: &PersonaInput) -> Vec<SystemBlock> {
     let mut blocks = Vec::with_capacity(3);
 
-    // System persona block: always included in Default.
-    blocks.push(system_persona_block(&input.system_persona));
+    // System persona block: always included in Default. Emits the full
+    // <system_instructions> wrap (Identity + Core Values + Safety Rules +
+    // Base Instructions) byte-identically to `PromptBuilder::system_persona`
+    // so Default-mode migrations (Skill, SimpleQuery) stay byte-identical.
+    blocks.push(system_persona_block_full(&input.system_persona));
 
     // User document block (if present and has content).
     if let Some(ref user_doc) = *input.user_document
@@ -76,20 +79,47 @@ fn build_default(input: &PersonaInput) -> Vec<SystemBlock> {
 }
 
 fn build_minimal(input: &PersonaInput) -> Vec<SystemBlock> {
-    // Minimal mode: only the system persona block. Used by Planner / Replanner /
-    // Pipeline / DagNode / LeadAgent where per-user identity is not relevant.
-    vec![system_persona_block(&input.system_persona)]
+    // Minimal mode: only the system persona block as bare `base_instructions`.
+    // Used by Planner / Replanner / Social / Pipeline / DagNode / LeadAgent
+    // where callers wrap the persona in their own templates (e.g. Social's
+    // `<system_instructions>{persona_text}</system_instructions>` format).
+    vec![system_persona_block_bare(&input.system_persona)]
 }
 
-fn system_persona_block(persona: &SystemPersona) -> SystemBlock {
-    // Phase 2 Default-mode note: Layer 2 takes the raw Layer-1 blocks and
-    // feeds them to PromptBuilder::raw_system_block — so we just ship the
-    // base_instructions verbatim here. Layer 2 is responsible for any XML
-    // envelope formatting it needs (and the planner/social modes replicate
-    // the existing inline formats byte-identically there).
+/// Bare persona block: emits only `persona.base_instructions` verbatim. Used
+/// by `PersonaMode::Minimal` — callers (SocialMinimal in Layer 2) wrap the
+/// content in their own template.
+fn system_persona_block_bare(persona: &SystemPersona) -> SystemBlock {
     SystemBlock {
         name: "system_persona",
         content: Arc::<str>::from(persona.base_instructions.as_str()),
+        priority: SectionPriority::Critical,
+    }
+}
+
+/// Full persona block: emits the complete `<system_instructions>` wrap in
+/// byte-identical form to `PromptBuilder::system_persona` so Default-mode
+/// migrations reproduce pre-migration output exactly.
+fn system_persona_block_full(persona: &SystemPersona) -> SystemBlock {
+    let mut block = String::new();
+    block.push_str("<system_instructions>\n");
+    block.push_str(&format!("Identity: {}\n", persona.name));
+    block.push_str("Core Values:\n");
+    for v in &persona.core_values {
+        block.push_str(&format!("- {}\n", v));
+    }
+    block.push_str("Safety Rules:\n");
+    for r in &persona.safety_rules {
+        block.push_str(&format!("- {}\n", r));
+    }
+    block.push_str(&format!(
+        "Base Instructions: {}\n",
+        persona.base_instructions
+    ));
+    block.push_str("</system_instructions>\n");
+    SystemBlock {
+        name: "system_persona",
+        content: Arc::<str>::from(block),
         priority: SectionPriority::Critical,
     }
 }

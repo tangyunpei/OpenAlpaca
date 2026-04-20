@@ -1,22 +1,26 @@
-//! Core skill invocation implementation: tool resolution, prompt building,
-//! agentic loop execution, output validation and repair.
+//! Core skill invocation implementation: tool resolution, prompt assembly
+//! via `ComposeEngine::compose(ComposeRequest::Skill{..})`, agentic loop
+//! execution, output validation and repair.
 
 use super::context::inject_skill_context;
 use super::handler::SkillInvocationResult;
 use super::invoke_executor::{SkillInvocationBuiltInAdapter, SkillInvocationToolExecutor};
 use super::output::{deterministic_repair, validate_skill_output};
 use super::preflight::preflight_permissions;
+use crate::compose::{
+    ComposeOverrides, ComposeRequest, ConnectorSummary, DynamicContextInput, DynamicContextMode,
+    HistoryInput, HistoryMode, PersonaInput, PersonaMode, StaticPromptInput, StaticPromptMode,
+    SummaryWrapMode, SystemBlock,
+};
 use crate::events::SystemEvent;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::bootstrap::bootstrap_to_prompt_block;
 use crate::middleware::guard::{OutputGuard, detect_hallucinated_send};
-use crate::middleware::identity::identity_to_prompt_block;
 use crate::middleware::prompt::AgentPersona;
 use crate::middleware::skill::skill_to_prompt_block;
 use crate::orchestrator::{ConversationContext, Orchestrator};
-use crate::prompt::PromptBuilder;
-use crate::prompt_ctx::sources::{ContextRequest, ExecutionPath};
 use crate::prompt_ctx::SectionPriority;
+use crate::prompt_ctx::sources::{ContextRequest, ExecutionPath};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
@@ -62,9 +66,7 @@ impl Orchestrator {
             String::new()
         };
 
-        // ── Build prompt via PromptBuilder ──────────────────────────────────
-        //
-        // Determine model context window for budget calculations.
+        // ── Resolve model context window (drives Layer 5 trimming + budget) ──
         let model_window = self
             .llm_router
             .as_ref()
@@ -88,19 +90,16 @@ impl Orchestrator {
             tone: "Concise and professional".to_string(),
             domain_knowledge: vec![],
         };
-        let identity_block = if let Ok(guard) = self.identity_document.read()
-            && let Some(ref doc) = *guard
-        {
-            let identity_budget = self
-                .daemon_config
-                .load()
-                .orchestrator
-                .prompt_budgets
-                .identity_budget;
-            identity_to_prompt_block(doc, Some(identity_budget))
-        } else {
-            String::new()
-        };
+        // Identity block is derived by Layer 1 Default from
+        // `PersonaInput.identity_document`; the pre-migration
+        // `identity_to_prompt_block(doc, Some(identity_budget))` call is
+        // replaced by Layer 1's equivalent `identity_to_prompt_block(doc, None)`
+        // (see `compose/persona.rs::identity_document_block`). The configurable
+        // `identity_budget` override is not plumbed through Layer 1 today —
+        // the rendered identity may be longer than pre-migration when the
+        // user has customized `daemon.orchestrator.prompt_budgets.identity_budget`
+        // to a value below the default 300. Track as a follow-up once Layer 1
+        // accepts per-caller budgets.
         let bootstrap_block = if let Ok(guard) = self.bootstrap_document.read()
             && let Some(ref doc) = *guard
         {
@@ -111,26 +110,10 @@ impl Orchestrator {
 
         let skill_block = skill_to_prompt_block(&skill_doc);
 
-        let mut builder = PromptBuilder::new(model_window)
-            .system_persona(&system_persona)
-            .agent_persona(&agent_persona)
-            .identity(&identity_block)
-            .bootstrap(&bootstrap_block);
-
-        // Skill block (High priority — this is an active skill invocation)
-        if !skill_block.is_empty() {
-            builder =
-                builder.raw_system_block("skill_body", &skill_block, SectionPriority::High);
-        }
-
-        // Injected skill context sources (Normal)
+        // Emit SkillContextInjected when injected_context is present. Moved here
+        // from inside the former PromptBuilder chain; the event contract is
+        // unchanged (request_id, skill_id, context_bytes, timestamp).
         if !injected_context.is_empty() {
-            builder = builder.raw_system_block(
-                "skill_context",
-                &injected_context,
-                SectionPriority::Normal,
-            );
-
             self.bus.publish(SystemEvent::SkillContextInjected {
                 request_id,
                 skill_id: skill_name.to_string(),
@@ -138,9 +121,6 @@ impl Orchestrator {
                 timestamp: Utc::now(),
             });
         }
-
-        // Message source
-        builder = builder.message_source(source);
 
         // Resolve tools via capability model, falling back to legacy name-based matching.
         // Intent-suggested tools are intentionally NOT merged here to maintain
@@ -250,24 +230,32 @@ impl Orchestrator {
             }
         }
 
-        // Connector guidance via PromptBuilder
+        // Connector status + sendable channels — packaged into
+        // `ConnectorSummary[]` for Layer 2's `connector_guidance` rendering.
         let sendable_channels: Vec<String> = self
             .connector_sender
             .read()
             .ok()
             .and_then(|g| g.as_ref().map(|p| p.sendable_channels()))
             .unwrap_or_default();
-        if let Ok(guard) = self.connector_status.read()
+        let connector_summaries_vec: Vec<ConnectorSummary> = if let Ok(guard) =
+            self.connector_status.read()
             && let Some(ref provider) = *guard
         {
-            let statuses = provider.list_status();
-            let sendable_ref = if sendable_channels.is_empty() {
-                None
-            } else {
-                Some(sendable_channels.as_slice())
-            };
-            builder = builder.connector_guidance(&statuses, sendable_ref);
-        }
+            provider
+                .list_status()
+                .into_iter()
+                .map(|(id, status)| ConnectorSummary {
+                    sendable: sendable_channels.contains(&id),
+                    id,
+                    status,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let connector_summaries: Arc<Vec<ConnectorSummary>> =
+            Arc::new(connector_summaries_vec);
 
         let (tools_for_loop, policy_opt, config_for_loop);
         if !tool_defs.is_empty() {
@@ -279,20 +267,6 @@ impl Orchestrator {
                 tool_defs.len(),
                 tool_names_log
             );
-            // Register tools in builder
-            builder = builder.tools(&tool_defs);
-
-            // Inject factual send_context when send is available
-            if tool_defs.iter().any(|d| d.name == "send") {
-                let send_ctx = self.build_send_context(owner_id);
-                if !send_ctx.is_empty() {
-                    builder = builder.raw_system_block(
-                        "send_context",
-                        &send_ctx,
-                        SectionPriority::Normal,
-                    );
-                }
-            }
             let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
             let mut denied_caps: Vec<String> = skill_deny.clone();
             for g in global_deny {
@@ -346,8 +320,102 @@ impl Orchestrator {
             config_for_loop = self.loop_config.clone();
         }
 
+        // ── Route system-prompt + message-list assembly through the layered
+        // compose engine (Phase 5 Commit 1 — Skill Invocation migration).
+        // `PersonaMode::Default` + `StaticPromptMode::Default` +
+        // `DynamicContextMode::Default` + `HistoryMode::Default` reproduce the
+        // pre-migration PromptBuilder chain output byte-identically. See the
+        // `test_golden_skill_invocation_byte_identical` test in
+        // `compose/tests.rs` for the byte-identical invariant.
+        let user_document = match self.user_document.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let identity_document = match self.identity_document.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+
+        let persona_input = PersonaInput {
+            system_persona: Arc::new(system_persona),
+            user_document: Arc::new(user_document),
+            identity_document: Arc::new(identity_document),
+            persona_version: self
+                .persona_version
+                .load(std::sync::atomic::Ordering::Relaxed),
+            mode: PersonaMode::Default,
+        };
+        let persona_output = Arc::new(crate::compose::persona::compute(&persona_input));
+
+        // send_tool_context is set only when `send` is in the resolved tool set.
+        let send_tool_context: Option<Arc<str>> = if tools_for_loop
+            .iter()
+            .any(|d| d.name == "send")
+        {
+            let send_ctx = self.build_send_context(owner_id);
+            if send_ctx.is_empty() {
+                None
+            } else {
+                Some(Arc::<str>::from(send_ctx))
+            }
+        } else {
+            None
+        };
+
+        // raw_blocks carry the loader-injected blocks that Layer 2 Default emits
+        // between skill_body and message_source. Skill's only raw_block today is
+        // `skill_context` (populated when injected_context is non-empty). The
+        // pre-migration order was: skill_body → skill_context → message_source.
+        let mut raw_blocks: Vec<SystemBlock> = Vec::new();
+        if !injected_context.is_empty() {
+            raw_blocks.push(SystemBlock {
+                name: "skill_context",
+                content: Arc::<str>::from(injected_context.clone()),
+                priority: SectionPriority::Normal,
+            });
+        }
+
+        // identity/bootstrap block passing: pre-migration passed the already-
+        // rendered strings via `builder.identity(&identity_block)` /
+        // `.bootstrap(&bootstrap_block)`. Layer 1 Default re-derives these from
+        // `identity_document` directly (not from `identity_block` text). Pass
+        // `bootstrap` via the dedicated field so Layer 2 Default emits it at
+        // the same position. Identity gets routed through Layer 1 Default's
+        // `identity_document_block` (in PersonaInput.identity_document), so
+        // we don't re-pass the rendered `identity_block` string here.
+        let bootstrap_field: Option<Arc<str>> = if bootstrap_block.is_empty() {
+            None
+        } else {
+            Some(Arc::<str>::from(bootstrap_block.clone()))
+        };
+        let skill_block_field: Option<Arc<str>> = if skill_block.is_empty() {
+            None
+        } else {
+            Some(Arc::<str>::from(skill_block.clone()))
+        };
+
+        let static_prompt_input = StaticPromptInput {
+            persona_output,
+            agent_persona: Some(Arc::new(agent_persona.clone())),
+            agent_config_fingerprint: [0u8; 32],
+            skill_block: skill_block_field,
+            skills_catalog: None,
+            bootstrap: bootstrap_field,
+            tools: Arc::new(tools_for_loop.clone()),
+            connector_status: connector_summaries,
+            send_tool_context,
+            message_source: Some(Arc::<str>::from(source)),
+            raw_blocks,
+            planner_agents: None,
+            planner_protocol_v2: false,
+            mode: StaticPromptMode::Default,
+            model_window: model_window as u32,
+        };
+
         // ── Resolve dynamic context via ContextManager ─────────────────────
-        let reserved = builder.estimate_static_tokens();
+        // reserved_tokens is informational for the ContextManager's source
+        // selection heuristics; Layer 3 does not use this field. Setting to 0
+        // matches the post-migration baseline (see plan doc Q4).
         let ctx_request = ContextRequest {
             query: query.to_string(),
             intent: crate::orchestrator::intent::Intent::SimpleQuery {
@@ -360,18 +428,65 @@ impl Orchestrator {
             owner_id: owner_id.map(|s| s.to_string()),
             scope: scope_ctx.clone(),
             model_context_window: model_window,
-            reserved_tokens: reserved,
+            reserved_tokens: 0,
         };
         let bundle = self.context_manager.resolve(&ctx_request).await;
-        builder = builder.context_bundle(&bundle);
 
-        let built = builder.build();
+        let dynamic_context_input = DynamicContextInput {
+            context_bundle: Arc::new(bundle),
+            query: Arc::from(query),
+            memory_retrieval_hash: [0u8; 32],
+            path: ExecutionPath::SkillInvocation {
+                skill_id: skill_name.to_string(),
+            },
+            reserved_tokens: 0,
+            mode: DynamicContextMode::Default,
+        };
 
-        // Build ContextBudgetManager for agentic loop
+        let history_input = HistoryInput {
+            lane_tip_fingerprint: [0u8; 32],
+            summary: ctx.summary.as_deref().map(Arc::<str>::from),
+            summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
+            recent_messages: Arc::new(ctx.recent_messages.clone()),
+            current_user_turn: Some(ChatMessage::user(query)),
+            mode: HistoryMode::Default,
+        };
+
+        let request = ComposeRequest::Skill {
+            lane_key: String::new(),
+            agent_persona: Arc::new(agent_persona.clone()),
+            skill_id: skill_name.to_string(),
+            skill_block: Arc::<str>::from(skill_block.clone()),
+            injected_context: Arc::<str>::from(injected_context.clone()),
+            query: query.to_string(),
+            message_source: Arc::<str>::from(source),
+            overrides: ComposeOverrides::default(),
+        };
+
+        let composed = self.compose_engine.compose(
+            &request,
+            persona_input,
+            static_prompt_input,
+            dynamic_context_input,
+            history_input,
+            model_window as u32,
+            Arc::new(tools_for_loop.clone()),
+            Some(&self.bus),
+            None, // lane: per-lane cache for Skill deferred (plan Q2)
+        );
+
+        // Build ContextBudgetManager for agentic loop. Register the
+        // combined static-prompt + dynamic-context tokens under `system_prompt`
+        // to preserve the pre-migration budget accounting (pre-migration
+        // `built.total_prompt_tokens` summed all registered sections including
+        // context_bundle sections).
         let ctx_config = &self.daemon_config.load().execution.context;
         let mut budget =
             crate::context_budget::ContextBudgetManager::new(model_window, ctx_config);
-        budget.register_section("system_prompt", built.total_prompt_tokens);
+        let system_prompt_tokens = (composed.token_budget.static_prompt_tokens
+            + composed.token_budget.dynamic_context_tokens)
+            as usize;
+        budget.register_section("system_prompt", system_prompt_tokens);
         budget.register_section("tools", tools_for_loop.len() * 200);
 
         // --- Context Budget Telemetry ---
@@ -416,28 +531,11 @@ impl Orchestrator {
         let mut inv_model_used: Option<String> = None;
 
         let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
-            let mut messages = Vec::with_capacity(
-                4 + built.context_messages.len() + ctx.recent_messages.len(),
-            );
-            messages.push(ChatMessage::system(&built.system_message));
-
-            // Insert context messages from PromptBuilder (user profile, memory, etc.)
-            messages.extend(built.context_messages);
-
-            // Inject session summary if available (user-role to prevent prompt injection)
-            // (ConversationSource is a stub; manual injection preserved until wired)
-            if let Some(ref summary) = ctx.summary {
-                messages.push(ChatMessage::user(
-                    &crate::orchestrator::wrap_untrusted_context(
-                        summary,
-                        "session_summary",
-                        "user_derived",
-                    ),
-                ));
-            }
-
-            messages.extend(ctx.recent_messages.clone());
-            messages.push(ChatMessage::user(query));
+            // The messages vec came out of the compose engine above, which
+            // already stitched system_prompt + dynamic_context blocks/messages
+            // + session summary + recent_messages + current_user_turn in the
+            // same order the pre-migration manual assembly produced.
+            let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
 
             // Per-request sandbox with ToolContext
             let tool_ctx = ToolContext {

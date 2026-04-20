@@ -104,14 +104,14 @@ fn build_default(input: &StaticPromptInput) -> StaticPromptOutput {
     // PromptBuilder takes a usize window; our input uses u32.
     let mut builder = PromptBuilder::new(input.model_window as usize);
 
-    // Ship Layer 1's blocks as raw system blocks. Layer 1 has already done the
-    // persona transformation; re-entering PromptBuilder::system_persona would
-    // duplicate work.
+    // Ship Layer 1's blocks as raw system blocks. Layer 1 Default mode emits
+    // the full `<system_instructions>` wrap so this block is byte-identical to
+    // what `PromptBuilder::system_persona` would produce.
     for block in &input.persona_output.blocks {
         builder = builder.raw_system_block(block.name, &block.content, block.priority);
     }
 
-    // Agent persona (Phase 6 migration sites populate this).
+    // Agent persona (migration sites populate this).
     if let Some(ref ap) = input.agent_persona {
         builder = builder.agent_persona(ap);
     }
@@ -125,8 +125,20 @@ fn build_default(input: &StaticPromptInput) -> StaticPromptOutput {
     if let Some(ref sb) = input.skill_block {
         builder = builder.raw_system_block("skill_body", sb, SectionPriority::High);
     }
-    if !input.tools.is_empty() {
-        builder = builder.tools(&input.tools);
+
+    // raw_blocks are emitted HERE — after skill_body, before message_source —
+    // so the Skill migration can inject "skill_context" in its pre-migration
+    // position (between skill_body and message_source; see
+    // orchestrator/skill/invocation.rs pre-migration order).
+    for block in &input.raw_blocks {
+        builder = builder.raw_system_block(block.name, &block.content, block.priority);
+    }
+
+    // message_source BEFORE connector_guidance/tools to preserve byte-identical
+    // order vs pre-migration Skill invocation (invocation.rs calls
+    // `.message_source(...)` before tool resolution/`.tools(...)`).
+    if let Some(ref ms) = input.message_source {
+        builder = builder.message_source(ms);
     }
 
     // PromptBuilder's `connector_guidance` expects `&[(String, String)]` +
@@ -151,15 +163,12 @@ fn build_default(input: &StaticPromptInput) -> StaticPromptOutput {
         builder = builder.connector_guidance(&statuses, sendable_slice);
     }
 
-    if let Some(ref stc) = input.send_tool_context {
-        builder = builder.raw_system_block("send_context", stc, SectionPriority::Normal);
-    }
-    if let Some(ref ms) = input.message_source {
-        builder = builder.message_source(ms);
+    if !input.tools.is_empty() {
+        builder = builder.tools(&input.tools);
     }
 
-    for block in &input.raw_blocks {
-        builder = builder.raw_system_block(block.name, &block.content, block.priority);
+    if let Some(ref stc) = input.send_tool_context {
+        builder = builder.raw_system_block("send_context", stc, SectionPriority::Normal);
     }
 
     let built = builder.build();
