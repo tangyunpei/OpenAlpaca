@@ -2387,7 +2387,7 @@ fn test_golden_skill_invocation_byte_identical() {
         raw_blocks: Vec::new(),
         planner_agents: None,
         planner_protocol_v2: false,
-        mode: StaticPromptMode::Default,
+        mode: StaticPromptMode::SkillInvocationDefault,
         model_window: model_window as u32,
     };
 

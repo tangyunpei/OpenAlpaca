@@ -2,9 +2,13 @@
 //!
 //! Assembles the cachable, tenant-stable part of the system prompt:
 //! persona blocks + agent persona + skills + bootstrap + tools + connector
-//! guidance + raw blocks. Three modes:
+//! guidance + raw blocks. Modes:
 //!
-//! - `Default` — wraps the existing `PromptBuilder` with all provided inputs.
+//! - `Default` — wraps the existing `PromptBuilder` with all provided inputs
+//!   in the SimpleQuery / Pipeline / DAG / LeadAgent canonical order
+//!   (persona -> agent_persona -> bootstrap -> skills_catalog -> skill_body
+//!   -> tools -> connector_guidance -> send_context -> message_source ->
+//!   raw_blocks).
 //! - `PlannerHierarchical` — emits the task-planner system prompt
 //!   (preamble + `<agents>` block + `<instructions>` / `<examples>` /
 //!   `<critical>` / `<format>` / `<rules>` + optional `<v2_protocol>` trailer).
@@ -12,6 +16,15 @@
 //!   helper (deleted in Phase 4 Commit 3).
 //! - `SocialMinimal` — replicates `simple_query_handler.rs:512-526`'s inline
 //!   `<system_instructions>` / `<agent_role>` format byte-for-byte.
+//! - `ReplannerHierarchical` — the replanner's system prompt shape (see
+//!   `build_replanner_hierarchical`).
+//! - `SkillInvocationDefault` — Skill Invocation's pre-migration order
+//!   (persona -> agent_persona -> bootstrap -> skills_catalog -> skill_body
+//!   -> raw_blocks -> message_source -> connector_guidance -> tools ->
+//!   send_context). Differs from `Default` in that `message_source` precedes
+//!   `tools`/`connector_guidance`, and `raw_blocks` land between `skill_body`
+//!   and `message_source` so `skill_context` sits at its pre-migration
+//!   position. See `build_skill_invocation_default`.
 
 use std::sync::Arc;
 
@@ -28,6 +41,7 @@ pub fn compute(input: &StaticPromptInput) -> StaticPromptOutput {
         StaticPromptMode::PlannerHierarchical => build_planner_hierarchical(input),
         StaticPromptMode::SocialMinimal => build_social_minimal(input),
         StaticPromptMode::ReplannerHierarchical => build_replanner_hierarchical(input),
+        StaticPromptMode::SkillInvocationDefault => build_skill_invocation_default(input),
     }
 }
 
@@ -95,10 +109,93 @@ fn mode_tag(mode: StaticPromptMode) -> u8 {
         StaticPromptMode::PlannerHierarchical => 1,
         StaticPromptMode::SocialMinimal => 2,
         StaticPromptMode::ReplannerHierarchical => 3,
+        StaticPromptMode::SkillInvocationDefault => 4,
     }
 }
 
 fn build_default(input: &StaticPromptInput) -> StaticPromptOutput {
+    use crate::prompt::PromptBuilder;
+
+    // PromptBuilder takes a usize window; our input uses u32.
+    let mut builder = PromptBuilder::new(input.model_window as usize);
+
+    // Ship Layer 1's blocks as raw system blocks. Layer 1 Default mode emits
+    // the full `<system_instructions>` wrap so this block is byte-identical to
+    // what `PromptBuilder::system_persona` would produce.
+    for block in &input.persona_output.blocks {
+        builder = builder.raw_system_block(block.name, &block.content, block.priority);
+    }
+
+    // Agent persona (migration sites populate this).
+    if let Some(ref ap) = input.agent_persona {
+        builder = builder.agent_persona(ap);
+    }
+
+    if let Some(ref b) = input.bootstrap {
+        builder = builder.bootstrap(b);
+    }
+    if let Some(ref sc) = input.skills_catalog {
+        builder = builder.skills_catalog(sc);
+    }
+    if let Some(ref sb) = input.skill_block {
+        builder = builder.raw_system_block("skill_body", sb, SectionPriority::High);
+    }
+    if !input.tools.is_empty() {
+        builder = builder.tools(&input.tools);
+    }
+
+    // PromptBuilder's `connector_guidance` expects `&[(String, String)]` +
+    // optional sendable list — adapt from our ConnectorSummary wrapper.
+    if !input.connector_status.is_empty() {
+        let statuses: Vec<(String, String)> = input
+            .connector_status
+            .iter()
+            .map(|s| (s.id.clone(), s.status.clone()))
+            .collect();
+        let sendable: Vec<String> = input
+            .connector_status
+            .iter()
+            .filter(|s| s.sendable)
+            .map(|s| s.id.clone())
+            .collect();
+        let sendable_slice = if sendable.is_empty() {
+            None
+        } else {
+            Some(sendable.as_slice())
+        };
+        builder = builder.connector_guidance(&statuses, sendable_slice);
+    }
+
+    if let Some(ref stc) = input.send_tool_context {
+        builder = builder.raw_system_block("send_context", stc, SectionPriority::Normal);
+    }
+    if let Some(ref ms) = input.message_source {
+        builder = builder.message_source(ms);
+    }
+
+    for block in &input.raw_blocks {
+        builder = builder.raw_system_block(block.name, &block.content, block.priority);
+    }
+
+    let built = builder.build();
+
+    StaticPromptOutput {
+        system_message: Arc::<str>::from(built.system_message),
+        section_registry: built.section_registry,
+        fingerprint: compute_fingerprint(input),
+    }
+}
+
+/// Skill Invocation-specific section order. Matches the pre-migration
+/// `invoke_skill` PromptBuilder chain at `orchestrator/skill/invocation.rs:114-230`:
+///   persona -> agent_persona -> identity -> bootstrap -> skill_body (raw, High) ->
+///   raw_blocks (incl. skill_context raw, Normal when present) -> message_source
+///   -> connector_guidance -> tools -> send_context (raw, when `send` tool active).
+///
+/// Differs from [`build_default`] in that `message_source` precedes `tools` /
+/// `connector_guidance`, and `raw_blocks` land between `skill_body` and
+/// `message_source` so `skill_context` sits at its pre-migration position.
+fn build_skill_invocation_default(input: &StaticPromptInput) -> StaticPromptOutput {
     use crate::prompt::PromptBuilder;
 
     // PromptBuilder takes a usize window; our input uses u32.

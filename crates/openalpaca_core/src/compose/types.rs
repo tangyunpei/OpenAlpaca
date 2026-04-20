@@ -100,6 +100,15 @@ pub enum StaticPromptMode {
     /// `raw_blocks`, and emits its own static preamble + response_format/rules
     /// blocks from within Layer 2. See `static_prompt::build_replanner_hierarchical`.
     ReplannerHierarchical,
+    /// Phase 5 Commit 1: Skill Invocation's pre-migration section order.
+    /// Matches `orchestrator/skill/invocation.rs:114-230` PromptBuilder chain:
+    ///   persona -> agent_persona -> bootstrap -> skills_catalog -> skill_body
+    ///   -> raw_blocks -> message_source -> connector_guidance -> tools ->
+    ///   send_context. Differs from `Default` in that `message_source` precedes
+    ///   `tools`/`connector_guidance`, and `raw_blocks` land between
+    ///   `skill_body` and `message_source` so `skill_context` sits at its
+    ///   pre-migration position.
+    SkillInvocationDefault,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,7 +238,12 @@ impl ComposeRequest {
         use StaticPromptMode as S;
         match self {
             Self::SimpleQuery { .. } => (P::Default, S::Default, D::Default, H::Default),
-            Self::Skill { .. } => (P::Default, S::Default, D::Default, H::Default),
+            Self::Skill { .. } => (
+                P::Default,
+                S::SkillInvocationDefault,
+                D::Default,
+                H::Default,
+            ),
             Self::Planner { .. } => (P::Minimal, S::PlannerHierarchical, D::Skip, H::Skip),
             // Replanner: History=Default (not Skip) so the canonical
             // "Evaluate the current task progress…" current_user_turn is
