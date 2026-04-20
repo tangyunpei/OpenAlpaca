@@ -42,6 +42,7 @@ pub fn compute(input: &StaticPromptInput) -> StaticPromptOutput {
         StaticPromptMode::SocialMinimal => build_social_minimal(input),
         StaticPromptMode::ReplannerHierarchical => build_replanner_hierarchical(input),
         StaticPromptMode::SkillInvocationDefault => build_skill_invocation_default(input),
+        StaticPromptMode::SubagentMinimal => build_subagent_minimal(input),
     }
 }
 
@@ -110,6 +111,7 @@ fn mode_tag(mode: StaticPromptMode) -> u8 {
         StaticPromptMode::SocialMinimal => 2,
         StaticPromptMode::ReplannerHierarchical => 3,
         StaticPromptMode::SkillInvocationDefault => 4,
+        StaticPromptMode::SubagentMinimal => 5,
     }
 }
 
@@ -172,6 +174,43 @@ fn build_default(input: &StaticPromptInput) -> StaticPromptOutput {
     if let Some(ref ms) = input.message_source {
         builder = builder.message_source(ms);
     }
+
+    for block in &input.raw_blocks {
+        builder = builder.raw_system_block(block.name, &block.content, block.priority);
+    }
+
+    let built = builder.build();
+
+    StaticPromptOutput {
+        system_message: Arc::<str>::from(built.system_message),
+        section_registry: built.section_registry,
+        fingerprint: compute_fingerprint(input),
+    }
+}
+
+/// Pipeline / DAG / LeadAgent raw_blocks-only section emission.
+///
+/// Matches `orchestrator/dispatcher/pipeline_step.rs:341-440` (and structurally
+/// identical DAG / LeadAgent pre-migration builders): NO persona wrap, NO
+/// agent_persona, NO identity, NO bootstrap, NO skills_catalog, NO send_context,
+/// NO message_source. The caller pre-renders tools via
+/// `format_tool_guidance(...)` and pushes the rendered string as a raw_block
+/// named "tools" at the correct position relative to other raw_blocks.
+/// Connector guidance (already-formatted by the caller via
+/// `format_connector_guidance(...)`) arrives as a raw_block named
+/// "connector_guidance". Task-description text (previously routed through the
+/// `ContextPackage` TaskDescription `InjectionMode::SystemPrompt` section,
+/// which pre-migration `PromptBuilder::build()` appended inline to the system
+/// message) is pushed as a raw_block named "task_description" at the end —
+/// callers must exclude TaskDescription from the bundle they feed into
+/// Layer 3, otherwise it will surface as a separate `ChatMessage::system`
+/// per Layer 3's `SystemPrompt` routing.
+///
+/// Build order: iterate `input.raw_blocks` once; no other sections emitted.
+fn build_subagent_minimal(input: &StaticPromptInput) -> StaticPromptOutput {
+    use crate::prompt::PromptBuilder;
+
+    let mut builder = PromptBuilder::new(input.model_window as usize);
 
     for block in &input.raw_blocks {
         builder = builder.raw_system_block(block.name, &block.content, block.priority);

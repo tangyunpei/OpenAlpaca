@@ -109,6 +109,17 @@ pub enum StaticPromptMode {
     ///   `skill_body` and `message_source` so `skill_context` sits at its
     ///   pre-migration position.
     SkillInvocationDefault,
+    /// Phase 6 Commit 1: Minimal "subagent"-shape emission used by
+    /// PipelineStep / DagNode / LeadAgent. Emits only `raw_blocks` in
+    /// registration order — the caller pre-renders tools via
+    /// `format_tool_guidance(...)` and injects it (plus connector guidance,
+    /// task-description text, etc.) as raw_blocks at the correct positions
+    /// relative to the other subagent blocks. Pre-migration at
+    /// `orchestrator/dispatcher/pipeline_step.rs:341-440` never used persona /
+    /// agent_persona / identity / bootstrap / skills_catalog / send_context /
+    /// message_source, so this mode short-circuits all of those. See
+    /// `build_subagent_minimal`.
+    SubagentMinimal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,19 +265,25 @@ impl ComposeRequest {
             // from the planner's and needs its own mode.
             Self::Replanner { .. } => (P::Minimal, S::ReplannerHierarchical, D::Skip, H::Default),
             Self::Social { .. } => (P::Minimal, S::SocialMinimal, D::Skip, H::Default),
-            Self::PipelineStep { memory_block, .. } => (
-                P::Minimal,
-                S::Default,
-                D::Skip,
-                match memory_block {
-                    Some(mb) => H::FirstStepOnly {
-                        memory_block: mb.clone(),
-                    },
-                    None => H::Skip,
-                },
+            // Phase 6 Commit 1 spec errata: the default-dispatch table lists
+            // (Minimal, Default, Skip, FirstStepOnly|Skip). Pre-migration
+            // emits NO SystemPersona content at all, so Skip matches
+            // byte-identically. StaticPromptMode::SubagentMinimal is a new
+            // variant (Phase 6) carrying the raw_blocks-only emission order
+            // that Pipeline/DAG/LeadAgent use. DynamicContextMode::Default is
+            // used so the ContextPackage's PredecessorOutput / WorkspaceArtifact
+            // sections flow through Layer 3 as user messages. HistoryMode::Default
+            // lets the caller attach memory-on-step-0 as a `recent_messages`
+            // entry + `current_user_turn = step_description` — FirstStepOnly's
+            // single-message output can't carry both memory AND step_description.
+            Self::PipelineStep { .. } => (
+                P::Skip,
+                S::SubagentMinimal,
+                D::Default,
+                H::Default,
             ),
-            Self::DagNode { .. } => (P::Minimal, S::Default, D::Skip, H::Skip),
-            Self::LeadAgent { .. } => (P::Minimal, S::Default, D::Skip, H::Skip),
+            Self::DagNode { .. } => (P::Skip, S::SubagentMinimal, D::Default, H::Default),
+            Self::LeadAgent { .. } => (P::Skip, S::SubagentMinimal, D::Default, H::Default),
         }
     }
 

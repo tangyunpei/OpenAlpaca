@@ -336,7 +336,15 @@ fn test_compose_request_default_modes_table() {
     assert_eq!(dc, D::Skip);
     assert!(matches!(h, H::Default));
 
-    // LeadAgent: Minimal + Default + Skip + Skip.
+    // Phase 6: PipelineStep, DagNode, LeadAgent all use
+    // (Skip, SubagentMinimal, Default, Default). Spec errata (pre-migration
+    // emits no SystemPersona content → Skip); StaticPromptMode::SubagentMinimal
+    // is the new Phase-6 mode carrying the raw_blocks-only emission order;
+    // DynamicContextMode::Default routes the ContextPackage's user-targeted
+    // sections through Layer 3; HistoryMode::Default lets the caller attach
+    // memory / predecessor / current_user_turn entries.
+
+    // LeadAgent: Skip + SubagentMinimal + Default + Default.
     let req = ComposeRequest::LeadAgent {
         base_persona: Arc::<str>::from("base"),
         agents_catalog: Arc::<str>::from("catalog"),
@@ -344,10 +352,62 @@ fn test_compose_request_default_modes_table() {
         overrides: ComposeOverrides::default(),
     };
     let (p, sp, dc, h) = req.default_modes();
-    assert_eq!(p, P::Minimal);
-    assert_eq!(sp, S::Default);
-    assert_eq!(dc, D::Skip);
-    assert!(matches!(h, H::Skip));
+    assert_eq!(p, P::Skip);
+    assert_eq!(sp, S::SubagentMinimal);
+    assert_eq!(dc, D::Default);
+    assert!(matches!(h, H::Default));
+
+    // PipelineStep: Skip + SubagentMinimal + Default + Default.
+    use crate::agent::subagent::{
+        AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, SubAgent,
+    };
+    let dummy_agent = Arc::new(SubAgent {
+        id: "dummy".to_string(),
+        template_id: "dummy".to_string(),
+        name: "Dummy".to_string(),
+        description: None,
+        icon: None,
+        status: AgentStatus::Idle,
+        current_task: None,
+        capabilities: vec![],
+        preset: AgentPreset::default(),
+        constraints: AgentConstraints::default(),
+        llm_config: AgentLlmConfig::default(),
+    });
+    let req = ComposeRequest::PipelineStep {
+        agent: dummy_agent.clone(),
+        step_index: 0,
+        step_description: Arc::<str>::from("desc"),
+        scope_block: Arc::<str>::from("scope"),
+        output_block: Arc::<str>::from("out"),
+        context_package: Arc::new(crate::prompt_ctx::ContextPackage {
+            sections: vec![],
+            total_tokens: 0,
+            budget: 0,
+            sub_agent_window: 200_000,
+        }),
+        memory_block: None,
+        overrides: ComposeOverrides::default(),
+    };
+    let (p, sp, dc, h) = req.default_modes();
+    assert_eq!(p, P::Skip);
+    assert_eq!(sp, S::SubagentMinimal);
+    assert_eq!(dc, D::Default);
+    assert!(matches!(h, H::Default));
+
+    // DagNode: Skip + SubagentMinimal + Default + Default.
+    let req = ComposeRequest::DagNode {
+        agent: dummy_agent.clone(),
+        assignment: Arc::<str>::from("a"),
+        workspace_context: Arc::<str>::from("ws"),
+        tools: Arc::new(vec![]),
+        overrides: ComposeOverrides::default(),
+    };
+    let (p, sp, dc, h) = req.default_modes();
+    assert_eq!(p, P::Skip);
+    assert_eq!(sp, S::SubagentMinimal);
+    assert_eq!(dc, D::Default);
+    assert!(matches!(h, H::Default));
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -2940,4 +3000,403 @@ fn test_golden_simple_query_multimodal_byte_identical() {
     }
     // Sanity: first message is the system prompt.
     assert_eq!(composed.messages[0].role, Role::System);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Phase 6 Commit 1 — Pipeline Step migration golden-output test
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Golden-output: asserts the migrated Pipeline Step path produces
+/// byte-identical `ComposedRequest.messages` to what the pre-migration
+/// `PromptBuilder` chain + manual message construction at
+/// `orchestrator/dispatcher/pipeline_step.rs:341-453` would have produced.
+///
+/// Routing through `compose(ComposeRequest::PipelineStep{..})` with
+/// `PersonaMode::Skip` + `StaticPromptMode::SubagentMinimal` +
+/// `DynamicContextMode::Default` + `HistoryMode::Default` reproduces the
+/// pre-migration PromptBuilder chain output byte-identically.
+///
+/// Scenario: step 0 of 2 (so step_description becomes the current_user_turn
+/// and a non-empty memory block arrives as the immediately-preceding user
+/// message — mirrors pre-migration `messages.push(ChatMessage::user(&block));
+/// messages.push(ChatMessage::user(&pctx.description));`). Includes:
+///   - `agent_identity`, `assignment`, `scope`, `output_format` raw_blocks
+///   - Pre-rendered tools via `format_tool_guidance(...)` — pushed as a
+///     raw_block named "tools" at the same position `.tools(...)` would have
+///     placed it in the pre-migration fluent chain
+///   - Non-empty connector_block → emitted as a raw_block named
+///     "connector_guidance" (not via `.connector_guidance(...)` — pre-migration
+///     code at pipeline_step.rs:362-368 also uses raw_system_block)
+///   - ContextPackage with TaskDescription (SystemPrompt), PredecessorOutput
+///     (UserMessage Untrusted), and WorkspaceArtifact (UserMessage Untrusted).
+///     Migration excludes TaskDescription from the bundle it feeds to Layer 3
+///     and pushes the equivalent content as a raw_block named "task_description"
+///     at the end of raw_blocks (same position the pre-migration `build()`
+///     rendered bundle's SystemPrompt section inline in system_parts).
+#[test]
+fn test_golden_pipeline_step_byte_identical() {
+    use crate::middleware::prompt::format_tool_guidance;
+    use crate::prompt::PromptBuilder;
+    use crate::prompt_ctx::package::{AgentSummary, HandoffContext};
+    use crate::prompt_ctx::{
+        ContextBundle, ContextKey, ContextKind, ContextSection, InjectionMode, PackageSection,
+        PackageSectionKind, TrustLevel,
+    };
+    use openalpaca_llm::Role;
+
+    // ── Canned pipeline-step scene ──────────────────────────────────────
+    // Mirrors the pre-migration arguments at pipeline_step.rs:84-92. The
+    // agent.preset.persona is canned, role_description is canned, step=0,
+    // total_agents=2 (so is_last_step=false), previous_output=Some(...) so
+    // HandoffContext exists, workspace_context=non-empty.
+    let agent_persona_text = "I am a test agent persona.";
+    let role_description = "Analyze the dataset for anomalies.";
+    let step: usize = 0;
+    let total_agents: usize = 2;
+    let memory_block_text = "<memory>prior relevant fact</memory>";
+    let previous_output_text = "Preliminary analysis complete.";
+    let workspace_context_text = "workspace: dataset.csv\n";
+    let connector_block_text =
+        "<connector_status>\n- telegram: active\n</connector_status>";
+    let description = "Find anomalies in sales data.";
+    let model_window: usize = 200_000;
+
+    // Pre-migration output_note branch for non-last step.
+    let output_note =
+        "Your output will be passed to the next agent in the pipeline. Be thorough and \
+         include all relevant details so the next agent can build on your work.";
+
+    // Canned tool definitions.
+    let tool_defs: Vec<ToolDefinition> = vec![ToolDefinition {
+        name: "analyze".to_string(),
+        description: "Analyze a dataset".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" } }
+        }),
+        strict: None,
+        input_examples: None,
+    }];
+
+    // ── Pre-migration reference: PromptBuilder chain. ───────────────────
+    let identity_block = format!("<identity>\n{}\n</identity>", agent_persona_text);
+    let assignment_block = format!(
+        "<assignment>\nRole: {}\nPipeline step: {} of {}\n</assignment>",
+        role_description,
+        step + 1,
+        total_agents
+    );
+    let scope_block = "<scope>\nFocus on completing your assigned role. \
+                        Do not attempt work outside your role description.\n</scope>";
+    let output_block = format!("<output-format>\n{}\n</output-format>", output_note);
+
+    // Pre-migration ContextPackage includes TaskDescription (SystemPrompt),
+    // PredecessorOutput (UserMessage Untrusted), WorkspaceArtifact (UserMessage
+    // Untrusted). We construct both the reference bundle (for the pre-migration
+    // PromptBuilder chain) and the migration bundle (same sections minus
+    // TaskDescription — the migration re-emits TaskDescription content as a
+    // raw_block named "task_description").
+    let handoff = HandoffContext {
+        producer: AgentSummary {
+            name: "unknown".to_string(),
+            role: "pipeline_predecessor".to_string(),
+            step: 0,
+        },
+        task_assigned: description.to_string(),
+        output: previous_output_text.to_string(),
+        decisions: vec![],
+        handoff_notes: None,
+    };
+    let predecessor_content = handoff.format();
+    let predecessor_tokens = handoff.token_estimate();
+
+    let package_sections_ref = vec![
+        PackageSection {
+            kind: PackageSectionKind::TaskDescription,
+            content: role_description.to_string(),
+            token_estimate: role_description.len() / 4,
+            priority: SectionPriority::Critical,
+        },
+        PackageSection {
+            kind: PackageSectionKind::PredecessorOutput,
+            content: predecessor_content.clone(),
+            token_estimate: predecessor_tokens,
+            priority: SectionPriority::High,
+        },
+        PackageSection {
+            kind: PackageSectionKind::WorkspaceArtifact,
+            content: workspace_context_text.to_string(),
+            token_estimate: workspace_context_text.len() / 4,
+            priority: SectionPriority::Normal,
+        },
+    ];
+    let total_tokens_ref: usize =
+        package_sections_ref.iter().map(|s| s.token_estimate).sum();
+    let context_package_ref = crate::prompt_ctx::ContextPackage {
+        sections: package_sections_ref,
+        total_tokens: total_tokens_ref,
+        budget: total_tokens_ref + 1000,
+        sub_agent_window: model_window,
+    };
+    let bundle_ref = context_package_ref.to_bundle();
+
+    let built = PromptBuilder::new(model_window)
+        .raw_system_block("agent_identity", &identity_block, SectionPriority::High)
+        .raw_system_block("assignment", &assignment_block, SectionPriority::Critical)
+        .raw_system_block("scope", scope_block, SectionPriority::Normal)
+        .raw_system_block("output_format", &output_block, SectionPriority::Normal)
+        .tools(&tool_defs)
+        .raw_system_block(
+            "connector_guidance",
+            connector_block_text,
+            SectionPriority::Normal,
+        )
+        .context_bundle(&bundle_ref)
+        .build();
+    let expected_system = built.system_message.clone();
+
+    // Reference messages: [system, ...built.context_messages, memory_user (step 0),
+    // user(description)].
+    let mut expected_messages: Vec<ChatMessage> =
+        Vec::with_capacity(1 + built.context_messages.len() + 2);
+    expected_messages.push(ChatMessage::system(&expected_system));
+    expected_messages.extend(built.context_messages.iter().cloned());
+    expected_messages.push(ChatMessage::user(memory_block_text));
+    expected_messages.push(ChatMessage::user(description));
+
+    // ── Via the engine: PersonaMode::Skip + StaticPromptMode::SubagentMinimal. ──
+    //
+    // Caller pre-renders tools via `format_tool_guidance(...)` and pushes the
+    // result as raw_block "tools". Connector block is pushed as raw_block
+    // "connector_guidance". Task-description text is pushed as raw_block
+    // "task_description" at the end. The bundle fed to Layer 3 omits
+    // TaskDescription (the migration's equivalent of inline-append-to-system
+    // is the "task_description" raw_block).
+    let engine = ComposeEngine::new(16);
+
+    let tools_rendered = format_tool_guidance(&tool_defs);
+    let raw_blocks_for_engine: Vec<SystemBlock> = vec![
+        SystemBlock {
+            name: "agent_identity",
+            content: Arc::<str>::from(identity_block.clone()),
+            priority: SectionPriority::High,
+        },
+        SystemBlock {
+            name: "assignment",
+            content: Arc::<str>::from(assignment_block.clone()),
+            priority: SectionPriority::Critical,
+        },
+        SystemBlock {
+            name: "scope",
+            content: Arc::<str>::from(scope_block.to_string()),
+            priority: SectionPriority::Normal,
+        },
+        SystemBlock {
+            name: "output_format",
+            content: Arc::<str>::from(output_block.clone()),
+            priority: SectionPriority::Normal,
+        },
+        SystemBlock {
+            name: "tools",
+            content: Arc::<str>::from(tools_rendered),
+            priority: SectionPriority::Normal,
+        },
+        SystemBlock {
+            name: "connector_guidance",
+            content: Arc::<str>::from(connector_block_text.to_string()),
+            priority: SectionPriority::Normal,
+        },
+        SystemBlock {
+            name: "task_description",
+            content: Arc::<str>::from(role_description.to_string()),
+            priority: SectionPriority::Critical,
+        },
+    ];
+
+    // Migration bundle: same PredecessorOutput + WorkspaceArtifact sections
+    // as pre-migration, but TaskDescription omitted (it now lives in
+    // raw_blocks as "task_description").
+    let migration_bundle = ContextBundle {
+        sections: vec![
+            ContextSection {
+                source: PackageSectionKind::PredecessorOutput.source_name(),
+                kind: ContextKind::WorkspaceArtifact,
+                content: predecessor_content.clone(),
+                token_estimate: predecessor_tokens,
+                priority: SectionPriority::High,
+                relevance: 1.0,
+                key: ContextKey::Package(
+                    PackageSectionKind::PredecessorOutput.key_name(),
+                ),
+                injection: InjectionMode::UserMessage {
+                    tag: "predecessor_output".to_string(),
+                    trust: TrustLevel::Untrusted,
+                },
+            },
+            ContextSection {
+                source: PackageSectionKind::WorkspaceArtifact.source_name(),
+                kind: ContextKind::WorkspaceArtifact,
+                content: workspace_context_text.to_string(),
+                token_estimate: workspace_context_text.len() / 4,
+                priority: SectionPriority::Normal,
+                relevance: 1.0,
+                key: ContextKey::Package(
+                    PackageSectionKind::WorkspaceArtifact.key_name(),
+                ),
+                injection: InjectionMode::UserMessage {
+                    tag: "workspace_artifact".to_string(),
+                    trust: TrustLevel::Untrusted,
+                },
+            },
+        ],
+        total_tokens: predecessor_tokens + workspace_context_text.len() / 4,
+        available_budget: 1000,
+    };
+
+    // Construct a canned SubAgent for the request variant. Pre-migration
+    // reads `agent.preset.persona`; we mirror that with the canned text.
+    use crate::agent::subagent::{
+        AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, SubAgent,
+    };
+    let agent = Arc::new(SubAgent {
+        id: "test-agent-01".to_string(),
+        template_id: "test-agent".to_string(),
+        name: "Test Agent".to_string(),
+        description: None,
+        icon: None,
+        status: AgentStatus::Idle,
+        current_task: None,
+        capabilities: vec![],
+        preset: AgentPreset {
+            persona: agent_persona_text.to_string(),
+            ..AgentPreset::default()
+        },
+        constraints: AgentConstraints::default(),
+        llm_config: AgentLlmConfig::default(),
+    });
+
+    let persona_input = PersonaInput {
+        system_persona: Arc::new(SystemPersona::default()),
+        user_document: Arc::new(None),
+        identity_document: Arc::new(None),
+        persona_version: 0,
+        mode: PersonaMode::Skip,
+    };
+    let persona_output = Arc::new(super::persona::compute(&persona_input));
+
+    let static_prompt_input = StaticPromptInput {
+        persona_output,
+        agent_persona: None,
+        agent_config_fingerprint: [0u8; 32],
+        skill_block: None,
+        skills_catalog: None,
+        bootstrap: None,
+        tools: Arc::new(tool_defs.clone()),
+        connector_status: Arc::new(Vec::new()),
+        send_tool_context: None,
+        message_source: None,
+        raw_blocks: raw_blocks_for_engine,
+        planner_agents: None,
+        planner_protocol_v2: false,
+        mode: StaticPromptMode::SubagentMinimal,
+        model_window: model_window as u32,
+    };
+
+    let dynamic_context_input = DynamicContextInput {
+        context_bundle: Arc::new(migration_bundle),
+        query: Arc::from(description),
+        memory_retrieval_hash: [0u8; 32],
+        path: ExecutionPath::SimpleQuery,
+        reserved_tokens: 0,
+        mode: DynamicContextMode::Default,
+    };
+
+    // HistoryMode::Default: step-0 memory block arrives as a `recent_messages`
+    // entry (comes BEFORE current_user_turn in Layer 4 Default's emission
+    // order). current_user_turn = user(description) mirrors pre-migration's
+    // final `messages.push(ChatMessage::user(&pctx.description))`.
+    let history_input = HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        summary: None,
+        summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
+        recent_messages: Arc::new(vec![ChatMessage::user(memory_block_text)]),
+        current_user_turn: Some(ChatMessage::user(description)),
+        mode: HistoryMode::Default,
+    };
+
+    let request = ComposeRequest::PipelineStep {
+        agent: agent.clone(),
+        step_index: step,
+        step_description: Arc::<str>::from(description),
+        scope_block: Arc::<str>::from(scope_block),
+        output_block: Arc::<str>::from(output_block.clone()),
+        context_package: Arc::new(crate::prompt_ctx::ContextPackage {
+            sections: vec![],
+            total_tokens: 0,
+            budget: 0,
+            sub_agent_window: model_window,
+        }),
+        memory_block: Some(Arc::<str>::from(memory_block_text)),
+        overrides: ComposeOverrides::default(),
+    };
+
+    let composed = engine.compose(
+        &request,
+        persona_input,
+        static_prompt_input,
+        dynamic_context_input,
+        history_input,
+        model_window as u32,
+        Arc::new(tool_defs.clone()),
+        None,
+        None,
+    );
+
+    // ── Byte-identical assertion. ───────────────────────────────────────
+    assert_eq!(
+        composed.messages.len(),
+        expected_messages.len(),
+        "Pipeline Step migration produced wrong message count: got {} vs expected {}",
+        composed.messages.len(),
+        expected_messages.len()
+    );
+    for (idx, (got, expected)) in composed
+        .messages
+        .iter()
+        .zip(expected_messages.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            got.role, expected.role,
+            "message {idx} role mismatch: got {:?} expected {:?}",
+            got.role, expected.role
+        );
+        assert_eq!(
+            got.content, expected.content,
+            "message {idx} content mismatch:\n--- GOT ---\n{}\n--- EXPECTED ---\n{}\n",
+            got.content, expected.content
+        );
+        assert!(
+            got.parts.is_none(),
+            "message {idx} got parts should be None"
+        );
+        assert!(
+            got.tool_calls.is_none(),
+            "message {idx} got tool_calls should be None"
+        );
+        assert_eq!(
+            got.tool_call_id, expected.tool_call_id,
+            "message {idx} tool_call_id mismatch"
+        );
+    }
+
+    // Sanity: first message is system, last is user(description), and the
+    // memory block lives at the index just before the description.
+    assert_eq!(composed.messages[0].role, Role::System);
+    let last = composed.messages.last().unwrap();
+    assert_eq!(last.role, Role::User);
+    assert_eq!(last.content, description);
+    let second_to_last = &composed.messages[composed.messages.len() - 2];
+    assert_eq!(second_to_last.role, Role::User);
+    assert_eq!(second_to_last.content, memory_block_text);
 }

@@ -6,12 +6,17 @@ use super::retrieve_memory_block;
 use super::usage;
 use crate::agent::subagent::{AgentStatus, SubAgent};
 use crate::bus::EventBus;
+use crate::compose::{
+    ComposeOverrides, ComposeRequest, DynamicContextInput, DynamicContextMode, HistoryInput,
+    HistoryMode, PersonaInput, PersonaMode, StaticPromptInput, StaticPromptMode, SummaryWrapMode,
+    SystemBlock,
+};
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
 use crate::events::SystemEvent;
-use crate::prompt::PromptBuilder;
+use crate::middleware::prompt::format_tool_guidance;
 use crate::prompt_ctx::package::{AgentSummary, HandoffContext};
-use crate::prompt_ctx::SectionPriority;
+use crate::prompt_ctx::{ExecutionPath, SectionPriority};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::registry::ToolContext;
@@ -40,6 +45,10 @@ pub(super) struct PipelineStepContext {
     pub workspace_id: Option<String>,
     pub total_agents: usize,
     pub cancel_token: CancellationToken,
+    /// Phase 6 Commit 1: shared with the owning `TaskDispatcher` so pipeline
+    /// step prompt caches are globally visible. Routed via
+    /// `execute_pipeline_step` → `ComposeEngine::compose(ComposeRequest::PipelineStep{...})`.
+    pub compose_engine: Arc<crate::compose::ComposeEngine>,
 }
 
 /// Result from executing a single pipeline step.
@@ -278,10 +287,21 @@ pub(super) async fn execute_pipeline_step(
         .iter()
         .map(|s| s.to_lowercase())
         .collect();
-    let mut package_sections = Vec::new();
 
-    // Task description (Critical) -- always included
-    package_sections.push(crate::prompt_ctx::PackageSection {
+    // Phase 6 Commit 1: Task description is re-routed into the StaticPromptInput's
+    // `raw_blocks` field (as a "task_description" raw_block) rather than flowing
+    // through the ContextPackage's TaskDescription SystemPrompt injection. The
+    // pre-migration PromptBuilder chain appended TaskDescription inline to the
+    // system_message via `.context_bundle()`; Layer 3's `build_from_bundle`
+    // would instead surface it as a separate `ChatMessage::system`, breaking
+    // byte-identity. Keep the metadata consistent: the package we report to
+    // `ContextPackageBuilt` still includes TaskDescription so downstream
+    // observability matches pre-migration signal. The bundle fed to the compose
+    // engine omits TaskDescription.
+    let mut package_sections_full = Vec::new();
+
+    // Task description (Critical) -- retained for the telemetry event.
+    package_sections_full.push(crate::prompt_ctx::PackageSection {
         kind: crate::prompt_ctx::PackageSectionKind::TaskDescription,
         content: role_description.to_string(),
         token_estimate: role_description.len() / 4,
@@ -292,7 +312,7 @@ pub(super) async fn execute_pipeline_step(
     if let Some(ref h) = handoff
         && !denied_sections.contains("workspace_artifacts")
     {
-        package_sections.push(crate::prompt_ctx::PackageSection {
+        package_sections_full.push(crate::prompt_ctx::PackageSection {
             kind: crate::prompt_ctx::PackageSectionKind::PredecessorOutput,
             content: h.format(),
             token_estimate: h.token_estimate(),
@@ -304,7 +324,7 @@ pub(super) async fn execute_pipeline_step(
     if !cached_workspace_context.is_empty()
         && !denied_sections.contains("workspace_artifacts")
     {
-        package_sections.push(crate::prompt_ctx::PackageSection {
+        package_sections_full.push(crate::prompt_ctx::PackageSection {
             kind: crate::prompt_ctx::PackageSectionKind::WorkspaceArtifact,
             content: cached_workspace_context.to_string(),
             token_estimate: cached_workspace_context.len() / 4,
@@ -312,15 +332,16 @@ pub(super) async fn execute_pipeline_step(
         });
     }
 
-    let total_tokens: usize = package_sections.iter().map(|s| s.token_estimate).sum();
+    let total_tokens: usize = package_sections_full.iter().map(|s| s.token_estimate).sum();
     let context_package = crate::prompt_ctx::ContextPackage {
-        sections: package_sections,
+        sections: package_sections_full,
         total_tokens,
         budget: total_tokens + 1000, // generous budget for pipeline steps
         sub_agent_window: context_budget.model_context_window(),
     };
 
-    // Emit telemetry
+    // Emit telemetry (preserves pre-migration ContextPackageBuilt signal
+    // including TaskDescription).
     pctx.bus
         .publish(crate::events::SystemEvent::ContextPackageBuilt {
             request_id: uuid::Uuid::new_v4(),
@@ -336,9 +357,41 @@ pub(super) async fn execute_pipeline_step(
             timestamp: chrono::Utc::now(),
         });
 
-    let bundle = context_package.to_bundle();
+    // Bundle fed to Layer 3: copy the full package minus TaskDescription (which
+    // is now re-emitted as a raw_block named "task_description"). See
+    // `StaticPromptMode::SubagentMinimal` / `test_golden_pipeline_step_byte_identical`.
+    let bundle_package = crate::prompt_ctx::ContextPackage {
+        sections: context_package
+            .sections
+            .iter()
+            .filter(|s| s.kind != crate::prompt_ctx::PackageSectionKind::TaskDescription)
+            .cloned()
+            .collect(),
+        total_tokens: context_package
+            .sections
+            .iter()
+            .filter(|s| s.kind != crate::prompt_ctx::PackageSectionKind::TaskDescription)
+            .map(|s| s.token_estimate)
+            .sum(),
+        budget: context_package.budget,
+        sub_agent_window: context_package.sub_agent_window,
+    };
+    let bundle = bundle_package.to_bundle();
 
-    // Build prompt via PromptBuilder
+    // ── Phase 6 Commit 1: route system-prompt + message-list assembly through
+    // the layered compose engine. `PersonaMode::Skip` +
+    // `StaticPromptMode::SubagentMinimal` (raw-blocks-only) +
+    // `DynamicContextMode::Default` (bundle → user messages) +
+    // `HistoryMode::Default` reproduces the pre-migration PromptBuilder chain
+    // byte-identically. See `test_golden_pipeline_step_byte_identical` in
+    // `compose/tests.rs` for the invariant.
+    //
+    // Spec errata: the default-dispatch table listed `PersonaMode::Minimal` for
+    // PipelineStep; pre-migration emits NO SystemPersona content, so Skip
+    // matches byte-identically. FirstStepOnly was considered for the memory
+    // injection but can only emit a single user message — pipeline step 0 has
+    // both a memory block AND the step_description, so we use HistoryMode::Default
+    // and attach the memory as a `recent_messages` entry.
     let model_window = context_budget.model_context_window();
     let identity_block = format!("<identity>\n{}\n</identity>", agent.preset.persona);
     let assignment_block = format!(
@@ -351,26 +404,164 @@ pub(super) async fn execute_pipeline_step(
                         Do not attempt work outside your role description.\n</scope>";
     let output_block = format!("<output-format>\n{}\n</output-format>", output_note);
 
-    let mut builder = PromptBuilder::new(model_window);
-    builder = builder
-        .raw_system_block("agent_identity", &identity_block, SectionPriority::High)
-        .raw_system_block("assignment", &assignment_block, SectionPriority::Critical)
-        .raw_system_block("scope", scope_block, SectionPriority::Normal)
-        .raw_system_block("output_format", &output_block, SectionPriority::Normal)
-        .tools(&tools);
+    // Retrieve memory block first so we can attach it to HistoryInput.recent_messages
+    // before calling compose(). Preserves the pre-migration side effect order
+    // (the DB query runs before the prompt is assembled either way).
+    let memory_block_text: Option<String> = if step == 0
+        && let Some(ref db) = pctx.db
+    {
+        let scope_ctx = pctx.workspace_id.as_ref().map(|ws| {
+            crate::memory::scope_context::MemoryScopeContext::new(Some(ws.clone()))
+        });
+        let access_boost = pctx
+            .daemon_config
+            .load()
+            .orchestrator
+            .memory
+            .decay
+            .access_boost;
+        retrieve_memory_block(
+            db,
+            pctx.embedder.as_ref(),
+            &pctx.created_by,
+            &pctx.description,
+            5,
+            scope_ctx.as_ref(),
+            access_boost,
+        )
+        .await
+    } else {
+        None
+    };
 
-    if !pctx.connector_block.is_empty() {
-        builder = builder.raw_system_block(
-            "connector_guidance",
-            &pctx.connector_block,
-            SectionPriority::Normal,
-        );
+    // raw_blocks replicate the pre-migration `.raw_system_block(...)` / `.tools()`
+    // / raw_system_block("connector_guidance") / bundle-SystemPrompt order at
+    // pipeline_step.rs:355-371. Tools are pre-rendered via format_tool_guidance
+    // (same helper `PromptBuilder::tools` calls internally) and pushed as a
+    // raw_block named "tools". Connector guidance is pushed as a raw_block
+    // named "connector_guidance". Task description goes last to match the
+    // pre-migration TaskDescription-SystemPrompt append-inline position.
+    let mut raw_blocks: Vec<SystemBlock> = Vec::with_capacity(7);
+    raw_blocks.push(SystemBlock {
+        name: "agent_identity",
+        content: Arc::<str>::from(identity_block),
+        priority: SectionPriority::High,
+    });
+    raw_blocks.push(SystemBlock {
+        name: "assignment",
+        content: Arc::<str>::from(assignment_block),
+        priority: SectionPriority::Critical,
+    });
+    raw_blocks.push(SystemBlock {
+        name: "scope",
+        content: Arc::<str>::from(scope_block.to_string()),
+        priority: SectionPriority::Normal,
+    });
+    raw_blocks.push(SystemBlock {
+        name: "output_format",
+        content: Arc::<str>::from(output_block),
+        priority: SectionPriority::Normal,
+    });
+    let tools_rendered = format_tool_guidance(&tools);
+    if !tools_rendered.is_empty() {
+        raw_blocks.push(SystemBlock {
+            name: "tools",
+            content: Arc::<str>::from(tools_rendered),
+            priority: SectionPriority::Normal,
+        });
     }
+    if !pctx.connector_block.is_empty() {
+        raw_blocks.push(SystemBlock {
+            name: "connector_guidance",
+            content: Arc::<str>::from(pctx.connector_block.clone()),
+            priority: SectionPriority::Normal,
+        });
+    }
+    raw_blocks.push(SystemBlock {
+        name: "task_description",
+        content: Arc::<str>::from(role_description.to_string()),
+        priority: SectionPriority::Critical,
+    });
 
-    // Inject context bundle (HandoffContext + workspace sections)
-    builder = builder.context_bundle(&bundle);
+    // PersonaMode::Skip: Layer 1 emits NO content regardless of the underlying
+    // SystemPersona. Use a default-constructed persona to keep the input shape
+    // minimal (no RwLock fetch needed, no clone of the orchestrator's persona).
+    let persona_input = PersonaInput {
+        system_persona: Arc::new(crate::middleware::prompt::SystemPersona::default()),
+        user_document: Arc::new(None),
+        identity_document: Arc::new(None),
+        persona_version: 0,
+        mode: PersonaMode::Skip,
+    };
+    let persona_output = Arc::new(crate::compose::persona::compute(&persona_input));
 
-    let built = builder.build();
+    let tools_arc: Arc<Vec<openalpaca_llm::ToolDefinition>> = Arc::new(tools.clone());
+
+    let static_prompt_input = StaticPromptInput {
+        persona_output,
+        agent_persona: None,
+        agent_config_fingerprint: [0u8; 32],
+        skill_block: None,
+        skills_catalog: None,
+        bootstrap: None,
+        tools: tools_arc.clone(),
+        connector_status: Arc::new(Vec::new()),
+        send_tool_context: None,
+        message_source: None,
+        raw_blocks,
+        planner_agents: None,
+        planner_protocol_v2: false,
+        mode: StaticPromptMode::SubagentMinimal,
+        model_window: model_window as u32,
+    };
+
+    let dynamic_context_input = DynamicContextInput {
+        context_bundle: Arc::new(bundle),
+        query: Arc::from(pctx.description.as_str()),
+        memory_retrieval_hash: [0u8; 32],
+        path: ExecutionPath::PipelineStep {
+            step,
+            total: pctx.total_agents,
+        },
+        reserved_tokens: 0,
+        mode: DynamicContextMode::Default,
+    };
+
+    let recent_messages: Vec<ChatMessage> = match memory_block_text.as_deref() {
+        Some(block) => vec![ChatMessage::user(block)],
+        None => Vec::new(),
+    };
+    let history_input = HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        summary: None,
+        summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
+        recent_messages: Arc::new(recent_messages),
+        current_user_turn: Some(ChatMessage::user(&pctx.description)),
+        mode: HistoryMode::Default,
+    };
+
+    let compose_request = ComposeRequest::PipelineStep {
+        agent: Arc::new(agent.clone()),
+        step_index: step,
+        step_description: Arc::<str>::from(pctx.description.as_str()),
+        scope_block: Arc::<str>::from(scope_block),
+        output_block: Arc::<str>::from(format!("<output-format>\n{}\n</output-format>", output_note)),
+        context_package: Arc::new(context_package),
+        memory_block: memory_block_text.as_deref().map(Arc::<str>::from),
+        overrides: ComposeOverrides::default(),
+    };
+
+    let composed = pctx.compose_engine.compose(
+        &compose_request,
+        persona_input,
+        static_prompt_input,
+        dynamic_context_input,
+        history_input,
+        model_window as u32,
+        tools_arc.clone(),
+        Some(&pctx.bus),
+        None, // lane: per-lane cache for PipelineStep deferred (no natural lane key).
+    );
 
     // --- Context Budget Telemetry ---
     {
@@ -386,7 +577,14 @@ pub(super) async fn execute_pipeline_step(
                 model_window,
                 &pctx.daemon_config.load().execution.context,
             );
-        budget_snapshot.register_section("system_prompt", built.total_prompt_tokens);
+        // Register the combined static-prompt + dynamic-context tokens under
+        // `system_prompt` to preserve the pre-migration budget accounting
+        // (pre-migration `built.total_prompt_tokens` summed all registered
+        // sections including context_bundle sections).
+        let system_prompt_tokens = (composed.token_budget.static_prompt_tokens
+            + composed.token_budget.dynamic_context_tokens)
+            as usize;
+        budget_snapshot.register_section("system_prompt", system_prompt_tokens);
         budget_snapshot.register_section("tools", tools.len() * 200);
 
         tracing::debug!(
@@ -415,42 +613,15 @@ pub(super) async fn execute_pipeline_step(
         });
     }
 
-    let system_prompt = built.system_message;
-
-    // Build messages: system + context messages from bundle + task
-    let mut messages = vec![ChatMessage::system(&system_prompt)];
-    messages.extend(built.context_messages);
-
-    // Inject memory context for the first agent in the pipeline
-    if step == 0
-        && let Some(ref db) = pctx.db
-    {
-        let scope_ctx = pctx.workspace_id.as_ref().map(|ws| {
-            crate::memory::scope_context::MemoryScopeContext::new(Some(ws.clone()))
-        });
-        let access_boost = pctx
-            .daemon_config
-            .load()
-            .orchestrator
-            .memory
-            .decay
-            .access_boost;
-        if let Some(block) = retrieve_memory_block(
-            db,
-            pctx.embedder.as_ref(),
-            &pctx.created_by,
-            &pctx.description,
-            5,
-            scope_ctx.as_ref(),
-            access_boost,
-        )
-        .await
-        {
-            messages.push(ChatMessage::user(&block));
-        }
-    }
-
-    messages.push(ChatMessage::user(&pctx.description));
+    // The compose engine's Arc'd messages vec: pipeline's downstream path needs
+    // ownership because run_agentic_loop_routed takes Vec<ChatMessage>. The
+    // runner will mutate the vec during the agentic loop, so we clone out.
+    let system_prompt = composed
+        .messages
+        .first()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
 
     // ── Plugin agent dispatch path ──────────────────────────────────────
     // If the agent's template has AgentSource::Plugin, route to the
