@@ -202,7 +202,6 @@ pub(super) async fn execute_single_node(
         identity_document: Arc::new(None),
         persona_version: 0,
         mode: PersonaMode::Skip,
-        identity_budget: None,
     };
     let persona_output = Arc::new(crate::compose::persona::compute(&persona_input));
 

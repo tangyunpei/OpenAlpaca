@@ -49,16 +49,6 @@ pub(super) fn compute_fingerprint(input: &PersonaInput) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(&input.persona_version.to_le_bytes());
     h.update(&[mode_tag(input.mode)]);
-    // identity_budget is part of the rendered identity block length, so
-    // the Layer-1 cache must bust when it changes. Tag None vs Some to
-    // avoid collisions with Some(0).
-    match input.identity_budget {
-        None => h.update(&[0u8]),
-        Some(n) => {
-            h.update(&[1u8]);
-            h.update(&(n as u64).to_le_bytes())
-        }
-    };
     h.finalize().into()
 }
 
@@ -80,7 +70,7 @@ fn build_default(input: &PersonaInput) -> Vec<SystemBlock> {
 
     // Identity document block (if present and has content).
     if let Some(ref identity_doc) = *input.identity_document
-        && let Some(block) = identity_document_block(identity_doc, input.identity_budget)
+        && let Some(block) = identity_document_block(identity_doc)
     {
         blocks.push(block);
     }
@@ -150,8 +140,8 @@ fn user_document_block(doc: &UserDocument) -> Option<SystemBlock> {
     }
 }
 
-fn identity_document_block(doc: &IdentityDocument, budget: Option<usize>) -> Option<SystemBlock> {
-    let rendered = crate::middleware::identity::identity_to_prompt_block(doc, budget);
+fn identity_document_block(doc: &IdentityDocument) -> Option<SystemBlock> {
+    let rendered = crate::middleware::identity::identity_to_prompt_block(doc, None);
     if rendered.is_empty() {
         None
     } else {
