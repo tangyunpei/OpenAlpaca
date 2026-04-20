@@ -326,6 +326,10 @@ pub struct PersonaInput {
     pub identity_document: Arc<Option<IdentityDocument>>,
     pub persona_version: u64,
     pub mode: PersonaMode,
+    /// Per-caller truncation budget for the identity block, sourced from
+    /// `daemon.orchestrator.prompt_budgets.identity_budget`. `None` defers
+    /// to the helper's internal default (300 chars).
+    pub identity_budget: Option<usize>,
 }
 
 #[derive(Debug, Clone)]

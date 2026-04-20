@@ -91,15 +91,8 @@ impl Orchestrator {
             domain_knowledge: vec![],
         };
         // Identity block is derived by Layer 1 Default from
-        // `PersonaInput.identity_document`; the pre-migration
-        // `identity_to_prompt_block(doc, Some(identity_budget))` call is
-        // replaced by Layer 1's equivalent `identity_to_prompt_block(doc, None)`
-        // (see `compose/persona.rs::identity_document_block`). The configurable
-        // `identity_budget` override is not plumbed through Layer 1 today —
-        // the rendered identity may be longer than pre-migration when the
-        // user has customized `daemon.orchestrator.prompt_budgets.identity_budget`
-        // to a value below the default 300. Track as a follow-up once Layer 1
-        // accepts per-caller budgets.
+        // `PersonaInput.identity_document` + `PersonaInput.identity_budget`
+        // (sourced from `daemon.orchestrator.prompt_budgets.identity_budget`).
         let bootstrap_block = if let Ok(guard) = self.bootstrap_document.read()
             && let Some(ref doc) = *guard
         {
@@ -344,6 +337,13 @@ impl Orchestrator {
                 .persona_version
                 .load(std::sync::atomic::Ordering::Relaxed),
             mode: PersonaMode::Default,
+            identity_budget: Some(
+                self.daemon_config
+                    .load()
+                    .orchestrator
+                    .prompt_budgets
+                    .identity_budget,
+            ),
         };
         let persona_output = Arc::new(crate::compose::persona::compute(&persona_input));
 
