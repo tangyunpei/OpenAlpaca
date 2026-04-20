@@ -4629,3 +4629,200 @@ fn test_l2_miss_firstbuild_on_cold_cache() {
     assert!(!result.hit);
     assert_eq!(result.miss_reason, Some(MissReason::FirstBuild));
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Task 4: Per-lane cache activation
+// ═══════════════════════════════════════════════════════════════════
+
+fn make_minimal_lane() -> Arc<crate::lane::ConversationLane> {
+    use crate::lane::{ConversationLane, LaneKey};
+    Arc::new(ConversationLane::new(LaneKey::new("test_user", "test_source")))
+}
+
+#[test]
+fn test_per_lane_cache_hit_on_simple_query_second_call() {
+    let engine = ComposeEngine::new(16);
+    let lane = make_minimal_lane();
+    let (persona_input, static_prompt_input, dynamic_context_input, mut history_input) =
+        empty_compose_inputs();
+    history_input.lane_tip_fingerprint = lane.compute_tip_fingerprint();
+
+    let request = ComposeRequest::SimpleQuery {
+        lane_key: "test_lane".to_string(),
+        agent_persona: Arc::new(AgentPersona {
+            role: "Assistant".to_string(),
+            tone: "Concise".to_string(),
+            domain_knowledge: vec![],
+        }),
+        query: "first".to_string(),
+        current_parts: None,
+        message_source: Arc::<str>::from("test"),
+        overrides: ComposeOverrides::default(),
+    };
+
+    let composed_a = engine.compose(
+        &request,
+        persona_input.clone(),
+        static_prompt_input.clone(),
+        dynamic_context_input.clone(),
+        history_input.clone(),
+        8192,
+        Arc::new(Vec::new()),
+        None,
+        Some(&lane),
+    );
+    assert!(!composed_a.layer_trace.memo_hits.dynamic_context);
+    assert!(!composed_a.layer_trace.memo_hits.history);
+
+    let composed_b = engine.compose(
+        &request,
+        persona_input,
+        static_prompt_input,
+        dynamic_context_input,
+        history_input,
+        8192,
+        Arc::new(Vec::new()),
+        None,
+        Some(&lane),
+    );
+    assert!(composed_b.layer_trace.memo_hits.dynamic_context);
+    assert!(composed_b.layer_trace.memo_hits.history);
+}
+
+#[test]
+fn test_per_lane_cache_busts_on_tip_advance_simple_query() {
+    let engine = ComposeEngine::new(16);
+    let lane = make_minimal_lane();
+    let (persona_input, static_prompt_input, dynamic_context_input, mut history_input) =
+        empty_compose_inputs();
+    history_input.lane_tip_fingerprint = lane.compute_tip_fingerprint();
+
+    let request = ComposeRequest::SimpleQuery {
+        lane_key: "test_lane".to_string(),
+        agent_persona: Arc::new(AgentPersona {
+            role: "Assistant".to_string(),
+            tone: "Concise".to_string(),
+            domain_knowledge: vec![],
+        }),
+        query: "first".to_string(),
+        current_parts: None,
+        message_source: Arc::<str>::from("test"),
+        overrides: ComposeOverrides::default(),
+    };
+
+    let _ = engine.compose(
+        &request,
+        persona_input.clone(),
+        static_prompt_input.clone(),
+        dynamic_context_input.clone(),
+        history_input.clone(),
+        8192,
+        Arc::new(Vec::new()),
+        None,
+        Some(&lane),
+    );
+
+    lane.record_message();
+    history_input.lane_tip_fingerprint = lane.compute_tip_fingerprint();
+
+    let composed = engine.compose(
+        &request,
+        persona_input,
+        static_prompt_input,
+        dynamic_context_input,
+        history_input,
+        8192,
+        Arc::new(Vec::new()),
+        None,
+        Some(&lane),
+    );
+    assert!(!composed.layer_trace.memo_hits.history, "L4 must bust when tip advances");
+    assert!(composed.layer_trace.memo_hits.dynamic_context, "L3 stays hit");
+}
+
+#[test]
+fn test_per_lane_cache_hit_on_social_second_call() {
+    let engine = ComposeEngine::new(16);
+    let lane = make_minimal_lane();
+    let (persona_input, static_prompt_input, dynamic_context_input, mut history_input) =
+        empty_compose_inputs();
+    history_input.lane_tip_fingerprint = lane.compute_tip_fingerprint();
+
+    let request = ComposeRequest::Social {
+        lane_key: "test_lane".to_string(),
+        query: "hi".to_string(),
+        overrides: ComposeOverrides::default(),
+    };
+
+    let composed_a = engine.compose(
+        &request,
+        persona_input.clone(),
+        static_prompt_input.clone(),
+        dynamic_context_input.clone(),
+        history_input.clone(),
+        8192,
+        Arc::new(Vec::new()),
+        None,
+        Some(&lane),
+    );
+    assert!(!composed_a.layer_trace.memo_hits.dynamic_context);
+    assert!(!composed_a.layer_trace.memo_hits.history);
+
+    let composed_b = engine.compose(
+        &request,
+        persona_input,
+        static_prompt_input,
+        dynamic_context_input,
+        history_input,
+        8192,
+        Arc::new(Vec::new()),
+        None,
+        Some(&lane),
+    );
+    assert!(composed_b.layer_trace.memo_hits.dynamic_context);
+    assert!(composed_b.layer_trace.memo_hits.history);
+}
+
+#[test]
+fn test_per_lane_cache_busts_on_tip_advance_social() {
+    let engine = ComposeEngine::new(16);
+    let lane = make_minimal_lane();
+    let (persona_input, static_prompt_input, dynamic_context_input, mut history_input) =
+        empty_compose_inputs();
+    history_input.lane_tip_fingerprint = lane.compute_tip_fingerprint();
+
+    let request = ComposeRequest::Social {
+        lane_key: "test_lane".to_string(),
+        query: "hi".to_string(),
+        overrides: ComposeOverrides::default(),
+    };
+
+    let _ = engine.compose(
+        &request,
+        persona_input.clone(),
+        static_prompt_input.clone(),
+        dynamic_context_input.clone(),
+        history_input.clone(),
+        8192,
+        Arc::new(Vec::new()),
+        None,
+        Some(&lane),
+    );
+
+    lane.record_message();
+    history_input.lane_tip_fingerprint = lane.compute_tip_fingerprint();
+
+    let composed = engine.compose(
+        &request,
+        persona_input,
+        static_prompt_input,
+        dynamic_context_input,
+        history_input,
+        8192,
+        Arc::new(Vec::new()),
+        None,
+        Some(&lane),
+    );
+    assert!(!composed.layer_trace.memo_hits.history, "L4 must bust when tip advances");
+    assert!(composed.layer_trace.memo_hits.dynamic_context, "L3 stays hit");
+}

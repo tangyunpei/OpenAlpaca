@@ -74,3 +74,41 @@ fn test_task_lane_agents() {
     assert_eq!(agents[0], "agent-1");
     assert_eq!(agents[1], "agent-2");
 }
+
+#[test]
+fn test_compute_tip_fingerprint_deterministic() {
+    let lane1 = ConversationLane::new(LaneKey::new("alice", "cli"));
+    let lane2 = ConversationLane::new(LaneKey::new("alice", "cli"));
+    assert_eq!(lane1.compute_tip_fingerprint(), lane2.compute_tip_fingerprint());
+}
+
+#[test]
+fn test_compute_tip_fingerprint_advances_on_message() {
+    let lane = ConversationLane::new(LaneKey::new("alice", "cli"));
+    let fp_before = lane.compute_tip_fingerprint();
+    lane.record_message();
+    let fp_after = lane.compute_tip_fingerprint();
+    assert_ne!(fp_before, fp_after);
+}
+
+#[test]
+fn test_compute_tip_fingerprint_distinct_per_lane() {
+    let a = ConversationLane::new(LaneKey::new("alice", "cli"));
+    let b = ConversationLane::new(LaneKey::new("bob", "cli"));
+    assert_ne!(a.compute_tip_fingerprint(), b.compute_tip_fingerprint());
+}
+
+#[test]
+fn test_lane_key_from_str_roundtrip() {
+    let k = LaneKey::new("alice", "telegram");
+    let s = k.to_string();
+    let parsed = LaneKey::from_str(&s).unwrap();
+    assert_eq!(parsed, k);
+}
+
+#[test]
+fn test_lane_key_from_str_rejects_malformed() {
+    assert!(LaneKey::from_str("no_colon").is_none());
+    assert!(LaneKey::from_str(":empty_user").is_none());
+    assert!(LaneKey::from_str("empty_source:").is_none());
+}

@@ -32,7 +32,7 @@ impl Orchestrator {
         source: &str,
         query: &str,
         tool_suggestion_query: &str,
-        _lane_key: &str,
+        lane_key: &str,
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
@@ -150,7 +150,7 @@ impl Orchestrator {
                 max_tool_calls: None,
                 max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
                 stream_id: stream_id.map(|s| s.to_string()),
-                lane_key: Some(_lane_key.to_string()),
+                lane_key: Some(lane_key.to_string()),
                 confirmation_timeout_secs: None,
                 auto_approve: self.daemon_config.load().security.auto_approve_confirmations,
             });
@@ -374,8 +374,20 @@ impl Orchestrator {
                 (ctx.recent_messages.clone(), Some(ChatMessage::user(query)))
             };
 
+        // Resolve ConversationLane for Tier-2 cache activation (Component 4).
+        // `lane_key` is canonical "user_id:source" form; parse back to typed
+        // LaneKey and fetch/insert via the LaneManager. `None` when the
+        // string is malformed — the compose engine falls back to the global
+        // Tier-1 cache in that case.
+        let lane_opt: Option<Arc<crate::lane::ConversationLane>> =
+            crate::lane::LaneKey::from_str(lane_key)
+                .map(|k| self.lane_manager.get_or_create_conversation(k));
+
         let history_input = HistoryInput {
-            lane_tip_fingerprint: [0u8; 32],
+            lane_tip_fingerprint: lane_opt
+                .as_ref()
+                .map(|l| l.compute_tip_fingerprint())
+                .unwrap_or([0u8; 32]),
             summary: ctx.summary.as_deref().map(Arc::<str>::from),
             summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
             recent_messages: Arc::new(adapted_recent),
@@ -384,7 +396,7 @@ impl Orchestrator {
         };
 
         let request = ComposeRequest::SimpleQuery {
-            lane_key: _lane_key.to_string(),
+            lane_key: lane_key.to_string(),
             agent_persona: Arc::new(agent_persona.clone()),
             query: query.to_string(),
             current_parts: current_parts.map(|p| p.to_vec()),
@@ -401,7 +413,7 @@ impl Orchestrator {
             model_window as u32,
             Arc::new(tools_for_loop.clone()),
             Some(&self.bus),
-            None, // lane: per-lane cache for SimpleQuery deferred (plan Q2)
+            lane_opt.as_deref(),
         );
 
         // ── Build ContextBudgetManager for agentic loop. Register the
@@ -626,6 +638,7 @@ impl Orchestrator {
         &self,
         request_id: Uuid,
         query: &str,
+        lane_key: &str,
         ctx: &ConversationContext,
     ) -> Result<String, String> {
         let router = self.llm_router.as_ref().ok_or_else(|| "No LLM router".to_string())?;
@@ -698,8 +711,19 @@ impl Orchestrator {
             mode: DynamicContextMode::Skip,
         };
 
+        // Resolve ConversationLane for Tier-2 cache activation (Component 4).
+        // `lane_key` is the canonical "user_id:source" form threaded down
+        // from the gateway. Malformed input falls back to the global Tier-1
+        // cache (lane_opt == None).
+        let lane_opt: Option<Arc<crate::lane::ConversationLane>> =
+            crate::lane::LaneKey::from_str(lane_key)
+                .map(|k| self.lane_manager.get_or_create_conversation(k));
+
         let history_input = HistoryInput {
-            lane_tip_fingerprint: [0u8; 32],
+            lane_tip_fingerprint: lane_opt
+                .as_ref()
+                .map(|l| l.compute_tip_fingerprint())
+                .unwrap_or([0u8; 32]),
             summary: None,
             summary_wrap_mode: SummaryWrapMode::Plain,
             recent_messages: Arc::new(ctx.recent_messages.clone()),
@@ -708,12 +732,7 @@ impl Orchestrator {
         };
 
         let request = ComposeRequest::Social {
-            // `lane_key` on `ComposeRequest::Social` is informational only; the
-            // engine uses it for telemetry, not for cache behaviour. The
-            // real per-lane context is passed via the trailing `lane:
-            // Option<&ConversationLane>` arg, which this social path leaves
-            // `None` (no lane handle plumbed into `handle_social_query`).
-            lane_key: "social".to_string(),
+            lane_key: lane_key.to_string(),
             query: query.to_string(),
             overrides: ComposeOverrides::default(),
         };
@@ -727,7 +746,7 @@ impl Orchestrator {
             8192,
             Arc::new(Vec::new()),
             Some(&self.bus),
-            None,
+            lane_opt.as_deref(),
         );
 
         let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();

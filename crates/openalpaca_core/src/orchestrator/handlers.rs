@@ -192,7 +192,7 @@ impl Orchestrator {
                 reason: "social_fast_path".to_string(),
                 timestamp: Utc::now(),
             });
-            self.handle_social_query(request_id, &model_input_content, &ctx)
+            self.handle_social_query(request_id, &model_input_content, &lane_key, &ctx)
                 .await
         } else if self.llm_router.is_some()
             && matches!(intent, Intent::SimpleQuery { .. })

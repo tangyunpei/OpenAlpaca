@@ -16,6 +16,22 @@ impl LaneKey {
             source: source.into(),
         }
     }
+
+    /// Parse the canonical `"{user_id}:{source}"` format produced by
+    /// `LaneKey::to_string()`. Returns None if the input doesn't contain
+    /// exactly one `:` separator, or if either side is empty.
+    ///
+    /// Note: the `Option<Self>` return type is intentional — we don't want
+    /// the `FromStr` trait's `Result`-based contract here; plain `Option`
+    /// is clearer for a single-error-case parser.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        let (user_id, source) = s.split_once(':')?;
+        if user_id.is_empty() || source.is_empty() {
+            return None;
+        }
+        Some(Self::new(user_id, source))
+    }
 }
 
 impl std::fmt::Display for LaneKey {
@@ -120,6 +136,20 @@ impl ConversationLane {
     /// Get the last time a message was processed on this lane.
     pub fn last_active_at(&self) -> DateTime<Utc> {
         *self.last_active_at.lock().unwrap()
+    }
+
+    /// Deterministic fingerprint of the lane's current tip state. Advances
+    /// on every new message via `record_message`. Feeds
+    /// `HistoryInput.lane_tip_fingerprint` so Layer 4's per-lane cache busts
+    /// on turn advance. No lane-content info leaks out — hash covers only
+    /// `lane_id + message_count`.
+    pub fn compute_tip_fingerprint(&self) -> [u8; 32] {
+        let mut h = blake3::Hasher::new();
+        let key_str = self.key.to_string();
+        h.update(&(key_str.len() as u64).to_le_bytes());
+        h.update(key_str.as_bytes());
+        h.update(&(self.message_count() as u64).to_le_bytes());
+        h.finalize().into()
     }
 }
 
