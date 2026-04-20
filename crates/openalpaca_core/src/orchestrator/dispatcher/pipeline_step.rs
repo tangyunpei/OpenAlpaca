@@ -502,7 +502,7 @@ pub(super) async fn execute_pipeline_step(
     let static_prompt_input = StaticPromptInput {
         persona_output,
         agent_persona: None,
-        agent_config_fingerprint: [0u8; 32],
+        agent_config_fingerprint: crate::compose::fingerprint::hash_agent_config(agent),
         skill_block: None,
         skills_catalog: None,
         bootstrap: None,

@@ -4343,3 +4343,51 @@ fn test_golden_lead_agent_spawn_subagent_byte_identical() {
     assert_eq!(last.role, Role::User);
     assert_eq!(last.content, objective);
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Task 2: hash_agent_config
+// ═══════════════════════════════════════════════════════════════════
+
+fn make_agent_for_hash_test(persona: &str) -> crate::agent::subagent::SubAgent {
+    use crate::agent::subagent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, SubAgent};
+
+    SubAgent {
+        id: "test_agent".to_string(),
+        template_id: "test_agent".to_string(),
+        name: "Test Agent".to_string(),
+        description: Some("A test agent.".to_string()),
+        icon: None,
+        status: AgentStatus::Idle,
+        current_task: None,
+        capabilities: vec![],
+        preset: AgentPreset {
+            persona: persona.to_string(),
+            temperature: 0.7,
+            verbosity: "normal".to_string(),
+        },
+        constraints: AgentConstraints::default(),
+        llm_config: AgentLlmConfig::default(),
+    }
+}
+
+#[test]
+fn test_hash_agent_config_deterministic() {
+    let a1 = make_agent_for_hash_test("You are a coder.");
+    let a2 = make_agent_for_hash_test("You are a coder.");
+    assert_eq!(
+        super::fingerprint::hash_agent_config(&a1),
+        super::fingerprint::hash_agent_config(&a2),
+        "hash_agent_config must be deterministic"
+    );
+}
+
+#[test]
+fn test_hash_agent_config_busts_on_persona_change() {
+    let a1 = make_agent_for_hash_test("You are a coder.");
+    let a2 = make_agent_for_hash_test("You are a writer.");
+    assert_ne!(
+        super::fingerprint::hash_agent_config(&a1),
+        super::fingerprint::hash_agent_config(&a2),
+        "preset.persona differences must bust the agent_config fingerprint"
+    );
+}

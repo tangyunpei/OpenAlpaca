@@ -101,6 +101,42 @@ pub fn hash_opt_arc_str(opt: &Option<Arc<str>>) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// blake3 over the render-affecting subset of a SubAgent. Drives the
+/// Layer 2 cache `agent_config_fingerprint` for Pipeline / DAG / LeadAgent
+/// migrations where `agent.preset.persona` (and siblings) actually appear
+/// in the rendered system prompt.
+///
+/// Covers: id, template_id, name, description, preset.persona +
+/// temperature + verbosity, capabilities (name + category + proficiency).
+/// Does NOT cover status, current_task (runtime-only, shouldn't bust cache)
+/// or constraints/llm_config (not rendered in the system prompt today).
+pub fn hash_agent_config(agent: &crate::agent::subagent::SubAgent) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(&(agent.id.len() as u64).to_le_bytes());
+    h.update(agent.id.as_bytes());
+    h.update(&(agent.template_id.len() as u64).to_le_bytes());
+    h.update(agent.template_id.as_bytes());
+    h.update(&(agent.name.len() as u64).to_le_bytes());
+    h.update(agent.name.as_bytes());
+    let desc = agent.description.as_deref().unwrap_or("");
+    h.update(&(desc.len() as u64).to_le_bytes());
+    h.update(desc.as_bytes());
+    h.update(&(agent.preset.persona.len() as u64).to_le_bytes());
+    h.update(agent.preset.persona.as_bytes());
+    h.update(&agent.preset.temperature.to_le_bytes());
+    h.update(&(agent.preset.verbosity.len() as u64).to_le_bytes());
+    h.update(agent.preset.verbosity.as_bytes());
+    h.update(&(agent.capabilities.len() as u64).to_le_bytes());
+    for cap in &agent.capabilities {
+        h.update(&(cap.name.len() as u64).to_le_bytes());
+        h.update(cap.name.as_bytes());
+        h.update(&(cap.category.len() as u64).to_le_bytes());
+        h.update(cap.category.as_bytes());
+        h.update(&cap.proficiency.to_le_bytes());
+    }
+    h.finalize().into()
+}
+
 /// blake3 over an `Option<ChatMessage>` for Layer 4 fingerprinting.
 ///
 /// Phase 3: covers role tag + content + multimodal `parts` so the history
