@@ -69,6 +69,33 @@ pub(super) fn compute_fingerprint(input: &PersonaInput) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// Per-sub-field fingerprints for Layer 1 cache attribution. Encoded so
+/// that two inputs producing the same overall `compute_fingerprint` also
+/// produce identical `PersonaSubFingerprints` (up to `PartialEq`).
+///
+/// The budget fields use a 9-byte encoding: `[tag, u64_le]`. `None` → all
+/// zeros; `Some(n)` → `[1, n_le_bytes]`.
+pub(super) fn compute_sub_fingerprints(
+    input: &PersonaInput,
+) -> super::PersonaSubFingerprints {
+    let mut ib = [0u8; 9];
+    if let Some(n) = input.identity_budget {
+        ib[0] = 1;
+        ib[1..9].copy_from_slice(&(n as u64).to_le_bytes());
+    }
+    let mut ub = [0u8; 9];
+    if let Some(n) = input.user_budget {
+        ub[0] = 1;
+        ub[1..9].copy_from_slice(&(n as u64).to_le_bytes());
+    }
+    super::PersonaSubFingerprints {
+        persona_version: input.persona_version,
+        mode_tag: mode_tag(input.mode),
+        identity_budget: ib,
+        user_budget: ub,
+    }
+}
+
 fn build_default(input: &PersonaInput) -> Vec<SystemBlock> {
     let mut blocks = Vec::with_capacity(3);
 

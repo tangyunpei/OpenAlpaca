@@ -104,6 +104,76 @@ pub(super) fn compute_fingerprint(input: &StaticPromptInput) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// Per-sub-field fingerprints for Layer 2 cache attribution. Each `*_fp` byte
+/// array covers one logical sub-field of `StaticPromptInput`; on miss,
+/// `attribute_static_prompt_miss` diffs these against the MRU cached entry's
+/// sub-fingerprints to pick a specific `MissReason`.
+///
+/// The `agent_persona_fp` and `planner_agents_fp` helpers use the same
+/// Debug-serializer trick as `compute_fingerprint` does for `AgentPersona`.
+pub(super) fn compute_sub_fingerprints(
+    input: &StaticPromptInput,
+) -> super::StaticPromptSubFingerprints {
+    let agent_persona_fp: [u8; 32] = if let Some(ref ap) = input.agent_persona {
+        let mut h = blake3::Hasher::new();
+        h.update(&[1u8]);
+        let ap_bytes = format!("{:?}", ap).into_bytes();
+        h.update(&(ap_bytes.len() as u64).to_le_bytes());
+        h.update(&ap_bytes);
+        h.finalize().into()
+    } else {
+        let mut h = blake3::Hasher::new();
+        h.update(&[0u8]);
+        h.finalize().into()
+    };
+
+    // `planner_agents_fp` mirrors the planner_agents section of
+    // `compute_fingerprint` above; hashes each agent's render-relevant fields.
+    let planner_agents_fp: [u8; 32] = if let Some(ref agents) = input.planner_agents {
+        let mut h = blake3::Hasher::new();
+        h.update(&[1u8]);
+        h.update(&(agents.len() as u64).to_le_bytes());
+        for agent in agents.iter() {
+            h.update(&(agent.id.len() as u64).to_le_bytes());
+            h.update(agent.id.as_bytes());
+            h.update(&(agent.name.len() as u64).to_le_bytes());
+            h.update(agent.name.as_bytes());
+            let desc = agent.description.as_deref().unwrap_or("");
+            h.update(&(desc.len() as u64).to_le_bytes());
+            h.update(desc.as_bytes());
+            h.update(&(agent.capabilities.len() as u64).to_le_bytes());
+            for cap in &agent.capabilities {
+                h.update(&(cap.name.len() as u64).to_le_bytes());
+                h.update(cap.name.as_bytes());
+                h.update(&cap.proficiency.to_le_bytes());
+            }
+        }
+        h.finalize().into()
+    } else {
+        let mut h = blake3::Hasher::new();
+        h.update(&[0u8]);
+        h.finalize().into()
+    };
+
+    super::StaticPromptSubFingerprints {
+        persona_fp: input.persona_output.fingerprint,
+        agent_config_fp: input.agent_config_fingerprint,
+        agent_persona_fp,
+        tools_fp: hash_tool_set(&input.tools),
+        skills_catalog_fp: hash_opt_arc_str(&input.skills_catalog),
+        skill_block_fp: hash_opt_arc_str(&input.skill_block),
+        bootstrap_fp: hash_opt_arc_str(&input.bootstrap),
+        connector_status_fp: hash_connector_status(&input.connector_status),
+        raw_blocks_fp: hash_raw_blocks(&input.raw_blocks),
+        send_tool_context_fp: hash_opt_arc_str(&input.send_tool_context),
+        message_source_fp: hash_opt_arc_str(&input.message_source),
+        planner_agents_fp,
+        mode_tag: mode_tag(input.mode),
+        model_window: input.model_window,
+        planner_protocol_v2: input.planner_protocol_v2,
+    }
+}
+
 fn mode_tag(mode: StaticPromptMode) -> u8 {
     match mode {
         StaticPromptMode::Default => 0,

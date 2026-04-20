@@ -4391,3 +4391,241 @@ fn test_hash_agent_config_busts_on_persona_change() {
         "preset.persona differences must bust the agent_config fingerprint"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Task 3: Layer 1 MissReason attribution
+// ═══════════════════════════════════════════════════════════════════
+
+/// Minimal PersonaInput with mode + version controllable. Defaults keep all
+/// other fields at their neutral values (None, version 0).
+fn make_persona_input_with_mode(mode: PersonaMode, version: u64) -> PersonaInput {
+    PersonaInput {
+        system_persona: Arc::new(SystemPersona::default()),
+        user_document: Arc::new(None),
+        identity_document: Arc::new(Option::<IdentityDocument>::None),
+        persona_version: version,
+        mode,
+        identity_budget: None,
+        user_budget: None,
+    }
+}
+
+#[test]
+fn test_l1_miss_firstbuild_on_cold_cache() {
+    let engine = ComposeEngine::new(16);
+    let input = make_persona_input_with_mode(PersonaMode::Default, 0);
+    let result = engine.lookup_or_build_persona(&input, None);
+    assert!(!result.hit);
+    assert_eq!(result.miss_reason, Some(MissReason::FirstBuild));
+}
+
+#[test]
+fn test_l1_miss_attributes_persona_version_change() {
+    let engine = ComposeEngine::new(16);
+    let a = make_persona_input_with_mode(PersonaMode::Default, 1);
+    let b = make_persona_input_with_mode(PersonaMode::Default, 2);
+    let _ = engine.lookup_or_build_persona(&a, None);
+    let result = engine.lookup_or_build_persona(&b, None);
+    assert!(!result.hit);
+    assert_eq!(result.miss_reason, Some(MissReason::PersonaChanged));
+}
+
+#[test]
+fn test_l1_miss_attributes_identity_budget_change() {
+    let engine = ComposeEngine::new(16);
+    let mut a = make_persona_input_with_mode(PersonaMode::Default, 0);
+    a.identity_budget = Some(300);
+    let mut b = make_persona_input_with_mode(PersonaMode::Default, 0);
+    b.identity_budget = Some(500);
+    let _ = engine.lookup_or_build_persona(&a, None);
+    let result = engine.lookup_or_build_persona(&b, None);
+    assert!(!result.hit);
+    assert_eq!(result.miss_reason, Some(MissReason::IdentityBudgetChanged));
+}
+
+#[test]
+fn test_l1_miss_attributes_user_budget_change() {
+    let engine = ComposeEngine::new(16);
+    let mut a = make_persona_input_with_mode(PersonaMode::Default, 0);
+    a.user_budget = Some(1000);
+    let mut b = make_persona_input_with_mode(PersonaMode::Default, 0);
+    b.user_budget = Some(2000);
+    let _ = engine.lookup_or_build_persona(&a, None);
+    let result = engine.lookup_or_build_persona(&b, None);
+    assert!(!result.hit);
+    assert_eq!(result.miss_reason, Some(MissReason::UserBudgetChanged));
+}
+
+#[test]
+fn test_l1_miss_attributes_mode_change() {
+    let engine = ComposeEngine::new(16);
+    let a = make_persona_input_with_mode(PersonaMode::Default, 0);
+    let b = make_persona_input_with_mode(PersonaMode::Minimal, 0);
+    let _ = engine.lookup_or_build_persona(&a, None);
+    let result = engine.lookup_or_build_persona(&b, None);
+    assert!(!result.hit);
+    assert_eq!(result.miss_reason, Some(MissReason::ModeChanged));
+}
+
+#[test]
+fn test_l1_hit_has_no_miss_reason() {
+    let engine = ComposeEngine::new(16);
+    let input = make_persona_input_with_mode(PersonaMode::Default, 0);
+    let _ = engine.lookup_or_build_persona(&input, None);
+    let result = engine.lookup_or_build_persona(&input, None);
+    assert!(result.hit);
+    assert_eq!(result.miss_reason, None);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Task 3: Layer 2 MissReason attribution
+// ═══════════════════════════════════════════════════════════════════
+
+/// Build a default `StaticPromptInput` using the canonical empty-inputs
+/// helper. Returns the second tuple element.
+fn make_default_static_prompt_input() -> StaticPromptInput {
+    let (_, s, _, _) = empty_compose_inputs();
+    s
+}
+
+/// Seed the L2 cache with `first`, then probe with `second`. Panics if the
+/// second lookup was a hit (caller must ensure the two inputs bust the
+/// fingerprint).
+fn seed_l2_and_probe(
+    engine: &ComposeEngine,
+    first: StaticPromptInput,
+    second: StaticPromptInput,
+) -> Option<MissReason> {
+    let _ = engine.lookup_or_build_static_prompt(&first, None);
+    let result = engine.lookup_or_build_static_prompt(&second, None);
+    assert!(!result.hit);
+    result.miss_reason
+}
+
+#[test]
+fn test_l2_miss_attributes_tools_change() {
+    let engine = ComposeEngine::new(16);
+    let base = make_default_static_prompt_input();
+    let mut a = base.clone();
+    a.tools = Arc::new(vec![ToolDefinition {
+        name: "tool_a".to_string(),
+        description: "A".to_string(),
+        parameters: serde_json::json!({}),
+        strict: None,
+        input_examples: None,
+    }]);
+    let mut b = base.clone();
+    b.tools = Arc::new(vec![ToolDefinition {
+        name: "tool_b".to_string(),
+        description: "B".to_string(),
+        parameters: serde_json::json!({}),
+        strict: None,
+        input_examples: None,
+    }]);
+    assert_eq!(
+        seed_l2_and_probe(&engine, a, b),
+        Some(MissReason::ToolsChanged)
+    );
+}
+
+#[test]
+fn test_l2_miss_attributes_bootstrap_change() {
+    let engine = ComposeEngine::new(16);
+    let base = make_default_static_prompt_input();
+    let mut a = base.clone();
+    a.bootstrap = Some(Arc::<str>::from("bootstrap v1"));
+    let mut b = base.clone();
+    b.bootstrap = Some(Arc::<str>::from("bootstrap v2"));
+    assert_eq!(
+        seed_l2_and_probe(&engine, a, b),
+        Some(MissReason::BootstrapChanged)
+    );
+}
+
+#[test]
+fn test_l2_miss_attributes_mode_change() {
+    let engine = ComposeEngine::new(16);
+    let base = make_default_static_prompt_input();
+    let mut a = base.clone();
+    a.mode = StaticPromptMode::Default;
+    let mut b = base.clone();
+    b.mode = StaticPromptMode::SubagentMinimal;
+    assert_eq!(
+        seed_l2_and_probe(&engine, a, b),
+        Some(MissReason::ModeChanged)
+    );
+}
+
+#[test]
+fn test_l2_miss_attributes_model_window_change() {
+    let engine = ComposeEngine::new(16);
+    let base = make_default_static_prompt_input();
+    let mut a = base.clone();
+    a.model_window = 8192;
+    let mut b = base.clone();
+    b.model_window = 200_000;
+    assert_eq!(
+        seed_l2_and_probe(&engine, a, b),
+        Some(MissReason::ModelWindowChanged)
+    );
+}
+
+#[test]
+fn test_l2_miss_attributes_persona_change() {
+    // Changing persona_output.fingerprint propagates via persona_fp sub-field.
+    let engine = ComposeEngine::new(16);
+    let base = make_default_static_prompt_input();
+    let mut a = base.clone();
+    let mut persona_out = (*a.persona_output).clone();
+    persona_out.fingerprint = [1u8; 32];
+    a.persona_output = Arc::new(persona_out);
+    let mut b = base.clone();
+    let mut persona_out = (*b.persona_output).clone();
+    persona_out.fingerprint = [2u8; 32];
+    b.persona_output = Arc::new(persona_out);
+    assert_eq!(
+        seed_l2_and_probe(&engine, a, b),
+        Some(MissReason::PersonaChanged)
+    );
+}
+
+#[test]
+fn test_l2_miss_attributes_agent_config_change() {
+    let engine = ComposeEngine::new(16);
+    let base = make_default_static_prompt_input();
+    let mut a = base.clone();
+    a.agent_config_fingerprint = [1u8; 32];
+    let mut b = base.clone();
+    b.agent_config_fingerprint = [2u8; 32];
+    assert_eq!(
+        seed_l2_and_probe(&engine, a, b),
+        Some(MissReason::AgentConfigChanged)
+    );
+}
+
+#[test]
+fn test_l2_miss_attributes_raw_blocks_change() {
+    let engine = ComposeEngine::new(16);
+    let base = make_default_static_prompt_input();
+    let mut a = base.clone();
+    a.raw_blocks = vec![];
+    let mut b = base.clone();
+    b.raw_blocks = vec![SystemBlock {
+        name: "new_block",
+        content: Arc::<str>::from("content"),
+        priority: SectionPriority::Normal,
+    }];
+    assert_eq!(
+        seed_l2_and_probe(&engine, a, b),
+        Some(MissReason::RawBlocksChanged)
+    );
+}
+
+#[test]
+fn test_l2_miss_firstbuild_on_cold_cache() {
+    let engine = ComposeEngine::new(16);
+    let input = make_default_static_prompt_input();
+    let result = engine.lookup_or_build_static_prompt(&input, None);
+    assert!(!result.hit);
+    assert_eq!(result.miss_reason, Some(MissReason::FirstBuild));
+}

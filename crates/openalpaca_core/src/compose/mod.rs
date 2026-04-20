@@ -33,12 +33,6 @@ pub enum GlobalCacheKey {
     StaticPrompt(StaticPromptFingerprint),
 }
 
-#[derive(Debug, Clone)]
-pub enum GlobalCacheValue {
-    Persona(Arc<PersonaOutput>),
-    StaticPrompt(Arc<StaticPromptOutput>),
-}
-
 /// Identifies which compose-engine layer emitted a telemetry event
 /// (spec section Component 4 Events).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -51,6 +45,12 @@ pub enum LayerId {
 }
 
 /// Reason a compose-engine layer rebuilt its output (cache miss).
+///
+/// Structured attribution (spec section Component 3): Layer 1 + Layer 2 cache
+/// misses are attributed to a specific sub-field of the input by diffing
+/// the new sub-fingerprints against the most-recently-used existing entry.
+/// Layer 3 + Layer 4 report `FirstBuild` on miss (per-lane attribution out
+/// of scope for this cycle).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MissReason {
@@ -59,17 +59,76 @@ pub enum MissReason {
     AgentConfigChanged,
     ToolsChanged,
     SkillsChanged,
+    SkillBlockChanged,
     BootstrapChanged,
+    ConnectorStatusChanged,
+    RawBlocksChanged,
+    SendToolContextChanged,
+    MessageSourceChanged,
+    ModeChanged,
+    ModelWindowChanged,
+    IdentityBudgetChanged,
+    UserBudgetChanged,
+    PlannerAgentsChanged,
+    PlannerProtocolChanged,
+    AgentPersonaChanged,
     QueryChanged,
     MemoryChanged,
     LaneTipAdvanced,
+    Unknown,
+}
+
+/// Per-sub-field fingerprints for Layer 1 (Persona) cache entries. Stored
+/// alongside each cached output so `attribute_persona_miss` can diff against
+/// the previous entry and return a specific `MissReason`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonaSubFingerprints {
+    pub persona_version: u64,
+    pub mode_tag: u8,
+    /// 9-byte encoding: [tag(0/1), u64_le(value)]. Zero when None.
+    pub identity_budget: [u8; 9],
+    pub user_budget: [u8; 9],
+}
+
+/// Per-sub-field fingerprints for Layer 2 (StaticPrompt) cache entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticPromptSubFingerprints {
+    pub persona_fp: [u8; 32],
+    pub agent_config_fp: [u8; 32],
+    pub agent_persona_fp: [u8; 32],
+    pub tools_fp: [u8; 32],
+    pub skills_catalog_fp: [u8; 32],
+    pub skill_block_fp: [u8; 32],
+    pub bootstrap_fp: [u8; 32],
+    pub connector_status_fp: [u8; 32],
+    pub raw_blocks_fp: [u8; 32],
+    pub send_tool_context_fp: [u8; 32],
+    pub message_source_fp: [u8; 32],
+    pub planner_agents_fp: [u8; 32],
+    pub mode_tag: u8,
+    pub model_window: u32,
+    pub planner_protocol_v2: bool,
+}
+
+/// Tagged cache value that pairs each output with its per-sub-field
+/// fingerprints. Replaces the previous `GlobalCacheValue` shape.
+#[derive(Debug, Clone)]
+pub enum CachedEntry {
+    Persona {
+        output: Arc<PersonaOutput>,
+        subs: PersonaSubFingerprints,
+    },
+    StaticPrompt {
+        output: Arc<StaticPromptOutput>,
+        subs: StaticPromptSubFingerprints,
+    },
 }
 
 /// The compose engine. Holds the tier-1 global cache for Layer 1 (persona)
 /// and Layer 2 (static prompt) outputs. Tier-2 per-lane cache lives on
 /// `ConversationLane.caches` — this struct does not own those slots.
 pub struct ComposeEngine {
-    global_cache: Arc<Mutex<LruCache<GlobalCacheKey, Arc<GlobalCacheValue>>>>,
+    global_cache: Arc<Mutex<LruCache<GlobalCacheKey, Arc<CachedEntry>>>>,
 }
 
 impl std::fmt::Debug for ComposeEngine {
@@ -85,6 +144,89 @@ impl std::fmt::Debug for ComposeEngine {
 pub struct CacheLookup<T> {
     pub output: Arc<T>,
     pub hit: bool,
+    /// Populated when `hit == false` so the caller emits the right
+    /// `ComposeLayerCacheMiss { reason, ... }` variant. On `hit == true`,
+    /// this is always `None`.
+    pub miss_reason: Option<MissReason>,
+}
+
+/// Compare two `PersonaSubFingerprints` and return the first differing field
+/// as a `MissReason`. Priority order: persona_version → identity_budget →
+/// user_budget → mode_tag. Returns `MissReason::Unknown` if all fields match
+/// (defensive; should never fire if caller verified the composite fingerprints
+/// differ).
+fn attribute_persona_miss(
+    old: &PersonaSubFingerprints,
+    new: &PersonaSubFingerprints,
+) -> MissReason {
+    if old.persona_version != new.persona_version {
+        return MissReason::PersonaChanged;
+    }
+    if old.identity_budget != new.identity_budget {
+        return MissReason::IdentityBudgetChanged;
+    }
+    if old.user_budget != new.user_budget {
+        return MissReason::UserBudgetChanged;
+    }
+    if old.mode_tag != new.mode_tag {
+        return MissReason::ModeChanged;
+    }
+    MissReason::Unknown
+}
+
+/// Compare two `StaticPromptSubFingerprints` and return the first differing
+/// field as a `MissReason`. Priority order follows declaration order; first
+/// mismatch wins.
+fn attribute_static_prompt_miss(
+    old: &StaticPromptSubFingerprints,
+    new: &StaticPromptSubFingerprints,
+) -> MissReason {
+    if old.persona_fp != new.persona_fp {
+        return MissReason::PersonaChanged;
+    }
+    if old.agent_config_fp != new.agent_config_fp {
+        return MissReason::AgentConfigChanged;
+    }
+    if old.agent_persona_fp != new.agent_persona_fp {
+        return MissReason::AgentPersonaChanged;
+    }
+    if old.tools_fp != new.tools_fp {
+        return MissReason::ToolsChanged;
+    }
+    if old.skills_catalog_fp != new.skills_catalog_fp {
+        return MissReason::SkillsChanged;
+    }
+    if old.skill_block_fp != new.skill_block_fp {
+        return MissReason::SkillBlockChanged;
+    }
+    if old.bootstrap_fp != new.bootstrap_fp {
+        return MissReason::BootstrapChanged;
+    }
+    if old.connector_status_fp != new.connector_status_fp {
+        return MissReason::ConnectorStatusChanged;
+    }
+    if old.raw_blocks_fp != new.raw_blocks_fp {
+        return MissReason::RawBlocksChanged;
+    }
+    if old.send_tool_context_fp != new.send_tool_context_fp {
+        return MissReason::SendToolContextChanged;
+    }
+    if old.message_source_fp != new.message_source_fp {
+        return MissReason::MessageSourceChanged;
+    }
+    if old.planner_agents_fp != new.planner_agents_fp {
+        return MissReason::PlannerAgentsChanged;
+    }
+    if old.mode_tag != new.mode_tag {
+        return MissReason::ModeChanged;
+    }
+    if old.model_window != new.model_window {
+        return MissReason::ModelWindowChanged;
+    }
+    if old.planner_protocol_v2 != new.planner_protocol_v2 {
+        return MissReason::PlannerProtocolChanged;
+    }
+    MissReason::Unknown
 }
 
 impl ComposeEngine {
@@ -97,13 +239,18 @@ impl ComposeEngine {
 
     /// Access to the global cache. Phase 2 wires this up inside the layer
     /// computations; Phase 1 exposes it for tests and future inspection.
-    pub fn global_cache(&self) -> &Arc<Mutex<LruCache<GlobalCacheKey, Arc<GlobalCacheValue>>>> {
+    pub fn global_cache(&self) -> &Arc<Mutex<LruCache<GlobalCacheKey, Arc<CachedEntry>>>> {
         &self.global_cache
     }
 
     /// Global-cache lookup for Layer 1 (Persona) outputs. Computes the cache
     /// key from the input's fingerprint; on hit, returns an `Arc`-clone of
     /// the cached output. On miss, runs `persona::compute` and inserts.
+    ///
+    /// On miss, diffs the new sub-fingerprints against the most-recently-used
+    /// existing Persona entry to attribute the miss to a specific
+    /// `MissReason`. Cold-cache misses (no prior entry) report
+    /// `MissReason::FirstBuild`.
     ///
     /// `lane_id` is accepted for symmetry with the event-emission code path
     /// but is ignored here (the persona layer has no lane-scoped state).
@@ -113,24 +260,46 @@ impl ComposeEngine {
         _lane_id: Option<&str>,
     ) -> CacheLookup<PersonaOutput> {
         let fingerprint = persona::compute_fingerprint(input);
+        let new_subs = persona::compute_sub_fingerprints(input);
         let key = GlobalCacheKey::Persona(fingerprint);
 
+        // Try hit path (separate lock scope from miss-path attribution scan).
         {
             let mut cache = self
                 .global_cache
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some(value) = cache.get(&key)
-                && let GlobalCacheValue::Persona(arc) = value.as_ref()
+            if let Some(entry) = cache.get(&key)
+                && let CachedEntry::Persona { output, .. } = entry.as_ref()
             {
                 return CacheLookup {
-                    output: arc.clone(),
+                    output: output.clone(),
                     hit: true,
+                    miss_reason: None,
                 };
             }
         }
 
-        // Miss: compute and insert.
+        // Miss: attribute against the most-recently-used existing Persona
+        // entry. `iter()` yields entries in LRU order (most-recently-used
+        // first), so `find_map` picks the MRU Persona variant.
+        let reason = {
+            let cache = self
+                .global_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            cache
+                .iter()
+                .find_map(|(_k, v)| match v.as_ref() {
+                    CachedEntry::Persona { subs, .. } => {
+                        Some(attribute_persona_miss(subs, &new_subs))
+                    }
+                    _ => None,
+                })
+                .unwrap_or(MissReason::FirstBuild)
+        };
+
+        // Build + insert.
         let built = persona::compute(input);
         let arc = Arc::new(built);
         {
@@ -138,24 +307,33 @@ impl ComposeEngine {
                 .global_cache
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            cache.put(key, Arc::new(GlobalCacheValue::Persona(arc.clone())));
+            cache.put(
+                key,
+                Arc::new(CachedEntry::Persona {
+                    output: arc.clone(),
+                    subs: new_subs,
+                }),
+            );
         }
 
         CacheLookup {
             output: arc,
             hit: false,
+            miss_reason: Some(reason),
         }
     }
 
     /// Global-cache lookup for Layer 2 (Static Prompt) outputs. Mirrors
     /// `lookup_or_build_persona` but keys against the static-prompt
-    /// fingerprint variant.
+    /// fingerprint variant. On miss, attribution diffs the new sub-fingerprints
+    /// against the most-recently-used existing StaticPrompt entry.
     pub fn lookup_or_build_static_prompt(
         &self,
         input: &StaticPromptInput,
         _lane_id: Option<&str>,
     ) -> CacheLookup<StaticPromptOutput> {
         let fingerprint = static_prompt::compute_fingerprint(input);
+        let new_subs = static_prompt::compute_sub_fingerprints(input);
         let key = GlobalCacheKey::StaticPrompt(fingerprint);
 
         {
@@ -163,15 +341,32 @@ impl ComposeEngine {
                 .global_cache
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some(value) = cache.get(&key)
-                && let GlobalCacheValue::StaticPrompt(arc) = value.as_ref()
+            if let Some(entry) = cache.get(&key)
+                && let CachedEntry::StaticPrompt { output, .. } = entry.as_ref()
             {
                 return CacheLookup {
-                    output: arc.clone(),
+                    output: output.clone(),
                     hit: true,
+                    miss_reason: None,
                 };
             }
         }
+
+        let reason = {
+            let cache = self
+                .global_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            cache
+                .iter()
+                .find_map(|(_k, v)| match v.as_ref() {
+                    CachedEntry::StaticPrompt { subs, .. } => {
+                        Some(attribute_static_prompt_miss(subs, &new_subs))
+                    }
+                    _ => None,
+                })
+                .unwrap_or(MissReason::FirstBuild)
+        };
 
         let built = static_prompt::compute(input);
         let arc = Arc::new(built);
@@ -180,12 +375,19 @@ impl ComposeEngine {
                 .global_cache
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            cache.put(key, Arc::new(GlobalCacheValue::StaticPrompt(arc.clone())));
+            cache.put(
+                key,
+                Arc::new(CachedEntry::StaticPrompt {
+                    output: arc.clone(),
+                    subs: new_subs,
+                }),
+            );
         }
 
         CacheLookup {
             output: arc,
             hit: false,
+            miss_reason: Some(reason),
         }
     }
 
@@ -213,6 +415,7 @@ impl ComposeEngine {
                 return CacheLookup {
                     output: cached_arc.clone(),
                     hit: true,
+                    miss_reason: None,
                 };
             }
         }
@@ -228,9 +431,12 @@ impl ComposeEngine {
             *guard = Some((fingerprint, arc.clone()));
         }
 
+        // Per-lane cache attribution is out of scope for this cycle (spec
+        // Future Phases). Report `FirstBuild` on every miss.
         CacheLookup {
             output: arc,
             hit: false,
+            miss_reason: Some(MissReason::FirstBuild),
         }
     }
 
@@ -257,6 +463,7 @@ impl ComposeEngine {
                 return CacheLookup {
                     output: cached_arc.clone(),
                     hit: true,
+                    miss_reason: None,
                 };
             }
         }
@@ -272,9 +479,12 @@ impl ComposeEngine {
             *guard = Some((fingerprint, arc.clone()));
         }
 
+        // Per-lane cache attribution is out of scope for this cycle (spec
+        // Future Phases). Report `FirstBuild` on every miss.
         CacheLookup {
             output: arc,
             hit: false,
+            miss_reason: Some(MissReason::FirstBuild),
         }
     }
 
@@ -322,7 +532,7 @@ impl ComposeEngine {
             LayerId::Persona,
             persona_result.output.fingerprint,
             persona_result.hit,
-            MissReason::FirstBuild,
+            persona_result.miss_reason.unwrap_or(MissReason::FirstBuild),
             lane_id.clone(),
         );
 
@@ -338,7 +548,7 @@ impl ComposeEngine {
             LayerId::StaticPrompt,
             static_result.output.fingerprint,
             static_result.hit,
-            MissReason::FirstBuild,
+            static_result.miss_reason.unwrap_or(MissReason::FirstBuild),
             lane_id.clone(),
         );
 
@@ -349,7 +559,7 @@ impl ComposeEngine {
             LayerId::DynamicContext,
             dynamic_result.output.fingerprint,
             dynamic_result.hit,
-            MissReason::FirstBuild,
+            dynamic_result.miss_reason.unwrap_or(MissReason::FirstBuild),
             lane_id.clone(),
         );
 
@@ -360,7 +570,7 @@ impl ComposeEngine {
             LayerId::History,
             history_result.output.fingerprint,
             history_result.hit,
-            MissReason::FirstBuild,
+            history_result.miss_reason.unwrap_or(MissReason::FirstBuild),
             lane_id.clone(),
         );
 
