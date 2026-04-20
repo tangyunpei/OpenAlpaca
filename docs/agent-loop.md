@@ -40,7 +40,7 @@ Hermes step      OpenAlpaca      Notes
 ──────────────────────────────────────────────────────────────────────
 1. task_id       Compliant       Pre-loop
 2. append user   Compliant       Arc<Vec<ChatMessage>>
-3. sys prompt    Partial         Rebuilt per turn; memoization deferred to context-engine rebuild (was spec P2)
+3. sys prompt    Compliant       Layered compose engine with two-tier memoization (global LRU + per-lane cache); 8 call sites unified via ComposeEngine::compose
 4. preflight     Compliant       Graduated compaction
 5. build API     Compliant       3 providers via adapter crate
 6. ephemeral     Compliant       Flag-gated (spec P0)
