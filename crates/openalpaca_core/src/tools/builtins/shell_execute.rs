@@ -15,7 +15,10 @@ impl BuiltInTool for ShellExecuteTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: command".to_string())?;
 
-        // Note: InputSanitizer already blocks ;, &&, ||, backticks, $( in arguments.
+        // Note: InputSanitizer blocks backticks, $( command substitution, and
+        // newlines/carriage returns in arguments. Shell chaining (;, &&, ||) and
+        // pipes are intentionally allowed — the agent constructs the full command
+        // string (see security::sanitizer::check_string_safety).
         // The primary timeout is enforced by the SandboxManager (default 60s from
         // daemon_config.execution.agent_defaults.max_tool_runtime_secs). This 300s
         // timeout is a defense-in-depth safety net in case the sandbox layer is
@@ -69,8 +72,9 @@ pub(super) fn shell_execute_tool() -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "shell_execute".to_string(),
-            description: "Execute a single shell command and return its output. Command \
-                chaining (;, &&, ||) and subshells ($()) are blocked for security. \
+            description: "Execute a single shell command and return its output. Subshells \
+                ($(), backticks) and embedded newlines are blocked for security; shell \
+                chaining (;, &&, ||) and pipes are allowed. \
                 Timeout: 300 seconds. Output is truncated to 512KB. Use for system \
                 operations, package management, git commands, build tools, and any \
                 operations not covered by other tools."

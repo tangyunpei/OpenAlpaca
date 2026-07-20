@@ -82,12 +82,20 @@ pub async fn send_chat_handler(
             })
             .into_response()
         }
-        Err(e) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "GATEWAY_ERROR",
-            &e.to_string(),
-        )
-        .into_response(),
+        Err(e) => {
+            // A bad/foreign attachment id is a client error, not a gateway
+            // failure — map it to 4xx so the GUI/CLI can distinguish
+            // report-vs-retry instead of treating everything as a 500.
+            let msg = e.to_string();
+            let (status, code) = if msg.starts_with("Attachment not found") {
+                (StatusCode::NOT_FOUND, "ATTACHMENT_NOT_FOUND")
+            } else if msg.starts_with("Access denied to attachment") {
+                (StatusCode::FORBIDDEN, "ATTACHMENT_ACCESS_DENIED")
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, "GATEWAY_ERROR")
+            };
+            error_response(status, code, &msg).into_response()
+        }
     }
 }
 

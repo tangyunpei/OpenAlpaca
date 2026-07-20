@@ -77,11 +77,14 @@ impl LlmRouter {
                         pool.report_result(&key_guard.id, CallResult::Success).await;
                         self.rate_limiter_registry.report_success().await;
 
-                        // Record cost
-                        let cost = self.cost_tracker.calculate_cost(
+                        // Record cost (cache-aware: cache-read tokens must not be
+                        // billed at the full input rate, or budgets abort early).
+                        let cost = self.cost_tracker.calculate_cost_with_cache(
                             &response.model,
                             response.usage.input_tokens,
                             response.usage.output_tokens,
+                            response.usage.cache_creation_input_tokens,
+                            response.usage.cache_read_input_tokens,
                         );
                         let record = CallRecord {
                             agent_id: request

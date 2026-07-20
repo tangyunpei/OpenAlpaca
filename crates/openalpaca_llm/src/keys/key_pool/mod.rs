@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -199,15 +199,60 @@ pub struct KeyPool {
     keys: Vec<Arc<RwLock<ApiKey>>>,
     strategy: SelectionStrategy,
     round_robin_index: AtomicUsize,
+    /// Per-key "last handed out" sequence number for LeastRecentlyUsed
+    /// selection (index-aligned with `keys`; 0 = never used).
+    last_used: Vec<AtomicU64>,
+    /// Monotonic counter stamped onto `last_used` on each LRU selection.
+    usage_seq: AtomicU64,
 }
 
 impl KeyPool {
     pub fn new(keys: Vec<ApiKey>, strategy: SelectionStrategy) -> Self {
+        let last_used = keys.iter().map(|_| AtomicU64::new(0)).collect();
         let keys = keys.into_iter().map(|k| Arc::new(RwLock::new(k))).collect();
         Self {
             keys,
             strategy,
             round_robin_index: AtomicUsize::new(0),
+            last_used,
+            usage_seq: AtomicU64::new(0),
+        }
+    }
+
+    /// LeastRecentlyUsed selection: among available keys (optionally restricted
+    /// to API-compatible ones), pick the one selected least recently, and stamp
+    /// it as just-used. Real usage tracking — not a scan from index 0.
+    async fn acquire_lru(&self, api_only: bool) -> Result<KeyGuard, KeyPoolError> {
+        let mut best: Option<(usize, u64)> = None;
+        let mut has_candidate = false;
+        for (idx, key_lock) in self.keys.iter().enumerate() {
+            let key = key_lock.read().await;
+            if api_only && !key.is_api_compatible_key() {
+                continue;
+            }
+            has_candidate = true;
+            if !key.is_available() {
+                continue;
+            }
+            let seq = self.last_used[idx].load(Ordering::Relaxed);
+            if best.is_none_or(|(_, b)| seq < b) {
+                best = Some((idx, seq));
+            }
+        }
+        if let Some((idx, _)) = best {
+            let next = self.usage_seq.fetch_add(1, Ordering::Relaxed) + 1;
+            self.last_used[idx].store(next, Ordering::Relaxed);
+            let key = self.keys[idx].read().await;
+            return Ok(KeyGuard {
+                id: key.id.clone(),
+                secret: key.secret.clone(),
+                rate_limit: key.rate_limit,
+            });
+        }
+        if api_only && !has_candidate {
+            Err(KeyPoolError::NoApiCompatibleKeys)
+        } else {
+            Err(KeyPoolError::AllKeysRateLimited)
         }
     }
 
@@ -249,12 +294,15 @@ impl KeyPool {
 
     /// Standard round-robin / LRU acquisition (API-compatible keys only).
     async fn acquire_standard(&self) -> Result<KeyGuard, KeyPoolError> {
+        if self.strategy == SelectionStrategy::LeastRecentlyUsed {
+            return self.acquire_lru(true).await;
+        }
         let len = self.keys.len();
         let start = match self.strategy {
             SelectionStrategy::RoundRobin => {
                 self.round_robin_index.fetch_add(1, Ordering::Relaxed) % len
             }
-            SelectionStrategy::LeastRecentlyUsed => 0,
+            SelectionStrategy::LeastRecentlyUsed => unreachable!(),
             SelectionStrategy::PrimaryFallback => unreachable!(),
         };
 
@@ -288,12 +336,15 @@ impl KeyPool {
 
     /// Standard round-robin / LRU acquisition (any key, including managed).
     async fn acquire_standard_any(&self) -> Result<KeyGuard, KeyPoolError> {
+        if self.strategy == SelectionStrategy::LeastRecentlyUsed {
+            return self.acquire_lru(false).await;
+        }
         let len = self.keys.len();
         let start = match self.strategy {
             SelectionStrategy::RoundRobin => {
                 self.round_robin_index.fetch_add(1, Ordering::Relaxed) % len
             }
-            SelectionStrategy::LeastRecentlyUsed => 0,
+            SelectionStrategy::LeastRecentlyUsed => unreachable!(),
             SelectionStrategy::PrimaryFallback => unreachable!(),
         };
 
@@ -530,11 +581,15 @@ impl KeyPool {
 
 /// Mask a secret key for display — shows first 8 + last 4 characters.
 pub fn mask_secret(secret: &str) -> String {
-    if secret.len() <= 12 {
-        return "*".repeat(secret.len());
+    // Count/slice by chars, not bytes: a secret containing multi-byte
+    // characters (e.g. a smart-quote paste artifact) would panic on a
+    // non-char-boundary byte slice.
+    let char_count = secret.chars().count();
+    if char_count <= 12 {
+        return "*".repeat(char_count);
     }
-    let prefix = &secret[..8];
-    let suffix = &secret[secret.len() - 4..];
+    let prefix: String = secret.chars().take(8).collect();
+    let suffix: String = secret.chars().skip(char_count - 4).collect();
     format!("{}...{}", prefix, suffix)
 }
 

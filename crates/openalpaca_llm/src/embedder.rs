@@ -45,8 +45,16 @@ impl OpenAiEmbedder {
         dimensions: u32,
         url: Option<String>,
     ) -> Result<Self, EmbedError> {
+        // A stalled connection to the embeddings endpoint must not hang the
+        // caller forever — memory retrieval runs inline on the chat path and the
+        // background indexer loop, neither of which wraps `embed()` in a timeout.
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| EmbedError::Config(format!("failed to build HTTP client: {e}")))?;
         Ok(Self {
-            client: reqwest::Client::new(),
+            client,
             api_key,
             model,
             dimensions,

@@ -24,13 +24,19 @@ impl<'a> EventLogRepository<'a> {
         result: Option<&serde_json::Value>,
     ) -> Result<i64> {
         self.db.with_connection(|conn| {
+            // Store an explicit RFC3339 timestamp so it round-trips through
+            // `row_to_event` (which parses RFC3339) and so `range()`'s string
+            // comparison against `to_rfc3339()` bounds is correct — the column
+            // DEFAULT `datetime('now')` produces a space-separated form that
+            // sorts before the 'T'-separated bounds and fails to parse.
             conn.execute(
-                "INSERT INTO event_log (event_type, agent_id, detail, result) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO event_log (event_type, agent_id, detail, result, timestamp) VALUES (?1, ?2, ?3, ?4, ?5)",
                 (
                     event_type,
                     agent_id,
                     detail.map(|v| v.to_string()),
                     result.map(|v| v.to_string()),
+                    Utc::now().to_rfc3339(),
                 ),
             )?;
             Ok(conn.last_insert_rowid())
@@ -120,8 +126,14 @@ impl<'a> EventLogRepository<'a> {
             .transpose()
             .context("Failed to parse event detail JSON")?;
 
+        // Accept RFC3339 (new rows) and the legacy SQLite `datetime('now')`
+        // format (existing rows) before giving up to read-time.
         let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
             .map(|dt| dt.with_timezone(&Utc))
+            .or_else(|_| {
+                chrono::NaiveDateTime::parse_from_str(&timestamp_str, "%Y-%m-%d %H:%M:%S")
+                    .map(|ndt| ndt.and_utc())
+            })
             .unwrap_or_else(|_| Utc::now());
 
         let result = result_str

@@ -150,15 +150,33 @@ pub async fn command_handler(
 
             let identity_repo = IdentityRepository::new(&state.db);
 
-            // Ensure global user exists or create one
-            if identity_repo
-                .get_global_user(&global_user_id)
-                .unwrap()
-                .is_none()
+            // Ensure global user exists or create one. Return a JSON 500 on a DB
+            // error (e.g. SQLITE_BUSY) instead of unwrapping and panicking the
+            // handler task — no CatchPanicLayer is installed.
+            let existing_user = match identity_repo.get_global_user(&global_user_id) {
+                Ok(u) => u,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "request_id": request_id.clone(),
+                            "status": "error",
+                            "error": e.to_string()
+                        })),
+                    );
+                }
+            };
+            if existing_user.is_none()
+                && let Err(e) = identity_repo.create_global_user(&global_user_id, None)
             {
-                identity_repo
-                    .create_global_user(&global_user_id, None)
-                    .unwrap();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "request_id": request_id.clone(),
+                        "status": "error",
+                        "error": e.to_string()
+                    })),
+                );
             }
 
             match identity_repo.create_link_token(&global_user_id, &token) {
@@ -218,14 +236,36 @@ pub async fn command_handler(
 
             match identity_repo.consume_link_token(token) {
                 Ok(Some(global_user_id)) => {
-                    // Create or get external identity and link it
-                    let ext_identity = identity_repo
+                    // Create or get external identity and link it. Map DB errors
+                    // to a JSON 500 rather than unwrapping (would panic the task).
+                    let ext_identity = match identity_repo
                         .get_or_create_external_identity(provider, provider_user_id, None)
-                        .unwrap();
+                    {
+                        Ok(x) => x,
+                        Err(e) => {
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(serde_json::json!({
+                                    "request_id": request_id.clone(),
+                                    "status": "error",
+                                    "error": e.to_string()
+                                })),
+                            );
+                        }
+                    };
 
-                    identity_repo
-                        .link_external_identity(ext_identity.id, &global_user_id)
-                        .unwrap();
+                    if let Err(e) =
+                        identity_repo.link_external_identity(ext_identity.id, &global_user_id)
+                    {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({
+                                "request_id": request_id.clone(),
+                                "status": "error",
+                                "error": e.to_string()
+                            })),
+                        );
+                    }
 
                     state
                         .event_broadcaster

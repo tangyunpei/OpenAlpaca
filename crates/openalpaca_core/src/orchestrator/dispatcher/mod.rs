@@ -501,8 +501,11 @@ pub(super) fn generate_title(description: &str) -> String {
     // Take first 8 words or 50 chars
     let words: Vec<&str> = title.split_whitespace().take(8).collect();
     let result = words.join(" ");
-    if result.len() > 50 {
-        format!("{}...", &result[..47])
+    if result.chars().count() > 50 {
+        // Truncate on a char boundary, not a byte index — a CJK description
+        // (3 bytes/char, no spaces) would otherwise panic on `&result[..47]`.
+        let truncated: String = result.chars().take(47).collect();
+        format!("{}...", truncated)
     } else if words.len() == 8 && title.split_whitespace().count() > 8 {
         format!("{}...", result)
     } else {

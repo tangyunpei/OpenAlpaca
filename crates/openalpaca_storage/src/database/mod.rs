@@ -188,9 +188,22 @@ impl Database {
             tx.execute("DELETE FROM conversation_message_attachments", [])?;
             tx.execute("DELETE FROM file_assets", [])?;
 
+            // 0. Conversation history (children first: feedback -> messages -> conversations)
+            tx.execute("DELETE FROM message_feedback", [])?;
+            tx.execute("DELETE FROM conversation_messages", [])?;
+            tx.execute("DELETE FROM conversations", [])?;
+
             // 0. LLM Usage (no FKs, safe to delete first)
             tx.execute("DELETE FROM llm_call_log", [])?;
             tx.execute("DELETE FROM llm_usage_daily", [])?;
+
+            // 0. Telemetry / analytics logs (standalone, no FKs)
+            tx.execute("DELETE FROM discovered_models", [])?;
+            tx.execute("DELETE FROM orchestrator_latency", [])?;
+            tx.execute("DELETE FROM dispatch_decisions", [])?;
+            tx.execute("DELETE FROM skill_execution_log", [])?;
+            tx.execute("DELETE FROM tool_execution_log", [])?;
+            tx.execute("DELETE FROM context_compaction_log", [])?;
 
             // 0. SubAgent System (FK to agent and task)
             tx.execute("DELETE FROM agent_task_history", [])?;
