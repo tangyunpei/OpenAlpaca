@@ -33,7 +33,10 @@ impl PluginProcess {
             .current_dir(plugin_dir)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            // Ensure the child is killed if this PluginProcess is dropped without
+            // an explicit shutdown, instead of leaking an orphaned process.
+            .kill_on_drop(true);
 
         for (key, value) in &manifest.plugin.env {
             cmd.env(key, value);
@@ -59,6 +62,20 @@ impl PluginProcess {
         let stdout = child.stdout.take().ok_or_else(|| {
             PluginError::SpawnFailed("failed to capture plugin stdout".to_string())
         })?;
+
+        // Drain the child's stderr in the background. It is piped but nothing
+        // else reads it, so a plugin logging more than ~64KB to stderr would
+        // block on a full pipe and freeze — every subsequent RPC then times out.
+        if let Some(stderr) = child.stderr.take() {
+            let plugin_name = manifest.plugin.name.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    debug!(plugin = %plugin_name, "plugin stderr: {line}");
+                }
+            });
+        }
 
         let (channel, notification_rx) = StdioChannel::new(
             stdin,

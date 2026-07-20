@@ -64,9 +64,38 @@ pub fn start_daemon() -> Result<()> {
     Ok(())
 }
 
+/// Verify the given PID belongs to a live `openalpacad` process.
+///
+/// A stale discovery.json (left after a crash/reboot) can point at a PID the OS
+/// has since recycled for an unrelated process; signalling or trusting it blindly
+/// would kill/misreport that process. Check the process identity first.
+fn pid_is_daemon(pid: u32) -> bool {
+    let mut s = System::new();
+    s.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    match s.process(sysinfo::Pid::from_u32(pid)) {
+        Some(proc_) => {
+            let name_matches = proc_.name().to_string_lossy().contains("openalpacad");
+            let exe_matches = proc_
+                .exe()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().contains("openalpacad"))
+                .unwrap_or(false);
+            name_matches || exe_matches
+        }
+        None => false,
+    }
+}
+
 /// Stop the Daemon using PID from discovery.json.
 pub fn stop_daemon() -> Result<()> {
     if let Some(d) = discovery::read_discovery()? {
+        if !pid_is_daemon(d.pid) {
+            println!(
+                "⚠️  PID {} is not a running openalpacad (stale discovery.json?); not signalling.",
+                d.pid
+            );
+            return Ok(());
+        }
         println!("🛑 Stopping Daemon (PID: {})...", d.pid);
         let pid = Pid::from_raw(d.pid as i32);
 
@@ -85,12 +114,8 @@ pub fn stop_daemon() -> Result<()> {
 /// Check if daemon process is running.
 pub fn is_daemon_running() -> bool {
     if let Ok(Some(d)) = discovery::read_discovery() {
-        // Verify PID existence
-        let mut s = System::new();
-        s.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-        if s.process(sysinfo::Pid::from_u32(d.pid)).is_some() {
-            return true;
-        }
+        // Verify the PID exists AND is actually openalpacad (not a recycled PID).
+        return pid_is_daemon(d.pid);
     }
     false
 }

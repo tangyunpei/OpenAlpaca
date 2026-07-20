@@ -30,29 +30,48 @@ fn get_connection_info() -> Result<ConnectionInfo, String> {
 /// Returns connection info once daemon is ready.
 #[tauri::command]
 async fn ensure_daemon_running() -> Result<ConnectionInfo, String> {
-    // Step 1: Check if daemon is already running
+    // Step 1: Check if a daemon is already running AND actually alive. A stale
+    // discovery.json (left by a crashed/killed daemon or a reboot) would
+    // otherwise be trusted forever, so the GUI would never respawn. Liveness is
+    // the authoritative signal — a live daemon is used even if the file's own
+    // 24h expiry has lapsed (long uptime).
     if let Ok(Some(d)) = discovery::read_discovery()
-        && discovery::ensure_not_expired(&d).is_ok()
+        && daemon_is_alive(&d)
     {
-        // Optionally verify via health check (TODO)
         return Ok(ConnectionInfo::from(&d));
     }
 
     // Step 2: Spawn the daemon process
     spawn_daemon().map_err(|e| format!("Failed to spawn daemon: {e}"))?;
 
-    // Step 3: Wait for discovery.json to appear (poll up to 5 seconds)
+    // Step 3: Wait for the new daemon to appear AND accept connections.
     for _ in 0..25 {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         if let Ok(Some(d)) = discovery::read_discovery()
-            && discovery::ensure_not_expired(&d).is_ok()
+            && daemon_is_alive(&d)
         {
             return Ok(ConnectionInfo::from(&d));
         }
     }
 
     Err("Daemon did not become ready within timeout".into())
+}
+
+/// Liveness probe: can we open a TCP connection to the daemon's listen address?
+/// A stale discovery.json (dead daemon) fails this, so callers respawn instead
+/// of returning a dead endpoint.
+fn daemon_is_alive(d: &discovery::Discovery) -> bool {
+    use std::net::ToSocketAddrs;
+    let Ok(addrs) = (d.listen.host.as_str(), d.listen.port).to_socket_addrs() else {
+        return false;
+    };
+    for addr in addrs {
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Spawn the daemon as a detached background process.

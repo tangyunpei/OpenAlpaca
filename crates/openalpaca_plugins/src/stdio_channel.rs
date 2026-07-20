@@ -193,9 +193,18 @@ async fn reader_task(
 ) {
     let mut reader = BufReader::new(stdout);
 
+    // Upper bound on a single framed message. The Content-Length comes from the
+    // (untrusted) plugin's stdout; without a cap, a bogus huge value (e.g.
+    // usize::MAX) would `vec![0u8; len]` and OOM/abort the whole daemon.
+    const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
     loop {
         // Step 1: Read header line(s) until we find Content-Length.
         let content_length = match read_content_length(&mut reader).await {
+            Ok(len) if len > MAX_MESSAGE_BYTES => {
+                error!(len, max = MAX_MESSAGE_BYTES, "plugin message exceeds maximum size; closing channel");
+                break;
+            }
             Ok(len) => len,
             Err(e) => {
                 debug!(error = %e, "reader loop ending");
