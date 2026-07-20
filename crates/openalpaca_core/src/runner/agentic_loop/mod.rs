@@ -272,7 +272,8 @@ async fn run_agentic_loop_inner(
         }
 
         // ── 3. Cost check (CostTracker for Router, local estimate for Direct) ──
-        let round_cost = backend.task_cost(state.total_input, state.total_output).await;
+        // agent-scoped: the per-agent budget must not inherit other agents' spend.
+        let round_cost = backend.agent_cost(state.total_input, state.total_output).await;
         let cost_delta = (round_cost - state.last_cost).max(0.0);
         if cost_delta > 0.0 {
             cost_acc.add_usd(cost_delta);

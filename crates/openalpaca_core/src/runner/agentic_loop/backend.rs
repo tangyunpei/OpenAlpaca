@@ -157,23 +157,27 @@ impl<'a> LlmBackend<'a> {
         matches!(self, LlmBackend::Router { .. })
     }
 
-    /// Get the current accumulated cost for this task/agent.
-    /// For the Direct backend (tests), falls back to local token-based estimate.
-    /// For the Router backend, reads from the global CostTracker.
-    pub(super) async fn task_cost(&self, total_input: u32, total_output: u32) -> f64 {
+    /// Accumulated cost attributable to THIS agent (not the whole task).
+    ///
+    /// The agentic loop's budget (`config.max_cost`) is per-agent, so it must be
+    /// charged only this agent's spend. Using the task-wide total makes every
+    /// agent after the first inherit all prior agents' spend and exit
+    /// `CostExceeded` before its first LLM call. Prefer the agent-scoped total;
+    /// fall back to task-scoped, then a local estimate (Direct/test backend).
+    pub(super) async fn agent_cost(&self, total_input: u32, total_output: u32) -> f64 {
         match self {
             LlmBackend::Direct { .. } => {
                 estimate_cost(total_input, total_output, FALLBACK_INPUT_RATE, FALLBACK_OUTPUT_RATE)
             }
             LlmBackend::Router { router, context, .. } => {
-                if let Some(ref task_id) = context.task_id {
-                    router.cost_tracker
-                        .get_task_usage(task_id).await
-                        .map(|u| u.total_cost_usd)
-                        .unwrap_or(0.0)
-                } else if let Some(ref agent_id) = context.agent_id {
+                if let Some(ref agent_id) = context.agent_id {
                     router.cost_tracker
                         .get_agent_usage(agent_id).await
+                        .map(|u| u.total_cost_usd)
+                        .unwrap_or(0.0)
+                } else if let Some(ref task_id) = context.task_id {
+                    router.cost_tracker
+                        .get_task_usage(task_id).await
                         .map(|u| u.total_cost_usd)
                         .unwrap_or(0.0)
                 } else {

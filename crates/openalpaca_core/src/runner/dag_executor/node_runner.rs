@@ -341,9 +341,12 @@ pub(super) async fn execute_single_node(
     // (and will mutate the vec during the agentic loop).
     let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
 
-    // Run agentic loop
+    // Run agentic loop, bounded by the node timeout. Previously `node_timeout`
+    // only clamped per-tool runtime (above), so a node could run for
+    // max_rounds × (LLM latency + tool time) — far past the configured limit,
+    // also stalling `total_timeout`. Enforce it on the whole node here.
     let agent_start = Instant::now();
-    let result = run_agentic_loop_routed(
+    let loop_fut = run_agentic_loop_routed(
         router.as_ref(),
         messages,
         tools,
@@ -356,8 +359,32 @@ pub(super) async fn execute_single_node(
         cancel_token,
         Some(&tool_ctx),
         None,
-    )
-    .await;
+    );
+    let result = match tokio::time::timeout(node_timeout, loop_fut).await {
+        Ok(r) => r,
+        Err(_) => {
+            tracing::warn!(
+                "DAG node '{}' (agent '{}') exceeded node timeout of {}s; aborting node",
+                node.node_id,
+                agent_id,
+                node_timeout.as_secs()
+            );
+            LoopResult {
+                final_content: format!("Node timed out after {}s", node_timeout.as_secs()),
+                rounds_used: 0,
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+                tool_calls_made: 0,
+                finish_reason: LoopFinishReason::Error(format!(
+                    "node timeout ({}s) exceeded",
+                    node_timeout.as_secs()
+                )),
+                model_used: loop_config.model.clone(),
+                elapsed: agent_start.elapsed(),
+                estimated_cost: 0.0,
+            }
+        }
+    };
 
     let agent_elapsed = agent_start.elapsed();
     let agent_runtime = agent_elapsed.as_secs() as i64;
