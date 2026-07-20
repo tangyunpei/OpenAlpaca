@@ -74,6 +74,36 @@ impl CostTracker {
         }
     }
 
+    /// Calculate cost including Anthropic prompt-cache pricing.
+    ///
+    /// `input_tokens` is the folded total reported by the provider (cache tokens
+    /// are a subset of it, per `Usage`). Non-cached input bills at the base input
+    /// rate, cache-write tokens at 1.25x, and cache-read tokens at 0.1x — so a
+    /// mostly-cached prompt is no longer charged up to ~10x its real cost.
+    pub fn calculate_cost_with_cache(
+        &self,
+        model: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_creation_tokens: u32,
+        cache_read_tokens: u32,
+    ) -> f64 {
+        let (input_price, output_price) = match self.model_registry.get_pricing(model) {
+            Some(pricing) => (
+                pricing.input_price_per_million,
+                pricing.output_price_per_million,
+            ),
+            // Fallback: $3/1M input, $15/1M output (Sonnet-like)
+            None => (3.0, 15.0),
+        };
+        let cached = cache_creation_tokens as u64 + cache_read_tokens as u64;
+        let non_cached_input = (input_tokens as u64).saturating_sub(cached);
+        (non_cached_input as f64 * input_price / 1_000_000.0)
+            + (cache_creation_tokens as f64 * input_price * 1.25 / 1_000_000.0)
+            + (cache_read_tokens as f64 * input_price * 0.10 / 1_000_000.0)
+            + (output_tokens as f64 * output_price / 1_000_000.0)
+    }
+
     /// Record a completed API call's usage.
     pub async fn record(&self, record: &CallRecord) {
         // Update agent usage
@@ -151,7 +181,13 @@ impl CostTracker {
         model: &str,
         usage: &crate::types::Usage,
     ) {
-        let cost = self.calculate_cost(model, usage.input_tokens, usage.output_tokens);
+        let cost = self.calculate_cost_with_cache(
+            model,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+        );
         let record = CallRecord {
             agent_id: agent_id.to_string(),
             task_id: task_id.map(|s| s.to_string()),

@@ -149,28 +149,23 @@ impl<'a> ConversationRepository<'a> {
             return Ok(conv);
         }
 
-        // Create new
+        // Create new. Two callers can race here (chat reply + task-completion
+        // persist) — `conversations.lane_key` is UNIQUE, so use ON CONFLICT and
+        // then re-read the canonical row (ours, or the concurrent winner's)
+        // instead of failing the loser with a UNIQUE-constraint error.
         let id = uuid::Uuid::new_v4().to_string();
         self.db.with_connection(|conn| {
             conn.execute(
                 "INSERT INTO conversations (id, lane_key, source, title, message_count)
-                 VALUES (?1, ?2, ?3, '', 0)",
+                 VALUES (?1, ?2, ?3, '', 0)
+                 ON CONFLICT(lane_key) DO NOTHING",
                 rusqlite::params![id, lane_key, source],
             )?;
-            Ok(Conversation {
-                id,
-                lane_key: lane_key.to_string(),
-                source: source.to_string(),
-                title: String::new(),
-                message_count: 0,
-                last_message_at: None,
-                created_at: String::new(),
-                updated_at: String::new(),
-                summary: String::new(),
-                summary_version: 0,
-                last_summarized_message_id: 0,
-                summary_updated_at: None,
-            })
+            Ok(())
+        })?;
+
+        self.get_conversation_by_lane(lane_key)?.ok_or_else(|| {
+            anyhow::anyhow!("conversation row missing after upsert for lane {lane_key}")
         })
     }
 

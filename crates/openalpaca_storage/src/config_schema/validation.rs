@@ -111,10 +111,14 @@ pub fn keys_in_subcategory(cat: &str, sub: &str) -> Vec<&'static ConfigKeyDef> {
 
 /// Mask a sensitive value, showing only the last 4 characters.
 pub fn mask_value(value: &str) -> String {
-    if value.len() <= 4 {
+    // Count/slice by chars, not bytes: a value with multi-byte characters
+    // would panic on a non-char-boundary byte slice.
+    let char_count = value.chars().count();
+    if char_count <= 4 {
         "****".to_string()
     } else {
-        format!("****{}", &value[value.len() - 4..])
+        let suffix: String = value.chars().skip(char_count - 4).collect();
+        format!("****{}", suffix)
     }
 }
 

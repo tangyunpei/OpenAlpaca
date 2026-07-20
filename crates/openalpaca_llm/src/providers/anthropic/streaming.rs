@@ -11,8 +11,9 @@ use futures_util::StreamExt;
 pub(super) fn parse_anthropic_sse(
     byte_stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
 ) -> impl futures_util::Stream<Item = Result<StreamEvent, LlmError>> + Send {
+    let text_stream = crate::providers::utf8::utf8_chunks(byte_stream);
     futures_util::stream::unfold(
-        (Box::pin(byte_stream), String::new(), 0_usize),
+        (Box::pin(text_stream), String::new(), 0_usize),
         |(mut stream, mut buffer, mut block_index)| async move {
             loop {
                 // Try to extract a complete SSE frame from the buffer
@@ -204,8 +205,8 @@ pub(super) fn parse_anthropic_sse(
 
                 // Need more data from the byte stream
                 match stream.next().await {
-                    Some(Ok(bytes)) => {
-                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    Some(Ok(text)) => {
+                        buffer.push_str(&text);
                     }
                     Some(Err(e)) => {
                         return Some((

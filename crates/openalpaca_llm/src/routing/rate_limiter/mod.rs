@@ -54,10 +54,19 @@ impl TokenBucket {
                 let mut inner = self.inner.lock().await;
                 inner.refill();
 
-                if inner.tokens >= n {
-                    inner.tokens -= n;
+                // A request larger than the bucket can never be satisfied by
+                // waiting (refill caps `tokens` at `capacity`), which would spin
+                // this loop forever and pin the caller's concurrency permit. Clamp
+                // the demand to full capacity so an oversized request proceeds once
+                // the bucket refills, instead of deadlocking the router.
+                let want = n.min(inner.capacity);
+
+                if inner.tokens >= want {
+                    inner.tokens -= want;
                     return total_wait;
                 }
+
+                let n = want;
 
                 // Calculate how long to wait for enough tokens
                 let deficit = n - inner.tokens;
@@ -165,6 +174,12 @@ struct CircuitBreakerInner {
     failure_threshold: u32,
     last_failure: Option<Instant>,
     recovery_timeout: Duration,
+    /// Whether a HalfOpen probe is currently outstanding. Ensures only one
+    /// request is admitted while HalfOpen instead of a thundering herd.
+    probe_in_flight: bool,
+    /// When the outstanding probe started, so a lost probe (no success/failure
+    /// report) can't wedge the breaker in HalfOpen forever.
+    probe_started: Option<Instant>,
 }
 
 impl CircuitBreaker {
@@ -180,6 +195,8 @@ impl CircuitBreaker {
                 failure_threshold,
                 last_failure: None,
                 recovery_timeout,
+                probe_in_flight: false,
+                probe_started: None,
             }),
         }
     }
@@ -198,12 +215,26 @@ impl CircuitBreaker {
                     && last.elapsed() >= inner.recovery_timeout
                 {
                     inner.state = CircuitState::HalfOpen;
+                    inner.probe_in_flight = true;
+                    inner.probe_started = Some(Instant::now());
                     return Ok(());
                 }
                 Err(CircuitState::Open)
             }
             CircuitState::HalfOpen => {
-                // Allow the probe request through
+                // Admit only one probe at a time. A fresh probe is allowed only
+                // if none is outstanding, or if the outstanding one has been
+                // stuck past the recovery window (report never arrived) — this
+                // prevents both the thundering herd and a permanent wedge.
+                let stale = inner
+                    .probe_started
+                    .map(|t| t.elapsed() >= inner.recovery_timeout)
+                    .unwrap_or(true);
+                if inner.probe_in_flight && !stale {
+                    return Err(CircuitState::HalfOpen);
+                }
+                inner.probe_in_flight = true;
+                inner.probe_started = Some(Instant::now());
                 Ok(())
             }
         }
@@ -215,6 +246,8 @@ impl CircuitBreaker {
         let mut inner = self.inner.lock().await;
         inner.state = CircuitState::Closed;
         inner.failure_count = 0;
+        inner.probe_in_flight = false;
+        inner.probe_started = None;
     }
 
     /// Report a failed API call.
@@ -236,8 +269,11 @@ impl CircuitBreaker {
                 }
             }
             CircuitState::HalfOpen => {
-                // Probe failed — go back to Open
+                // Probe failed — go back to Open and clear the probe slot so a
+                // new probe is admitted after the next recovery window.
                 inner.state = CircuitState::Open;
+                inner.probe_in_flight = false;
+                inner.probe_started = None;
                 tracing::warn!("Circuit breaker probe failed, returning to Open state");
             }
             CircuitState::Open => {

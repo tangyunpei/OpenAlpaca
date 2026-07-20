@@ -49,7 +49,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     loop {
         tokio::select! {
             // Forward broadcast events to this client
-            Ok(event) = event_rx.recv() => {
+            event = event_rx.recv() => {
+                // Bind the full Result: an `Ok(event) =` pattern would silently
+                // disable this branch on Lagged, and since browsers rarely send
+                // frames, select! would then block forever on receiver.next(),
+                // freezing event delivery while the UI still shows "connected".
+                let event = match event {
+                    Ok(ev) => ev,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("WebSocket event stream lagged; dropped {n} events");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
                 let msg = match serde_json::to_string(&event) {
                     Ok(json) => json,
                     Err(e) => {
