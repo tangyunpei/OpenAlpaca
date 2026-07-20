@@ -3,11 +3,9 @@
 `openalpacad` is the local control plane for OpenAlpaca, serving HTTP APIs, streaming events, orchestration runtime, connectors, and storage.
 
 Related docs:
-- [Daemon API Reference](api/apps/openalpacad.md)
+- [API Docs index](api/README.md) (generated from source by `python3 scripts/gen_api_docs.py`)
 - [CLI Manual](CLI_Manual.md)
 - [GUI Manual](GUI_Manual.md)
-- [Database Schema](api/database/schema.md)
-- [Database Migrations](api/database/migrations.md)
 
 ## Run
 
@@ -38,6 +36,8 @@ Install package (target machine):
 ./scripts/release/install.sh --file ./dist/openalpaca-macos-<target>-v<version>.tar.gz
 ```
 
+`install.sh` also supports `--url <https://...>` (instead of `--file`), `--prefix <dir>` (default `~/.local/openalpaca`), `--app-dir <dir>` (macOS app bundle location, default `~/Applications`), and `--yes` (non-interactive). Linux (`package-linux.sh`) and Windows (`package-windows.ps1` / `install-windows.ps1`) equivalents exist alongside the macOS scripts.
+
 Runtime paths after installer-based startup:
 - config base dir: `~/Library/Application Support/OpenAlpaca/config`
 - discovery: `~/Library/Application Support/OpenAlpaca/discovery.json`
@@ -49,14 +49,15 @@ Runtime paths after installer-based startup:
 1. Initialize tracing/logging.
 2. Migrate legacy app directory naming (if needed).
 3. Acquire single-instance lock (`openalpacad.lock`).
-4. Resolve config directory and ensure master key.
+4. Resolve config directory, seed missing default configs, and ensure master key.
 5. Install signal handlers.
 6. Bind to `127.0.0.1:0` (OS-selected port).
 7. Write discovery metadata (`discovery.json`).
 8. Open SQLite database and apply migrations.
-9. Start orchestrator, wake manager, connectors, hot reload, and HTTP router.
+9. Bootstrap persona documents (SOUL/USER/IDENTITY/BOOTSTRAP) if missing.
+10. Start orchestrator, wake manager, plugin manager, MCP clients, connectors, hot reload, background workers, and HTTP router.
 
-Shutdown can be initiated by signal handling or daemon command endpoint.
+Shutdown can be initiated by signal handling or daemon command endpoint. A watchdog force-exits the process (exit code 1) if graceful shutdown takes longer than 10 seconds; after a forced exit, a stale `discovery.json` may be left behind.
 
 ## Config Resolution
 
@@ -71,9 +72,25 @@ Important runtime files:
 
 - `config/llm.toml`
 - `config/daemon.toml`
-- `config/agents/*.toml`
+- `config/mcp.toml` (MCP server declarations)
+- `config/agents/*.md` (Markdown with YAML frontmatter; legacy `.toml` agent files still load with a deprecation warning)
+- `config/skills/*/SKILL.md`
 - `config/tools/*.toml`
-- orchestrator profile docs under `config/orchestrator/`
+- orchestrator persona docs under `config/orchestrator/`
+
+## Secrets and First Run
+
+- On first startup the daemon seeds missing `llm.toml` and `daemon.toml` from templates embedded in the binary (sourced from `scripts/release/templates/config/`).
+- The AES-256-GCM master key lives at `<app_dir>/.master_key` (a legacy `<config>/.master_key` is migrated automatically). The daemon exports it as `OPENALPACA_MASTER_KEY` for its own process; startup fails hard if the key cannot be ensured.
+- Persona documents (`SOUL.md`, `USER.md`, `IDENTITY.md`, and conditionally `BOOTSTRAP.md`) are written into `<config>/orchestrator/` from templates if absent.
+
+## Hot Reload
+
+A file watcher reloads configuration without restart:
+
+- `config/orchestrator/SOUL.md`, `USER.md`, `IDENTITY.md`, `BOOTSTRAP.md` (parse failures keep the last valid version)
+- `config/llm.toml` and `config/daemon.toml`
+- the `config/skills/` and `config/agents/` directories
 
 ## Discovery and Auth Model
 
@@ -93,20 +110,23 @@ Auth behavior:
 
 ## API Route Groups
 
-See complete matrix in [Daemon API Reference](api/apps/openalpacad.md).
+Route table source of truth: `apps/openalpacad/src/router.rs` (see also the [API docs index](api/README.md)).
 
 Major groups:
 
-- Core: health, command, events history
+- Core: health, `/v1/command`, `/v1/events/history`
 - Tasks: list/create/status/action, DAG view
-- Agents: CRUD/action/config plus templates and runtime instances
-- Chat: send/history/conversations/stream
-- Connectors + auth link token
-- LLM/settings/models/pricing/usage
+- Agents: CRUD/action/config plus templates (`/v1/agent-templates`) and runtime instances (`/v1/agent-instances`)
+- Chat: send/history/conversations/stream, message feedback (`PUT|GET|DELETE /v1/chat/messages/{message_id}/feedback`), tool confirmations (`POST /v1/chat/confirmations/{request_id}`)
+- Files: `POST /v1/files/upload` (body limit 100 MiB), `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, `POST /v1/files/{id}/open`
+- Connectors + auth link token (`POST /v1/auth/link`)
+- LLM settings/models/pricing/usage, key management (delete/reorder/priority/validate/status), credential discovery (`GET /v1/settings/llm/credentials`, `POST /v1/settings/llm/credentials/rescan`), CLI backends (`GET /v1/settings/llm/cli-backends`)
 - Preferences
 - Memory + KB ingest + index/reindex status
-- Orchestrator metrics (latency and decisions)
-- Daemon provider config endpoints
+- Orchestrator: metrics (latency and decisions) and config (`GET|PUT /v1/orchestrator/config`)
+- Daemon provider config endpoints (`GET /v1/daemon/config/providers`, `PUT /v1/daemon/config/providers/web-search`)
+- Skills: `GET /v1/skills/health`
+- Plugins: `GET /v1/plugins`; `POST /v1/plugins/{name}/approve|deny|enable|disable|config` (plugins are loaded from `<app_dir>/plugins`; the plugin system is early-stage)
 
 ## Streaming Surfaces
 
@@ -120,7 +140,9 @@ Major groups:
 
 - Create stream: `POST /v1/chat`
 - Consume stream: `GET /v1/chat/stream/{stream_id}?token=...`
-- SSE event types: `thinking`, `delta`, `done`, `error`
+- SSE event types: `thinking`, `delta`, `done`, `error`, `confirmation_requested`
+
+When a tool run requires approval, the stream emits `confirmation_requested`; the client resolves it via `POST /v1/chat/confirmations/{request_id}`.
 
 ## Event Taxonomy (High Level)
 
@@ -134,17 +156,24 @@ Representative server event types include:
 - `dag_node_status`, `task_replanned`
 - `security_violation`, `circuit_breaker_tripped`, `tool_executed`
 - `llm_call_completed`, `skill_catalog_updated`, `soul_updated`
+- `skill_invocation_started`, `skill_completed`, `skill_failed`
+- `plugin_loaded`, `plugin_crashed`, `plugin_pending_approval`
+
+## Background Tasks
+
+The daemon runs periodic workers, all cancelled together on shutdown (intervals are read from `daemon.toml` and hot-reloadable unless noted):
+
+- heartbeat event emitter
+- embedding indexer (only when an embedder is configured)
+- memory importance decay
+- file-processing worker and asset cleanup (upload governance)
+- telemetry cleanup (fixed daily interval)
+- chat-stream cleanup (stale SSE streams)
 
 ## Storage Model
 
 - SQLite location is resolved by `openalpaca_storage::paths::database_path()`.
-- Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`.
-- Current migration chain includes `001` through `026`.
-
-Use these references for details:
-
-- [Schema](api/database/schema.md)
-- [Migrations](api/database/migrations.md)
+- Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`. The authoritative list is `crates/openalpaca_storage/src/migrations/` (currently `001` through `032`).
 
 ## Logging and Operations
 

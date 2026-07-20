@@ -5,8 +5,7 @@
 Related docs:
 - [Daemon Manual](Daemon_Manual.md)
 - [GUI Manual](GUI_Manual.md)
-- [Daemon HTTP API](api/apps/openalpacad.md)
-- [Database Schema](api/database/schema.md)
+- [API Docs](api/README.md)
 
 ## Installation and Run
 
@@ -47,6 +46,8 @@ Defaults:
 - PATH link: `~/.local/bin/openalpaca`
 - runtime config/data: `~/Library/Application Support/OpenAlpaca/`
 
+Linux and Windows packaging/install scripts also exist under `scripts/release/` (`package-linux.sh`, `package-windows.ps1`, `install-windows.ps1`, `uninstall.sh`, `uninstall-windows.ps1`).
+
 ## Connection and Auth Model
 
 - The daemon writes discovery metadata to `discovery.json` under the OpenAlpaca app data directory.
@@ -80,7 +81,7 @@ Manage daemon process lifecycle.
 
 ```bash
 openalpaca daemon status
-openalpaca daemon tail [--count N]
+openalpaca daemon tail [-c|--count N]
 openalpaca daemon start [--daemon-only]
 openalpaca daemon stop
 openalpaca daemon restart
@@ -88,8 +89,9 @@ openalpaca daemon restart
 
 Notes:
 - `start` launches daemon and then GUI unless `--daemon-only` is set.
+- `stop` stops both daemon and GUI.
 - `restart` restarts daemon only.
-- `tail` streams live daemon events (not historical query output).
+- `tail` streams live daemon events (not historical query output); `--count` limits the number of events shown, default `0` = unlimited (Ctrl+C to stop).
 - Optional daemon binary override: `OPENALPACA_DAEMON_BIN=/abs/path/openalpacad`.
 - Daemon startup sets `OPENALPACA_CONFIG_DIR` to `~/Library/Application Support/OpenAlpaca/config`.
 
@@ -101,16 +103,22 @@ Manage system and runtime configuration.
 openalpaca config
 openalpaca config set <key> <value>
 openalpaca config get <key>
-openalpaca config list [--all] [--format table|json] [--verbose]
+openalpaca config list [--all] [--format table|json] [-v|--verbose]
 openalpaca config reset [<key>] [--factory]
 ```
 
+Notes:
+- Bare `openalpaca config` (no subcommand) opens an interactive configuration TUI.
+- `config` operates directly on the local database and TOML files — no running daemon required (the TUI's agent-management screen is the exception; it talks to the daemon).
+- `--all` includes unset keys with their defaults; `-v/--verbose` adds a source column (db / llm.toml / daemon.toml).
+- `set` validates keys against the config schema; unknown keys get "did you mean" suggestions.
+
 Backends:
-- DB-backed settings (`system_config`, preferences, etc.)
+- DB-backed settings (`system_config` table)
 - `config/llm.toml`
 - `config/daemon.toml`
 
-`--factory` performs full storage reset.
+`reset` without `--factory` resets configuration only (agents preserved); `--factory` performs a full storage reset (wipes agents, memories, everything) after confirmation.
 
 ### `gui`
 
@@ -149,6 +157,11 @@ openalpaca tasks pause <task_id>
 openalpaca tasks resume <task_id>
 ```
 
+Notes:
+- `--status` accepts `queued`, `running`, `completed`, `failed`, `cancelled`, `paused`, `active`.
+- `--limit` defaults to 50 (for both `list` and `log`).
+- `create` prompts for a title if the description argument is omitted; `--priority` defaults to 0.
+
 ### `agents`
 
 Sub-agent and template-backed runtime control.
@@ -164,7 +177,9 @@ openalpaca agents create [--from-file <path>] [--interactive] [--from-chat <desc
 openalpaca agents remove <agent_id>
 ```
 
-`openalpaca agents` with no subcommand enters interactive creation mode.
+Notes:
+- `openalpaca agents` with no subcommand enters interactive creation mode.
+- `--from-chat` is a planned feature: the daemon may return "Not Implemented", in which case the CLI reports it as planned for a future release.
 
 ### `llm`
 
@@ -186,6 +201,27 @@ openalpaca llm backends [--format table|json]
 openalpaca llm provider-usage [--format table|json]
 ```
 
+### `plugin`
+
+Manage daemon plugins (approval, lifecycle, configuration).
+
+```bash
+openalpaca plugin list [--format table|json]
+openalpaca plugin approve <name>
+openalpaca plugin deny <name>
+openalpaca plugin enable <name>
+openalpaca plugin disable <name>
+openalpaca plugin info <name>
+openalpaca plugin config <name> set <key> <value>
+openalpaca plugin config <name> get [<key>]
+```
+
+Notes:
+- `approve` allows a plugin to load; `deny` prevents loading; `enable`/`disable` toggle an approved plugin.
+- `info` shows name, version, status, and tools for one plugin.
+- `config set` writes a key through the daemon (values are parsed as number/bool/string).
+- `config get` does not fetch anything: it only prints a pointer to the plugin's config file (`~/.openalpaca/plugins/.config/<name>.toml`).
+
 ### `chat`
 
 Interactive or one-shot chat through daemon orchestrator.
@@ -193,8 +229,15 @@ Interactive or one-shot chat through daemon orchestrator.
 ```bash
 openalpaca chat
 openalpaca chat --message "hello"
+openalpaca chat --message "summarize these" --file a.txt --file b.png
 echo "hello" | openalpaca chat
 ```
+
+Notes:
+- `--file <PATH>` is repeatable and uploads the files as message attachments; it requires `--message` (attachments are not supported in interactive or pipe mode).
+- With no `--message` and a TTY on stdin, an interactive REPL opens: streaming replies, tab completion, and slash commands (`/help`, `/status`, `/model`, `/models`, `/agents`, `/tasks [n]`, `/keys`, `/usage`, `/clear`, `/verbose`). Exit with `exit`, `quit`, or Ctrl-D.
+- If stdin is piped, the CLI reads all of stdin, sends it as one message, and streams the reply.
+- When a reply delegates work to a task, the CLI polls the task and prints the result when it completes.
 
 ## Troubleshooting
 
