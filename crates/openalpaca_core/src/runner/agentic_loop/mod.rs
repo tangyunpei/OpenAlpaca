@@ -188,7 +188,6 @@ async fn run_agentic_loop_inner(
     let cost_acc = cost_accumulator.unwrap_or_default();
     let mut messages: Arc<Vec<ChatMessage>> = Arc::new(initial_messages);
     let tools_arc = Arc::new(tools);
-    let mut known_token_count: u32 = estimate_messages_tokens(&messages);
     let mut consecutive_llm_errors: usize = 0;
     const MAX_LLM_RETRIES: usize = 3;
 
@@ -401,12 +400,8 @@ async fn run_agentic_loop_inner(
                         timestamp: Utc::now(),
                     });
                 }
-
-                known_token_count = estimate_messages_tokens(&messages);
             }
         }
-
-        let prev_msg_len = messages.len();
 
         // ── 5. Build request (pre-LLM-call assembly) ──────────────
         let tool_choice = {
@@ -541,11 +536,6 @@ async fn run_agentic_loop_inner(
                             "Model access denied: {}",
                             violation
                         )));
-                    }
-
-                    // Use actual input tokens as ground truth for our estimate
-                    if response.usage.input_tokens > 0 {
-                        known_token_count = response.usage.input_tokens;
                     }
 
                     tracing::debug!(
@@ -718,12 +708,6 @@ async fn run_agentic_loop_inner(
                         let err = format_tool_error("max tools per round exceeded");
                         Arc::make_mut(&mut messages)
                             .push(ChatMessage::tool_result(&tc.id, &err));
-                    }
-
-                    // Update token estimate incrementally for newly-appended messages
-                    if messages.len() > prev_msg_len {
-                        known_token_count +=
-                            estimate_messages_tokens(&messages[prev_msg_len..]);
                     }
 
                     state.max_tokens_retries = 0;
