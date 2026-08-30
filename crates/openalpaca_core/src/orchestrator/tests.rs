@@ -49,46 +49,6 @@ fn make_orchestrator_with_config(config: DaemonConfig) -> Orchestrator {
     )
 }
 
-/// Config pinned to the legacy planner ladder. Routing V2 flipped the
-/// default to `mode = "tool"`; tests that exercise the pre-classifier /
-/// heuristic-dispatch ladder must opt into it explicitly (the planner
-/// path stays functional behind this flag until Phase 5 deletes it).
-fn planner_pinned_config() -> DaemonConfig {
-    let mut config = DaemonConfig::default();
-    config.orchestrator.routing.mode = "planner".to_string();
-    config
-}
-
-fn make_orchestrator_with_agents_and_config(
-    agents: Vec<SubAgent>,
-    config: DaemonConfig,
-) -> Orchestrator {
-    let ctx = Arc::new(SharedContext::new());
-    for a in &agents {
-        ctx.agent_registry.register_template(template_from_agent(a));
-        ctx.agent_registry.register(a.clone());
-    }
-    let lanes = Arc::new(LaneManager::new());
-    let bus = EventBus::default();
-    let gate = make_security_gate(&bus);
-    let registry = make_tool_registry();
-    Orchestrator::new(
-        ctx,
-        lanes,
-        bus,
-        SystemPersona::default(),
-        None,
-        LoopConfig::default(),
-        gate,
-        registry,
-        None,
-        None,
-        Arc::new(skill_catalog::SkillCatalog::new()),
-        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
-        Arc::new(ArcSwap::from_pointee(config)),
-    )
-}
-
 fn make_orchestrator_with_fixed_llm_response(response: &str) -> Orchestrator {
     use openalpaca_llm::{
         ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, ProviderType, Usage,
@@ -241,79 +201,6 @@ async fn test_task_query_empty() {
 }
 
 #[tokio::test]
-async fn test_complex_task_dispatch() {
-    // Legacy-ladder test: heuristic ComplexTask dispatch (planner mode).
-    let orch = make_orchestrator_with_agents_and_config(
-        vec![
-            make_agent("a1", vec!["web_search"]),
-            make_agent("a2", vec!["text_generate"]),
-        ],
-        planner_pinned_config(),
-    );
-    let result = orch
-        .handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "please research and write about Rust".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-            None,
-            None,
-        )
-        .await;
-    assert!(result.is_ok());
-    let text = result.unwrap();
-    // Response is now human-readable, not JSON
-    assert!(text.contains("assigned"));
-}
-
-#[tokio::test]
-async fn test_complex_task_dispatch_records_delegation() {
-    // Legacy-ladder test: delegation recording on the planner dispatch
-    // path (tool-mode recording is covered by the StartWorkflowTool tests).
-    let orch = make_orchestrator_with_agents_and_config(
-        vec![
-            make_agent("a1", vec!["web_search"]),
-            make_agent("a2", vec!["text_generate"]),
-        ],
-        planner_pinned_config(),
-    );
-    let request_id = Uuid::new_v4();
-    let result = orch
-        .handle_message(
-            request_id,
-            "cli".to_string(),
-            "please research and write about Rust".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-            None,
-            None,
-        )
-        .await;
-    assert!(result.is_ok());
-
-    // Dispatch must populate the structured delegation side channel,
-    // keyed by request_id, with the created task's identity.
-    let delegation = orch
-        .delegation_map
-        .remove(&request_id)
-        .map(|(_, v)| v)
-        .expect("dispatch should record delegation metadata");
-    assert!(!delegation.task_id.is_empty());
-    assert!(!delegation.title.is_empty());
-    // The recorded task_id must reference the actually-registered task.
-    assert!(
-        orch.shared_context
-            .task_registry
-            .get(&delegation.task_id)
-            .is_some(),
-        "delegation.task_id should match a registered task"
-    );
-}
-
-#[tokio::test]
 async fn test_task_control_cancel() {
     let orch = make_orchestrator();
     // Register a task first
@@ -358,58 +245,6 @@ async fn test_permission_denied_external() {
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Permission Denied"));
-}
-
-#[tokio::test]
-async fn test_full_lifecycle_events() {
-    // Legacy-ladder test: IntentClassified only fires on the planner ladder.
-    let orch = make_orchestrator_with_agents_and_config(
-        vec![make_agent("a1", vec!["web_search"])],
-        planner_pinned_config(),
-    );
-    let mut rx = orch.bus.subscribe();
-
-    // Send a complex task
-    let _result = orch
-        .handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "can you search for Rust tutorials".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-            None,
-            None,
-        )
-        .await;
-
-    // Collect events
-    let mut events = Vec::new();
-    while let Ok(event) = rx.try_recv() {
-        events.push(event);
-    }
-
-    // Should have: IntentClassified, AgentStatusChanged, TaskCreated
-    let event_types: Vec<String> = events
-        .iter()
-        .map(|e| match e {
-            SystemEvent::IntentClassified { .. } => "intent_classified".to_string(),
-            SystemEvent::AgentStatusChanged { .. } => "agent_status_changed".to_string(),
-            SystemEvent::TaskCreated { .. } => "task_created".to_string(),
-            other => format!("{:?}", other),
-        })
-        .collect();
-
-    assert!(
-        event_types.contains(&"intent_classified".to_string()),
-        "Missing IntentClassified event. Got: {:?}",
-        event_types
-    );
-    assert!(
-        event_types.contains(&"task_created".to_string()),
-        "Missing TaskCreated event. Got: {:?}",
-        event_types
-    );
 }
 
 #[tokio::test]
@@ -613,102 +448,6 @@ fn make_orchestrator_with_llm_and_agents(
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
     )
-}
-
-#[tokio::test]
-async fn test_llm_planning_complex_task() {
-    let plan_json = r#"{"classification": "complex_task", "title": "Research Rust patterns", "assignments": [{"agent_id": "a1", "agent_name": "Agent a1", "role_description": "Research agent", "matched_skills": ["web_search"]}], "reasoning": "User wants research"}"#;
-    let router = make_planning_mock_llm(plan_json);
-    // Legacy-ladder test: LLM task planning only runs in planner mode.
-    let orch = make_orchestrator_with_llm_agents_and_config(
-        router,
-        vec![make_agent("a1", vec!["web_search"])],
-        planner_pinned_config(),
-    );
-
-    let result = orch
-        .handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "please research Rust async patterns".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-            None,
-            None,
-        )
-        .await;
-
-    assert!(result.is_ok());
-    let text = result.unwrap();
-    assert!(
-        text.contains("assigned"),
-        "Expected 'assigned' in: {}",
-        text
-    );
-
-    // Verify task is registered
-    assert_eq!(orch.shared_context.task_registry.count(), 1);
-}
-
-#[tokio::test]
-async fn test_llm_planning_simple_query() {
-    let plan_json = r#"{"classification": "simple_query", "title": null, "assignments": [], "reasoning": "This is a greeting"}"#;
-    let router = make_planning_mock_llm(plan_json);
-    // Legacy-ladder test: planner classification of a simple query.
-    let orch =
-        make_orchestrator_with_llm_agents_and_config(router, vec![], planner_pinned_config());
-
-    let result = orch
-        .handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "hello".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-            None,
-            None,
-        )
-        .await;
-
-    assert!(result.is_ok());
-    // Should NOT dispatch a task
-    assert_eq!(orch.shared_context.task_registry.count(), 0);
-}
-
-#[tokio::test]
-async fn test_llm_planning_fallback_on_malformed() {
-    // LLM returns garbage — should fall back to keyword heuristic
-    let router = make_planning_mock_llm("this is not valid json at all");
-    // Legacy-ladder test: planner-fallback heuristic dispatch.
-    let orch = make_orchestrator_with_llm_agents_and_config(
-        router,
-        vec![make_agent("a1", vec!["web_search"])],
-        planner_pinned_config(),
-    );
-
-    let result = orch
-        .handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "can you search for Rust tutorials".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-            None,
-            None,
-        )
-        .await;
-
-    // Should still work via heuristic fallback
-    assert!(result.is_ok());
-    let text = result.unwrap();
-    assert!(
-        text.contains("assigned"),
-        "Expected heuristic fallback to dispatch. Got: {}",
-        text
-    );
 }
 
 #[tokio::test]
@@ -1025,37 +764,6 @@ async fn test_tool_intent_but_not_in_registry() {
 
     // Should succeed without error — just proceeds tool-less
     assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
-}
-
-#[tokio::test]
-async fn test_dispatch_error_falls_back_to_simple_query() {
-    // Planner returns complex_task with nonexistent agent → dispatch fails → fallback to simple_query
-    let plan_json = r#"{"classification": "complex_task", "title": "Do something", "assignments": [{"agent_id": "nonexistent_agent", "agent_name": "Ghost", "role_description": "Ghost role", "matched_skills": ["web_search"]}], "reasoning": "complex"}"#;
-    let router = make_planning_mock_llm(plan_json);
-    // No agents registered → dispatch_planned will fail
-    let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
-
-    let result = orch
-        .handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "do something complex".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-            None,
-            None,
-        )
-        .await;
-
-    // Should succeed via fallback to simple_query (echo stub since mock LLM returns plan JSON)
-    assert!(
-        result.is_ok(),
-        "Expected Ok via fallback, got: {:?}",
-        result
-    );
-    // No tasks should be registered (dispatch failed)
-    assert_eq!(orch.shared_context.task_registry.count(), 0);
 }
 
 fn make_attachment_with_text(extracted_text: &str) -> ResolvedAttachment {
@@ -2107,11 +1815,9 @@ async fn test_steer_prefix_multiple_workflows_asks_which() {
 
 #[tokio::test]
 async fn test_steer_prefix_flag_off_routes_unchanged() {
-    // Phase-1 flag-off parity: pinned to the pre-Routing-V2 combo
-    // (mode="planner", steering_enabled=false). "/steer x" must route
-    // exactly as any other plain message — same mode sequence, no
-    // steering side effects.
-    let mut config = planner_pinned_config();
+    // Steering flag off: "/steer x" must route exactly as any other
+    // plain message — same mode sequence, no steering side effects.
+    let mut config = DaemonConfig::default();
     config.orchestrator.routing.steering_enabled = false;
     let orch = make_orchestrator_with_config(config);
     orch.shared_context
@@ -2145,18 +1851,13 @@ async fn test_steer_prefix_flag_off_routes_unchanged() {
     assert!(orch.shared_context.steering_inbox("task-1").unwrap().is_empty());
 }
 
-// ── Routing V2: tool-mode main loop (mode = "tool") ─────────────────
-
-fn tool_mode_config() -> DaemonConfig {
-    let mut config = DaemonConfig::default();
-    config.orchestrator.routing.mode = "tool".to_string();
-    config
-}
+// ── Routing V2: main loop ───────────────────────────────────────────
 
 fn make_orchestrator_with_llm_agents_and_config(
     router: Arc<openalpaca_llm::LlmRouter>,
     agents: Vec<SubAgent>,
     config: DaemonConfig,
+    db: Option<openalpaca_storage::Database>,
 ) -> Orchestrator {
     let ctx = Arc::new(SharedContext::new());
     for a in &agents {
@@ -2176,7 +1877,7 @@ fn make_orchestrator_with_llm_agents_and_config(
         LoopConfig::default(),
         gate,
         registry,
-        None,
+        db,
         None,
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
@@ -2258,6 +1959,16 @@ fn make_tool_mode_orchestrator(
     config: DaemonConfig,
     agents: Vec<SubAgent>,
 ) -> (Orchestrator, Arc<std::sync::Mutex<Vec<ChatRequest>>>) {
+    make_tool_mode_orchestrator_with_db(tool_call, final_text, config, agents, None)
+}
+
+fn make_tool_mode_orchestrator_with_db(
+    tool_call: Option<(String, serde_json::Value)>,
+    final_text: &str,
+    config: DaemonConfig,
+    agents: Vec<SubAgent>,
+    db: Option<openalpaca_storage::Database>,
+) -> (Orchestrator, Arc<std::sync::Mutex<Vec<ChatRequest>>>) {
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(ToolModeMockLlm {
@@ -2268,7 +1979,7 @@ fn make_tool_mode_orchestrator(
         openalpaca_llm::ProviderType::Anthropic,
         "claude-sonnet-4-5-20250929".to_string(),
     );
-    let orch = make_orchestrator_with_llm_agents_and_config(Arc::new(router), agents, config);
+    let orch = make_orchestrator_with_llm_agents_and_config(Arc::new(router), agents, config, db);
     (orch, requests)
 }
 
@@ -2294,7 +2005,7 @@ async fn test_tool_mode_chat_answers_inline_without_planner() {
     let (orch, requests) = make_tool_mode_orchestrator(
         None,
         "The borrow checker enforces ownership at compile time.",
-        tool_mode_config(),
+        DaemonConfig::default(),
         vec![],
     );
     let mut rx = orch.bus.subscribe();
@@ -2341,7 +2052,7 @@ async fn test_tool_mode_task_message_starts_workflow() {
             }),
         )),
         "Started \"Borrow checker research\" in the background — keep chatting while it runs.",
-        tool_mode_config(),
+        DaemonConfig::default(),
         vec![make_agent("lead", vec!["orchestration"])],
     );
     let mut rx = orch.bus.subscribe();
@@ -2415,7 +2126,7 @@ async fn test_tool_mode_task_message_starts_workflow() {
 
 #[tokio::test]
 async fn test_tool_mode_at_cap_start_returns_directive_error_and_model_relays() {
-    let mut config = tool_mode_config();
+    let mut config = DaemonConfig::default();
     config.orchestrator.routing.max_workflows_per_lane = 1;
     let (orch, requests) = make_tool_mode_orchestrator(
         Some((
@@ -2466,7 +2177,7 @@ async fn test_tool_mode_at_cap_start_returns_directive_error_and_model_relays() 
 
 #[tokio::test]
 async fn test_tool_mode_steer_workflow_injects_mid_workflow() {
-    let mut config = tool_mode_config();
+    let mut config = DaemonConfig::default();
     config.orchestrator.routing.steering_enabled = true;
     let (orch, requests) = make_tool_mode_orchestrator(
         Some((
@@ -2527,6 +2238,82 @@ async fn test_tool_mode_steer_workflow_injects_mid_workflow() {
                 && m.content.contains("Steering message queued")
         }),
         "steer_workflow tool result never reached the model"
+    );
+}
+
+#[tokio::test]
+async fn test_tool_mode_unprocessed_steering_leftovers_surface_exactly_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (steering_id, followup_id) = {
+        let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+        let steering_id = repo
+            .queue(
+                "user1:cli",
+                openalpaca_storage::repository::FOLLOWUP_KIND_UNPROCESSED_STEERING,
+                "focus on unit tests",
+                "{\"User\":{\"global_id\":\"user1\"}}",
+                None,
+                Some("task-old"),
+            )
+            .unwrap();
+        let followup_id = repo
+            .queue(
+                "user1:cli",
+                openalpaca_storage::repository::FOLLOWUP_KIND_FOLLOWUP,
+                "run the benchmarks after",
+                "{\"User\":{\"global_id\":\"user1\"}}",
+                None,
+                Some("task-old"),
+            )
+            .unwrap();
+        (steering_id, followup_id)
+    };
+
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "Noted — I'll pick those up now.",
+        DaemonConfig::default(),
+        vec![],
+        Some(db.clone()),
+    );
+
+    let reply = send_tool_mode(&orch, Uuid::new_v4(), "hey, how did it go?").await;
+    assert_eq!(reply, "Noted — I'll pick those up now.");
+
+    // Turn 1's request carries the unprocessed-steering block (and makes
+    // clear the messages were not acted on); followup-kind rows are NOT
+    // injected — they belong to the follow-up runner.
+    {
+        let reqs = requests.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        let block_msg = reqs[0]
+            .messages
+            .iter()
+            .find(|m| m.content.contains("<unprocessed_steering>"))
+            .expect("unprocessed steering block missing from turn 1");
+        assert!(block_msg.content.contains("focus on unit tests"), "{}", block_msg.content);
+        assert!(block_msg.content.contains("NOT processed"), "{}", block_msg.content);
+        assert!(
+            !reqs[0].messages.iter().any(|m| m.content.contains("run the benchmarks after")),
+            "followup-kind row must not be injected"
+        );
+    }
+
+    // The surfaced row is done; the followup row stays queued.
+    {
+        let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+        assert_eq!(repo.get(steering_id).unwrap().unwrap().status, "done");
+        assert_eq!(repo.get(followup_id).unwrap().unwrap().status, "queued");
+    }
+
+    // Turn 2 is clean — the block surfaces exactly once.
+    let _ = send_tool_mode(&orch, Uuid::new_v4(), "thanks!").await;
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 2);
+    assert!(
+        !reqs[1].messages.iter().any(|m| m.content.contains("<unprocessed_steering>")),
+        "block must not surface again on the second turn"
     );
 }
 

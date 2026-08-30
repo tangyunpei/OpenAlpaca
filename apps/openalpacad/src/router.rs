@@ -62,10 +62,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/tasks/{id}/action",
             post(crate::routes::task_action_handler),
         )
-        .route(
-            "/v1/tasks/{id}/dag",
-            get(crate::routes::get_task_dag_handler),
-        )
+
         // Preferences routes (Phase 5)
         .route(
             "/v1/preferences",

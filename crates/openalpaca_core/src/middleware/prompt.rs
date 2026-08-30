@@ -64,7 +64,7 @@ pub fn format_tool_guidance(tools: &[openalpaca_llm::ToolDefinition]) -> String 
 
 /// Format a `<connector_status>` prompt block from a list of (name, status) pairs.
 ///
-/// Used by `query_handler.rs`, `pipeline.rs`, `lead_agent/mod.rs`, and `dag_executor/mod.rs`
+/// Used by `prompt/builder.rs` (the static-prompt layer) and `dispatcher/mod.rs`
 /// to inject connector awareness into system prompts without duplicating the XML formatting.
 ///
 /// When `sendable_channels` is provided, channels not in the active list are

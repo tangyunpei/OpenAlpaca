@@ -12,7 +12,6 @@ mod tools;
 mod tracker;
 
 // External API (unchanged)
-pub(crate) use guard::AgentBusyGuard;
 pub use prompt::build_lead_agent_prompt_from_templates;
 pub use tools::{
     check_subagent_status_tool_definition, post_update_tool_definition,

@@ -141,13 +141,6 @@ impl DaemonConfig {
             "user_profile_budget",
         );
         // ── Orchestrator > Routing ──
-        if self.orchestrator.routing.mode != "planner" && self.orchestrator.routing.mode != "tool" {
-            tracing::warn!(
-                "Config 'routing.mode': unknown value '{}', resetting to 'planner'",
-                self.orchestrator.routing.mode
-            );
-            self.orchestrator.routing.mode = "planner".to_string();
-        }
         clamp_val(
             &mut self.orchestrator.routing.steering_inbox_cap,
             1,
@@ -267,62 +260,6 @@ impl DaemonConfig {
             0.0,
             1.0,
             "skill_defaults.router_suggest_threshold",
-        );
-        // ── Execution > Planner ──
-        clamp_val(
-            &mut self.execution.planner.planning_timeout_secs,
-            5,
-            120,
-            "planner.planning_timeout_secs",
-        );
-        clamp_val(
-            &mut self.execution.planner.max_retries,
-            0,
-            5,
-            "planner.max_retries",
-        );
-        clamp_val(
-            &mut self.execution.planner.max_tokens,
-            256,
-            4096,
-            "planner.max_tokens",
-        );
-        // ── Execution > DAG ──
-        clamp_val(
-            &mut self.execution.dag.max_concurrent_agents,
-            1,
-            32,
-            "dag.max_concurrent_agents",
-        );
-        clamp_val(
-            &mut self.execution.dag.node_timeout_secs,
-            10,
-            3600,
-            "dag.node_timeout_secs",
-        );
-        clamp_val(
-            &mut self.execution.dag.total_timeout_secs,
-            60,
-            7200,
-            "dag.total_timeout_secs",
-        );
-        clamp_val(
-            &mut self.execution.dag.max_retries_per_node,
-            0,
-            10,
-            "dag.max_retries_per_node",
-        );
-        clamp_val(
-            &mut self.execution.dag.replan_after_every_n_nodes,
-            1,
-            50,
-            "dag.replan_after_every_n_nodes",
-        );
-        clamp_val(
-            &mut self.execution.dag.max_replans,
-            0,
-            50,
-            "dag.max_replans",
         );
         // ── Security ──
         clamp_val(

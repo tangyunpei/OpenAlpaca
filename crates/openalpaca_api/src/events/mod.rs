@@ -198,17 +198,6 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
-    /// A task DAG was replanned during execution
-    TaskReplanned {
-        task_id: String,
-        replan_number: usize,
-        /// "continue" | "modify" | "abort"
-        decision: String,
-        nodes_added: usize,
-        nodes_removed: usize,
-        ts: DateTime<Utc>,
-        instance_id: String,
-    },
     /// A tool requires interactive human confirmation before execution
     ToolConfirmationRequested {
         request_id: String,
@@ -278,7 +267,6 @@ pub enum EventSource {
     IMessage { chat_id: String, sender: String },
     Discord { channel_id: String, user_id: String, guild_id: Option<String> },
     Gui { connection_id: String },
-    Cli { session_id: String },
     Api { request_id: String },
     Internal,
 }

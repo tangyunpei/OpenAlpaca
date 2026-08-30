@@ -4,8 +4,8 @@ use super::*;
 fn test_default_adapter_user_message() {
     let adapter = DefaultAdapter;
     let msg = InboundMessage {
-        source: EventSource::Cli {
-            session_id: "s1".into(),
+        source: EventSource::Api {
+            request_id: "r1".into(),
         },
         content: "hello world".into(),
         attachments: Vec::new(),
@@ -21,8 +21,8 @@ fn test_default_adapter_user_message() {
     );
     assert_eq!(
         event.source,
-        EventSource::Cli {
-            session_id: "s1".into()
+        EventSource::Api {
+            request_id: "r1".into()
         }
     );
 }

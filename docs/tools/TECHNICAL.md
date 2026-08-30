@@ -100,7 +100,7 @@
 | `crates/openalpaca_core/src/runner/agentic_loop/cost.rs` | `LoopCostAccumulator` |
 | `crates/openalpaca_core/src/runner/agentic_loop/tests.rs` | Loop tests |
 
-### Lead Agent & DAG
+### Lead Agent
 
 | File | Purpose |
 |------|---------|
@@ -110,10 +110,6 @@
 | `crates/openalpaca_core/src/runner/lead_agent/guard.rs` | `AgentBusyGuard` claim/release |
 | `crates/openalpaca_core/src/runner/lead_agent/prompt.rs` | Lead agent prompt assembly |
 | `crates/openalpaca_core/src/runner/lead_agent/tests.rs` | Lead agent tests |
-| `crates/openalpaca_core/src/runner/dag_executor/mod.rs` | DAG node execution |
-| `crates/openalpaca_core/src/runner/dag_executor/node_runner.rs` | Per-node tool resolution |
-| `crates/openalpaca_core/src/runner/dag_executor/progress.rs` | DAG progress tracking |
-| `crates/openalpaca_core/src/runner/dag_executor/tests.rs` | DAG tests |
 
 ### LLM Types
 
@@ -179,7 +175,7 @@ pub struct ToolCall {
 
 The identity-carrying spine of tool execution.  Lightweight — plain strings,
 no `Arc` dependencies or DB handles.  Built by the caller (query handler,
-DAG node runner, lead agent, skill handler) and threaded through
+lead agent, subagent spawn, skill handler) and threaded through
 `SandboxManager` into `BuiltInTool::execute_with_context()`.
 
 ```rust
@@ -1392,7 +1388,6 @@ Markdown files with YAML frontmatter.  Tool access is declared via
 | `security/confirmation.rs` (inline) | Broker lifecycle, approval cache, canonical args hashing |
 | `runner/agentic_loop/tests.rs` | Tool call limiting, budget enforcement, loop behavior |
 | `runner/lead_agent/tests.rs` | Coordination tool behavior, spawn guards |
-| `runner/dag_executor/tests.rs` | DAG node execution |
 
 ### Running Tests
 

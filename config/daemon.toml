@@ -5,16 +5,6 @@ max_tool_runtime_secs = 60
 max_tools_per_round = 5
 confirmation_timeout_secs = 300
 
-[execution.dag]
-critical_path_scheduling_enabled = false
-max_concurrent_agents = 4
-max_replans = 3
-max_retries_per_node = 1
-node_timeout_secs = 300
-replan_after_every_n_nodes = 2
-replan_enabled = false
-total_timeout_secs = 1800
-
 [execution.lead_agent_defaults]
 batch_spawn_enabled = true
 max_concurrent_subagents = 6
@@ -29,17 +19,6 @@ compaction_target_ratio = 0.50
 # compaction_model = "claude-haiku-4-5-20251001"
 max_extractions_per_compaction = 10
 min_recent_messages = 4
-
-[execution.planner]
-dag_prefer_predictable_enabled = false
-deep_query_max_rounds = 10
-deep_query_max_tools_per_round = 4
-dispatch_analysis_enabled = false
-max_retries = 0
-max_tokens = 1024
-plan_protocol_v2_enabled = false
-planning_timeout_secs = 15
-two_phase_enabled = true
 
 [orchestrator.costs]
 extract_every_n_turns = 5
@@ -71,14 +50,10 @@ identity_budget = 300
 user_profile_budget = 1000
 
 [orchestrator.routing]
-# Routing V2 defaults. Full rollback: mode = "planner" AND steering_enabled = false.
-# Routing ladder: "tool" routes everything past the deterministic tier
-# (slash task control, skills, /steer) and the social fast path into the
-# main loop, where chat vs. task vs. steer is the model's tool choice
-# (start_workflow / steer_workflow). "planner" restores the legacy
-# fast-path / two-phase-triage / hierarchical-planner pre-classifier
-# ladder (scheduled for deletion).
-mode = "tool"
+# Routing V2: everything past the deterministic tier (slash task control,
+# skills, /steer) and the social fast path enters the main loop, where
+# chat vs. task vs. steer is the model's tool choice
+# (start_workflow / steer_workflow).
 # Mid-workflow steering rail: per-workflow steering inboxes, the /steer
 # prefix, the main-loop steer_workflow/queue_followup tools, and the
 # lead agent's post_update/queue_followup tools. When false, no inbox
@@ -87,14 +62,15 @@ steering_enabled = true
 # Max queued steering messages per workflow inbox. A full inbox rejects
 # the push and the sender is told to queue a follow-up instead.
 steering_inbox_cap = 16
-# Max concurrent workflows per lane. Enforced inside start_workflow
-# (tool mode only — legacy planner dispatch is uncapped); at the cap the
-# tool directs the model to steer an existing workflow or queue a follow-up.
+# Max concurrent workflows per lane. Enforced inside start_workflow; at the
+# cap the tool directs the model to steer an existing workflow or queue a
+# follow-up.
 max_workflows_per_lane = 3
 # Auto-start the next queued `followup` item when a workflow finalizes
-# (`unprocessed_steering` leftovers never auto-run).
+# (`unprocessed_steering` leftovers never auto-run — they surface once as a
+# context block on the lane's next main-loop turn).
 followup_autostart = true
-# Budgets for the tool-mode main loop (per user turn).
+# Budgets for the main loop (per user turn).
 main_loop_max_rounds = 8
 main_loop_max_tools_per_round = 4
 # Main-loop tool surface: "core_union" (keyword-suggested tools + the

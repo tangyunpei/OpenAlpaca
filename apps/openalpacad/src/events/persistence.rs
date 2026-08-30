@@ -264,23 +264,6 @@ impl EventBroadcaster {
                     });
                     repo.log("skill_failed", None, Some(&detail), None)
                 }
-                ServerEvent::TaskReplanned {
-                    task_id,
-                    replan_number,
-                    decision,
-                    nodes_added,
-                    nodes_removed,
-                    ..
-                } => {
-                    let detail = serde_json::json!({
-                        "task_id": task_id,
-                        "replan_number": replan_number,
-                        "decision": decision,
-                        "nodes_added": nodes_added,
-                        "nodes_removed": nodes_removed
-                    });
-                    repo.log("task_replanned", None, Some(&detail), None)
-                }
                 // Log DAG node status changes
                 ServerEvent::DagNodeStatus {
                     task_id,

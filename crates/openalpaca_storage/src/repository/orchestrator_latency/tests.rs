@@ -51,7 +51,7 @@ fn test_aggregate_single_mode() {
         repo.record(&OrchestratorLatencyRecord {
             id: None,
             request_id: format!("req-{}", i),
-            mode: "fast_path".to_string(),
+            mode: "main_loop".to_string(),
             planner_ms: 10 + i,
             dispatch_ms: 5,
             ack_ms: 2,
@@ -64,7 +64,7 @@ fn test_aggregate_single_mode() {
 
     let aggs = repo.aggregate_by_mode(None, None).unwrap();
     assert_eq!(aggs.len(), 1);
-    assert_eq!(aggs[0].mode, "fast_path");
+    assert_eq!(aggs[0].mode, "main_loop");
     assert_eq!(aggs[0].count, 10);
     assert!(aggs[0].p50_total_ms > 0);
     assert!(aggs[0].p95_total_ms >= aggs[0].p50_total_ms);
@@ -76,11 +76,7 @@ fn test_aggregate_multiple_modes() {
     let db = setup_db();
     let repo = OrchestratorLatencyRepository::new(&db);
 
-    for mode in &[
-        "fast_path",
-        "planner_complex_task",
-        "heuristic_simple_query",
-    ] {
+    for mode in &["main_loop", "task_ops", "steered"] {
         for i in 0..5 {
             repo.record(&OrchestratorLatencyRecord {
                 id: None,
@@ -108,9 +104,9 @@ fn test_aggregate_multiple_modes() {
     let aggs = repo.aggregate_by_mode(None, None).unwrap();
     assert_eq!(aggs.len(), 3);
     // Sorted by mode name
-    assert_eq!(aggs[0].mode, "fast_path");
-    assert_eq!(aggs[1].mode, "heuristic_simple_query");
-    assert_eq!(aggs[2].mode, "planner_complex_task");
+    assert_eq!(aggs[0].mode, "main_loop");
+    assert_eq!(aggs[1].mode, "steered");
+    assert_eq!(aggs[2].mode, "task_ops");
     // Each has 5 records
     for agg in &aggs {
         assert_eq!(agg.count, 5);

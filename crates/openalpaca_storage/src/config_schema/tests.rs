@@ -45,12 +45,10 @@ fn test_validate_enum() {
 
 #[test]
 fn test_validate_int_range() {
-    assert!(validate("system.max_agents", "8").is_ok());
-    assert!(validate("system.max_agents", "1").is_ok());
-    assert!(validate("system.max_agents", "32").is_ok());
-    assert!(validate("system.max_agents", "0").is_err());
-    assert!(validate("system.max_agents", "99").is_err());
-    assert!(validate("system.max_agents", "abc").is_err());
+    assert!(validate("daemon.execution.max_rounds", "8").is_ok());
+    assert!(validate("daemon.execution.max_rounds", "1").is_ok());
+    assert!(validate("daemon.execution.max_rounds", "0").is_err());
+    assert!(validate("daemon.execution.max_rounds", "abc").is_err());
 }
 
 #[test]
@@ -83,21 +81,15 @@ fn test_categories() {
 fn test_keys_in_category() {
     let keys = keys_in_category("System");
     assert!(keys.iter().any(|d| d.key == "system.debug_level"));
-    // system.max_agents moved to "Daemon" category
+    // The retired system.max_agents alias no longer exists anywhere.
     assert!(!keys.iter().any(|d| d.key == "system.max_agents"));
 }
 
 #[test]
 fn test_daemon_keys_in_category() {
     let keys = keys_in_category("Daemon");
-    // 42 daemon keys + 1 alias (system.max_agents) + 2 streaming keys + 1 lead_max_concurrent_subagents + 2 background model keys = 48 total
-    // (web_search keys moved to AI category)
-    assert_eq!(keys.len(), 48);
-    assert!(keys.iter().any(|d| d.key == "system.max_agents"));
-    assert!(
-        keys.iter()
-            .any(|d| d.key == "daemon.dag.max_concurrent_agents")
-    );
+    // 48 keys minus the 7 retired DAG/alias keys (Routing V2 Phase 5).
+    assert_eq!(keys.len(), 41);
     assert!(
         keys.iter()
             .any(|d| d.key == "daemon.orchestrator.prompt_recent_messages")
@@ -127,11 +119,6 @@ fn test_daemon_keys_in_category() {
     assert!(
         keys.iter()
             .any(|d| d.key == "daemon.execution.lead_max_tools_per_round")
-    );
-    assert!(keys.iter().any(|d| d.key == "daemon.dag.node_timeout_secs"));
-    assert!(
-        keys.iter()
-            .any(|d| d.key == "daemon.dag.max_retries_per_node")
     );
     assert!(
         keys.iter()
@@ -248,10 +235,9 @@ fn test_subcategories() {
 
     // Daemon subcategories
     let daemon_subs = subcategories_in_category("Daemon");
-    assert_eq!(daemon_subs.len(), 5);
+    assert_eq!(daemon_subs.len(), 4);
     assert!(daemon_subs.contains(&"Orchestrator"));
     assert!(daemon_subs.contains(&"Execution"));
-    assert!(daemon_subs.contains(&"DAG"));
     assert!(daemon_subs.contains(&"Security"));
     assert!(daemon_subs.contains(&"Server"));
 
@@ -305,13 +291,13 @@ fn test_suggest_key() {
 
 #[test]
 fn test_daemon_key_lookup() {
-    let def = lookup("daemon.dag.max_concurrent_agents").unwrap();
+    let def = lookup("daemon.execution.max_rounds").unwrap();
     assert_eq!(def.backend, ConfigBackend::DaemonToml);
     assert_eq!(def.category, "Daemon");
-    assert_eq!(def.default, Some("3"));
 
-    let def = lookup("system.max_agents").unwrap();
-    assert_eq!(def.backend, ConfigBackend::DaemonToml);
+    // Retired DAG keys are gone from the registry.
+    assert!(lookup("daemon.dag.max_concurrent_agents").is_none());
+    assert!(lookup("system.max_agents").is_none());
 
     let def = lookup("daemon.orchestrator.prompt_recent_messages").unwrap();
     assert_eq!(def.default, Some("40"));
@@ -319,11 +305,8 @@ fn test_daemon_key_lookup() {
 
 #[test]
 fn test_validate_daemon_int_range() {
-    assert!(validate("daemon.dag.max_concurrent_agents", "3").is_ok());
-    assert!(validate("daemon.dag.max_concurrent_agents", "1").is_ok());
-    assert!(validate("daemon.dag.max_concurrent_agents", "32").is_ok());
-    assert!(validate("daemon.dag.max_concurrent_agents", "0").is_err());
-    assert!(validate("daemon.dag.max_concurrent_agents", "99").is_err());
+    assert!(validate("daemon.execution.lead_max_concurrent_subagents", "3").is_ok());
+    assert!(validate("daemon.execution.lead_max_concurrent_subagents", "0").is_err());
 }
 
 #[test]
@@ -394,10 +377,6 @@ fn test_validate_new_daemon_keys() {
     assert!(validate("daemon.execution.max_tools_per_round", "5").is_ok());
     assert!(validate("daemon.execution.max_tools_per_round", "0").is_err());
 
-    // DAG keys
-    assert!(validate("daemon.dag.node_timeout_secs", "300").is_ok());
-    assert!(validate("daemon.dag.max_retries_per_node", "0").is_ok());
-    assert!(validate("daemon.dag.max_retries_per_node", "11").is_err());
 }
 
 #[test]

@@ -122,12 +122,12 @@ fn format_category_label(category: &str, config_map: &HashMap<String, String>) -
 /// Format a config key as a human-readable menu item with value, description, and backend.
 ///
 /// Example output:
-///   max retries per node          1          Max retries per DAG node on failure  [daemon.toml]
+///   max rounds                    15         Default max rounds per agent  [daemon.toml]
 fn format_key_menu_item(
     def: &config_schema::ConfigKeyDef,
     config: &HashMap<String, String>,
 ) -> String {
-    // Extract leaf key name and humanize: "daemon.dag.max_retries_per_node" → "max retries per node"
+    // Extract leaf key name and humanize: "daemon.execution.max_rounds" → "max rounds"
     let leaf = def
         .key
         .rsplit('.')

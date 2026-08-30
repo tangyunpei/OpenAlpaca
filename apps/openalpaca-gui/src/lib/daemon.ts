@@ -35,7 +35,6 @@ export type ServerEvent =
   | { type: "tool_executed"; agent_id: string; tool_name: string; success: boolean; duration_ms: number; ts: string; instance_id: string; _id: number }
   | { type: "llm_call_completed"; agent_id: string; model: string; input_tokens: number; output_tokens: number; cost_usd: number; ts: string; instance_id: string; _id: number }
   | { type: "skill_catalog_updated"; skill_name: string; action: string; ts: string; instance_id: string; _id: number }
-  | { type: "task_replanned"; task_id: string; replan_number: number; decision: string; nodes_added: number; nodes_removed: number; ts: string; instance_id: string; _id: number }
   | { type: "soul_updated"; actor: string; mode: string; content_sha256: string; backup_path: string | null; ts: string; instance_id: string; _id: number }
   | { type: "context_package_built"; agent_id: string; sections: [string, number][]; total_tokens: number; budget: number; sub_agent_window: number; ts: string; instance_id: string; _id: number }
   | { type: "daemon_config_changed"; ts: string; instance_id: string; _id: number }

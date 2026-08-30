@@ -322,29 +322,6 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
-    /// Broadcast a task replanned event and persist it
-    pub fn task_replanned(
-        &self,
-        task_id: &str,
-        replan_number: usize,
-        decision: &str,
-        nodes_added: usize,
-        nodes_removed: usize,
-    ) {
-        let event = ServerEvent::TaskReplanned {
-            task_id: task_id.to_string(),
-            replan_number,
-            decision: decision.to_string(),
-            nodes_added,
-            nodes_removed,
-            ts: Utc::now(),
-            instance_id: self.instance_id.clone(),
-        };
-
-        self.persist(&event);
-        let _ = self.tx.send(event);
-    }
-
     /// Broadcast a tool confirmation requested event and persist it
     #[allow(clippy::too_many_arguments)]
     pub fn tool_confirmation_requested(

@@ -95,11 +95,7 @@ pub(super) fn build_task_outcome(
                     } else {
                         final_content
                     };
-                    let mut outcome = if state.dag.is_some() {
-                        state.build_outcome_dag(fallback, None)
-                    } else {
-                        state.build_outcome(fallback, None)
-                    };
+                    let mut outcome = state.build_outcome(fallback, None);
                     if !success {
                         outcome.outcome_kind = OutcomeKind::Failed;
                         // Prepend error reason if it's not already in the summary

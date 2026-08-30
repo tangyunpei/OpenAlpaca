@@ -1,17 +1,10 @@
 use super::Orchestrator;
-use openalpaca_llm::{ChatMessage, ContentPart, ImageSource, Role, ToolChoice, ToolDefinition};
+use openalpaca_llm::{ChatMessage, ContentPart, ImageSource, Role, ToolChoice};
 use openalpaca_storage::repository::PreferenceRepository;
 
 /// Optional overrides for handle_simple_query loop configuration.
 pub(super) enum LoopOverrides {
-    /// deep_query triage tier: expanded budget and LLM-suggested tools.
-    DeepQuery {
-        max_rounds: usize,
-        max_tools_per_round: usize,
-        /// When non-empty, replaces the keyword-heuristic tool list.
-        override_tools: Vec<ToolDefinition>,
-    },
-    /// Routing V2 tool-mode main loop: budgets from `[orchestrator.routing]`,
+    /// Routing V2 main loop: budgets from `[orchestrator.routing]`,
     /// suggested tools unioned with the per-request core/workflow tool set
     /// (`start_workflow`, `task_status`, memory tools, and — on lanes with
     /// active workflows — `steer_workflow`/`queue_followup`).
@@ -24,8 +17,10 @@ pub(super) enum LoopOverrides {
 }
 
 mod simple_query_handler;
+mod unprocessed_steering;
 mod workflow_context;
 
+pub(super) use unprocessed_steering::take_unprocessed_steering_block;
 pub(super) use workflow_context::render_workflow_context_block;
 
 #[cfg(test)]

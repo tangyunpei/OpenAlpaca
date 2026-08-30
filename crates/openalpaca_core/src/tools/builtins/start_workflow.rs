@@ -135,9 +135,8 @@ impl BuiltInTool for StartWorkflowTool {
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = Some(outcome.clone());
 
-        // 4. Record the routing decision (Routing V2 Phase 3): the model's
-        // tool call IS the dispatch decision, recorded UNCONDITIONALLY —
-        // the `dispatch_analysis_enabled` gate only covers the planner path.
+        // 4. Record the routing decision (Routing V2): the model's
+        // tool call IS the dispatch decision, recorded unconditionally.
         let request_id = ctx.request_id.unwrap_or_else(Uuid::nil);
         self.task_dispatcher
             .record_tool_dispatch_decision(&request_id.to_string(), &outcome.task_id);
@@ -370,14 +369,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_start_workflow_records_decision_despite_analysis_gate_off() {
-        // Routing V2 Phase 3: the tool path records its DispatchDecision
-        // UNCONDITIONALLY — `dispatch_analysis_enabled=false` (the shipped
-        // config value) only gates the planner path's analysis layer.
+    async fn test_start_workflow_records_decision_unconditionally() {
+        // Routing V2: the tool path records its DispatchDecision
+        // UNCONDITIONALLY — the model's `start_workflow` call IS the
+        // routing decision (the planner-era analysis gate is gone).
         let dir = tempfile::tempdir().unwrap();
         let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
-        let mut config = crate::daemon_config::DaemonConfig::default();
-        config.execution.planner.dispatch_analysis_enabled = false;
+        let config = crate::daemon_config::DaemonConfig::default();
         let (shared, dispatcher, bus) = setup_with(Some(db.clone()), config);
         let mut rx = bus.subscribe();
         let request_id = Uuid::new_v4();

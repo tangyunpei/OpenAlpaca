@@ -86,8 +86,8 @@ fn test_task_status_deserialization_missing_outcome_fields() {
 #[test]
 fn test_unified_event_creation() {
     let event = UnifiedEvent::new(
-        EventSource::Cli {
-            session_id: "sess-1".into(),
+        EventSource::Api {
+            request_id: "req-1".into(),
         },
         EventPayload::UserMessage {
             content: "hello".into(),
@@ -97,8 +97,8 @@ fn test_unified_event_creation() {
     assert!(!event.id.is_nil());
     assert_eq!(
         event.source,
-        EventSource::Cli {
-            session_id: "sess-1".into()
+        EventSource::Api {
+            request_id: "req-1".into()
         }
     );
 }

@@ -1,7 +1,6 @@
 //! Task state, step state, and constraints.
 
 use super::workspace::{TaskWorkspace, WorkspaceEntryType};
-use crate::orchestrator::task_planner::TaskDag;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -13,8 +12,6 @@ pub struct TaskState {
     pub constraints: TaskConstraints,
     #[serde(default)]
     pub workspace: TaskWorkspace,
-    #[serde(default)]
-    pub dag: Option<TaskDag>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -89,7 +86,6 @@ impl TaskState {
                 pipeline_sequential: true,
             },
             workspace: TaskWorkspace::default(),
-            dag: None,
             created_at: now,
             updated_at: now,
         }

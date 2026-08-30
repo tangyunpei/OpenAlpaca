@@ -96,8 +96,8 @@ async fn test_handle_event_echo() {
     let gw = make_gateway();
     let resp = gw
         .handle_event(GatewayRequest {
-            source: EventSource::Cli {
-                session_id: "user1".to_string(),
+            source: EventSource::Gui {
+                connection_id: "user1".to_string(),
             },
             content: "hello".to_string(),
             principal: Principal::System,
@@ -109,7 +109,7 @@ async fn test_handle_event_echo() {
         })
         .await;
     assert_eq!(resp.lane_key.user_id, "user1");
-    assert_eq!(resp.lane_key.source, "cli");
+    assert_eq!(resp.lane_key.source, "gui");
     assert_eq!(resp.content, "Echo: hello");
     assert!(!resp.is_error);
     assert!(resp.delegation.is_none());
@@ -126,8 +126,8 @@ async fn test_handle_event_propagates_delegation() {
     );
     let resp = gw
         .handle_event(GatewayRequest {
-            source: EventSource::Cli {
-                session_id: "user1".to_string(),
+            source: EventSource::Gui {
+                connection_id: "user1".to_string(),
             },
             content: "do a big task".to_string(),
             principal: Principal::System,
@@ -338,15 +338,6 @@ async fn test_principal_aware_lane_derivation() {
         })
         .await;
     assert_eq!(resp3.lane_key.user_id, "tg_user_789");
-}
-
-#[tokio::test]
-async fn test_backward_compat_handle_message() {
-    let gw = make_gateway();
-    let resp = gw.handle_message("user1", "cli", "hello").await;
-    // handle_message now delegates through the handler
-    assert!(resp.content.starts_with("Echo:"));
-    assert!(!resp.is_error);
 }
 
 #[tokio::test]

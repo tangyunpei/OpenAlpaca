@@ -11,7 +11,7 @@ use std::path::PathBuf;
 /// Each entry maps a dotted schema key (as registered in `config_schema.rs`)
 /// to the TOML section path and field name within `daemon.toml`.
 struct TomlMapping {
-    /// Schema key, e.g. `"daemon.dag.max_concurrent_agents"`.
+    /// Schema key, e.g. `"daemon.execution.max_rounds"`.
     schema_key: &'static str,
     /// TOML dotted section path, e.g. `["execution", "dag"]`.
     section: &'static [&'static str],
@@ -70,17 +70,6 @@ static MAPPINGS: &[TomlMapping] = &[
         schema_key: "daemon.execution.lead_max_cost",
         section: &["execution", "lead_agent_defaults"],
         field: "max_cost",
-    },
-    // DAG
-    TomlMapping {
-        schema_key: "daemon.dag.max_concurrent_agents",
-        section: &["execution", "dag"],
-        field: "max_concurrent_agents",
-    },
-    TomlMapping {
-        schema_key: "daemon.dag.total_timeout_secs",
-        section: &["execution", "dag"],
-        field: "total_timeout_secs",
     },
     // Orchestrator: Memory (cont.)
     TomlMapping {
@@ -195,27 +184,6 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["execution", "lead_agent_defaults"],
         field: "max_concurrent_subagents",
     },
-    // DAG (cont.)
-    TomlMapping {
-        schema_key: "daemon.dag.node_timeout_secs",
-        section: &["execution", "dag"],
-        field: "node_timeout_secs",
-    },
-    TomlMapping {
-        schema_key: "daemon.dag.max_retries_per_node",
-        section: &["execution", "dag"],
-        field: "max_retries_per_node",
-    },
-    TomlMapping {
-        schema_key: "daemon.dag.replan_after_every_n_nodes",
-        section: &["execution", "dag"],
-        field: "replan_after_every_n_nodes",
-    },
-    TomlMapping {
-        schema_key: "daemon.dag.max_replans",
-        section: &["execution", "dag"],
-        field: "max_replans",
-    },
     // Security
     TomlMapping {
         schema_key: "daemon.security.max_input_length",
@@ -274,12 +242,6 @@ static MAPPINGS: &[TomlMapping] = &[
         schema_key: "daemon.server.embedding_batch_size",
         section: &["server", "embedding_indexer"],
         field: "batch_size",
-    },
-    // Alias: system.max_agents → same as daemon.dag.max_concurrent_agents
-    TomlMapping {
-        schema_key: "system.max_agents",
-        section: &["execution", "dag"],
-        field: "max_concurrent_agents",
     },
 ];
 

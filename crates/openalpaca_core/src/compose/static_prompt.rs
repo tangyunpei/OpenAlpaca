@@ -550,7 +550,9 @@ Example:
 }
 
 fn build_replanner_hierarchical(input: &StaticPromptInput) -> StaticPromptOutput {
-    // Absorbs orchestrator/replanner/mod.rs:build_replan_prompt's format.
+    // Absorbed the (since-deleted, Routing V2 Phase 5)
+    // orchestrator/replanner build_replan_prompt format. No production
+    // caller remains; compose tests pin the byte-identical output.
     //
     // Loader contract: `raw_blocks` arrives pre-serialized by the caller in
     // this order with these `name` values:
@@ -606,8 +608,8 @@ fn build_replanner_hierarchical(input: &StaticPromptInput) -> StaticPromptOutput
         prompt.push_str(&ctx_block.content);
     }
 
-    // Static response_format + rules (absorbed from build_replan_prompt
-    // orchestrator/replanner/mod.rs lines 184-210).
+    // Static response_format + rules (absorbed from the deleted replanner's
+    // build_replan_prompt).
     prompt.push_str(
         r#"<response_format>
 Respond with ONLY a single JSON object. No markdown, no explanation, no other text.

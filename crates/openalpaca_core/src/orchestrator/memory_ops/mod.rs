@@ -1,4 +1,3 @@
-use super::Orchestrator;
 use crate::daemon_config::DaemonConfig;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::memory::task_extraction::{PersistResult, persist_memory_item};
@@ -14,8 +13,7 @@ use std::sync::Arc;
 /// Supports a `--workspace` flag in `content` to scope the memory to the
 /// current project workspace; default (no flag) stores as Global scope.
 ///
-/// Shared by the intent path (`Orchestrator::handle_remember_command`) and
-/// the `memory_store` builtin tool (Routing V2).
+/// Used by the `memory_store` builtin tool (Routing V2).
 pub(crate) async fn store_memory(
     db: Option<&Database>,
     embedder: &Option<Arc<dyn openalpaca_llm::Embedder>>,
@@ -79,8 +77,7 @@ pub(crate) async fn store_memory(
 
 /// Search for and delete the best-matching Preference memory (shared core).
 ///
-/// Shared by the intent path (`Orchestrator::handle_forget_command`) and the
-/// `memory_forget` builtin tool (Routing V2).
+/// Used by the `memory_forget` builtin tool (Routing V2).
 pub(crate) fn forget_memory(
     db: Option<&Database>,
     content: &str,
@@ -118,37 +115,6 @@ pub(crate) fn forget_memory(
         ))
     } else {
         Err("Memory system is not available.".to_string())
-    }
-}
-
-impl Orchestrator {
-    /// Handle "remember X" commands by storing in Memory v2 as a Preference.
-    /// Thin wrapper over [`store_memory`] (Routing V2 shared core).
-    pub(super) async fn handle_remember_command(
-        &self,
-        content: &str,
-        owner_id: Option<&str>,
-        scope_ctx: &MemoryScopeContext,
-    ) -> Result<String, String> {
-        store_memory(
-            self.db.as_ref(),
-            &self.embedder,
-            &self.daemon_config,
-            content,
-            owner_id,
-            scope_ctx,
-        )
-        .await
-    }
-
-    /// Handle "forget X" commands by searching and removing from Memory v2.
-    /// Thin wrapper over [`forget_memory`] (Routing V2 shared core).
-    pub(super) async fn handle_forget_command(
-        &self,
-        content: &str,
-        owner_id: Option<&str>,
-    ) -> Result<String, String> {
-        forget_memory(self.db.as_ref(), content, owner_id)
     }
 }
 

@@ -40,20 +40,21 @@ pub type CompositeFingerprint = [u8; 32];
 // compile; later phases (the loader layer in particular) can either replace
 // these with richer types or keep the wrapper as the stable contract.
 
-/// Slim wrapper for the planner's current-plan snapshot.
+/// Slim wrapper for a planner-era current-plan snapshot (opaque JSON).
 ///
-/// Phase 1 placeholder: holds an opaque JSON payload. The replanner migration
-/// (Phase 4) will either swap this for a richer struct or keep it as a
-/// transport envelope around whatever the existing replanner prompt uses.
+/// The planner/replanner production paths were deleted in Routing V2
+/// Phase 5; this type survives only as the input shape of the retained
+/// `ComposeRequest::Replanner` compose mode (exercised by compose tests
+/// alone — no production caller constructs it).
 #[derive(Debug, Clone, Default)]
 pub struct PlanState {
     pub payload: Arc<str>,
 }
 
-/// Slim wrapper for the replanner's workspace snapshot.
+/// Slim wrapper for a planner-era workspace snapshot (opaque JSON).
 ///
-/// Phase 1 placeholder: holds an opaque JSON payload. Replaced or kept as
-/// an envelope when the replanner migration lands (Phase 4).
+/// Same status as [`PlanState`]: no production caller since Routing V2
+/// Phase 5 deleted the replanner.
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceSnapshot {
     pub payload: Arc<str>,
@@ -366,8 +367,9 @@ pub struct StaticPromptInput {
     /// raw_blocks, so the agent list is plumbed through via this field.
     #[doc(hidden)]
     pub planner_agents: Option<Arc<Vec<AgentConfig>>>,
-    /// Planner v2 protocol flag (see `PlannerLimits.plan_protocol_v2_enabled`).
-    /// Defaults to false when the planner_agents field is None.
+    /// Planner v2 protocol flag. Always `false` since Routing V2 Phase 5
+    /// deleted the planner (and its `plan_protocol_v2_enabled` config key);
+    /// only the planner-mode compose tests still toggle it.
     #[doc(hidden)]
     pub planner_protocol_v2: bool,
 }

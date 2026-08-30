@@ -8,10 +8,6 @@ fn test_default_config() {
     assert_eq!(config.orchestrator.costs.summary_max_daily_cost_usd, 0.50);
     assert_eq!(config.execution.agent_defaults.max_rounds, 15);
     assert_eq!(config.execution.lead_agent_defaults.max_rounds, 18);
-    assert_eq!(config.execution.planner.planning_timeout_secs, 60);
-    assert_eq!(config.execution.planner.max_retries, 2);
-    assert_eq!(config.execution.planner.max_tokens, 2048);
-    assert_eq!(config.execution.dag.max_concurrent_agents, 4);
     assert_eq!(config.security.max_input_length, 32768);
     assert_eq!(config.server.heartbeat_interval_secs, 5);
 }
@@ -20,7 +16,7 @@ fn test_default_config() {
 fn test_empty_toml_gives_defaults() {
     let config: DaemonConfig = toml::from_str("").unwrap();
     assert_eq!(config.orchestrator.memory.prompt_recent_messages, 25);
-    assert_eq!(config.execution.dag.total_timeout_secs, 1800);
+    assert_eq!(config.execution.lead_agent_defaults.max_cost, 5.0);
 }
 
 #[test]
@@ -29,14 +25,14 @@ fn test_partial_override() {
 [orchestrator.memory]
 prompt_recent_messages = 60
 
-[execution.dag]
-max_concurrent_agents = 8
+[execution.agent_defaults]
+max_rounds = 20
 "#;
     let config: DaemonConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.orchestrator.memory.prompt_recent_messages, 60);
     assert_eq!(config.orchestrator.memory.summary_max_chars, 4000); // still default
-    assert_eq!(config.execution.dag.max_concurrent_agents, 8);
-    assert_eq!(config.execution.dag.node_timeout_secs, 300); // still default
+    assert_eq!(config.execution.agent_defaults.max_rounds, 20);
+    assert_eq!(config.execution.agent_defaults.max_tools_per_round, 5); // still default
 }
 
 #[test]
@@ -47,7 +43,6 @@ fn test_validate_clamps_out_of_range_values() {
     config.orchestrator.memory.summary_max_chars = 999_999; // max is 32000
     config.orchestrator.memory.fts_jaccard_threshold = 2.5; // max is 1.0
     config.orchestrator.memory.decay.half_life_days = 0.0; // min is 1.0
-    config.execution.dag.max_concurrent_agents = 100; // max is 32
     config.security.max_input_length = 0; // min is 1024
     config.server.event_bus_capacity = 1; // min is 64
 
@@ -57,7 +52,6 @@ fn test_validate_clamps_out_of_range_values() {
     assert_eq!(config.orchestrator.memory.summary_max_chars, 32000);
     assert_eq!(config.orchestrator.memory.fts_jaccard_threshold, 1.0);
     assert_eq!(config.orchestrator.memory.decay.half_life_days, 1.0);
-    assert_eq!(config.execution.dag.max_concurrent_agents, 32);
     assert_eq!(config.security.max_input_length, 1024);
     assert_eq!(config.server.event_bus_capacity, 64);
 }
@@ -78,10 +72,6 @@ fn test_validate_leaves_valid_values_unchanged() {
         original.orchestrator.memory.summary_max_chars
     );
     assert_eq!(
-        config.execution.dag.max_concurrent_agents,
-        original.execution.dag.max_concurrent_agents
-    );
-    assert_eq!(
         config.security.max_input_length,
         original.security.max_input_length
     );
@@ -89,59 +79,6 @@ fn test_validate_leaves_valid_values_unchanged() {
         config.server.event_bus_capacity,
         original.server.event_bus_capacity
     );
-}
-
-#[test]
-fn test_phase2_flags_default_to_true() {
-    let config = DaemonConfig::default();
-    assert!(config.execution.planner.dispatch_analysis_enabled);
-    assert!(config.execution.planner.plan_protocol_v2_enabled);
-    assert!(config.execution.lead_agent_defaults.batch_spawn_enabled);
-    assert!(config.execution.dag.critical_path_scheduling_enabled);
-}
-
-#[test]
-fn test_phase2_flags_from_toml() {
-    let toml_str = r#"
-[execution.planner]
-dispatch_analysis_enabled = true
-plan_protocol_v2_enabled = true
-
-[execution.lead_agent_defaults]
-batch_spawn_enabled = true
-
-[execution.dag]
-critical_path_scheduling_enabled = true
-"#;
-    let config: DaemonConfig = toml::from_str(toml_str).unwrap();
-    assert!(config.execution.planner.dispatch_analysis_enabled);
-    assert!(config.execution.planner.plan_protocol_v2_enabled);
-    assert!(config.execution.lead_agent_defaults.batch_spawn_enabled);
-    assert!(config.execution.dag.critical_path_scheduling_enabled);
-}
-
-#[test]
-fn test_dag_max_concurrent_default_4() {
-    let config = DaemonConfig::default();
-    assert_eq!(config.execution.dag.max_concurrent_agents, 4);
-}
-
-#[test]
-fn test_phase2_flags_backward_compat() {
-    // Parsing a TOML without Phase 2 fields should succeed.
-    // Field-level #[serde(default)] → bool::default() = false for present structs.
-    // Struct-level #[serde(default)] → Default::default() for absent structs.
-    let toml_str = r#"
-[execution.planner]
-max_tokens = 1024
-"#;
-    let config: DaemonConfig = toml::from_str(toml_str).unwrap();
-    // planner section is present → field-level defaults (false)
-    assert!(!config.execution.planner.dispatch_analysis_enabled);
-    assert!(!config.execution.planner.plan_protocol_v2_enabled);
-    // lead_agent_defaults / dag sections are absent → struct Default (now true)
-    assert!(config.execution.lead_agent_defaults.batch_spawn_enabled);
-    assert!(config.execution.dag.critical_path_scheduling_enabled);
 }
 
 #[test]
@@ -322,7 +259,6 @@ fn test_upload_governance_wait_settings_validate_clamps() {
 // ── Routing V2: [orchestrator.routing] ──
 
 fn assert_routing_is_default(routing: &crate::daemon_config::RoutingConfig) {
-    assert_eq!(routing.mode, "tool");
     assert!(routing.steering_enabled);
     assert_eq!(routing.steering_inbox_cap, 16);
     assert_eq!(routing.max_workflows_per_lane, 3);
@@ -355,7 +291,7 @@ prompt_recent_messages = 60
 
 #[test]
 fn test_routing_partial_table_keeps_field_defaults() {
-    // The two_phase_enabled footgun: a present-but-partial table must not
+    // The partial-table footgun: a present-but-partial table must not
     // flip default-true fields to false via bool::default(). Every field
     // has a named serde default matching the Default impl.
     let toml_str = r#"
@@ -365,7 +301,6 @@ steering_inbox_cap = 8
     let config: DaemonConfig = toml::from_str(toml_str).unwrap();
     let routing = &config.orchestrator.routing;
     assert_eq!(routing.steering_inbox_cap, 8);
-    assert_eq!(routing.mode, "tool");
     assert_eq!(routing.max_workflows_per_lane, 3);
     // These two would be false under bare #[serde(default)]:
     assert!(routing.steering_enabled);
@@ -386,7 +321,6 @@ fn test_routing_serde_round_trip() {
 fn test_routing_from_toml() {
     let toml_str = r#"
 [orchestrator.routing]
-mode = "tool"
 steering_enabled = true
 steering_inbox_cap = 8
 max_workflows_per_lane = 2
@@ -396,7 +330,6 @@ main_loop_max_tools_per_round = 6
 tool_selection = "full"
 "#;
     let config: DaemonConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.orchestrator.routing.mode, "tool");
     assert!(config.orchestrator.routing.steering_enabled);
     assert_eq!(config.orchestrator.routing.steering_inbox_cap, 8);
     assert_eq!(config.orchestrator.routing.max_workflows_per_lane, 2);
@@ -407,16 +340,14 @@ tool_selection = "full"
 }
 
 #[test]
-fn test_routing_validate_clamps_and_resets_mode() {
+fn test_routing_validate_clamps() {
     let mut config = DaemonConfig::default();
-    config.orchestrator.routing.mode = "yolo".to_string();
     config.orchestrator.routing.steering_inbox_cap = 0;
     config.orchestrator.routing.max_workflows_per_lane = 999;
     config.orchestrator.routing.main_loop_max_rounds = 0;
     config.orchestrator.routing.main_loop_max_tools_per_round = 999;
     config.orchestrator.routing.tool_selection = "everything".to_string();
     config.validate();
-    assert_eq!(config.orchestrator.routing.mode, "planner");
     assert_eq!(config.orchestrator.routing.steering_inbox_cap, 1);
     assert_eq!(config.orchestrator.routing.max_workflows_per_lane, 16);
     assert_eq!(config.orchestrator.routing.main_loop_max_rounds, 1);

@@ -45,6 +45,7 @@
   function modeColor(mode: string): string {
     switch (mode) {
       case "lead_agent": return "text-accent";
+      // Retired planner-era modes — historical rows only
       case "dag_parallel": return "text-success";
       case "sequential_pipeline": return "text-muted-foreground";
       default: return "text-foreground";
@@ -54,6 +55,7 @@
   function modeLabel(mode: string): string {
     switch (mode) {
       case "lead_agent": return "Lead Agent";
+      // Retired planner-era modes — historical rows only
       case "dag_parallel": return "DAG Parallel";
       case "sequential_pipeline": return "Pipeline";
       default: return mode;
@@ -62,6 +64,9 @@
 
   function reasonLabel(reason: string): string {
     switch (reason) {
+      // Live vocabulary (Routing V2 tool path)
+      case "model_tool_call": return "Model Tool Call";
+      // Retired planner-era strings — historical rows only
       case "planner_explicit": return "Planner";
       case "execution_mode_field": return "V2 Mode";
       case "empty_assignments_fallback": return "Fallback";
@@ -73,8 +78,6 @@
 
   let totalDecisions = $derived(records.length);
   let leadAgentCount = $derived(records.filter((r) => r.mode === "lead_agent").length);
-  let dagCount = $derived(records.filter((r) => r.mode === "dag_parallel").length);
-  let pipelineCount = $derived(records.filter((r) => r.mode === "sequential_pipeline").length);
   let avgPredictability = $derived(() => {
     const scored = records.filter((r) => r.predictability_score !== null);
     if (scored.length === 0) return null;
@@ -115,14 +118,6 @@
     <div class="text-center flex-1">
       <span class="block text-[1.1rem] font-bold text-accent">{leadAgentCount}</span>
       <span class="text-[0.65rem] text-muted-foreground uppercase">Lead Agent</span>
-    </div>
-    <div class="text-center flex-1">
-      <span class="block text-[1.1rem] font-bold text-success">{dagCount}</span>
-      <span class="text-[0.65rem] text-muted-foreground uppercase">DAG</span>
-    </div>
-    <div class="text-center flex-1">
-      <span class="block text-[1.1rem] font-bold text-foreground">{pipelineCount}</span>
-      <span class="text-[0.65rem] text-muted-foreground uppercase">Pipeline</span>
     </div>
     <div class="text-center flex-1">
       <span class="block text-[1.1rem] font-bold text-foreground">{avgPredictability() !== null ? avgPredictability()!.toFixed(2) : "-"}</span>

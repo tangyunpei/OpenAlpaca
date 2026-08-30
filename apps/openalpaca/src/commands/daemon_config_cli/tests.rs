@@ -2,16 +2,16 @@ use super::*;
 
 #[test]
 fn test_find_mapping_known_key() {
-    let m = find_mapping("daemon.dag.max_concurrent_agents").unwrap();
-    assert_eq!(m.section, &["execution", "dag"]);
-    assert_eq!(m.field, "max_concurrent_agents");
+    let m = find_mapping("daemon.execution.max_rounds").unwrap();
+    assert_eq!(m.section, &["execution", "agent_defaults"]);
+    assert_eq!(m.field, "max_rounds");
 }
 
 #[test]
-fn test_find_mapping_alias() {
-    let m = find_mapping("system.max_agents").unwrap();
-    assert_eq!(m.section, &["execution", "dag"]);
-    assert_eq!(m.field, "max_concurrent_agents");
+fn test_find_mapping_retired_dag_keys_gone() {
+    // Routing V2 Phase 5: DAG executor deleted; its config keys are retired.
+    assert!(find_mapping("daemon.dag.max_concurrent_agents").is_none());
+    assert!(find_mapping("system.max_agents").is_none());
 }
 
 #[test]
@@ -56,13 +56,13 @@ fn test_toml_value_to_string() {
 #[test]
 fn test_navigate_to_section() {
     let toml_str = r#"
-[execution.dag]
-max_concurrent_agents = 5
+[execution.agent_defaults]
+max_rounds = 5
 "#;
     let root: toml::Value = toml::from_str(toml_str).unwrap();
-    let section = navigate_to_section(&root, &["execution", "dag"]).unwrap();
+    let section = navigate_to_section(&root, &["execution", "agent_defaults"]).unwrap();
     assert_eq!(
-        section.get("max_concurrent_agents").unwrap(),
+        section.get("max_rounds").unwrap(),
         &toml::Value::Integer(5)
     );
 }
@@ -70,5 +70,5 @@ max_concurrent_agents = 5
 #[test]
 fn test_navigate_to_section_missing() {
     let root: toml::Value = toml::from_str("").unwrap();
-    assert!(navigate_to_section(&root, &["execution", "dag"]).is_none());
+    assert!(navigate_to_section(&root, &["execution", "agent_defaults"]).is_none());
 }

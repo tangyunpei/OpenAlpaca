@@ -137,7 +137,7 @@ impl Orchestrator {
             principal: Some(principal.clone()),
             scope: Some(scope.clone()),
             // Threaded only on the tool-mode main loop, where steer/followup
-            // items persist it for re-entry scope; None elsewhere (legacy
+            // items persist it for re-entry scope; None elsewhere (other
             // paths carry no tools that read it).
             workspace_path: match &loop_overrides {
                 Some(super::LoopOverrides::MainLoop { workspace_path }) => workspace_path.clone(),
@@ -145,23 +145,11 @@ impl Orchestrator {
             },
         };
 
-        // Apply loop overrides if provided (deep_query tier / tool-mode main loop)
+        // Apply loop overrides if provided (main loop)
         let (tool_defs, override_max_rounds, override_max_tools, main_loop_set) =
             match &loop_overrides {
-                Some(super::LoopOverrides::DeepQuery {
-                    max_rounds,
-                    max_tools_per_round,
-                    override_tools,
-                }) => {
-                    let tools = if override_tools.is_empty() {
-                        tool_defs // fallback to keyword heuristic
-                    } else {
-                        override_tools.clone()
-                    };
-                    (tools, Some(*max_rounds), Some(*max_tools_per_round), None)
-                }
                 Some(super::LoopOverrides::MainLoop { .. }) => {
-                    // Routing V2 tool-mode main loop: budgets from
+                    // Routing V2 main loop: budgets from
                     // `[orchestrator.routing]`; tool surface = base picks ∪
                     // the per-request core/workflow set.
                     let routing = self.daemon_config.load().orchestrator.routing.clone();
@@ -215,7 +203,7 @@ impl Orchestrator {
             };
 
         // Keep the guard/telemetry name list in sync with the actual surface
-        // on the main-loop path; legacy paths keep the suggested list verbatim.
+        // on the main-loop path; other paths keep the suggested list verbatim.
         let tool_names: Vec<String> = if main_loop_set.is_some() {
             tool_defs.iter().map(|d| d.name.clone()).collect()
         } else {
@@ -250,7 +238,7 @@ impl Orchestrator {
                     tool_defs.iter().any(|d| d.name == "send"),
                 ),
                 // Routing V2 deliberate flip: cache the system prompt + tools
-                // on the simple-query loop (applies to the legacy ladder too).
+                // on the simple-query loop.
                 enable_caching: true,
                 thinking: None,
                 ..self.loop_config.clone()
@@ -545,12 +533,11 @@ impl Orchestrator {
             // compose layers) so a live status change can't be masked by the
             // Tier-2 per-lane cache — Layer 3's fingerprint is keyed on query
             // text and would replay a stale block for a repeated query.
-            // Gated on the tool-mode main loop: the block directs the model
-            // to steer_workflow/queue_followup/task_status, which only that
-            // path carries — rendering it on legacy-ladder turns (planner
-            // mode with steering enabled) would coach the model toward tools
-            // it cannot call. Legacy prompts therefore stay byte-identical
-            // in every configuration.
+            // Gated on the main loop: the block directs the model to
+            // steer_workflow/queue_followup/task_status, which only that
+            // path carries — rendering it on override-less turns (bootstrap,
+            // forced-simple) would coach the model toward tools it cannot
+            // call.
             if main_loop_set.is_some()
                 && let Some(block) = super::render_workflow_context_block(
                     &self.shared_context,
@@ -560,6 +547,24 @@ impl Orchestrator {
             {
                 // Before the current user turn (last message) so the user's
                 // message stays the final input.
+                let insert_at = messages.len().saturating_sub(1);
+                messages.insert(insert_at, ChatMessage::user(&block));
+            }
+
+            // Routing V2: lazy injection of unprocessed steering leftovers.
+            // Steering messages a workflow could not deliver before it ended
+            // become `unprocessed_steering` rows; the lane's next main-loop
+            // turn surfaces them exactly once (the helper marks them done)
+            // so the model can acknowledge and act on them. Same per-turn
+            // injection point as the workflow-context block above, and same
+            // main-loop gate: only this path carries the tools the model
+            // may need to re-dispatch the leftover instructions.
+            if main_loop_set.is_some()
+                && let Some(block) = super::take_unprocessed_steering_block(
+                    self.db.as_ref(),
+                    lane_key,
+                )
+            {
                 let insert_at = messages.len().saturating_sub(1);
                 messages.insert(insert_at, ChatMessage::user(&block));
             }

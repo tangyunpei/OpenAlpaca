@@ -1,13 +1,11 @@
 //! Orchestrator module: the central message handler.
 //!
-//! Routes user messages through intent classification, skill matching,
-//! and task dispatch pipelines.
+//! Routes user messages through deterministic tiers (task ops, skills,
+//! /steer, social) and the tool-calling main loop (Routing V2).
 
 pub mod dispatcher;
 pub mod intent;
-pub mod replanner;
 pub mod skill;
-pub mod task_planner;
 pub mod task_state;
 
 mod bootstrap;
@@ -29,7 +27,6 @@ pub(crate) use memory_ops::{forget_memory, store_memory};
 pub(crate) use task_ops::task_status_query;
 
 pub use skill::catalog as skill_catalog;
-pub use skill::matcher as skill_matcher;
 pub use skill::router as skill_router;
 pub use skill::smoke as skill_smoke;
 
@@ -51,7 +48,7 @@ use crate::security::policy::Principal;
 use crate::tools::ToolRegistry;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use openalpaca_llm::{ChatMessage, LlmRouter, Role};
+use openalpaca_llm::{ChatMessage, LlmRouter};
 use openalpaca_storage::{Database, Task};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -138,11 +135,10 @@ pub struct LlmMetadata {
 
 /// The Orchestrator: unified message handler for all user interactions.
 ///
-/// Intent-based routing:
-/// - SimpleQuery → LLM call (or echo stub if no LLM configured)
-/// - TaskQuery → query task registry
-/// - ComplexTask → dispatch to agents via TaskDispatcher
-/// - TaskControl → manage task lifecycle
+/// Routing (Routing V2): deterministic tiers (task ops, `/steer`, skills,
+/// social) answer directly; everything else enters the main loop, where
+/// chat vs. workflow dispatch (`start_workflow`) vs. steering
+/// (`steer_workflow`) is the model's tool choice.
 pub struct Orchestrator {
     pub shared_context: Arc<SharedContext>,
     pub lane_manager: Arc<LaneManager>,
@@ -247,14 +243,6 @@ pub(crate) fn wrap_untrusted_context(
     )
 }
 
-pub(super) fn role_label(role: &Role) -> &'static str {
-    match role {
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::System => "system",
-        Role::Tool => "tool",
-    }
-}
 
 impl Orchestrator {
     #[allow(clippy::too_many_arguments)]
@@ -606,28 +594,6 @@ pub(super) fn db_task_to_json(task: &Task) -> String {
         obj["outcome_summary"] = serde_json::json!(parsed.outcome_summary);
         obj["no_artifact_reason"] = serde_json::json!(parsed.no_artifact_reason);
         obj["artifacts"] = serde_json::json!(parsed.artifacts);
-    }
-
-    // Parse state_json to extract DAG node details if available
-    if let Some(ref sj) = task.state_json
-        && let Ok(state) = serde_json::from_str::<task_state::TaskState>(sj)
-        && let Some(ref dag) = state.dag
-    {
-        let nodes_summary: Vec<serde_json::Value> = dag
-            .nodes
-            .iter()
-            .map(|n| {
-                serde_json::json!({
-                    "node_id": n.node_id,
-                    "title": n.title,
-                    "agent_id": n.agent_id,
-                    "status": n.status,
-                })
-            })
-            .collect();
-        obj.as_object_mut()
-            .unwrap()
-            .insert("dag_nodes".to_string(), serde_json::json!(nodes_summary));
     }
 
     obj.to_string()

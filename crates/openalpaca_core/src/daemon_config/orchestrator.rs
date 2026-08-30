@@ -12,21 +12,15 @@ pub struct OrchestratorConfig {
 
 /// Routing V2 configuration (`[orchestrator.routing]`).
 ///
-/// Defaults are the Routing V2 behavior: `mode = "tool"` (main-loop tool
-/// calls) with `steering_enabled = true`. Full rollback invariant:
-/// `mode = "planner"` AND `steering_enabled = false` restores the legacy
-/// pre-classifier ladder with no steering rail.
+/// The main-loop tool ladder is the only routing ladder (the legacy planner
+/// pre-classifier and its `mode` key were deleted in Phase 5).
 ///
 /// Every field carries a named `#[serde(default = "...")]` function shared
 /// with the `Default` impl, so a partially-specified table gets the same
-/// values as an absent one (avoids the `two_phase_enabled` field-level
-/// `#[serde(default)]` footgun where a bool silently defaults to `false`).
+/// values as an absent one (avoids the field-level `#[serde(default)]`
+/// footgun where a bool silently defaults to `false`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingConfig {
-    /// Routing ladder: "planner" (legacy pre-classifier) or "tool"
-    /// (main-loop tool calls; Routing V2).
-    #[serde(default = "default_routing_mode")]
-    pub mode: String,
     /// Enable the mid-workflow steering rail (steering inboxes plus the
     /// `post_update`/`queue_followup` lead-agent tools).
     #[serde(default = "default_steering_enabled")]
@@ -34,7 +28,7 @@ pub struct RoutingConfig {
     /// Maximum queued steering messages per workflow inbox.
     #[serde(default = "default_steering_inbox_cap")]
     pub steering_inbox_cap: usize,
-    /// Maximum concurrent workflows per lane (enforced in tool mode only).
+    /// Maximum concurrent workflows per lane (enforced in `start_workflow`).
     #[serde(default = "default_max_workflows_per_lane")]
     pub max_workflows_per_lane: usize,
     /// Auto-start the next queued `followup` item when a workflow finalizes.
@@ -53,9 +47,6 @@ pub struct RoutingConfig {
     pub tool_selection: String,
 }
 
-fn default_routing_mode() -> String {
-    "tool".to_string()
-}
 fn default_steering_enabled() -> bool {
     true
 }
@@ -81,7 +72,6 @@ fn default_tool_selection() -> String {
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
-            mode: default_routing_mode(),
             steering_enabled: default_steering_enabled(),
             steering_inbox_cap: default_steering_inbox_cap(),
             max_workflows_per_lane: default_max_workflows_per_lane(),

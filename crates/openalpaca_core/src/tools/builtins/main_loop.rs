@@ -9,7 +9,7 @@
 //!
 //! All per-request instances are constructed fresh each turn (`SpawnSubagentTool`
 //! precedent) and injected into the caller's per-request registry — never the
-//! global one, which would leak them into the legacy planner/triage prompts.
+//! global one, which would leak them into every other tool-listing surface.
 
 use crate::bus::EventBus;
 use crate::context::SharedContext;
@@ -32,7 +32,7 @@ use super::task_status::{TaskStatusTool, task_status_tool_definition};
 /// The per-request main-loop tool set produced by [`main_loop_tool_set`].
 pub struct MainLoopToolSet {
     /// Definitions to expose to the model this turn (core set; the caller
-    /// unions these with its suggested/legacy picks).
+    /// unions these with its suggested picks).
     pub definitions: Vec<ToolDefinition>,
     /// Per-request instances to inject into the per-request registry,
     /// paired with their definitions. Excludes `memory_search`, whose

@@ -296,8 +296,10 @@ impl TaskDispatcher {
             // Detach steering. Close FIRST so a concurrent push gets
             // Err(Closed) instead of landing after the drain, then
             // deregister and convert leftovers to `unprocessed_steering`
-            // follow-up rows — surfaced on the lane's next user turn, never
-            // auto-run (claim_next only claims kind='followup').
+            // follow-up rows — injected as a context block on the lane's
+            // next main-loop turn (`query_handler/unprocessed_steering.rs`,
+            // which marks them done), never auto-run (claim_next only
+            // claims kind='followup').
             if let Some(ref inbox) = steering_inbox {
                 let leftovers = inbox.close_and_drain();
                 ctx.remove_steering_inbox(&task_id);

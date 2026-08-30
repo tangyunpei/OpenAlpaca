@@ -124,9 +124,10 @@ fn build_default(input: &PersonaInput) -> Vec<SystemBlock> {
 
 fn build_minimal(input: &PersonaInput) -> Vec<SystemBlock> {
     // Minimal mode: only the system persona block as bare `base_instructions`.
-    // Used by Planner / Replanner / Social / Pipeline / DagNode / LeadAgent
-    // where callers wrap the persona in their own templates (e.g. Social's
-    // `<system_instructions>{persona_text}</system_instructions>` format).
+    // Used by Social / DagNode / LeadAgent (and the retained planner-era
+    // test-only modes) where callers wrap the persona in their own templates
+    // (e.g. Social's `<system_instructions>{persona_text}</system_instructions>`
+    // format).
     vec![system_persona_block_bare(&input.system_persona)]
 }
 

@@ -26,7 +26,9 @@ pub use dispatch_decision::DispatchDecisionRepository;
 pub use event_log::EventLogRepository;
 pub use feedback::MessageFeedbackRepository;
 pub use file_asset::FileAssetRepository;
-pub use followup::{FollowupRecord, FollowupRepository};
+pub use followup::{
+    FOLLOWUP_KIND_FOLLOWUP, FOLLOWUP_KIND_UNPROCESSED_STEERING, FollowupRecord, FollowupRepository,
+};
 pub use identity::IdentityRepository;
 pub use llm_usage::LlmUsageRepository;
 pub use memory::MemoryRepository;

@@ -260,33 +260,14 @@ pub enum SystemEvent {
         reset_after_secs: u64,
         timestamp: DateTime<Utc>,
     },
-    /// A task DAG was replanned during execution
-    TaskReplanned {
-        task_id: String,
-        /// Which replan iteration this was (1-based)
-        replan_number: usize,
-        /// The decision taken: "continue", "modify", or "abort"
-        decision: String,
-        /// How many nodes were added in the new DAG
-        nodes_added: usize,
-        /// How many nodes were removed (replaced) from the old DAG
-        nodes_removed: usize,
-        timestamp: DateTime<Utc>,
-    },
-    /// The LLM planner was bypassed (fast path, bootstrap, no router)
-    PlannerBypassed {
-        request_id: Uuid,
-        /// "fast_path" | "bootstrap" | "no_llm_router"
-        reason: String,
-        timestamp: DateTime<Utc>,
-    },
-    /// Dispatcher analysis decision (Phase 2: decoupled analysis from execution)
+    /// Dispatch decision record (Routing V2 tool path). Historical rows may
+    /// carry retired planner-era mode/reason strings.
     DispatchDecision {
         request_id: String,
         task_id: Option<String>,
-        /// "lead_agent" | "dag_parallel" | "sequential_pipeline"
+        /// "lead_agent"
         mode: String,
-        /// "planner_explicit" | "execution_mode_field" | "empty_assignments_fallback" | "heuristic_fallback" | "heuristic_match_failed" | "model_tool_call"
+        /// "model_tool_call"
         reason: String,
         agent_count: usize,
         dag_node_count: Option<usize>,
@@ -297,8 +278,8 @@ pub enum SystemEvent {
     /// Request-level orchestration stage metrics
     OrchestrationStage {
         request_id: Uuid,
-        /// "fast_path" | "planner_simple_query" | "planner_complex_task" |
-        /// "heuristic_simple_query" | "heuristic_complex_task" | "bootstrap" | "no_llm"
+        /// "task_ops" | "steered" | "skill_command" | "bootstrap" |
+        /// "forced_simple_query" | "social_fast_path" | "main_loop"
         mode: String,
         planner_ms: u64,
         dispatch_ms: u64,

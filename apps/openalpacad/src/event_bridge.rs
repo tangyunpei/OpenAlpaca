@@ -157,23 +157,6 @@ pub fn spawn_event_bridge(
                 } => {
                     eb.skill_catalog_updated(&skill_name, &action);
                 }
-                openalpaca_core::events::SystemEvent::TaskReplanned {
-                    task_id,
-                    replan_number,
-                    decision,
-                    nodes_added,
-                    nodes_removed,
-                    ..
-                } => {
-                    eb.task_replanned(
-                        &task_id,
-                        replan_number,
-                        &decision,
-                        nodes_added,
-                        nodes_removed,
-                    );
-                }
-
                 // ── Forwarded to clients: config changes ──────────────────
                 openalpaca_core::events::SystemEvent::AgentConfigChanged {
                     agent_id,
@@ -351,13 +334,6 @@ pub fn spawn_event_bridge(
                 }
                 openalpaca_core::events::SystemEvent::Error { code, message, .. } => {
                     tracing::error!("System error: code={code}, message={message}");
-                }
-                openalpaca_core::events::SystemEvent::PlannerBypassed {
-                    request_id,
-                    reason,
-                    ..
-                } => {
-                    tracing::debug!("Planner bypassed: request={request_id}, reason={reason}");
                 }
                 openalpaca_core::events::SystemEvent::DispatchDecision {
                     request_id,

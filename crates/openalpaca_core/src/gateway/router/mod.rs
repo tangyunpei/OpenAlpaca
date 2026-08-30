@@ -308,28 +308,6 @@ impl Gateway {
         }
     }
 
-    /// Backward-compatible handle_message (delegates to handle_event with defaults).
-    pub async fn handle_message(
-        &self,
-        _user_id: &str,
-        _source: &str,
-        content: &str,
-    ) -> GatewayResponse {
-        self.handle_event(GatewayRequest {
-            source: EventSource::Api {
-                request_id: Uuid::new_v4().to_string(),
-            },
-            content: content.to_string(),
-            attachments: Vec::new(),
-            principal: Principal::System,
-            scope: Scope::Global,
-            workspace_path: None,
-            stream_id: None,
-            lane_override: None,
-        })
-        .await
-    }
-
     /// Health check.
     pub fn is_healthy(&self) -> bool {
         true
@@ -343,7 +321,6 @@ fn derive_user_and_source(source: &EventSource) -> (String, String) {
         EventSource::IMessage { sender, .. } => (sender.clone(), "imessage".to_string()),
         EventSource::Discord { user_id, .. } => (user_id.clone(), "discord".to_string()),
         EventSource::Gui { connection_id } => (connection_id.clone(), "gui".to_string()),
-        EventSource::Cli { session_id } => (session_id.clone(), "cli".to_string()),
         EventSource::Api { request_id } => (request_id.clone(), "api".to_string()),
         EventSource::Internal => ("system".to_string(), "internal".to_string()),
     }
