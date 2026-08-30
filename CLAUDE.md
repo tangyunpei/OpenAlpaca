@@ -55,9 +55,11 @@
 
 ```bash
 # Full workspace
-cargo build                      # debug build (all crates + apps)
+cargo build                      # debug build (library crates only — apps are excluded via default-members)
+cargo build --workspace          # debug build including apps (daemon, CLI, GUI backend)
 cargo build --release            # release build
-cargo test                       # run all tests
+cargo test                       # run library-crate tests
+cargo test --workspace           # run all tests including apps
 cargo clippy                     # lint
 
 # Individual crates
