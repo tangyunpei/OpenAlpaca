@@ -29,6 +29,7 @@ use openalpaca_core::daemon_config::DaemonConfig;
 use openalpaca_core::gateway::Gateway;
 use openalpaca_core::security::confirmation::ConfirmationBroker;
 use openalpaca_storage::Database;
+#[allow(unused_imports)] // used only by feature-gated connector factories
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -69,6 +70,7 @@ pub enum ConnectorError {
 }
 
 /// Builder for creating connectors with shared dependencies.
+#[allow(dead_code)] // fields read only by feature-gated connector methods
 pub struct ConnectorBuilder {
     db: Arc<Database>,
     bus: Arc<EventBus>,

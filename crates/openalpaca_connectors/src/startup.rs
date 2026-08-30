@@ -39,6 +39,7 @@ pub enum ConnectorHandle {
 
 /// Guard that clears a running flag on drop.
 /// Wrap a connector future with this so the flag is cleared on exit.
+#[allow(dead_code)] // constructed only in feature-gated connector spawn paths
 pub(crate) struct RunningGuard(pub Arc<AtomicBool>);
 
 impl Drop for RunningGuard {
@@ -110,11 +111,13 @@ pub fn auto_start_connectors(
     gateway: Arc<Gateway>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
 ) -> std::collections::HashMap<String, ConnectorHandle> {
-    let _ = &bus;
+    #[allow(unused_mut)] // mutated only by the feature-gated blocks below
     let mut started = std::collections::HashMap::new();
 
     // Initialize Config Repository
     let config_repo = ConfigRepository::new(&db);
+    // Read only by the feature-gated connector blocks below.
+    let _ = (&bus, &gateway, &daemon_config, &config_repo);
 
     // --- Telegram ---
     #[cfg(feature = "telegram")]
