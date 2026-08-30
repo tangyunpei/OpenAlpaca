@@ -9,6 +9,37 @@ use crate::prompt_ctx::section::{ContextBundle, SectionPriority};
 use crate::prompt_ctx::ExecutionPath;
 use std::sync::Arc;
 
+/// Routing V2 workflow-contract sections, appended by `run_lead_agent` after
+/// the tool guidance / connector guidance suffixes (never inside the composed
+/// golden prompt). `<interjection_protocol>` is included only when a steering
+/// inbox is attached to this run; `<completion_report>` is unconditional
+/// (spec §2b: the final message is the user-facing completion report).
+pub(super) fn workflow_contract_suffix(steering_attached: bool) -> String {
+    let mut suffix = String::new();
+    if steering_attached {
+        suffix.push_str(
+            "\n<interjection_protocol>\n\
+             The user may send messages while you work. They arrive in the conversation \
+             tagged <user_interjection>. Treat each one as exactly one of:\n\
+             - a correction or new constraint — apply it to the work immediately;\n\
+             - a quick question — answer it via the post_update tool and keep working;\n\
+             - additional follow-up work — queue it via the queue_followup tool.\n\
+             Never ignore an interjection silently: acknowledge each one through your \
+             actions, a post_update, or a queued follow-up.\n\
+             </interjection_protocol>",
+        );
+    }
+    suffix.push_str(
+        "\n<completion_report>\n\
+         Your final message is the user-facing completion report for this task. \
+         State what was done, the key results and artifacts produced, any problems \
+         you hit and how you handled them, and anything queued for later. \
+         Write it like a work report, not a status line.\n\
+         </completion_report>",
+    );
+    suffix
+}
+
 /// Build the system prompt for the Lead Agent from agent templates.
 ///
 /// Phase 6 Commit 3: routes through `ComposeEngine::compose` with

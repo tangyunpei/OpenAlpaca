@@ -532,6 +532,29 @@ pub fn spawn_event_bridge(
                     ref layer, ref reason, ref lane_id, ..
                 } => {
                     tracing::debug!(?layer, ?reason, ?lane_id, "Compose layer cache miss");
+                }
+                // ── Routing V2 workflow events (log-only; GUI rendering is Phase 4) ──
+                openalpaca_core::events::SystemEvent::WorkflowStarted {
+                    request_id, ref task_id, ref lane_key, ref title, ..
+                } => {
+                    tracing::info!(
+                        %request_id, %task_id, %lane_key, %title, "Workflow started"
+                    );
+                }
+                openalpaca_core::events::SystemEvent::WorkflowSteered {
+                    ref task_id, ref lane_key, request_id, ..
+                } => {
+                    tracing::info!(%request_id, %task_id, %lane_key, "Workflow steered");
+                }
+                openalpaca_core::events::SystemEvent::WorkflowProgress {
+                    ref task_id, ref lane_key, ..
+                } => {
+                    tracing::debug!(%task_id, %lane_key, "Workflow progress update");
+                }
+                openalpaca_core::events::SystemEvent::FollowupQueued {
+                    ref lane_key, followup_id, ref kind, ..
+                } => {
+                    tracing::info!(%lane_key, followup_id, %kind, "Follow-up queued");
                 } // NO catch-all: compiler will flag any missing SystemEvent variant
             }
         }

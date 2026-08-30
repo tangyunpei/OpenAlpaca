@@ -312,6 +312,83 @@ impl Orchestrator {
         })
         .to_string())
     }
+
+    /// Handle the deterministic `/steer <message>` prefix (Routing V2):
+    /// guaranteed injection into the lane's sole running workflow, bypassing
+    /// the model. Replies are deterministic; the reply is always `Ok` — a
+    /// missing or ambiguous target is an answer, not a handler failure.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn handle_steer_prefix(
+        &self,
+        request_id: uuid::Uuid,
+        text: &str,
+        principal: &crate::security::policy::Principal,
+        scope: &crate::security::policy::Scope,
+        lane_key: &str,
+        workspace_path: Option<String>,
+    ) -> Result<String, String> {
+        use crate::runner::steering::{SteeringMsg, SteeringPushError, push_steering};
+
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok("Usage: /steer <message> — inject a message into the running workflow.".to_string());
+        }
+
+        let workflows = self.shared_context.workflows_for_lane(lane_key);
+        match workflows.as_slice() {
+            [] => Ok("No running workflow on this conversation.".to_string()),
+            [task_id] => {
+                let title = self
+                    .shared_context
+                    .task_registry
+                    .get(task_id)
+                    .map(|e| e.title)
+                    .unwrap_or_else(|| task_id.clone());
+                let msg = SteeringMsg {
+                    text: text.to_string(),
+                    request_id,
+                    principal: principal.clone(),
+                    scope: scope.clone(),
+                    workspace_path,
+                    received_at: Utc::now(),
+                };
+                match push_steering(&self.shared_context, &self.bus, task_id, lane_key, msg) {
+                    Ok(depth) => Ok(format!(
+                        "Steering message queued for \"{}\" ({}). {} message{} waiting — the workflow picks it up at its next round.",
+                        title,
+                        task_id,
+                        depth,
+                        if depth == 1 { "" } else { "s" },
+                    )),
+                    Err(SteeringPushError::Full) => Ok(format!(
+                        "The steering queue for \"{}\" ({}) is full — the workflow hasn't caught up with earlier messages yet. Wait for it to process the backlog, or use /cancel {} to stop it.",
+                        title, task_id, task_id,
+                    )),
+                    Err(SteeringPushError::Closed) => {
+                        Ok("No running workflow on this conversation.".to_string())
+                    }
+                }
+            }
+            many => {
+                let list: Vec<String> = many
+                    .iter()
+                    .map(|id| {
+                        let title = self
+                            .shared_context
+                            .task_registry
+                            .get(id)
+                            .map(|e| e.title)
+                            .unwrap_or_default();
+                        format!("- {} ({})", id, title)
+                    })
+                    .collect();
+                Ok(format!(
+                    "Multiple workflows are running on this conversation:\n{}\nWhich task should receive this message? Nothing was queued.",
+                    list.join("\n"),
+                ))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

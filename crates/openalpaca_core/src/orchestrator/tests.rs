@@ -23,6 +23,10 @@ fn make_security_gate(bus: &EventBus) -> Arc<SecurityGate> {
 }
 
 fn make_orchestrator() -> Orchestrator {
+    make_orchestrator_with_config(DaemonConfig::default())
+}
+
+fn make_orchestrator_with_config(config: DaemonConfig) -> Orchestrator {
     let ctx = Arc::new(SharedContext::new());
     let lanes = Arc::new(LaneManager::new());
     let bus = EventBus::default();
@@ -41,7 +45,7 @@ fn make_orchestrator() -> Orchestrator {
         None,
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
-        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        Arc::new(ArcSwap::from_pointee(config)),
     )
 }
 
@@ -1935,4 +1939,165 @@ async fn test_slash_skill_no_router_still_invokes_skill() {
     }
     assert!(saw_skill_started, "handle_skill_invocation was not reached");
     assert_eq!(intent_classified_count, 1, "IntentClassified must be emitted exactly once");
+}
+
+// ── Routing V2: deterministic /steer prefix ──────────────────────────
+
+fn make_steering_orchestrator() -> Orchestrator {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.routing.steering_enabled = true;
+    make_orchestrator_with_config(config)
+}
+
+/// Drain the bus and return the modes of every OrchestrationStage event.
+fn orchestration_modes(rx: &mut tokio::sync::broadcast::Receiver<SystemEvent>) -> Vec<String> {
+    let mut modes = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let SystemEvent::OrchestrationStage { mode, .. } = event {
+            modes.push(mode);
+        }
+    }
+    modes
+}
+
+async fn send_steer(orch: &Orchestrator, content: &str) -> String {
+    orch.handle_message(
+        Uuid::new_v4(),
+        "cli".to_string(),
+        content.to_string(),
+        Principal::User {
+            global_id: "user1".to_string(),
+        },
+        Scope::Global,
+        "user1:cli".to_string(),
+        None,
+        None,
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_steer_prefix_no_active_workflow() {
+    let orch = make_steering_orchestrator();
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, "/steer focus on tests").await;
+    assert!(
+        reply.contains("No running workflow"),
+        "unexpected reply: {reply}"
+    );
+    assert_eq!(orchestration_modes(&mut rx), vec!["steered".to_string()]);
+}
+
+#[tokio::test]
+async fn test_steer_prefix_single_workflow_pushes_and_confirms() {
+    let orch = make_steering_orchestrator();
+    orch.shared_context
+        .task_registry
+        .register("task-1".to_string(), "Build the report".to_string());
+    let inbox = Arc::new(crate::runner::steering::SteeringInbox::default());
+    orch.shared_context
+        .register_steering_inbox("task-1", inbox.clone());
+    orch.shared_context
+        .register_workflow_for_lane("user1:cli", "task-1");
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, "/steer switch to staging").await;
+    assert!(reply.contains("Build the report"), "reply must name the task: {reply}");
+    assert!(reply.contains("task-1"), "reply must include the task id: {reply}");
+    assert!(reply.contains("1 message"), "reply must include queue depth: {reply}");
+
+    let queued = inbox.drain_all();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].text, "switch to staging");
+    assert_eq!(
+        queued[0].principal,
+        Principal::User {
+            global_id: "user1".to_string()
+        }
+    );
+    assert_eq!(orchestration_modes(&mut rx), vec!["steered".to_string()]);
+}
+
+#[tokio::test]
+async fn test_steer_prefix_full_inbox_explains_backlog() {
+    let orch = make_steering_orchestrator();
+    orch.shared_context
+        .task_registry
+        .register("task-1".to_string(), "Busy task".to_string());
+    let inbox = Arc::new(crate::runner::steering::SteeringInbox::new(1));
+    orch.shared_context
+        .register_steering_inbox("task-1", inbox.clone());
+    orch.shared_context
+        .register_workflow_for_lane("user1:cli", "task-1");
+    // Fill the inbox to its cap of 1.
+    let _ = send_steer(&orch, "/steer first").await;
+
+    let reply = send_steer(&orch, "/steer second").await;
+    assert!(reply.contains("full"), "unexpected reply: {reply}");
+    assert!(reply.contains("/cancel task-1"), "reply should suggest /cancel: {reply}");
+    // Only the first message landed.
+    assert_eq!(inbox.drain_all().len(), 1);
+}
+
+#[tokio::test]
+async fn test_steer_prefix_multiple_workflows_asks_which() {
+    let orch = make_steering_orchestrator();
+    for id in ["task-1", "task-2"] {
+        orch.shared_context
+            .task_registry
+            .register(id.to_string(), format!("Title {id}"));
+        orch.shared_context.register_steering_inbox(
+            id,
+            Arc::new(crate::runner::steering::SteeringInbox::default()),
+        );
+        orch.shared_context
+            .register_workflow_for_lane("user1:cli", id);
+    }
+
+    let reply = send_steer(&orch, "/steer hurry up").await;
+    assert!(reply.contains("task-1"), "unexpected reply: {reply}");
+    assert!(reply.contains("task-2"), "unexpected reply: {reply}");
+    assert!(reply.contains("Which task"), "unexpected reply: {reply}");
+    // No push happened on either inbox.
+    for id in ["task-1", "task-2"] {
+        assert!(orch.shared_context.steering_inbox(id).unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn test_steer_prefix_flag_off_routes_unchanged() {
+    // steering_enabled=false (default): "/steer x" must route exactly as any
+    // other plain message — same mode sequence, no steering side effects.
+    let orch = make_orchestrator();
+    orch.shared_context
+        .task_registry
+        .register("task-1".to_string(), "Some task".to_string());
+    orch.shared_context.register_steering_inbox(
+        "task-1",
+        Arc::new(crate::runner::steering::SteeringInbox::default()),
+    );
+    orch.shared_context
+        .register_workflow_for_lane("user1:cli", "task-1");
+    let mut rx = orch.bus.subscribe();
+
+    // Baseline: a plain message through the no-LLM ladder.
+    let baseline = send_steer(&orch, "hello there").await;
+    let baseline_modes = orchestration_modes(&mut rx);
+
+    let reply = send_steer(&orch, "/steer hello there").await;
+    let steer_modes = orchestration_modes(&mut rx);
+
+    assert_eq!(
+        steer_modes, baseline_modes,
+        "flag-off /steer must produce a byte-identical mode sequence"
+    );
+    // Same echo-stub shape as the baseline (content differs only by the text).
+    let baseline_json: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+    let steer_json: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(baseline_json["status"], steer_json["status"]);
+    assert!(steer_json["echo"].as_str().unwrap().contains("/steer hello there"));
+    // Nothing was pushed to the (manually registered) inbox.
+    assert!(orch.shared_context.steering_inbox("task-1").unwrap().is_empty());
 }

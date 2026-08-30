@@ -1,5 +1,6 @@
 use crate::agent::subagent::AgentConstraints;
 use crate::bus::EventBus;
+use crate::runner::steering::SteeringInbox;
 use crate::security::capabilities::CapabilityManager;
 use openalpaca_llm::{ModelRegistry, StreamEvent, ThinkingConfig, ToolChoice};
 use std::sync::Arc;
@@ -62,6 +63,11 @@ pub struct LoopConfig {
     /// When true, the loop injects an ephemeral system notice into each
     /// request once cost or round ratios cross 0.8 (spec P0).
     pub experimental_ephemeral_pressure: bool,
+    /// Steering inbox for mid-workflow user interjections (Routing V2).
+    /// When `Some`, the loop drains queued messages at its round boundary
+    /// and injects them as `<user_interjection>` user messages. `None`
+    /// (default) disables steering entirely.
+    pub steering: Option<Arc<SteeringInbox>>,
 }
 
 impl Clone for LoopConfig {
@@ -85,6 +91,7 @@ impl Clone for LoopConfig {
             compaction_model: self.compaction_model.clone(),
             event_bus: self.event_bus.clone(),
             experimental_ephemeral_pressure: self.experimental_ephemeral_pressure,
+            steering: self.steering.clone(),
         }
     }
 }
@@ -109,6 +116,7 @@ impl std::fmt::Debug for LoopConfig {
                 "experimental_ephemeral_pressure",
                 &self.experimental_ephemeral_pressure,
             )
+            .field("steering", &self.steering.is_some())
             .finish()
     }
 }
@@ -134,6 +142,7 @@ impl Default for LoopConfig {
             compaction_model: None,
             event_bus: None,
             experimental_ephemeral_pressure: false,
+            steering: None,
         }
     }
 }
@@ -194,6 +203,7 @@ impl LoopConfig {
             compaction_model: None,
             event_bus: None,
             experimental_ephemeral_pressure: false,
+            steering: None,
         }
     }
 

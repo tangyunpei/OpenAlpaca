@@ -296,3 +296,107 @@ fn test_upload_governance_wait_settings_validate_clamps() {
         50
     );
 }
+
+// ── Routing V2: [orchestrator.routing] ──
+
+fn assert_routing_is_default(routing: &crate::daemon_config::RoutingConfig) {
+    assert_eq!(routing.mode, "planner");
+    assert!(!routing.steering_enabled);
+    assert_eq!(routing.steering_inbox_cap, 16);
+    assert_eq!(routing.max_workflows_per_lane, 3);
+    assert!(routing.followup_autostart);
+    assert_eq!(routing.main_loop_max_rounds, 8);
+    assert_eq!(routing.main_loop_max_tools_per_round, 4);
+    assert_eq!(routing.tool_selection, "core_union");
+}
+
+#[test]
+fn test_routing_defaults() {
+    let config = DaemonConfig::default();
+    assert_routing_is_default(&config.orchestrator.routing);
+}
+
+#[test]
+fn test_routing_absent_table_parses_to_defaults() {
+    // No [orchestrator] at all.
+    let config: DaemonConfig = toml::from_str("").unwrap();
+    assert_routing_is_default(&config.orchestrator.routing);
+
+    // [orchestrator] present but [orchestrator.routing] absent.
+    let toml_str = r#"
+[orchestrator.memory]
+prompt_recent_messages = 60
+"#;
+    let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+    assert_routing_is_default(&config.orchestrator.routing);
+}
+
+#[test]
+fn test_routing_partial_table_keeps_field_defaults() {
+    // The two_phase_enabled footgun: a present-but-partial table must not
+    // flip default-true fields to false via bool::default(). Every field
+    // has a named serde default matching the Default impl.
+    let toml_str = r#"
+[orchestrator.routing]
+steering_enabled = true
+"#;
+    let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+    let routing = &config.orchestrator.routing;
+    assert!(routing.steering_enabled);
+    assert_eq!(routing.mode, "planner");
+    assert_eq!(routing.steering_inbox_cap, 16);
+    assert_eq!(routing.max_workflows_per_lane, 3);
+    assert!(routing.followup_autostart); // would be false under bare #[serde(default)]
+    assert_eq!(routing.main_loop_max_rounds, 8);
+    assert_eq!(routing.main_loop_max_tools_per_round, 4);
+    assert_eq!(routing.tool_selection, "core_union");
+}
+
+#[test]
+fn test_routing_serde_round_trip() {
+    let serialized = toml::to_string(&DaemonConfig::default()).unwrap();
+    let config: DaemonConfig = toml::from_str(&serialized).unwrap();
+    assert_routing_is_default(&config.orchestrator.routing);
+}
+
+#[test]
+fn test_routing_from_toml() {
+    let toml_str = r#"
+[orchestrator.routing]
+mode = "tool"
+steering_enabled = true
+steering_inbox_cap = 8
+max_workflows_per_lane = 2
+followup_autostart = false
+main_loop_max_rounds = 12
+main_loop_max_tools_per_round = 6
+tool_selection = "full"
+"#;
+    let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.orchestrator.routing.mode, "tool");
+    assert!(config.orchestrator.routing.steering_enabled);
+    assert_eq!(config.orchestrator.routing.steering_inbox_cap, 8);
+    assert_eq!(config.orchestrator.routing.max_workflows_per_lane, 2);
+    assert!(!config.orchestrator.routing.followup_autostart);
+    assert_eq!(config.orchestrator.routing.main_loop_max_rounds, 12);
+    assert_eq!(config.orchestrator.routing.main_loop_max_tools_per_round, 6);
+    assert_eq!(config.orchestrator.routing.tool_selection, "full");
+}
+
+#[test]
+fn test_routing_validate_clamps_and_resets_mode() {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.routing.mode = "yolo".to_string();
+    config.orchestrator.routing.steering_inbox_cap = 0;
+    config.orchestrator.routing.max_workflows_per_lane = 999;
+    config.orchestrator.routing.main_loop_max_rounds = 0;
+    config.orchestrator.routing.main_loop_max_tools_per_round = 999;
+    config.orchestrator.routing.tool_selection = "everything".to_string();
+    config.validate();
+    assert_eq!(config.orchestrator.routing.mode, "planner");
+    assert_eq!(config.orchestrator.routing.steering_inbox_cap, 1);
+    assert_eq!(config.orchestrator.routing.max_workflows_per_lane, 16);
+    assert_eq!(config.orchestrator.routing.main_loop_max_rounds, 1);
+    assert_eq!(config.orchestrator.routing.main_loop_max_tools_per_round, 50);
+    assert_eq!(config.orchestrator.routing.tool_selection, "core_union");
+}

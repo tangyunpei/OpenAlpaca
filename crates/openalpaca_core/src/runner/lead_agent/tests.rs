@@ -66,7 +66,7 @@ fn test_lead_agent_registry_contains_coordination_tools() {
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
     });
-    let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
+    let wait_tool = Arc::new(WaitForSubagentsTool { tracker, steering: None });
 
     register_coordination_tools(
         &registry,
@@ -376,7 +376,7 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
     let check_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
     });
-    let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
+    let wait_tool = Arc::new(WaitForSubagentsTool { tracker, steering: None });
 
     let registry = ToolRegistry::default();
     register_coordination_tools(
@@ -433,7 +433,7 @@ fn test_batch_spawn_tool_present_when_enabled() {
     let check_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
     });
-    let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
+    let wait_tool = Arc::new(WaitForSubagentsTool { tracker, steering: None });
 
     let registry = ToolRegistry::default();
     register_coordination_tools(
@@ -596,6 +596,24 @@ fn test_lead_agent_prompt_includes_batch_spawn_instruction() {
     );
 }
 
+#[test]
+fn test_workflow_contract_suffix_gates_interjection_protocol() {
+    // Steering attached: both sections, interjection protocol first.
+    let with_steering = super::prompt::workflow_contract_suffix(true);
+    assert!(with_steering.contains("<interjection_protocol>"));
+    assert!(with_steering.contains("<user_interjection>"));
+    assert!(with_steering.contains("post_update"));
+    assert!(with_steering.contains("queue_followup"));
+    assert!(with_steering.contains("<completion_report>"));
+
+    // No steering inbox: completion-report contract only (spec §2b is
+    // unconditional; the interjection protocol rides with the rail).
+    let without_steering = super::prompt::workflow_contract_suffix(false);
+    assert!(!without_steering.contains("<interjection_protocol>"));
+    assert!(without_steering.contains("<completion_report>"));
+    assert!(without_steering.contains("user-facing completion report"));
+}
+
 // ── Phase P4: LA-3 prompt template caching test ──
 
 #[test]
@@ -613,4 +631,252 @@ fn test_spawn_subagent_prompt_template_substitution() {
     assert!(result.contains("Tools: search, browse"));
     assert!(!result.contains("{PERSONA}"));
     assert!(!result.contains("{TOOL_GUIDANCE}"));
+}
+
+// ── Routing V2: workflow tools (post_update / queue_followup) ──
+
+/// Drain matching events from a broadcast receiver without blocking.
+fn recv_all(
+    rx: &mut tokio::sync::broadcast::Receiver<crate::events::SystemEvent>,
+) -> Vec<crate::events::SystemEvent> {
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    events
+}
+
+#[tokio::test]
+async fn test_post_update_persists_conversation_and_publishes_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+
+    let tool = PostUpdateTool::new(
+        Some(db.clone()),
+        bus,
+        "task-1".to_string(),
+        "junpei:cli".to_string(),
+        "cli".to_string(),
+    );
+    let result = tool
+        .execute(&serde_json::json!({"message": "Halfway there"}))
+        .await
+        .unwrap();
+    assert!(result.contains("posted"));
+
+    // Persisted as an assistant message on the lane conversation.
+    let conv_repo = openalpaca_storage::ConversationRepository::new(&db);
+    let messages = conv_repo.list_recent_by_lane("junpei:cli", 10).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].role, "assistant");
+    assert_eq!(messages[0].content, "Halfway there");
+    assert_eq!(messages[0].source.as_deref(), Some("cli"));
+
+    // WorkflowProgress published with lane + task identity.
+    let events = recv_all(&mut rx);
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        crate::events::SystemEvent::WorkflowProgress { task_id, lane_key, message, .. }
+            if task_id == "task-1" && lane_key == "junpei:cli" && message == "Halfway there"
+    )));
+}
+
+#[tokio::test]
+async fn test_post_update_rejects_empty_message() {
+    let tool = PostUpdateTool::new(
+        None,
+        EventBus::default(),
+        "task-1".to_string(),
+        "junpei:cli".to_string(),
+        "cli".to_string(),
+    );
+    assert!(tool.execute(&serde_json::json!({})).await.is_err());
+    assert!(tool.execute(&serde_json::json!({"message": "  "})).await.is_err());
+}
+
+#[tokio::test]
+async fn test_queue_followup_inserts_row_and_publishes_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+
+    let tool = QueueFollowupTool::new(
+        Some(db.clone()),
+        bus,
+        "task-1".to_string(),
+        "junpei:cli".to_string(),
+        "junpei".to_string(),
+    );
+    let result = tool
+        .execute(&serde_json::json!({"description": "Also update the docs"}))
+        .await
+        .unwrap();
+    assert!(result.contains("Follow-up queued"));
+
+    // Row inserted with the reconstructed principal and source task.
+    let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+    let rows = repo.list_queued_by_lane("junpei:cli").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, "followup");
+    assert_eq!(rows[0].content, "Also update the docs");
+    assert_eq!(rows[0].source_task_id.as_deref(), Some("task-1"));
+    let principal: crate::security::policy::Principal =
+        serde_json::from_str(&rows[0].principal_json).unwrap();
+    assert_eq!(
+        principal,
+        crate::security::policy::Principal::User {
+            global_id: "junpei".to_string()
+        }
+    );
+
+    // FollowupQueued published with the row id.
+    let events = recv_all(&mut rx);
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        crate::events::SystemEvent::FollowupQueued { lane_key, followup_id, kind, .. }
+            if lane_key == "junpei:cli" && *followup_id == rows[0].id && kind == "followup"
+    )));
+}
+
+#[tokio::test]
+async fn test_queue_followup_system_owner_maps_to_system_principal() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let tool = QueueFollowupTool::new(
+        Some(db.clone()),
+        EventBus::default(),
+        "task-1".to_string(),
+        "system:internal".to_string(),
+        "system".to_string(),
+    );
+    tool.execute(&serde_json::json!({"description": "scheduled follow-up"}))
+        .await
+        .unwrap();
+
+    let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+    let rows = repo.list_queued_by_lane("system:internal").unwrap();
+    let principal: crate::security::policy::Principal =
+        serde_json::from_str(&rows[0].principal_json).unwrap();
+    assert_eq!(principal, crate::security::policy::Principal::System);
+}
+
+// ── Routing V2: wait_for_subagents steering interrupt ──────────────
+
+fn wait_steering_msg(text: &str) -> crate::runner::steering::SteeringMsg {
+    crate::runner::steering::SteeringMsg {
+        text: text.to_string(),
+        request_id: uuid::Uuid::new_v4(),
+        principal: crate::security::policy::Principal::System,
+        scope: crate::security::policy::Scope::Global,
+        workspace_path: None,
+        received_at: chrono::Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn test_wait_for_subagents_interrupted_by_steering_push() {
+    // A push while the tool is blocked in its select must break the wait.
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("run-1"); // never completes — wait would block 600s
+    let inbox = Arc::new(crate::runner::steering::SteeringInbox::default());
+    let tool = Arc::new(WaitForSubagentsTool {
+        tracker,
+        steering: Some(inbox.clone()),
+    });
+
+    let waiter = {
+        let tool = tool.clone();
+        tokio::spawn(async move { tool.execute(&serde_json::json!({})).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    inbox.push(wait_steering_msg("adjust course")).unwrap();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+        .await
+        .expect("steering push must interrupt the wait")
+        .unwrap()
+        .unwrap();
+    assert!(result.contains("Wait interrupted"), "got: {result}");
+    assert!(result.contains("1 queued"), "got: {result}");
+}
+
+#[tokio::test]
+async fn test_wait_for_subagents_pre_queued_steering_returns_immediately() {
+    // No lost wakeup: a message pushed BEFORE the wait starts must still
+    // interrupt within the first iteration (the pre-check catches it).
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("run-1"); // never completes
+    let inbox = Arc::new(crate::runner::steering::SteeringInbox::default());
+    inbox.push(wait_steering_msg("queued before wait")).unwrap();
+    let tool = WaitForSubagentsTool {
+        tracker,
+        steering: Some(inbox),
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        tool.execute(&serde_json::json!({})),
+    )
+    .await
+    .expect("pre-queued interjection must interrupt without waiting")
+    .unwrap();
+    assert!(result.contains("Wait interrupted"), "got: {result}");
+}
+
+#[tokio::test]
+async fn test_wait_for_subagents_without_steering_completes_normally() {
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("run-1");
+    tracker.complete("run-1", "done".to_string(), true);
+    let tool = WaitForSubagentsTool {
+        tracker,
+        steering: None,
+    };
+    let result = tool.execute(&serde_json::json!({})).await.unwrap();
+    assert!(result.contains("All subagents finished"));
+}
+
+#[tokio::test]
+async fn test_wait_for_subagents_closed_empty_inbox_does_not_interrupt() {
+    // A closed, empty inbox is treated as absent — the wait completes on
+    // subagent completion instead of spinning or interrupting.
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("run-1");
+    tracker.complete("run-1", "done".to_string(), true);
+    let inbox = Arc::new(crate::runner::steering::SteeringInbox::default());
+    inbox.close_and_drain();
+    let tool = WaitForSubagentsTool {
+        tracker,
+        steering: Some(inbox),
+    };
+    let result = tool.execute(&serde_json::json!({})).await.unwrap();
+    assert!(result.contains("All subagents finished"));
+}
+
+#[test]
+fn test_register_workflow_tools_registers_both() {
+    let registry = ToolRegistry::default();
+    register_workflow_tools(
+        &registry,
+        Arc::new(PostUpdateTool::new(
+            None,
+            EventBus::default(),
+            "task-1".to_string(),
+            "junpei:cli".to_string(),
+            "cli".to_string(),
+        )),
+        Arc::new(QueueFollowupTool::new(
+            None,
+            EventBus::default(),
+            "task-1".to_string(),
+            "junpei:cli".to_string(),
+            "junpei".to_string(),
+        )),
+    );
+    let tools = registry.registered_tool_names();
+    assert!(tools.contains(&"post_update".to_string()));
+    assert!(tools.contains(&"queue_followup".to_string()));
 }

@@ -84,3 +84,47 @@ fn test_agent_registry_in_shared_context() {
     assert_eq!(ctx.agent_registry.count(), 1);
     assert!(ctx.agent_registry.get("a1").is_some());
 }
+
+#[test]
+fn test_steering_inbox_registry() {
+    use crate::runner::steering::SteeringInbox;
+
+    let ctx = SharedContext::new();
+    assert!(ctx.steering_inbox("t1").is_none());
+
+    let inbox = Arc::new(SteeringInbox::default());
+    ctx.register_steering_inbox("t1", Arc::clone(&inbox));
+    let found = ctx.steering_inbox("t1").expect("inbox should be registered");
+    assert!(Arc::ptr_eq(&found, &inbox));
+
+    let removed = ctx.remove_steering_inbox("t1").expect("inbox should be removable");
+    assert!(Arc::ptr_eq(&removed, &inbox));
+    assert!(ctx.steering_inbox("t1").is_none());
+    assert!(ctx.remove_steering_inbox("t1").is_none());
+}
+
+#[test]
+fn test_workflows_by_lane_registry() {
+    let ctx = SharedContext::new();
+    assert!(ctx.workflows_for_lane("lane-a").is_empty());
+
+    ctx.register_workflow_for_lane("lane-a", "t1");
+    ctx.register_workflow_for_lane("lane-a", "t2");
+    ctx.register_workflow_for_lane("lane-a", "t1"); // dedup
+    ctx.register_workflow_for_lane("lane-b", "t3");
+
+    assert_eq!(ctx.workflows_for_lane("lane-a"), vec!["t1".to_string(), "t2".to_string()]);
+    assert_eq!(ctx.workflows_for_lane("lane-b"), vec!["t3".to_string()]);
+
+    ctx.deregister_workflow_for_lane("lane-a", "t1");
+    assert_eq!(ctx.workflows_for_lane("lane-a"), vec!["t2".to_string()]);
+
+    // Deregistering an unknown task/lane is a no-op.
+    ctx.deregister_workflow_for_lane("lane-a", "nope");
+    ctx.deregister_workflow_for_lane("lane-x", "t2");
+    assert_eq!(ctx.workflows_for_lane("lane-a"), vec!["t2".to_string()]);
+
+    // Removing the last workflow drops the lane entry entirely.
+    ctx.deregister_workflow_for_lane("lane-a", "t2");
+    assert!(ctx.workflows_for_lane("lane-a").is_empty());
+}

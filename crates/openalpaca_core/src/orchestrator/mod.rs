@@ -93,6 +93,29 @@ pub trait ConnectorSendProvider: Send + Sync {
     }
 }
 
+/// A claimed follow-up item handed to the runner for execution as a fresh
+/// turn through the normal front door (Routing V2).
+#[derive(Debug, Clone)]
+pub struct FollowupItem {
+    /// `lane_followups` row id (the runner marks it done when finished).
+    pub id: i64,
+    pub lane_key: String,
+    pub content: String,
+    pub principal: Principal,
+    pub scope: crate::security::policy::Scope,
+    pub workspace_path: Option<String>,
+    /// Task the item was queued from, if any.
+    pub source_task_id: Option<String>,
+}
+
+/// Executes queued follow-ups. Implemented at daemon level over
+/// `Gateway::handle_event` (same inversion pattern as ConnectorSendProvider).
+pub trait FollowupRunner: Send + Sync {
+    /// Start executing a claimed follow-up item. Must not block — the daemon
+    /// implementation spawns the turn and marks the row done afterwards.
+    fn spawn_followup(&self, item: FollowupItem);
+}
+
 use dispatcher::TaskDispatcher;
 use intent::IntentParser;
 
@@ -341,6 +364,12 @@ impl Orchestrator {
         if let Ok(mut guard) = self.task_dispatcher.confirmation_broker.write() {
             *guard = Some(broker);
         }
+    }
+
+    /// Set the follow-up runner on the TaskDispatcher (post-construction,
+    /// same inversion pattern as set_confirmation_broker).
+    pub fn set_followup_runner(&self, runner: Arc<dyn FollowupRunner>) {
+        self.task_dispatcher.set_followup_runner(runner);
     }
 
     /// Set the path to USER.md for extraction writes.

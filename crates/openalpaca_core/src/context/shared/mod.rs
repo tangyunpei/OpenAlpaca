@@ -1,5 +1,7 @@
 use crate::agent::registry::AgentRegistry;
+use crate::runner::steering::SteeringInbox;
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -170,6 +172,10 @@ pub struct SharedContext {
     pub agent_registry: Arc<AgentRegistry>,
     /// Cancellation tokens for running tasks, keyed by task_id.
     cancellation_tokens: Mutex<HashMap<String, CancellationToken>>,
+    /// Steering inboxes for running workflows, keyed by task_id.
+    steering_inboxes: DashMap<String, Arc<SteeringInbox>>,
+    /// Active workflow task_ids per lane, keyed by lane_key.
+    active_workflows_by_lane: DashMap<String, Vec<String>>,
 }
 
 impl SharedContext {
@@ -178,6 +184,8 @@ impl SharedContext {
             task_registry: TaskRegistry::new(),
             agent_registry: Arc::new(AgentRegistry::new()),
             cancellation_tokens: Mutex::new(HashMap::new()),
+            steering_inboxes: DashMap::new(),
+            active_workflows_by_lane: DashMap::new(),
         }
     }
 
@@ -211,6 +219,58 @@ impl SharedContext {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         tokens.remove(task_id);
+    }
+
+    /// Register a steering inbox for a running workflow.
+    pub fn register_steering_inbox(&self, task_id: &str, inbox: Arc<SteeringInbox>) {
+        self.steering_inboxes.insert(task_id.to_string(), inbox);
+    }
+
+    /// Look up the steering inbox for a workflow, if one is registered.
+    pub fn steering_inbox(&self, task_id: &str) -> Option<Arc<SteeringInbox>> {
+        self.steering_inboxes
+            .get(task_id)
+            .map(|entry| Arc::clone(entry.value()))
+    }
+
+    /// Deregister a workflow's steering inbox (cleanup at detach).
+    /// Returns the inbox if it was registered.
+    pub fn remove_steering_inbox(&self, task_id: &str) -> Option<Arc<SteeringInbox>> {
+        self.steering_inboxes.remove(task_id).map(|(_, inbox)| inbox)
+    }
+
+    /// Record a workflow as active on a lane (deduplicated).
+    pub fn register_workflow_for_lane(&self, lane_key: &str, task_id: &str) {
+        let mut entry = self
+            .active_workflows_by_lane
+            .entry(lane_key.to_string())
+            .or_default();
+        if !entry.iter().any(|id| id == task_id) {
+            entry.push(task_id.to_string());
+        }
+    }
+
+    /// Remove a workflow from a lane; drops the lane entry once empty.
+    pub fn deregister_workflow_for_lane(&self, lane_key: &str, task_id: &str) {
+        let now_empty = match self.active_workflows_by_lane.get_mut(lane_key) {
+            Some(mut entry) => {
+                entry.retain(|id| id != task_id);
+                entry.is_empty()
+            }
+            None => return,
+        };
+        if now_empty {
+            self.active_workflows_by_lane
+                .remove_if(lane_key, |_, ids| ids.is_empty());
+        }
+    }
+
+    /// Task ids of workflows currently active on a lane.
+    pub fn workflows_for_lane(&self, lane_key: &str) -> Vec<String> {
+        self.active_workflows_by_lane
+            .get(lane_key)
+            .map(|entry| entry.clone())
+            .unwrap_or_default()
     }
 }
 

@@ -13,6 +13,7 @@ mod connector_bridge;
 mod event_bridge;
 mod events;
 mod extraction;
+mod followup;
 mod gateway_bridge;
 mod hot_reload;
 mod managers;
@@ -443,6 +444,13 @@ async fn async_main(
         bus.clone(),
         Some(db.clone()),
     ));
+
+    // Routing V2: wire the follow-up runner so queued follow-ups re-enter
+    // through the gateway when a workflow finalizes (inert while none are queued).
+    orchestrator.set_followup_runner(Arc::new(followup::GatewayFollowupRunner::new(
+        gateway.clone(),
+        db.clone(),
+    )));
 
     let notif_bus = bus.clone();
     let chat_bus = bus.clone();

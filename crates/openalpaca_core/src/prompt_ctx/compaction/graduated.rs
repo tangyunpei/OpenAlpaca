@@ -366,6 +366,26 @@ mod tests {
     }
 
     #[test]
+    fn test_truncate_and_drop_tiers_leave_interjections_untouched() {
+        // Routing V2: steering interjections must survive the truncate/drop
+        // tiers untouched (they are user text messages — tier 1 only
+        // truncates tool results and tier 2 only replaces media parts).
+        let interjection = format!(
+            "{} ts=\"2026-08-30T00:00:00Z\">{}</user_interjection>",
+            crate::runner::steering::USER_INTERJECTION_PREFIX,
+            "y".repeat(1000)
+        );
+        let mut messages = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user(&interjection),
+        ];
+        truncate_tool_results(&mut messages);
+        drop_multimedia(&mut messages);
+        assert_eq!(messages[1].content, interjection);
+        assert!(messages[1].parts.is_none());
+    }
+
+    #[test]
     fn test_drop_multimedia() {
         let mut messages = vec![
             ChatMessage::system("system"),

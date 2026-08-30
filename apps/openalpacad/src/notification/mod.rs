@@ -110,6 +110,11 @@ impl NotificationDispatcher {
                     self.handle_failure(&task_id, &error, outcome_kind.as_deref())
                         .await;
                 }
+                SystemEvent::WorkflowProgress {
+                    lane_key, message, ..
+                } => {
+                    self.handle_progress(&lane_key, &message).await;
+                }
                 _ => {}
             }
         }
@@ -209,6 +214,24 @@ impl NotificationDispatcher {
                 .await;
             self.try_cross_channel_discord(&task.created_by, &content)
                 .await;
+        }
+    }
+
+    /// Push a mid-workflow progress update to the lane's originating channel.
+    /// Same per-lane suffix routing as completions, but terse: the message is
+    /// sent as-is, with no cross-channel fan-out or artifact delivery.
+    async fn handle_progress(&self, lane_key: &str, content: &str) {
+        if lane_key.ends_with(":telegram") {
+            if let Some(chat_id) = self.resolve_telegram_chat_id(lane_key)
+                && let Some(ref bot) = self.telegram_bot()
+                && let Err(e) = bot.send_message(ChatId(chat_id), content).await
+            {
+                warn!("Failed to send workflow progress notification: {e}");
+            }
+        } else if lane_key.ends_with(":imessage") {
+            self.try_imessage_notification(lane_key, content).await;
+        } else if lane_key.ends_with(":discord") {
+            self.try_discord_notification(lane_key, content).await;
         }
     }
 

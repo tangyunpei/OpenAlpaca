@@ -140,6 +140,47 @@ impl DaemonConfig {
             10000,
             "user_profile_budget",
         );
+        // ── Orchestrator > Routing ──
+        if self.orchestrator.routing.mode != "planner" && self.orchestrator.routing.mode != "tool" {
+            tracing::warn!(
+                "Config 'routing.mode': unknown value '{}', resetting to 'planner'",
+                self.orchestrator.routing.mode
+            );
+            self.orchestrator.routing.mode = "planner".to_string();
+        }
+        clamp_val(
+            &mut self.orchestrator.routing.steering_inbox_cap,
+            1,
+            256,
+            "routing.steering_inbox_cap",
+        );
+        clamp_val(
+            &mut self.orchestrator.routing.max_workflows_per_lane,
+            1,
+            16,
+            "routing.max_workflows_per_lane",
+        );
+        clamp_val(
+            &mut self.orchestrator.routing.main_loop_max_rounds,
+            1,
+            100,
+            "routing.main_loop_max_rounds",
+        );
+        clamp_val(
+            &mut self.orchestrator.routing.main_loop_max_tools_per_round,
+            1,
+            50,
+            "routing.main_loop_max_tools_per_round",
+        );
+        if self.orchestrator.routing.tool_selection != "core_union"
+            && self.orchestrator.routing.tool_selection != "full"
+        {
+            tracing::warn!(
+                "Config 'routing.tool_selection': unknown value '{}', resetting to 'core_union'",
+                self.orchestrator.routing.tool_selection
+            );
+            self.orchestrator.routing.tool_selection = "core_union".to_string();
+        }
         // ── Execution > Agent Defaults ──
         clamp_val(
             &mut self.execution.agent_defaults.max_rounds,

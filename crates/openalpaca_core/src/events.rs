@@ -433,4 +433,34 @@ pub enum SystemEvent {
         lane_id: Option<String>,
         timestamp: DateTime<Utc>,
     },
+    /// A background workflow was started for a lane (Routing V2)
+    WorkflowStarted {
+        request_id: Uuid,
+        task_id: String,
+        lane_key: String,
+        title: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// A steering message was accepted into a running workflow's inbox (Routing V2)
+    WorkflowSteered {
+        task_id: String,
+        lane_key: String,
+        request_id: Uuid,
+        timestamp: DateTime<Utc>,
+    },
+    /// A running workflow posted a user-facing progress update (Routing V2)
+    WorkflowProgress {
+        task_id: String,
+        lane_key: String,
+        message: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// A follow-up item was queued for a lane (Routing V2)
+    FollowupQueued {
+        lane_key: String,
+        followup_id: i64,
+        /// "followup" | "unprocessed_steering"
+        kind: String,
+        timestamp: DateTime<Utc>,
+    },
 }

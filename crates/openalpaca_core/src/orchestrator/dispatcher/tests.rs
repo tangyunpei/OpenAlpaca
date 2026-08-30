@@ -47,6 +47,62 @@ fn setup_with_config_and_db(
     )
 }
 
+/// Setup with a (provider-less) router and a real DB so the spawned lead
+/// agent execution actually runs — required by the steering lifecycle tests.
+fn setup_with_router_and_db(
+    agents: Vec<SubAgent>,
+    config: DaemonConfig,
+    db: Database,
+) -> TaskDispatcher {
+    // Provider-less router: the spawned loop's first LLM call fails, so the
+    // execution runs and finalizes with LoopFinishReason::Error.
+    let router = Arc::new(openalpaca_llm::LlmRouter::new(
+        std::collections::HashMap::new(),
+        openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+        std::collections::HashMap::new(),
+        Arc::new(openalpaca_llm::CostTracker::new(
+            openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+        )),
+        "test-model".to_string(),
+    ));
+    setup_with_specific_router_and_db(agents, config, db, router)
+}
+
+fn setup_with_specific_router_and_db(
+    agents: Vec<SubAgent>,
+    config: DaemonConfig,
+    db: Database,
+    router: Arc<openalpaca_llm::LlmRouter>,
+) -> TaskDispatcher {
+    let ctx = Arc::new(SharedContext::new());
+    for a in &agents {
+        ctx.agent_registry.register_template(template_from_agent(a));
+        ctx.agent_registry.register(a.clone());
+    }
+    let lane_mgr = Arc::new(LaneManager::new());
+    let bus = EventBus::default();
+    let tool_registry = Arc::new(crate::tools::ToolRegistry::default());
+    let sandbox = Arc::new(crate::security::sandbox::SandboxManager::with_defaults(
+        tool_registry.clone(),
+        bus.clone(),
+    ));
+    let gate = Arc::new(crate::security::gate::SecurityGate::new(sandbox));
+    TaskDispatcher::new(
+        ctx,
+        lane_mgr,
+        bus,
+        Some(router),
+        gate,
+        tool_registry,
+        Some(db),
+        None,
+        Arc::new(ArcSwap::from_pointee(config)),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+    )
+}
+
 #[test]
 fn test_creates_task_and_lane() {
     let dispatcher = setup(vec![make_agent("a1", vec!["web_search"])]);
@@ -1382,5 +1438,248 @@ async fn test_plugin_agent_cancellation() {
     assert!(
         executor.step_count.load(Ordering::SeqCst) >= 1,
         "Should have polled at least once before cancellation"
+    );
+}
+
+// ── Routing V2: steering attach/detach lifecycle ─────────────────────
+
+fn lifecycle_steering_msg(text: &str) -> crate::runner::steering::SteeringMsg {
+    crate::runner::steering::SteeringMsg {
+        text: text.to_string(),
+        request_id: Uuid::new_v4(),
+        principal: crate::security::policy::Principal::User {
+            global_id: "user1".to_string(),
+        },
+        scope: crate::security::policy::Scope::Global,
+        workspace_path: None,
+        received_at: Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn test_lead_agent_steering_attach_detach_and_leftover_conversion() {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.routing.steering_enabled = true;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        config,
+        db.clone(),
+    );
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Long running task",
+            "Steering lifecycle".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            None,
+        )
+        .unwrap();
+    let task_id = outcome.task_id;
+
+    // Attach: inbox + lane registration happen synchronously at dispatch
+    // (before the spawned execution runs on the current-thread test runtime).
+    let inbox = dispatcher
+        .shared_context
+        .steering_inbox(&task_id)
+        .expect("steering inbox must be registered at dispatch");
+    assert_eq!(
+        dispatcher.shared_context.workflows_for_lane("user1:cli"),
+        vec![task_id.clone()]
+    );
+
+    // Queue a message the loop will never consume, then cancel the task.
+    inbox
+        .push(lifecycle_steering_msg("switch to staging"))
+        .unwrap();
+    assert!(dispatcher.shared_context.cancel_task(&task_id));
+
+    // Detach: the spawned execution closes and deregisters the inbox.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while dispatcher.shared_context.steering_inbox(&task_id).is_some() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "steering detach timed out"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(inbox.is_closed());
+    assert!(
+        dispatcher
+            .shared_context
+            .workflows_for_lane("user1:cli")
+            .is_empty()
+    );
+
+    // The undelivered message became an unprocessed_steering follow-up row…
+    let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+    let rows = repo.list_queued_by_lane("user1:cli").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, "unprocessed_steering");
+    assert_eq!(rows[0].content, "switch to staging");
+    assert_eq!(rows[0].source_task_id.as_deref(), Some(task_id.as_str()));
+    let principal: crate::security::policy::Principal =
+        serde_json::from_str(&rows[0].principal_json).unwrap();
+    assert_eq!(
+        principal,
+        crate::security::policy::Principal::User {
+            global_id: "user1".to_string()
+        }
+    );
+    // …which the finalize autostart hook must never claim.
+    assert!(repo.claim_next("user1:cli").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_lead_agent_no_steering_attach_when_disabled() {
+    // Default config (steering_enabled=false): dispatch must register
+    // neither an inbox nor a lane workflow entry.
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db,
+    );
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Some task",
+            "No steering".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            None,
+        )
+        .unwrap();
+
+    assert!(
+        dispatcher
+            .shared_context
+            .steering_inbox(&outcome.task_id)
+            .is_none()
+    );
+    assert!(
+        dispatcher
+            .shared_context
+            .workflows_for_lane("user1:cli")
+            .is_empty()
+    );
+
+    // Stop the background execution.
+    dispatcher.shared_context.cancel_task(&outcome.task_id);
+}
+
+// ── Routing V2 §2b: model-authored completion report ─────────────────
+
+/// Poll the lane's conversation until an assistant message lands (the spawned
+/// lead execution persists it right before publishing TaskCompleted).
+async fn wait_for_conversation_message(
+    db: &Database,
+    lane_key: &str,
+) -> openalpaca_storage::ConversationMessage {
+    let repo = openalpaca_storage::ConversationRepository::new(db);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let messages = repo.list_by_lane(lane_key, 10, 0).unwrap_or_default();
+        if let Some(msg) = messages.into_iter().next() {
+            return msg;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the completion conversation message"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn test_lead_agent_completion_report_persists_final_content_verbatim() {
+    use openalpaca_llm::{ChatResponse, FinishReason, ProviderType, Usage};
+
+    let report = "Report: refactored the parser, added 12 tests, all green.\n\
+                  Problems hit: none. Queued for later: nothing.";
+    let mock_provider = Arc::new(e2e_mock::MockProvider::new(vec![ChatResponse {
+        content: report.to_string(),
+        tool_calls: vec![],
+        model: "claude-sonnet-4-5-20250929".to_string(),
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::Stop,
+        thinking: None,
+        parts: None,
+    }]));
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        mock_provider,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    ));
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_specific_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db.clone(),
+        router,
+    );
+
+    dispatcher
+        .dispatch_lead_agent(
+            "Refactor the parser",
+            "Parser refactor".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            None,
+        )
+        .unwrap();
+
+    // The lead agent's final message IS the completion message — verbatim,
+    // no "**Task completed: ...**" template wrapper, no status prefix.
+    let msg = wait_for_conversation_message(&db, "user1:cli").await;
+    assert_eq!(msg.role, "assistant");
+    assert_eq!(msg.content, report);
+}
+
+#[tokio::test]
+async fn test_lead_agent_completion_report_empty_falls_back_to_template_with_status() {
+    // Provider-less router: the loop exits with LoopFinishReason::Error and
+    // empty final content → legacy template fallback + one-line status prefix.
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db.clone(),
+    );
+
+    dispatcher
+        .dispatch_lead_agent(
+            "Doomed task",
+            "Doomed task".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            None,
+        )
+        .unwrap();
+
+    let msg = wait_for_conversation_message(&db, "user1:cli").await;
+    assert!(
+        msg.content.starts_with("Task ended with an error:\n\n"),
+        "missing status prefix: {}",
+        msg.content
+    );
+    assert!(
+        msg.content.contains("**Task failed: Doomed task**"),
+        "missing template fallback: {}",
+        msg.content
     );
 }

@@ -139,7 +139,24 @@ impl Orchestrator {
         let mut fallback_reason: Option<String> = None;
         let mut auto_promotion_reason: Option<String> = None;
 
-        let result: Result<String, String> = if let Intent::SkillInvocation {
+        let result: Result<String, String> = if !force_simple_query
+            && self.daemon_config.load().orchestrator.routing.steering_enabled
+            && let Some(steer_text) = intent_source_content.strip_prefix("/steer ")
+        {
+            // Deterministic steering override (Routing V2): guaranteed
+            // injection into the lane's running workflow, bypassing the
+            // model. With steering_enabled=false (default) this arm is
+            // skipped and "/steer ..." routes exactly as before.
+            mode = "steered".to_string();
+            self.handle_steer_prefix(
+                request_id,
+                steer_text,
+                &principal,
+                &scope,
+                &lane_key,
+                workspace_path.clone(),
+            )
+        } else if let Intent::SkillInvocation {
             ref skill_name,
             ref query,
         } = intent

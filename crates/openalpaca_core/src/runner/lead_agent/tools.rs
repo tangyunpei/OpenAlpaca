@@ -14,6 +14,7 @@ use crate::middleware::prompt::{format_tool_guidance, SystemPersona};
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
 use crate::prompt_ctx::{ExecutionPath, SectionPriority};
+use crate::runner::steering::SteeringInbox;
 use crate::runner::{LoopConfig, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
@@ -774,8 +775,14 @@ pub fn check_subagent_status_tool_definition() -> ToolDefinition {
 
 /// Tool that blocks until all spawned subagents have completed,
 /// then returns a summary of all results.
+///
+/// When a steering inbox is attached (Routing V2), a queued user
+/// interjection interrupts the wait so the loop can drain it at the next
+/// round boundary instead of blocking for up to the full timeout.
 pub struct WaitForSubagentsTool {
     pub(super) tracker: Arc<SubagentTracker>,
+    /// Steering inbox for wait interruption. `None` disables the arm.
+    pub(super) steering: Option<Arc<SteeringInbox>>,
 }
 
 #[async_trait]
@@ -785,6 +792,25 @@ impl BuiltInTool for WaitForSubagentsTool {
         let deadline = tokio::time::Instant::now() + max_wait;
 
         loop {
+            // Steering pre-check BEFORE any wait — a message pushed before
+            // this call started must still interrupt (no lost wakeup:
+            // `SteeringInbox::notified` registers interest before
+            // re-checking emptiness, and this loop re-checks first).
+            if let Some(ref inbox) = self.steering
+                && !inbox.is_empty()
+            {
+                let (queued, running, completed, failed) = self.tracker.status_counts();
+                return Ok(format!(
+                    "Wait interrupted: a user interjection is pending and will be \
+                     delivered next round — address it before resuming the wait. \
+                     Status: {} completed, {} failed, {} queued, {} running.\n\n{}",
+                    completed,
+                    failed,
+                    queued,
+                    running,
+                    self.tracker.summary()
+                ));
+            }
             if self.tracker.all_done() {
                 break;
             }
@@ -802,9 +828,18 @@ impl BuiltInTool for WaitForSubagentsTool {
                     self.tracker.summary()
                 ));
             }
-            // Wait for a subagent status change or timeout
+            // Wait for a subagent status change, a steering push, or timeout.
+            // A closed inbox is treated as absent — its `notified()` returns
+            // immediately, which would otherwise busy-spin this loop.
+            let steering_wakeup = async {
+                match self.steering.as_ref().filter(|i| !i.is_closed()) {
+                    Some(inbox) => inbox.notified().await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 _ = self.tracker.notify.notified() => { /* re-check all_done */ }
+                _ = steering_wakeup => { /* re-check inbox */ }
                 _ = tokio::time::sleep(remaining) => { /* timeout */ }
             }
         }
@@ -843,6 +878,231 @@ pub fn wait_for_subagents_tool_definition() -> ToolDefinition {
         strict: None,
         input_examples: None,
     }
+}
+
+// ── PostUpdateTool ───────────────────────────────────────────────────
+
+/// Lead-agent tool that posts a user-facing progress update: persists the
+/// message to the lane conversation and publishes `WorkflowProgress` so the
+/// NotificationDispatcher can push it to the originating channel (Routing V2).
+pub struct PostUpdateTool {
+    db: Option<Database>,
+    bus: EventBus,
+    task_id: String,
+    lane_key: String,
+    source: String,
+}
+
+impl PostUpdateTool {
+    pub fn new(
+        db: Option<Database>,
+        bus: EventBus,
+        task_id: String,
+        lane_key: String,
+        source: String,
+    ) -> Self {
+        Self {
+            db,
+            bus,
+            task_id,
+            lane_key,
+            source,
+        }
+    }
+}
+
+#[async_trait]
+impl BuiltInTool for PostUpdateTool {
+    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        let message = arguments
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .ok_or_else(|| "Missing required parameter: message".to_string())?;
+
+        if let Some(ref db) = self.db {
+            crate::orchestrator::dispatcher::outcome::persist_conversation(
+                db,
+                &self.lane_key,
+                &self.source,
+                message.to_string(),
+                None,
+                0,
+                0,
+                0,
+            );
+        }
+        self.bus.publish(SystemEvent::WorkflowProgress {
+            task_id: self.task_id.clone(),
+            lane_key: self.lane_key.clone(),
+            message: message.to_string(),
+            timestamp: Utc::now(),
+        });
+        Ok("Progress update posted to the conversation.".to_string())
+    }
+}
+
+/// Build the tool definition for `post_update`.
+pub fn post_update_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "post_update".to_string(),
+        description: "Post a short, user-facing progress update to the conversation while the \
+                       task is still running. Use sparingly — at meaningful milestones, not \
+                       every step."
+            .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The progress update to show the user"
+                }
+            },
+            "required": ["message"]
+        }),
+        strict: None,
+        input_examples: None,
+    }
+}
+
+// ── QueueFollowupTool ────────────────────────────────────────────────
+
+/// Lead-agent tool that queues a follow-up item for the lane. The item runs
+/// as a fresh turn after this workflow completes (Routing V2).
+pub struct QueueFollowupTool {
+    db: Option<Database>,
+    bus: EventBus,
+    task_id: String,
+    lane_key: String,
+    created_by: String,
+}
+
+impl QueueFollowupTool {
+    pub fn new(
+        db: Option<Database>,
+        bus: EventBus,
+        task_id: String,
+        lane_key: String,
+        created_by: String,
+    ) -> Self {
+        Self {
+            db,
+            bus,
+            task_id,
+            lane_key,
+            created_by,
+        }
+    }
+}
+
+#[async_trait]
+impl BuiltInTool for QueueFollowupTool {
+    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        let description = arguments
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .ok_or_else(|| "Missing required parameter: description".to_string())?;
+
+        let Some(ref db) = self.db else {
+            return Err("Follow-up queue unavailable: no database configured".to_string());
+        };
+
+        // Reconstruct the originating principal from the task owner so the
+        // follow-up can re-enter the front door with the right identity.
+        let principal = if self.created_by == "system" {
+            crate::security::policy::Principal::System
+        } else {
+            crate::security::policy::Principal::User {
+                global_id: self.created_by.clone(),
+            }
+        };
+        let principal_json = serde_json::to_string(&principal)
+            .map_err(|e| format!("Failed to serialize principal: {e}"))?;
+
+        let repo = openalpaca_storage::repository::FollowupRepository::new(db);
+        let followup_id = repo
+            .queue(
+                &self.lane_key,
+                "followup",
+                description,
+                &principal_json,
+                None,
+                Some(&self.task_id),
+            )
+            .map_err(|e| format!("Failed to queue follow-up: {e}"))?;
+
+        self.bus.publish(SystemEvent::FollowupQueued {
+            lane_key: self.lane_key.clone(),
+            followup_id,
+            kind: "followup".to_string(),
+            timestamp: Utc::now(),
+        });
+
+        Ok(format!(
+            "Follow-up queued (id: {}). It will run as a new task after this workflow completes.",
+            followup_id
+        ))
+    }
+}
+
+/// Build the tool definition for `queue_followup`.
+pub fn queue_followup_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "queue_followup".to_string(),
+        description: "Queue a follow-up task for after this workflow completes. Use for work \
+                       that is out of scope now but should happen next (e.g. requested \
+                       mid-flight by the user). Returns the queued item's id."
+            .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "A clear, self-contained description of the follow-up work"
+                }
+            },
+            "required": ["description"]
+        }),
+        strict: None,
+        input_examples: None,
+    }
+}
+
+/// Register the Routing V2 workflow tools (`post_update`, `queue_followup`)
+/// into a `ToolRegistry`. Only called when `orchestrator.routing.steering_enabled`.
+pub fn register_workflow_tools(
+    registry: &crate::tools::ToolRegistry,
+    post_update_tool: Arc<PostUpdateTool>,
+    queue_followup_tool: Arc<QueueFollowupTool>,
+) {
+    // Known-good builtin tool definitions — unwrap is safe (same as above).
+    registry
+        .register(RegisteredTool {
+            definition: post_update_tool_definition(),
+            backend: ToolBackend::BuiltIn(post_update_tool),
+            provides_capabilities: vec!["orchestration".to_string()],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            author: "builtin".to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    registry
+        .register(RegisteredTool {
+            definition: queue_followup_tool_definition(),
+            backend: ToolBackend::BuiltIn(queue_followup_tool),
+            provides_capabilities: vec!["orchestration".to_string()],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            author: "builtin".to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
 }
 
 // ── Tool definitions ─────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 mod agentic_loop;
 pub mod dag_executor;
 pub mod lead_agent;
+pub mod steering;
 
 pub use agentic_loop::{
     LoopConfig, LoopCostAccumulator, LoopFinishReason, LoopResult, run_agentic_loop,
@@ -11,3 +12,4 @@ pub use dag_executor::{
     DagExecutionResult, DagExecutorConfig, DagFinishReason, NodeResult, execute_dag,
 };
 pub use lead_agent::{LeadAgentResult, run_lead_agent};
+pub use steering::{SteeringInbox, SteeringMsg, SteeringPushError};

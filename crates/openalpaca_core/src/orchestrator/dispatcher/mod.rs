@@ -70,6 +70,9 @@ pub struct TaskDispatcher {
     cached_connector_guidance: std::sync::Mutex<(String, Instant)>,
     /// Optional confirmation broker for interactive tool approval in agent pipelines.
     pub(crate) confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
+    /// Optional follow-up runner for autostarting queued follow-ups after a
+    /// workflow finalizes (Routing V2; set post-construction).
+    followup_runner: Arc<RwLock<Option<Arc<dyn crate::orchestrator::FollowupRunner>>>>,
     /// Context manager for distilling parent context into sub-agent packages.
     pub(crate) context_manager: Arc<ContextManager>,
     /// Layered compose engine. Shared with the owning `Orchestrator` so
@@ -107,8 +110,17 @@ impl TaskDispatcher {
             connector_status,
             cached_connector_guidance: std::sync::Mutex::new((String::new(), Instant::now())),
             confirmation_broker: Arc::new(RwLock::new(None)),
+            followup_runner: Arc::new(RwLock::new(None)),
             context_manager,
             compose_engine,
+        }
+    }
+
+    /// Set the follow-up runner (post-construction, same pattern as the
+    /// confirmation broker injection).
+    pub fn set_followup_runner(&self, runner: Arc<dyn crate::orchestrator::FollowupRunner>) {
+        if let Ok(mut guard) = self.followup_runner.write() {
+            *guard = Some(runner);
         }
     }
 
