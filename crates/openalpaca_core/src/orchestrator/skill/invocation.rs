@@ -41,6 +41,7 @@ impl Orchestrator {
         source: &str,
         skill_name: &str,
         query: &str,
+        lane_key: &str,
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
@@ -286,7 +287,7 @@ impl Orchestrator {
                     .map(|n| n as u32),
                 max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
                 stream_id: stream_id.map(|s| s.to_string()),
-                lane_key: None,
+                lane_key: Some(lane_key.to_string()),
                 confirmation_timeout_secs: None,
                 auto_approve: self
                     .daemon_config
@@ -553,6 +554,12 @@ impl Orchestrator {
                 workspace_id: scope_ctx.workspace_id.clone(),
                 skill_stack: vec![skill_name.to_string()],
                 effective_constraints: None,
+                lane_key: Some(lane_key.to_string()),
+                source: Some(source.to_string()),
+                request_id: Some(request_id),
+                principal: None,
+                scope: None,
+                workspace_path: None,
             };
             let needs_clone = !skill_doc.frontmatter.scripts.is_empty()
                 || !skill_doc.frontmatter.depends_on.is_empty();
@@ -749,13 +756,26 @@ impl Orchestrator {
                 return Err(format!("LLM error: {}", err));
             }
 
-            // Post-hoc guard: detect hallucinated send confirmations
+            // Post-hoc guard: detect hallucinated send confirmations.
+            // Narrowed (Routing V2): only with an actual send-intent signal —
+            // the query suggested send, or recent turns show active send
+            // hints — a skill merely declaring `send` must not trip it.
+            let send_intent_signal = self
+                .intent_parser
+                .suggest_tools(query)
+                .contains(&"send".to_string())
+                || crate::orchestrator::query_handler::detect_active_send_hints(
+                    &ctx.recent_messages,
+                    &sendable_channels,
+                )
+                .send;
             let tool_name_refs: Vec<&str> =
                 resolved_tool_names.iter().map(|s| s.as_str()).collect();
             if detect_hallucinated_send(
                 &tool_name_refs,
                 result.tool_calls_made,
                 &result.final_content,
+                send_intent_signal,
             ) {
                 tracing::warn!(
                     tool_calls = result.tool_calls_made,

@@ -1,6 +1,9 @@
 # OpenAlpaca default daemon configuration template.
 # Missing sections fall back to daemon defaults at runtime.
 
+[execution.lead_agent_defaults]
+batch_spawn_enabled = true
+
 [security]
 max_input_length = 32768
 

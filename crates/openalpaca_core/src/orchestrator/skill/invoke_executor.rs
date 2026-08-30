@@ -377,8 +377,12 @@ impl SkillInvocationToolExecutor {
                     .max_calls
                     .map(|n| n as u32),
                 max_tool_runtime_secs: config.max_tool_runtime.as_secs(),
-                stream_id: None, // no stream/lane threading into nested loops
-                lane_key: None,
+                // Lane identity is inherited from the parent ToolContext when
+                // the invocation chain started on a conversational path.
+                // stream_id is not carried on ToolContext — nested loops stay
+                // stream-detached.
+                stream_id: None,
+                lane_key: child_tool_ctx.lane_key.clone(),
                 confirmation_timeout_secs: None,
                 auto_approve: self.auto_approve,
             })

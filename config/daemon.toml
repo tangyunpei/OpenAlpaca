@@ -16,7 +16,7 @@ replan_enabled = false
 total_timeout_secs = 1800
 
 [execution.lead_agent_defaults]
-batch_spawn_enabled = false
+batch_spawn_enabled = true
 max_concurrent_subagents = 6
 max_cost = 5
 max_rounds = 18

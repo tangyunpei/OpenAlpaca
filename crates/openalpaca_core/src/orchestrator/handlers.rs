@@ -184,6 +184,8 @@ impl Orchestrator {
                 &source,
                 &model_input_content,
                 &intent_source_content,
+                &principal,
+                &scope,
                 &lane_key,
                 &ctx,
                 owner_id,
@@ -200,6 +202,8 @@ impl Orchestrator {
                 &source,
                 &model_input_content,
                 &intent_source_content,
+                &principal,
+                &scope,
                 &lane_key,
                 &ctx,
                 owner_id,
@@ -232,6 +236,32 @@ impl Orchestrator {
             });
             self.handle_social_query(request_id, &model_input_content, &lane_key, &ctx)
                 .await
+        } else if self.daemon_config.load().orchestrator.routing.mode == "tool" {
+            // Routing V2 tool-mode main loop: the front door for everything
+            // that survived the deterministic tier and the social branch.
+            // The fast-path / two-phase / full-planner ladder is skipped
+            // entirely — chat vs. task vs. steer is the model's tool choice
+            // (`start_workflow` / `steer_workflow` via the per-request core
+            // tool set assembled inside handle_simple_query).
+            mode = "main_loop".to_string();
+            self.handle_simple_query(
+                request_id,
+                &source,
+                &model_input_content,
+                &intent_source_content,
+                &principal,
+                &scope,
+                &lane_key,
+                &ctx,
+                owner_id,
+                &scope_ctx,
+                current_parts.as_deref(),
+                stream_id.as_deref(),
+                Some(super::query_handler::LoopOverrides::MainLoop {
+                    workspace_path: workspace_path.clone(),
+                }),
+            )
+            .await
         } else if self.llm_router.is_some()
             && matches!(intent, Intent::SimpleQuery { .. })
             && self
@@ -250,6 +280,8 @@ impl Orchestrator {
                 &source,
                 &model_input_content,
                 &intent_source_content,
+                &principal,
+                &scope,
                 &lane_key,
                 &ctx,
                 owner_id,
@@ -290,6 +322,8 @@ impl Orchestrator {
                                 &source,
                                 &model_input_content,
                                 &intent_source_content,
+                                &principal,
+                                &scope,
                                 &lane_key,
                                 &ctx,
                                 owner_id,
@@ -331,6 +365,8 @@ impl Orchestrator {
                                                 &source,
                                                 &model_input_content,
                                                 &intent_source_content,
+                                                &principal,
+                                                &scope,
                                                 &lane_key,
                                                 &ctx,
                                                 owner_id,
@@ -372,6 +408,8 @@ impl Orchestrator {
                                                         &source,
                                                         &model_input_content,
                                                         &intent_source_content,
+                                                        &principal,
+                                                        &scope,
                                                         &lane_key,
                                                         &ctx,
                                                         owner_id,
@@ -392,6 +430,8 @@ impl Orchestrator {
                                                 &source,
                                                 &model_input_content,
                                                 &intent_source_content,
+                                                &principal,
+                                                &scope,
                                                 &lane_key,
                                                 &ctx,
                                                 owner_id,
@@ -412,6 +452,8 @@ impl Orchestrator {
                                         &source,
                                         &model_input_content,
                                         &intent_source_content,
+                                        &principal,
+                                        &scope,
                                         &lane_key,
                                         &ctx,
                                         owner_id,
@@ -434,7 +476,7 @@ impl Orchestrator {
                                 .filter_map(|name| self.tool_registry.get(name))
                                 .map(|t| t.definition.clone())
                                 .collect();
-                            let overrides = super::query_handler::LoopOverrides {
+                            let overrides = super::query_handler::LoopOverrides::DeepQuery {
                                 max_rounds: deep_cfg.deep_query_max_rounds,
                                 max_tools_per_round: deep_cfg.deep_query_max_tools_per_round,
                                 override_tools,
@@ -444,6 +486,8 @@ impl Orchestrator {
                                 &source,
                                 &model_input_content,
                                 &intent_source_content,
+                                &principal,
+                                &scope,
                                 &lane_key,
                                 &ctx,
                                 owner_id,
@@ -466,6 +510,8 @@ impl Orchestrator {
                         &source,
                         &model_input_content,
                         &intent_source_content,
+                        &principal,
+                        &scope,
                         &lane_key,
                         &ctx,
                         owner_id,
@@ -512,6 +558,8 @@ impl Orchestrator {
                                 &source,
                                 &model_input_content,
                                 &intent_source_content,
+                                &principal,
+                                &scope,
                                 &lane_key,
                                 &ctx,
                                 owner_id,
@@ -559,6 +607,8 @@ impl Orchestrator {
                                         &source,
                                         &model_input_content,
                                         &intent_source_content,
+                                        &principal,
+                                        &scope,
                                         &lane_key,
                                         &ctx,
                                         owner_id,
@@ -584,6 +634,7 @@ impl Orchestrator {
                                 &intent_source_content,
                                 &model_input_content,
                                 &principal,
+                                &scope,
                                 &lane_key,
                                 &ctx,
                                 owner_id,
@@ -606,6 +657,7 @@ impl Orchestrator {
                         &intent_source_content,
                         &model_input_content,
                         &principal,
+                        &scope,
                         &lane_key,
                         &ctx,
                         owner_id,
@@ -625,6 +677,7 @@ impl Orchestrator {
                 &intent_source_content,
                 &model_input_content,
                 &principal,
+                &scope,
                 &lane_key,
                 &ctx,
                 owner_id,

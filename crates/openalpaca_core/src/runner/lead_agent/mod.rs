@@ -188,6 +188,12 @@ pub async fn run_lead_agent(
         workspace_id: workspace_id.clone(),
         skill_stack: vec![],
         effective_constraints: None,
+        lane_key: Some(lane_key.to_string()),
+        source: Some(source.to_string()),
+        request_id: None,
+        principal: None,
+        scope: None,
+        workspace_path: None,
     };
 
     // Build a per-request ToolRegistry containing the base tools plus

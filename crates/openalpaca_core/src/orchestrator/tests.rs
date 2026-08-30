@@ -2101,3 +2101,388 @@ async fn test_steer_prefix_flag_off_routes_unchanged() {
     // Nothing was pushed to the (manually registered) inbox.
     assert!(orch.shared_context.steering_inbox("task-1").unwrap().is_empty());
 }
+
+// ── Routing V2: tool-mode main loop (mode = "tool") ─────────────────
+
+fn tool_mode_config() -> DaemonConfig {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.routing.mode = "tool".to_string();
+    config
+}
+
+fn make_orchestrator_with_llm_agents_and_config(
+    router: Arc<openalpaca_llm::LlmRouter>,
+    agents: Vec<SubAgent>,
+    config: DaemonConfig,
+) -> Orchestrator {
+    let ctx = Arc::new(SharedContext::new());
+    for a in &agents {
+        ctx.agent_registry.register_template(template_from_agent(a));
+        ctx.agent_registry.register(a.clone());
+    }
+    let lanes = Arc::new(LaneManager::new());
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let registry = make_tool_registry();
+    Orchestrator::new(
+        ctx,
+        lanes,
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        None,
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(config)),
+    )
+}
+
+/// Scripted provider for tool-mode tests: when the request carries the
+/// scripted tool and no tool result has landed yet, emit the tool call;
+/// every other request (round 2, or the detached lead-agent loop, whose
+/// tool surface differs) gets the plain final text.
+struct ToolModeMockLlm {
+    tool_call: Option<(String, serde_json::Value)>,
+    final_text: String,
+    requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for ToolModeMockLlm {
+    fn name(&self) -> &str {
+        "tool-mode-mock"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    async fn chat(
+        &self,
+        request: ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        use openalpaca_llm::{ChatResponse, FinishReason, Usage};
+        self.requests.lock().unwrap().push(request.clone());
+        if let Some((ref name, ref args)) = self.tool_call {
+            let has_tool = request.tools.iter().any(|t| &t.name == name);
+            let has_tool_result = request
+                .messages
+                .iter()
+                .any(|m| matches!(m.role, openalpaca_llm::Role::Tool));
+            if has_tool && !has_tool_result {
+                return Ok(ChatResponse {
+                    content: String::new(),
+                    tool_calls: vec![openalpaca_llm::ToolCall {
+                        id: "tc_1".to_string(),
+                        name: name.clone(),
+                        arguments: args.clone(),
+                    }],
+                    model: "mock-model".to_string(),
+                    usage: Usage {
+                        input_tokens: 20,
+                        output_tokens: 10,
+                        ..Default::default()
+                    },
+                    finish_reason: FinishReason::ToolUse,
+                    thinking: None,
+                    parts: None,
+                });
+            }
+        }
+        Ok(ChatResponse {
+            content: self.final_text.clone(),
+            tool_calls: vec![],
+            model: "mock-model".to_string(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        })
+    }
+}
+
+fn make_tool_mode_orchestrator(
+    tool_call: Option<(String, serde_json::Value)>,
+    final_text: &str,
+    config: DaemonConfig,
+    agents: Vec<SubAgent>,
+) -> (Orchestrator, Arc<std::sync::Mutex<Vec<ChatRequest>>>) {
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(ToolModeMockLlm {
+            tool_call,
+            final_text: final_text.to_string(),
+            requests: requests.clone(),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let orch = make_orchestrator_with_llm_agents_and_config(Arc::new(router), agents, config);
+    (orch, requests)
+}
+
+async fn send_tool_mode(orch: &Orchestrator, request_id: Uuid, content: &str) -> String {
+    orch.handle_message(
+        request_id,
+        "cli".to_string(),
+        content.to_string(),
+        Principal::User {
+            global_id: "user1".to_string(),
+        },
+        Scope::Global,
+        "user1:cli".to_string(),
+        None,
+        None,
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_tool_mode_chat_answers_inline_without_planner() {
+    let (orch, requests) = make_tool_mode_orchestrator(
+        None,
+        "The borrow checker enforces ownership at compile time.",
+        tool_mode_config(),
+        vec![],
+    );
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_tool_mode(
+        &orch,
+        Uuid::new_v4(),
+        "Tell me about the Rust borrow checker in depth",
+    )
+    .await;
+    assert_eq!(reply, "The borrow checker enforces ownership at compile time.");
+
+    // Exactly ONE LLM call — no planner / triage call preceded the loop.
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "planner/triage must be skipped in tool mode");
+
+    // The main loop carried the core tool set (no workflow tools — the lane
+    // has no active workflows), the model-relay guidance, and caching.
+    let tool_names: Vec<&str> = requests[0].tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(tool_names.contains(&"start_workflow"), "tools: {tool_names:?}");
+    assert!(tool_names.contains(&"task_status"), "tools: {tool_names:?}");
+    assert!(!tool_names.contains(&"steer_workflow"), "tools: {tool_names:?}");
+    assert!(requests[0].enable_caching, "caching flip must reach the request");
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|m| m.content.contains("<workflow_relay_rules>")),
+        "relay guidance missing from the main-loop prompt"
+    );
+
+    // OrchestrationStage records the new mode.
+    assert_eq!(orchestration_modes(&mut rx), vec!["main_loop".to_string()]);
+}
+
+#[tokio::test]
+async fn test_tool_mode_task_message_starts_workflow() {
+    let (orch, requests) = make_tool_mode_orchestrator(
+        Some((
+            "start_workflow".to_string(),
+            serde_json::json!({
+                "goal": "Research the Rust borrow checker end to end",
+                "title": "Borrow checker research"
+            }),
+        )),
+        "Started \"Borrow checker research\" in the background — keep chatting while it runs.",
+        tool_mode_config(),
+        vec![make_agent("lead", vec!["orchestration"])],
+    );
+    let mut rx = orch.bus.subscribe();
+    let request_id = Uuid::new_v4();
+
+    let reply = send_tool_mode(
+        &orch,
+        request_id,
+        "Please research the Rust borrow checker end to end",
+    )
+    .await;
+
+    // The model's own text IS the reply — no canonical-ack swap.
+    assert_eq!(
+        reply,
+        "Started \"Borrow checker research\" in the background — keep chatting while it runs."
+    );
+
+    // Structured delegation populated from the result cell.
+    let delegation = orch
+        .delegation_map
+        .get(&request_id)
+        .expect("delegation must be recorded for the started workflow");
+    assert_eq!(delegation.title, "Borrow checker research");
+    assert!(!delegation.task_id.is_empty());
+    let task_id = delegation.task_id.clone();
+    drop(delegation);
+
+    // The task registered and both TaskCreated + WorkflowStarted fired.
+    assert_eq!(orch.shared_context.task_registry.count(), 1);
+    let mut saw_task_created = false;
+    let mut saw_workflow_started = false;
+    let mut stage_mode = None;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            SystemEvent::TaskCreated { task_id: tid, .. } => {
+                assert_eq!(tid, task_id);
+                saw_task_created = true;
+            }
+            SystemEvent::WorkflowStarted {
+                request_id: rid,
+                task_id: tid,
+                lane_key,
+                title,
+                ..
+            } => {
+                assert_eq!(rid, request_id);
+                assert_eq!(tid, task_id);
+                assert_eq!(lane_key, "user1:cli");
+                assert_eq!(title, "Borrow checker research");
+                saw_workflow_started = true;
+            }
+            SystemEvent::OrchestrationStage { mode, .. } => stage_mode = Some(mode),
+            _ => {}
+        }
+    }
+    assert!(saw_task_created, "TaskCreated was not published");
+    assert!(saw_workflow_started, "WorkflowStarted was not published");
+    assert_eq!(stage_mode.as_deref(), Some("main_loop"));
+
+    // Round 2 of the MAIN loop saw the tool result naming the task.
+    let requests = requests.lock().unwrap();
+    let round2_has_result = requests.iter().any(|r| {
+        r.messages.iter().any(|m| {
+            matches!(m.role, openalpaca_llm::Role::Tool)
+                && m.content.contains("Workflow started in the background")
+        })
+    });
+    assert!(round2_has_result, "start_workflow tool result never reached the model");
+}
+
+#[tokio::test]
+async fn test_tool_mode_at_cap_start_returns_directive_error_and_model_relays() {
+    let mut config = tool_mode_config();
+    config.orchestrator.routing.max_workflows_per_lane = 1;
+    let (orch, requests) = make_tool_mode_orchestrator(
+        Some((
+            "start_workflow".to_string(),
+            serde_json::json!({"goal": "Another big research task"}),
+        )),
+        "One workflow is already running here — I can steer it or queue this as a follow-up.",
+        config,
+        vec![make_agent("lead", vec!["orchestration"])],
+    );
+    // Lane already at the cap.
+    orch.shared_context
+        .task_registry
+        .register("existing-task".to_string(), "Existing work".to_string());
+    orch.shared_context
+        .register_workflow_for_lane("user1:cli", "existing-task");
+    let mut rx = orch.bus.subscribe();
+    let request_id = Uuid::new_v4();
+
+    let reply = send_tool_mode(&orch, request_id, "Please run another big research task").await;
+
+    // The model relays the alternatives in its own words.
+    assert_eq!(
+        reply,
+        "One workflow is already running here — I can steer it or queue this as a follow-up."
+    );
+
+    // Nothing dispatched: no delegation, no WorkflowStarted, no new task.
+    assert!(orch.delegation_map.get(&request_id).is_none());
+    assert_eq!(orch.shared_context.task_registry.count(), 1);
+    while let Ok(event) = rx.try_recv() {
+        assert!(
+            !matches!(event, SystemEvent::WorkflowStarted { .. }),
+            "WorkflowStarted must not fire at the cap"
+        );
+    }
+
+    // The directive error reached the model as the tool result.
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let round2_has_directive = requests[1].messages.iter().any(|m| {
+        matches!(m.role, openalpaca_llm::Role::Tool)
+            && m.content.contains("Workflow limit reached")
+            && m.content.contains("queue_followup")
+    });
+    assert!(round2_has_directive, "directive cap error never reached the model");
+}
+
+#[tokio::test]
+async fn test_tool_mode_steer_workflow_injects_mid_workflow() {
+    let mut config = tool_mode_config();
+    config.orchestrator.routing.steering_enabled = true;
+    let (orch, requests) = make_tool_mode_orchestrator(
+        Some((
+            "steer_workflow".to_string(),
+            serde_json::json!({"task_id": "task-1", "message": "focus on unit tests"}),
+        )),
+        "Passed that along to the running research task.",
+        config,
+        vec![],
+    );
+    // A workflow is running on this lane with a live steering inbox.
+    orch.shared_context
+        .task_registry
+        .register("task-1".to_string(), "Research task".to_string());
+    let inbox = Arc::new(crate::runner::steering::SteeringInbox::default());
+    orch.shared_context
+        .register_steering_inbox("task-1", inbox.clone());
+    orch.shared_context
+        .register_workflow_for_lane("user1:cli", "task-1");
+    let request_id = Uuid::new_v4();
+
+    let reply = send_tool_mode(
+        &orch,
+        request_id,
+        "Actually make sure it focuses on unit tests",
+    )
+    .await;
+    assert_eq!(reply, "Passed that along to the running research task.");
+
+    // The interjection landed in the workflow's inbox with the caller identity.
+    let queued = inbox.drain_all();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].text, "focus on unit tests");
+    assert_eq!(
+        queued[0].principal,
+        Principal::User {
+            global_id: "user1".to_string()
+        }
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    // Round 1: workflow-aware tool surface + live workflow context block.
+    let tool_names: Vec<&str> = requests[0].tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(tool_names.contains(&"steer_workflow"), "tools: {tool_names:?}");
+    assert!(tool_names.contains(&"queue_followup"), "tools: {tool_names:?}");
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|m| m.content.contains("<active_workflows>") && m.content.contains("task-1")),
+        "workflow context block missing"
+    );
+    // Round 2: the steer confirmation reached the model as the tool result.
+    assert!(
+        requests[1].messages.iter().any(|m| {
+            matches!(m.role, openalpaca_llm::Role::Tool)
+                && m.content.contains("Steering message queued")
+        }),
+        "steer_workflow tool result never reached the model"
+    );
+}

@@ -109,6 +109,13 @@ pub(super) async fn execute_pipeline_step(
         workspace_id: pctx.workspace_id.clone(),
         skill_stack: vec![],
         effective_constraints: None,
+        // Pipeline steps are lane-detached: no lane/request threading here.
+        lane_key: None,
+        source: None,
+        request_id: None,
+        principal: None,
+        scope: None,
+        workspace_path: None,
     };
     let mut per_request_sandbox =
         SandboxManager::with_defaults(pctx.tool_registry.clone(), pctx.bus.clone());

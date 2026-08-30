@@ -105,6 +105,7 @@ async fn test_handle_event_echo() {
             attachments: Vec::new(),
             workspace_path: None,
             stream_id: None,
+            lane_override: None,
         })
         .await;
     assert_eq!(resp.lane_key.user_id, "user1");
@@ -134,6 +135,7 @@ async fn test_handle_event_propagates_delegation() {
             attachments: Vec::new(),
             workspace_path: None,
             stream_id: None,
+            lane_override: None,
         })
         .await;
     assert!(!resp.is_error);
@@ -158,6 +160,7 @@ async fn test_handle_event_creates_lane() {
         attachments: Vec::new(),
         workspace_path: None,
         stream_id: None,
+        lane_override: None,
     })
     .await;
     assert_eq!(gw.lane_manager.conversation_count(), 1);
@@ -174,6 +177,7 @@ async fn test_handle_event_creates_lane() {
         attachments: Vec::new(),
         workspace_path: None,
         stream_id: None,
+        lane_override: None,
     })
     .await;
     assert_eq!(gw.lane_manager.conversation_count(), 1);
@@ -193,6 +197,7 @@ async fn test_handle_event_error_propagation() {
             attachments: Vec::new(),
             workspace_path: None,
             stream_id: None,
+            lane_override: None,
         })
         .await;
     assert!(resp.is_error);
@@ -214,6 +219,7 @@ async fn test_handle_event_emits_user_request() {
         attachments: Vec::new(),
         workspace_path: None,
         stream_id: None,
+        lane_override: None,
     })
     .await;
 
@@ -244,6 +250,7 @@ async fn test_handle_event_records_message_on_lane() {
         attachments: Vec::new(),
         workspace_path: None,
         stream_id: None,
+        lane_override: None,
     })
     .await;
     gw.handle_event(GatewayRequest {
@@ -257,6 +264,7 @@ async fn test_handle_event_records_message_on_lane() {
         attachments: Vec::new(),
         workspace_path: None,
         stream_id: None,
+        lane_override: None,
     })
     .await;
 
@@ -284,6 +292,7 @@ async fn test_principal_aware_lane_derivation() {
             attachments: Vec::new(),
             workspace_path: None,
             stream_id: None,
+            lane_override: None,
         })
         .await;
     assert_eq!(resp.lane_key.user_id, "global1");
@@ -306,6 +315,7 @@ async fn test_principal_aware_lane_derivation() {
             attachments: Vec::new(),
             workspace_path: None,
             stream_id: None,
+            lane_override: None,
         })
         .await;
     assert_eq!(resp2.lane_key.user_id, "tg_user_456");
@@ -324,6 +334,7 @@ async fn test_principal_aware_lane_derivation() {
             attachments: Vec::new(),
             workspace_path: None,
             stream_id: None,
+            lane_override: None,
         })
         .await;
     assert_eq!(resp3.lane_key.user_id, "tg_user_789");
@@ -368,6 +379,7 @@ async fn test_gateway_persists_messages() {
         attachments: Vec::new(),
         workspace_path: None,
         stream_id: None,
+        lane_override: None,
     })
     .await;
 
@@ -421,6 +433,7 @@ async fn test_full_gateway_stack_integration() {
             attachments: Vec::new(),
             workspace_path: None,
             stream_id: None,
+            lane_override: None,
         })
         .await;
     let r2 = gw
@@ -434,6 +447,7 @@ async fn test_full_gateway_stack_integration() {
             attachments: Vec::new(),
             workspace_path: None,
             stream_id: None,
+            lane_override: None,
         })
         .await;
     let r3 = gw
@@ -448,6 +462,7 @@ async fn test_full_gateway_stack_integration() {
             attachments: Vec::new(),
             workspace_path: None,
             stream_id: None,
+            lane_override: None,
         })
         .await;
 
@@ -486,4 +501,51 @@ async fn test_full_gateway_stack_integration() {
 
     // Health
     assert!(gw.is_healthy());
+}
+
+#[tokio::test]
+async fn test_handle_event_lane_override_pins_originating_lane() {
+    // Routing V2 lane continuity: an Internal-source re-entry (follow-up
+    // runner) with lane_override lands on the ORIGINATING lane, not the
+    // "user:internal" lane the source would derive.
+    let gw = make_gateway();
+    let resp = gw
+        .handle_event(GatewayRequest {
+            source: EventSource::Internal,
+            content: "follow-up work".to_string(),
+            principal: Principal::User {
+                global_id: "junpei".to_string(),
+            },
+            scope: Scope::Global,
+            attachments: Vec::new(),
+            workspace_path: None,
+            stream_id: None,
+            lane_override: Some("junpei:cli".to_string()),
+        })
+        .await;
+    assert_eq!(resp.lane_key.user_id, "junpei");
+    assert_eq!(resp.lane_key.source, "cli");
+    assert!(!resp.is_error);
+}
+
+#[tokio::test]
+async fn test_handle_event_malformed_lane_override_falls_back() {
+    let gw = make_gateway();
+    let resp = gw
+        .handle_event(GatewayRequest {
+            source: EventSource::Internal,
+            content: "hello".to_string(),
+            principal: Principal::User {
+                global_id: "junpei".to_string(),
+            },
+            scope: Scope::Global,
+            attachments: Vec::new(),
+            workspace_path: None,
+            stream_id: None,
+            lane_override: Some("no_colon".to_string()),
+        })
+        .await;
+    // Malformed override → derived lane (principal + internal source).
+    assert_eq!(resp.lane_key.user_id, "junpei");
+    assert_eq!(resp.lane_key.source, "internal");
 }

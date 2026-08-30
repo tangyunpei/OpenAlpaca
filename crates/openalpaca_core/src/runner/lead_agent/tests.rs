@@ -763,6 +763,75 @@ async fn test_queue_followup_system_owner_maps_to_system_principal() {
     assert_eq!(principal, crate::security::policy::Principal::System);
 }
 
+#[tokio::test]
+async fn test_queue_followup_main_loop_uses_ctx_identity_and_workspace_path() {
+    // Main-loop variant (Routing V2 Phase 2): identity + workspace path come
+    // from the invocation's ToolContext, no source task recorded.
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let tool = QueueFollowupTool::for_main_loop(
+        Some(db.clone()),
+        EventBus::default(),
+        "junpei:cli".to_string(),
+        "fallback-owner".to_string(),
+    );
+    let ctx = crate::tools::registry::ToolContext {
+        owner_id: Some("junpei".to_string()),
+        principal: Some(crate::security::policy::Principal::User {
+            global_id: "junpei".to_string(),
+        }),
+        workspace_path: Some("/ws/project".to_string()),
+        ..Default::default()
+    };
+    tool.execute_with_context(&serde_json::json!({"description": "Do it later"}), &ctx)
+        .await
+        .unwrap();
+
+    let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+    let rows = repo.list_queued_by_lane("junpei:cli").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].source_task_id, None);
+    assert_eq!(rows[0].workspace_path.as_deref(), Some("/ws/project"));
+    let principal: crate::security::policy::Principal =
+        serde_json::from_str(&rows[0].principal_json).unwrap();
+    assert_eq!(
+        principal,
+        crate::security::policy::Principal::User {
+            global_id: "junpei".to_string()
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_queue_followup_ctx_without_principal_falls_back_to_created_by() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let tool = QueueFollowupTool::for_main_loop(
+        Some(db.clone()),
+        EventBus::default(),
+        "junpei:cli".to_string(),
+        "junpei".to_string(),
+    );
+    tool.execute_with_context(
+        &serde_json::json!({"description": "later"}),
+        &crate::tools::registry::ToolContext::default(),
+    )
+    .await
+    .unwrap();
+
+    let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+    let rows = repo.list_queued_by_lane("junpei:cli").unwrap();
+    let principal: crate::security::policy::Principal =
+        serde_json::from_str(&rows[0].principal_json).unwrap();
+    assert_eq!(
+        principal,
+        crate::security::policy::Principal::User {
+            global_id: "junpei".to_string()
+        }
+    );
+    assert_eq!(rows[0].workspace_path, None);
+}
+
 // ── Routing V2: wait_for_subagents steering interrupt ──────────────
 
 fn wait_steering_msg(text: &str) -> crate::runner::steering::SteeringMsg {

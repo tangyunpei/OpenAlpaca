@@ -161,120 +161,137 @@ pub fn apply_task_action(
     Ok(new_status)
 }
 
+/// Resolve a task-status query to the same JSON `handle_task_query` returns
+/// (shared core). With a `task_id`: that task's record (DB first, registry
+/// fallback). Without: the creator's active tasks, falling back to recent
+/// terminal ones.
+///
+/// Shared by the intent path (`Orchestrator::handle_task_query`) and the
+/// `task_status` builtin tool (Routing V2).
+pub(crate) fn task_status_query(
+    db: Option<&Database>,
+    shared_context: &SharedContext,
+    task_id: Option<String>,
+    created_by: &str,
+) -> Result<String, String> {
+    match task_id {
+        Some(id) => {
+            // Try DB first, fall back to in-memory registry
+            if let Some(db) = db {
+                let repo = TaskRepository::new(db);
+                if let Ok(Some(task)) = repo.get(&id) {
+                    return Ok(db_task_to_json(&task));
+                }
+            }
+            match shared_context.task_registry.get(&id) {
+                Some(entry) => Ok(task_entry_to_json(&entry)),
+                None => Ok(serde_json::json!({
+                    "error": "not_found",
+                    "message": format!("Task '{}' not found", id)
+                })
+                .to_string()),
+            }
+        }
+        None => {
+            // Try DB first, fall back to in-memory registry
+            if let Some(db) = db {
+                let repo = TaskRepository::new(db);
+                if let Ok(mut tasks) = repo.list_active_by_creator(created_by, 20) {
+                    let mut scope = "active";
+                    if tasks.is_empty()
+                        && let Ok(recent) = repo.list_by_creator(created_by, 20)
+                    {
+                        // If nothing is running, surface recent terminal tasks so
+                        // "what was the result?" queries can still resolve.
+                        tasks = recent
+                            .into_iter()
+                            .filter(|t| t.status.is_terminal())
+                            .take(5)
+                            .collect();
+                        scope = "recent_terminal";
+                    }
+
+                    let task_list: Vec<serde_json::Value> = tasks
+                        .iter()
+                        .map(|t| {
+                            let (outcome_summary, no_artifact_reason, artifacts) =
+                                parse_outcome(t)
+                                    .map(|p| {
+                                        (
+                                            p.outcome_summary,
+                                            p.no_artifact_reason,
+                                            serde_json::json!(p.artifacts),
+                                        )
+                                    })
+                                    .unwrap_or((None, None, serde_json::json!([])));
+
+                            serde_json::json!({
+                                "task_id": t.id,
+                                "title": t.title,
+                                "status": t.status.as_str(),
+                                "progress_current": t.progress_current,
+                                "progress_total": t.progress_total,
+                                "result_summary": t.result_summary,
+                                "created_at": t.created_at.to_rfc3339(),
+                                "completed_at": t.completed_at.map(|ts| ts.to_rfc3339()),
+                                "outcome_kind": t.outcome_kind.map(|k| k.as_str()),
+                                "artifact_count": t.artifact_count,
+                                "outcome_summary": outcome_summary,
+                                "no_artifact_reason": no_artifact_reason,
+                                "artifacts": artifacts,
+                            })
+                        })
+                        .collect();
+                    return Ok(serde_json::json!({
+                        "tasks": task_list,
+                        "count": task_list.len(),
+                        "scope": scope,
+                    })
+                    .to_string());
+                }
+            }
+            let active = shared_context.task_registry.list_active();
+            let tasks: Vec<serde_json::Value> = active
+                .iter()
+                .map(|e| {
+                    let mut v = serde_json::json!({
+                        "task_id": e.task_id,
+                        "title": e.title,
+                        "status": e.status.as_str(),
+                        "progress_current": e.progress_current,
+                        "progress_total": e.progress_total,
+                    });
+                    if let Some(ref dag) = e.dag_summary {
+                        v.as_object_mut().unwrap().insert(
+                            "dag_summary".to_string(),
+                            serde_json::json!({
+                                "total_nodes": dag.total_nodes,
+                                "completed_nodes": dag.completed_nodes,
+                                "running_nodes": dag.running_nodes,
+                                "failed_nodes": dag.failed_nodes,
+                            }),
+                        );
+                    }
+                    v
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "tasks": tasks,
+                "count": tasks.len(),
+            })
+            .to_string())
+        }
+    }
+}
+
 impl Orchestrator {
+    /// Thin wrapper over [`task_status_query`] (Routing V2 shared core).
     pub(super) fn handle_task_query(
         &self,
         task_id: Option<String>,
         created_by: &str,
     ) -> Result<String, String> {
-        match task_id {
-            Some(id) => {
-                // Try DB first, fall back to in-memory registry
-                if let Some(ref db) = self.db {
-                    let repo = TaskRepository::new(db);
-                    if let Ok(Some(task)) = repo.get(&id) {
-                        return Ok(db_task_to_json(&task));
-                    }
-                }
-                match self.shared_context.task_registry.get(&id) {
-                    Some(entry) => Ok(task_entry_to_json(&entry)),
-                    None => Ok(serde_json::json!({
-                        "error": "not_found",
-                        "message": format!("Task '{}' not found", id)
-                    })
-                    .to_string()),
-                }
-            }
-            None => {
-                // Try DB first, fall back to in-memory registry
-                if let Some(ref db) = self.db {
-                    let repo = TaskRepository::new(db);
-                    if let Ok(mut tasks) = repo.list_active_by_creator(created_by, 20) {
-                        let mut scope = "active";
-                        if tasks.is_empty()
-                            && let Ok(recent) = repo.list_by_creator(created_by, 20)
-                        {
-                            // If nothing is running, surface recent terminal tasks so
-                            // "what was the result?" queries can still resolve.
-                            tasks = recent
-                                .into_iter()
-                                .filter(|t| t.status.is_terminal())
-                                .take(5)
-                                .collect();
-                            scope = "recent_terminal";
-                        }
-
-                        let task_list: Vec<serde_json::Value> = tasks
-                            .iter()
-                            .map(|t| {
-                                let (outcome_summary, no_artifact_reason, artifacts) =
-                                    parse_outcome(t)
-                                        .map(|p| {
-                                            (
-                                                p.outcome_summary,
-                                                p.no_artifact_reason,
-                                                serde_json::json!(p.artifacts),
-                                            )
-                                        })
-                                        .unwrap_or((None, None, serde_json::json!([])));
-
-                                serde_json::json!({
-                                    "task_id": t.id,
-                                    "title": t.title,
-                                    "status": t.status.as_str(),
-                                    "progress_current": t.progress_current,
-                                    "progress_total": t.progress_total,
-                                    "result_summary": t.result_summary,
-                                    "created_at": t.created_at.to_rfc3339(),
-                                    "completed_at": t.completed_at.map(|ts| ts.to_rfc3339()),
-                                    "outcome_kind": t.outcome_kind.map(|k| k.as_str()),
-                                    "artifact_count": t.artifact_count,
-                                    "outcome_summary": outcome_summary,
-                                    "no_artifact_reason": no_artifact_reason,
-                                    "artifacts": artifacts,
-                                })
-                            })
-                            .collect();
-                        return Ok(serde_json::json!({
-                            "tasks": task_list,
-                            "count": task_list.len(),
-                            "scope": scope,
-                        })
-                        .to_string());
-                    }
-                }
-                let active = self.shared_context.task_registry.list_active();
-                let tasks: Vec<serde_json::Value> = active
-                    .iter()
-                    .map(|e| {
-                        let mut v = serde_json::json!({
-                            "task_id": e.task_id,
-                            "title": e.title,
-                            "status": e.status.as_str(),
-                            "progress_current": e.progress_current,
-                            "progress_total": e.progress_total,
-                        });
-                        if let Some(ref dag) = e.dag_summary {
-                            v.as_object_mut().unwrap().insert(
-                                "dag_summary".to_string(),
-                                serde_json::json!({
-                                    "total_nodes": dag.total_nodes,
-                                    "completed_nodes": dag.completed_nodes,
-                                    "running_nodes": dag.running_nodes,
-                                    "failed_nodes": dag.failed_nodes,
-                                }),
-                            );
-                        }
-                        v
-                    })
-                    .collect();
-                Ok(serde_json::json!({
-                    "tasks": tasks,
-                    "count": tasks.len(),
-                })
-                .to_string())
-            }
-        }
+        task_status_query(self.db.as_ref(), &self.shared_context, task_id, created_by)
     }
 
     pub(super) fn handle_task_control(

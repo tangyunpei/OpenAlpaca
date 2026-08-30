@@ -1270,8 +1270,7 @@ fn test_nested_skill_context_inheritance() {
         task_id: Some("task-1".into()),
         owner_id: Some("user-1".into()),
         workspace_id: Some("ws-1".into()),
-        skill_stack: vec![],
-        effective_constraints: None,
+        ..Default::default()
     };
 
     let child_ctx = parent_ctx.with_skill_pushed("skill-A");
@@ -1920,4 +1919,123 @@ async fn test_steering_closed_inbox_drains_nothing() {
     );
     // The leftover stays queued for the cleanup path.
     assert_eq!(inbox.drain_all().len(), 1);
+}
+
+#[tokio::test]
+async fn test_steering_error_exit_reappends_undelivered() {
+    // Widened re-append (Routing V2 chunk 3): an interjection drained into a
+    // request whose LLM call FAILS was never seen by the model — the Error
+    // exit must return it to the inbox for follow-up conversion.
+    let inbox = Arc::new(SteeringInbox::default());
+    let hook_inbox = Arc::clone(&inbox);
+    let provider = SteeringHookProvider::new(
+        vec![
+            Ok(MockProvider::tool_use_response()),
+            Err(LlmError::NotConfigured),
+        ],
+        Box::new(move |idx| {
+            if idx == 0 {
+                hook_inbox.push(steering_msg("urgent change")).unwrap();
+            }
+        }),
+    );
+    let config = LoopConfig {
+        enable_caching: false,
+        steering: Some(Arc::clone(&inbox)),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("start")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result.finish_reason, LoopFinishReason::Error(_)));
+    // Round 2's request did carry the interjection, but the call failed.
+    let requests = provider.requests_seen();
+    assert!(contains_interjection(&requests[1], "urgent change"));
+    // The undelivered message is back in the inbox.
+    let leftover = inbox.drain_all();
+    assert_eq!(leftover.len(), 1);
+    assert_eq!(leftover[0].text, "urgent change");
+}
+
+#[tokio::test]
+async fn test_steering_cancel_during_llm_call_reappends_undelivered() {
+    // Widened re-append (Routing V2 chunk 3): cancellation racing the LLM
+    // call that carried a drained interjection must return the message to
+    // the inbox instead of dropping it.
+    use tokio_util::sync::CancellationToken;
+
+    struct CancelSecondCallProvider {
+        inbox: Arc<SteeringInbox>,
+        token: CancellationToken,
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CancelSecondCallProvider {
+        fn name(&self) -> &str {
+            "cancel-second"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if idx == 0 {
+                self.inbox.push(steering_msg("mid-flight fix")).unwrap();
+                Ok(MockProvider::tool_use_response())
+            } else {
+                // Cancel while "in flight", then stall so the select! races
+                // the cancellation branch to victory.
+                self.token.cancel();
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Ok(MockProvider::simple_response("never delivered"))
+            }
+        }
+    }
+
+    let inbox = Arc::new(SteeringInbox::default());
+    let token = CancellationToken::new();
+    let provider = CancelSecondCallProvider {
+        inbox: Arc::clone(&inbox),
+        token: token.clone(),
+        call_count: AtomicUsize::new(0),
+    };
+    let config = LoopConfig {
+        enable_caching: false,
+        steering: Some(Arc::clone(&inbox)),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("start")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        Some(token),
+        None,
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Cancelled);
+    // The interrupted call never delivered the drained message — it must be
+    // back in the inbox for follow-up conversion.
+    let leftover = inbox.drain_all();
+    assert_eq!(leftover.len(), 1);
+    assert_eq!(leftover[0].text, "mid-flight fix");
 }

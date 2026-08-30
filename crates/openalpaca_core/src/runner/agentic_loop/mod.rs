@@ -174,6 +174,17 @@ pub async fn run_agentic_loop_routed(
     .await
 }
 
+/// Return drained-but-unsent steering messages to the inbox on a loop exit
+/// that never delivered them to an LLM call (budget, cancellation, or error
+/// exits), so the cleanup path can convert them to follow-ups.
+fn return_pending_steering(config: &LoopConfig, pending: &mut Vec<SteeringMsg>) {
+    if let Some(ref inbox) = config.steering
+        && !pending.is_empty()
+    {
+        inbox.push_front_all(std::mem::take(pending));
+    }
+}
+
 /// Core agentic loop implementation shared by both Direct and Router backends.
 #[allow(clippy::too_many_arguments)]
 async fn run_agentic_loop_inner(
@@ -261,6 +272,10 @@ async fn run_agentic_loop_inner(
                     rounds = state.rounds,
                     "Agentic loop cancelled"
                 );
+                // A prior failed call may have left drained-but-unsent
+                // steering messages pending — return them for follow-up
+                // conversion (Routing V2, widened from the budget exits).
+                return_pending_steering(config, &mut pending_steering);
                 return state.result(LoopFinishReason::Cancelled);
             }
         }
@@ -287,11 +302,7 @@ async fn run_agentic_loop_inner(
                 );
                 // Return drained-but-unsent steering messages to the inbox
                 // so the cleanup path can convert them to follow-ups.
-                if let Some(ref inbox) = config.steering
-                    && !pending_steering.is_empty()
-                {
-                    inbox.push_front_all(std::mem::take(&mut pending_steering));
-                }
+                return_pending_steering(config, &mut pending_steering);
                 return state.result(LoopFinishReason::MaxRounds);
             }
         }
@@ -325,11 +336,7 @@ async fn run_agentic_loop_inner(
                 );
                 // Return drained-but-unsent steering messages to the inbox
                 // so the cleanup path can convert them to follow-ups.
-                if let Some(ref inbox) = config.steering
-                    && !pending_steering.is_empty()
-                {
-                    inbox.push_front_all(std::mem::take(&mut pending_steering));
-                }
+                return_pending_steering(config, &mut pending_steering);
                 return state.result(LoopFinishReason::CostExceeded);
             }
         }
@@ -526,6 +533,10 @@ async fn run_agentic_loop_inner(
                 ).instrument(llm_call_span.clone()) => result,
                 _ = token.cancelled() => {
                     tracing::info!(agent_id = agent_id, round = state.rounds + 1, "LLM call interrupted by cancellation");
+                    // The interrupted call never delivered this round's
+                    // drained steering messages — return them to the inbox
+                    // for follow-up conversion.
+                    return_pending_steering(config, &mut pending_steering);
                     return state.result(LoopFinishReason::Cancelled);
                 }
             }
@@ -878,6 +889,7 @@ async fn run_agentic_loop_inner(
                                 () = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
                                 () = token.cancelled() => {
                                     tracing::info!(agent_id = agent_id, rounds = state.rounds, "Agentic loop cancelled during retry backoff");
+                                    return_pending_steering(config, &mut pending_steering);
                                     return state.result(LoopFinishReason::Cancelled);
                                 }
                             }
@@ -894,6 +906,9 @@ async fn run_agentic_loop_inner(
                     error = %e,
                     "Agentic loop exiting: LLM error"
                 );
+                // The failed call never delivered this round's drained
+                // steering messages — return them for follow-up conversion.
+                return_pending_steering(config, &mut pending_steering);
                 return state.result(LoopFinishReason::Error(e.to_string()));
             }
         }

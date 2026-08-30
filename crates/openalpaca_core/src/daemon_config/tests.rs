@@ -145,6 +145,28 @@ max_tokens = 1024
 }
 
 #[test]
+fn test_batch_spawn_defaults_true_when_field_omitted_in_present_section() {
+    // Routing V2: batch_spawn_enabled uses a serde default fn returning true,
+    // so a present [execution.lead_agent_defaults] section that omits the
+    // field still gets true (previously field-level #[serde(default)] → false).
+    let toml_str = r#"
+[execution.lead_agent_defaults]
+max_rounds = 20
+"#;
+    let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.execution.lead_agent_defaults.max_rounds, 20);
+    assert!(config.execution.lead_agent_defaults.batch_spawn_enabled);
+
+    // An explicit false is still honored.
+    let toml_str = r#"
+[execution.lead_agent_defaults]
+batch_spawn_enabled = false
+"#;
+    let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+    assert!(!config.execution.lead_agent_defaults.batch_spawn_enabled);
+}
+
+#[test]
 fn test_skill_defaults_new_fields_default() {
     let config = DaemonConfig::default();
     let sd = &config.execution.skill_defaults;

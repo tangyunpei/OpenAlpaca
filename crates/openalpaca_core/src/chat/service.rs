@@ -156,6 +156,7 @@ impl ChatService {
                     scope: Scope::Global,
                     workspace_path,
                     stream_id: Some(sid.clone()),
+                    lane_override: None,
                 })
                 .await;
 

@@ -2,17 +2,27 @@ use regex::Regex;
 use std::borrow::Cow;
 
 /// Detect if the model hallucinated a send confirmation without calling the tool.
-/// Returns true if `send` was available, no tools were called, and the
-/// response text contains send-success patterns.
+/// Returns true if `send` was available, an actual send-intent signal was
+/// present (`send_intent`: the query suggested send, or recent turns show
+/// active send hints — see `detect_active_send_hints`), no tools were called,
+/// and the response text contains send-success patterns.
+///
+/// The `send_intent` requirement narrows the guard (Routing V2): with a broad
+/// tool surface, `send` being merely *available* must not turn a bare ✅ into
+/// a false positive.
 pub fn detect_hallucinated_send(
     tool_names: &[&str],
     tool_calls_made: usize,
     response: &str,
+    send_intent: bool,
 ) -> bool {
     if tool_calls_made > 0 {
         return false;
     }
     if !tool_names.contains(&"send") {
+        return false;
+    }
+    if !send_intent {
         return false;
     }
 
@@ -145,7 +155,8 @@ mod tests {
         assert!(detect_hallucinated_send(
             &["send"],
             0,
-            "✅ 发送成功！消息已通过Telegram发出。"
+            "✅ 发送成功！消息已通过Telegram发出。",
+            true
         ));
     }
 
@@ -154,7 +165,8 @@ mod tests {
         assert!(detect_hallucinated_send(
             &["send"],
             0,
-            "Message sent successfully via Telegram!"
+            "Message sent successfully via Telegram!",
+            true
         ));
     }
 
@@ -164,7 +176,8 @@ mod tests {
         assert!(!detect_hallucinated_send(
             &["send"],
             1,
-            "✅ 发送成功！"
+            "✅ 发送成功！",
+            true
         ));
     }
 
@@ -174,7 +187,8 @@ mod tests {
         assert!(!detect_hallucinated_send(
             &["web_fetch"],
             0,
-            "✅ 发送成功！"
+            "✅ 发送成功！",
+            true
         ));
     }
 
@@ -184,7 +198,8 @@ mod tests {
         assert!(!detect_hallucinated_send(
             &["send"],
             0,
-            "好的，我可以帮你发送消息。请告诉我收件人。"
+            "好的，我可以帮你发送消息。请告诉我收件人。",
+            true
         ));
     }
 
@@ -193,7 +208,38 @@ mod tests {
         assert!(detect_hallucinated_send(
             &["send"],
             0,
-            "消息已发送到你的Telegram联系人。"
+            "消息已发送到你的Telegram联系人。",
+            true
+        ));
+    }
+
+    #[test]
+    fn no_hallucination_without_send_intent_signal() {
+        // Narrowed guard (Routing V2): send available + zero calls + success
+        // text, but no send-intent signal → not a hallucination. Protects a
+        // broad tool surface (tool_selection="full") from bare-✅ false
+        // positives.
+        assert!(!detect_hallucinated_send(
+            &["send"],
+            0,
+            "✅ Task list updated successfully.",
+            false
+        ));
+        assert!(!detect_hallucinated_send(
+            &["send"],
+            0,
+            "Message sent successfully via Telegram!",
+            false
+        ));
+    }
+
+    #[test]
+    fn hallucination_still_detected_with_send_intent_signal() {
+        assert!(detect_hallucinated_send(
+            &["send"],
+            0,
+            "✅ Done!",
+            true
         ));
     }
 
@@ -204,7 +250,8 @@ mod tests {
         assert!(detect_hallucinated_send(
             &["send"],
             0,
-            "File sent successfully via Telegram!"
+            "File sent successfully via Telegram!",
+            true
         ));
     }
 
@@ -213,7 +260,8 @@ mod tests {
         assert!(detect_hallucinated_send(
             &["send"],
             0,
-            "文件已发送到你的Telegram联系人。"
+            "文件已发送到你的Telegram联系人。",
+            true
         ));
     }
 
@@ -222,7 +270,8 @@ mod tests {
         assert!(!detect_hallucinated_send(
             &["send"],
             1,
-            "文件已发送到你的Telegram联系人。"
+            "文件已发送到你的Telegram联系人。",
+            true
         ));
     }
 
@@ -231,7 +280,8 @@ mod tests {
         assert!(!detect_hallucinated_send(
             &["send"],
             0,
-            "请告诉我文件路径，我来帮你发送。"
+            "请告诉我文件路径，我来帮你发送。",
+            true
         ));
     }
 }

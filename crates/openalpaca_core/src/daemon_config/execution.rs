@@ -52,9 +52,14 @@ pub struct LeadAgentDefaults {
     /// Maximum number of concurrent subagents a single lead agent can have running.
     pub max_concurrent_subagents: usize,
     /// When true, lead agents get the `spawn_subagents_batch` tool for
-    /// spawning multiple subagents in a single tool call. Phase 2 feature flag.
-    #[serde(default)]
+    /// spawning multiple subagents in a single tool call. Default: true
+    /// (Routing V2 — batch spawn is the parallel fan-out primitive).
+    #[serde(default = "default_batch_spawn_enabled")]
     pub batch_spawn_enabled: bool,
+}
+
+fn default_batch_spawn_enabled() -> bool {
+    true
 }
 
 impl Default for LeadAgentDefaults {

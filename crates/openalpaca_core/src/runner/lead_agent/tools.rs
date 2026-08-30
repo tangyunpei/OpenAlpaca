@@ -249,6 +249,13 @@ impl BuiltInTool for SpawnSubagentTool {
             workspace_id: self.workspace_id.clone(),
             skill_stack: vec![],
             effective_constraints: None,
+            // Subagents are lane-detached: no lane/request threading here.
+            lane_key: None,
+            source: None,
+            request_id: None,
+            principal: None,
+            scope: None,
+            workspace_path: None,
         };
         let mut sandbox = SandboxManager::with_defaults(self.tool_registry.clone(), self.bus.clone());
         if let Some(ref broker) = self.confirmation_broker {
@@ -968,12 +975,19 @@ pub fn post_update_tool_definition() -> ToolDefinition {
 
 // ── QueueFollowupTool ────────────────────────────────────────────────
 
-/// Lead-agent tool that queues a follow-up item for the lane. The item runs
-/// as a fresh turn after this workflow completes (Routing V2).
+/// Tool that queues a follow-up item for the lane. The item runs as a fresh
+/// turn after the current workflow completes (Routing V2).
+///
+/// Two construction modes:
+/// - **Lead agent** (`new`): identity from the task's `created_by`, the
+///   running task recorded as `source_task_id`.
+/// - **Main loop** (`for_main_loop`): per-request, no source task — identity
+///   and workspace path come from the invocation's `ToolContext`.
 pub struct QueueFollowupTool {
     db: Option<Database>,
     bus: EventBus,
-    task_id: String,
+    /// Task the item is queued from (lead-agent mode); `None` in the main loop.
+    source_task_id: Option<String>,
     lane_key: String,
     created_by: String,
 }
@@ -989,16 +1003,35 @@ impl QueueFollowupTool {
         Self {
             db,
             bus,
-            task_id,
+            source_task_id: Some(task_id),
             lane_key,
             created_by,
         }
     }
-}
 
-#[async_trait]
-impl BuiltInTool for QueueFollowupTool {
-    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+    /// Main-loop variant: no source task; identity resolved per-invocation
+    /// from the `ToolContext` (falling back to `created_by`).
+    pub fn for_main_loop(
+        db: Option<Database>,
+        bus: EventBus,
+        lane_key: String,
+        created_by: String,
+    ) -> Self {
+        Self {
+            db,
+            bus,
+            source_task_id: None,
+            lane_key,
+            created_by,
+        }
+    }
+
+    fn queue(
+        &self,
+        arguments: &serde_json::Value,
+        principal: crate::security::policy::Principal,
+        workspace_path: Option<&str>,
+    ) -> Result<String, String> {
         let description = arguments
             .get("description")
             .and_then(|v| v.as_str())
@@ -1010,15 +1043,6 @@ impl BuiltInTool for QueueFollowupTool {
             return Err("Follow-up queue unavailable: no database configured".to_string());
         };
 
-        // Reconstruct the originating principal from the task owner so the
-        // follow-up can re-enter the front door with the right identity.
-        let principal = if self.created_by == "system" {
-            crate::security::policy::Principal::System
-        } else {
-            crate::security::policy::Principal::User {
-                global_id: self.created_by.clone(),
-            }
-        };
         let principal_json = serde_json::to_string(&principal)
             .map_err(|e| format!("Failed to serialize principal: {e}"))?;
 
@@ -1029,8 +1053,8 @@ impl BuiltInTool for QueueFollowupTool {
                 "followup",
                 description,
                 &principal_json,
-                None,
-                Some(&self.task_id),
+                workspace_path,
+                self.source_task_id.as_deref(),
             )
             .map_err(|e| format!("Failed to queue follow-up: {e}"))?;
 
@@ -1045,6 +1069,41 @@ impl BuiltInTool for QueueFollowupTool {
             "Follow-up queued (id: {}). It will run as a new task after this workflow completes.",
             followup_id
         ))
+    }
+
+    /// Reconstruct the originating principal from the constructor-provided
+    /// owner so the follow-up can re-enter the front door with the right
+    /// identity (lead-agent path — no `ToolContext` principal threaded).
+    fn constructed_principal(&self) -> crate::security::policy::Principal {
+        if self.created_by == "system" {
+            crate::security::policy::Principal::System
+        } else {
+            crate::security::policy::Principal::User {
+                global_id: self.created_by.clone(),
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl BuiltInTool for QueueFollowupTool {
+    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        self.queue(arguments, self.constructed_principal(), None)
+    }
+
+    /// Context-aware variant: prefer the invocation's threaded identity and
+    /// workspace path (main-loop path) over the constructor fallback, so
+    /// re-entry scope survives (Routing V2 Phase-1 gap fix).
+    async fn execute_with_context(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
+        let principal = ctx
+            .principal
+            .clone()
+            .unwrap_or_else(|| self.constructed_principal());
+        self.queue(arguments, principal, ctx.workspace_path.as_deref())
     }
 }
 

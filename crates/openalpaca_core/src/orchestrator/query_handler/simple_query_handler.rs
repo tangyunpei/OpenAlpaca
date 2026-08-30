@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use super::{apply_send_keepalive, resolve_send_tool_choice, sanitize_parts_for_dispatch};
+use super::{
+    apply_send_keepalive, detect_active_send_hints, resolve_send_tool_choice,
+    sanitize_parts_for_dispatch,
+};
 use crate::compose::{
     ComposeOverrides, ComposeRequest, ConnectorSummary, DynamicContextInput, DynamicContextMode,
     HistoryInput, HistoryMode, PersonaInput, PersonaMode, StaticPromptInput, StaticPromptMode,
@@ -32,6 +35,8 @@ impl Orchestrator {
         source: &str,
         query: &str,
         tool_suggestion_query: &str,
+        principal: &crate::security::policy::Principal,
+        scope: &crate::security::policy::Scope,
         lane_key: &str,
         ctx: &ConversationContext,
         owner_id: Option<&str>,
@@ -100,7 +105,7 @@ impl Orchestrator {
 
         // ── Resolve tools ───────────────────────────────────────────────────
         let mut tool_names = self.intent_parser.suggest_tools(tool_suggestion_query);
-        let _intent_has_send =
+        let intent_has_send =
             apply_send_keepalive(&mut tool_names, &ctx.recent_messages, &sendable_channels);
 
         // Force-include persona tools during bootstrap mode
@@ -116,22 +121,106 @@ impl Orchestrator {
             .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
             .collect();
 
-        // Apply loop overrides if provided (deep_query tier)
-        let (tool_defs, override_max_rounds, override_max_tools) =
-            if let Some(ref overrides) = loop_overrides {
-                let tools = if overrides.override_tools.is_empty() {
-                    tool_defs // fallback to keyword heuristic
-                } else {
-                    overrides.override_tools.clone()
-                };
-                (
-                    tools,
-                    Some(overrides.max_rounds),
-                    Some(overrides.max_tools_per_round),
-                )
-            } else {
-                (tool_defs, None, None)
+        // Per-request ToolContext for owner-scoped tools. Built before the
+        // loop-override resolution because the tool-mode main loop hands it
+        // to `main_loop_tool_set` (identity for steer/followup re-entry).
+        let tool_ctx = ToolContext {
+            agent_id: None,
+            task_id: None,
+            owner_id: owner_id.map(|s| s.to_string()),
+            workspace_id: scope_ctx.workspace_id.clone(),
+            skill_stack: vec![],
+            effective_constraints: None,
+            lane_key: Some(lane_key.to_string()),
+            source: Some(source.to_string()),
+            request_id: Some(request_id),
+            principal: Some(principal.clone()),
+            scope: Some(scope.clone()),
+            // Threaded only on the tool-mode main loop, where steer/followup
+            // items persist it for re-entry scope; None elsewhere (legacy
+            // paths carry no tools that read it).
+            workspace_path: match &loop_overrides {
+                Some(super::LoopOverrides::MainLoop { workspace_path }) => workspace_path.clone(),
+                _ => None,
+            },
+        };
+
+        // Apply loop overrides if provided (deep_query tier / tool-mode main loop)
+        let (tool_defs, override_max_rounds, override_max_tools, main_loop_set) =
+            match &loop_overrides {
+                Some(super::LoopOverrides::DeepQuery {
+                    max_rounds,
+                    max_tools_per_round,
+                    override_tools,
+                }) => {
+                    let tools = if override_tools.is_empty() {
+                        tool_defs // fallback to keyword heuristic
+                    } else {
+                        override_tools.clone()
+                    };
+                    (tools, Some(*max_rounds), Some(*max_tools_per_round), None)
+                }
+                Some(super::LoopOverrides::MainLoop { .. }) => {
+                    // Routing V2 tool-mode main loop: budgets from
+                    // `[orchestrator.routing]`; tool surface = base picks ∪
+                    // the per-request core/workflow set.
+                    let routing = self.daemon_config.load().orchestrator.routing.clone();
+                    let set = crate::tools::builtins::main_loop_tool_set(
+                        self.task_dispatcher.clone(),
+                        self.shared_context.clone(),
+                        self.bus.clone(),
+                        &routing,
+                        self.db.clone(),
+                        self.embedder.clone(),
+                        self.daemon_config.clone(),
+                        &self.tool_registry,
+                        lane_key,
+                        &tool_ctx,
+                    );
+                    // Base surface: suggested picks ("core_union", default) or
+                    // the whole registry minus the global deny list ("full").
+                    let mut defs: Vec<openalpaca_llm::ToolDefinition> =
+                        if routing.tool_selection == "full" {
+                            let deny = self
+                                .daemon_config
+                                .load()
+                                .execution
+                                .skill_defaults
+                                .global_tool_deny
+                                .clone();
+                            self.tool_registry
+                                .registered_tool_names()
+                                .iter()
+                                .filter(|n| !deny.contains(n))
+                                .filter_map(|n| {
+                                    self.tool_registry.get(n).map(|t| t.definition.clone())
+                                })
+                                .collect()
+                        } else {
+                            tool_defs
+                        };
+                    for def in &set.definitions {
+                        if !defs.iter().any(|d| d.name == def.name) {
+                            defs.push(def.clone());
+                        }
+                    }
+                    (
+                        defs,
+                        Some(routing.main_loop_max_rounds),
+                        Some(routing.main_loop_max_tools_per_round),
+                        Some(set),
+                    )
+                }
+                None => (tool_defs, None, None, None),
             };
+
+        // Keep the guard/telemetry name list in sync with the actual surface
+        // on the main-loop path; legacy paths keep the suggested list verbatim.
+        let tool_names: Vec<String> = if main_loop_set.is_some() {
+            tool_defs.iter().map(|d| d.name.clone()).collect()
+        } else {
+            tool_names
+        };
 
         let (tools_for_loop, policy_opt, config_for_loop);
         if !tool_defs.is_empty() {
@@ -160,7 +249,9 @@ impl Orchestrator {
                 initial_tool_choice: resolve_send_tool_choice(
                     tool_defs.iter().any(|d| d.name == "send"),
                 ),
-                enable_caching: false,
+                // Routing V2 deliberate flip: cache the system prompt + tools
+                // on the simple-query loop (applies to the legacy ladder too).
+                enable_caching: true,
                 thinking: None,
                 ..self.loop_config.clone()
             };
@@ -435,7 +526,43 @@ impl Orchestrator {
             // already stitched system_prompt + dynamic_context blocks/messages
             // + session summary + recent_messages + current_user_turn in the
             // same order the pre-migration manual assembly produced.
-            let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
+            let mut messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
+
+            // Routing V2: model-relay contract for the tool-mode main loop —
+            // how to relay start_workflow / steer / cap results in the
+            // model's own words. Injected at the same per-turn assembly
+            // point as the workflow-context block below.
+            if main_loop_set.is_some() {
+                let insert_at = messages.len().saturating_sub(1);
+                messages.insert(
+                    insert_at,
+                    ChatMessage::user(crate::tools::builtins::main_loop_relay_guidance()),
+                );
+            }
+
+            // Routing V2: workflow-context block for lanes with active
+            // workflows. Injected per-turn AFTER compose (never through the
+            // compose layers) so a live status change can't be masked by the
+            // Tier-2 per-lane cache — Layer 3's fingerprint is keyed on query
+            // text and would replay a stale block for a repeated query.
+            // Gated on the tool-mode main loop: the block directs the model
+            // to steer_workflow/queue_followup/task_status, which only that
+            // path carries — rendering it on legacy-ladder turns (planner
+            // mode with steering enabled) would coach the model toward tools
+            // it cannot call. Legacy prompts therefore stay byte-identical
+            // in every configuration.
+            if main_loop_set.is_some()
+                && let Some(block) = super::render_workflow_context_block(
+                    &self.shared_context,
+                    self.db.as_ref(),
+                    lane_key,
+                )
+            {
+                // Before the current user turn (last message) so the user's
+                // message stays the final input.
+                let insert_at = messages.len().saturating_sub(1);
+                messages.insert(insert_at, ChatMessage::user(&block));
+            }
 
             // --- Context Budget Observation ---
             {
@@ -475,17 +602,22 @@ impl Orchestrator {
                 });
             }
 
-            // Per-request sandbox with ToolContext for owner-scoped tools
-            let tool_ctx = ToolContext {
-                agent_id: None,
-                task_id: None,
-                owner_id: owner_id.map(|s| s.to_string()),
-                workspace_id: scope_ctx.workspace_id.clone(),
-                skill_stack: vec![],
-                effective_constraints: None,
+            // Per-request registry: the tool-mode main loop's injected tools
+            // (start_workflow, steer_workflow, …) must be reachable from the
+            // sandbox execution path — clone the global registry and register
+            // them into the clone (lead-runner per-request registry
+            // precedent, `runner/lead_agent/mod.rs`). Legacy paths keep
+            // sharing the global registry Arc.
+            let loop_registry: Arc<crate::tools::ToolRegistry> = match &main_loop_set {
+                Some(set) if !set.instances.is_empty() => {
+                    let registry = (*self.tool_registry).clone();
+                    set.register_into(&registry);
+                    Arc::new(registry)
+                }
+                _ => self.tool_registry.clone(),
             };
             let mut per_request_sandbox =
-                SandboxManager::with_defaults(self.tool_registry.clone(), self.bus.clone());
+                SandboxManager::with_defaults(loop_registry, self.bus.clone());
             if let Ok(guard) = self.confirmation_broker.read()
                 && let Some(broker) = guard.as_ref()
             {
@@ -509,6 +641,15 @@ impl Orchestrator {
             )
             .await;
             let latency_ms = call_start.elapsed().as_millis() as i64;
+
+            // Routing V2: structured delegation from the start_workflow
+            // result cell (SpawnSubagentTool result-cell precedent). The
+            // model's own text remains the reply — no canonical-ack swap.
+            if let Some(ref set) = main_loop_set
+                && let Some(outcome) = set.start_workflow.outcome()
+            {
+                self.record_delegation(request_id, &outcome);
+            }
 
             // Persist LLM usage and emit event
             let default_model = router.default_model();
@@ -584,9 +725,20 @@ impl Orchestrator {
                 return Err(format!("LLM error: {}", err));
             }
 
-            // Post-hoc guard: detect hallucinated send confirmations
+            // Post-hoc guard: detect hallucinated send confirmations.
+            // Narrowed (Routing V2): only with an actual send-intent signal —
+            // the query suggested send, or recent turns show active send
+            // hints — so a broad tool surface (e.g. tool_selection="full")
+            // can't trip it on a bare checkmark.
+            let send_intent_signal = intent_has_send
+                || detect_active_send_hints(&ctx.recent_messages, &sendable_channels).send;
             let tool_name_refs: Vec<&str> = tool_names.iter().map(|s| s.as_str()).collect();
-            if detect_hallucinated_send(&tool_name_refs, result.tool_calls_made, &result.final_content) {
+            if detect_hallucinated_send(
+                &tool_name_refs,
+                result.tool_calls_made,
+                &result.final_content,
+                send_intent_signal,
+            ) {
                 tracing::warn!(
                     tool_calls = result.tool_calls_made,
                     "Detected hallucinated send confirmation; overriding response"

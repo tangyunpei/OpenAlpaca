@@ -119,6 +119,12 @@ pub struct GatewayRequest {
     /// SSE stream ID for routing tool confirmation prompts to the active chat stream.
     /// Set by `ChatService::send_message()`, `None` for connector/API requests.
     pub stream_id: Option<String>,
+    /// Optional explicit lane override in canonical "user_id:source" form
+    /// (Routing V2): when set and well-formed, the turn lands on this exact
+    /// lane instead of the one derived from `source`/`principal`. Set by the
+    /// follow-up runner so re-entered turns continue the ORIGINATING
+    /// conversation; `None` everywhere else.
+    pub lane_override: Option<String>,
 }
 
 /// Response from the gateway after handling a message.
@@ -177,7 +183,21 @@ impl Gateway {
             user_id = global_id.clone();
         }
 
-        let key = LaneKey::new(&user_id, &source_name);
+        // Lane override (Routing V2): a well-formed override pins the turn to
+        // its originating lane (follow-up re-entry); malformed values fall
+        // back to the derived lane.
+        let key = match req.lane_override.as_deref().and_then(LaneKey::from_str) {
+            Some(overridden) => overridden,
+            None => {
+                if let Some(ref raw) = req.lane_override {
+                    tracing::warn!(
+                        lane_override = %raw,
+                        "Malformed lane_override; falling back to derived lane"
+                    );
+                }
+                LaneKey::new(&user_id, &source_name)
+            }
+        };
         let lane_key_str = key.to_string();
         let lane = self.lane_manager.get_or_create_conversation(key.clone());
 
@@ -305,6 +325,7 @@ impl Gateway {
             scope: Scope::Global,
             workspace_path: None,
             stream_id: None,
+            lane_override: None,
         })
         .await
     }

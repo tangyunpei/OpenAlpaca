@@ -14,7 +14,7 @@ pub use capabilities::{
 };
 
 /// Per-invocation execution context passed to tools that need identity.
-/// Lightweight — no Arc deps, no DB handles. Just identity strings.
+/// Lightweight — no Arc deps, no DB handles. Just identity values.
 #[derive(Debug, Clone, Default)]
 pub struct ToolContext {
     pub agent_id: Option<String>,
@@ -26,6 +26,24 @@ pub struct ToolContext {
     /// Effective tool constraints inherited from parent skill chain.
     /// None at top level; Some when inside a nested skill invocation.
     pub effective_constraints: Option<EffectiveToolSet>,
+    /// Conversation lane the invocation belongs to (canonical "user_id:source"
+    /// form). Present on conversational paths; None inside detached task loops
+    /// that have no lane threading (Routing V2).
+    pub lane_key: Option<String>,
+    /// Message source channel (e.g. "cli", "telegram"). Present where the
+    /// caller has one.
+    pub source: Option<String>,
+    /// The originating request id, when the invocation belongs to a user turn.
+    pub request_id: Option<uuid::Uuid>,
+    /// The requesting principal, for tools that re-enter the front door or
+    /// need identity beyond `owner_id`. None where not threaded.
+    pub principal: Option<crate::security::policy::Principal>,
+    /// The resource scope of the originating request. None where not threaded.
+    pub scope: Option<crate::security::policy::Scope>,
+    /// Filesystem workspace path of the originating request (from GUI/CLI),
+    /// when one was provided. Persisted with steering/follow-up items so
+    /// re-entry turns can restore the workspace scope (Routing V2).
+    pub workspace_path: Option<String>,
 }
 
 impl ToolContext {

@@ -43,6 +43,10 @@ impl FollowupRunner for GatewayFollowupRunner {
                     scope: item.scope,
                     workspace_path: item.workspace_path,
                     stream_id: None,
+                    // Lane continuity (Routing V2): land the re-entered turn
+                    // on the ORIGINATING lane, not the "{principal}:internal"
+                    // lane EventSource::Internal would derive.
+                    lane_override: Some(item.lane_key),
                 })
                 .await;
             if response.is_error {
@@ -71,9 +75,12 @@ mod tests {
     use std::sync::Mutex;
     use uuid::Uuid;
 
+    /// (source, content, principal, lane_key) captured per handled turn.
+    type RecordedCall = (String, String, Principal, String);
+
     /// Stub handler that records what reached it.
     struct StubHandler {
-        calls: Arc<Mutex<Vec<(String, String, Principal)>>>,
+        calls: Arc<Mutex<Vec<RecordedCall>>>,
     }
 
     #[async_trait]
@@ -85,14 +92,14 @@ mod tests {
             content: String,
             principal: Principal,
             _scope: Scope,
-            _lane_key: String,
+            lane_key: String,
             _workspace_path: Option<String>,
             _stream_id: Option<String>,
         ) -> Result<HandleResult, String> {
             self.calls
                 .lock()
                 .unwrap()
-                .push((source, content, principal));
+                .push((source, content, principal, lane_key));
             Ok(HandleResult::text("ack".to_string()))
         }
     }
@@ -156,7 +163,7 @@ mod tests {
 
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "handler should have been called once");
-        let (source, content, principal) = &calls[0];
+        let (source, content, principal, lane_key) = &calls[0];
         assert_eq!(source, "internal");
         assert_eq!(content, "run the follow-up work");
         assert_eq!(
@@ -165,6 +172,9 @@ mod tests {
                 global_id: "junpei".to_string()
             }
         );
+        // Lane continuity: the re-entered turn lands on the ORIGINATING lane,
+        // not the "junpei:internal" lane EventSource::Internal would derive.
+        assert_eq!(lane_key, "junpei:cli");
 
         // Row is terminal: done, not claimable, not queued.
         assert!(repo.claim_next("junpei:cli").unwrap().is_none());

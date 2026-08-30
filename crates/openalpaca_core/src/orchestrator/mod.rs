@@ -23,6 +23,10 @@ mod summary;
 mod task_ops;
 
 pub use task_ops::{TaskActionError, apply_task_action};
+// Routing V2 shared cores, re-exported for the main-loop builtin tools
+// (`memory_store` / `memory_forget` / `task_status`).
+pub(crate) use memory_ops::{forget_memory, store_memory};
+pub(crate) use task_ops::task_status_query;
 
 pub use skill::catalog as skill_catalog;
 pub use skill::matcher as skill_matcher;
@@ -151,7 +155,9 @@ pub struct Orchestrator {
     pub security_gate: Arc<SecurityGate>,
     pub tool_registry: Arc<ToolRegistry>,
     intent_parser: IntentParser,
-    task_dispatcher: TaskDispatcher,
+    /// Shared so per-request tools (e.g. `start_workflow`) can hold a
+    /// reference into the dispatch family (Routing V2).
+    task_dispatcher: Arc<TaskDispatcher>,
     db: Option<Database>,
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     /// Per-lane turn counter for extraction frequency gating.
@@ -301,7 +307,7 @@ impl Orchestrator {
         // conversation + task execution paths.
         let compose_engine = Arc::new(crate::compose::ComposeEngine::new(256));
 
-        let task_dispatcher = TaskDispatcher::new(
+        let task_dispatcher = Arc::new(TaskDispatcher::new(
             shared_context.clone(),
             lane_manager.clone(),
             bus.clone(),
@@ -314,7 +320,7 @@ impl Orchestrator {
             connector_status.clone(),
             context_manager.clone(),
             compose_engine.clone(),
-        );
+        ));
         let loop_config = {
             let mut lc = loop_config;
             lc.event_bus = Some(bus.clone());

@@ -1,11 +1,28 @@
 mod file_ops;
 mod helpers;
+mod main_loop;
+mod memory_ops;
 mod memory_search;
 mod send;
 mod shell_execute;
+mod start_workflow;
+mod steer_workflow;
+mod task_status;
 mod update_persona;
 mod web_fetch;
 mod web_search;
+
+// Routing V2: these tools are constructed per-request by the tool-mode
+// main loop (via `main_loop_tool_set`) and injected into its per-request
+// registry — never registered globally via `builtin_tools()`.
+pub use main_loop::{main_loop_relay_guidance, main_loop_tool_set, MainLoopToolSet};
+pub use memory_ops::{
+    memory_forget_tool_definition, memory_store_tool_definition, MemoryForgetTool,
+    MemoryStoreTool,
+};
+pub use start_workflow::{start_workflow_tool_definition, StartWorkflowTool};
+pub use steer_workflow::{steer_workflow_tool_definition, SteerWorkflowTool};
+pub use task_status::{task_status_tool_definition, TaskStatusTool};
 
 use crate::daemon_config::DaemonConfig;
 use crate::orchestrator::task_state::{TaskState, WorkspaceEntryType};

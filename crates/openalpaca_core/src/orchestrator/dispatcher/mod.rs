@@ -504,7 +504,8 @@ impl TaskDispatcher {
 
 /// Generate a concise task title from a description by stripping filler prefixes
 /// and truncating to a reasonable length.
-pub(super) fn generate_title(description: &str) -> String {
+/// `pub(crate)` so `StartWorkflowTool` can default a missing title (Routing V2).
+pub(crate) fn generate_title(description: &str) -> String {
     let lower = description.to_lowercase();
     // Strip filler prefixes
     let cleaned = lower
