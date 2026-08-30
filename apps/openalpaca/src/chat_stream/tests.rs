@@ -29,7 +29,7 @@ fn test_process_sse_event_thinking() {
     let mut state = SseState {
         usage: None,
         had_delta: false,
-        done_content: None,
+        delegation: None,
     };
     let result = process_sse_event("event: thinking\ndata: {}", false, &mut state);
     assert!(result.is_ok());
@@ -42,7 +42,7 @@ fn test_process_sse_event_delta() {
     let mut state = SseState {
         usage: None,
         had_delta: false,
-        done_content: None,
+        delegation: None,
     };
     let result = process_sse_event(
         "event: delta\ndata: {\"content\":\"hello\"}",
@@ -59,7 +59,7 @@ fn test_process_sse_event_done_with_prior_delta() {
     let mut state = SseState {
         usage: None,
         had_delta: true,
-        done_content: None,
+        delegation: None,
     };
     let result = process_sse_event(
         "event: done\ndata: {\"content\":\"hello\",\"model\":\"gpt-4\",\"tokens_in\":10,\"tokens_out\":20,\"duration_ms\":100}",
@@ -79,7 +79,7 @@ fn test_process_sse_event_done_no_prior_delta() {
     let mut state = SseState {
         usage: None,
         had_delta: false,
-        done_content: None,
+        delegation: None,
     };
     let result = process_sse_event(
         "event: done\ndata: {\"content\":\"response text\",\"model\":\"gpt-4\",\"tokens_in\":5,\"tokens_out\":10,\"duration_ms\":50}",
@@ -96,7 +96,7 @@ fn test_process_sse_event_error() {
     let mut state = SseState {
         usage: None,
         had_delta: false,
-        done_content: None,
+        delegation: None,
     };
     let result = process_sse_event(
         "event: error\ndata: {\"message\":\"something failed\"}",
@@ -112,7 +112,7 @@ fn test_process_sse_event_unknown() {
     let mut state = SseState {
         usage: None,
         had_delta: false,
-        done_content: None,
+        delegation: None,
     };
     let result = process_sse_event("event: unknown\ndata: {}", false, &mut state);
     assert!(result.is_ok());
@@ -127,67 +127,54 @@ fn test_find_event_boundary() {
 }
 
 #[test]
-fn test_is_delegation_true() {
-    let usage = Some(UsageInfo {
-        model: "router".to_string(),
-        tokens_in: 0,
-        tokens_out: 0,
-        duration_ms: 50,
-    });
-    assert!(is_delegation(
-        &usage,
-        "I've created a task for the research team."
-    ));
-}
-
-#[test]
-fn test_is_delegation_false_nonzero_tokens() {
-    let usage = Some(UsageInfo {
-        model: "gpt-4".to_string(),
-        tokens_in: 100,
-        tokens_out: 200,
-        duration_ms: 500,
-    });
-    assert!(!is_delegation(
-        &usage,
-        "I've created a task for the research team."
-    ));
-}
-
-#[test]
-fn test_is_delegation_false_no_marker() {
-    let usage = Some(UsageInfo {
-        model: "router".to_string(),
-        tokens_in: 0,
-        tokens_out: 0,
-        duration_ms: 50,
-    });
-    assert!(!is_delegation(&usage, "Here is a normal response."));
-}
-
-#[test]
-fn test_parse_task_title_found() {
-    let content =
-        "I've created a task for this.\nTask: Research quantum computing\nYou'll see results soon.";
-    assert_eq!(
-        parse_task_title(content),
-        Some("Research quantum computing".to_string())
+fn test_process_sse_event_done_with_delegation() {
+    let mut state = SseState {
+        usage: None,
+        had_delta: true,
+        delegation: None,
+    };
+    let result = process_sse_event(
+        "event: done\ndata: {\"content\":\"I've kicked off a task\",\"model\":\"router\",\"tokens_in\":0,\"tokens_out\":0,\"duration_ms\":50,\"delegation\":{\"task_id\":\"task-123\",\"title\":\"Research quantum computing\"}}",
+        false,
+        &mut state,
     );
+    assert!(result.is_ok());
+    let delegation = state.delegation.as_ref().unwrap();
+    assert_eq!(delegation.task_id, "task-123");
+    assert_eq!(delegation.title, "Research quantum computing");
 }
 
 #[test]
-fn test_parse_task_title_at_end() {
-    let content = "I've created a task.\nTask: Deploy the service";
-    assert_eq!(
-        parse_task_title(content),
-        Some("Deploy the service".to_string())
+fn test_process_sse_event_done_without_delegation() {
+    let mut state = SseState {
+        usage: None,
+        had_delta: true,
+        delegation: None,
+    };
+    let result = process_sse_event(
+        "event: done\ndata: {\"content\":\"a normal reply\",\"model\":\"gpt-4\",\"tokens_in\":10,\"tokens_out\":20,\"duration_ms\":100}",
+        false,
+        &mut state,
     );
+    assert!(result.is_ok());
+    assert!(state.delegation.is_none());
 }
 
 #[test]
-fn test_parse_task_title_not_found() {
-    let content = "No task here, just a normal response.";
-    assert_eq!(parse_task_title(content), None);
+fn test_process_sse_event_done_with_malformed_delegation() {
+    let mut state = SseState {
+        usage: None,
+        had_delta: true,
+        delegation: None,
+    };
+    // Missing required "title" field — must be ignored, not crash
+    let result = process_sse_event(
+        "event: done\ndata: {\"content\":\"x\",\"model\":\"m\",\"tokens_in\":0,\"tokens_out\":0,\"duration_ms\":1,\"delegation\":{\"task_id\":\"task-123\"}}",
+        false,
+        &mut state,
+    );
+    assert!(result.is_ok());
+    assert!(state.delegation.is_none());
 }
 
 #[test]
@@ -212,7 +199,10 @@ fn test_stream_result_usage() {
             tokens_out: 0,
             duration_ms: 50,
         }),
-        task_title: "test".to_string(),
+        delegation: DelegationInfo {
+            task_id: "task-1".to_string(),
+            title: "test".to_string(),
+        },
     };
     assert!(result.usage().is_some());
 }

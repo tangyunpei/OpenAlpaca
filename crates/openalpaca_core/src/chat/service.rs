@@ -184,8 +184,16 @@ impl ChatService {
                 let model = response.model.as_deref().unwrap_or("default");
                 let tokens_in = response.tokens_in.unwrap_or(0) as u64;
                 let tokens_out = response.tokens_out.unwrap_or(0) as u64;
+                let delegation = response.delegation.clone();
                 if response.attachments_used.is_empty() {
-                    sink.send_done(&response.content, model, tokens_in, tokens_out, duration_ms);
+                    sink.send_done(
+                        &response.content,
+                        model,
+                        tokens_in,
+                        tokens_out,
+                        duration_ms,
+                        delegation,
+                    );
                 } else {
                     sink.send_done_with_attachments(
                         &response.content,
@@ -194,6 +202,7 @@ impl ChatService {
                         tokens_out,
                         duration_ms,
                         response.attachments_used,
+                        delegation,
                     );
                 }
             }

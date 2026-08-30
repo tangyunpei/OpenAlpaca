@@ -110,14 +110,15 @@ pub async fn command_handler(
                 state
                     .event_broadcaster
                     .command_received(&request_id, "process");
-                (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "request_id": request_id,
-                        "status": "completed",
-                        "output": response.content
-                    })),
-                )
+                let mut body = serde_json::json!({
+                    "request_id": request_id,
+                    "status": "completed",
+                    "output": response.content
+                });
+                if let Some(delegation) = response.delegation {
+                    body["delegation"] = serde_json::json!(delegation);
+                }
+                (StatusCode::OK, Json(body))
             }
         }
         // PR-2: /link command skeleton

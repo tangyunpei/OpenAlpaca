@@ -139,7 +139,28 @@ impl Orchestrator {
         let mut fallback_reason: Option<String> = None;
         let mut auto_promotion_reason: Option<String> = None;
 
-        let result: Result<String, String> = if self.is_bootstrapping() {
+        let result: Result<String, String> = if let Intent::SkillInvocation {
+            ref skill_name,
+            ref query,
+        } = intent
+        {
+            // Deterministic skill tier: slash commands and router-selected
+            // skills execute directly, before the bootstrap check and the
+            // planner ladder (Routing V2 Phase 0.5).
+            mode = "skill_command".to_string();
+            self.invoke_skill_with_telemetry(
+                request_id,
+                &source,
+                skill_name,
+                query,
+                &lane_key,
+                &ctx,
+                owner_id,
+                &scope_ctx,
+                stream_id.as_deref(),
+            )
+            .await
+        } else if self.is_bootstrapping() {
             mode = "bootstrap".to_string();
             self.handle_simple_query(
                 request_id,
@@ -321,7 +342,10 @@ impl Orchestrator {
                                             dispatch_ms =
                                                 dispatch_start.elapsed().as_millis() as u64;
                                             match dispatch_result {
-                                                Ok(response) => Ok(response),
+                                                Ok(outcome) => {
+                                                    self.record_delegation(request_id, &outcome);
+                                                    Ok(outcome.ack)
+                                                }
                                                 Err(e) => {
                                                     fallback_reason = Some(format!(
                                                         "two_phase_dispatch_failed: {e}"
@@ -504,7 +528,10 @@ impl Orchestrator {
                             dispatch_ms = dispatch_start.elapsed().as_millis() as u64;
 
                             match dispatch_result {
-                                Ok(response) => Ok(response),
+                                Ok(outcome) => {
+                                    self.record_delegation(request_id, &outcome);
+                                    Ok(outcome.ack)
+                                }
                                 Err(e) => {
                                     fallback_reason = Some(format!("dispatch_planned_failed: {e}"));
                                     tracing::warn!(

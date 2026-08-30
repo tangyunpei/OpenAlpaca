@@ -8,6 +8,14 @@ fn setup(agents: Vec<SubAgent>) -> TaskDispatcher {
 }
 
 fn setup_with_config(agents: Vec<SubAgent>, config: DaemonConfig) -> TaskDispatcher {
+    setup_with_config_and_db(agents, config, None)
+}
+
+fn setup_with_config_and_db(
+    agents: Vec<SubAgent>,
+    config: DaemonConfig,
+    db: Option<Database>,
+) -> TaskDispatcher {
     let ctx = Arc::new(SharedContext::new());
     for a in &agents {
         // Register both template (for spawn_instance) and instance (for backward compat)
@@ -30,7 +38,7 @@ fn setup_with_config(agents: Vec<SubAgent>, config: DaemonConfig) -> TaskDispatc
         None,
         gate,
         tool_registry,
-        None,
+        db,
         None,
         daemon_config,
         Arc::new(std::sync::RwLock::new(None)),
@@ -53,13 +61,21 @@ fn test_creates_task_and_lane() {
     );
 
     assert!(result.is_ok());
-    let text = result.unwrap();
-    // Response is now human-readable, not JSON
-    assert!(text.contains("assigned"));
-    assert!(text.contains("Agent a1"));
+    let outcome = result.unwrap();
+    // Ack is human-readable, not JSON
+    assert!(outcome.ack.contains("assigned"));
+    assert!(outcome.ack.contains("Agent a1"));
+    assert!(outcome.ack.contains(&outcome.title));
 
-    // Verify task registered
+    // Verify task registered under the returned task_id
     assert_eq!(dispatcher.shared_context.task_registry.count(), 1);
+    assert!(
+        dispatcher
+            .shared_context
+            .task_registry
+            .get(&outcome.task_id)
+            .is_some()
+    );
     // Verify lane created
     assert_eq!(dispatcher.lane_manager.task_count(), 1);
 }
@@ -97,9 +113,9 @@ fn test_assigns_multiple() {
         )
         .unwrap();
 
-    // Human-readable response should mention both agents
-    assert!(result.contains("Agent a1"));
-    assert!(result.contains("Agent a2"));
+    // Human-readable ack should mention both agents
+    assert!(result.ack.contains("Agent a1"));
+    assert!(result.ack.contains("Agent a2"));
 }
 
 #[test]
@@ -157,9 +173,10 @@ fn test_dispatch_planned_with_use_lead_agent_routes_correctly() {
 
     // Should succeed because lead agent path doesn't require assignments
     assert!(result.is_ok());
-    let text = result.unwrap();
-    assert!(text.contains("Lead Agent"));
-    assert!(text.contains("dynamic orchestration"));
+    let outcome = result.unwrap();
+    assert!(outcome.ack.contains("Lead Agent"));
+    assert!(outcome.ack.contains("dynamic orchestration"));
+    assert_eq!(outcome.title, "Lead agent test");
 
     // Task should be registered
     assert_eq!(dispatcher.shared_context.task_registry.count(), 1);
@@ -323,7 +340,7 @@ fn test_dispatch_planned_empty_assignments_promotes_to_lead_agent() {
 
     // Should succeed — dispatched to lead agent as last-resort fallback
     assert!(result.is_ok());
-    assert!(result.unwrap().contains("Lead Agent"));
+    assert!(result.unwrap().ack.contains("Lead Agent"));
 }
 
 #[test]
@@ -367,7 +384,7 @@ fn test_dispatch_planned_pipeline_empty_assignments_decision_and_execution_agree
     // 1. Execution must route to lead-agent (not fail trying to run empty pipeline)
     assert!(result.is_ok(), "Expected dispatch to succeed");
     assert!(
-        result.unwrap().contains("Lead Agent"),
+        result.unwrap().ack.contains("Lead Agent"),
         "Expected lead-agent execution, not pipeline"
     );
 
@@ -390,6 +407,54 @@ fn test_dispatch_planned_pipeline_empty_assignments_decision_and_execution_agree
     assert!(
         found_decision,
         "Expected DispatchDecision event to be published"
+    );
+}
+
+#[test]
+fn test_dispatch_decision_backfill_records_task_id_not_ack_prose() {
+    // Regression: the backfill used to write the human-readable ack prose into
+    // dispatch_decisions.task_id. It must record the created task's id instead.
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+
+    let mut config = DaemonConfig::default();
+    config.execution.planner.dispatch_analysis_enabled = true;
+
+    let dispatcher = setup_with_config_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        config,
+        Some(db.clone()),
+    );
+
+    let outcome = dispatcher
+        .dispatch_lead_agent_heuristic(
+            Uuid::new_v4(),
+            "Complex research task",
+            "user1",
+            "user1:cli",
+            "cli",
+            None,
+        )
+        .unwrap();
+
+    // The returned task_id is the registered task's id, not prose
+    assert!(Uuid::parse_str(&outcome.task_id).is_ok());
+    assert!(
+        dispatcher
+            .shared_context
+            .task_registry
+            .get(&outcome.task_id)
+            .is_some()
+    );
+
+    // The recorded dispatch decision must carry that same task_id
+    let repo = DispatchDecisionRepository::new(&db);
+    let records = repo.query(None, None, None, 10).unwrap();
+    assert_eq!(records.len(), 1, "Expected exactly one recorded decision");
+    assert_eq!(
+        records[0].task_id.as_deref(),
+        Some(outcome.task_id.as_str()),
+        "dispatch_decisions.task_id must equal the created task's id"
     );
 }
 

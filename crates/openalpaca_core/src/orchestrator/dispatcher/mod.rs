@@ -43,6 +43,16 @@ use outcome::{finalize_task_with_outcome, persist_conversation, update_state_wit
 #[cfg(test)]
 use outcome::{build_task_outcome, finalize_task};
 
+/// Result of a successful dispatch: the created task's identity plus the
+/// human-readable ack for the chat reply. Callers that record analytics
+/// must use `task_id` — never the ack prose.
+#[derive(Debug, Clone)]
+pub struct DispatchOutcome {
+    pub task_id: String,
+    pub title: String,
+    pub ack: String,
+}
+
 /// Dispatches complex tasks by matching skills to agents and creating task lanes.
 pub struct TaskDispatcher {
     shared_context: Arc<SharedContext>,
@@ -238,7 +248,7 @@ impl TaskDispatcher {
         created_by: &str,
         lane_key: &str,
         workspace_id: Option<String>,
-    ) -> Result<String, String> {
+    ) -> Result<DispatchOutcome, String> {
         let matches = match self
             .skill_matcher
             .match_skills(required_skills, &self.shared_context.agent_registry)
@@ -290,8 +300,8 @@ impl TaskDispatcher {
             source,
             workspace_id,
         );
-        if let Ok(ref task_id) = result {
-            self.backfill_decision_task_id(decision_row_id, task_id);
+        if let Ok(ref outcome) = result {
+            self.backfill_decision_task_id(decision_row_id, &outcome.task_id);
         }
         result
     }
@@ -306,7 +316,7 @@ impl TaskDispatcher {
         lane_key: &str,
         source: &str,
         workspace_id: Option<String>,
-    ) -> Result<String, String> {
+    ) -> Result<DispatchOutcome, String> {
         // Record heuristic lead-agent dispatch decision
         let dd = decision::DispatchDecision {
             mode: decision::DispatchMode::LeadAgent,
@@ -329,8 +339,8 @@ impl TaskDispatcher {
             source,
             workspace_id,
         );
-        if let Ok(ref task_id) = result {
-            self.backfill_decision_task_id(decision_row_id, task_id);
+        if let Ok(ref outcome) = result {
+            self.backfill_decision_task_id(decision_row_id, &outcome.task_id);
         }
         result
     }
@@ -348,7 +358,7 @@ impl TaskDispatcher {
         lane_key: &str,
         source: &str,
         workspace_id: Option<String>,
-    ) -> Result<String, String> {
+    ) -> Result<DispatchOutcome, String> {
         // ── Dispatch Analysis (Phase 2) ────────────────────────────────
         let dd = decision::analyze_plan(&plan);
         let decision_row_id = self.record_decision(&request_id.to_string(), &dd);
@@ -377,8 +387,8 @@ impl TaskDispatcher {
                 source,
                 workspace_id,
             );
-            if let Ok(ref task_id) = result {
-                self.backfill_decision_task_id(decision_row_id, task_id);
+            if let Ok(ref outcome) = result {
+                self.backfill_decision_task_id(decision_row_id, &outcome.task_id);
             }
             return result;
         }
@@ -408,8 +418,8 @@ impl TaskDispatcher {
                 source,
                 workspace_id,
             );
-            if let Ok(ref task_id) = result {
-                self.backfill_decision_task_id(decision_row_id, task_id);
+            if let Ok(ref outcome) = result {
+                self.backfill_decision_task_id(decision_row_id, &outcome.task_id);
             }
             return result;
         }
@@ -434,8 +444,8 @@ impl TaskDispatcher {
                 source,
                 workspace_id,
             );
-            if let Ok(ref task_id) = result {
-                self.backfill_decision_task_id(decision_row_id, task_id);
+            if let Ok(ref outcome) = result {
+                self.backfill_decision_task_id(decision_row_id, &outcome.task_id);
             }
             return result;
         }
@@ -473,8 +483,8 @@ impl TaskDispatcher {
             source,
             workspace_id,
         );
-        if let Ok(ref task_id) = result {
-            self.backfill_decision_task_id(decision_row_id, task_id);
+        if let Ok(ref outcome) = result {
+            self.backfill_decision_task_id(decision_row_id, &outcome.task_id);
         }
         result
     }

@@ -248,6 +248,46 @@ async fn test_complex_task_dispatch() {
 }
 
 #[tokio::test]
+async fn test_complex_task_dispatch_records_delegation() {
+    let orch = make_orchestrator_with_agents(vec![
+        make_agent("a1", vec!["web_search"]),
+        make_agent("a2", vec!["text_generate"]),
+    ]);
+    let request_id = Uuid::new_v4();
+    let result = orch
+        .handle_message(
+            request_id,
+            "cli".to_string(),
+            "please research and write about Rust".to_string(),
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+            None,
+        )
+        .await;
+    assert!(result.is_ok());
+
+    // Dispatch must populate the structured delegation side channel,
+    // keyed by request_id, with the created task's identity.
+    let delegation = orch
+        .delegation_map
+        .remove(&request_id)
+        .map(|(_, v)| v)
+        .expect("dispatch should record delegation metadata");
+    assert!(!delegation.task_id.is_empty());
+    assert!(!delegation.title.is_empty());
+    // The recorded task_id must reference the actually-registered task.
+    assert!(
+        orch.shared_context
+            .task_registry
+            .get(&delegation.task_id)
+            .is_some(),
+        "delegation.task_id should match a registered task"
+    );
+}
+
+#[tokio::test]
 async fn test_task_control_cancel() {
     let orch = make_orchestrator();
     // Register a task first
@@ -1698,4 +1738,201 @@ fn test_wrap_untrusted_context_ampersand_escaped() {
     assert!(result.contains("Tom &amp; Jerry &lt;/context_data&gt;"));
     // Only 1 real closing tag
     assert_eq!(result.matches("</context_data>").count(), 1);
+}
+
+// --- Deterministic skill tier (Routing V2 Phase 0.5) ---
+
+fn make_review_skill_catalog() -> (tempfile::TempDir, Arc<skill_catalog::SkillCatalog>) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join("code-review");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        r#"---
+name: "Code Review"
+description: "Review code for issues"
+command: "review"
+auto_load: false
+---
+
+## Instructions
+
+Review the code.
+"#,
+    )
+    .unwrap();
+    let catalog = skill_catalog::SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+    (tmp, Arc::new(catalog))
+}
+
+fn make_orchestrator_with_llm_and_skills(
+    router: Arc<LlmRouter>,
+    catalog: Arc<skill_catalog::SkillCatalog>,
+) -> Orchestrator {
+    let ctx = Arc::new(SharedContext::new());
+    let lanes = Arc::new(LaneManager::new());
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let registry = make_tool_registry();
+    Orchestrator::new(
+        ctx,
+        lanes,
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        None,
+        catalog,
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    )
+}
+
+#[tokio::test]
+async fn test_slash_skill_takes_deterministic_tier_with_router() {
+    use openalpaca_llm::{ChatResponse, FinishReason, LlmError, LlmProvider, Usage};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingMockLlm {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CountingMockLlm {
+        fn name(&self) -> &str {
+            "counting-mock"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Ok(ChatResponse {
+                content: "review done".to_string(),
+                tool_calls: vec![],
+                model: "mock-model".to_string(),
+                usage: Usage {
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    ..Default::default()
+                },
+                finish_reason: FinishReason::Stop,
+                thinking: None,
+                parts: None,
+            })
+        }
+    }
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(CountingMockLlm {
+            call_count: call_count.clone(),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let (_tmp, catalog) = make_review_skill_catalog();
+    let orch = make_orchestrator_with_llm_and_skills(Arc::new(router), catalog);
+    let mut rx = orch.bus.subscribe();
+
+    let result = orch
+        .handle_message(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "/review some code".to_string(),
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+            None,
+        )
+        .await;
+
+    assert_eq!(result.unwrap(), "review done");
+    // Exactly one LLM call: the skill's agentic loop. A planner-first route
+    // would have made a planning call before (or instead of) it.
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+    let mut saw_skill_started = false;
+    let mut saw_intent_classified = false;
+    let mut stage_mode = None;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            SystemEvent::SkillInvocationStarted { skill_id, .. } => {
+                assert_eq!(skill_id, "Code Review");
+                saw_skill_started = true;
+            }
+            SystemEvent::IntentClassified { intent_type, .. } => {
+                assert_eq!(intent_type, "skill_invocation");
+                saw_intent_classified = true;
+            }
+            SystemEvent::OrchestrationStage { mode, .. } => stage_mode = Some(mode),
+            _ => {}
+        }
+    }
+    assert!(saw_skill_started, "handle_skill_invocation was not reached");
+    assert!(saw_intent_classified, "IntentClassified was not emitted");
+    assert_eq!(stage_mode.as_deref(), Some("skill_command"));
+}
+
+#[tokio::test]
+async fn test_slash_skill_no_router_still_invokes_skill() {
+    let (_tmp, catalog) = make_review_skill_catalog();
+    let ctx = Arc::new(SharedContext::new());
+    let lanes = Arc::new(LaneManager::new());
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let registry = make_tool_registry();
+    let orch = Orchestrator::new(
+        ctx,
+        lanes,
+        bus,
+        SystemPersona::default(),
+        None,
+        LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        None,
+        catalog,
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    let mut rx = orch.bus.subscribe();
+
+    let result = orch
+        .handle_message(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "/review some code".to_string(),
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+            None,
+        )
+        .await;
+
+    // No router: the skill handler falls back to its echo stub.
+    let content = result.unwrap();
+    assert!(content.contains("Code Review"), "unexpected content: {content}");
+
+    let mut saw_skill_started = false;
+    let mut intent_classified_count = 0;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            SystemEvent::SkillInvocationStarted { .. } => saw_skill_started = true,
+            SystemEvent::IntentClassified { intent_type, .. } => {
+                assert_eq!(intent_type, "skill_invocation");
+                intent_classified_count += 1;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_skill_started, "handle_skill_invocation was not reached");
+    assert_eq!(intent_classified_count, 1, "IntentClassified must be emitted exactly once");
 }

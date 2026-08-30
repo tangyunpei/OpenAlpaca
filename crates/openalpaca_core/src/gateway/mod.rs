@@ -2,5 +2,6 @@ pub mod persistence;
 mod router;
 
 pub use router::{
-    Gateway, GatewayRequest, GatewayResponse, HandleResult, MessageHandler, ResolvedAttachment,
+    DelegationInfo, Gateway, GatewayRequest, GatewayResponse, HandleResult, MessageHandler,
+    ResolvedAttachment,
 };

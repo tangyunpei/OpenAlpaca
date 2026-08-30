@@ -2,8 +2,8 @@ use super::super::task_state::TaskState;
 use super::update_state_with_retry;
 use super::usage;
 use super::{
-    TaskDispatcher, finalize_task_with_outcome, format_task_result, persist_conversation,
-    spawn_task_memory_extraction,
+    DispatchOutcome, TaskDispatcher, finalize_task_with_outcome, format_task_result,
+    persist_conversation, spawn_task_memory_extraction,
 };
 use crate::agent::registry::DestroyOutcome;
 use crate::agent::subagent::SubAgent;
@@ -26,7 +26,7 @@ impl TaskDispatcher {
         lane_key: &str,
         source: &str,
         workspace_id: Option<String>,
-    ) -> Result<String, String> {
+    ) -> Result<DispatchOutcome, String> {
         let task_id = Uuid::new_v4().to_string();
         let now = Utc::now();
 
@@ -152,12 +152,17 @@ impl TaskDispatcher {
             workspace_id,
         );
 
-        Ok(format!(
+        let ack = format!(
             "I've created a task and assigned it to the Lead Agent for dynamic orchestration:\n\n\
              - Lead Agent will analyze, delegate to subagents, and synthesize results\n\n\
              Task: {}\nYou'll see the results here when the task completes.",
             title
-        ))
+        );
+        Ok(DispatchOutcome {
+            task_id,
+            title,
+            ack,
+        })
     }
 
     /// Spawn the lead agent execution in a background tokio task.

@@ -22,6 +22,14 @@ pub struct ResolvedAttachment {
     pub storage_path: String,
 }
 
+/// Structured metadata for a delegated task, carried alongside the ack text
+/// so clients can track the created task without parsing prose.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DelegationInfo {
+    pub task_id: String,
+    pub title: String,
+}
+
 /// Rich result from message handling, carrying optional LLM metadata.
 ///
 /// Non-LLM paths (task queries, commands, etc.) use `HandleResult::text()` which
@@ -34,6 +42,8 @@ pub struct HandleResult {
     pub tokens_out: Option<u32>,
     /// File IDs of attachments consumed during handling.
     pub attachments_used: Vec<String>,
+    /// Set when handling delegated the message to a background task.
+    pub delegation: Option<DelegationInfo>,
 }
 
 impl HandleResult {
@@ -45,6 +55,7 @@ impl HandleResult {
             tokens_in: None,
             tokens_out: None,
             attachments_used: Vec::new(),
+            delegation: None,
         }
     }
 }
@@ -126,6 +137,8 @@ pub struct GatewayResponse {
     pub tokens_out: Option<u32>,
     /// File IDs of attachments consumed during handling.
     pub attachments_used: Vec<String>,
+    /// Set when handling delegated the message to a background task.
+    pub delegation: Option<DelegationInfo>,
 }
 
 /// The unified entry point for all inbound messages.
@@ -259,6 +272,7 @@ impl Gateway {
                     tokens_in: result.tokens_in,
                     tokens_out: result.tokens_out,
                     attachments_used: result.attachments_used,
+                    delegation: result.delegation,
                 }
             }
             Err(e) => GatewayResponse {
@@ -269,6 +283,7 @@ impl Gateway {
                 tokens_in: None,
                 tokens_out: None,
                 attachments_used: Vec::new(),
+                delegation: None,
             },
         }
     }

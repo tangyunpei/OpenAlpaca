@@ -9,10 +9,24 @@ use openalpaca_llm::ContentPart;
 use openalpaca_storage::repository::TaskRepository;
 use uuid::Uuid;
 
+use super::dispatcher::DispatchOutcome;
 use super::intent::Intent;
 use super::task_planner::PlannerLimits;
 
 impl Orchestrator {
+    /// Record structured delegation metadata for the bridge to attach to the
+    /// response (mirrors `llm_metadata_map`: inserted here, drained by the
+    /// daemon's `build_result`).
+    pub(super) fn record_delegation(&self, request_id: Uuid, outcome: &DispatchOutcome) {
+        self.delegation_map.insert(
+            request_id,
+            crate::gateway::DelegationInfo {
+                task_id: outcome.task_id.clone(),
+                title: outcome.title.clone(),
+            },
+        );
+    }
+
     /// Build a formatted block of active tasks for planner context injection.
     pub(super) fn build_active_tasks_block(&self, owner_id: &str) -> Option<String> {
         let db = self.db.as_ref()?;
@@ -120,11 +134,15 @@ impl Orchestrator {
             )
         });
 
-        self.bus.publish(SystemEvent::IntentClassified {
-            request_id,
-            intent_type: intent.intent_type().to_string(),
-            timestamp: Utc::now(),
-        });
+        // Skill invocations publish IntentClassified inside
+        // invoke_skill_with_telemetry (shared with the deterministic tier).
+        if !matches!(intent, Intent::SkillInvocation { .. }) {
+            self.bus.publish(SystemEvent::IntentClassified {
+                request_id,
+                intent_type: intent.intent_type().to_string(),
+                timestamp: Utc::now(),
+            });
+        }
 
         match intent {
             Intent::SimpleQuery { .. } => {
@@ -159,7 +177,10 @@ impl Orchestrator {
                     lane_key,
                     scope_ctx.workspace_id.clone(),
                 ) {
-                    Ok(response) => Ok(response),
+                    Ok(outcome) => {
+                        self.record_delegation(request_id, &outcome);
+                        Ok(outcome.ack)
+                    }
                     Err(e) => {
                         tracing::info!(
                             "Heuristic dispatch failed ({e}), trying lead agent fallback"
@@ -172,7 +193,10 @@ impl Orchestrator {
                             source,
                             scope_ctx.workspace_id.clone(),
                         ) {
-                            Ok(response) => Ok(response),
+                            Ok(outcome) => {
+                                self.record_delegation(request_id, &outcome);
+                                Ok(outcome.ack)
+                            }
                             Err(e2) => {
                                 tracing::warn!(
                                     "Lead agent fallback also failed: {e2}, falling back to simple_query"
@@ -205,17 +229,7 @@ impl Orchestrator {
                 self.handle_forget_command(&content, owner_id).await
             }
             Intent::SkillInvocation { skill_name, query } => {
-                // Capture route metadata for telemetry (re-route is cheap, no side effects)
-                let route_result = self.skill_router.route(&query, &self.skill_catalog);
-                let was_auto_selected =
-                    route_result.selected.as_ref() == Some(&skill_name);
-                let route_score = route_result
-                    .scores
-                    .iter()
-                    .find(|s| s.skill_id == skill_name)
-                    .map(|s| s.score);
-
-                self.handle_skill_invocation(
+                self.invoke_skill_with_telemetry(
                     request_id,
                     source,
                     &skill_name,
@@ -224,13 +238,59 @@ impl Orchestrator {
                     ctx,
                     owner_id,
                     scope_ctx,
-                    route_score,
-                    was_auto_selected,
                     stream_id,
                 )
                 .await
             }
         }
+    }
+
+    /// Invoke a skill with route-telemetry capture and IntentClassified emission.
+    ///
+    /// Shared by the deterministic skill tier in `handle_message_internal` and
+    /// the heuristic fallback's `SkillInvocation` arm.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn invoke_skill_with_telemetry(
+        &self,
+        request_id: Uuid,
+        source: &str,
+        skill_name: &str,
+        query: &str,
+        lane_key: &str,
+        ctx: &ConversationContext,
+        owner_id: Option<&str>,
+        scope_ctx: &MemoryScopeContext,
+        stream_id: Option<&str>,
+    ) -> Result<String, String> {
+        self.bus.publish(SystemEvent::IntentClassified {
+            request_id,
+            intent_type: "skill_invocation".to_string(),
+            timestamp: Utc::now(),
+        });
+
+        // Capture route metadata for telemetry (re-route is cheap, no side effects)
+        let route_result = self.skill_router.route(query, &self.skill_catalog);
+        let was_auto_selected = route_result.selected.as_deref() == Some(skill_name);
+        let route_score = route_result
+            .scores
+            .iter()
+            .find(|s| s.skill_id == skill_name)
+            .map(|s| s.score);
+
+        self.handle_skill_invocation(
+            request_id,
+            source,
+            skill_name,
+            query,
+            lane_key,
+            ctx,
+            owner_id,
+            scope_ctx,
+            route_score,
+            was_auto_selected,
+            stream_id,
+        )
+        .await
     }
 
     /// Adapt multimodal content parts for a model's capabilities.

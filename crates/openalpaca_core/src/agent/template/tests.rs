@@ -244,3 +244,39 @@ fn test_singleton_extract_persona() {
     let persona = extract_persona(&doc);
     assert!(persona.contains("strategic orchestration agent"));
 }
+
+#[test]
+fn test_to_subagent_orchestration_allows_coordination_tools() {
+    use crate::security::capabilities::CapabilityManager;
+
+    let doc = parse_agent_markdown(SINGLETON_AGENT).expect("should parse");
+    let agent = doc.to_subagent("lead-01", "task-1");
+    for tool in [
+        "spawn_subagent",
+        "spawn_subagents_batch",
+        "check_subagent_status",
+        "wait_for_subagents",
+        "post_update",
+        "queue_followup",
+    ] {
+        assert!(
+            CapabilityManager::check_agent_capability(&agent.id, tool, &agent.constraints)
+                .is_ok(),
+            "coordination tool '{}' should pass the capability allowlist",
+            tool
+        );
+    }
+}
+
+#[test]
+fn test_to_subagent_non_orchestration_denies_coordination_tools() {
+    use crate::security::capabilities::CapabilityManager;
+
+    let doc = parse_agent_markdown(VALID_AGENT).expect("should parse");
+    let agent = doc.to_subagent("code-01", "task-1");
+    assert!(
+        CapabilityManager::check_agent_capability(&agent.id, "spawn_subagent", &agent.constraints)
+            .is_err(),
+        "non-orchestration agents must not get coordination tools"
+    );
+}

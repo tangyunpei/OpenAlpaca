@@ -15,10 +15,8 @@ use chrono::Utc;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use openalpaca_core::context::TaskEntryStatus;
 use openalpaca_core::events::SystemEvent;
-use openalpaca_core::lane::TaskLaneStatus;
-use openalpaca_core::orchestrator::parse_outcome;
+use openalpaca_core::orchestrator::{TaskActionError, apply_task_action, parse_outcome};
 use openalpaca_storage::{Task, TaskRepository, TaskStatus};
 
 use super::tasks_types::*;
@@ -330,142 +328,57 @@ pub async fn task_action_handler(
     Path(id): Path<String>,
     Json(request): Json<TaskActionRequest>,
 ) -> impl IntoResponse {
-    let repo = TaskRepository::new(&state.db);
-
-    // Fetch current task
-    let task = match repo.get(&id) {
-        Ok(Some(t)) => t,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "Task not found" })),
-            );
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            );
-        }
-    };
-
-    // Validate state transition
-    let new_status = match request.action.as_str() {
-        "cancel" => {
-            if task.status.is_terminal() {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": format!("Cannot cancel a task in '{}' state", task.status)
-                    })),
-                );
-            }
-
-            // Trigger actual cancellation of the running task
-            let cancelled = state.gateway.shared_context.cancel_task(&id);
-            if cancelled {
-                tracing::info!(task_id = %id, "Task cancellation triggered via API");
-            } else {
-                tracing::warn!(task_id = %id, "No cancellation token found — task may have already completed");
-            }
-
-            TaskStatus::Cancelled
-        }
-        "pause" => {
-            if task.status != TaskStatus::Running {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": format!("Can only pause a running task, current state: '{}'", task.status)
-                    })),
-                );
-            }
-            TaskStatus::Paused
-        }
-        "resume" => {
-            if task.status != TaskStatus::Paused {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": format!("Can only resume a paused task, current state: '{}'", task.status)
-                    })),
-                );
-            }
-            TaskStatus::Running
-        }
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": format!("Unknown action: '{}'. Valid: cancel, pause, resume", request.action)
-                })),
-            );
-        }
-    };
-
-    // 1. Update DB
-    if let Err(e) = repo.update_status(&id, new_status) {
-        return (
+    // Shared with the orchestrator chat handler: registry-first resolution with
+    // DB fallback, transition validation, token cancel, persistence, lane sync,
+    // and TaskUpdated event all live in core.
+    match apply_task_action(
+        &state.gateway.shared_context,
+        &state.gateway.lane_manager,
+        &state.gateway.bus,
+        Some(&state.db),
+        &id,
+        &request.action,
+    ) {
+        Ok(new_status) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "task_id": id,
+                "status": new_status.as_str()
+            })),
+        ),
+        Err(TaskActionError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Task not found" })),
+        ),
+        Err(TaskActionError::CannotCancel { current }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("Cannot cancel a task in '{}' state", current)
+            })),
+        ),
+        Err(TaskActionError::CannotPause { current }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("Can only pause a running task, current state: '{}'", current)
+            })),
+        ),
+        Err(TaskActionError::CannotResume { current }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("Can only resume a paused task, current state: '{}'", current)
+            })),
+        ),
+        Err(TaskActionError::UnknownAction) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("Unknown action: '{}'. Valid: cancel, pause, resume", request.action)
+            })),
+        ),
+        Err(TaskActionError::Db(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        );
+            Json(serde_json::json!({ "error": e })),
+        ),
     }
-
-    // 2. Update in-memory registry
-    let entry_status = match new_status {
-        TaskStatus::Queued => TaskEntryStatus::Queued,
-        TaskStatus::Running => TaskEntryStatus::Running,
-        TaskStatus::Completed => TaskEntryStatus::Completed,
-        TaskStatus::Failed => TaskEntryStatus::Failed,
-        TaskStatus::Cancelled => TaskEntryStatus::Cancelled,
-        TaskStatus::Paused => TaskEntryStatus::Paused,
-    };
-    state
-        .gateway
-        .shared_context
-        .task_registry
-        .update_status(&id, entry_status);
-
-    // 3. Update task lane
-    if let Some(lane) = state.gateway.lane_manager.get_task_lane(&id) {
-        let lane_status = match new_status {
-            TaskStatus::Queued => TaskLaneStatus::Queued,
-            TaskStatus::Running => TaskLaneStatus::Running,
-            TaskStatus::Completed => TaskLaneStatus::Completed,
-            TaskStatus::Failed => TaskLaneStatus::Failed,
-            TaskStatus::Cancelled => TaskLaneStatus::Cancelled,
-            TaskStatus::Paused => TaskLaneStatus::Paused,
-        };
-        lane.set_status(lane_status);
-    }
-
-    // 4. Emit event
-    let now = Utc::now();
-    let event = match new_status {
-        TaskStatus::Cancelled => SystemEvent::TaskUpdated {
-            task_id: id.clone(),
-            status: "cancelled".to_string(),
-            progress_current: None,
-            progress_total: None,
-            timestamp: now,
-        },
-        _ => SystemEvent::TaskUpdated {
-            task_id: id.clone(),
-            status: new_status.as_str().to_string(),
-            progress_current: None,
-            progress_total: None,
-            timestamp: now,
-        },
-    };
-    let _ = state.gateway.bus.publish(event);
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "task_id": id,
-            "status": new_status.as_str()
-        })),
-    )
 }
 
 #[cfg(test)]

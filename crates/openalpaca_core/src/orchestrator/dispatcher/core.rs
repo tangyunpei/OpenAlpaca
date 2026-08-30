@@ -1,7 +1,7 @@
 use super::super::skill_matcher::SkillMatch;
 use super::super::task_planner::TaskDag;
 use super::super::task_state::TaskState;
-use super::TaskDispatcher;
+use super::{DispatchOutcome, TaskDispatcher};
 use crate::agent::registry::DestroyOutcome;
 use crate::agent::subagent::SubAgent;
 use crate::context::TaskEntryStatus;
@@ -28,7 +28,7 @@ impl TaskDispatcher {
         lane_key: &str,
         source: &str,
         workspace_id: Option<String>,
-    ) -> Result<String, String> {
+    ) -> Result<DispatchOutcome, String> {
         let task_id = Uuid::new_v4().to_string();
 
         // Register in task_registry
@@ -277,11 +277,16 @@ impl TaskDispatcher {
             })
             .collect();
 
-        Ok(format!(
+        let ack = format!(
             "I've created a task and assigned it to the following agents:\n\n{}\n\nTask: {}\nYou'll see the results here when the task completes.",
             agent_list.join("\n"),
             title
-        ))
+        );
+        Ok(DispatchOutcome {
+            task_id,
+            title,
+            ack,
+        })
     }
 
     /// Dispatch a DAG-only plan: spawn one agent instance per DAG node, rewrite
@@ -297,7 +302,7 @@ impl TaskDispatcher {
         lane_key: &str,
         source: &str,
         workspace_id: Option<String>,
-    ) -> Result<String, String> {
+    ) -> Result<DispatchOutcome, String> {
         let task_id = Uuid::new_v4().to_string();
         let now = Utc::now();
 
@@ -466,11 +471,16 @@ impl TaskDispatcher {
             .map(|n| format!("- {} ({})", n.title, n.agent_name))
             .collect();
 
-        Ok(format!(
+        let ack = format!(
             "I've created a DAG task with {} parallel/sequential nodes:\n\n{}\n\nTask: {}\nYou'll see the results here when the task completes.",
             dag.nodes.len(),
             node_list.join("\n"),
             title
-        ))
+        );
+        Ok(DispatchOutcome {
+            task_id,
+            title,
+            ack,
+        })
     }
 }

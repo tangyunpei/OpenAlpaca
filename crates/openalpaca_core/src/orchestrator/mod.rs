@@ -22,6 +22,8 @@ mod query_handler;
 mod summary;
 mod task_ops;
 
+pub use task_ops::{TaskActionError, apply_task_action};
+
 pub use skill::catalog as skill_catalog;
 pub use skill::matcher as skill_matcher;
 pub use skill::router as skill_router;
@@ -156,6 +158,10 @@ pub struct Orchestrator {
     /// Keyed by request_id to avoid races between concurrent requests.
     /// Populated after LLM response, removed by bridge after reading.
     pub llm_metadata_map: DashMap<Uuid, LlmMetadata>,
+    /// Per-request delegation metadata from dispatch paths → bridge.
+    /// Mirrors `llm_metadata_map`: populated when a dispatch creates a task,
+    /// removed by bridge after reading.
+    pub delegation_map: DashMap<Uuid, crate::gateway::DelegationInfo>,
     /// Optional broker for interactive tool confirmation (set post-construction via `set_confirmation_broker()`).
     pub confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
     /// Context manager for resolving dynamic context (memory, user profile, etc.) via PromptBuilder.
@@ -318,6 +324,7 @@ impl Orchestrator {
             connector_status,
             connector_sender,
             llm_metadata_map: DashMap::new(),
+            delegation_map: DashMap::new(),
             confirmation_broker: Arc::new(RwLock::new(None)),
             context_manager,
             persona_version: Arc::new(AtomicU64::new(0)),

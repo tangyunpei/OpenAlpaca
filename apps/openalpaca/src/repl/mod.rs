@@ -204,9 +204,9 @@ impl ReplSession {
                     self.context.session_usage.add(usage);
                 }
                 // If delegation, poll for task completion
-                if let StreamResult::Delegation { task_title, .. } = &result
+                if let StreamResult::Delegation { delegation, .. } = &result
                     && let Err(e) =
-                        chat_stream::poll_task_completion(&self.client, task_title).await
+                        chat_stream::poll_task_completion(&self.client, &delegation.task_id).await
                 {
                     eprintln!("{} {}", "Poll error:".red(), e);
                 }

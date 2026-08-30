@@ -158,33 +158,8 @@ fn make_sse_stream(
                 openalpaca_core::chat::ChatStreamEvent::Delta { content } => Event::default()
                     .event("delta")
                     .data(serde_json::json!({"content": content}).to_string()),
-                openalpaca_core::chat::ChatStreamEvent::Done {
-                    content,
-                    model,
-                    tokens_in,
-                    tokens_out,
-                    duration_ms,
-                    attachments_used,
-                    citations,
-                    artifacts,
-                } => {
-                    let mut data = serde_json::json!({
-                        "content": content,
-                        "model": model,
-                        "tokens_in": tokens_in,
-                        "tokens_out": tokens_out,
-                        "duration_ms": duration_ms
-                    });
-                    if let Some(att) = attachments_used {
-                        data["attachments_used"] = serde_json::json!(att);
-                    }
-                    if let Some(cit) = citations {
-                        data["citations"] = serde_json::json!(cit);
-                    }
-                    if let Some(art) = artifacts {
-                        data["artifacts"] = serde_json::json!(art);
-                    }
-                    Event::default().event("done").data(data.to_string())
+                openalpaca_core::chat::ChatStreamEvent::Done { .. } => {
+                    Event::default().event("done").data(done_event_data(&event))
                 }
                 openalpaca_core::chat::ChatStreamEvent::Error { message } => Event::default()
                     .event("error")
@@ -205,6 +180,17 @@ fn make_sse_stream(
         }
         Err(_) => None,
     })
+}
+
+/// SSE data payload for a `done` event: the serde form of the event minus the
+/// `"event"` tag. Optional fields (attachments_used, citations, artifacts,
+/// delegation) appear only when present.
+fn done_event_data(event: &openalpaca_core::chat::ChatStreamEvent) -> String {
+    let mut value = serde_json::to_value(event).unwrap_or_default();
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("event");
+    }
+    value.to_string()
 }
 
 // ── GET /v1/chat/history ────────────────────────────────────────────
@@ -502,5 +488,47 @@ mod tests {
         assert!(!is_lane_owned_by("", "user1"));
         assert!(!is_lane_owned_by("user1", "user1")); // no colon separator
         assert!(is_lane_owned_by("user1:", "user1")); // empty source, still valid format
+    }
+
+    fn make_done(
+        delegation: Option<openalpaca_core::gateway::DelegationInfo>,
+    ) -> openalpaca_core::chat::ChatStreamEvent {
+        openalpaca_core::chat::ChatStreamEvent::Done {
+            content: "ack".to_string(),
+            model: "router".to_string(),
+            tokens_in: 0,
+            tokens_out: 0,
+            duration_ms: 42,
+            attachments_used: None,
+            citations: None,
+            artifacts: None,
+            delegation,
+        }
+    }
+
+    #[test]
+    fn test_done_event_data_without_delegation() {
+        let data: serde_json::Value =
+            serde_json::from_str(&done_event_data(&make_done(None))).unwrap();
+        assert_eq!(data["content"], "ack");
+        assert_eq!(data["model"], "router");
+        assert_eq!(data["tokens_in"], 0);
+        assert_eq!(data["tokens_out"], 0);
+        assert_eq!(data["duration_ms"], 42);
+        // The SSE payload carries no event tag and omits absent optionals.
+        assert!(data.get("event").is_none());
+        assert!(data.get("delegation").is_none());
+        assert!(data.get("attachments_used").is_none());
+    }
+
+    #[test]
+    fn test_done_event_data_with_delegation() {
+        let event = make_done(Some(openalpaca_core::gateway::DelegationInfo {
+            task_id: "task-123".to_string(),
+            title: "Research Rust".to_string(),
+        }));
+        let data: serde_json::Value = serde_json::from_str(&done_event_data(&event)).unwrap();
+        assert_eq!(data["delegation"]["task_id"], "task-123");
+        assert_eq!(data["delegation"]["title"], "Research Rust");
     }
 }

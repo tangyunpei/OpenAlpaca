@@ -587,6 +587,11 @@ impl Orchestrator {
                         None,                          // cost_accumulator (top-level)
                         Some(tool_ctx.clone()),         // parent_tool_context
                         config_for_loop.max_cost,       // parent_max_cost
+                        self.daemon_config
+                            .load()
+                            .security
+                            .auto_approve_confirmations, // auto_approve
+                        global_deny.clone(),            // global_tool_deny
                     ));
                     for dep_id in &skill_doc.frontmatter.depends_on {
                         if self.skill_catalog.get(dep_id).is_some() {

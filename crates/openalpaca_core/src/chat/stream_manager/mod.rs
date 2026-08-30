@@ -3,6 +3,7 @@
 //! Manages broadcast channels for chat streaming. Each active chat request
 //! gets a unique stream_id with a broadcast channel for SSE delivery.
 
+use crate::gateway::DelegationInfo;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -30,6 +31,8 @@ pub enum ChatStreamEvent {
         citations: Option<Vec<Citation>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         artifacts: Option<Vec<Artifact>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        delegation: Option<DelegationInfo>,
     },
     Error {
         message: String,
@@ -108,6 +111,7 @@ impl StreamSink {
         tokens_in: u64,
         tokens_out: u64,
         duration_ms: u64,
+        delegation: Option<DelegationInfo>,
     ) {
         self.send_event(ChatStreamEvent::Done {
             content: content.to_string(),
@@ -118,10 +122,12 @@ impl StreamSink {
             attachments_used: None,
             citations: None,
             artifacts: None,
+            delegation,
         });
     }
 
     /// Send the final Done event with attachment info.
+    #[allow(clippy::too_many_arguments)]
     pub fn send_done_with_attachments(
         &self,
         content: &str,
@@ -130,6 +136,7 @@ impl StreamSink {
         tokens_out: u64,
         duration_ms: u64,
         attachments_used: Vec<String>,
+        delegation: Option<DelegationInfo>,
     ) {
         let att = if attachments_used.is_empty() {
             None
@@ -145,6 +152,7 @@ impl StreamSink {
             attachments_used: att,
             citations: None,
             artifacts: None,
+            delegation,
         });
     }
 
@@ -185,6 +193,7 @@ impl StreamSink {
             attachments_used: att,
             citations: cit,
             artifacts: art,
+            delegation: None,
         });
     }
 

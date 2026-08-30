@@ -20,6 +20,31 @@ impl MessageHandler for StubHandler {
     }
 }
 
+/// A handler that reports a delegated task.
+struct DelegatingHandler;
+
+#[async_trait]
+impl MessageHandler for DelegatingHandler {
+    async fn handle(
+        &self,
+        _request_id: Uuid,
+        _source: String,
+        _content: String,
+        _principal: Principal,
+        _scope: Scope,
+        _lane_key: String,
+        _workspace_path: Option<String>,
+        _stream_id: Option<String>,
+    ) -> Result<HandleResult, String> {
+        let mut result = HandleResult::text("ack".to_string());
+        result.delegation = Some(DelegationInfo {
+            task_id: "task-42".to_string(),
+            title: "Research Rust".to_string(),
+        });
+        Ok(result)
+    }
+}
+
 /// A handler that always fails.
 struct FailHandler;
 
@@ -86,6 +111,35 @@ async fn test_handle_event_echo() {
     assert_eq!(resp.lane_key.source, "cli");
     assert_eq!(resp.content, "Echo: hello");
     assert!(!resp.is_error);
+    assert!(resp.delegation.is_none());
+}
+
+#[tokio::test]
+async fn test_handle_event_propagates_delegation() {
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        Arc::new(DelegatingHandler),
+        EventBus::default(),
+        None,
+    );
+    let resp = gw
+        .handle_event(GatewayRequest {
+            source: EventSource::Cli {
+                session_id: "user1".to_string(),
+            },
+            content: "do a big task".to_string(),
+            principal: Principal::System,
+            scope: Scope::Global,
+            attachments: Vec::new(),
+            workspace_path: None,
+            stream_id: None,
+        })
+        .await;
+    assert!(!resp.is_error);
+    let delegation = resp.delegation.expect("delegation should propagate");
+    assert_eq!(delegation.task_id, "task-42");
+    assert_eq!(delegation.title, "Research Rust");
 }
 
 #[tokio::test]
