@@ -330,6 +330,42 @@ impl Orchestrator {
         .to_string())
     }
 
+    /// Handle a bare `/cancel` | `/pause` | `/resume` (no task id) by
+    /// resolving the target from the lane's active workflows (Routing V2
+    /// Phase 3): exactly one running workflow → apply the action to it;
+    /// zero → say so; multiple → list the ids and ask which (no action).
+    pub(super) fn handle_bare_task_control(
+        &self,
+        action: &str,
+        lane_key: &str,
+    ) -> Result<String, String> {
+        let workflows = self.shared_context.workflows_for_lane(lane_key);
+        match workflows.as_slice() {
+            [] => Ok("No running workflow on this conversation.".to_string()),
+            [task_id] => self.handle_task_control(task_id, action),
+            many => {
+                let list: Vec<String> = many
+                    .iter()
+                    .map(|id| {
+                        let title = self
+                            .shared_context
+                            .task_registry
+                            .get(id)
+                            .map(|e| e.title)
+                            .unwrap_or_default();
+                        format!("- {} ({})", id, title)
+                    })
+                    .collect();
+                Ok(format!(
+                    "Multiple workflows are running on this conversation:\n{}\nWhich task should I {}? Use /{} <task-id>. Nothing was changed.",
+                    list.join("\n"),
+                    action,
+                    action,
+                ))
+            }
+        }
+    }
+
     /// Handle the deterministic `/steer <message>` prefix (Routing V2):
     /// guaranteed injection into the lane's sole running workflow, bypassing
     /// the model. Replies are deterministic; the reply is always `Ok` — a

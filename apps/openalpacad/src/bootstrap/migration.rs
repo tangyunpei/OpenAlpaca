@@ -1,7 +1,30 @@
 //! Utility functions and data migration helpers.
 
+use openalpaca_storage::repository::TaskRepository;
 use openalpaca_storage::{ConfigRepository, ConversationRepository, Database, IdentityRepository};
 use std::path::Path;
+
+/// Startup orphan sweep (Routing V2 Phase 3): mark every non-terminal task
+/// (queued / running / paused) as failed. In-flight execution never survives
+/// a daemon restart — the tokio tasks driving them are gone — so any task
+/// left non-terminal in the DB is an orphan that would otherwise look alive
+/// forever in /status output and lane workflow context.
+///
+/// CALL-ORDER GUARANTEE: this must run right after the database opens and
+/// BEFORE any ingress can create or resume work — i.e. before
+/// `WakeManager::start()` (scheduler/watcher events) and before
+/// `ConnectorManager::start_all()` (chat ingress) in `async_main`. Tasks
+/// created after the sweep belong to this daemon generation and must not be
+/// touched.
+///
+/// Non-fatal: failure is logged but doesn't prevent daemon startup.
+pub fn sweep_orphaned_tasks(db: &Database) {
+    match TaskRepository::new(db).fail_all_non_terminal("daemon restarted — task orphaned") {
+        Ok(0) => {}
+        Ok(count) => tracing::info!("Startup orphan sweep: failed {count} orphaned task(s)"),
+        Err(e) => tracing::warn!("Startup orphan sweep failed (non-fatal): {e}"),
+    }
+}
 
 pub fn is_same_file_path(a: &Path, b: &Path) -> bool {
     if a == b {

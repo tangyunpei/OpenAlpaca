@@ -322,8 +322,8 @@ fn test_upload_governance_wait_settings_validate_clamps() {
 // ── Routing V2: [orchestrator.routing] ──
 
 fn assert_routing_is_default(routing: &crate::daemon_config::RoutingConfig) {
-    assert_eq!(routing.mode, "planner");
-    assert!(!routing.steering_enabled);
+    assert_eq!(routing.mode, "tool");
+    assert!(routing.steering_enabled);
     assert_eq!(routing.steering_inbox_cap, 16);
     assert_eq!(routing.max_workflows_per_lane, 3);
     assert!(routing.followup_autostart);
@@ -360,15 +360,16 @@ fn test_routing_partial_table_keeps_field_defaults() {
     // has a named serde default matching the Default impl.
     let toml_str = r#"
 [orchestrator.routing]
-steering_enabled = true
+steering_inbox_cap = 8
 "#;
     let config: DaemonConfig = toml::from_str(toml_str).unwrap();
     let routing = &config.orchestrator.routing;
-    assert!(routing.steering_enabled);
-    assert_eq!(routing.mode, "planner");
-    assert_eq!(routing.steering_inbox_cap, 16);
+    assert_eq!(routing.steering_inbox_cap, 8);
+    assert_eq!(routing.mode, "tool");
     assert_eq!(routing.max_workflows_per_lane, 3);
-    assert!(routing.followup_autostart); // would be false under bare #[serde(default)]
+    // These two would be false under bare #[serde(default)]:
+    assert!(routing.steering_enabled);
+    assert!(routing.followup_autostart);
     assert_eq!(routing.main_loop_max_rounds, 8);
     assert_eq!(routing.main_loop_max_tools_per_round, 4);
     assert_eq!(routing.tool_selection, "core_union");

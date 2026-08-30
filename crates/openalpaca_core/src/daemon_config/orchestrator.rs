@@ -12,9 +12,10 @@ pub struct OrchestratorConfig {
 
 /// Routing V2 configuration (`[orchestrator.routing]`).
 ///
-/// With the defaults (`mode = "planner"`, `steering_enabled = false`) the
-/// daemon behaves exactly as before Routing V2. Full rollback invariant:
-/// `mode = "planner"` AND `steering_enabled = false`.
+/// Defaults are the Routing V2 behavior: `mode = "tool"` (main-loop tool
+/// calls) with `steering_enabled = true`. Full rollback invariant:
+/// `mode = "planner"` AND `steering_enabled = false` restores the legacy
+/// pre-classifier ladder with no steering rail.
 ///
 /// Every field carries a named `#[serde(default = "...")]` function shared
 /// with the `Default` impl, so a partially-specified table gets the same
@@ -53,10 +54,10 @@ pub struct RoutingConfig {
 }
 
 fn default_routing_mode() -> String {
-    "planner".to_string()
+    "tool".to_string()
 }
 fn default_steering_enabled() -> bool {
-    false
+    true
 }
 fn default_steering_inbox_cap() -> usize {
     16

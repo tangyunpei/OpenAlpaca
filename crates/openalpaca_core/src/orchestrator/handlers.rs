@@ -117,13 +117,35 @@ impl Orchestrator {
                     intent_type: intent.intent_type().to_string(),
                     timestamp: Utc::now(),
                 });
-                return match intent {
+                let result = match intent {
                     Intent::TaskQuery { task_id } => self.handle_task_query(task_id, &owner_id_str),
-                    Intent::TaskControl { task_id, action } => {
-                        self.handle_task_control(&task_id, &action)
+                    Intent::TaskControl {
+                        task_id: Some(task_id),
+                        action,
+                    } => self.handle_task_control(&task_id, &action),
+                    Intent::TaskControl {
+                        task_id: None,
+                        action,
+                    } => {
+                        // Bare /cancel|/pause|/resume: resolve the target from
+                        // the lane's active workflows (Routing V2 Phase 3).
+                        self.handle_bare_task_control(&action, &lane_key)
                     }
                     _ => unreachable!(),
                 };
+                // Task ops skip the routing ladder entirely, but every routed
+                // message must still be observable (Routing V2 Phase 3):
+                // emit OrchestrationStage + the latency record before returning.
+                self.record_orchestration_stage(
+                    request_id,
+                    "task_ops".to_string(),
+                    0,
+                    0,
+                    ack_start.elapsed().as_millis() as u64,
+                    None,
+                    None,
+                );
+                return result;
             }
             _ => {}
         }
@@ -145,8 +167,8 @@ impl Orchestrator {
         {
             // Deterministic steering override (Routing V2): guaranteed
             // injection into the lane's running workflow, bypassing the
-            // model. With steering_enabled=false (default) this arm is
-            // skipped and "/steer ..." routes exactly as before.
+            // model. With steering_enabled=false (rollback) this arm is
+            // skipped and "/steer ..." routes like any other message.
             mode = "steered".to_string();
             self.handle_steer_prefix(
                 request_id,
@@ -691,35 +713,16 @@ impl Orchestrator {
 
         let ack_ms = ack_start.elapsed().as_millis() as u64;
 
-        // Emit OrchestrationStage event
-        self.bus.publish(SystemEvent::OrchestrationStage {
+        // Emit OrchestrationStage event + persist the latency record
+        self.record_orchestration_stage(
             request_id,
-            mode: mode.clone(),
+            mode,
             planner_ms,
             dispatch_ms,
             ack_ms,
-            fallback_reason: fallback_reason.clone(),
-            auto_promotion_reason: auto_promotion_reason.clone(),
-            timestamp: Utc::now(),
-        });
-
-        // Persist latency record (best-effort)
-        if let Some(ref db) = self.db {
-            let repo = OrchestratorLatencyRepository::new(db);
-            if let Err(e) = repo.record(&OrchestratorLatencyRecord {
-                id: None,
-                request_id: request_id.to_string(),
-                mode,
-                planner_ms,
-                dispatch_ms,
-                ack_ms,
-                fallback_reason,
-                auto_promotion_reason,
-                timestamp: None,
-            }) {
-                tracing::debug!("Failed to persist orchestrator latency: {e}");
-            }
-        }
+            fallback_reason,
+            auto_promotion_reason,
+        );
 
         // 6 + 7. Summary update and user trait extraction run concurrently
         // in a background spawn (fire-and-forget, never blocks the response).
@@ -796,5 +799,48 @@ impl Orchestrator {
         self.maybe_complete_bootstrap().await;
 
         result
+    }
+
+    /// Publish an `OrchestrationStage` event and persist the matching
+    /// latency record (best-effort). Shared by the routing ladder and the
+    /// task-ops early return so every routed message is observable.
+    #[allow(clippy::too_many_arguments)]
+    fn record_orchestration_stage(
+        &self,
+        request_id: Uuid,
+        mode: String,
+        planner_ms: u64,
+        dispatch_ms: u64,
+        ack_ms: u64,
+        fallback_reason: Option<String>,
+        auto_promotion_reason: Option<String>,
+    ) {
+        self.bus.publish(SystemEvent::OrchestrationStage {
+            request_id,
+            mode: mode.clone(),
+            planner_ms,
+            dispatch_ms,
+            ack_ms,
+            fallback_reason: fallback_reason.clone(),
+            auto_promotion_reason: auto_promotion_reason.clone(),
+            timestamp: Utc::now(),
+        });
+
+        if let Some(ref db) = self.db {
+            let repo = OrchestratorLatencyRepository::new(db);
+            if let Err(e) = repo.record(&OrchestratorLatencyRecord {
+                id: None,
+                request_id: request_id.to_string(),
+                mode,
+                planner_ms,
+                dispatch_ms,
+                ack_ms,
+                fallback_reason,
+                auto_promotion_reason,
+                timestamp: None,
+            }) {
+                tracing::debug!("Failed to persist orchestrator latency: {e}");
+            }
+        }
     }
 }

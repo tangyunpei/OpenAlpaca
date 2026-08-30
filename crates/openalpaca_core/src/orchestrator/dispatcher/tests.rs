@@ -1534,14 +1534,17 @@ async fn test_lead_agent_steering_attach_detach_and_leftover_conversion() {
 }
 
 #[tokio::test]
-async fn test_lead_agent_no_steering_attach_when_disabled() {
-    // Default config (steering_enabled=false): dispatch must register
-    // neither an inbox nor a lane workflow entry.
+async fn test_lead_agent_lane_attachment_independent_of_steering_flag() {
+    // steering_enabled=false: no inbox registers, but the lane attachment
+    // (which backs the StartWorkflowTool cap and the workflow-context
+    // block) must still register at dispatch and deregister at cleanup.
+    let mut config = DaemonConfig::default();
+    config.orchestrator.routing.steering_enabled = false;
     let dir = tempfile::tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
     let dispatcher = setup_with_router_and_db(
         vec![make_agent("lead-01", vec!["orchestration"])],
-        DaemonConfig::default(),
+        config,
         db,
     );
 
@@ -1556,21 +1559,33 @@ async fn test_lead_agent_no_steering_attach_when_disabled() {
         )
         .unwrap();
 
+    // Lane attachment registered, no steering inbox.
+    assert_eq!(
+        dispatcher.shared_context.workflows_for_lane("user1:cli"),
+        vec![outcome.task_id.clone()]
+    );
     assert!(
         dispatcher
             .shared_context
             .steering_inbox(&outcome.task_id)
             .is_none()
     );
-    assert!(
-        dispatcher
-            .shared_context
-            .workflows_for_lane("user1:cli")
-            .is_empty()
-    );
 
-    // Stop the background execution.
+    // Cancel the background execution; the lane attachment must
+    // deregister even though no inbox was ever registered.
     dispatcher.shared_context.cancel_task(&outcome.task_id);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !dispatcher
+        .shared_context
+        .workflows_for_lane("user1:cli")
+        .is_empty()
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "lane deregistration timed out"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 // ── Routing V2 §2b: model-authored completion report ─────────────────

@@ -13,9 +13,9 @@ use openalpaca_storage::Database;
 use openalpaca_storage::repository::TaskRepository;
 
 /// Render the lane's active workflows as a `<active_workflows>` prompt
-/// block. Returns `None` when the lane has none (the common case — lane
-/// registration only happens with steering enabled, so legacy-path prompts
-/// are untouched).
+/// block. Returns `None` when the lane has none (the common case). Only the
+/// tool-mode main loop calls this, so legacy-path prompts are untouched even
+/// though lane registration itself is unconditional.
 ///
 /// Per workflow: task id, title, status (in-memory registry first, DB
 /// fallback for post-restart entries), and the registry's progress counters

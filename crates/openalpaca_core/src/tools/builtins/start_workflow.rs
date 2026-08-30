@@ -135,16 +135,23 @@ impl BuiltInTool for StartWorkflowTool {
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = Some(outcome.clone());
 
-        // 4. Publish WorkflowStarted (Routing V2).
+        // 4. Record the routing decision (Routing V2 Phase 3): the model's
+        // tool call IS the dispatch decision, recorded UNCONDITIONALLY —
+        // the `dispatch_analysis_enabled` gate only covers the planner path.
+        let request_id = ctx.request_id.unwrap_or_else(Uuid::nil);
+        self.task_dispatcher
+            .record_tool_dispatch_decision(&request_id.to_string(), &outcome.task_id);
+
+        // 5. Publish WorkflowStarted (Routing V2).
         self.bus.publish(SystemEvent::WorkflowStarted {
-            request_id: ctx.request_id.unwrap_or_else(Uuid::nil),
+            request_id,
             task_id: outcome.task_id.clone(),
             lane_key: lane_key.to_string(),
             title: outcome.title.clone(),
             timestamp: Utc::now(),
         });
 
-        // 5. Short result the model relays in its own words.
+        // 6. Short result the model relays in its own words.
         Ok(format!(
             "Workflow started in the background (task id: {}, title: \"{}\"). \
              It will post its results to this conversation when it completes. \
@@ -198,6 +205,13 @@ mod tests {
     /// No router: `dispatch_lead_agent` still returns Ok(DispatchOutcome) —
     /// the spawned execution just aborts at `require_router`.
     fn setup() -> (Arc<SharedContext>, Arc<TaskDispatcher>, EventBus) {
+        setup_with(None, crate::daemon_config::DaemonConfig::default())
+    }
+
+    fn setup_with(
+        db: Option<openalpaca_storage::Database>,
+        config: crate::daemon_config::DaemonConfig,
+    ) -> (Arc<SharedContext>, Arc<TaskDispatcher>, EventBus) {
         let ctx = Arc::new(SharedContext::new());
         let lead = make_agent("lead", vec!["orchestration"]);
         ctx.agent_registry.register_template(template_from_agent(&lead));
@@ -211,9 +225,7 @@ mod tests {
             bus.clone(),
         ));
         let gate = Arc::new(crate::security::gate::SecurityGate::new(sandbox));
-        let daemon_config = Arc::new(arc_swap::ArcSwap::from_pointee(
-            crate::daemon_config::DaemonConfig::default(),
-        ));
+        let daemon_config = Arc::new(arc_swap::ArcSwap::from_pointee(config));
         let dispatcher = Arc::new(TaskDispatcher::new(
             ctx.clone(),
             lane_mgr,
@@ -221,7 +233,7 @@ mod tests {
             None,
             gate,
             tool_registry,
-            None,
+            db,
             None,
             daemon_config,
             Arc::new(std::sync::RwLock::new(None)),
@@ -355,6 +367,64 @@ mod tests {
                 "WorkflowStarted must not be published at the cap"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_start_workflow_records_decision_despite_analysis_gate_off() {
+        // Routing V2 Phase 3: the tool path records its DispatchDecision
+        // UNCONDITIONALLY — `dispatch_analysis_enabled=false` (the shipped
+        // config value) only gates the planner path's analysis layer.
+        let dir = tempfile::tempdir().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+        let mut config = crate::daemon_config::DaemonConfig::default();
+        config.execution.planner.dispatch_analysis_enabled = false;
+        let (shared, dispatcher, bus) = setup_with(Some(db.clone()), config);
+        let mut rx = bus.subscribe();
+        let request_id = Uuid::new_v4();
+        let tool = StartWorkflowTool::new(
+            dispatcher,
+            shared,
+            bus.clone(),
+            routing_with_cap(3),
+        );
+
+        tool.execute_with_context(
+            &serde_json::json!({"goal": "Research the Rust borrow checker"}),
+            &lane_ctx("user1:cli", request_id),
+        )
+        .await
+        .expect("dispatch should succeed");
+        let task_id = tool.outcome().unwrap().task_id;
+
+        // Event published with the REAL task id and the new reason.
+        let mut saw_decision = false;
+        while let Ok(event) = rx.try_recv() {
+            if let SystemEvent::DispatchDecision {
+                request_id: rid,
+                task_id: tid,
+                mode,
+                reason,
+                ..
+            } = event
+            {
+                assert_eq!(rid, request_id.to_string());
+                assert_eq!(tid.as_deref(), Some(task_id.as_str()));
+                assert_eq!(mode, "lead_agent");
+                assert_eq!(reason, "model_tool_call");
+                saw_decision = true;
+            }
+        }
+        assert!(saw_decision, "DispatchDecision was not published");
+
+        // Row persisted with the real task id (never ack prose).
+        let rows = openalpaca_storage::repository::dispatch_decision::DispatchDecisionRepository::new(&db)
+            .query(None, None, None, 10)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].request_id, request_id.to_string());
+        assert_eq!(rows[0].task_id.as_deref(), Some(task_id.as_str()));
+        assert_eq!(rows[0].mode, "lead_agent");
+        assert_eq!(rows[0].reason, "model_tool_call");
     }
 
     #[tokio::test]

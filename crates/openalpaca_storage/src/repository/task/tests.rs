@@ -377,3 +377,63 @@ fn test_set_outcome_updates_existing() {
         "outcome_json should not contain old summary"
     );
 }
+
+#[test]
+fn test_fail_all_non_terminal_sweeps_only_live_rows() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    // One row per status.
+    for (id, status) in [
+        ("queued", TaskStatus::Queued),
+        ("running", TaskStatus::Running),
+        ("paused", TaskStatus::Paused),
+        ("completed", TaskStatus::Completed),
+        ("failed", TaskStatus::Failed),
+        ("cancelled", TaskStatus::Cancelled),
+    ] {
+        let mut task = make_task(id, id);
+        task.status = status;
+        repo.create(&task).unwrap();
+    }
+    // A running row with an existing summary must keep it.
+    let mut with_summary = make_task("running-with-summary", "has summary");
+    with_summary.status = TaskStatus::Running;
+    with_summary.result_summary = Some("partial progress".to_string());
+    repo.create(&with_summary).unwrap();
+
+    let swept = repo
+        .fail_all_non_terminal("daemon restarted — task orphaned")
+        .unwrap();
+    assert_eq!(swept, 4, "queued + running + paused + running-with-summary");
+
+    // Non-terminal rows flipped to Failed with the reason + completed_at.
+    for id in ["queued", "running", "paused"] {
+        let task = repo.get(id).unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Failed, "task {id}");
+        assert_eq!(
+            task.result_summary.as_deref(),
+            Some("daemon restarted — task orphaned"),
+            "task {id}"
+        );
+        assert!(task.completed_at.is_some(), "task {id}");
+    }
+    // Existing summary preserved.
+    let task = repo.get("running-with-summary").unwrap().unwrap();
+    assert_eq!(task.status, TaskStatus::Failed);
+    assert_eq!(task.result_summary.as_deref(), Some("partial progress"));
+
+    // Terminal rows untouched.
+    for (id, status) in [
+        ("completed", TaskStatus::Completed),
+        ("failed", TaskStatus::Failed),
+        ("cancelled", TaskStatus::Cancelled),
+    ] {
+        let task = repo.get(id).unwrap().unwrap();
+        assert_eq!(task.status, status, "terminal task {id} must be untouched");
+        assert!(task.result_summary.is_none(), "terminal task {id}");
+    }
+
+    // Idempotent: a second sweep finds nothing.
+    assert_eq!(repo.fail_all_non_terminal("again").unwrap(), 0);
+}

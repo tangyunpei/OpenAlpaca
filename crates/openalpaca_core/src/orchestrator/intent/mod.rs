@@ -20,8 +20,13 @@ pub enum Intent {
         description: String,
         required_skills: Vec<String>,
     },
-    /// A task control command (cancel, pause, resume).
-    TaskControl { task_id: String, action: String },
+    /// A task control command (cancel, pause, resume). A bare command
+    /// (no id) carries `task_id: None` and is resolved against the lane's
+    /// active workflows by the handler (Routing V2 Phase 3).
+    TaskControl {
+        task_id: Option<String>,
+        action: String,
+    },
     /// User wants to remember something (store in profile or memory).
     RememberCommand { content: String },
     /// User wants to forget something (remove from profile or memory).
@@ -127,24 +132,32 @@ impl IntentParser {
     }
 
     fn parse_task_control(lower: &str) -> Option<Intent> {
-        let (action, rest) = if let Some(r) = lower.strip_prefix("/cancel ") {
+        let (action, rest) = if let Some(r) = lower.strip_prefix("/cancel") {
             ("cancel", r)
-        } else if let Some(r) = lower.strip_prefix("/pause ") {
+        } else if let Some(r) = lower.strip_prefix("/pause") {
             ("pause", r)
-        } else if let Some(r) = lower.strip_prefix("/resume ") {
+        } else if let Some(r) = lower.strip_prefix("/resume") {
             ("resume", r)
         } else {
             return None;
         };
-        let task_id = rest.trim().to_string();
-        if !task_id.is_empty() {
-            Some(Intent::TaskControl {
-                task_id,
+        // Bare command ("/cancel") → id resolved from the lane's active
+        // workflows by the handler. With a trailing id ("/cancel <id>") the
+        // id is explicit. Anything else ("/cancellation") is not a command.
+        if rest.is_empty() {
+            return Some(Intent::TaskControl {
+                task_id: None,
                 action: action.to_string(),
-            })
-        } else {
-            None
+            });
         }
+        if !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let task_id = rest.trim().to_string();
+        Some(Intent::TaskControl {
+            task_id: (!task_id.is_empty()).then_some(task_id),
+            action: action.to_string(),
+        })
     }
 
     fn parse_task_query(lower: &str) -> Option<Intent> {

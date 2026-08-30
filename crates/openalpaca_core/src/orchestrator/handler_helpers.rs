@@ -225,7 +225,10 @@ impl Orchestrator {
                     }
                 }
             }
-            Intent::TaskControl { task_id, action } => self.handle_task_control(&task_id, &action),
+            Intent::TaskControl { task_id, action } => match task_id {
+                Some(id) => self.handle_task_control(&id, &action),
+                None => self.handle_bare_task_control(&action, lane_key),
+            },
             Intent::RememberCommand { content } => {
                 self.handle_remember_command(&content, owner_id, scope_ctx)
                     .await

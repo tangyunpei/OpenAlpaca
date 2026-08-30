@@ -49,7 +49,20 @@ fn make_orchestrator_with_config(config: DaemonConfig) -> Orchestrator {
     )
 }
 
-fn make_orchestrator_with_agents(agents: Vec<SubAgent>) -> Orchestrator {
+/// Config pinned to the legacy planner ladder. Routing V2 flipped the
+/// default to `mode = "tool"`; tests that exercise the pre-classifier /
+/// heuristic-dispatch ladder must opt into it explicitly (the planner
+/// path stays functional behind this flag until Phase 5 deletes it).
+fn planner_pinned_config() -> DaemonConfig {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.routing.mode = "planner".to_string();
+    config
+}
+
+fn make_orchestrator_with_agents_and_config(
+    agents: Vec<SubAgent>,
+    config: DaemonConfig,
+) -> Orchestrator {
     let ctx = Arc::new(SharedContext::new());
     for a in &agents {
         ctx.agent_registry.register_template(template_from_agent(a));
@@ -72,7 +85,7 @@ fn make_orchestrator_with_agents(agents: Vec<SubAgent>) -> Orchestrator {
         None,
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
-        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        Arc::new(ArcSwap::from_pointee(config)),
     )
 }
 
@@ -229,10 +242,14 @@ async fn test_task_query_empty() {
 
 #[tokio::test]
 async fn test_complex_task_dispatch() {
-    let orch = make_orchestrator_with_agents(vec![
-        make_agent("a1", vec!["web_search"]),
-        make_agent("a2", vec!["text_generate"]),
-    ]);
+    // Legacy-ladder test: heuristic ComplexTask dispatch (planner mode).
+    let orch = make_orchestrator_with_agents_and_config(
+        vec![
+            make_agent("a1", vec!["web_search"]),
+            make_agent("a2", vec!["text_generate"]),
+        ],
+        planner_pinned_config(),
+    );
     let result = orch
         .handle_message(
             Uuid::new_v4(),
@@ -253,10 +270,15 @@ async fn test_complex_task_dispatch() {
 
 #[tokio::test]
 async fn test_complex_task_dispatch_records_delegation() {
-    let orch = make_orchestrator_with_agents(vec![
-        make_agent("a1", vec!["web_search"]),
-        make_agent("a2", vec!["text_generate"]),
-    ]);
+    // Legacy-ladder test: delegation recording on the planner dispatch
+    // path (tool-mode recording is covered by the StartWorkflowTool tests).
+    let orch = make_orchestrator_with_agents_and_config(
+        vec![
+            make_agent("a1", vec!["web_search"]),
+            make_agent("a2", vec!["text_generate"]),
+        ],
+        planner_pinned_config(),
+    );
     let request_id = Uuid::new_v4();
     let result = orch
         .handle_message(
@@ -340,7 +362,11 @@ async fn test_permission_denied_external() {
 
 #[tokio::test]
 async fn test_full_lifecycle_events() {
-    let orch = make_orchestrator_with_agents(vec![make_agent("a1", vec!["web_search"])]);
+    // Legacy-ladder test: IntentClassified only fires on the planner ladder.
+    let orch = make_orchestrator_with_agents_and_config(
+        vec![make_agent("a1", vec!["web_search"])],
+        planner_pinned_config(),
+    );
     let mut rx = orch.bus.subscribe();
 
     // Send a complex task
@@ -593,8 +619,12 @@ fn make_orchestrator_with_llm_and_agents(
 async fn test_llm_planning_complex_task() {
     let plan_json = r#"{"classification": "complex_task", "title": "Research Rust patterns", "assignments": [{"agent_id": "a1", "agent_name": "Agent a1", "role_description": "Research agent", "matched_skills": ["web_search"]}], "reasoning": "User wants research"}"#;
     let router = make_planning_mock_llm(plan_json);
-    let orch =
-        make_orchestrator_with_llm_and_agents(router, vec![make_agent("a1", vec!["web_search"])]);
+    // Legacy-ladder test: LLM task planning only runs in planner mode.
+    let orch = make_orchestrator_with_llm_agents_and_config(
+        router,
+        vec![make_agent("a1", vec!["web_search"])],
+        planner_pinned_config(),
+    );
 
     let result = orch
         .handle_message(
@@ -625,7 +655,9 @@ async fn test_llm_planning_complex_task() {
 async fn test_llm_planning_simple_query() {
     let plan_json = r#"{"classification": "simple_query", "title": null, "assignments": [], "reasoning": "This is a greeting"}"#;
     let router = make_planning_mock_llm(plan_json);
-    let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
+    // Legacy-ladder test: planner classification of a simple query.
+    let orch =
+        make_orchestrator_with_llm_agents_and_config(router, vec![], planner_pinned_config());
 
     let result = orch
         .handle_message(
@@ -649,8 +681,12 @@ async fn test_llm_planning_simple_query() {
 async fn test_llm_planning_fallback_on_malformed() {
     // LLM returns garbage — should fall back to keyword heuristic
     let router = make_planning_mock_llm("this is not valid json at all");
-    let orch =
-        make_orchestrator_with_llm_and_agents(router, vec![make_agent("a1", vec!["web_search"])]);
+    // Legacy-ladder test: planner-fallback heuristic dispatch.
+    let orch = make_orchestrator_with_llm_agents_and_config(
+        router,
+        vec![make_agent("a1", vec!["web_search"])],
+        planner_pinned_config(),
+    );
 
     let result = orch
         .handle_message(
@@ -1352,8 +1388,11 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
 
     let guard = captured_requests.lock().unwrap();
     let req = guard.last().expect("expected captured request");
+    // Tool mode always carries the core set (start_workflow, task_status, …);
+    // the guard is that attachment text must not pull in suggested tools
+    // like file_write.
     assert!(
-        req.tools.is_empty(),
+        !req.tools.iter().any(|t| t.name == "file_write"),
         "Attachment text should not drive tool suggestion; got tools: {:?}",
         req.tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
     );
@@ -2068,9 +2107,13 @@ async fn test_steer_prefix_multiple_workflows_asks_which() {
 
 #[tokio::test]
 async fn test_steer_prefix_flag_off_routes_unchanged() {
-    // steering_enabled=false (default): "/steer x" must route exactly as any
-    // other plain message — same mode sequence, no steering side effects.
-    let orch = make_orchestrator();
+    // Phase-1 flag-off parity: pinned to the pre-Routing-V2 combo
+    // (mode="planner", steering_enabled=false). "/steer x" must route
+    // exactly as any other plain message — same mode sequence, no
+    // steering side effects.
+    let mut config = planner_pinned_config();
+    config.orchestrator.routing.steering_enabled = false;
+    let orch = make_orchestrator_with_config(config);
     orch.shared_context
         .task_registry
         .register("task-1".to_string(), "Some task".to_string());
@@ -2485,4 +2528,112 @@ async fn test_tool_mode_steer_workflow_injects_mid_workflow() {
         }),
         "steer_workflow tool result never reached the model"
     );
+}
+
+// ── Routing V2 Phase 3: bare task control + task_ops observability ──
+
+#[tokio::test]
+async fn test_bare_cancel_with_single_workflow_cancels_it() {
+    let orch = make_orchestrator();
+    orch.shared_context
+        .task_registry
+        .register("task-1".to_string(), "Long build".to_string());
+    orch.shared_context
+        .register_workflow_for_lane("user1:cli", "task-1");
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, "/cancel").await;
+
+    let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(json["task_id"], "task-1");
+    assert_eq!(json["action"], "cancel");
+    assert_eq!(json["new_status"], "cancelled");
+    assert_eq!(
+        orch.shared_context.task_registry.get("task-1").unwrap().status,
+        crate::context::TaskEntryStatus::Cancelled
+    );
+    // Task ops are observable: OrchestrationStage fires with the new mode.
+    assert_eq!(orchestration_modes(&mut rx), vec!["task_ops".to_string()]);
+}
+
+#[tokio::test]
+async fn test_bare_cancel_with_no_workflow_replies_helpfully() {
+    let orch = make_orchestrator();
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, "/cancel").await;
+    assert_eq!(reply, "No running workflow on this conversation.");
+    assert_eq!(orchestration_modes(&mut rx), vec!["task_ops".to_string()]);
+}
+
+#[tokio::test]
+async fn test_bare_cancel_with_two_workflows_asks_which() {
+    let orch = make_orchestrator();
+    for id in ["task-1", "task-2"] {
+        orch.shared_context
+            .task_registry
+            .register(id.to_string(), format!("Title {id}"));
+        orch.shared_context
+            .register_workflow_for_lane("user1:cli", id);
+    }
+
+    let reply = send_steer(&orch, "/cancel").await;
+    assert!(reply.contains("task-1"), "unexpected reply: {reply}");
+    assert!(reply.contains("task-2"), "unexpected reply: {reply}");
+    assert!(reply.contains("Which task"), "unexpected reply: {reply}");
+    // No action was taken on either task.
+    for id in ["task-1", "task-2"] {
+        assert_ne!(
+            orch.shared_context.task_registry.get(id).unwrap().status,
+            crate::context::TaskEntryStatus::Cancelled,
+            "task {id} must not be cancelled by an ambiguous bare command"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_explicit_cancel_with_id_unchanged() {
+    let orch = make_orchestrator();
+    orch.shared_context
+        .task_registry
+        .register("task-9".to_string(), "Explicit target".to_string());
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, "/cancel task-9").await;
+    let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(json["task_id"], "task-9");
+    assert_eq!(json["new_status"], "cancelled");
+    assert_eq!(orchestration_modes(&mut rx), vec!["task_ops".to_string()]);
+}
+
+#[tokio::test]
+async fn test_task_query_emits_task_ops_stage() {
+    let orch = make_orchestrator();
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, "/status").await;
+    let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert!(json.get("tasks").is_some(), "unexpected reply: {reply}");
+    assert_eq!(orchestration_modes(&mut rx), vec!["task_ops".to_string()]);
+}
+
+#[tokio::test]
+async fn test_bare_pause_resume_resolve_via_lane() {
+    let orch = make_orchestrator();
+    orch.shared_context
+        .task_registry
+        .register("task-1".to_string(), "Runner".to_string());
+    orch.shared_context
+        .task_registry
+        .update_status("task-1", crate::context::TaskEntryStatus::Running);
+    orch.shared_context
+        .register_workflow_for_lane("user1:cli", "task-1");
+
+    let reply = send_steer(&orch, "/pause").await;
+    let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(json["new_status"], "paused");
+
+    let reply = send_steer(&orch, "/resume").await;
+    let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(json["new_status"], "running");
 }

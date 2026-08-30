@@ -186,6 +186,12 @@ async fn async_main(
     let db = Database::open(&db_path).context("Failed to initialize database")?;
     info!("Database initialized: {}", db_path.display());
     bootstrap::migrate_preference_summaries(&db);
+    // Routing V2 Phase 3: fail all orphaned (non-terminal) tasks from the
+    // previous daemon generation. MUST stay here — after the DB opens and
+    // before any ingress starts (WakeManager::start in Step 8,
+    // ConnectorManager::start_all in Step 12), so it can never sweep tasks
+    // created by this run.
+    bootstrap::sweep_orphaned_tasks(&db);
 
     // Step 4: Resolve stable local user ID
     let local_user_id = bootstrap::resolve_local_user_id(&db);

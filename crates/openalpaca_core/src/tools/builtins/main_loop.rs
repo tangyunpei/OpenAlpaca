@@ -89,9 +89,8 @@ pub fn main_loop_relay_guidance() -> &'static str {
 /// Build the main-loop tool set for one request on `lane_key`.
 ///
 /// `steer_workflow` + `queue_followup` are included only when the lane has
-/// active workflows AND `routing.steering_enabled` — with the default config
-/// (steering off) lanes never have registered workflows, so the conditional
-/// set stays empty.
+/// active workflows AND `routing.steering_enabled` — on lanes with nothing
+/// running (the common case) the conditional set stays empty.
 #[allow(clippy::too_many_arguments)]
 pub fn main_loop_tool_set(
     task_dispatcher: Arc<TaskDispatcher>,

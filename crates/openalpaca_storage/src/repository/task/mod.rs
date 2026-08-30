@@ -251,6 +251,30 @@ impl<'a> TaskRepository<'a> {
         })
     }
 
+    /// Mark every non-terminal task (queued / running / paused) as failed
+    /// with the given reason, preserving any result summary already present.
+    /// Returns the number of tasks swept.
+    ///
+    /// Used by the daemon's startup orphan sweep (Routing V2 Phase 3):
+    /// in-flight execution does not survive a restart, so any task left
+    /// non-terminal in the DB is an orphan.
+    pub fn fail_all_non_terminal(&self, reason: &str) -> Result<usize> {
+        self.db.with_connection(|conn| {
+            let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            let rows = conn
+                .execute(
+                    "UPDATE task SET status = 'failed',
+                            result_summary = COALESCE(result_summary, ?1),
+                            updated_at = ?2,
+                            completed_at = COALESCE(completed_at, ?2)
+                     WHERE status IN ('queued', 'running', 'paused')",
+                    rusqlite::params![reason, now],
+                )
+                .context("Failed to sweep non-terminal tasks")?;
+            Ok(rows)
+        })
+    }
+
     /// Set a task's result summary.
     /// Returns true if a row was updated.
     pub fn set_result(&self, id: &str, result_summary: &str) -> Result<bool> {

@@ -286,7 +286,7 @@ pub enum SystemEvent {
         task_id: Option<String>,
         /// "lead_agent" | "dag_parallel" | "sequential_pipeline"
         mode: String,
-        /// "planner_explicit" | "execution_mode_field" | "empty_assignments_fallback" | "heuristic_fallback" | "heuristic_match_failed"
+        /// "planner_explicit" | "execution_mode_field" | "empty_assignments_fallback" | "heuristic_fallback" | "heuristic_match_failed" | "model_tool_call"
         reason: String,
         agent_count: usize,
         dag_node_count: Option<usize>,

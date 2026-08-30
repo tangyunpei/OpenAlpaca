@@ -236,6 +236,56 @@ impl TaskDispatcher {
         None
     }
 
+    /// Record the tool-path dispatch decision (Routing V2 Phase 3).
+    ///
+    /// Unlike [`record_decision`], this is UNCONDITIONAL — the
+    /// `dispatch_analysis_enabled` gate only applies to the planner path's
+    /// analysis layer. In tool mode the model's `start_workflow` call IS the
+    /// routing decision, so every dispatch is recorded with the real task id
+    /// (no backfill step: the task already exists when this runs).
+    pub(crate) fn record_tool_dispatch_decision(&self, request_id: &str, task_id: &str) {
+        let mode = decision::DispatchMode::LeadAgent.to_string();
+        let reason = decision::DecisionReason::ModelToolCall.to_string();
+
+        tracing::info!(
+            mode = %mode,
+            reason = %reason,
+            task_id = %task_id,
+            "DispatchDecision (tool path)"
+        );
+
+        self.bus.publish(SystemEvent::DispatchDecision {
+            request_id: request_id.to_string(),
+            task_id: Some(task_id.to_string()),
+            mode: mode.clone(),
+            reason: reason.clone(),
+            agent_count: 0,
+            dag_node_count: None,
+            predictability_score: None,
+            error_message: None,
+            timestamp: Utc::now(),
+        });
+
+        if let Some(ref db) = self.db {
+            let repo = DispatchDecisionRepository::new(db);
+            if let Err(e) = repo.record(&DispatchDecisionRecord {
+                id: None,
+                request_id: request_id.to_string(),
+                task_id: Some(task_id.to_string()),
+                mode,
+                reason,
+                agent_count: 0,
+                dag_node_count: None,
+                predictability_score: None,
+                planner_requested_mode: None,
+                error_message: None,
+                timestamp: None,
+            }) {
+                tracing::warn!("Failed to persist tool-path dispatch decision: {e}");
+            }
+        }
+    }
+
     /// Backfill task_id after task creation.
     fn backfill_decision_task_id(&self, decision_id: Option<i64>, task_id: &str) {
         if let (Some(id), Some(db)) = (decision_id, &self.db) {

@@ -40,7 +40,7 @@ fn test_cancel() {
     assert_eq!(
         intent,
         Intent::TaskControl {
-            task_id: "task-456".to_string(),
+            task_id: Some("task-456".to_string()),
             action: "cancel".to_string()
         }
     );
@@ -52,10 +52,39 @@ fn test_pause() {
     assert_eq!(
         intent,
         Intent::TaskControl {
-            task_id: "task-789".to_string(),
+            task_id: Some("task-789".to_string()),
             action: "pause".to_string()
         }
     );
+}
+
+#[test]
+fn test_bare_task_control_commands() {
+    // Bare commands (no id) resolve against the lane's active workflows.
+    for (cmd, action) in [
+        ("/cancel", "cancel"),
+        ("/pause", "pause"),
+        ("/resume", "resume"),
+        ("/cancel   ", "cancel"), // trailing whitespace, still bare
+    ] {
+        assert_eq!(
+            parser().parse(cmd),
+            Intent::TaskControl {
+                task_id: None,
+                action: action.to_string()
+            },
+            "command: {cmd:?}"
+        );
+    }
+}
+
+#[test]
+fn test_task_control_prefix_words_are_not_commands() {
+    // "/cancellation" must not parse as a bare /cancel.
+    assert!(matches!(
+        parser().parse("/cancellation"),
+        Intent::SimpleQuery { .. }
+    ));
 }
 
 #[test]

@@ -201,9 +201,13 @@ impl TaskDispatcher {
         let cancel_token = CancellationToken::new();
         ctx.register_cancellation_token(&task_id, cancel_token.clone());
 
-        // Routing V2: attach a steering inbox alongside the cancellation
-        // token. Flag-gated — with steering off nothing registers and the
-        // behavior is identical to before.
+        // Routing V2: attach the workflow to its lane unconditionally — the
+        // lane attachment backs the StartWorkflowTool per-lane cap and the
+        // workflow-context block, which must bind in every mode/flag combo.
+        ctx.register_workflow_for_lane(&lane_key, &task_id);
+
+        // The steering inbox itself stays flag-gated: with steering off no
+        // inbox registers and steer paths report "not steerable".
         let steering_inbox = {
             let cfg = daemon_config.load();
             if cfg.orchestrator.routing.steering_enabled {
@@ -211,7 +215,6 @@ impl TaskDispatcher {
                     cfg.orchestrator.routing.steering_inbox_cap,
                 ));
                 ctx.register_steering_inbox(&task_id, inbox.clone());
-                ctx.register_workflow_for_lane(&lane_key, &task_id);
                 Some(inbox)
             } else {
                 None
@@ -285,15 +288,19 @@ impl TaskDispatcher {
             // Cleanup cancellation token
             ctx.remove_cancellation_token(&task_id);
 
-            // Routing V2: detach steering. Close FIRST so a concurrent push
-            // gets Err(Closed) instead of landing after the drain, then
+            // Routing V2: detach the lane attachment unconditionally — it
+            // was registered unconditionally at dispatch, independent of the
+            // steering flag.
+            ctx.deregister_workflow_for_lane(&lane_key, &task_id);
+
+            // Detach steering. Close FIRST so a concurrent push gets
+            // Err(Closed) instead of landing after the drain, then
             // deregister and convert leftovers to `unprocessed_steering`
             // follow-up rows — surfaced on the lane's next user turn, never
             // auto-run (claim_next only claims kind='followup').
             if let Some(ref inbox) = steering_inbox {
                 let leftovers = inbox.close_and_drain();
                 ctx.remove_steering_inbox(&task_id);
-                ctx.deregister_workflow_for_lane(&lane_key, &task_id);
                 if !leftovers.is_empty() {
                     if let Some(ref db) = db {
                         let repo =

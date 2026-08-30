@@ -39,6 +39,8 @@ pub enum DecisionReason {
     HeuristicFallback,
     /// Heuristic skill matching was attempted but failed (no matching agents found).
     HeuristicMatchFailed,
+    /// The model called the `start_workflow` tool (Routing V2 tool mode).
+    ModelToolCall,
 }
 
 impl std::fmt::Display for DecisionReason {
@@ -49,6 +51,7 @@ impl std::fmt::Display for DecisionReason {
             Self::EmptyAssignmentsFallback => write!(f, "empty_assignments_fallback"),
             Self::HeuristicFallback => write!(f, "heuristic_fallback"),
             Self::HeuristicMatchFailed => write!(f, "heuristic_match_failed"),
+            Self::ModelToolCall => write!(f, "model_tool_call"),
         }
     }
 }

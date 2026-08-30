@@ -8,7 +8,9 @@ mod persona;
 mod tests;
 
 pub use config::{resolve_config_base_dir, seed_default_configs};
-pub use migration::{is_same_file_path, migrate_preference_summaries, resolve_local_user_id};
+pub use migration::{
+    is_same_file_path, migrate_preference_summaries, resolve_local_user_id, sweep_orphaned_tasks,
+};
 pub use persona::{
     bootstrap_bootstrap_document, bootstrap_identity_document, bootstrap_system_persona,
     bootstrap_user_document, load_bootstrap_document_from_file,
