@@ -925,6 +925,160 @@ async fn test_wait_for_subagents_closed_empty_inbox_does_not_interrupt() {
     assert!(result.contains("All subagents finished"));
 }
 
+// ── Plugin-backed subagent spawning ─────────────────────────────────
+
+/// Stub plugin executor: accepts the spawn, records the instructions,
+/// and completes on the first step.
+struct CompletingPluginExecutor {
+    instructions: std::sync::Mutex<Option<String>>,
+}
+
+#[async_trait]
+impl openalpaca_api::plugin_traits::PluginAgentExecutor for CompletingPluginExecutor {
+    async fn spawn(
+        &self,
+        _instance_id: &str,
+        _task_id: &str,
+        instructions: &str,
+        _context: &serde_json::Value,
+    ) -> Result<bool, String> {
+        *self.instructions.lock().unwrap() = Some(instructions.to_string());
+        Ok(true)
+    }
+
+    async fn step(
+        &self,
+        _instance_id: &str,
+        _tool_results: Option<&serde_json::Value>,
+    ) -> Result<(String, String, Vec<serde_json::Value>), String> {
+        Ok(("complete".to_string(), "plugin result".to_string(), vec![]))
+    }
+
+    async fn stop(&self, _instance_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn plugin_id(&self) -> &str {
+        "test_plugin"
+    }
+
+    fn agent_id(&self) -> &str {
+        "plugin_researcher"
+    }
+}
+
+#[tokio::test]
+async fn test_spawn_subagent_executes_plugin_backed_template() {
+    use crate::agent::template::{AgentSource, AgentTemplateFrontmatter};
+
+    let executor = Arc::new(CompletingPluginExecutor {
+        instructions: std::sync::Mutex::new(None),
+    });
+    let template = AgentTemplate {
+        frontmatter: AgentTemplateFrontmatter {
+            id: "plugin_researcher".to_string(),
+            name: "Plugin Researcher".to_string(),
+            description: "Plugin-backed research agent".to_string(),
+            icon: None,
+            singleton: false,
+            capabilities: vec![],
+            denied_capabilities: vec![],
+            temperature: 0.5,
+            verbosity: "normal".to_string(),
+            model: None,
+            fallback_models: vec![],
+            max_tool_calls: None,
+            timeout_seconds: None,
+            max_cost_per_task: None,
+            max_rounds: None,
+            require_confirmation_for: vec![],
+        },
+        body: String::new(),
+        sections: HashMap::new(),
+        source: AgentSource::Plugin {
+            plugin_id: "test_plugin".to_string(),
+            executor: executor.clone(),
+        },
+    };
+
+    let shared_context = Arc::new(SharedContext::new());
+    assert!(shared_context.agent_registry.register_template(template));
+
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn_tool = SpawnSubagentTool::new(
+        Arc::new(openalpaca_llm::LlmRouter::new(
+            std::collections::HashMap::new(),
+            openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+            std::collections::HashMap::new(),
+            Arc::new(openalpaca_llm::CostTracker::new(
+                openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+            )),
+            "test-model".to_string(),
+        )),
+        Arc::new(ToolRegistry::default()),
+        shared_context,
+        EventBus::default(),
+        None,
+        "task-1".to_string(),
+        "user-1".to_string(),
+        "test-lead".to_string(),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        None,
+        tracker.clone(),
+        0,
+        DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        None,
+        None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+    );
+
+    let msg = spawn_tool
+        .execute(&serde_json::json!({
+            "agent_id": "plugin_researcher",
+            "objective": "Summarize the design doc"
+        }))
+        .await
+        .unwrap();
+    assert!(msg.contains("spawned"), "got: {msg}");
+
+    // The plugin loop runs in a background task — wait for the tracker.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !tracker.all_done() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "plugin-backed subagent never completed; summary: {}",
+            tracker.summary()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // The result lands in the tracker with the plugin's output.
+    let statuses = tracker.statuses.lock().unwrap();
+    assert_eq!(statuses.len(), 1);
+    let (run_id, status) = statuses.iter().next().unwrap();
+    assert!(
+        run_id.starts_with("plugin_researcher::"),
+        "unexpected run_id: {run_id}"
+    );
+    match status {
+        SubagentStatus::Completed { content, success } => {
+            assert!(success);
+            assert_eq!(content, "plugin result");
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+
+    // The plugin received instructions carrying the objective.
+    let instructions = executor.instructions.lock().unwrap();
+    let instructions = instructions.as_ref().expect("plugin spawn was never called");
+    assert!(
+        instructions.contains("Summarize the design doc"),
+        "instructions missing objective: {instructions}"
+    );
+}
+
 #[test]
 fn test_register_workflow_tools_registers_both() {
     let registry = ToolRegistry::default();

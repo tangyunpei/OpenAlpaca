@@ -38,6 +38,10 @@ export type ServerEvent =
   | { type: "soul_updated"; actor: string; mode: string; content_sha256: string; backup_path: string | null; ts: string; instance_id: string; _id: number }
   | { type: "context_package_built"; agent_id: string; sections: [string, number][]; total_tokens: number; budget: number; sub_agent_window: number; ts: string; instance_id: string; _id: number }
   | { type: "daemon_config_changed"; ts: string; instance_id: string; _id: number }
+  | { type: "workflow_started"; task_id: string; lane_key: string; title: string; ts: string; instance_id: string; _id: number }
+  | { type: "workflow_steered"; task_id: string; lane_key: string; ts: string; instance_id: string; _id: number }
+  | { type: "workflow_progress"; task_id: string; lane_key: string; message: string; ts: string; instance_id: string; _id: number }
+  | { type: "followup_queued"; lane_key: string; followup_id: number; kind: string; ts: string; instance_id: string; _id: number }
   | { type: "plugin_loaded"; plugin_id: string; tools: string[]; _id: number }
   | { type: "plugin_unloaded"; plugin_id: string; _id: number }
   | { type: "plugin_crashed"; plugin_id: string; error: string; restart_in_secs: number; _id: number }

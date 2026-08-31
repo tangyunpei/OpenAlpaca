@@ -222,6 +222,38 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// A background workflow was started for a lane (Routing V2)
+    WorkflowStarted {
+        task_id: String,
+        lane_key: String,
+        title: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// A steering message was accepted into a running workflow's inbox (Routing V2)
+    WorkflowSteered {
+        task_id: String,
+        lane_key: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// A running workflow posted a user-facing progress update (Routing V2)
+    WorkflowProgress {
+        task_id: String,
+        lane_key: String,
+        message: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// A follow-up item was queued for a lane (Routing V2)
+    FollowupQueued {
+        lane_key: String,
+        followup_id: i64,
+        /// "followup" | "unprocessed_steering"
+        kind: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
     /// A plugin was loaded and registered its tools
     PluginLoaded {
         plugin_id: String,

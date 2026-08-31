@@ -373,8 +373,6 @@ impl Orchestrator {
             send_tool_context,
             message_source: Some(Arc::<str>::from(source)),
             raw_blocks,
-            planner_agents: None,
-            planner_protocol_v2: false,
             mode: StaticPromptMode::Default,
             model_window: model_window as u32,
         };
@@ -853,8 +851,6 @@ impl Orchestrator {
             send_tool_context: None,
             message_source: None,
             raw_blocks: Vec::new(),
-            planner_agents: None,
-            planner_protocol_v2: false,
             mode: StaticPromptMode::SocialMinimal,
             model_window: 8192,
         };

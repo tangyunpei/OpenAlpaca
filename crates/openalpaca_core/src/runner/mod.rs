@@ -1,5 +1,6 @@
 mod agentic_loop;
 pub mod lead_agent;
+pub mod plugin_agent;
 pub mod steering;
 
 pub use agentic_loop::{

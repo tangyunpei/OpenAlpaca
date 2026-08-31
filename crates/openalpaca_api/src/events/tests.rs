@@ -81,6 +81,75 @@ fn test_task_status_deserialization_missing_outcome_fields() {
     }
 }
 
+// ── ServerEvent workflow-lifecycle tests (Routing V2) ─────────────
+
+#[test]
+fn test_workflow_started_serialization() {
+    let event = ServerEvent::WorkflowStarted {
+        task_id: "t-1".into(),
+        lane_key: "junpei:cli".into(),
+        title: "Research task".into(),
+        ts: Utc::now(),
+        instance_id: "inst-1".into(),
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("\"type\":\"workflow_started\""));
+    assert!(json.contains("\"task_id\":\"t-1\""));
+    assert!(json.contains("\"lane_key\":\"junpei:cli\""));
+    assert!(json.contains("\"title\":\"Research task\""));
+}
+
+#[test]
+fn test_workflow_steered_serialization() {
+    let event = ServerEvent::WorkflowSteered {
+        task_id: "t-2".into(),
+        lane_key: "junpei:cli".into(),
+        ts: Utc::now(),
+        instance_id: "inst-1".into(),
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("\"type\":\"workflow_steered\""));
+    assert!(json.contains("\"task_id\":\"t-2\""));
+}
+
+#[test]
+fn test_workflow_progress_serialization_roundtrip() {
+    let event = ServerEvent::WorkflowProgress {
+        task_id: "t-3".into(),
+        lane_key: "junpei:cli".into(),
+        message: "Halfway through the analysis".into(),
+        ts: Utc::now(),
+        instance_id: "inst-1".into(),
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("\"type\":\"workflow_progress\""));
+    let deserialized: ServerEvent = serde_json::from_str(&json).unwrap();
+    match deserialized {
+        ServerEvent::WorkflowProgress {
+            task_id, message, ..
+        } => {
+            assert_eq!(task_id, "t-3");
+            assert_eq!(message, "Halfway through the analysis");
+        }
+        _ => panic!("Expected WorkflowProgress variant"),
+    }
+}
+
+#[test]
+fn test_followup_queued_serialization() {
+    let event = ServerEvent::FollowupQueued {
+        lane_key: "junpei:cli".into(),
+        followup_id: 42,
+        kind: "followup".into(),
+        ts: Utc::now(),
+        instance_id: "inst-1".into(),
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("\"type\":\"followup_queued\""));
+    assert!(json.contains("\"followup_id\":42"));
+    assert!(json.contains("\"kind\":\"followup\""));
+}
+
 // ── Existing tests ────────────────────────────────────────────────
 
 #[test]

@@ -6,14 +6,6 @@ fn test_parse_help() {
 }
 
 #[test]
-fn test_parse_status() {
-    assert!(matches!(
-        SlashCommand::parse("/status"),
-        SlashCommand::Status
-    ));
-}
-
-#[test]
 fn test_parse_model() {
     assert!(matches!(SlashCommand::parse("/model"), SlashCommand::Model));
 }
@@ -32,30 +24,6 @@ fn test_parse_agents() {
         SlashCommand::parse("/agents"),
         SlashCommand::Agents
     ));
-}
-
-#[test]
-fn test_parse_tasks_default() {
-    match SlashCommand::parse("/tasks") {
-        SlashCommand::Tasks(n) => assert_eq!(n, 5),
-        _ => panic!("expected Tasks"),
-    }
-}
-
-#[test]
-fn test_parse_tasks_with_arg() {
-    match SlashCommand::parse("/tasks 10") {
-        SlashCommand::Tasks(n) => assert_eq!(n, 10),
-        _ => panic!("expected Tasks"),
-    }
-}
-
-#[test]
-fn test_parse_tasks_invalid_arg() {
-    match SlashCommand::parse("/tasks abc") {
-        SlashCommand::Tasks(n) => assert_eq!(n, 5),
-        _ => panic!("expected Tasks"),
-    }
 }
 
 #[test]
@@ -82,9 +50,48 @@ fn test_parse_verbose() {
 }
 
 #[test]
-fn test_parse_unknown() {
-    match SlashCommand::parse("/foo") {
-        SlashCommand::Unknown(c) => assert_eq!(c, "/foo"),
-        _ => panic!("expected Unknown"),
+fn test_local_commands_are_not_forwarded() {
+    for cmd in [
+        "/help", "/model", "/models", "/agents", "/keys", "/usage", "/clear", "/verbose",
+    ] {
+        assert!(
+            !SlashCommand::parse(cmd).is_forward(),
+            "{cmd} should stay local"
+        );
     }
+}
+
+#[test]
+fn test_known_daemon_commands_forward() {
+    for cmd in [
+        "/status",
+        "/status abc123",
+        "/tasks",
+        "/steer focus on the tests",
+        "/cancel",
+        "/cancel abc123",
+        "/pause",
+        "/resume abc123",
+    ] {
+        assert!(
+            SlashCommand::parse(cmd).is_forward(),
+            "{cmd} should forward to the daemon"
+        );
+    }
+}
+
+#[test]
+fn test_unknown_slash_forwards() {
+    // Unknown slashes may be skill commands only the daemon knows.
+    assert!(SlashCommand::parse("/unknownskill").is_forward());
+    assert!(SlashCommand::parse("/review src/main.rs").is_forward());
+}
+
+#[test]
+fn test_parse_local_command_with_args_stays_local() {
+    // Arguments do not change the routing of a client-side command.
+    assert!(matches!(
+        SlashCommand::parse("/model extra"),
+        SlashCommand::Model
+    ));
 }

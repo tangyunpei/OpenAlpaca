@@ -69,8 +69,6 @@ pub enum MissReason {
     ModelWindowChanged,
     IdentityBudgetChanged,
     UserBudgetChanged,
-    PlannerAgentsChanged,
-    PlannerProtocolChanged,
     AgentPersonaChanged,
     QueryChanged,
     MemoryChanged,
@@ -104,10 +102,8 @@ pub struct StaticPromptSubFingerprints {
     pub raw_blocks_fp: [u8; 32],
     pub send_tool_context_fp: [u8; 32],
     pub message_source_fp: [u8; 32],
-    pub planner_agents_fp: [u8; 32],
     pub mode_tag: u8,
     pub model_window: u32,
-    pub planner_protocol_v2: bool,
 }
 
 /// Tagged cache value that pairs each output with its per-sub-field
@@ -214,17 +210,11 @@ fn attribute_static_prompt_miss(
     if old.message_source_fp != new.message_source_fp {
         return MissReason::MessageSourceChanged;
     }
-    if old.planner_agents_fp != new.planner_agents_fp {
-        return MissReason::PlannerAgentsChanged;
-    }
     if old.mode_tag != new.mode_tag {
         return MissReason::ModeChanged;
     }
     if old.model_window != new.model_window {
         return MissReason::ModelWindowChanged;
-    }
-    if old.planner_protocol_v2 != new.planner_protocol_v2 {
-        return MissReason::PlannerProtocolChanged;
     }
     MissReason::Unknown
 }

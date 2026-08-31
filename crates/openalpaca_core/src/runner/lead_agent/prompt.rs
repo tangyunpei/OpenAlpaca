@@ -214,8 +214,6 @@ pub fn build_lead_agent_prompt_from_templates(
         send_tool_context: None,
         message_source: None,
         raw_blocks,
-        planner_agents: None,
-        planner_protocol_v2: false,
         mode: StaticPromptMode::SubagentMinimal,
         model_window: model_window as u32,
     };

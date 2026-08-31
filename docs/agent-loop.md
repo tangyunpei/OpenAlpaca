@@ -37,6 +37,16 @@ siblings); `cache_markers` lives in the provider layer and carries only
 |---|---|---|---|
 | Lead agent | `runner/lead_agent/mod.rs` | One for the lead + one per subagent spawned via the `spawn_subagent` / `spawn_subagents_batch` (1–8 per call) tools | The only multi-agent topology (the legacy sequential pipeline and DAG executor were deleted in Routing V2 Phase 5; batch work goes through `spawn_subagents_batch` + `wait_for_subagents`) |
 
+Subagents can be plugin-backed: when the spawned template's source is
+`AgentSource::Plugin` (contributed by a plugin manifest), the spawn path
+skips the internal loop entirely and `runner/plugin_agent.rs` drives the
+plugin's external reasoning loop instead — `spawn()` with the composed
+instructions, then `step()` polls capped at 50 iterations, with requested
+tool calls proxied through the same `SandboxManager::execute_tool` path
+(capability checks, sanitization, confirmation, timeouts) as internal
+subagents. Depth, concurrency-permit, and cancellation semantics are
+unchanged; the cancel token is checked between steps.
+
 The loop also runs outside the multi-agent topology: the main-loop
 front door (below) IS a direct loop invocation per user turn
 (`orchestrator/query_handler/simple_query_handler.rs`); skill invocation
@@ -197,7 +207,7 @@ Hermes step      OpenAlpaca      Notes
 ──────────────────────────────────────────────────────────────────────
 1. task_id       Compliant       Pre-loop
 2. append user   Compliant       Arc<Vec<ChatMessage>>
-3. sys prompt    Compliant       Layered compose engine with two-tier memoization (global LRU + per-lane cache); 9 call sites unified via ComposeEngine::compose
+3. sys prompt    Compliant       Layered compose engine with two-tier memoization (global LRU + per-lane cache); 5 call sites unified via ComposeEngine::compose
 4. preflight     Compliant       Graduated compaction
 5. build API     Compliant       3 providers via adapter crate
 6. ephemeral     Compliant       Flag-gated (spec P0)
@@ -269,9 +279,10 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
 ## System-Prompt Memoization
 
 Implemented via the layered `ComposeEngine` (`compose/mod.rs`). All
-production prompt-assembly call sites (simple query ×2, skill
-invocation, lead-agent prompt + subagent spawn — the latter reusing the
-`DagNode` compose mode) route through `ComposeEngine::compose`, which runs
+five production prompt-assembly call sites (simple query + social fast
+path, skill invocation, lead-agent prompt + subagent spawn — the latter
+reusing the `DagNode` compose mode) route through
+`ComposeEngine::compose`, which runs
 five layers — Persona, Static Prompt, Dynamic Context, History, Assembly
 — with two-tier memoization:
 
@@ -293,9 +304,6 @@ Known gaps:
   miss attribution is out of scope for this cycle.
 - The legacy `PromptBuilder` survives only as the internal backend of
   the static-prompt layer (`compose/static_prompt.rs`).
-- The planner-era compose modes (`Planner`, `Replanner`, `PipelineStep`)
-  still exist in `compose/types.rs` but have no production caller since
-  Routing V2 Phase 5; only compose tests exercise them.
 
 ## Sources
 

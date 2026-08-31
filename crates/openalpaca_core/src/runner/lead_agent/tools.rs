@@ -1,6 +1,6 @@
 use super::guard::AgentBusyGuard;
 use super::tracker::{SubagentStatus, SubagentTracker};
-use crate::agent::template::AgentTemplate;
+use crate::agent::template::{AgentSource, AgentTemplate};
 use crate::bus::EventBus;
 use crate::compose::{
     ComposeOverrides, ComposeRequest, DynamicContextInput, DynamicContextMode, HistoryInput,
@@ -14,6 +14,7 @@ use crate::middleware::prompt::{format_tool_guidance, SystemPersona};
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
 use crate::prompt_ctx::{ExecutionPath, SectionPriority};
+use crate::runner::plugin_agent::{PluginLoopOutcome, run_plugin_agent_loop};
 use crate::runner::steering::SteeringInbox;
 use crate::runner::{LoopConfig, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
@@ -370,8 +371,6 @@ impl BuiltInTool for SpawnSubagentTool {
             send_tool_context: None,
             message_source: None,
             raw_blocks,
-            planner_agents: None,
-            planner_protocol_v2: false,
             mode: StaticPromptMode::SubagentMinimal,
             model_window: model_window as u32,
         };
@@ -425,6 +424,21 @@ impl BuiltInTool for SpawnSubagentTool {
             sandbox_policy.auto_approve = true;
         }
 
+        // Plugin-backed template? Resolve the executor + full objective now
+        // so the spawned task can run the external plugin loop instead of
+        // the internal agentic loop (see `runner/plugin_agent.rs`).
+        let plugin_execution = match self
+            .shared_context
+            .agent_registry
+            .get_template(agent_id)
+            .map(|t| t.source)
+        {
+            Some(AgentSource::Plugin { executor, .. }) => {
+                Some((executor, objective.to_string()))
+            }
+            _ => None,
+        };
+
         // 9. Spawn subagent as a background task (non-blocking).
         //    This allows the lead agent to spawn multiple subagents in parallel.
         let run_id = format!(
@@ -461,6 +475,100 @@ impl BuiltInTool for SpawnSubagentTool {
             }
 
             tracker.set_status(&run_id_clone, SubagentStatus::Running);
+
+            // ── Plugin-backed template: run the plugin executor loop
+            // instead of the LLM loop. Tool calls are proxied through the
+            // same sandbox as internal subagents; depth/concurrency/
+            // cancellation semantics are unchanged (the permit is held for
+            // the loop's lifetime and the child token is checked between
+            // steps).
+            if let Some((executor, objective_full)) = plugin_execution {
+                tracing::info!(
+                    agent_id = %agent_id_owned,
+                    instance_id = %instance_id,
+                    "Subagent template is plugin-backed — routing to PluginAgentExecutor"
+                );
+                let system_prompt = messages
+                    .first()
+                    .map(|m| m.content.clone())
+                    .unwrap_or_default();
+                let instructions =
+                    format!("{system_prompt}\n\nObjective: {objective_full}");
+                let plugin_ctx = serde_json::json!({
+                    "objective": objective_full,
+                    "task_id": task_id,
+                });
+
+                let outcome = run_plugin_agent_loop(
+                    &executor,
+                    &instance_id,
+                    &task_id,
+                    &instructions,
+                    &plugin_ctx,
+                    &sandbox,
+                    &sandbox_policy,
+                    &subagent_tool_ctx,
+                    child_token.as_ref(),
+                )
+                .await;
+
+                let duration_ms = agent_start.elapsed().as_millis() as u64;
+                busy_guard.restore();
+
+                bus.publish(SystemEvent::DagNodeCompleted {
+                    task_id: task_id.clone(),
+                    node_id: node_id.clone(),
+                    node_title: objective_preview.clone(),
+                    agent_id: instance_id.clone(),
+                    success: outcome.success(),
+                    duration_ms,
+                    output_preview: match &outcome {
+                        PluginLoopOutcome::Completed { content, .. } if !content.is_empty() => {
+                            Some(content.chars().take(200).collect())
+                        }
+                        _ => None,
+                    },
+                    timestamp: Utc::now(),
+                });
+
+                // No LLM usage to record — the plugin runs its own model
+                // calls out-of-process. Agent history still counts the run.
+                if let Some(ref db) = db {
+                    crate::orchestrator::dispatcher::usage::record_agent_history(
+                        db,
+                        &agent_id_owned,
+                        &task_id,
+                        "subagent",
+                        outcome.success(),
+                        duration_ms as i64 / 1000,
+                    );
+                }
+
+                match outcome {
+                    PluginLoopOutcome::Completed {
+                        content,
+                        tool_calls_made,
+                        iterations,
+                    } => {
+                        let content = if content.is_empty() {
+                            format!(
+                                "Plugin agent '{}' completed in {} iterations ({} tool calls) but produced no text output.",
+                                agent_id_owned, iterations, tool_calls_made
+                            )
+                        } else {
+                            content
+                        };
+                        tracker.complete(&run_id_clone, content, true);
+                    }
+                    PluginLoopOutcome::Failed { error, .. } => {
+                        tracker.fail(
+                            &run_id_clone,
+                            format!("Plugin agent '{}' failed: {}", agent_id_owned, error),
+                        );
+                    }
+                }
+                return;
+            }
 
             let result = run_agentic_loop_routed(
                 router.as_ref(),

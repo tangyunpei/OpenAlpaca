@@ -348,6 +348,61 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
+    /// Broadcast a workflow started event and persist it
+    pub fn workflow_started(&self, task_id: &str, lane_key: &str, title: &str) {
+        let event = ServerEvent::WorkflowStarted {
+            task_id: task_id.to_string(),
+            lane_key: lane_key.to_string(),
+            title: title.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a workflow steered event and persist it
+    pub fn workflow_steered(&self, task_id: &str, lane_key: &str) {
+        let event = ServerEvent::WorkflowSteered {
+            task_id: task_id.to_string(),
+            lane_key: lane_key.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a workflow progress event and persist it
+    pub fn workflow_progress(&self, task_id: &str, lane_key: &str, message: &str) {
+        let event = ServerEvent::WorkflowProgress {
+            task_id: task_id.to_string(),
+            lane_key: lane_key.to_string(),
+            message: message.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a follow-up queued event and persist it
+    pub fn followup_queued(&self, lane_key: &str, followup_id: i64, kind: &str) {
+        let event = ServerEvent::FollowupQueued {
+            lane_key: lane_key.to_string(),
+            followup_id,
+            kind: kind.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
     /// Broadcast a SOUL.md update event and persist it
     pub fn soul_updated(
         &self,

@@ -36,6 +36,10 @@
     task_status: "bg-amber-400/10 text-amber-400",
     agent_status: "bg-blue-400/10 text-blue-400",
     connector_status: "bg-violet-500/10 text-violet-400",
+    workflow_started: "bg-success/10 text-success",
+    workflow_steered: "bg-blue-400/10 text-blue-400",
+    workflow_progress: "bg-amber-400/10 text-amber-400",
+    followup_queued: "bg-violet-500/10 text-violet-400",
   };
 </script>
 
@@ -60,7 +64,7 @@
         <span class="flex items-center justify-center w-6 h-6 shrink-0 max-[480px]:hidden">
           {@html getEventIcon(event.type)}
         </span>
-        <span class="text-muted-foreground font-mono text-xs">{formatTime(event.ts)}</span>
+        <span class="text-muted-foreground font-mono text-xs">{"ts" in event ? formatTime(event.ts) : ""}</span>
         <span class="px-2 py-0.5 rounded text-[0.75rem] uppercase font-bold min-w-[80px] text-center max-[480px]:min-w-[60px] max-[480px]:text-[0.65rem] {typeColors[event.type] || 'bg-white/5 text-muted-foreground'}">
           {event.type}
         </span>
@@ -69,6 +73,12 @@
         {/if}
         {#if event.type === "command_received"}
           <span class="text-muted-foreground flex-1 overflow-hidden text-ellipsis whitespace-nowrap">cmd: {event.command}</span>
+        {/if}
+        {#if event.type === "workflow_started"}
+          <span class="text-muted-foreground flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{event.title}</span>
+        {/if}
+        {#if event.type === "workflow_progress"}
+          <span class="text-muted-foreground flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{event.message}</span>
         {/if}
       </li>
     {:else}

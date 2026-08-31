@@ -6,6 +6,13 @@ rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[features]
+# Live steer-routing eval harness (tests/steer_routing_eval.rs): compiles the
+# real LLM providers into the test binary so `openalpaca_llm::build_router`
+# can serve a production llm.toml. Never enabled by default — the eval is
+# additionally #[ignore]d and gated on OPENALPACA_LIVE_EVAL=1.
+live-eval = ["openalpaca_llm/anthropic", "openalpaca_llm/openai", "openalpaca_llm/ollama"]
+
 [dependencies]
 arc-swap.workspace = true
 async-trait.workspace = true
@@ -40,3 +47,5 @@ openalpaca_storage.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tracing-test.workspace = true
+# test-util enables tokio::test(start_paused) for the plugin-agent poll-loop tests.
+tokio = { workspace = true, features = ["test-util"] }

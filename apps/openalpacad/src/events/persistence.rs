@@ -311,6 +311,55 @@ impl EventBroadcaster {
                     });
                     repo.log("soul_updated", None, Some(&detail), None)
                 }
+                // Log workflow lifecycle events (Routing V2)
+                ServerEvent::WorkflowStarted {
+                    task_id,
+                    lane_key,
+                    title,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "task_id": task_id,
+                        "lane_key": lane_key,
+                        "title": title,
+                    });
+                    repo.log("workflow_started", None, Some(&detail), None)
+                }
+                ServerEvent::WorkflowSteered {
+                    task_id, lane_key, ..
+                } => {
+                    let detail = serde_json::json!({
+                        "task_id": task_id,
+                        "lane_key": lane_key,
+                    });
+                    repo.log("workflow_steered", None, Some(&detail), None)
+                }
+                ServerEvent::WorkflowProgress {
+                    task_id,
+                    lane_key,
+                    message,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "task_id": task_id,
+                        "lane_key": lane_key,
+                        "message": message,
+                    });
+                    repo.log("workflow_progress", None, Some(&detail), None)
+                }
+                ServerEvent::FollowupQueued {
+                    lane_key,
+                    followup_id,
+                    kind,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "lane_key": lane_key,
+                        "followup_id": followup_id,
+                        "kind": kind,
+                    });
+                    repo.log("followup_queued", None, Some(&detail), None)
+                }
                 // Plugin lifecycle events
                 ServerEvent::PluginLoaded {
                     plugin_id, tools, ..

@@ -119,7 +119,11 @@ impl ReplSession {
                         break;
                     }
 
-                    if line.starts_with('/') {
+                    // Client-side commands run locally; everything else —
+                    // including daemon commands (/status, /steer, /cancel, …)
+                    // and unknown slashes (possible skill commands) — goes to
+                    // the daemon as a chat message.
+                    if line.starts_with('/') && !commands::SlashCommand::parse(line).is_forward() {
                         self.execute_slash(line).await;
                     } else {
                         self.execute_chat(line).await;

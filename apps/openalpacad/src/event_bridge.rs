@@ -509,30 +509,160 @@ pub fn spawn_event_bridge(
                 } => {
                     tracing::debug!(?layer, ?reason, ?lane_id, "Compose layer cache miss");
                 }
-                // ── Routing V2 workflow events (log-only; GUI rendering is Phase 4) ──
+                // ── Routing V2 workflow events (forwarded to clients) ──────
                 openalpaca_core::events::SystemEvent::WorkflowStarted {
                     request_id, ref task_id, ref lane_key, ref title, ..
                 } => {
                     tracing::info!(
                         %request_id, %task_id, %lane_key, %title, "Workflow started"
                     );
+                    eb.workflow_started(task_id, lane_key, title);
                 }
                 openalpaca_core::events::SystemEvent::WorkflowSteered {
                     ref task_id, ref lane_key, request_id, ..
                 } => {
                     tracing::info!(%request_id, %task_id, %lane_key, "Workflow steered");
+                    eb.workflow_steered(task_id, lane_key);
                 }
                 openalpaca_core::events::SystemEvent::WorkflowProgress {
-                    ref task_id, ref lane_key, ..
+                    ref task_id, ref lane_key, ref message, ..
                 } => {
                     tracing::debug!(%task_id, %lane_key, "Workflow progress update");
+                    eb.workflow_progress(task_id, lane_key, message);
                 }
                 openalpaca_core::events::SystemEvent::FollowupQueued {
                     ref lane_key, followup_id, ref kind, ..
                 } => {
                     tracing::info!(%lane_key, followup_id, %kind, "Follow-up queued");
+                    eb.followup_queued(lane_key, followup_id, kind);
                 } // NO catch-all: compiler will flag any missing SystemEvent variant
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openalpaca_api::events::ServerEvent;
+    use openalpaca_core::events::SystemEvent;
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    /// Spawn a bridge over a fresh bus/broadcaster pair and return
+    /// (bus, ServerEvent receiver, cancellation token).
+    fn setup_bridge() -> (
+        EventBus,
+        broadcast::Receiver<ServerEvent>,
+        CancellationToken,
+    ) {
+        let bus = EventBus::new(16);
+        let eb = EventBroadcaster::new(16, "test-instance".to_string(), None);
+        let rx = eb.subscribe();
+        let cancel = CancellationToken::new();
+        spawn_event_bridge(eb, &bus, None, cancel.clone());
+        (bus, rx, cancel)
+    }
+
+    async fn recv_event(rx: &mut broadcast::Receiver<ServerEvent>) -> ServerEvent {
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for bridged ServerEvent")
+            .expect("broadcast channel closed")
+    }
+
+    #[tokio::test]
+    async fn test_workflow_started_bridged_to_server_event() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::WorkflowStarted {
+            request_id: Uuid::new_v4(),
+            task_id: "t-1".into(),
+            lane_key: "junpei:cli".into(),
+            title: "Research task".into(),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::WorkflowStarted {
+                task_id,
+                lane_key,
+                title,
+                instance_id,
+                ..
+            } => {
+                assert_eq!(task_id, "t-1");
+                assert_eq!(lane_key, "junpei:cli");
+                assert_eq!(title, "Research task");
+                assert_eq!(instance_id, "test-instance");
+            }
+            other => panic!("Expected WorkflowStarted, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_workflow_steered_bridged_to_server_event() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::WorkflowSteered {
+            task_id: "t-2".into(),
+            lane_key: "junpei:cli".into(),
+            request_id: Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::WorkflowSteered {
+                task_id, lane_key, ..
+            } => {
+                assert_eq!(task_id, "t-2");
+                assert_eq!(lane_key, "junpei:cli");
+            }
+            other => panic!("Expected WorkflowSteered, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_workflow_progress_bridged_to_server_event() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::WorkflowProgress {
+            task_id: "t-3".into(),
+            lane_key: "junpei:cli".into(),
+            message: "Halfway done".into(),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::WorkflowProgress {
+                task_id, message, ..
+            } => {
+                assert_eq!(task_id, "t-3");
+                assert_eq!(message, "Halfway done");
+            }
+            other => panic!("Expected WorkflowProgress, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_followup_queued_bridged_to_server_event() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::FollowupQueued {
+            lane_key: "junpei:cli".into(),
+            followup_id: 42,
+            kind: "followup".into(),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::FollowupQueued {
+                lane_key,
+                followup_id,
+                kind,
+                ..
+            } => {
+                assert_eq!(lane_key, "junpei:cli");
+                assert_eq!(followup_id, 42);
+                assert_eq!(kind, "followup");
+            }
+            other => panic!("Expected FollowupQueued, got {other:?}"),
+        }
+        cancel.cancel();
+    }
 }

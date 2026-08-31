@@ -1,0 +1,146 @@
+[
+  {
+    "id": "steer-01",
+    "message": "actually, skip the API docs section entirely",
+    "context": "Writing a developer onboarding guide with an API docs section",
+    "expected": "steer"
+  },
+  {
+    "id": "steer-02",
+    "message": "use Chinese for the summary please",
+    "context": "Summarizing a research paper into a one-page brief",
+    "expected": "steer"
+  },
+  {
+    "id": "steer-03",
+    "message": "标题改成中文吧，正文保持英文",
+    "context": "Drafting release notes for version 2.0",
+    "expected": "steer"
+  },
+  {
+    "id": "steer-04",
+    "message": "only look at the last 30 days of data, not the full year",
+    "context": "Analyzing sales data across all regions for the annual report",
+    "expected": "steer"
+  },
+  {
+    "id": "steer-05",
+    "message": "报告里不要包含具体价格信息，用区间代替",
+    "context": "Compiling a competitor pricing report",
+    "expected": "steer"
+  },
+  {
+    "id": "steer-06",
+    "message": "wait — target Python 3.9, not 3.12",
+    "context": "Migrating a codebase's build scripts to a newer Python version",
+    "expected": "steer"
+  },
+  {
+    "id": "steer-07",
+    "message": "先别管测试了，优先把构建错误修好",
+    "context": "Fixing CI failures: build errors plus flaky tests",
+    "expected": "steer"
+  },
+  {
+    "id": "answer-01",
+    "message": "what's the weather like in Tokyo right now?",
+    "context": "Researching competitors in the CRM market",
+    "expected": "answer"
+  },
+  {
+    "id": "answer-02",
+    "message": "what does HTTP 429 mean?",
+    "context": "Scraping product listings from a supplier site",
+    "expected": "answer"
+  },
+  {
+    "id": "answer-03",
+    "message": "什么是依赖注入？跟单例模式有什么区别？",
+    "context": "Refactoring the payment module for testability",
+    "expected": "answer"
+  },
+  {
+    "id": "answer-04",
+    "message": "how do I exit vim without saving?",
+    "context": "Writing deployment documentation for the ops team",
+    "expected": "answer"
+  },
+  {
+    "id": "answer-05",
+    "message": "顺便问一下，光速是多少来着？",
+    "context": "Generating the weekly metrics report",
+    "expected": "answer"
+  },
+  {
+    "id": "answer-06",
+    "message": "roughly how many euros is 100 US dollars?",
+    "context": "Planning a two-week team offsite itinerary",
+    "expected": "answer"
+  },
+  {
+    "id": "answer-07",
+    "message": "what's the difference between TCP and UDP?",
+    "context": "Auditing the internal network configuration",
+    "expected": "answer"
+  },
+  {
+    "id": "queue-01",
+    "message": "when that's done, also update the README to match",
+    "context": "Refactoring the authentication module",
+    "expected": "queue"
+  },
+  {
+    "id": "queue-02",
+    "message": "等这个跑完之后，再生成一份英文版",
+    "context": "Writing the quarterly report in Chinese",
+    "expected": "queue"
+  },
+  {
+    "id": "queue-03",
+    "message": "after the report is finished, draft a short announcement post about it too",
+    "context": "Compiling the annual security report",
+    "expected": "queue"
+  },
+  {
+    "id": "queue-04",
+    "message": "完成之后顺便把旧的导出文件归档一下",
+    "context": "Cleaning up and deduplicating the data warehouse exports",
+    "expected": "queue"
+  },
+  {
+    "id": "queue-05",
+    "message": "once the Q1 analysis completes, run the same analysis for Q2",
+    "context": "Analyzing Q1 revenue by product line",
+    "expected": "queue"
+  },
+  {
+    "id": "det-01",
+    "message": "/cancel",
+    "context": "Long-running data migration workflow",
+    "expected": "deterministic"
+  },
+  {
+    "id": "det-02",
+    "message": "/steer 先做数据清洗，再跑聚合",
+    "context": "Building the monthly aggregation pipeline",
+    "expected": "deterministic"
+  },
+  {
+    "id": "det-03",
+    "message": "/status",
+    "context": "Crawling documentation sites for the knowledge base",
+    "expected": "deterministic"
+  },
+  {
+    "id": "det-04",
+    "message": "/steer skip the images for now, text only",
+    "context": "Generating a media-heavy product brochure",
+    "expected": "deterministic"
+  },
+  {
+    "id": "det-05",
+    "message": "/pause",
+    "context": "Batch-translating the help center articles",
+    "expected": "deterministic"
+  }
+]
