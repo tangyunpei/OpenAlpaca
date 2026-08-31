@@ -65,6 +65,8 @@ pub struct TaskDispatcher {
     /// Optional follow-up runner for autostarting queued follow-ups after a
     /// workflow finalizes (Routing V2; set post-construction).
     followup_runner: Arc<RwLock<Option<Arc<dyn crate::orchestrator::FollowupRunner>>>>,
+    /// Skill catalog for the lead agent's per-request `invoke_skill` tool.
+    skill_catalog: Arc<crate::orchestrator::skill_catalog::SkillCatalog>,
     /// Context manager for distilling parent context into sub-agent packages.
     pub(crate) context_manager: Arc<ContextManager>,
     /// Layered compose engine. Shared with the owning `Orchestrator` so
@@ -85,6 +87,7 @@ impl TaskDispatcher {
         embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
         connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
+        skill_catalog: Arc<crate::orchestrator::skill_catalog::SkillCatalog>,
         context_manager: Arc<ContextManager>,
         compose_engine: Arc<crate::compose::ComposeEngine>,
     ) -> Self {
@@ -99,6 +102,7 @@ impl TaskDispatcher {
             embedder,
             daemon_config,
             connector_status,
+            skill_catalog,
             cached_connector_guidance: std::sync::Mutex::new((String::new(), Instant::now())),
             confirmation_broker: Arc::new(RwLock::new(None)),
             followup_runner: Arc::new(RwLock::new(None)),

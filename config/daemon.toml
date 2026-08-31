@@ -74,7 +74,9 @@ main_loop_max_rounds = 8
 main_loop_max_tools_per_round = 4
 # Main-loop tool surface: "core_union" (keyword-suggested tools + the
 # core set: start_workflow, task_status, memory tools, and — on lanes
-# with active workflows — steer_workflow/queue_followup) or "full"
+# with active workflows — steer_workflow/queue_followup; plus invoke_skill
+# and every installed MCP/plugin tool minus
+# execution.skill_defaults.global_tool_deny, the opt-out) or "full"
 # (entire registry minus the global tool deny list; escape hatch).
 tool_selection = "core_union"
 # Global kill switch for cron-scheduled skills. Skills whose frontmatter sets

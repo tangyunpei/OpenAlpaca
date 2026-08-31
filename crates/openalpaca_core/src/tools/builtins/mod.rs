@@ -1,5 +1,6 @@
 mod file_ops;
 mod helpers;
+mod invoke_skill;
 mod main_loop;
 mod memory_ops;
 mod memory_search;
@@ -15,6 +16,7 @@ mod web_search;
 // Routing V2: these tools are constructed per-request by the tool-mode
 // main loop (via `main_loop_tool_set`) and injected into its per-request
 // registry — never registered globally via `builtin_tools()`.
+pub use invoke_skill::{invoke_skill_tool_definition, InvokeSkillTool};
 pub use main_loop::{main_loop_relay_guidance, main_loop_tool_set, MainLoopToolSet};
 pub use memory_ops::{
     memory_forget_tool_definition, memory_store_tool_definition, MemoryForgetTool,

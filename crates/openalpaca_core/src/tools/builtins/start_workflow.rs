@@ -236,6 +236,7 @@ mod tests {
             None,
             daemon_config,
             Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
             Arc::new(crate::prompt_ctx::ContextManager::noop()),
             Arc::new(crate::compose::ComposeEngine::new(16)),
         ));
