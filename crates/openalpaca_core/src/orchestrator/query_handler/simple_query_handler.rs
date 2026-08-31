@@ -145,9 +145,7 @@ impl Orchestrator {
                 Some(super::LoopOverrides::MainLoop { .. }) => {
                     // Routing V2 main loop: budgets from
                     // `[orchestrator.routing]`; tool surface = base picks ∪
-                    // the per-request set (core tools, MCP/plugin extension
-                    // tools minus the global deny list, `invoke_skill`, and —
-                    // when active — the workflow tools).
+                    // the per-request core/workflow set.
                     let routing = self.daemon_config.load().orchestrator.routing.clone();
                     let set = crate::tools::builtins::main_loop_tool_set(
                         self.task_dispatcher.clone(),
@@ -157,18 +155,12 @@ impl Orchestrator {
                         self.db.clone(),
                         self.embedder.clone(),
                         self.daemon_config.clone(),
-                        self.skill_catalog.clone(),
-                        self.llm_router.clone(),
-                        self.loop_config.max_cost,
                         &self.tool_registry,
                         lane_key,
                         &tool_ctx,
                     );
                     // Base surface: suggested picks ("core_union", default) or
                     // the whole registry minus the global deny list ("full").
-                    // Either way `set.definitions` is unioned in below, so
-                    // extension tools and `invoke_skill` are reachable in both
-                    // modes (deduped by name).
                     let mut defs: Vec<openalpaca_llm::ToolDefinition> =
                         if routing.tool_selection == "full" {
                             let deny = self
@@ -220,10 +212,7 @@ impl Orchestrator {
                 tool_names
             );
 
-            // Lowercased: `check_agent_capability` lowercases the tool name
-            // and expects allow-list entries pre-normalized (matters for
-            // mixed-case MCP/plugin tool names on the default surface).
-            let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.to_lowercase()).collect();
+            let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
             policy_opt = Some(SandboxPolicy {
                 agent_id: "orchestrator".to_string(),
                 allowed_capabilities: resolved,

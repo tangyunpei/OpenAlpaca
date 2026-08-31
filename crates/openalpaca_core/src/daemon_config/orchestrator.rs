@@ -41,11 +41,8 @@ pub struct RoutingConfig {
     /// Max tool calls per round for the tool-mode main loop.
     #[serde(default = "default_main_loop_max_tools_per_round")]
     pub main_loop_max_tools_per_round: usize,
-    /// Main-loop tool surface: "core_union" (default — core set ∪
-    /// keyword-suggested tools ∪ MCP/plugin extension tools ∪ `invoke_skill`)
-    /// or "full" (entire registry — escape hatch). Both subtract
-    /// `execution.skill_defaults.global_tool_deny` from the extension/full
-    /// portion — the deny list is the opt-out for installed MCP/plugin tools.
+    /// Main-loop tool surface: "core_union" (core set ∪ suggested tools)
+    /// or "full" (entire registry — escape hatch).
     #[serde(default = "default_tool_selection")]
     pub tool_selection: String,
     /// Global kill switch for cron-scheduled skills (`invoke.cron` /

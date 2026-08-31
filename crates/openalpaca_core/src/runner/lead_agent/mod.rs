@@ -89,7 +89,6 @@ pub async fn run_lead_agent(
     steering_inbox: Option<Arc<crate::runner::steering::SteeringInbox>>,
     connector_guidance: &str,
     confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
-    skill_catalog: Arc<crate::orchestrator::skill_catalog::SkillCatalog>,
     context_manager: Arc<ContextManager>,
     compose_engine: Arc<crate::compose::ComposeEngine>,
 ) -> LeadAgentResult {
@@ -140,36 +139,6 @@ pub async fn run_lead_agent(
     if let Some(mem_tool) = tool_registry.get("memory_search") {
         tools.push(mem_tool.definition.clone());
     }
-    // Extension tools (MCP-bridged `<server>__<tool>` + plugin-provided
-    // `<plugin>::<tool>`) join the lead surface by default, minus the global
-    // tool deny list — same union-minus-deny policy as the main loop
-    // (tool/skill wiring, Chunk 3). Definitions only: their backends already
-    // live in the global registry the per-request clone below carries.
-    let global_tool_deny = daemon_config
-        .load()
-        .execution
-        .skill_defaults
-        .global_tool_deny
-        .clone();
-    tools.extend(tool_registry.extension_tool_defs(&global_tool_deny));
-    // invoke_skill: per-request catalog-skill invocation over the nested-skill
-    // executor (same instance as the main loop's). Budget ceiling = this
-    // lead's own loop budget (defaults + agent constraint overrides).
-    let invoke_skill_budget = LoopConfig::from_lead_agent(
-        &daemon_config.load().execution.lead_agent_defaults,
-        lead_agent,
-    )
-    .max_cost;
-    let invoke_skill_tool = Arc::new(crate::tools::builtins::InvokeSkillTool::new(
-        skill_catalog,
-        tool_registry.clone(),
-        router.clone(),
-        bus.clone(),
-        db.clone(),
-        daemon_config.clone(),
-        invoke_skill_budget,
-    ));
-    tools.push(crate::tools::builtins::invoke_skill_tool_definition());
 
     // 4. Build coordination tools with shared SubagentTracker
     let tracker = Arc::new(SubagentTracker::new());
@@ -250,20 +219,6 @@ pub async fn run_lead_agent(
         check_subagent_status_tool_definition(),
         wait_for_subagents_tool_definition(),
     );
-    // invoke_skill is per-request like the coordination tools — inject its
-    // backend into the per-request registry, never the global one.
-    if let Err(e) = lead_registry.register(crate::tools::registry::RegisteredTool {
-        definition: crate::tools::builtins::invoke_skill_tool_definition(),
-        backend: crate::tools::registry::ToolBackend::BuiltIn(invoke_skill_tool),
-        provides_capabilities: vec![],
-        exempt_from_timeout: false,
-        annotations: None,
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        author: "builtin".to_string(),
-        created_at: chrono::Utc::now(),
-    }) {
-        tracing::warn!("Failed to register invoke_skill for lead agent: {e}");
-    }
     if steering_enabled {
         register_workflow_tools(
             &lead_registry,
@@ -305,20 +260,6 @@ pub async fn run_lead_agent(
     if daemon_config.load().security.auto_approve_confirmations {
         sandbox_policy.auto_approve = true;
     }
-    // The lead's tool surface is assembled here, not in its template — so the
-    // allowlist must admit the final defs (extension tools, invoke_skill,
-    // memory_search), mirroring how the main loop derives its policy from the
-    // exposed definitions. Template denials still win: the sandbox checks the
-    // deny list first. Subagents are untouched — their policies are built from
-    // their own template constraints in the spawn path.
-    if !sandbox_policy.allowed_capabilities.is_empty() {
-        for def in &tools {
-            let name = def.name.to_lowercase();
-            if !sandbox_policy.allowed_capabilities.contains(&name) {
-                sandbox_policy.allowed_capabilities.push(name);
-            }
-        }
-    }
 
     // 6. Build system prompt from templates
     let system_prompt = build_lead_agent_prompt_from_templates(
@@ -332,14 +273,12 @@ pub async fn run_lead_agent(
     } else {
         String::new()
     };
-    // Skill + integration guidance (invoke_skill, MCP/plugin tools).
-    let extension_suffix = prompt::extension_tools_suffix();
     // Routing V2 workflow contract: interjection protocol (steering runs
     // only) + completion-report contract (always — spec §2b).
     let workflow_suffix = prompt::workflow_contract_suffix(steering_inbox.is_some());
     let full_system = format!(
-        "{}{}{}{}{}",
-        system_prompt, tool_guidance, extension_suffix, connector_suffix, workflow_suffix
+        "{}{}{}{}",
+        system_prompt, tool_guidance, connector_suffix, workflow_suffix
     );
 
     // 7. Build messages (with proactive memory injection)

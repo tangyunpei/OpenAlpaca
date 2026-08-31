@@ -194,7 +194,6 @@ impl TaskDispatcher {
         let connector_block = self.connector_guidance_block();
         let broker = self.confirmation_broker.read().ok().and_then(|g| g.clone());
         let followup_runner = self.followup_runner.read().ok().and_then(|g| g.clone());
-        let skill_catalog = self.skill_catalog.clone();
         let context_manager = self.context_manager.clone();
         let compose_engine = self.compose_engine.clone();
 
@@ -281,7 +280,6 @@ impl TaskDispatcher {
                 steering_inbox.clone(),
                 &connector_block,
                 broker,
-                skill_catalog,
                 context_manager,
                 compose_engine,
             )

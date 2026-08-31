@@ -94,7 +94,7 @@ A file watcher reloads configuration without restart:
 
 ## MCP Servers
 
-Servers declared in `config/mcp.toml` are connected at boot; per-server failures are logged, never fatal. Each remote tool registers in the tool registry as `<server>__<tool>` and provides a capability equal to that namespaced name. Installed MCP and plugin tools are available by default to the assistant's main conversational loop (under both `tool_selection` modes) and to the lead agent orchestrating background workflows; list a namespaced name in `execution.skill_defaults.global_tool_deny` (`config/daemon.toml`) to opt a tool out of both surfaces. Subagents remain template-scoped — they see only the capabilities their template declares. To expose an MCP tool to an agent, list the namespaced name in the agent template's `capabilities` frontmatter (for skills: `requires_capabilities`). MCP resources and prompts are not implemented, and serving MCP is a non-goal.
+Servers declared in `config/mcp.toml` are connected at boot; per-server failures are logged, never fatal. Each remote tool registers in the tool registry as `<server>__<tool>` and provides a capability equal to that namespaced name. To expose an MCP tool to an agent, list the namespaced name in the agent template's `capabilities` frontmatter (for skills: `requires_capabilities`); the orchestrator main loop reaches MCP tools only when `tool_selection = "full"`. MCP resources and prompts are not implemented, and serving MCP is a non-goal.
 
 ## Discovery and Auth Model
 

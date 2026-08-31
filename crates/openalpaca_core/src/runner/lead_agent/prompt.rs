@@ -9,18 +9,6 @@ use crate::prompt_ctx::section::{ContextBundle, SectionPriority};
 use crate::prompt_ctx::ExecutionPath;
 use std::sync::Arc;
 
-/// Skill + integration guidance, appended by `run_lead_agent` after the tool
-/// guidance (tool/skill wiring, Chunk 3). Kept out of the composed golden
-/// prompt — like the workflow contract, it is a call-site suffix.
-pub(super) fn extension_tools_suffix() -> &'static str {
-    "\n<skills-and-integrations>\n\
-     You can invoke catalog skills directly via the invoke_skill tool, and use \
-     connected integrations (MCP server tools named <server>__<tool>, plugin \
-     tools named <plugin>::<tool>) yourself. For quick, well-scoped steps use \
-     them directly; for larger sub-objectives delegate to a subagent as usual.\n\
-     </skills-and-integrations>"
-}
-
 /// Routing V2 workflow-contract sections, appended by `run_lead_agent` after
 /// the tool guidance / connector guidance suffixes (never inside the composed
 /// golden prompt). `<interjection_protocol>` is included only when a steering

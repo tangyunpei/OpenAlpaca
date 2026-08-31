@@ -613,33 +613,6 @@ impl ToolRegistry {
         result
     }
 
-    /// Tool definitions for all "extension" tools — those bridged from MCP
-    /// servers (`ToolBackend::Mcp`, registered as `<server>__<tool>`) or
-    /// provided by plugins (`ToolBackend::Plugin`, registered as
-    /// `<plugin>::<tool>`) — excluding any name on `deny` (the
-    /// `execution.skill_defaults.global_tool_deny` list, the opt-out for
-    /// surfaces that include extension tools by default).
-    ///
-    /// The backend variant is the origin marker: builtins register as
-    /// `BuiltIn`, custom TOML tools as `Http`/`Command`. Sorted by name so
-    /// callers get a deterministic surface (DashMap iteration is unordered,
-    /// and tool ordering feeds prompt-cache fingerprints).
-    pub fn extension_tool_defs(&self, deny: &[String]) -> Vec<ToolDefinition> {
-        let mut defs: Vec<ToolDefinition> = self
-            .tools
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e.value().backend,
-                    ToolBackend::Mcp { .. } | ToolBackend::Plugin(_)
-                ) && !deny.contains(e.key())
-            })
-            .map(|e| e.value().definition.clone())
-            .collect();
-        defs.sort_by(|a, b| a.name.cmp(&b.name));
-        defs
-    }
-
     /// Return the names of tools that use command backends (i.e., execute via shell).
     /// These should be treated like shell tools for injection sanitization.
     pub fn command_backend_tool_names(&self) -> Vec<String> {

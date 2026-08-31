@@ -41,7 +41,6 @@ fn setup_with_config_and_db(
         None,
         daemon_config,
         Arc::new(std::sync::RwLock::new(None)),
-        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
     )
@@ -98,7 +97,6 @@ fn setup_with_specific_router_and_db(
         None,
         Arc::new(ArcSwap::from_pointee(config)),
         Arc::new(std::sync::RwLock::new(None)),
-        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
     )
