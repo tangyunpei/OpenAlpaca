@@ -134,7 +134,9 @@ impl Orchestrator {
     }
 }
 
-fn finish_reason_to_string(reason: &LoopFinishReason) -> &'static str {
+/// Map a loop finish reason to its telemetry string. Shared with the
+/// `invoke_skill` builtin, which persists the same skill-execution telemetry.
+pub(crate) fn finish_reason_to_string(reason: &LoopFinishReason) -> &'static str {
     match reason {
         LoopFinishReason::Complete => "complete",
         LoopFinishReason::MaxRounds => "max_rounds",

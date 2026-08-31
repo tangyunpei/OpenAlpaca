@@ -305,6 +305,7 @@ impl Orchestrator {
             embedder.clone(),
             daemon_config.clone(),
             connector_status.clone(),
+            skill_catalog.clone(),
             context_manager.clone(),
             compose_engine.clone(),
         ));

@@ -1,7 +1,7 @@
 use crate::bus::EventBus;
 use crate::orchestrator::skill::catalog::SkillCatalog;
 use crate::orchestrator::skill::constraints::{compose_constraints, filter_tools_by_constraints, MAX_SKILL_STACK_DEPTH};
-use crate::runner::{LoopConfig, LoopCostAccumulator, run_agentic_loop_routed};
+use crate::runner::{LoopConfig, LoopCostAccumulator, LoopResult, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::builtins::ScriptToolBuiltIn;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext, ToolRegistry};
@@ -78,12 +78,25 @@ impl SkillInvocationToolExecutor {
         tool_name.starts_with("invoke_skill:")
     }
 
-    /// Execute a skill invocation tool call.
+    /// Execute a skill invocation tool call, returning just the output text.
     pub async fn execute(
         &self,
         tool_name: &str,
         arguments: &serde_json::Value,
     ) -> Result<String, String> {
+        self.execute_detailed(tool_name, arguments)
+            .await
+            .map(|r| r.final_content)
+    }
+
+    /// Execute a skill invocation tool call, returning the full loop result
+    /// (rounds, tokens, cost, finish reason) for callers that persist
+    /// skill-execution telemetry (e.g. the `invoke_skill` builtin).
+    pub async fn execute_detailed(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<LoopResult, String> {
         let skill_id = tool_name
             .strip_prefix("invoke_skill:")
             .ok_or_else(|| format!("Invalid invoke_skill tool name: {}", tool_name))?;
@@ -417,7 +430,7 @@ impl SkillInvocationToolExecutor {
         )
         .await;
 
-        Ok(result.final_content)
+        Ok(result)
     }
 }
 
