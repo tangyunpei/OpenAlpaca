@@ -244,12 +244,6 @@ impl DaemonConfig {
             "skill_defaults.max_tools_per_round",
         );
         clamp_val(
-            &mut self.execution.skill_defaults.default_tool_rate_limit,
-            1,
-            1000,
-            "skill_defaults.default_tool_rate_limit",
-        );
-        clamp_val(
             &mut self.execution.skill_defaults.router_auto_select_threshold,
             0.0,
             1.0,
@@ -341,12 +335,6 @@ impl DaemonConfig {
             1,
             50,
             "upload.max_files_per_message",
-        );
-        clamp_val(
-            &mut self.upload.retention_days,
-            1,
-            365,
-            "upload.retention_days",
         );
         // ── Upload > Governance ──
         clamp_val(

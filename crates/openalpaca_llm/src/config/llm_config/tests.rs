@@ -109,7 +109,6 @@ strategy = "round_robin"
 id = "key1"
 secret_env = "ANTHROPIC_API_KEY"
 tier = "tier1"
-monthly_budget = 100.0
 
 [models.custom-model]
 provider = "anthropic"

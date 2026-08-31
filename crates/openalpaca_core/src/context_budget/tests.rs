@@ -27,7 +27,6 @@ fn test_context_budget_config_defaults() {
     assert!((config.autocompact_buffer_ratio - 0.165).abs() < f64::EPSILON);
     assert!((config.compaction_target_ratio - 0.50).abs() < f64::EPSILON);
     assert_eq!(config.compaction_model, None);
-    assert_eq!(config.max_extractions_per_compaction, 10);
     assert_eq!(config.min_recent_messages, 4);
 }
 
@@ -37,7 +36,6 @@ fn test_context_budget_config_from_toml() {
         autocompact_buffer_ratio = 0.20
         compaction_target_ratio = 0.60
         compaction_model = "claude-haiku-4-5-20251001"
-        max_extractions_per_compaction = 5
         min_recent_messages = 6
     "#;
     let config: ContextBudgetConfig = toml::from_str(toml_str).unwrap();
@@ -46,7 +44,6 @@ fn test_context_budget_config_from_toml() {
         config.compaction_model.as_deref(),
         Some("claude-haiku-4-5-20251001")
     );
-    assert_eq!(config.max_extractions_per_compaction, 5);
 }
 
 #[test]
@@ -141,7 +138,6 @@ fn test_compaction_tier_thresholds() {
         autocompact_buffer_ratio: 0.165,
         compaction_target_ratio: 0.50,
         compaction_model: None,
-        max_extractions_per_compaction: 10,
         min_recent_messages: 4,
     };
     let budget = ContextBudgetManager::new(200_000, &config);

@@ -92,6 +92,10 @@ A file watcher reloads configuration without restart:
 - `config/llm.toml` and `config/daemon.toml`
 - the `config/skills/` and `config/agents/` directories
 
+## MCP Servers
+
+Servers declared in `config/mcp.toml` are connected at boot; per-server failures are logged, never fatal. Each remote tool registers in the tool registry as `<server>__<tool>` and provides a capability equal to that namespaced name. To expose an MCP tool to an agent, list the namespaced name in the agent template's `capabilities` frontmatter (for skills: `requires_capabilities`); the orchestrator main loop reaches MCP tools only when `tool_selection = "full"`. MCP resources and prompts are not implemented, and serving MCP is a non-goal.
+
 ## Discovery and Auth Model
 
 Daemon writes discovery object including:
@@ -115,14 +119,12 @@ Route table source of truth: `apps/openalpacad/src/router.rs` (see also the [API
 Major groups:
 
 - Core: health, `/v1/command`, `/v1/events/history`
-- Tasks: list/create/status/action
-- Agents: CRUD/action/config plus templates (`/v1/agent-templates`) and runtime instances (`/v1/agent-instances`)
+- Tasks: list/create/status/action — the `assigned_agents` (list) / `assignments` (detail) arrays report agent runs from `agent_task_history` (agent id, role, status, runtime, completion time)
+- Agents: CRUD/action/config plus template CRUD (`/v1/agent-templates`) and a read-only instance list (`GET /v1/agent-instances`)
 - Chat: send/history/conversations/stream, message feedback (`PUT|GET|DELETE /v1/chat/messages/{message_id}/feedback`), tool confirmations (`POST /v1/chat/confirmations/{request_id}`)
 - Files: `POST /v1/files/upload` (body limit 100 MiB), `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, `POST /v1/files/{id}/open`
 - Connectors + auth link token (`POST /v1/auth/link`)
-- LLM settings/models/pricing/usage, key management (delete/reorder/priority/validate/status), credential discovery (`GET /v1/settings/llm/credentials`, `POST /v1/settings/llm/credentials/rescan`), CLI backends (`GET /v1/settings/llm/cli-backends`)
-- Preferences
-- Memory + KB ingest + index/reindex status
+- LLM settings/models/usage, key management (delete/reorder/priority/validate/status), credential discovery (`GET /v1/settings/llm/credentials`, `POST /v1/settings/llm/credentials/rescan`), CLI backends (`GET /v1/settings/llm/cli-backends`)
 - Orchestrator: metrics (latency and decisions) and config (`GET|PUT /v1/orchestrator/config`)
 - Daemon provider config endpoints (`GET /v1/daemon/config/providers`, `PUT /v1/daemon/config/providers/web-search`)
 - Skills: `GET /v1/skills/health`
@@ -136,11 +138,15 @@ Every chat message (any source: GUI, CLI, connectors) is routed by the orchestra
    - `/status` / `/tasks` — task summary; `/status <task_id>` for one task.
    - `/cancel`, `/pause`, `/resume` — task control. Bare forms (no id) resolve against the lane's active workflows; an explicit id (`/cancel <id>`) targets that task.
    - `/steer <text>` — inject a steering message into the lane's running workflow (guaranteed delivery, bypasses the model; requires `orchestrator.routing.steering_enabled`, default on).
-   - `/<skill> [args]` — invoke a skill by slash command; skills can also be selected by the weighted skill router.
+   - `/<skill> [args]` — invoke a skill by slash command, alias, or skill ID (directory name); skills can also be selected by the weighted skill router.
 2. **Social fast path** — trivial acknowledgements ("ok", "thanks") answered with an ultra-light prompt.
 3. **Main loop** — everything else, including messages sent while workflows run. The model answers directly or calls routing tools: `start_workflow` (background workflow), `steer_workflow` / `queue_followup` (offered while the lane has active workflows), `task_status`, and memory tools. Workflows run in the background under a lead agent that can spawn subagents; concurrency is capped per lane (`max_workflows_per_lane`, default 3). On completion the workflow posts a model-authored completion report to the lane, and queued follow-ups auto-start (`followup_autostart`, default on).
 
-Tunables live under `[orchestrator.routing]` in `config/daemon.toml` (steering, per-lane workflow cap, follow-up autostart, main-loop round/tool budgets, tool-surface selection).
+Tunables live under `[orchestrator.routing]` in `config/daemon.toml` (steering, per-lane workflow cap, follow-up autostart, main-loop round/tool budgets, tool-surface selection, scheduled-skills kill switch).
+
+### Scheduled skills
+
+Skills whose frontmatter sets `invoke.cron` (see the Skill Template Reference) are registered with the wake-module cron scheduler at boot and re-synced on skill hot-reload. Each fire injects the skill's slash command as a fresh turn — through the same gateway as user messages — on the local user's `<user>:scheduled` lane, running as that user so memory and preferences apply and results appear in chat history. `scheduled_skills_enabled = false` under `[orchestrator.routing]` disables all skill cron jobs (hot-reloadable).
 
 ## Streaming Surfaces
 
@@ -159,11 +165,13 @@ Tunables live under `[orchestrator.routing]` in `config/daemon.toml` (steering, 
 
 When a tool run requires approval, the stream emits `confirmation_requested`; the client resolves it via `POST /v1/chat/confirmations/{request_id}`.
 
+Confirmation prompts also reach connector channels: when the originating lane belongs to Telegram, iMessage, or Discord, the connector sends the prompt into the conversation and the user replies `/yes` (or `/y`) to approve, `/no` (or `/n`) to deny. Multiple pending confirmations in one conversation are answered in FIFO order. If no interface answers within the timeout (default 300s, `execution.agent_defaults.confirmation_timeout_secs` in daemon.toml), the tool is denied (fail-closed).
+
 ## Event Taxonomy (High Level)
 
 Representative server event types include:
 
-- `heartbeat`, `log`, `command_received`, `wake`
+- `heartbeat`, `command_received`, `wake`
 - `task_status`, `agent_status`, `agent_config_changed`
 - `connector_status`, `key_status_changed`
 - `chat_stream_started`, `chat_stream_ended`
@@ -172,7 +180,7 @@ Representative server event types include:
 - `security_violation`, `circuit_breaker_tripped`, `tool_executed`
 - `llm_call_completed`, `skill_catalog_updated`, `soul_updated`
 - `skill_invocation_started`, `skill_completed`, `skill_failed`
-- `plugin_loaded`, `plugin_crashed`, `plugin_pending_approval`
+- `plugin_loaded`, `plugin_unloaded`, `plugin_disabled`, `plugin_pending_approval`, `plugin_needs_config` (`plugin_crashed` is defined but never emitted — there is no crash monitor yet)
 
 ## Background Tasks
 

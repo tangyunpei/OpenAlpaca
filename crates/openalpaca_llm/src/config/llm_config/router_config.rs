@@ -8,7 +8,6 @@ pub struct LlmRouterConfig {
     pub providers: Option<HashMap<String, ProviderConfig>>,
     pub models: Option<HashMap<String, ModelConfigEntry>>,
     pub fallback_chains: Option<HashMap<String, Vec<String>>>,
-    pub limits: Option<LimitsConfig>,
     pub rate_limits: Option<crate::routing::rate_limiter::RateLimitConfig>,
     pub credential_discovery: Option<crate::keys::credential_discovery::CredentialDiscoveryConfig>,
     pub cli_backends: Option<crate::cli_backend::CliBackendsConfig>,
@@ -54,7 +53,6 @@ pub struct EmbeddingsConfig {
     pub provider: String,
     pub model: Option<String>,
     pub dimensions: Option<u32>,
-    pub batch_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,12 +85,10 @@ pub struct KeyConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_encrypted: Option<String>,
     pub tier: Option<String>,
-    pub monthly_budget: Option<f64>,
     pub priority: Option<String>,
     pub source: Option<String>,
     pub notes: Option<String>,
     pub rate_limit: Option<u32>,
-    pub allowed_models: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,8 +107,3 @@ pub struct ModelConfigEntry {
     pub supports_reasoning: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LimitsConfig {
-    pub max_cost_per_task: Option<f64>,
-    pub max_cost_per_agent: Option<f64>,
-}

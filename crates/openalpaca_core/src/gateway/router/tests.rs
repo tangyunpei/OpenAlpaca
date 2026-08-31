@@ -205,37 +205,6 @@ async fn test_handle_event_error_propagation() {
 }
 
 #[tokio::test]
-async fn test_handle_event_emits_user_request() {
-    let gw = make_gateway();
-    let mut rx = gw.bus.subscribe();
-
-    gw.handle_event(GatewayRequest {
-        source: EventSource::Api {
-            request_id: "req1".to_string(),
-        },
-        content: "hello bus".to_string(),
-        principal: Principal::System,
-        scope: Scope::Global,
-        attachments: Vec::new(),
-        workspace_path: None,
-        stream_id: None,
-        lane_override: None,
-    })
-    .await;
-
-    let event = rx.try_recv().unwrap();
-    match event {
-        SystemEvent::UserRequest {
-            content, source, ..
-        } => {
-            assert_eq!(content, "hello bus");
-            assert_eq!(source, "api");
-        }
-        _ => panic!("Expected UserRequest event"),
-    }
-}
-
-#[tokio::test]
 async fn test_handle_event_records_message_on_lane() {
     let gw = make_gateway();
 

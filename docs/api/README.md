@@ -50,7 +50,7 @@ One `crates/<name>.md` per workspace crate:
 | Output | Contents |
 |---|---|
 | `database/schema.md` | SQLite tables, indexes, and triggers, reconstructed by replaying the migrations |
-| `database/migrations.md` | The 33 numbered SQL migrations in `crates/openalpaca_storage/src/migrations/` |
+| `database/migrations.md` | The 34 numbered SQL migrations in `crates/openalpaca_storage/src/migrations/` |
 
 ## Committing generated output
 

@@ -6,17 +6,6 @@ use crate::Database;
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 
-/// Aggregate statistics for a tool computed from `tool_execution_log`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ToolInvocationStats {
-    /// Timestamp of the most recent invocation (UTC), or `None` if the tool
-    /// has never been logged.
-    pub last_invoked_at: Option<DateTime<Utc>>,
-    /// Total number of invocations recorded.
-    pub invocation_count: u64,
-    /// Number of invocations where `success = 0`.
-    pub error_count: u64,
-}
 
 /// Repository for skill/tool execution log operations.
 pub struct SkillExecutionRepository<'a> {
@@ -85,60 +74,6 @@ impl<'a> SkillExecutionRepository<'a> {
             .context("Failed to insert tool execution log")?;
             Ok(conn.last_insert_rowid())
         })
-    }
-
-    /// Get recent skill execution entries for a given skill.
-    pub fn get_by_skill(&self, skill_id: &str, limit: usize) -> Result<Vec<SkillExecutionEntry>> {
-        self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, request_id, skill_id, agent_id, status, finish_reason,
-                        error_message, validation_failures, duration_ms,
-                        rounds_used, tool_calls_made, input_tokens, output_tokens,
-                        cost_usd, model_used, query_preview, route_score,
-                        was_auto_selected, repair_attempted, repair_succeeded, timestamp
-                 FROM skill_execution_log
-                 WHERE skill_id = ?
-                 ORDER BY timestamp DESC
-                 LIMIT ?",
-            )?;
-            let rows = stmt.query_map(rusqlite::params![skill_id, limit as i64], |row| {
-                let ts_str: Option<String> = row.get(20)?;
-                Ok(SkillExecutionEntry {
-                    id: row.get(0)?,
-                    request_id: row.get(1)?,
-                    skill_id: row.get(2)?,
-                    agent_id: row.get(3)?,
-                    status: row.get(4)?,
-                    finish_reason: row.get(5)?,
-                    error_message: row.get(6)?,
-                    validation_failures: row.get(7)?,
-                    duration_ms: row.get(8)?,
-                    rounds_used: row.get(9)?,
-                    tool_calls_made: row.get(10)?,
-                    input_tokens: row.get(11)?,
-                    output_tokens: row.get(12)?,
-                    cost_usd: row.get(13)?,
-                    model_used: row.get(14)?,
-                    query_preview: row.get(15)?,
-                    route_score: row.get(16)?,
-                    was_auto_selected: row.get::<_, i32>(17)? != 0,
-                    repair_attempted: row.get::<_, i32>(18)? != 0,
-                    repair_succeeded: row.get::<_, i32>(19)? != 0,
-                    timestamp: ts_str.and_then(|s| parse_datetime(&s)),
-                })
-            })?;
-            let mut entries = Vec::new();
-            for row in rows {
-                entries.push(row?);
-            }
-            Ok(entries)
-        })
-    }
-
-    /// Get health metrics for a specific skill.
-    pub fn skill_health(&self, skill_id: &str) -> Result<Option<SkillHealthMetrics>> {
-        let all = self.all_skill_health()?;
-        Ok(all.into_iter().find(|m| m.skill_id == skill_id))
     }
 
     /// Get health metrics for all skills, enriched with user feedback data.
@@ -221,63 +156,6 @@ impl<'a> SkillExecutionRepository<'a> {
                 rusqlite::params![message_id, request_id],
             )?;
             Ok(changed > 0)
-        })
-    }
-
-    /// Aggregate stats for a single tool from `tool_execution_log`.
-    ///
-    /// If the tool has never been logged, returns
-    /// `ToolInvocationStats { last_invoked_at: None, invocation_count: 0,
-    /// error_count: 0 }`.
-    pub fn tool_stats(&self, tool_name: &str) -> Result<ToolInvocationStats> {
-        self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT MAX(timestamp), COUNT(*), \
-                        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) \
-                 FROM tool_execution_log \
-                 WHERE tool_name = ?1",
-            )?;
-            let (ts_str, count, errors): (Option<String>, i64, Option<i64>) =
-                stmt.query_row(rusqlite::params![tool_name], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })?;
-            Ok(ToolInvocationStats {
-                last_invoked_at: ts_str.as_deref().and_then(parse_datetime),
-                invocation_count: count.max(0) as u64,
-                error_count: errors.unwrap_or(0).max(0) as u64,
-            })
-        })
-    }
-
-    /// Aggregate stats for every tool in `tool_execution_log`, grouped by
-    /// `tool_name`.
-    pub fn tool_stats_all(&self) -> Result<Vec<(String, ToolInvocationStats)>> {
-        self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT tool_name, MAX(timestamp), COUNT(*), \
-                        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) \
-                 FROM tool_execution_log \
-                 GROUP BY tool_name",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                let name: String = row.get(0)?;
-                let ts_str: Option<String> = row.get(1)?;
-                let count: i64 = row.get(2)?;
-                let errors: Option<i64> = row.get(3)?;
-                Ok((
-                    name,
-                    ToolInvocationStats {
-                        last_invoked_at: ts_str.as_deref().and_then(parse_datetime),
-                        invocation_count: count.max(0) as u64,
-                        error_count: errors.unwrap_or(0).max(0) as u64,
-                    },
-                ))
-            })?;
-            let mut out = Vec::new();
-            for r in rows {
-                out.push(r?);
-            }
-            Ok(out)
         })
     }
 

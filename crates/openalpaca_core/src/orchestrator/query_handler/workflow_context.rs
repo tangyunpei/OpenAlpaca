@@ -35,20 +35,12 @@ pub(crate) fn render_workflow_context_block(
     );
     for task_id in &task_ids {
         let line = match shared_context.task_registry.get(task_id) {
-            Some(entry) => {
-                let progress = match (entry.progress_current, entry.progress_total) {
-                    (Some(cur), Some(total)) => format!(", progress {cur}/{total}"),
-                    (Some(cur), None) => format!(", progress {cur}"),
-                    _ => String::new(),
-                };
-                format!(
-                    "- {} — \"{}\" ({}{})\n",
-                    task_id,
-                    entry.title,
-                    entry.status.as_str(),
-                    progress,
-                )
-            }
+            Some(entry) => format!(
+                "- {} — \"{}\" ({})\n",
+                task_id,
+                entry.title,
+                entry.status.as_str(),
+            ),
             None => {
                 // Registry miss (e.g. post-restart) — one cheap DB read.
                 let db_row = db.and_then(|db| TaskRepository::new(db).get(task_id).ok().flatten());
@@ -92,7 +84,6 @@ mod tests {
             .register("task-1".to_string(), "Research task".to_string());
         ctx.task_registry
             .update_status("task-1", TaskEntryStatus::Running);
-        ctx.task_registry.update_progress("task-1", 2, 5, None);
         ctx.register_workflow_for_lane("user1:cli", "task-1");
 
         let block = render_workflow_context_block(&ctx, None, "user1:cli")
@@ -102,7 +93,6 @@ mod tests {
         assert!(block.contains("task-1"), "{block}");
         assert!(block.contains("\"Research task\""), "{block}");
         assert!(block.contains("running"), "{block}");
-        assert!(block.contains("progress 2/5"), "{block}");
         assert!(block.contains("steer_workflow"), "{block}");
         assert!(block.contains("queue_followup"), "{block}");
 

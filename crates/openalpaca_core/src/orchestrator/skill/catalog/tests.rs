@@ -117,24 +117,22 @@ fn test_get_by_command() {
 }
 
 #[test]
-fn test_match_triggers() {
+fn test_get_by_command_skill_id_fallback() {
     let tmp = TempDir::new().unwrap();
     create_skill_dir(tmp.path(), "code-review", REVIEW_SKILL);
-    create_skill_dir(tmp.path(), "explain-code", EXPLAIN_SKILL);
 
     let catalog = SkillCatalog::new();
     catalog.scan_directory(tmp.path(), SkillScope::Project);
 
-    let matches = catalog.match_triggers("please review my code");
-    assert!(!matches.is_empty());
-    assert!(matches.contains(&"code-review".to_string()));
+    // No command/alias named "code-review" — resolves via the skill-ID
+    // fallback (scheduled skills without invoke.slash depend on this).
+    let entry = catalog
+        .get_by_command("code-review")
+        .expect("should fall back to skill-ID lookup");
+    assert_eq!(entry.frontmatter.name, "Code Review");
 
-    let matches2 = catalog.match_triggers("explain this code to me");
-    assert!(!matches2.is_empty());
-    assert!(matches2.contains(&"explain-code".to_string()));
-
-    let matches3 = catalog.match_triggers("hello world");
-    assert!(matches3.is_empty());
+    // Case-insensitive, like the other indices.
+    assert!(catalog.get_by_command("Code-Review").is_some());
 }
 
 #[test]
@@ -273,7 +271,6 @@ fn test_empty_catalog() {
     assert_eq!(catalog.count(), 0);
     assert!(catalog.list_names().is_empty());
     assert!(catalog.catalog_summary().is_empty());
-    assert!(catalog.match_triggers("anything").is_empty());
 }
 
 #[test]
@@ -389,9 +386,6 @@ description: "ID does not match directory"
 
     // Skill is still loaded (just a warning)
     assert_eq!(catalog.count(), 1);
-    let errors = catalog.validation_errors();
-    assert!(!errors.is_empty());
-    assert!(errors[0].contains("does not match directory name"));
 }
 
 #[test]
@@ -459,12 +453,8 @@ command: "review"
 
     // Both loaded but one overwrites the command
     assert_eq!(catalog.count(), 2);
-    let errors = catalog.validation_errors();
-    assert!(
-        errors.iter().any(|e| e.contains("conflict")),
-        "Expected slash conflict warning, got: {:?}",
-        errors
-    );
+    // The conflicting command still resolves to exactly one skill.
+    assert!(catalog.get_by_command("review").is_some());
 }
 
 #[test]
@@ -484,7 +474,7 @@ fn test_scope_field_preserved() {
 // ===========================================================================
 
 #[tokio::test]
-async fn test_concurrent_match_triggers() {
+async fn test_concurrent_catalog_reads() {
     let tmp = TempDir::new().unwrap();
 
     // Create 5 skill directories with trigger patterns
@@ -509,12 +499,13 @@ Do something for skill {i}.
     catalog.scan_directory(tmp.path(), SkillScope::Project);
     assert_eq!(catalog.count(), 5);
 
-    // Spawn 10 tasks calling match_triggers concurrently
+    // Spawn 10 tasks reading the catalog concurrently
     let mut handles = Vec::new();
     for _ in 0..10 {
         let cat = catalog.clone();
         handles.push(tokio::spawn(async move {
-            let _ = cat.match_triggers("query about 2");
+            let _ = cat.get_by_id("skill-2");
+            let _ = cat.list_names();
         }));
     }
 
@@ -663,14 +654,6 @@ async fn test_plugin_skill_registration_lifecycle() {
     assert!(
         by_alias.is_some(),
         "get_by_command('pt') should return Some (alias)"
-    );
-
-    // Verify: match_triggers("test plugin") contains "plugtest"
-    let matches = catalog.match_triggers("test plugin");
-    assert!(
-        matches.contains(&"plugtest".to_string()),
-        "match_triggers should find 'plugtest', got: {:?}",
-        matches
     );
 
     // Verify: load_full("plugtest") returns synthetic doc with description as body

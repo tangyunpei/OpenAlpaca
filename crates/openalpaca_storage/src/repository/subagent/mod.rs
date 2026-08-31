@@ -236,14 +236,19 @@ impl<'a> SubAgentRepository<'a> {
         })
     }
 
-    /// Get task history for an agent, ordered by most recent first.
-    pub fn get_history(&self, agent_id: &str, limit: usize) -> Result<Vec<AgentTaskHistory>> {
+    /// Get all agent runs recorded for a task, in chronological order.
+    ///
+    /// Backs the `agents` enrichment on `GET /v1/tasks(/{id})`: every agent
+    /// that ran on the task (written via the dispatcher's
+    /// `record_agent_history`), with role, final status, runtime, and
+    /// completion timestamp.
+    pub fn get_history_for_task(&self, task_id: &str) -> Result<Vec<AgentTaskHistory>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, agent_id, task_id, role, status, runtime_seconds, completed_at
-                 FROM agent_task_history WHERE agent_id = ? ORDER BY completed_at DESC LIMIT ?",
+                 FROM agent_task_history WHERE task_id = ? ORDER BY completed_at ASC, id ASC",
             )?;
-            let rows = stmt.query_map(rusqlite::params![agent_id, limit as i64], |row| {
+            let rows = stmt.query_map(rusqlite::params![task_id], |row| {
                 Self::row_to_history(row)
             })?;
             let mut history = Vec::new();

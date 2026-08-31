@@ -309,8 +309,6 @@ impl TelegramConnector {
             );
         }
 
-        // Note: EventBus events (UserRequest + AgentResponse) are now emitted
-        // by Gateway and the MessageHandler, not by the connector.
         let _ = bus; // Keep bus in deps for /link events if needed
 
         Ok(())

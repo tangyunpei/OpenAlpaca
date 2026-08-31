@@ -233,38 +233,6 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
-    /// List conversations with optional source filter.
-    pub fn list_conversations(
-        &self,
-        source_filter: Option<&str>,
-        limit: i64,
-        offset: i64,
-    ) -> Result<Vec<Conversation>> {
-        self.db.with_connection(|conn| {
-            let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match source_filter {
-                Some(source) => (
-                    "SELECT id, lane_key, source, title, message_count, last_message_at, created_at, updated_at, summary, summary_version, last_summarized_message_id, summary_updated_at
-                     FROM conversations WHERE source = ?1 ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3".to_string(),
-                    vec![Box::new(source.to_string()), Box::new(limit), Box::new(offset)],
-                ),
-                None => (
-                    "SELECT id, lane_key, source, title, message_count, last_message_at, created_at, updated_at, summary, summary_version, last_summarized_message_id, summary_updated_at
-                     FROM conversations ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2".to_string(),
-                    vec![Box::new(limit), Box::new(offset)],
-                ),
-            };
-
-            let mut stmt = conn.prepare(&sql)?;
-            let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-            let mut rows = stmt.query(params_refs.as_slice())?;
-            let mut conversations = Vec::new();
-            while let Some(row) = rows.next()? {
-                conversations.push(Self::row_to_conversation(row)?);
-            }
-            Ok(conversations)
-        })
-    }
-
     /// Increment the message count and update last_message_at for a conversation.
     pub fn increment_message_count(&self, lane_key: &str) -> Result<()> {
         self.db.with_connection(|conn| {

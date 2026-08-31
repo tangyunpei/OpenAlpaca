@@ -72,21 +72,6 @@ impl<'a> FileAssetRepository<'a> {
         })
     }
 
-    pub fn list_by_owner(&self, owner_id: &str, limit: i64) -> Result<Vec<FileAsset>> {
-        self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, owner_id, sha256, filename, mime_type, size_bytes, storage_path, status, extracted_text, extract_error, metadata_json, created_at, updated_at
-                 FROM file_assets WHERE owner_id = ?1 ORDER BY created_at DESC LIMIT ?2",
-            )?;
-            let mut assets = Vec::new();
-            let mut rows = stmt.query(rusqlite::params![owner_id, limit])?;
-            while let Some(row) = rows.next()? {
-                assets.push(Self::row_to_asset(row)?);
-            }
-            Ok(assets)
-        })
-    }
-
     /// Get total storage bytes used across all file assets.
     pub fn total_storage_bytes(&self) -> Result<i64> {
         self.db.with_connection(|conn| {

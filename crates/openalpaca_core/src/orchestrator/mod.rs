@@ -28,7 +28,6 @@ pub(crate) use task_ops::task_status_query;
 
 pub use skill::catalog as skill_catalog;
 pub use skill::router as skill_router;
-pub use skill::smoke as skill_smoke;
 
 #[cfg(test)]
 mod tests;
@@ -514,27 +513,14 @@ pub(super) fn principal_id(principal: &Principal) -> String {
 }
 
 pub(super) fn task_entry_to_json(entry: &TaskEntry) -> String {
-    let mut obj = serde_json::json!({
+    serde_json::json!({
         "task_id": entry.task_id,
         "title": entry.title,
         "status": entry.status.as_str(),
-        "progress_current": entry.progress_current,
-        "progress_total": entry.progress_total,
         "created_at": entry.created_at.to_rfc3339(),
         "updated_at": entry.updated_at.to_rfc3339(),
-    });
-    if let Some(ref dag) = entry.dag_summary {
-        obj.as_object_mut().unwrap().insert(
-            "dag_summary".to_string(),
-            serde_json::json!({
-                "total_nodes": dag.total_nodes,
-                "completed_nodes": dag.completed_nodes,
-                "running_nodes": dag.running_nodes,
-                "failed_nodes": dag.failed_nodes,
-            }),
-        );
-    }
-    obj.to_string()
+    })
+    .to_string()
 }
 
 /// Parsed outcome fields extracted from a Task's outcome_json.

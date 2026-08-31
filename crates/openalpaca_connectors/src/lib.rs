@@ -8,7 +8,6 @@
 //!
 //! All connectors implement the `Connector` trait for a uniform interface.
 
-pub mod adapter;
 pub mod common;
 
 #[cfg(feature = "telegram")]
@@ -37,9 +36,8 @@ use std::sync::Arc;
 ///
 /// Each connector is responsible for:
 /// 1. Receiving messages from the platform
-/// 2. Converting them to SystemEvent::UserRequest
-/// 3. Processing through the pipeline
-/// 4. Sending responses back to the platform
+/// 2. Routing them through the Gateway (`Gateway::handle_event`)
+/// 3. Sending responses back to the platform
 #[async_trait]
 pub trait Connector: Send + Sync {
     /// The unique identifier for this connector (e.g., "telegram", "imessage")
@@ -120,13 +118,19 @@ impl ConnectorBuilder {
         cancel_token: tokio_util::sync::CancellationToken,
         local_user_id: Option<String>,
     ) -> imessage::IMessageConnector {
-        imessage::IMessageConnector::new(
+        let connector = imessage::IMessageConnector::new(
             self.db,
+            self.bus,
             self.gateway,
             self.daemon_config,
             cancel_token,
             local_user_id,
-        )
+        );
+        if let Some(broker) = self.confirmation_broker {
+            connector.with_confirmation_broker(broker)
+        } else {
+            connector
+        }
     }
 
     /// Build a Discord connector (requires `discord` feature).
@@ -136,9 +140,19 @@ impl ConnectorBuilder {
         token: String,
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> discord::DiscordConnector {
-        discord::DiscordConnector::new(
-            token, self.db, self.gateway, self.daemon_config, cancel_token,
-        )
+        let connector = discord::DiscordConnector::new(
+            token,
+            self.db,
+            self.bus,
+            self.gateway,
+            self.daemon_config,
+            cancel_token,
+        );
+        if let Some(broker) = self.confirmation_broker {
+            connector.with_confirmation_broker(broker)
+        } else {
+            connector
+        }
     }
 }
 
@@ -226,23 +240,27 @@ impl ConnectorFactory for IMessageFactory {
         &self,
         _token: String,
         db: Database,
-        _bus: EventBus,
+        bus: EventBus,
         gateway: Arc<Gateway>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
-        _confirmation_broker: Option<Arc<ConfirmationBroker>>,
+        confirmation_broker: Option<Arc<ConfirmationBroker>>,
     ) -> Result<startup::ConnectorHandle, ConnectorError> {
         let local_user_id = openalpaca_storage::ConfigRepository::new(&db)
             .get("identity.local_user_id")
             .ok()
             .flatten();
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        let connector = imessage::IMessageConnector::new(
+        let mut connector = imessage::IMessageConnector::new(
             Arc::new(db),
+            Arc::new(bus),
             gateway,
             daemon_config,
             cancel_token.clone(),
             local_user_id,
         );
+        if let Some(broker) = confirmation_broker {
+            connector = connector.with_confirmation_broker(broker);
+        }
 
         let running = Arc::new(AtomicBool::new(true));
         let guard = startup::RunningGuard(running.clone());
@@ -270,19 +288,23 @@ impl ConnectorFactory for DiscordFactory {
         &self,
         token: String,
         db: Database,
-        _bus: EventBus,
+        bus: EventBus,
         gateway: Arc<Gateway>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
-        _confirmation_broker: Option<Arc<ConfirmationBroker>>,
+        confirmation_broker: Option<Arc<ConfirmationBroker>>,
     ) -> Result<startup::ConnectorHandle, ConnectorError> {
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        let connector = discord::DiscordConnector::new(
+        let mut connector = discord::DiscordConnector::new(
             token,
             Arc::new(db),
+            Arc::new(bus),
             gateway,
             daemon_config,
             cancel_token.clone(),
         );
+        if let Some(broker) = confirmation_broker {
+            connector = connector.with_confirmation_broker(broker);
+        }
         let running = Arc::new(AtomicBool::new(true));
         let guard = startup::RunningGuard(running.clone());
         tokio::spawn(async move {

@@ -983,25 +983,6 @@ fn test_history_layer_default_mode_plain_summary_is_not_wrapped() {
 }
 
 #[test]
-fn test_history_layer_first_step_only_mode_emits_memory_user_message() {
-    let memory_block: Arc<str> = Arc::from("retrieved memory block");
-    let input = HistoryInput {
-        summary: None,
-        summary_wrap_mode: SummaryWrapMode::Plain,
-        recent_messages: Arc::new(vec![]),
-        current_user_turn: None,
-        lane_tip_fingerprint: [0u8; 32],
-        mode: HistoryMode::FirstStepOnly {
-            memory_block: memory_block.clone(),
-        },
-    };
-    let out = super::history::compute(&input);
-    assert_eq!(out.messages.len(), 1);
-    assert!(matches!(out.messages[0].role, Role::User));
-    assert_eq!(out.messages[0].content, "retrieved memory block");
-}
-
-#[test]
 fn test_history_layer_fingerprint_busts_on_lane_tip_advance() {
     let mut a = make_history_input(HistoryMode::Default);
     a.lane_tip_fingerprint = [1u8; 32];
@@ -2558,9 +2539,7 @@ fn test_golden_dag_node_byte_identical() {
         context_bundle: Arc::new(ContextBundle::empty()),
         query: Arc::from(task_description),
         memory_retrieval_hash: [0u8; 32],
-        path: ExecutionPath::DagNode {
-            node_id: "node_1".to_string(),
-        },
+        path: ExecutionPath::LeadAgent,
         reserved_tokens: 0,
         mode: DynamicContextMode::Default,
     };

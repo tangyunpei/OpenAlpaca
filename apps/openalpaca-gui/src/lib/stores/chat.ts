@@ -106,8 +106,6 @@ export function applyDoneDataToMessage(message: ChatMessage, data: ChatStreamDon
     tokens_in: data.tokens_in,
     tokens_out: data.tokens_out,
     duration_ms: data.duration_ms,
-    citations: data.citations,
-    artifacts: data.artifacts,
   };
 }
 

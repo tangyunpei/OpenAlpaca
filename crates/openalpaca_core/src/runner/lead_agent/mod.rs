@@ -241,11 +241,22 @@ pub async fn run_lead_agent(
     let lead_registry = Arc::new(lead_registry);
 
     // 5. Build SandboxManager with lead agent's policy
-    let mut sandbox = SandboxManager::with_defaults(lead_registry, bus.clone());
+    let mut sandbox = SandboxManager::new(
+        lead_registry,
+        bus.clone(),
+        &daemon_config.load().security.circuit_breaker,
+    );
     if let Some(ref broker) = confirmation_broker {
         sandbox.set_confirmation_broker(broker.clone());
     }
     let mut sandbox_policy = SandboxPolicy::from_constraints(&lead_agent.id, &lead_agent.constraints);
+    sandbox_policy.confirmation_timeout_secs = Some(
+        daemon_config
+            .load()
+            .execution
+            .agent_defaults
+            .confirmation_timeout_secs,
+    );
     if daemon_config.load().security.auto_approve_confirmations {
         sandbox_policy.auto_approve = true;
     }

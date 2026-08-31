@@ -182,12 +182,44 @@ impl<'a> LlmUsageRepository<'a> {
 
     /// Get all daily usage (no agent filter).
     pub fn get_all_daily_usage(&self, limit: usize) -> Result<Vec<LlmUsageDaily>> {
+        self.query_daily_usage(None, None, limit)
+    }
+
+    /// Query daily usage aggregates with optional agent and date filters.
+    ///
+    /// `date` matches the aggregate's `date` column exactly (format
+    /// `YYYY-MM-DD`, as written by `record_and_log`/`upsert_daily_usage`).
+    pub fn query_daily_usage(
+        &self,
+        agent_id: Option<&str>,
+        date: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LlmUsageDaily>> {
         self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
+            let mut sql = String::from(
                 "SELECT date, agent_id, model, total_requests, total_input_tokens, total_output_tokens, total_cost_usd
-                 FROM llm_usage_daily ORDER BY date DESC LIMIT ?",
-            )?;
-            let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
+                 FROM llm_usage_daily",
+            );
+            let mut clauses: Vec<&str> = Vec::new();
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::new();
+            if let Some(ref agent) = agent_id {
+                clauses.push("agent_id = ?");
+                params.push(agent);
+            }
+            if let Some(ref d) = date {
+                clauses.push("date = ?");
+                params.push(d);
+            }
+            if !clauses.is_empty() {
+                sql.push_str(" WHERE ");
+                sql.push_str(&clauses.join(" AND "));
+            }
+            sql.push_str(" ORDER BY date DESC LIMIT ?");
+            let limit_param = limit as i64;
+            params.push(&limit_param);
+
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
                 Ok(LlmUsageDaily {
                     date: row.get(0)?,
                     agent_id: row.get(1)?,
@@ -214,24 +246,6 @@ impl<'a> LlmUsageRepository<'a> {
                  FROM llm_call_log WHERE key_id = ? ORDER BY timestamp DESC LIMIT ?",
             )?;
             let rows = stmt.query_map(rusqlite::params![key_id, limit as i64], |row| {
-                Self::row_to_call_log(row)
-            })?;
-            let mut logs = Vec::new();
-            for row in rows {
-                logs.push(row?);
-            }
-            Ok(logs)
-        })
-    }
-
-    /// Get usage filtered by provider.
-    pub fn get_usage_by_provider(&self, provider: &str, limit: usize) -> Result<Vec<LlmCallLog>> {
-        self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, timestamp, agent_id, task_id, provider, model, key_id, input_tokens, output_tokens, cost_usd, status, latency_ms, error_message
-                 FROM llm_call_log WHERE provider = ? ORDER BY timestamp DESC LIMIT ?",
-            )?;
-            let rows = stmt.query_map(rusqlite::params![provider, limit as i64], |row| {
                 Self::row_to_call_log(row)
             })?;
             let mut logs = Vec::new();
@@ -271,28 +285,7 @@ impl<'a> LlmUsageRepository<'a> {
 
     /// Get daily usage for an agent.
     pub fn get_daily_usage(&self, agent_id: &str, limit: usize) -> Result<Vec<LlmUsageDaily>> {
-        self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT date, agent_id, model, total_requests, total_input_tokens, total_output_tokens, total_cost_usd
-                 FROM llm_usage_daily WHERE agent_id = ? ORDER BY date DESC LIMIT ?",
-            )?;
-            let rows = stmt.query_map(rusqlite::params![agent_id, limit as i64], |row| {
-                Ok(LlmUsageDaily {
-                    date: row.get(0)?,
-                    agent_id: row.get(1)?,
-                    model: row.get(2)?,
-                    total_requests: row.get(3)?,
-                    total_input_tokens: row.get(4)?,
-                    total_output_tokens: row.get(5)?,
-                    total_cost_usd: row.get(6)?,
-                })
-            })?;
-            let mut usage = Vec::new();
-            for row in rows {
-                usage.push(row?);
-            }
-            Ok(usage)
-        })
+        self.query_daily_usage(Some(agent_id), None, limit)
     }
 
     /// Record a completed LLM call: inserts into call log and upserts daily aggregate.

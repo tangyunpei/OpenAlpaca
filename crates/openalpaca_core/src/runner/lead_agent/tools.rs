@@ -258,7 +258,11 @@ impl BuiltInTool for SpawnSubagentTool {
             scope: None,
             workspace_path: None,
         };
-        let mut sandbox = SandboxManager::with_defaults(self.tool_registry.clone(), self.bus.clone());
+        let mut sandbox = SandboxManager::new(
+            self.tool_registry.clone(),
+            self.bus.clone(),
+            &self.daemon_config.load().security.circuit_breaker,
+        );
         if let Some(ref broker) = self.confirmation_broker {
             sandbox.set_confirmation_broker(broker.clone());
         }
@@ -420,6 +424,13 @@ impl BuiltInTool for SpawnSubagentTool {
         let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
 
         let mut sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
+        sandbox_policy.confirmation_timeout_secs = Some(
+            self.daemon_config
+                .load()
+                .execution
+                .agent_defaults
+                .confirmation_timeout_secs,
+        );
         if self.daemon_config.load().security.auto_approve_confirmations {
             sandbox_policy.auto_approve = true;
         }

@@ -109,9 +109,7 @@ fn test_skill_defaults_new_fields_default() {
     let sd = &config.execution.skill_defaults;
     assert_eq!(sd.max_rounds, 6);
     assert_eq!(sd.max_tools_per_round, 3);
-    assert_eq!(sd.default_permission_level, "readonly");
     assert!(sd.global_tool_deny.is_empty());
-    assert_eq!(sd.default_tool_rate_limit, 60);
     assert!((sd.router_auto_select_threshold - 0.65).abs() < f64::EPSILON);
     assert!((sd.router_suggest_threshold - 0.45).abs() < f64::EPSILON);
 }
@@ -121,18 +119,14 @@ fn test_skill_defaults_from_toml() {
     let toml_str = r#"
 [execution.skill_defaults]
 max_rounds = 10
-default_permission_level = "readwrite"
 global_tool_deny = ["shell_command", "file_delete"]
-default_tool_rate_limit = 30
 router_auto_select_threshold = 0.8
 router_suggest_threshold = 0.5
 "#;
     let config: DaemonConfig = toml::from_str(toml_str).unwrap();
     let sd = &config.execution.skill_defaults;
     assert_eq!(sd.max_rounds, 10);
-    assert_eq!(sd.default_permission_level, "readwrite");
     assert_eq!(sd.global_tool_deny, vec!["shell_command", "file_delete"]);
-    assert_eq!(sd.default_tool_rate_limit, 30);
     assert!((sd.router_auto_select_threshold - 0.8).abs() < f64::EPSILON);
     assert!((sd.router_suggest_threshold - 0.5).abs() < f64::EPSILON);
 }
@@ -150,9 +144,7 @@ max_tools_per_round = 5
     assert_eq!(sd.max_rounds, 8);
     assert_eq!(sd.max_tools_per_round, 5);
     // New fields have defaults
-    assert_eq!(sd.default_permission_level, "readonly");
     assert!(sd.global_tool_deny.is_empty());
-    assert_eq!(sd.default_tool_rate_limit, 60);
 }
 
 #[test]
@@ -160,7 +152,6 @@ fn test_skill_defaults_validate_clamps() {
     let mut config = DaemonConfig::default();
     config.execution.skill_defaults.router_auto_select_threshold = 1.5; // max is 1.0
     config.execution.skill_defaults.router_suggest_threshold = -0.1; // min is 0.0
-    config.execution.skill_defaults.default_tool_rate_limit = 0; // min is 1
 
     config.validate();
 
@@ -168,7 +159,6 @@ fn test_skill_defaults_validate_clamps() {
         (config.execution.skill_defaults.router_auto_select_threshold - 1.0).abs() < f64::EPSILON
     );
     assert!((config.execution.skill_defaults.router_suggest_threshold - 0.0).abs() < f64::EPSILON);
-    assert_eq!(config.execution.skill_defaults.default_tool_rate_limit, 1);
 }
 
 #[test]
@@ -266,6 +256,7 @@ fn assert_routing_is_default(routing: &crate::daemon_config::RoutingConfig) {
     assert_eq!(routing.main_loop_max_rounds, 8);
     assert_eq!(routing.main_loop_max_tools_per_round, 4);
     assert_eq!(routing.tool_selection, "core_union");
+    assert!(routing.scheduled_skills_enabled);
 }
 
 #[test]
@@ -302,9 +293,10 @@ steering_inbox_cap = 8
     let routing = &config.orchestrator.routing;
     assert_eq!(routing.steering_inbox_cap, 8);
     assert_eq!(routing.max_workflows_per_lane, 3);
-    // These two would be false under bare #[serde(default)]:
+    // These would be false under bare #[serde(default)]:
     assert!(routing.steering_enabled);
     assert!(routing.followup_autostart);
+    assert!(routing.scheduled_skills_enabled);
     assert_eq!(routing.main_loop_max_rounds, 8);
     assert_eq!(routing.main_loop_max_tools_per_round, 4);
     assert_eq!(routing.tool_selection, "core_union");

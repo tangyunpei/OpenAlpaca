@@ -122,11 +122,16 @@ fn test_migrate_lane_on_link() {
     assert_eq!(after_new[0].content, "hello");
 
     // Verify conversation_map updated
-    let cmap = identity_repo
-        .get_conversation_map("telegram", "999")
-        .unwrap()
+    let lane_key: Option<String> = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT lane_key FROM conversation_map WHERE provider = 'telegram' AND provider_conversation_id = '999'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
         .unwrap();
-    assert_eq!(cmap.lane_key, Some(new_lane.to_string()));
+    assert_eq!(lane_key, Some(new_lane.to_string()));
 }
 
 #[test]
@@ -187,4 +192,51 @@ fn test_migrate_lane_relink_no_unique_violation() {
     // All messages under global lane
     let msgs = conv_repo.list_by_lane("global2:telegram", 50, 0).unwrap();
     assert_eq!(msgs.len(), 2);
+}
+
+#[test]
+fn test_get_conversation_id_str_by_lane_key() {
+    let db = test_db();
+    let repo = IdentityRepository::new(&db);
+
+    // Non-numeric conversation id (iMessage chat identifier)
+    repo.update_conversation_map_lane_key(
+        "imessage",
+        "iMessage;-;+15551234567",
+        "global1:imessage",
+    )
+    .unwrap();
+
+    let id = repo
+        .get_conversation_id_str_by_lane_key("global1:imessage", "imessage")
+        .unwrap();
+    assert_eq!(id, Some("iMessage;-;+15551234567".to_string()));
+
+    // Numeric id still resolves via both accessors
+    repo.update_conversation_map_lane_key("telegram", "424242", "global1:telegram")
+        .unwrap();
+    assert_eq!(
+        repo.get_conversation_id_str_by_lane_key("global1:telegram", "telegram")
+            .unwrap(),
+        Some("424242".to_string())
+    );
+    assert_eq!(
+        repo.get_chat_id_by_lane_key("global1:telegram", "telegram")
+            .unwrap(),
+        Some(424242)
+    );
+
+    // Unknown lane -> None
+    assert_eq!(
+        repo.get_conversation_id_str_by_lane_key("nobody:imessage", "imessage")
+            .unwrap(),
+        None
+    );
+
+    // Non-numeric id through the numeric accessor -> None (parse failure)
+    assert_eq!(
+        repo.get_chat_id_by_lane_key("global1:imessage", "imessage")
+            .unwrap(),
+        None
+    );
 }

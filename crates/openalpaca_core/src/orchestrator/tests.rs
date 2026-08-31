@@ -1688,6 +1688,156 @@ async fn test_slash_skill_no_router_still_invokes_skill() {
     assert_eq!(intent_classified_count, 1, "IntentClassified must be emitted exactly once");
 }
 
+#[tokio::test]
+async fn test_plugin_skill_invoked_via_executor_with_sandboxed_tool_callback() {
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+    use openalpaca_api::plugin_traits::{PluginSkillExecutor, ToolCallbackExecutor};
+
+    // Builtin the plugin skill calls back into through the sandbox.
+    struct EchoTool;
+    #[async_trait]
+    impl BuiltInTool for EchoTool {
+        async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+            Ok(format!(
+                "echo:{}",
+                arguments.get("q").and_then(|v| v.as_str()).unwrap_or("")
+            ))
+        }
+    }
+
+    // Stub out-of-process executor: records the query, requests one tool
+    // callback, and folds the sandboxed result into its final output.
+    struct StubSkillExecutor {
+        received_query: std::sync::Mutex<Option<String>>,
+    }
+    #[async_trait]
+    impl PluginSkillExecutor for StubSkillExecutor {
+        async fn invoke(
+            &self,
+            query: &str,
+            _context: &serde_json::Value,
+            tool_executor: &dyn ToolCallbackExecutor,
+        ) -> Result<String, String> {
+            *self.received_query.lock().unwrap() = Some(query.to_string());
+            let tool_result = tool_executor
+                .execute_tool("echo", &serde_json::json!({"q": "hi"}))
+                .await?;
+            Ok(format!("plugin says: {tool_result}"))
+        }
+        fn plugin_id(&self) -> &str {
+            "test-plugin"
+        }
+        fn skill_id(&self) -> &str {
+            "plugtest"
+        }
+    }
+
+    let registry = Arc::new(ToolRegistry::default());
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "echo".to_string(),
+                description: "Echo tool".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+    let catalog = Arc::new(skill_catalog::SkillCatalog::new());
+    let executor = Arc::new(StubSkillExecutor {
+        received_query: std::sync::Mutex::new(None),
+    });
+    catalog.register_plugin_skill(
+        "plugtest".to_string(),
+        crate::middleware::skill::SkillFrontmatter {
+            name: "Plugin Test Skill".to_string(),
+            description: "Plugin-backed skill".to_string(),
+            invoke: crate::middleware::skill::InvokeConfig {
+                slash: Some("/plugtest".to_string()),
+                ..Default::default()
+            },
+            tools: crate::middleware::skill::ToolsConfig {
+                allow: vec!["echo".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        executor.clone(),
+        "test-plugin".to_string(),
+    );
+
+    let ctx = Arc::new(SharedContext::new());
+    let lanes = Arc::new(LaneManager::new());
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    // No LLM router — a plugin skill must run without one.
+    let orch = Orchestrator::new(
+        ctx,
+        lanes,
+        bus,
+        SystemPersona::default(),
+        None,
+        LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        None,
+        catalog,
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    let mut rx = orch.bus.subscribe();
+
+    let result = orch
+        .handle_message(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "/plugtest do the thing".to_string(),
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+            None,
+        )
+        .await;
+
+    // The plugin executor ran out-of-process logic and its tool callback
+    // went through the sandboxed execute path.
+    assert_eq!(result.unwrap(), "plugin says: echo:hi");
+    assert_eq!(
+        executor.received_query.lock().unwrap().as_deref(),
+        Some("do the thing")
+    );
+
+    // The shared lifecycle wrapper emitted the same events as file skills.
+    let mut saw_started = false;
+    let mut saw_completed = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            SystemEvent::SkillInvocationStarted { skill_id, .. } => {
+                assert_eq!(skill_id, "Plugin Test Skill");
+                saw_started = true;
+            }
+            SystemEvent::SkillCompleted { output_preview, .. } => {
+                assert!(output_preview.contains("plugin says"));
+                saw_completed = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_started, "SkillInvocationStarted was not emitted");
+    assert!(saw_completed, "SkillCompleted was not emitted");
+}
+
 // ── Routing V2: deterministic /steer prefix ──────────────────────────
 
 fn make_steering_orchestrator() -> Orchestrator {

@@ -26,7 +26,6 @@ fn test_initial_state() {
     assert_eq!(state.steps[0].status, "pending");
     assert_eq!(state.steps[1].step_order, 1);
     assert_eq!(state.steps[1].agent_id, "a2");
-    assert_eq!(state.constraints.max_agents, 2);
     assert!(state.constraints.pipeline_sequential);
 }
 
@@ -309,7 +308,7 @@ fn test_backward_compat_no_workspace_field() {
 fn test_step_add_artifact() {
     let mut state = TaskState::initial("obj", &make_assignments());
     state.mark_step_running(0);
-    state.add_step_artifact(0, "report.pdf", "Final report", None);
+    state.steps[0].add_artifact("report.pdf", "Final report", None);
     assert_eq!(state.steps[0].artifact_pointers.len(), 1);
     // Stored as JSON to avoid delimiter ambiguity
     let stored: serde_json::Value =
@@ -323,12 +322,12 @@ fn test_collect_artifacts_from_completed_steps_only() {
     let mut state = TaskState::initial("obj", &make_assignments());
     // Step 0: completed with artifact
     state.mark_step_running(0);
-    state.add_step_artifact(0, "data.csv", "Raw data", None);
+    state.steps[0].add_artifact("data.csv", "Raw data", None);
     state.mark_step_completed(0, "Gathered data");
 
     // Step 1: failed with artifact (should NOT be collected)
     state.mark_step_running(1);
-    state.add_step_artifact(1, "draft.txt", "Draft", None);
+    state.steps[1].add_artifact("draft.txt", "Draft", None);
     state.mark_step_failed(1, "Failed");
 
     let artifacts = state.collect_artifacts();
@@ -358,7 +357,7 @@ fn test_build_outcome_text_only() {
 fn test_build_outcome_artifact_only() {
     let mut state = TaskState::initial("obj", &make_assignments());
     state.mark_step_running(0);
-    state.add_step_artifact(0, "output.zip", "Results", None);
+    state.steps[0].add_artifact("output.zip", "Results", None);
     // Complete with empty summary
     state.mark_step_completed(0, "");
 
@@ -374,7 +373,7 @@ fn test_build_outcome_artifact_only() {
 fn test_build_outcome_mixed() {
     let mut state = TaskState::initial("obj", &make_assignments());
     state.mark_step_running(0);
-    state.add_step_artifact(0, "report.pdf", "Report", None);
+    state.steps[0].add_artifact("report.pdf", "Report", None);
     state.mark_step_completed(0, "Report generated successfully");
 
     let outcome = state.build_outcome("fallback", None);
@@ -568,7 +567,7 @@ fn test_scan_workspace_artifacts_avoids_duplicates() {
     state.mark_step_completed(0, "Done");
 
     // Add artifact pointer manually
-    state.add_step_artifact(0, "report.pdf", "Report", None);
+    state.steps[0].add_artifact("report.pdf", "Report", None);
 
     // Write the same key to workspace as Artifact
     state

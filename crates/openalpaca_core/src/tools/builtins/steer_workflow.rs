@@ -13,21 +13,16 @@ use crate::tools::registry::{BuiltInTool, ToolContext};
 use async_trait::async_trait;
 use chrono::Utc;
 use openalpaca_llm::ToolDefinition;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Per-request tool that pushes a steering message into a running workflow's
 /// inbox via the shared [`push_steering`] helper (which emits
 /// `WorkflowSteered` on success).
 ///
-/// Holds a result cell listing the task ids successfully steered this
-/// request, so the caller can mark the turn `steered` programmatically
-/// (same precedent as `StartWorkflowTool::outcome`).
 pub struct SteerWorkflowTool {
     shared_context: Arc<SharedContext>,
     bus: EventBus,
-    /// Task ids successfully steered during this request.
-    steered: Arc<Mutex<Vec<String>>>,
 }
 
 impl SteerWorkflowTool {
@@ -35,16 +30,7 @@ impl SteerWorkflowTool {
         Self {
             shared_context,
             bus,
-            steered: Arc::new(Mutex::new(Vec::new())),
         }
-    }
-
-    /// Task ids this request successfully steered (empty when none).
-    pub fn steered_tasks(&self) -> Vec<String> {
-        self.steered
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
     }
 }
 
@@ -125,10 +111,6 @@ impl BuiltInTool for SteerWorkflowTool {
 
         match push_steering(&self.shared_context, &self.bus, task_id, lane_key, msg) {
             Ok(depth) => {
-                self.steered
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .push(task_id.to_string());
                 Ok(format!(
                     "Steering message queued for workflow {} ({} message{} waiting). The \
                      workflow picks it up at its next round. Confirm this to the user in \
@@ -241,9 +223,6 @@ mod tests {
         );
         assert_eq!(drained[0].workspace_path.as_deref(), Some("/ws/project"));
 
-        // Result cell records the steered task.
-        assert_eq!(tool.steered_tasks(), vec!["task-1".to_string()]);
-
         // WorkflowSteered published by the shared push helper.
         let mut found = false;
         while let Ok(event) = rx.try_recv() {
@@ -282,7 +261,6 @@ mod tests {
             .await
             .expect_err("full inbox must reject");
         assert!(err.contains("queue_followup"), "missing followup directive: {err}");
-        assert!(tool.steered_tasks().is_empty());
     }
 
     #[tokio::test]
@@ -299,7 +277,6 @@ mod tests {
             .await
             .expect_err("closed inbox must reject");
         assert!(err.contains("finished"), "unexpected error: {err}");
-        assert!(tool.steered_tasks().is_empty());
     }
 
     #[tokio::test]
@@ -324,7 +301,6 @@ mod tests {
         );
         // Own lane's inbox untouched.
         assert!(inbox.is_empty());
-        assert!(tool.steered_tasks().is_empty());
     }
 
     #[tokio::test]

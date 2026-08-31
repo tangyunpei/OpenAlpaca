@@ -30,8 +30,11 @@ pub struct TaskActionRequest {
 #[derive(Debug, Serialize)]
 pub struct TaskResponse {
     pub task: Task,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub assignments: Option<Vec<openalpaca_storage::TaskAgentAssignment>>,
+    /// Agent runs recorded for this task (from `agent_task_history`, written
+    /// by the dispatcher's `record_agent_history`). Serialized under the
+    /// legacy `assignments` key for client compatibility.
+    #[serde(rename = "assignments", skip_serializing_if = "Option::is_none")]
+    pub agents: Option<Vec<openalpaca_storage::AgentTaskHistory>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<ParsedOutcomeFields>,
 }

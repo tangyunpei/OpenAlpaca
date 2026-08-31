@@ -1,7 +1,7 @@
-//! Repository for task and task assignment operations
+//! Repository for task operations
 
 use crate::Database;
-use crate::models::task::{AssignmentStatus, OutcomeKind, Task, TaskAgentAssignment, TaskStatus};
+use crate::models::task::{OutcomeKind, Task, TaskStatus};
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{OptionalExtension, Row};
@@ -46,66 +46,6 @@ impl<'a> TaskRepository<'a> {
                 ],
             )
             .context("Failed to create task")?;
-            Ok(())
-        })
-    }
-
-    /// Create a task and its assignments atomically in a single transaction.
-    /// If any insert fails, the entire operation is rolled back.
-    pub fn create_task_with_assignments(
-        &self,
-        task: &Task,
-        assignments: &[TaskAgentAssignment],
-    ) -> Result<()> {
-        self.db.with_connection_mut(|conn| {
-            let tx = conn.transaction()?;
-
-            tx.execute(
-                "INSERT INTO task (id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-                rusqlite::params![
-                    task.id,
-                    task.title,
-                    task.description,
-                    task.status.as_str(),
-                    task.priority,
-                    task.progress_current,
-                    task.progress_total,
-                    task.result_summary,
-                    task.created_by,
-                    task.source_lane,
-                    task.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    task.updated_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    task.completed_at.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
-                    task.state_json,
-                    task.state_version,
-                    task.outcome_json,
-                    task.outcome_kind.map(|k| k.as_str().to_string()),
-                    task.artifact_count,
-                ],
-            )
-            .context("Failed to create task")?;
-
-            for assignment in assignments {
-                tx.execute(
-                    "INSERT INTO task_agent_assignment (id, task_id, agent_id, role, status, step_order, started_at, completed_at, result_output)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    rusqlite::params![
-                        assignment.id,
-                        assignment.task_id,
-                        assignment.agent_id,
-                        assignment.role,
-                        assignment.status.as_str(),
-                        assignment.step_order,
-                        assignment.started_at.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
-                        assignment.completed_at.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
-                        assignment.result_output,
-                    ],
-                )
-                .context("Failed to create assignment")?;
-            }
-
-            tx.commit()?;
             Ok(())
         })
     }
@@ -237,20 +177,6 @@ impl<'a> TaskRepository<'a> {
         })
     }
 
-    /// Update a task's progress.
-    /// Returns true if a row was updated.
-    pub fn update_progress(&self, id: &str, current: i32, total: i32) -> Result<bool> {
-        self.db.with_connection(|conn| {
-            let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            let rows = conn.execute(
-                "UPDATE task SET progress_current = ?1, progress_total = ?2, updated_at = ?3 WHERE id = ?4",
-                rusqlite::params![current, total, now, id],
-            )
-            .context("Failed to update task progress")?;
-            Ok(rows > 0)
-        })
-    }
-
     /// Mark every non-terminal task (queued / running / paused) as failed
     /// with the given reason, preserving any result summary already present.
     /// Returns the number of tasks swept.
@@ -346,90 +272,6 @@ impl<'a> TaskRepository<'a> {
         })
     }
 
-    // ── Assignment CRUD ─────────────────────────────────────────
-
-    /// Create a new agent assignment for a task.
-    pub fn create_assignment(&self, assignment: &TaskAgentAssignment) -> Result<()> {
-        self.db.with_connection(|conn| {
-            conn.execute(
-                "INSERT INTO task_agent_assignment (id, task_id, agent_id, role, status, step_order, started_at, completed_at, result_output)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                rusqlite::params![
-                    assignment.id,
-                    assignment.task_id,
-                    assignment.agent_id,
-                    assignment.role,
-                    assignment.status.as_str(),
-                    assignment.step_order,
-                    assignment.started_at.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
-                    assignment.completed_at.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
-                    assignment.result_output,
-                ],
-            )
-            .context("Failed to create assignment")?;
-            Ok(())
-        })
-    }
-
-    /// Get all assignments for a task.
-    pub fn get_assignments(&self, task_id: &str) -> Result<Vec<TaskAgentAssignment>> {
-        self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, task_id, agent_id, role, status, step_order, started_at, completed_at, result_output
-                 FROM task_agent_assignment WHERE task_id = ? ORDER BY step_order ASC",
-            )?;
-            let rows = stmt.query_map([task_id], Self::row_to_assignment)?;
-            let mut assignments = Vec::new();
-            for row in rows {
-                assignments.push(row?);
-            }
-            Ok(assignments)
-        })
-    }
-
-    /// Update an assignment's status.
-    /// Returns true if a row was updated.
-    pub fn update_assignment_status(&self, id: &str, status: AssignmentStatus) -> Result<bool> {
-        self.db.with_connection(|conn| {
-            let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-
-            let (started_clause, completed_clause) = match status {
-                AssignmentStatus::Running => (
-                    "started_at = COALESCE(started_at, ?3)",
-                    "completed_at = completed_at",
-                ),
-                AssignmentStatus::Completed | AssignmentStatus::Failed => {
-                    ("started_at = started_at", "completed_at = ?3")
-                }
-                _ => ("started_at = started_at", "completed_at = completed_at"),
-            };
-
-            let sql = format!(
-                "UPDATE task_agent_assignment SET status = ?1, {}, {} WHERE id = ?2",
-                started_clause, completed_clause
-            );
-
-            let rows = conn
-                .execute(&sql, rusqlite::params![status.as_str(), id, now])
-                .context("Failed to update assignment status")?;
-            Ok(rows > 0)
-        })
-    }
-
-    /// Set an assignment's result output.
-    /// Returns true if a row was updated.
-    pub fn set_assignment_output(&self, id: &str, output: &str) -> Result<bool> {
-        self.db.with_connection(|conn| {
-            let rows = conn
-                .execute(
-                    "UPDATE task_agent_assignment SET result_output = ?1 WHERE id = ?2",
-                    rusqlite::params![output, id],
-                )
-                .context("Failed to set assignment output")?;
-            Ok(rows > 0)
-        })
-    }
-
     // ── Row Mappers ─────────────────────────────────────────────
 
     fn row_to_task(row: &Row) -> rusqlite::Result<Task> {
@@ -463,23 +305,6 @@ impl<'a> TaskRepository<'a> {
         })
     }
 
-    fn row_to_assignment(row: &Row) -> rusqlite::Result<TaskAgentAssignment> {
-        let status_str: String = row.get(4)?;
-        let started_str: Option<String> = row.get(6)?;
-        let completed_str: Option<String> = row.get(7)?;
-
-        Ok(TaskAgentAssignment {
-            id: row.get(0)?,
-            task_id: row.get(1)?,
-            agent_id: row.get(2)?,
-            role: row.get(3)?,
-            status: status_str.parse().unwrap_or(AssignmentStatus::Pending),
-            step_order: row.get(5)?,
-            started_at: started_str.as_deref().map(parse_datetime),
-            completed_at: completed_str.as_deref().map(parse_datetime),
-            result_output: row.get(8)?,
-        })
-    }
 }
 
 /// Parse a SQLite datetime string into DateTime<Utc>.

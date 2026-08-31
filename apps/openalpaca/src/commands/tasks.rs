@@ -119,15 +119,17 @@ struct TaskInner {
     completed_at: Option<String>,
 }
 
+/// One agent run on the task (the daemon serves `agent_task_history` rows
+/// under the legacy `assignments` key).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AssignmentDetail {
     agent_id: String,
     role: String,
     status: String,
     #[serde(default)]
-    step_order: Option<i64>,
+    runtime_seconds: Option<i64>,
     #[serde(default)]
-    result_output: Option<String>,
+    completed_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -275,35 +277,26 @@ async fn task_status(task_id: &str, format: OutputFormat) -> Result<()> {
                 && !assignments.is_empty()
             {
                 println!();
-                println!("{}", "Pipeline Steps:".dimmed());
-                let mut sorted = assignments.clone();
-                sorted.sort_by_key(|a| a.step_order.unwrap_or(0));
-                for a in &sorted {
-                    let step_label = a
-                        .step_order
-                        .map(|s| format!("[{}]", s))
-                        .unwrap_or_else(|| "[-]".to_string());
+                println!("{}", "Agent Runs:".dimmed());
+                // Served in chronological order by the daemon.
+                for a in assignments {
+                    let runtime_label = a
+                        .runtime_seconds
+                        .map(|s| format!(" {}s", s))
+                        .unwrap_or_default();
+                    let completed_label = a
+                        .completed_at
+                        .as_deref()
+                        .map(|t| format!(" @ {}", t.chars().take(19).collect::<String>()))
+                        .unwrap_or_default();
                     println!(
-                        "  {} {} {} ({})",
-                        step_label.dimmed(),
+                        "  {} {} ({}){}{}",
                         status_color(&a.status),
                         a.agent_id,
-                        a.role
+                        a.role,
+                        runtime_label.dimmed(),
+                        completed_label.dimmed()
                     );
-                    if let Some(ref output) = a.result_output {
-                        let mut lines = output.lines();
-                        let first_three: Vec<&str> = lines.by_ref().take(3).collect();
-                        let has_more = lines.next().is_some();
-                        let preview: String = first_three
-                            .iter()
-                            .map(|l| format!("    {}", l))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        println!("{}", preview.dimmed());
-                        if has_more {
-                            println!("    {}", "...".dimmed());
-                        }
-                    }
                 }
             }
         }

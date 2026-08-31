@@ -526,7 +526,6 @@ fn test_build_task_outcome_with_db_and_state_json() {
             },
         ],
         constraints: TaskConstraints {
-            max_agents: 2,
             pipeline_sequential: true,
         },
         workspace: TaskWorkspace::default(),
@@ -684,6 +683,8 @@ async fn test_lead_agent_steering_attach_detach_and_leftover_conversion() {
         dispatcher.shared_context.workflows_for_lane("user1:cli"),
         vec![task_id.clone()]
     );
+    // A task lane is created at dispatch…
+    assert!(dispatcher.lane_manager.get_task_lane(&task_id).is_some());
 
     // Queue a message the loop will never consume, then cancel the task.
     inbox
@@ -707,6 +708,15 @@ async fn test_lead_agent_steering_attach_detach_and_leftover_conversion() {
             .workflows_for_lane("user1:cli")
             .is_empty()
     );
+    // …and removed again by the execution cleanup (no task-lane leak).
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while dispatcher.lane_manager.get_task_lane(&task_id).is_some() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "task lane removal timed out"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 
     // The undelivered message became an unprocessed_steering follow-up row…
     let repo = openalpaca_storage::repository::FollowupRepository::new(&db);

@@ -96,47 +96,6 @@ impl std::fmt::Display for OutcomeKind {
     }
 }
 
-/// Status of an agent assignment within a task
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AssignmentStatus {
-    Pending,
-    Running,
-    Completed,
-    Failed,
-}
-
-impl AssignmentStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Running => "running",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-impl std::str::FromStr for AssignmentStatus {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "pending" => Ok(Self::Pending),
-            "running" => Ok(Self::Running),
-            "completed" => Ok(Self::Completed),
-            "failed" => Ok(Self::Failed),
-            _ => anyhow::bail!("Invalid assignment status: {}", s),
-        }
-    }
-}
-
-impl std::fmt::Display for AssignmentStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// A task tracked in the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
@@ -162,16 +121,3 @@ pub struct Task {
     pub artifact_count: i32,
 }
 
-/// An agent assignment within a task
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskAgentAssignment {
-    pub id: String,
-    pub task_id: String,
-    pub agent_id: String,
-    pub role: String,
-    pub status: AssignmentStatus,
-    pub step_order: Option<i32>,
-    pub started_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub result_output: Option<String>,
-}

@@ -6,7 +6,7 @@
 use crate::config::{KeyConfig, LlmRouterConfig, ProviderConfig, read_config, write_config};
 use crate::keys::key_encryption::KeyEncryptor;
 use crate::keys::key_pool::{
-    ApiKey, KeyHealthStatus, KeyPool, KeyPriority, KeySource, KeyStatus, ProviderType,
+    ApiKey, KeyHealthStatus, KeyPool, KeyStatus, ProviderType,
     SelectionStrategy, mask_secret,
 };
 use crate::keys::secret_store::SecretStore;
@@ -231,12 +231,10 @@ impl LlmSettingsService {
             secret_ref: new_secret_ref,
             secret_encrypted: new_secret_encrypted,
             tier: req.key.tier.clone(),
-            monthly_budget: None,
             priority: req.key.priority.clone(),
             source: req.key.source.clone(),
             notes: req.key.notes.clone(),
             rate_limit: None,
-            allowed_models: None,
         };
 
         self.persist_and_reload(provider_type, |config| {
@@ -777,21 +775,7 @@ impl LlmSettingsService {
                 };
 
                 let mut api_key = ApiKey::new(key_config.id.clone(), provider_type.clone(), secret);
-                api_key.tier = key_config.tier.clone();
-                api_key.monthly_budget = key_config.monthly_budget;
-                api_key.priority = match key_config.priority.as_deref() {
-                    Some("fallback") => KeyPriority::Fallback,
-                    _ => KeyPriority::Primary,
-                };
-                api_key.source = match key_config.source.as_deref() {
-                    Some("api_console") => KeySource::ApiConsole,
-                    Some("claude_code") => KeySource::ClaudeCode,
-                    Some("claude_max_pro") => KeySource::ClaudeMaxPro,
-                    Some("codex") => KeySource::Codex,
-                    Some("environment") => KeySource::Environment,
-                    _ => KeySource::Other,
-                };
-                api_key.notes = key_config.notes.clone();
+                super::key_pool_builder::apply_key_config_metadata(&mut api_key, key_config);
                 api_keys.push(api_key);
             }
         }

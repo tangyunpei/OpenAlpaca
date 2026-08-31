@@ -184,6 +184,47 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["execution", "lead_agent_defaults"],
         field: "max_concurrent_subagents",
     },
+    // Orchestrator: Routing (Routing V2)
+    TomlMapping {
+        schema_key: "daemon.orchestrator.routing.steering_enabled",
+        section: &["orchestrator", "routing"],
+        field: "steering_enabled",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.routing.steering_inbox_cap",
+        section: &["orchestrator", "routing"],
+        field: "steering_inbox_cap",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.routing.max_workflows_per_lane",
+        section: &["orchestrator", "routing"],
+        field: "max_workflows_per_lane",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.routing.followup_autostart",
+        section: &["orchestrator", "routing"],
+        field: "followup_autostart",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.routing.main_loop_max_rounds",
+        section: &["orchestrator", "routing"],
+        field: "main_loop_max_rounds",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.routing.main_loop_max_tools_per_round",
+        section: &["orchestrator", "routing"],
+        field: "main_loop_max_tools_per_round",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.routing.tool_selection",
+        section: &["orchestrator", "routing"],
+        field: "tool_selection",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.routing.scheduled_skills_enabled",
+        section: &["orchestrator", "routing"],
+        field: "scheduled_skills_enabled",
+    },
     // Security
     TomlMapping {
         schema_key: "daemon.security.max_input_length",
@@ -420,11 +461,6 @@ pub fn list_daemon_entries() -> Result<Vec<(String, String, String)>> {
     let mut entries = Vec::new();
 
     for mapping in MAPPINGS {
-        // Skip alias keys to avoid duplicates
-        if mapping.schema_key == "system.max_agents" {
-            continue;
-        }
-
         if let Some(section) = navigate_to_section(&root, mapping.section)
             && let Some(val) = section.get(mapping.field)
         {

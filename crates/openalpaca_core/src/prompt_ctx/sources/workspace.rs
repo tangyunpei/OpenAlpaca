@@ -28,11 +28,6 @@ impl ContextSource for WorkspaceSource {
     }
 
     fn active_for(&self, path: &ExecutionPath) -> bool {
-        matches!(
-            path,
-            ExecutionPath::PipelineStep { .. }
-                | ExecutionPath::DagNode { .. }
-                | ExecutionPath::LeadAgent
-        )
+        matches!(path, ExecutionPath::LeadAgent)
     }
 }

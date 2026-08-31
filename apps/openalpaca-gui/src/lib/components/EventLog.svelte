@@ -13,8 +13,6 @@
     switch (type) {
       case "heartbeat":
         return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>`;
-      case "log":
-        return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>`;
       case "command_received":
         return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 14 7-9 1 11h6L12 25l-1-11H5Z"/></svg>`;
       case "agent_status":
@@ -30,7 +28,6 @@
 
   const typeColors: Record<string, string> = {
     heartbeat: "bg-success/10 text-success",
-    log: "bg-blue-400/10 text-blue-400",
     command_received: "bg-accent/10 text-accent",
     wake: "bg-violet-500/10 text-violet-400",
     task_status: "bg-amber-400/10 text-amber-400",
@@ -40,6 +37,10 @@
     workflow_steered: "bg-blue-400/10 text-blue-400",
     workflow_progress: "bg-amber-400/10 text-amber-400",
     followup_queued: "bg-violet-500/10 text-violet-400",
+    skill_invocation_started: "bg-blue-400/10 text-blue-400",
+    skill_completed: "bg-success/10 text-success",
+    skill_failed: "bg-danger/10 text-danger",
+    tool_confirmation_requested: "bg-amber-400/10 text-amber-400",
   };
 </script>
 
@@ -68,9 +69,6 @@
         <span class="px-2 py-0.5 rounded text-[0.75rem] uppercase font-bold min-w-[80px] text-center max-[480px]:min-w-[60px] max-[480px]:text-[0.65rem] {typeColors[event.type] || 'bg-white/5 text-muted-foreground'}">
           {event.type}
         </span>
-        {#if event.type === "log"}
-          <span class="text-muted-foreground flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{event.message}</span>
-        {/if}
         {#if event.type === "command_received"}
           <span class="text-muted-foreground flex-1 overflow-hidden text-ellipsis whitespace-nowrap">cmd: {event.command}</span>
         {/if}
@@ -79,6 +77,18 @@
         {/if}
         {#if event.type === "workflow_progress"}
           <span class="text-muted-foreground flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{event.message}</span>
+        {/if}
+        {#if event.type === "skill_invocation_started"}
+          <span class="text-muted-foreground flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{event.skill_id}: {event.query_preview}</span>
+        {/if}
+        {#if event.type === "skill_completed"}
+          <span class="text-muted-foreground flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{event.skill_id} ({event.duration_ms}ms): {event.output_preview}</span>
+        {/if}
+        {#if event.type === "skill_failed"}
+          <span class="text-muted-foreground flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{event.skill_id}: {event.error}</span>
+        {/if}
+        {#if event.type === "tool_confirmation_requested"}
+          <span class="text-muted-foreground flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{event.agent_id} awaiting approval for {event.tool_name}</span>
         {/if}
       </li>
     {:else}

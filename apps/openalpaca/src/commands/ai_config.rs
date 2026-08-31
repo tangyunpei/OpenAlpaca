@@ -315,7 +315,6 @@ pub fn clear_ai_config() -> Result<()> {
     config.embeddings = None;
     config.models = None;
     config.fallback_chains = None;
-    config.limits = None;
     config.security = None;
     config.timeouts = None;
     config.endpoints = None;
@@ -398,12 +397,10 @@ pub fn upsert_provider_key(
             secret_ref: new_secret_ref,
             secret_encrypted: new_secret_encrypted,
             tier: tier.map(|t| t.to_string()),
-            monthly_budget: None,
             priority: Some(priority.unwrap_or("primary").to_string()),
             source: Some(source.unwrap_or("api_console").to_string()),
             notes: notes.map(|n| n.to_string()),
             rate_limit: None,
-            allowed_models: None,
         });
     }
 

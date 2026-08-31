@@ -95,7 +95,6 @@ pub enum DynamicContextMode {
 pub enum HistoryMode {
     Default,
     Skip,
-    FirstStepOnly { memory_block: Arc<str> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,8 +191,7 @@ impl ComposeRequest {
                 H::Default,
             ),
             Self::Social { .. } => (P::Minimal, S::SocialMinimal, D::Skip, H::Default),
-            // Phase 6 Commit 1 spec errata: the default-dispatch table lists
-            // (Minimal, Default, Skip, FirstStepOnly|Skip). Pre-migration
+            // Phase 6 Commit 1 spec errata: pre-migration
             // emits NO SystemPersona content at all, so Skip matches
             // byte-identically. StaticPromptMode::SubagentMinimal carries the
             // raw_blocks-only emission order that DagNode/LeadAgent use.

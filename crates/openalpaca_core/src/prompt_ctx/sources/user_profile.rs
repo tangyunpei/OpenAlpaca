@@ -2,7 +2,7 @@ use crate::middleware::user::{UserDocument, user_to_prompt_block};
 use crate::prompt_ctx::section::{
     ContextKey, ContextKind, ContextSection, InjectionMode, SectionPriority,
 };
-use crate::prompt_ctx::sources::{ContextRequest, ContextSource, ExecutionPath};
+use crate::prompt_ctx::sources::{ContextRequest, ContextSource};
 use async_trait::async_trait;
 use std::sync::{Arc, RwLock};
 
@@ -62,7 +62,4 @@ impl ContextSource for UserProfileSource {
         }]
     }
 
-    fn active_for(&self, path: &ExecutionPath) -> bool {
-        !matches!(path, ExecutionPath::SocialQuery)
-    }
 }

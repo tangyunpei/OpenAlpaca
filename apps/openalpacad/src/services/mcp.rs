@@ -10,18 +10,19 @@ use std::time::Duration;
 
 use openalpaca_core::tools::ToolRegistry;
 use openalpaca_core::tools::mcp::{
-    McpClientSet, McpConfig, McpDefaults, McpServerConfig, McpServerStatus, McpServerSummary,
+    McpConfig, McpDefaults, McpServerConfig, McpServerStatus, McpServerSummary,
     bridge, config::HttpAuthConfig, config::LoadError,
 };
 use openalpaca_mcp::{Implementation, McpClient, McpClientConfig, TransportKind};
 
 /// Load config/mcp.toml and connect to all enabled servers. Registers their
-/// tools into the provided `ToolRegistry`. Returns an `McpClientSet` holding
-/// the client Arcs + per-server summaries.
+/// tools into the provided `ToolRegistry`. Registered tools hold `Arc`s to
+/// their `McpClient`, which keeps the client connections alive for the
+/// daemon's lifetime.
 pub(super) async fn register_mcp_servers(
     config_base_dir: &Path,
     tool_registry: &Arc<ToolRegistry>,
-) -> anyhow::Result<McpClientSet> {
+) -> anyhow::Result<()> {
     let config_path = config_base_dir.join("mcp.toml");
 
     let config = match McpConfig::load(&config_path) {
@@ -31,7 +32,7 @@ pub(super) async fn register_mcp_servers(
                 path = %config_path.display(),
                 "no config/mcp.toml — no MCP servers to register"
             );
-            return Ok(McpClientSet::new());
+            return Ok(());
         }
         Err(e) => {
             return Err(anyhow::anyhow!(
@@ -41,39 +42,27 @@ pub(super) async fn register_mcp_servers(
         }
     };
 
-    let mut set = McpClientSet::new();
+    let mut connected = 0usize;
+    let mut total = 0usize;
 
     for (server_name, server_cfg) in config.servers {
+        total += 1;
         if !server_cfg.is_enabled() {
             tracing::info!(server_name = %server_name, "MCP server disabled by config");
-            set.add_disabled(server_name, server_cfg.transport_kind());
             continue;
         }
 
-        let summary = connect_and_register_one(
-            &server_name,
-            &server_cfg,
-            &config.defaults,
-            tool_registry,
-            &mut set,
-        )
-        .await;
-
-        set.add_summary(summary);
+        let summary =
+            connect_and_register_one(&server_name, &server_cfg, &config.defaults, tool_registry)
+                .await;
+        if matches!(summary.status, McpServerStatus::Connected { .. }) {
+            connected += 1;
+        }
     }
 
-    let connected = set
-        .summaries()
-        .iter()
-        .filter(|s| matches!(s.status, McpServerStatus::Connected { .. }))
-        .count();
-    tracing::info!(
-        connected,
-        total = set.summaries().len(),
-        "MCP server bootstrap complete"
-    );
+    tracing::info!(connected, total, "MCP server bootstrap complete");
 
-    Ok(set)
+    Ok(())
 }
 
 async fn connect_and_register_one(
@@ -81,7 +70,6 @@ async fn connect_and_register_one(
     server_cfg: &McpServerConfig,
     defaults: &McpDefaults,
     tool_registry: &Arc<ToolRegistry>,
-    set: &mut McpClientSet,
 ) -> McpServerSummary {
     let transport_kind = server_cfg.transport_kind();
     let mut summary = McpServerSummary {
@@ -171,8 +159,6 @@ async fn connect_and_register_one(
         skipped,
         "MCP server registered tools"
     );
-
-    set.push_client(Arc::clone(&client));
 
     summary.status = McpServerStatus::Connected {
         server_version: server_info

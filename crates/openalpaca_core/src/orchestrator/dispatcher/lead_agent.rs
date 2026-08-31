@@ -74,8 +74,7 @@ impl TaskDispatcher {
             .register(task_id.clone(), title.clone());
 
         // Create TaskLane
-        let task_lane = self.lane_manager.create_task_lane(&task_id);
-        task_lane.assign_agent(lead_agent.id.clone());
+        self.lane_manager.create_task_lane(&task_id);
 
         // Emit status change — lead agent instance just spawned
         self.bus.publish(SystemEvent::AgentStatusChanged {
@@ -187,6 +186,7 @@ impl TaskDispatcher {
 
         let bus = self.bus.clone();
         let ctx = self.shared_context.clone();
+        let lane_manager = self.lane_manager.clone();
         let db = self.db.clone();
         let embedder = self.embedder.clone();
         let tool_registry = self.tool_registry.clone();
@@ -287,6 +287,10 @@ impl TaskDispatcher {
 
             // Cleanup cancellation token
             ctx.remove_cancellation_token(&task_id);
+
+            // Remove the task lane — task lanes are per-execution and would
+            // otherwise accumulate for the daemon's lifetime (slow leak).
+            lane_manager.remove_task_lane(&task_id);
 
             // Routing V2: detach the lane attachment unconditionally — it
             // was registered unconditionally at dispatch, independent of the

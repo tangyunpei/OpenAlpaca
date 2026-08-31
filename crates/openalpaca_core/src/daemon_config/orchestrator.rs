@@ -45,6 +45,12 @@ pub struct RoutingConfig {
     /// or "full" (entire registry — escape hatch).
     #[serde(default = "default_tool_selection")]
     pub tool_selection: String,
+    /// Global kill switch for cron-scheduled skills (`invoke.cron` /
+    /// `invoke.mode = "scheduled"` frontmatter). When false, no skill cron
+    /// jobs are registered with the wake scheduler and pending timer fires
+    /// are ignored.
+    #[serde(default = "default_scheduled_skills_enabled")]
+    pub scheduled_skills_enabled: bool,
 }
 
 fn default_steering_enabled() -> bool {
@@ -68,6 +74,9 @@ fn default_main_loop_max_tools_per_round() -> usize {
 fn default_tool_selection() -> String {
     "core_union".to_string()
 }
+fn default_scheduled_skills_enabled() -> bool {
+    true
+}
 
 impl Default for RoutingConfig {
     fn default() -> Self {
@@ -79,6 +88,7 @@ impl Default for RoutingConfig {
             main_loop_max_rounds: default_main_loop_max_rounds(),
             main_loop_max_tools_per_round: default_main_loop_max_tools_per_round(),
             tool_selection: default_tool_selection(),
+            scheduled_skills_enabled: default_scheduled_skills_enabled(),
         }
     }
 }

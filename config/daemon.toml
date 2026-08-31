@@ -17,7 +17,6 @@ max_tools_per_round = 3
 autocompact_buffer_ratio = 0.165
 compaction_target_ratio = 0.50
 # compaction_model = "claude-haiku-4-5-20251001"
-max_extractions_per_compaction = 10
 min_recent_messages = 4
 
 [orchestrator.costs]
@@ -78,10 +77,25 @@ main_loop_max_tools_per_round = 4
 # with active workflows — steer_workflow/queue_followup) or "full"
 # (entire registry minus the global tool deny list; escape hatch).
 tool_selection = "core_union"
+# Global kill switch for cron-scheduled skills. Skills whose frontmatter sets
+# invoke.cron (or invoke.mode = "scheduled" with a cron expression) are
+# registered with the wake scheduler at boot and re-synced on skill
+# hot-reload; each fire injects the skill's slash command as a fresh turn on
+# the local user's "scheduled" lane. Set false to disable all skill cron
+# jobs without editing the skills themselves.
+scheduled_skills_enabled = true
 
 [security]
 max_input_length = 32768
 auto_approve_confirmations = false
+
+# Tool circuit breaker: after `failure_threshold` consecutive transient
+# failures for an (agent, tool) pair, calls are rejected until
+# `reset_timeout_secs` elapses (then one probe call is allowed).
+[security.circuit_breaker]
+enabled = true
+failure_threshold = 5
+reset_timeout_secs = 300
 
 [server]
 event_broadcaster_capacity = 64
@@ -117,7 +131,6 @@ allowed_mime_prefixes = [
 max_file_size_bytes = 52428800
 max_files_per_message = 10
 max_total_storage_bytes = 524288000
-retention_days = 30
 
 [upload.governance]
 attachment_ready_poll_interval_ms = 200

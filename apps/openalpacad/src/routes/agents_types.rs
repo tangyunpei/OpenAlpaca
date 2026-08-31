@@ -104,18 +104,8 @@ pub struct CreateTemplateRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CreateTemplateFromMarkdownRequest {
-    pub markdown: String,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct UpdateTemplateRequest {
     pub config: AgentConfigFile,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SpawnInstanceRequest {
-    pub task_id: String,
 }
 
 /// JSON representation of an active agent instance.

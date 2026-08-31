@@ -166,6 +166,11 @@ impl LoopConfig {
             match CapabilityManager::check_model_access(&agent.id, model_id, &agent.constraints) {
                 Ok(()) => Some(model_id.clone()),
                 Err(violation) => {
+                    // NOTE: no SystemEvent::ModelAccessDenied here — this is a
+                    // static factory with no EventBus in scope (event_bus is
+                    // attached to the LoopConfig later). The runtime denial in
+                    // the agentic loop publishes the event; this path only
+                    // downgrades to the router default and logs.
                     tracing::warn!(
                         agent_id = %agent.id,
                         model = %model_id,

@@ -398,11 +398,8 @@ pub async fn get_llm_usage_daily(
     let repo = openalpaca_storage::repository::LlmUsageRepository::new(&state.db);
     let limit = query.limit.unwrap_or(30).min(365);
 
-    let result = if let Some(ref agent_id) = query.agent_id {
-        repo.get_daily_usage(agent_id, limit)
-    } else {
-        repo.get_all_daily_usage(limit)
-    };
+    let result =
+        repo.query_daily_usage(query.agent_id.as_deref(), query.date.as_deref(), limit);
 
     match result {
         Ok(usage) => (StatusCode::OK, Json(serde_json::to_value(usage).unwrap())).into_response(),
@@ -520,56 +517,6 @@ pub async fn get_provider_usage(State(state): State<Arc<AppState>>) -> impl Into
     (
         StatusCode::OK,
         Json(serde_json::to_value(summaries).unwrap()),
-    )
-        .into_response()
-}
-
-// ── LLM Pricing endpoints ──────────────────────────────────────────
-
-/// GET /v1/llm/pricing — list all models with their pricing information
-pub async fn get_llm_pricing(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let service = match &state.llm_settings_service {
-        Some(s) => s,
-        None => {
-            return settings_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LLM_NOT_CONFIGURED",
-                "LLM router is not configured",
-            )
-            .into_response();
-        }
-    };
-
-    let models = service.all_models_with_pricing();
-    (StatusCode::OK, Json(serde_json::to_value(models).unwrap())).into_response()
-}
-
-/// GET /v1/llm/pricing/estimate — estimate cost for given model and token counts
-pub async fn estimate_cost(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<CostEstimateQuery>,
-) -> impl IntoResponse {
-    let service = match &state.llm_settings_service {
-        Some(s) => s,
-        None => {
-            return settings_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LLM_NOT_CONFIGURED",
-                "LLM router is not configured",
-            )
-            .into_response();
-        }
-    };
-
-    let cost = service.estimate_cost(&query.model, query.input_tokens, query.output_tokens);
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "model": query.model,
-            "input_tokens": query.input_tokens,
-            "output_tokens": query.output_tokens,
-            "estimated_cost_usd": cost,
-        })),
     )
         .into_response()
 }

@@ -4236,7 +4236,6 @@ dependencies = [
  "anyhow",
  "directories",
  "libc",
- "openalpaca_api",
  "openalpaca_storage",
  "serde",
  "serde_json",

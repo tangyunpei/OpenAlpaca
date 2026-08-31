@@ -220,8 +220,64 @@ fn test_history_add_and_get() {
     };
     repo.add_history(&entry).unwrap();
 
-    let history = repo.get_history("sa1", 10).unwrap();
+    let history = repo.get_history_for_task("t1").unwrap();
     assert_eq!(history.len(), 1);
+    assert_eq!(history[0].agent_id, "sa1");
     assert_eq!(history[0].role, "executor");
     assert_eq!(history[0].runtime_seconds, Some(45));
+}
+
+#[test]
+fn test_history_for_task_chronological_and_scoped() {
+    let db = setup_db();
+    let repo = SubAgentRepository::new(&db);
+    let task_repo = TaskRepository::new(&db);
+
+    repo.upsert(&make_config("sa1", "Researcher")).unwrap();
+    repo.upsert(&make_config("sa2", "Writer")).unwrap();
+    task_repo.create(&make_task("t1")).unwrap();
+    task_repo.create(&make_task("t2")).unwrap();
+
+    let base = Utc::now();
+    // Insert out of chronological order to prove the ORDER BY.
+    repo.add_history(&AgentTaskHistory {
+        id: "h2".to_string(),
+        agent_id: "sa2".to_string(),
+        task_id: "t1".to_string(),
+        role: "writer".to_string(),
+        status: "failed".to_string(),
+        runtime_seconds: Some(10),
+        completed_at: base + chrono::Duration::seconds(60),
+    })
+    .unwrap();
+    repo.add_history(&AgentTaskHistory {
+        id: "h1".to_string(),
+        agent_id: "sa1".to_string(),
+        task_id: "t1".to_string(),
+        role: "researcher".to_string(),
+        status: "completed".to_string(),
+        runtime_seconds: Some(30),
+        completed_at: base,
+    })
+    .unwrap();
+    // A run on another task must not leak in.
+    repo.add_history(&AgentTaskHistory {
+        id: "h3".to_string(),
+        agent_id: "sa1".to_string(),
+        task_id: "t2".to_string(),
+        role: "researcher".to_string(),
+        status: "completed".to_string(),
+        runtime_seconds: Some(5),
+        completed_at: base,
+    })
+    .unwrap();
+
+    let runs = repo.get_history_for_task("t1").unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].agent_id, "sa1");
+    assert_eq!(runs[0].status, "completed");
+    assert_eq!(runs[1].agent_id, "sa2");
+    assert_eq!(runs[1].status, "failed");
+
+    assert!(repo.get_history_for_task("no-such-task").unwrap().is_empty());
 }

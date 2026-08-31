@@ -362,6 +362,30 @@ fn test_router_slash_command_takes_priority() {
 }
 
 #[test]
+fn test_router_auto_select_records_usage_for_recency() {
+    let (_tmp, catalog) = make_router_test_catalog();
+    let router = SkillRouter::new(0.65, 0.45);
+
+    // Auto-selection at the production site must write the recency tier
+    // via record_usage (wiring audit §2: recency bonus needs a writer).
+    let intent = parser().parse_with_skills_and_router("review code for bugs", &catalog, &router);
+    assert!(matches!(intent, Intent::SkillInvocation { .. }));
+
+    // A subsequent route sees the recency bonus for the selected skill.
+    let result = router.route("review code for bugs", &catalog);
+    let score = result
+        .scores
+        .iter()
+        .find(|s| s.skill_id == "code-review")
+        .expect("code-review must be scored");
+    assert!(
+        score.recency_bonus > 0.0,
+        "auto-select must record usage; recency_bonus = {}",
+        score.recency_bonus
+    );
+}
+
+#[test]
 fn test_router_no_match_falls_through() {
     let (_tmp, catalog) = make_router_test_catalog();
     let router = SkillRouter::new(0.65, 0.45);

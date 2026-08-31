@@ -3,7 +3,7 @@
 //! Handles GlobalUser, ExternalIdentity, ConversationMap, and LinkToken.
 
 use crate::Database;
-use crate::models::identity::{ConversationMap, ExternalIdentity, GlobalUser, LinkToken};
+use crate::models::identity::{ExternalIdentity, GlobalUser, LinkToken};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 
@@ -69,21 +69,6 @@ impl<'a> IdentityRepository<'a> {
             display_name,
             created_at,
             updated_at,
-        })
-    }
-
-    /// Get the first global user (ordered by created_at).
-    /// Used by iMessage connector for auto-linking to the Mac owner.
-    pub fn get_first_global_user(&self) -> Result<Option<GlobalUser>> {
-        self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, display_name, created_at, updated_at FROM global_user ORDER BY created_at ASC LIMIT 1",
-            )?;
-            let mut rows = stmt.query([])?;
-            match rows.next()? {
-                Some(row) => Ok(Some(Self::row_to_global_user(row)?)),
-                None => Ok(None),
-            }
         })
     }
 
@@ -328,77 +313,6 @@ impl<'a> IdentityRepository<'a> {
 
     // ========== ConversationMap ==========
 
-    /// Get or create conversation map
-    pub fn get_or_create_conversation_map(
-        &self,
-        provider: &str,
-        provider_conversation_id: &str,
-        global_user_id: Option<&str>,
-    ) -> Result<ConversationMap> {
-        // Try to find existing
-        if let Some(existing) = self.get_conversation_map(provider, provider_conversation_id)? {
-            return Ok(existing);
-        }
-
-        // Create new
-        let now = Utc::now();
-        self.db.with_connection(|conn| {
-            conn.execute(
-                "INSERT INTO conversation_map (provider, provider_conversation_id, global_user_id, created_at) VALUES (?1, ?2, ?3, ?4)",
-                (provider, provider_conversation_id, global_user_id, now.to_rfc3339()),
-            )?;
-            let id = conn.last_insert_rowid();
-            Ok(ConversationMap {
-                id,
-                provider: provider.to_string(),
-                provider_conversation_id: provider_conversation_id.to_string(),
-                global_user_id: global_user_id.map(|s| s.to_string()),
-                lane_key: None,
-                created_at: now,
-            })
-        })
-    }
-
-    /// Get conversation map
-    pub fn get_conversation_map(
-        &self,
-        provider: &str,
-        provider_conversation_id: &str,
-    ) -> Result<Option<ConversationMap>> {
-        self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, provider, provider_conversation_id, global_user_id, lane_key, created_at
-                 FROM conversation_map WHERE provider = ?1 AND provider_conversation_id = ?2",
-            )?;
-            let mut rows = stmt.query([provider, provider_conversation_id])?;
-
-            match rows.next()? {
-                Some(row) => {
-                    let id: i64 = row.get(0)?;
-                    let provider: String = row.get(1)?;
-                    let provider_conversation_id: String = row.get(2)?;
-                    let global_user_id: Option<String> = row.get(3)?;
-                    let lane_key: Option<String> = row.get(4)?;
-                    let created_at_str: String = row.get(5)?;
-
-                    let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now());
-
-                    Ok(Some(ConversationMap {
-                        id,
-                        provider,
-                        provider_conversation_id,
-                        global_user_id,
-                        lane_key,
-                        created_at,
-                    }))
-                }
-                None => Ok(None),
-            }
-        })
-    }
-
     /// Update the lane_key on a conversation_map entry.
     pub fn update_conversation_map_lane_key(
         &self,
@@ -431,16 +345,30 @@ impl<'a> IdentityRepository<'a> {
 
     /// Get the provider_conversation_id (e.g. Telegram chat_id) for a given lane_key and provider.
     pub fn get_chat_id_by_lane_key(&self, lane_key: &str, provider: &str) -> Result<Option<i64>> {
+        Ok(self
+            .get_conversation_id_str_by_lane_key(lane_key, provider)?
+            .and_then(|id_str| id_str.parse::<i64>().ok()))
+    }
+
+    /// Get the raw provider_conversation_id string for a given lane_key and provider.
+    ///
+    /// Unlike [`get_chat_id_by_lane_key`], this does not assume the id is numeric —
+    /// needed for providers with string conversation ids (e.g. iMessage chat
+    /// identifiers, Discord snowflakes that exceed i64 conventions).
+    ///
+    /// [`get_chat_id_by_lane_key`]: Self::get_chat_id_by_lane_key
+    pub fn get_conversation_id_str_by_lane_key(
+        &self,
+        lane_key: &str,
+        provider: &str,
+    ) -> Result<Option<String>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT provider_conversation_id FROM conversation_map WHERE lane_key = ?1 AND provider = ?2 ORDER BY created_at DESC LIMIT 1",
             )?;
             let mut rows = stmt.query(rusqlite::params![lane_key, provider])?;
             match rows.next()? {
-                Some(row) => {
-                    let id_str: String = row.get(0)?;
-                    Ok(id_str.parse::<i64>().ok())
-                }
+                Some(row) => Ok(Some(row.get::<_, String>(0)?)),
                 None => Ok(None),
             }
         })

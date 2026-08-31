@@ -30,6 +30,11 @@ pub struct SkillInvocationToolExecutor {
     /// From `execution.skill_defaults.global_tool_deny` — enforced on nested
     /// skills the same as the top-level path in invocation.rs.
     pub global_tool_deny: Vec<String>,
+    /// From `[security.circuit_breaker]` — nested sandboxes use the same
+    /// breaker settings as the top-level path in invocation.rs.
+    pub circuit_breaker: crate::daemon_config::CircuitBreakerConfig,
+    /// From `execution.agent_defaults.confirmation_timeout_secs`.
+    pub confirmation_timeout_secs: u64,
 }
 
 impl SkillInvocationToolExecutor {
@@ -47,6 +52,8 @@ impl SkillInvocationToolExecutor {
         parent_max_cost: f64,
         auto_approve: bool,
         global_tool_deny: Vec<String>,
+        circuit_breaker: crate::daemon_config::CircuitBreakerConfig,
+        confirmation_timeout_secs: u64,
     ) -> Self {
         Self {
             catalog,
@@ -61,6 +68,8 @@ impl SkillInvocationToolExecutor {
             parent_max_cost,
             auto_approve,
             global_tool_deny,
+            circuit_breaker,
+            confirmation_timeout_secs,
         }
     }
 
@@ -281,6 +290,8 @@ impl SkillInvocationToolExecutor {
                     remaining,
                     self.auto_approve,
                     self.global_tool_deny.clone(),
+                    self.circuit_breaker.clone(),
+                    self.confirmation_timeout_secs,
                 ));
                 for dep_id in &skill_doc.frontmatter.depends_on {
                     if self.catalog.get(dep_id).is_some() {
@@ -344,7 +355,7 @@ impl SkillInvocationToolExecutor {
         // tools — the agentic loop stubs out every tool call unless BOTH the
         // sandbox and the policy are present. Mirrors the top-level policy in
         // invocation.rs, scoped to the composed child constraints.
-        let sandbox = SandboxManager::with_defaults(registry, self.bus.clone());
+        let sandbox = SandboxManager::new(registry, self.bus.clone(), &self.circuit_breaker);
         let sandbox_policy = if tool_defs.is_empty() {
             None
         } else {
@@ -383,7 +394,7 @@ impl SkillInvocationToolExecutor {
                 // stream-detached.
                 stream_id: None,
                 lane_key: child_tool_ctx.lane_key.clone(),
-                confirmation_timeout_secs: None,
+                confirmation_timeout_secs: Some(self.confirmation_timeout_secs),
                 auto_approve: self.auto_approve,
             })
         };
@@ -585,6 +596,8 @@ Use echo_tool to answer.
             1.0,
             false,
             vec![],
+            crate::daemon_config::CircuitBreakerConfig::default(),
+            300,
         );
 
         let result = executor
@@ -693,6 +706,8 @@ Use echo_tool to answer.
             1.0,
             false,
             vec!["echo_tool".to_string()],
+            crate::daemon_config::CircuitBreakerConfig::default(),
+            300,
         );
 
         let _ = executor

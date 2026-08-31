@@ -16,7 +16,6 @@ use crate::middleware::skill::{
     SkillDocument, SkillFrontmatter, SkillScope, parse_skill_frontmatter, parse_skill_markdown,
 };
 use chrono::Utc;
-use regex::Regex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -51,9 +50,6 @@ pub struct SkillEntry {
     pub skill_md_path: Option<PathBuf>,
     /// Absolute path to the skill directory (None for plugin skills).
     pub skill_dir: Option<PathBuf>,
-    /// Compiled trigger regex patterns (compiled once at scan time).
-    /// Patterns that fail to compile are silently dropped.
-    pub compiled_triggers: Vec<Regex>,
     /// Where this skill was discovered.
     pub scope: SkillScope,
     /// Where this skill's execution logic comes from.
@@ -76,7 +72,6 @@ pub struct SkillCatalog {
     /// Alias index: maps alias command → skill ID.
     alias_index: RwLock<HashMap<String, String>>,
     /// Diagnostic messages accumulated during scanning.
-    validation_errors: RwLock<Vec<String>>,
     /// Optional event bus for emitting lifecycle events.
     bus: Option<EventBus>,
     /// Cached catalog summary — invalidated on mutation (Opt-8a).
@@ -95,7 +90,6 @@ impl SkillCatalog {
             entries: RwLock::new(HashMap::new()),
             command_index: RwLock::new(HashMap::new()),
             alias_index: RwLock::new(HashMap::new()),
-            validation_errors: RwLock::new(Vec::new()),
             bus: None,
             cached_summary: RwLock::new(None),
         }
@@ -107,7 +101,6 @@ impl SkillCatalog {
             entries: RwLock::new(HashMap::new()),
             command_index: RwLock::new(HashMap::new()),
             alias_index: RwLock::new(HashMap::new()),
-            validation_errors: RwLock::new(Vec::new()),
             bus: Some(bus),
             cached_summary: RwLock::new(None),
         }
@@ -119,11 +112,6 @@ impl SkillCatalog {
     /// as a skill. Only the YAML frontmatter is parsed (Level 1).
     /// Returns the count of skills successfully loaded.
     pub fn scan_directory(&self, dir: &Path, scope: SkillScope) -> usize {
-        // Clear validation errors from previous scan
-        if let Ok(mut errors) = self.validation_errors.write() {
-            errors.clear();
-        }
-
         let read_dir = match std::fs::read_dir(dir) {
             Ok(rd) => rd,
             Err(e) => {
@@ -205,11 +193,6 @@ impl SkillCatalog {
                 frontmatter.name
             );
             tracing::warn!("SkillCatalog: {}", msg);
-            if let Ok(mut errors) = self.validation_errors.write() {
-                if errors.len() < 100 {
-                    errors.push(msg);
-                }
-            }
         }
         if !frontmatter.tools.defaults.is_empty() {
             let msg = format!(
@@ -218,11 +201,6 @@ impl SkillCatalog {
                 frontmatter.name
             );
             tracing::warn!("SkillCatalog: {}", msg);
-            if let Ok(mut errors) = self.validation_errors.write() {
-                if errors.len() < 100 {
-                    errors.push(msg);
-                }
-            }
         }
 
         // Validation: invoke.mode == "disabled" => skip
@@ -243,31 +221,7 @@ impl SkillCatalog {
                 frontmatter.name, declared_id, dir_name
             );
             tracing::warn!("SkillCatalog: {}", msg);
-            if let Ok(mut errors) = self.validation_errors.write() {
-                if errors.len() < 100 {
-                    errors.push(msg);
-                }
-            }
         }
-
-        // Compile trigger patterns (use routing.intent which is populated by legacy compat)
-        let compiled_triggers: Vec<Regex> = frontmatter
-            .routing
-            .intent
-            .iter()
-            .filter_map(|pattern| match Regex::new(&format!("(?i){}", pattern)) {
-                Ok(re) => Some(re),
-                Err(e) => {
-                    tracing::warn!(
-                        "SkillCatalog: invalid trigger pattern '{}' in {}: {}",
-                        pattern,
-                        frontmatter.name,
-                        e
-                    );
-                    None
-                }
-            })
-            .collect();
 
         let key = dir_name.to_lowercase();
         let skill_name_for_event = frontmatter.name.clone();
@@ -276,14 +230,13 @@ impl SkillCatalog {
             frontmatter,
             skill_md_path: Some(skill_md.to_path_buf()),
             skill_dir: Some(skill_dir.to_path_buf()),
-            compiled_triggers,
             scope,
             source: SkillSource::FileBased,
         };
 
         // Collect old index data and insert entry under entries lock,
         // then release entries lock before acquiring index locks to avoid deadlock.
-        let (old_slash_cmd, old_aliases, new_slash_cmd, new_aliases, conflict_msg) = {
+        let (old_slash_cmd, old_aliases, new_slash_cmd, new_aliases) = {
             let mut entries_guard = match self.entries.write() {
                 Ok(g) => g,
                 Err(_) => {
@@ -309,14 +262,13 @@ impl SkillCatalog {
             entries_guard.insert(key.clone(), entry);
 
             // entries_guard is dropped here (end of block)
-            (old_slash, old_als, new_slash, new_als, None::<String>)
+            (old_slash, old_als, new_slash, new_als)
         };
 
         // Remove old index entries (entries lock released)
         self.remove_index_entries(old_slash_cmd.as_deref(), &old_aliases);
 
         // Build command index from effective_slash_command (entries lock released)
-        let mut conflict_msg_actual = conflict_msg;
         if let Some(ref cmd) = new_slash_cmd {
             if let Ok(mut idx) = self.command_index.write() {
                 let cmd_lower = cmd.to_lowercase();
@@ -329,19 +281,10 @@ impl SkillCatalog {
                         cmd, key, existing_key
                     );
                     tracing::warn!("SkillCatalog: {}", msg);
-                    conflict_msg_actual = Some(msg);
                 }
                 idx.insert(cmd_lower, key.clone());
             }
         }
-        if let Some(msg) = conflict_msg_actual {
-            if let Ok(mut errors) = self.validation_errors.write() {
-                if errors.len() < 100 {
-                    errors.push(msg);
-                }
-            }
-        }
-
         // Build alias index (entries lock released)
         if let Ok(mut alias_idx) = self.alias_index.write() {
             for alias in &new_aliases {
@@ -405,7 +348,10 @@ impl SkillCatalog {
 
     /// Look up a skill by slash command (e.g. "review" -> SkillEntry).
     ///
-    /// Checks the primary command index first, then the alias index.
+    /// Checks the primary command index first, then the alias index, then
+    /// falls back to a direct skill-ID lookup so `/{skill_id}` always works —
+    /// scheduled skills (invoke.cron) rely on this when they declare no
+    /// explicit slash command. Explicit commands and aliases win on conflict.
     pub fn get_by_command(&self, command: &str) -> Option<SkillEntry> {
         let cmd_lower = command.to_lowercase();
         // Snapshot both indices in one scope to avoid stale results from
@@ -423,46 +369,19 @@ impl SkillCatalog {
                 return Some(entry);
             }
         }
-        if let Some(id) = alias_id {
-            return self.get_by_id(&id);
+        if let Some(id) = alias_id
+            && let Some(entry) = self.get_by_id(&id)
+        {
+            return Some(entry);
         }
-        None
+        // Fallback: treat the command as a skill ID (directory name).
+        self.get_by_id(&cmd_lower)
     }
 
     /// Look up a skill by its ID (directory name) only.
     fn get_by_id(&self, id: &str) -> Option<SkillEntry> {
         let guard = self.entries.read().ok()?;
         guard.get(&id.to_lowercase()).cloned()
-    }
-
-    /// Find skills whose routing.intent patterns match the given text.
-    ///
-    /// Returns matched skill IDs, ordered by specificity (most patterns matched first).
-    pub fn match_triggers(&self, text: &str) -> Vec<String> {
-        let guard = match self.entries.read() {
-            Ok(g) => g,
-            Err(_) => {
-                tracing::error!("SkillCatalog entries lock poisoned in match_triggers");
-                return Vec::new();
-            }
-        };
-
-        let mut matches: Vec<(String, usize)> = Vec::new();
-
-        for (key, entry) in guard.iter() {
-            let hit_count = entry
-                .compiled_triggers
-                .iter()
-                .filter(|re| re.is_match(text))
-                .count();
-            if hit_count > 0 {
-                matches.push((key.clone(), hit_count));
-            }
-        }
-
-        // Sort by hit count descending (most specific match first)
-        matches.sort_by(|a, b| b.1.cmp(&a.1));
-        matches.into_iter().map(|(name, _)| name).collect()
     }
 
     /// List all registered skill IDs (directory names).
@@ -591,14 +510,12 @@ impl SkillCatalog {
         executor: Arc<dyn openalpaca_api::plugin_traits::PluginSkillExecutor>,
         plugin_id: String,
     ) {
-        let compiled = Self::compile_triggers(&frontmatter);
         let slash_cmd = frontmatter.invoke.slash.clone();
         let aliases = frontmatter.invoke.aliases.clone();
         let entry = SkillEntry {
             frontmatter,
             skill_md_path: None,
             skill_dir: None,
-            compiled_triggers: compiled,
             scope: SkillScope::User,
             source: SkillSource::Plugin { plugin_id, executor },
         };
@@ -635,27 +552,6 @@ impl SkillCatalog {
             }
         }
         self.invalidate_summary_cache();
-    }
-
-    /// Compile routing.intent patterns into regexes for trigger matching.
-    fn compile_triggers(frontmatter: &SkillFrontmatter) -> Vec<Regex> {
-        frontmatter
-            .routing
-            .intent
-            .iter()
-            .filter_map(|pattern| match Regex::new(&format!("(?i){}", pattern)) {
-                Ok(re) => Some(re),
-                Err(e) => {
-                    tracing::warn!(
-                        skill = %frontmatter.name,
-                        pattern = %pattern,
-                        error = %e,
-                        "Skill trigger pattern failed to compile — skipping"
-                    );
-                    None
-                }
-            })
-            .collect()
     }
 
     /// Hot-reload a single skill directory.
@@ -740,14 +636,6 @@ impl SkillCatalog {
     pub fn entries_snapshot(&self) -> Vec<(String, SkillEntry)> {
         match self.entries.read() {
             Ok(guard) => guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            Err(_) => Vec::new(),
-        }
-    }
-
-    /// Return accumulated validation errors/warnings from scanning.
-    pub fn validation_errors(&self) -> Vec<String> {
-        match self.validation_errors.read() {
-            Ok(guard) => guard.clone(),
             Err(_) => Vec::new(),
         }
     }
@@ -865,15 +753,6 @@ impl SkillCatalog {
             for err in &errors {
                 tracing::warn!("{}", err);
             }
-            let mut validation_errors = self
-                .validation_errors
-                .write()
-                .unwrap_or_else(|p| {
-                    tracing::error!("SkillCatalog lock poisoned — recovering");
-                    p.into_inner()
-                });
-            let remaining = 100usize.saturating_sub(validation_errors.len());
-            validation_errors.extend(errors.iter().take(remaining).cloned());
         }
 
         errors

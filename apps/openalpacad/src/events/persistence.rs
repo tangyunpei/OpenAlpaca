@@ -11,13 +11,6 @@ impl EventBroadcaster {
             let repo = EventLogRepository::new(db);
             let persist_result: Result<i64, _> = match event {
                 ServerEvent::Heartbeat { .. } => Ok(0), // Skip heartbeats
-                ServerEvent::Log { level, message, .. } => {
-                    let detail = serde_json::json!({
-                        "level": level,
-                        "message": message
-                    });
-                    repo.log("log", None, Some(&detail), None)
-                }
                 ServerEvent::CommandReceived {
                     request_id,
                     command,

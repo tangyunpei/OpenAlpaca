@@ -1099,6 +1099,99 @@ async fn test_agentic_loop_routed_completes() {
 }
 
 #[tokio::test]
+async fn test_agentic_loop_routed_publishes_model_access_denied_event() {
+    use crate::agent::subagent::AgentConstraints;
+    use crate::bus::EventBus;
+    use crate::events::SystemEvent;
+
+    // The router "falls back" to a model the agent is not allowed to use:
+    // the response reports a model on the agent's deny list.
+    let provider = Arc::new(MockRouterProvider::new(vec![Ok(ChatResponse {
+        content: "Should be rejected".to_string(),
+        tool_calls: vec![],
+        model: "claude-sonnet-4-20250514".to_string(),
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::Stop,
+        thinking: None,
+        parts: None,
+    })]));
+
+    let router = LlmRouter::single_provider(
+        provider,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let mut constraints = AgentConstraints {
+        denied_models: vec!["claude-sonnet-4-20250514".to_string()],
+        ..Default::default()
+    };
+    constraints.normalize();
+
+    let bus = EventBus::new(16);
+    let mut event_rx = bus.subscribe();
+
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        thinking: None,
+        agent_constraints: Some(constraints),
+        event_bus: Some(bus),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("hello")],
+        vec![],
+        &config,
+        None,          // sandbox
+        "denied-agent", // agent_id
+        None,          // sandbox_policy
+        None,          // task_id
+        None,          // context_budget
+        None,          // cancel_token
+        None,          // tool_context
+        None,          // cost_accumulator
+    )
+    .await;
+
+    // The loop aborts with an access error...
+    match result.finish_reason {
+        LoopFinishReason::Error(ref msg) => {
+            assert!(
+                msg.contains("Model access denied"),
+                "unexpected error message: {msg}"
+            );
+        }
+        other => panic!("expected Error finish reason, got {other:?}"),
+    }
+
+    // ...and publishes SystemEvent::ModelAccessDenied on the bus.
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("timed out waiting for ModelAccessDenied event")
+        .expect("event bus closed");
+    match event {
+        SystemEvent::ModelAccessDenied {
+            agent_id,
+            model_id,
+            reason,
+            ..
+        } => {
+            assert_eq!(agent_id, "denied-agent");
+            assert_eq!(model_id, "claude-sonnet-4-20250514");
+            assert!(!reason.is_empty());
+        }
+        other => panic!("expected ModelAccessDenied, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_agentic_loop_routed_with_tool_calls() {
     // Test that router path handles tool calls properly (two rounds:
     // first returns tool_use, second returns stop).

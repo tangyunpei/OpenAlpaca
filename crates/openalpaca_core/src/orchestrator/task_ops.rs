@@ -254,25 +254,11 @@ pub(crate) fn task_status_query(
             let tasks: Vec<serde_json::Value> = active
                 .iter()
                 .map(|e| {
-                    let mut v = serde_json::json!({
+                    serde_json::json!({
                         "task_id": e.task_id,
                         "title": e.title,
                         "status": e.status.as_str(),
-                        "progress_current": e.progress_current,
-                        "progress_total": e.progress_total,
-                    });
-                    if let Some(ref dag) = e.dag_summary {
-                        v.as_object_mut().unwrap().insert(
-                            "dag_summary".to_string(),
-                            serde_json::json!({
-                                "total_nodes": dag.total_nodes,
-                                "completed_nodes": dag.completed_nodes,
-                                "running_nodes": dag.running_nodes,
-                                "failed_nodes": dag.failed_nodes,
-                            }),
-                        );
-                    }
-                    v
+                    })
                 })
                 .collect();
             Ok(serde_json::json!({

@@ -173,13 +173,12 @@ openalpaca agents config <agent_id> [--format table|json]
 openalpaca agents pause <agent_id>
 openalpaca agents resume <agent_id>
 openalpaca agents set <agent_id> <dotted.path> <value>
-openalpaca agents create [--from-file <path>] [--interactive] [--from-chat <desc>]
+openalpaca agents create [--from-file <path>] [--interactive]
 openalpaca agents remove <agent_id>
 ```
 
 Notes:
 - `openalpaca agents` with no subcommand enters interactive creation mode.
-- `--from-chat` is a planned feature: the daemon may return "Not Implemented", in which case the CLI reports it as planned for a future release.
 
 ### `llm`
 
@@ -193,7 +192,7 @@ openalpaca llm keys remove <provider> <key_id>
 openalpaca llm keys validate --provider <name> --secret <key>
 openalpaca llm keys set-primary <provider> <key_id>
 openalpaca llm keys reorder <key_id>...
-openalpaca llm usage [--agent <id>] [--date YYYY-MM-DD] [--key <key_id>] [--daily] [--format table|json]
+openalpaca llm usage [--agent <id>] [--key <key_id>] [--daily [--date YYYY-MM-DD]] [--format table|json]
 openalpaca llm models [--format table|json]
 openalpaca llm strategy --provider <name> <strategy>
 openalpaca llm credentials [--format table|json]

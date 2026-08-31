@@ -1,18 +1,14 @@
 //! Layer 4 — Conversation History.
 //!
 //! Assembles the per-turn messages: summary (if any) + recent_messages +
-//! current user turn. Supports three modes:
+//! current user turn. Supports two modes:
 //!
 //! - `Default` — summary (optionally wrapped) + recent history + current turn.
-//! - `Skip`    — empty output (used by planner / replanner / pipeline N>0 /
-//!   dag / lead-agent paths).
-//! - `FirstStepOnly { memory_block }` — a single user message carrying the
-//!   retrieved memory block (used by pipeline step 0 per the spec).
+//! - `Skip`    — empty output (used by lead-agent / subagent paths).
 //!
 //! Fingerprint covers:
 //! `blake3(lane_tip_fingerprint || hash_opt_arc_str(summary) || summary_wrap_mode_tag
-//!  || hash_opt_msg(current_user_turn) || mode_tag)` with the `FirstStepOnly`
-//! memory block hashed in when present.
+//!  || hash_opt_msg(current_user_turn) || mode_tag)`.
 
 use openalpaca_llm::ChatMessage;
 
@@ -25,9 +21,6 @@ pub fn compute(input: &HistoryInput) -> HistoryOutput {
     let messages = match &input.mode {
         HistoryMode::Skip => Vec::new(),
         HistoryMode::Default => build_default(input),
-        HistoryMode::FirstStepOnly { memory_block } => {
-            vec![ChatMessage::user(memory_block.as_ref())]
-        }
     };
 
     HistoryOutput {
@@ -75,13 +68,6 @@ pub(super) fn compute_fingerprint(input: &HistoryInput) -> [u8; 32] {
     h.update(&[summary_wrap_mode_tag(input.summary_wrap_mode)]);
     h.update(&hash_opt_msg(&input.current_user_turn));
     h.update(&[mode_tag(&input.mode)]);
-    // `FirstStepOnly` carries a memory_block whose bytes change the output;
-    // hash it so two FirstStepOnly invocations with different memory_blocks
-    // produce different fingerprints.
-    if let HistoryMode::FirstStepOnly { memory_block } = &input.mode {
-        h.update(&(memory_block.len() as u64).to_le_bytes());
-        h.update(memory_block.as_bytes());
-    }
     h.finalize().into()
 }
 
@@ -89,7 +75,6 @@ fn mode_tag(m: &HistoryMode) -> u8 {
     match m {
         HistoryMode::Default => 0,
         HistoryMode::Skip => 1,
-        HistoryMode::FirstStepOnly { .. } => 2,
     }
 }
 

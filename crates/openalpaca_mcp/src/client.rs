@@ -63,6 +63,30 @@ pub(crate) struct ClientInner {
 }
 
 impl McpClient {
+    /// Test-only constructor: a client shell that has never connected.
+    ///
+    /// Gated behind the `test-utils` feature for downstream test consumers
+    /// (e.g. `openalpaca_core` bridge tests that need an `Arc<McpClient>` to
+    /// build a `ToolBackend::Mcp` without a live server). Any RPC call on the
+    /// returned client fails with a not-connected error.
+    #[cfg(feature = "test-utils")]
+    pub fn disconnected_for_tests(server_name: impl Into<String>) -> Self {
+        let config = McpClientConfig {
+            server_name: server_name.into(),
+            ..Default::default()
+        };
+        Self {
+            inner: Arc::new(ClientInner {
+                config,
+                state: tokio::sync::RwLock::new(ConnectionState::Disconnected),
+                service: Mutex::new(None),
+                server_info: tokio::sync::OnceCell::new(),
+                protocol_version: tokio::sync::OnceCell::new(),
+                attempt_counter: AtomicU32::new(0),
+            }),
+        }
+    }
+
     /// Connect to the configured MCP server. Performs initialize handshake.
     pub async fn connect(config: McpClientConfig) -> Result<Self, McpError> {
         let inner = Arc::new(ClientInner {

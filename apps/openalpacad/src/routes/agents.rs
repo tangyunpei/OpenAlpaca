@@ -7,22 +7,17 @@
 //! PUT  /v1/agents/{id}/config -> update agent config (optimistic locking)
 //! POST /v1/agents             -> create agent
 //! POST /v1/agents/from-toml   -> create agent from raw TOML
-//! POST /v1/agents/from-chat   -> stub (501)
 //! DELETE /v1/agents/{id}      -> delete (archive) agent
 //!
 //! Template endpoints:
 //! GET    /v1/agent-templates              -> list all templates
 //! GET    /v1/agent-templates/{id}         -> get template (JSON)
-//! GET    /v1/agent-templates/{id}/markdown -> get template as raw Markdown
 //! POST   /v1/agent-templates              -> create template (JSON body)
-//! POST   /v1/agent-templates/from-markdown -> create template from raw Markdown
 //! PUT    /v1/agent-templates/{id}         -> update template
 //! DELETE /v1/agent-templates/{id}         -> archive template
 //!
 //! Instance endpoints:
 //! GET    /v1/agent-instances              -> list active instances
-//! POST   /v1/agent-templates/{id}/instances -> spawn instance from template
-//! DELETE /v1/agent-instances/{id}         -> destroy instance
 
 use axum::{
     Json,
@@ -33,7 +28,6 @@ use axum::{
 use chrono::Utc;
 use std::sync::Arc;
 
-use openalpaca_core::agent::template::render_agent_markdown;
 use openalpaca_core::events::SystemEvent;
 use openalpaca_storage::{SubAgentConfig, SubAgentRepository};
 
@@ -398,16 +392,6 @@ pub async fn create_agent_from_toml_handler(
     }
 }
 
-/// POST /v1/agents/from-chat — stub: returns 501
-pub async fn create_agent_from_chat_handler() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({
-            "error": "Agent creation from chat is planned for Phase 6.0+"
-        })),
-    )
-}
-
 /// DELETE /v1/agents/{id}
 pub async fn delete_agent_handler(
     State(state): State<Arc<AppState>>,
@@ -493,37 +477,6 @@ pub async fn get_template_handler(
     }
 }
 
-/// GET /v1/agent-templates/{id}/markdown
-pub async fn get_template_markdown_handler(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    match state
-        .gateway
-        .shared_context
-        .agent_registry
-        .get_template(&id)
-    {
-        Some(template) => {
-            let markdown = render_agent_markdown(&template);
-            (
-                StatusCode::OK,
-                [(
-                    axum::http::header::CONTENT_TYPE,
-                    "text/markdown; charset=utf-8",
-                )],
-                markdown,
-            )
-                .into_response()
-        }
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": format!("Template '{}' not found", id) })),
-        )
-            .into_response(),
-    }
-}
-
 /// POST /v1/agent-templates
 pub async fn create_template_handler(
     State(state): State<Arc<AppState>>,
@@ -541,47 +494,6 @@ pub async fn create_template_handler(
     };
 
     match service.create_template_from_toml_config(body.config) {
-        Ok(template_id) => {
-            let _ = state.gateway.bus.publish(SystemEvent::AgentConfigChanged {
-                agent_id: template_id.clone(),
-                action: "created".to_string(),
-                config_version: 0,
-                timestamp: Utc::now(),
-            });
-            (
-                StatusCode::CREATED,
-                Json(serde_json::json!({
-                    "template_id": template_id,
-                    "status": "created"
-                })),
-            )
-                .into_response()
-        }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": e })),
-        )
-            .into_response(),
-    }
-}
-
-/// POST /v1/agent-templates/from-markdown
-pub async fn create_template_from_markdown_handler(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<CreateTemplateFromMarkdownRequest>,
-) -> impl IntoResponse {
-    let service = match &state.agent_config_service {
-        Some(s) => s,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "Agent config service not available" })),
-            )
-                .into_response();
-        }
-    };
-
-    match service.create_template_from_markdown(&body.markdown) {
         Ok(template_id) => {
             let _ = state.gateway.bus.publish(SystemEvent::AgentConfigChanged {
                 agent_id: template_id.clone(),
@@ -714,101 +626,3 @@ pub async fn list_instances_handler(State(state): State<Arc<AppState>>) -> impl 
     )
 }
 
-/// POST /v1/agent-templates/{id}/instances
-///
-/// Spawn a new instance from a template.
-pub async fn spawn_instance_handler(
-    State(state): State<Arc<AppState>>,
-    Path(template_id): Path<String>,
-    Json(body): Json<SpawnInstanceRequest>,
-) -> impl IntoResponse {
-    let registry = &state.gateway.shared_context.agent_registry;
-
-    match registry.spawn_instance(&template_id, body.task_id) {
-        Ok(agent) => {
-            let now = Utc::now();
-            let _ = state.gateway.bus.publish(SystemEvent::AgentStatusChanged {
-                agent_id: agent.id.clone(),
-                instance_id: agent.id.clone(),
-                template_id: agent.template_id.clone(),
-                status: "spawned".to_string(),
-                current_task_id: agent.current_task.clone(),
-                timestamp: now,
-            });
-            (
-                StatusCode::CREATED,
-                Json(serde_json::json!({
-                    "instance_id": agent.id,
-                    "template_id": agent.template_id,
-                    "name": agent.name,
-                    "status": agent.status.as_str(),
-                    "current_task": agent.current_task,
-                })),
-            )
-                .into_response()
-        }
-        Err(e) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({ "error": e })),
-        )
-            .into_response(),
-    }
-}
-
-/// DELETE /v1/agent-instances/{id}
-///
-/// Destroy (remove) an agent instance.
-pub async fn destroy_instance_handler(
-    State(state): State<Arc<AppState>>,
-    Path(instance_id): Path<String>,
-) -> impl IntoResponse {
-    use openalpaca_core::agent::DestroyOutcome;
-
-    let registry = &state.gateway.shared_context.agent_registry;
-
-    // Capture template_id before destruction (extract from instance_id format)
-    let template_id = registry
-        .get_instance(&instance_id)
-        .map(|a| a.template_id.clone())
-        .unwrap_or_else(|| {
-            instance_id
-                .split("::")
-                .next()
-                .unwrap_or(&instance_id)
-                .to_string()
-        });
-
-    let outcome = registry.destroy_instance(&instance_id);
-    match outcome {
-        DestroyOutcome::Removed | DestroyOutcome::ResetToIdle => {
-            let status = match outcome {
-                DestroyOutcome::ResetToIdle => "idle",
-                _ => "destroyed",
-            };
-            let now = Utc::now();
-            let _ = state.gateway.bus.publish(SystemEvent::AgentStatusChanged {
-                agent_id: instance_id.clone(),
-                instance_id: instance_id.clone(),
-                template_id,
-                status: status.to_string(),
-                current_task_id: None,
-                timestamp: now,
-            });
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "instance_id": instance_id,
-                    "status": status
-                })),
-            )
-                .into_response()
-        }
-        DestroyOutcome::NotFound => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": format!("Instance '{}' not found", instance_id)
-            })),
-        )
-            .into_response(),
-    }
-}

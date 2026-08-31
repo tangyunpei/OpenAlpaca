@@ -1,11 +1,9 @@
 use crate::bus::EventBus;
 use crate::context::SharedContext;
-use crate::events::SystemEvent;
 use crate::gateway::persistence::GatewayPersistence;
 use crate::lane::{LaneKey, LaneManager};
 use crate::security::policy::{Principal, Scope};
 use async_trait::async_trait;
-use chrono::Utc;
 use openalpaca_api::events::EventSource;
 use openalpaca_storage::Database;
 use std::sync::Arc;
@@ -202,14 +200,6 @@ impl Gateway {
         let lane = self.lane_manager.get_or_create_conversation(key.clone());
 
         let request_id = Uuid::new_v4();
-
-        // Emit UserRequest event
-        self.bus.publish(SystemEvent::UserRequest {
-            request_id,
-            source: source_name.clone(),
-            content: req.content.clone(),
-            timestamp: Utc::now(),
-        });
 
         // Record message on the lane
         lane.record_message();

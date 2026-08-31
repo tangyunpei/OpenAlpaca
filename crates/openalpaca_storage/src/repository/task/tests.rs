@@ -130,19 +130,6 @@ fn test_update_status_nonexistent() {
 }
 
 #[test]
-fn test_update_progress() {
-    let db = setup_db();
-    let repo = TaskRepository::new(&db);
-
-    repo.create(&make_task("t1", "Task")).unwrap();
-    assert!(repo.update_progress("t1", 5, 10).unwrap());
-
-    let task = repo.get("t1").unwrap().unwrap();
-    assert_eq!(task.progress_current, Some(5));
-    assert_eq!(task.progress_total, Some(10));
-}
-
-#[test]
 fn test_set_result() {
     let db = setup_db();
     let repo = TaskRepository::new(&db);
@@ -162,41 +149,6 @@ fn test_delete() {
     repo.create(&make_task("t1", "Task")).unwrap();
     repo.delete("t1").unwrap();
     assert!(repo.get("t1").unwrap().is_none());
-}
-
-#[test]
-fn test_assignments() {
-    let db = setup_db();
-    let repo = TaskRepository::new(&db);
-
-    repo.create(&make_task("t1", "Task")).unwrap();
-
-    let assignment = TaskAgentAssignment {
-        id: "a1".to_string(),
-        task_id: "t1".to_string(),
-        agent_id: "agent-1".to_string(),
-        role: "executor".to_string(),
-        status: AssignmentStatus::Pending,
-        step_order: Some(1),
-        started_at: None,
-        completed_at: None,
-        result_output: None,
-    };
-    repo.create_assignment(&assignment).unwrap();
-
-    let assignments = repo.get_assignments("t1").unwrap();
-    assert_eq!(assignments.len(), 1);
-    assert_eq!(assignments[0].agent_id, "agent-1");
-    assert_eq!(assignments[0].status, AssignmentStatus::Pending);
-
-    // Update assignment status
-    assert!(
-        repo.update_assignment_status("a1", AssignmentStatus::Running)
-            .unwrap()
-    );
-    let assignments = repo.get_assignments("t1").unwrap();
-    assert_eq!(assignments[0].status, AssignmentStatus::Running);
-    assert!(assignments[0].started_at.is_some());
 }
 
 #[test]
@@ -264,31 +216,6 @@ fn test_list_active_by_creator() {
     assert!(active.iter().all(|t| t.created_by == "user1"));
     // Should be active statuses only
     assert!(active.iter().all(|t| !t.status.is_terminal()));
-}
-
-#[test]
-fn test_delete_cascades_assignments() {
-    let db = setup_db();
-    let repo = TaskRepository::new(&db);
-
-    repo.create(&make_task("t1", "Task")).unwrap();
-    let assignment = TaskAgentAssignment {
-        id: "a1".to_string(),
-        task_id: "t1".to_string(),
-        agent_id: "agent-1".to_string(),
-        role: "executor".to_string(),
-        status: AssignmentStatus::Pending,
-        step_order: None,
-        started_at: None,
-        completed_at: None,
-        result_output: None,
-    };
-    repo.create_assignment(&assignment).unwrap();
-
-    // Delete task -> should cascade to assignments
-    repo.delete("t1").unwrap();
-    let assignments = repo.get_assignments("t1").unwrap();
-    assert!(assignments.is_empty());
 }
 
 #[test]

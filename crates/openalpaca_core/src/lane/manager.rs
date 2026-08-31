@@ -43,11 +43,6 @@ impl LaneManager {
         self.tasks.lock().unwrap().remove(task_id)
     }
 
-    /// List all task lane IDs.
-    pub fn list_task_lanes(&self) -> Vec<String> {
-        self.tasks.lock().unwrap().keys().cloned().collect()
-    }
-
     /// Number of active conversation lanes.
     pub fn conversation_count(&self) -> usize {
         self.conversations.lock().unwrap().len()
@@ -117,17 +112,6 @@ mod tests {
         assert!(removed.is_some());
         assert_eq!(mgr.task_count(), 0);
         assert!(mgr.remove_task_lane("t1").is_none());
-    }
-
-    #[test]
-    fn test_list_task_lanes() {
-        let mgr = LaneManager::new();
-        mgr.create_task_lane("t1");
-        mgr.create_task_lane("t2");
-
-        let mut ids = mgr.list_task_lanes();
-        ids.sort();
-        assert_eq!(ids, vec!["t1", "t2"]);
     }
 
     #[test]

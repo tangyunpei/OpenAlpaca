@@ -600,6 +600,14 @@ async fn run_agentic_loop_inner(
                             "Model access denied at runtime: {}",
                             violation,
                         );
+                        if let Some(ref bus) = config.event_bus {
+                            bus.publish(crate::events::SystemEvent::ModelAccessDenied {
+                                agent_id: agent_id.to_string(),
+                                model_id: response.model.clone(),
+                                reason: violation.to_string(),
+                                timestamp: Utc::now(),
+                            });
+                        }
                         return state.result(LoopFinishReason::Error(format!(
                             "Model access denied: {}",
                             violation

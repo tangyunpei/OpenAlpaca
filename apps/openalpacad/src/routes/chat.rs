@@ -183,8 +183,8 @@ fn make_sse_stream(
 }
 
 /// SSE data payload for a `done` event: the serde form of the event minus the
-/// `"event"` tag. Optional fields (attachments_used, citations, artifacts,
-/// delegation) appear only when present.
+/// `"event"` tag. Optional fields (attachments_used, delegation) appear only
+/// when present.
 fn done_event_data(event: &openalpaca_core::chat::ChatStreamEvent) -> String {
     let mut value = serde_json::to_value(event).unwrap_or_default();
     if let Some(obj) = value.as_object_mut() {
@@ -500,8 +500,6 @@ mod tests {
             tokens_out: 0,
             duration_ms: 42,
             attachments_used: None,
-            citations: None,
-            artifacts: None,
             delegation,
         }
     }

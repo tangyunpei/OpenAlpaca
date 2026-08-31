@@ -69,9 +69,6 @@ pub enum AgentsCommands {
         /// Interactive creation mode
         #[arg(long)]
         interactive: bool,
-        /// Create from chat description (planned)
-        #[arg(long)]
-        from_chat: Option<String>,
     },
     /// Remove (archive) an agent
     Remove {
@@ -194,11 +191,8 @@ pub async fn run(args: AgentsArgs) -> Result<()> {
         AgentsCommands::Create {
             from_file,
             interactive,
-            from_chat,
         } => {
-            if let Some(ref desc) = from_chat {
-                create_from_chat(desc).await
-            } else if let Some(ref path) = from_file {
+            if let Some(ref path) = from_file {
                 create_from_file(path).await
             } else if interactive {
                 create_interactive().await
@@ -407,29 +401,6 @@ async fn create_from_file(path: &str) -> Result<()> {
 
     let agent_id = result["agent_id"].as_str().unwrap_or("unknown");
     println!("{} Agent created: {}", "✓".green(), agent_id);
-    Ok(())
-}
-
-async fn create_from_chat(description: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
-    let body = serde_json::json!({ "description": description });
-
-    match client.post_raw("/v1/agents/from-chat", &body).await {
-        Ok(_) => {
-            println!("{} Agent created from chat description", "✓".green());
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("501") || msg.contains("Not Implemented") {
-                println!(
-                    "{} Agent creation from chat description is planned for Phase 6.0+",
-                    "→".yellow()
-                );
-            } else {
-                return Err(e);
-            }
-        }
-    }
     Ok(())
 }
 

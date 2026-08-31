@@ -5,20 +5,25 @@
 //! (same pattern as iMessage connector).
 
 use crate::common::{
-    LinkResult, format_denial_message, handle_link_token, redact_token, resolve_principal,
+    LinkResult, format_confirmation_prompt, format_denial_message, handle_link_token,
+    intercept_confirmation_reply, redact_token, resolve_principal,
 };
 use crate::{Connector, ConnectorError};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use dashmap::DashMap;
 use openalpaca_api::events::EventSource;
 use openalpaca_core::{
+    bus::EventBus,
     daemon_config::DaemonConfig,
+    events::SystemEvent,
     gateway::{Gateway, GatewayRequest, ResolvedAttachment},
+    security::confirmation::ConfirmationBroker,
     security::policy::Scope,
     types::Capability,
 };
 use openalpaca_storage::{Database, IdentityRepository, PreferenceRepository};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -106,6 +111,31 @@ pub async fn send_with_retry(
     Ok(())
 }
 
+/// Resolve the Discord channel to deliver a tool-confirmation prompt to,
+/// for a lane key ending in `:discord`.
+///
+/// Tries the `discord.last_channel_id` preference (most recent channel for
+/// the lane's user) first, then falls back to the conversation_map entry
+/// recorded for the lane. Mirrors the Telegram connector's resolution order.
+fn resolve_confirmation_channel(db: &Database, lane_key: &str) -> Option<u64> {
+    let user_id = lane_key.strip_suffix(":discord").unwrap_or("");
+    let pref_repo = PreferenceRepository::new(db);
+    pref_repo
+        .get(user_id, "discord.last_channel_id")
+        .ok()
+        .flatten()
+        .and_then(|p| p.value.parse::<u64>().ok())
+        .or_else(|| {
+            IdentityRepository::new(db)
+                .get_conversation_id_str_by_lane_key(lane_key, "discord")
+                .ok()
+                .flatten()
+                .and_then(|id| id.parse::<u64>().ok())
+        })
+        // Guard against Id::new(0) panicking downstream
+        .filter(|id| *id != 0)
+}
+
 /// Simple per-channel rate limiter. Allows at most 1 message per `min_interval` per channel.
 struct ChannelRateLimiter {
     last_sent: Mutex<HashMap<u64, Instant>>,
@@ -141,10 +171,16 @@ impl ChannelRateLimiter {
 pub struct DiscordConnector {
     token: String,
     db: Arc<Database>,
+    bus: Arc<EventBus>,
     gateway: Arc<Gateway>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     cancel_token: CancellationToken,
     rate_limiter: Arc<ChannelRateLimiter>,
+    confirmation_broker: Option<Arc<ConfirmationBroker>>,
+    /// Maps channel_id -> queue of request_ids for pending tool confirmations.
+    /// VecDeque allows FIFO processing when multiple tools need confirmation.
+    /// (Same pattern — and same per-conversation-key caveat — as Telegram.)
+    pending_confirmations: Arc<DashMap<u64, VecDeque<String>>>,
 }
 
 impl DiscordConnector {
@@ -152,6 +188,7 @@ impl DiscordConnector {
     pub fn new(
         token: String,
         db: Arc<Database>,
+        bus: Arc<EventBus>,
         gateway: Arc<Gateway>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
         cancel_token: CancellationToken,
@@ -159,11 +196,20 @@ impl DiscordConnector {
         Self {
             token,
             db,
+            bus,
             gateway,
             daemon_config,
             cancel_token,
             rate_limiter: Arc::new(ChannelRateLimiter::new(Duration::from_secs(1))),
+            confirmation_broker: None,
+            pending_confirmations: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Attach a confirmation broker for interactive tool approval.
+    pub fn with_confirmation_broker(mut self, broker: Arc<ConfirmationBroker>) -> Self {
+        self.confirmation_broker = Some(broker);
+        self
     }
 
     /// Main event loop.
@@ -180,6 +226,11 @@ impl DiscordConnector {
         let mut shard = Shard::new(ShardId::ONE, self.token.clone(), intents);
         let http = Arc::new(twilight_http::Client::new(self.token.clone()));
         let mut bot_user_id: Option<twilight_model::id::Id<twilight_model::id::marker::UserMarker>> = None;
+
+        // Spawn confirmation listener (if broker available)
+        if self.confirmation_broker.is_some() {
+            self.spawn_confirmation_listener(http.clone());
+        }
 
         loop {
             tokio::select! {
@@ -223,6 +274,84 @@ impl DiscordConnector {
         }
     }
 
+    /// Spawn a background task that listens for `ToolConfirmationRequested`
+    /// events targeting Discord lanes and sends confirmation prompts.
+    fn spawn_confirmation_listener(&self, http: Arc<twilight_http::Client>) {
+        let mut rx = self.bus.subscribe();
+        let db = self.db.clone();
+        let pending = self.pending_confirmations.clone();
+        let cancel = self.cancel_token.clone();
+        tokio::spawn(async move {
+            loop {
+                let event = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        info!("Discord confirmation listener shutting down");
+                        break;
+                    }
+                    event = rx.recv() => event,
+                };
+                match event {
+                    Ok(SystemEvent::ToolConfirmationRequested {
+                        request_id,
+                        tool_name,
+                        tool_arguments,
+                        lane_key: Some(ref lane_key),
+                        ..
+                    }) if lane_key.ends_with(":discord") => {
+                        // Resolve channel_id from lane_key via DB lookup
+                        let Some(channel_id) = resolve_confirmation_channel(&db, lane_key) else {
+                            warn!(
+                                "Could not resolve Discord channel_id for lane_key={}, skipping confirmation",
+                                lane_key
+                            );
+                            continue;
+                        };
+
+                        // Store pending confirmation mapping (queue per channel)
+                        pending
+                            .entry(channel_id)
+                            .or_default()
+                            .push_back(request_id.clone());
+                        let queue_len = pending.get(&channel_id).map(|q| q.len()).unwrap_or(1);
+
+                        let prompt =
+                            format_confirmation_prompt(&tool_name, &tool_arguments, queue_len);
+
+                        if let Err(e) = send_with_retry(
+                            &http,
+                            twilight_model::id::Id::new(channel_id),
+                            &prompt,
+                        )
+                        .await
+                        {
+                            error!(
+                                "Failed to send confirmation prompt to channel {}: {}",
+                                channel_id, e
+                            );
+                            // Remove the one we just added (last in queue)
+                            if let Some(mut q) = pending.get_mut(&channel_id) {
+                                q.pop_back();
+                            }
+                        } else {
+                            debug!(
+                                "Sent confirmation prompt for request {} to channel {}",
+                                request_id, channel_id
+                            );
+                        }
+                    }
+                    Ok(_) => {} // ignore other events
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("Confirmation listener lagged by {} events", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        info!("EventBus closed, confirmation listener exiting");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     /// Handle a single incoming Discord message.
     async fn handle_message(
         &self,
@@ -239,6 +368,26 @@ impl DiscordConnector {
         let user_id = msg.author.id;
         let guild_id = msg.guild_id;
         let display_name = msg.author.name.clone();
+
+        // Step 1.5: Intercept confirmation responses (/yes, /y, /no, /n)
+        // BEFORE normal processing (including the guild mention gate, so a
+        // bare "/yes" works in guild channels the prompt was sent to).
+        if let Some(broker) = self.confirmation_broker.as_ref()
+            && let Some(reply) = intercept_confirmation_reply(
+                &msg.content,
+                &channel_id.get(),
+                broker,
+                &self.pending_confirmations,
+            )
+        {
+            if let Err(e) = send_with_retry(http, channel_id, &reply).await {
+                error!(
+                    "Failed to send confirmation acknowledgment to channel {}: {}",
+                    channel_id, e
+                );
+            }
+            return Ok(());
+        }
 
         // Step 2: Check if mentioned or DM
         // Guild channels require @bot mention; DMs always process
@@ -592,5 +741,82 @@ mod tests {
         let limiter = ChannelRateLimiter::new(Duration::from_secs(1));
         limiter.check(12345);
         assert!(limiter.check(67890).is_none());
+    }
+
+    fn test_db() -> Database {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.db")).unwrap();
+        // Keep the tempdir alive for the lifetime of the process — tests are short.
+        std::mem::forget(dir);
+        db
+    }
+
+    #[test]
+    fn test_resolve_confirmation_channel_via_preference() {
+        let db = test_db();
+        let pref_repo = PreferenceRepository::new(&db);
+        pref_repo
+            .set("global1", "discord.last_channel_id", "111222333", None)
+            .unwrap();
+
+        assert_eq!(
+            resolve_confirmation_channel(&db, "global1:discord"),
+            Some(111222333)
+        );
+    }
+
+    #[test]
+    fn test_resolve_confirmation_channel_via_conversation_map() {
+        let db = test_db();
+        let identity_repo = IdentityRepository::new(&db);
+        identity_repo
+            .update_conversation_map_lane_key("discord", "444555666", "global2:discord")
+            .unwrap();
+
+        // No preference set — falls back to conversation_map
+        assert_eq!(
+            resolve_confirmation_channel(&db, "global2:discord"),
+            Some(444555666)
+        );
+    }
+
+    #[test]
+    fn test_resolve_confirmation_channel_unknown_lane() {
+        let db = test_db();
+        assert_eq!(resolve_confirmation_channel(&db, "nobody:discord"), None);
+    }
+
+    #[test]
+    fn test_confirmation_intercept_broker_roundtrip() {
+        use openalpaca_core::security::confirmation::ConfirmationRequest;
+
+        let broker = ConfirmationBroker::new();
+        let mut rx = broker.request(&ConfirmationRequest {
+            request_id: "req-discord-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            tool_name: "shell_exec".to_string(),
+            tool_arguments: serde_json::json!({"cmd": "ls"}),
+            stream_id: None,
+            lane_key: Some("global1:discord".to_string()),
+            timestamp: chrono::Utc::now(),
+        });
+
+        // Simulate the listener queuing the request for a channel
+        let pending: DashMap<u64, VecDeque<String>> = DashMap::new();
+        pending
+            .entry(111222333u64)
+            .or_default()
+            .push_back("req-discord-1".to_string());
+
+        // Reply from a different channel falls through to normal processing
+        assert!(
+            intercept_confirmation_reply("/yes", &999u64, &broker, &pending).is_none()
+        );
+
+        // Reply from the prompted channel approves via the broker
+        let reply =
+            intercept_confirmation_reply("/yes", &111222333u64, &broker, &pending).unwrap();
+        assert!(reply.contains("Approved"));
+        assert!(rx.try_recv().unwrap().approved);
     }
 }

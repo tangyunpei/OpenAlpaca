@@ -12,9 +12,7 @@ pub mod events;
 pub mod events_history;
 pub mod files;
 mod files_types;
-pub mod memory;
 pub mod orchestrator_latency;
-pub mod preferences;
 pub mod settings;
 mod settings_types;
 pub mod plugins;
@@ -24,24 +22,19 @@ mod tasks_types;
 
 pub use agents::{
     agent_action_handler,
-    create_agent_from_chat_handler,
     create_agent_from_toml_handler,
     create_agent_handler,
-    create_template_from_markdown_handler,
     create_template_handler,
     delete_agent_handler,
     delete_template_handler,
-    destroy_instance_handler,
     get_agent_config_handler,
     get_agent_handler,
     get_template_handler,
-    get_template_markdown_handler,
     list_agents_handler,
     // Instance endpoints
     list_instances_handler,
     // Template endpoints
     list_templates_handler,
-    spawn_instance_handler,
     update_agent_config_handler,
     update_template_handler,
 };
@@ -62,20 +55,12 @@ pub use events_history::events_history_handler;
 pub use files::{
     get_file_content_handler, get_file_metadata_handler, open_file_handler, upload_file_handler,
 };
-pub use memory::{
-    delete_memory_handler, get_memory_handler, index_status_handler, kb_ingest_handler,
-    list_memories_handler, reindex_handler,
-};
 pub use orchestrator_latency::{
     orchestrator_latency_aggregate_handler, orchestrator_latency_handler,
 };
-pub use preferences::{
-    delete_preference_handler, get_preference_handler, list_preferences_handler,
-    set_preference_handler,
-};
 pub use settings::{
-    delete_key, estimate_cost, get_cli_backends, get_daemon_providers, get_discovered_credentials,
-    get_key_status, get_llm_pricing, get_llm_settings, get_llm_usage, get_llm_usage_daily,
+    delete_key, get_cli_backends, get_daemon_providers, get_discovered_credentials,
+    get_key_status, get_llm_settings, get_llm_usage, get_llm_usage_daily,
     get_orchestrator_config, get_provider_usage, list_models, refresh_models, reorder_keys,
     rescan_credentials, set_key_priority, update_orchestrator_config, update_web_search_config,
     upsert_key, validate_key,

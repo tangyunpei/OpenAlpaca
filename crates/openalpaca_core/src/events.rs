@@ -11,36 +11,6 @@ pub use openalpaca_api::events::WakeEvent;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum SystemEvent {
-    /// A heartbeat to keep connections alive or signal healthy status
-    Heartbeat { timestamp: DateTime<Utc> },
-    /// An event triggered by the scheduler or file watcher
-    Wake(WakeEvent),
-    /// A raw log message from the system
-    Log {
-        level: String,
-        message: String,
-        timestamp: DateTime<Utc>,
-    },
-    /// A structured request from a user (via Connector or API)
-    UserRequest {
-        request_id: Uuid,
-        source: String, // e.g. "telegram", "http"
-        content: String,
-        timestamp: DateTime<Utc>,
-    },
-    /// A response from an Agent
-    AgentResponse {
-        request_id: Uuid,
-        agent_id: String,
-        content: String,
-        timestamp: DateTime<Utc>,
-    },
-    /// A system error
-    Error {
-        code: String,
-        message: String,
-        timestamp: DateTime<Utc>,
-    },
     /// A connector status change
     ConnectorStatus {
         id: String,
@@ -378,24 +348,6 @@ pub enum SystemEvent {
         memories_extracted: usize,
         messages_discarded: usize,
         summary_tokens: usize,
-        timestamp: DateTime<Utc>,
-    },
-    /// A single compaction phase completed
-    CompactionPhaseCompleted {
-        request_id: Uuid,
-        phase: String,
-        duration_ms: u64,
-        items_processed: usize,
-        timestamp: DateTime<Utc>,
-    },
-    /// Context package built for sub-agent dispatch
-    ContextPackageBuilt {
-        request_id: Uuid,
-        agent_id: String,
-        sections: Vec<(String, usize)>,
-        total_tokens: usize,
-        budget: usize,
-        sub_agent_window: usize,
         timestamp: DateTime<Utc>,
     },
     /// Emitted when a compose-engine layer retrieved its output from cache

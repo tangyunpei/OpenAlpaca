@@ -63,32 +63,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(crate::routes::task_action_handler),
         )
 
-        // Preferences routes (Phase 5)
-        .route(
-            "/v1/preferences",
-            get(crate::routes::list_preferences_handler),
-        )
-        .route(
-            "/v1/preferences/{key}",
-            get(crate::routes::get_preference_handler),
-        )
-        .route(
-            "/v1/preferences/{key}",
-            put(crate::routes::set_preference_handler),
-        )
-        .route(
-            "/v1/preferences/{key}",
-            delete(crate::routes::delete_preference_handler),
-        )
         .route("/v1/agents", get(crate::routes::list_agents_handler))
         .route("/v1/agents", post(crate::routes::create_agent_handler))
         .route(
             "/v1/agents/from-toml",
             post(crate::routes::create_agent_from_toml_handler),
-        )
-        .route(
-            "/v1/agents/from-chat",
-            post(crate::routes::create_agent_from_chat_handler),
         )
         .route("/v1/agents/{id}", get(crate::routes::get_agent_handler))
         .route(
@@ -117,10 +96,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(crate::routes::create_template_handler),
         )
         .route(
-            "/v1/agent-templates/from-markdown",
-            post(crate::routes::create_template_from_markdown_handler),
-        )
-        .route(
             "/v1/agent-templates/{id}",
             get(crate::routes::get_template_handler),
         )
@@ -132,22 +107,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/agent-templates/{id}",
             delete(crate::routes::delete_template_handler),
         )
-        .route(
-            "/v1/agent-templates/{id}/markdown",
-            get(crate::routes::get_template_markdown_handler),
-        )
         // Agent instance endpoints
         .route(
             "/v1/agent-instances",
             get(crate::routes::list_instances_handler),
-        )
-        .route(
-            "/v1/agent-templates/{id}/instances",
-            post(crate::routes::spawn_instance_handler),
-        )
-        .route(
-            "/v1/agent-instances/{id}",
-            delete(crate::routes::destroy_instance_handler),
         )
         // File upload routes (multimodal)
         .route(
@@ -214,12 +177,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/llm/usage/daily",
             get(crate::routes::get_llm_usage_daily),
-        )
-        // Pricing routes
-        .route("/v1/llm/pricing", get(crate::routes::get_llm_pricing))
-        .route(
-            "/v1/llm/pricing/estimate",
-            get(crate::routes::estimate_cost),
         )
         // Model discovery routes
         .route("/v1/models", get(crate::routes::list_models))
@@ -302,21 +259,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/plugins/{name}/config",
             post(crate::routes::set_plugin_config_handler),
-        )
-        // Memory routes
-        .route("/v1/memory", get(crate::routes::list_memories_handler))
-        .route("/v1/memory/reindex", post(crate::routes::reindex_handler))
-        .route(
-            "/v1/memory/status",
-            get(crate::routes::index_status_handler),
-        )
-        .route(
-            "/v1/memory/kb/ingest",
-            post(crate::routes::kb_ingest_handler),
-        )
-        .route(
-            "/v1/memory/{id}",
-            get(crate::routes::get_memory_handler).delete(crate::routes::delete_memory_handler),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

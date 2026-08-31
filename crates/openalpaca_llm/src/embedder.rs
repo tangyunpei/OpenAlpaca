@@ -277,7 +277,6 @@ mod tests {
             provider: "nonexistent".to_string(),
             model: None,
             dimensions: None,
-            batch_size: None,
         };
         let result = build_embedder(&config, None, None);
         // Should fail because provider is unknown, not because of dimensions
@@ -296,7 +295,6 @@ mod tests {
             provider: "openai".to_string(),
             model: Some("text-embedding-3-small".to_string()),
             dimensions: Some(768),
-            batch_size: None,
         };
         // Without any key source, should fail
         let result = build_embedder(&config, None, None);
@@ -313,7 +311,6 @@ mod tests {
             provider: "nonexistent".to_string(),
             model: None,
             dimensions: Some(768),
-            batch_size: None,
         };
         let result = build_embedder(&config, None, None);
         assert!(result.is_err());

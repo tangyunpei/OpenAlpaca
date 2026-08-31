@@ -155,7 +155,6 @@ mkdir -p "$SKILL_DIR"
   fi
   if [[ "$NET" == "true" || "$LEVEL" != "readonly" ]]; then
     echo "  sandbox:"
-    echo "    enabled: true"
     echo "    net: $NET"
   fi
   echo ""

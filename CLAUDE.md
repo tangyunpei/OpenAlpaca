@@ -96,7 +96,7 @@ crates/
   openalpaca_llm/       # LLM router, providers (Anthropic/OpenAI/Ollama), key management
   openalpaca_storage/   # SQLite (rusqlite + sqlite-vec), repositories, migrations
   openalpaca_api/       # Shared event types (WakeEvent) + plugin executor traits
-  openalpaca_wake/      # Cron scheduler + filesystem watcher
+  openalpaca_wake/      # Cron scheduler (drives scheduled skills) + filesystem watcher
   openalpaca_connectors/# Chat platform adapters (Telegram, iMessage, Discord)
   openalpaca_mcp/       # MCP client (rmcp wrapper) — connects out to MCP servers, imports tools
   openalpaca_plugins/   # Out-of-process plugin system (JSON-RPC over stdio, approval gate)
@@ -149,8 +149,8 @@ Mid-workflow steering (gated on `steering_enabled`, default on): each running le
 
 Two mechanisms extend the tool surface:
 
-- **MCP servers** (`config/mcp.toml`): the daemon connects out to declared MCP servers at boot (`openalpaca_mcp` crate, stdio or streamable-HTTP transports) and registers their tools in the tool registry as `<server>__<tool>`. Tools only — MCP resources/prompts are stubbed (not implemented), and serving MCP is a non-goal. Per-server failures are logged, never fatal.
-- **Plugins** (`~/Library/Application Support/OpenAlpaca/plugins/`): out-of-process child programs speaking JSON-RPC 2.0 over stdio, declared by a `plugin.toml` manifest, gated by a first-load approval flow (`.permissions.toml`). Plugin tools register as `<plugin>::<tool>`; plugins can also contribute skills and agent templates. Plugin-contributed agent templates (`AgentSource::Plugin`) execute through the lead-agent subagent spawn path: `runner/plugin_agent.rs` drives the plugin's external reasoning loop (spawn → step polls, 50-iteration cap) and proxies its tool requests through the sandboxed execute path. Connector and LLM-provider plugin bridges exist in code but are not yet wired into `ConnectorManager`/`LlmRouter` — treat those plugin types as non-functional. Managed via `GET/POST /v1/plugins/...` routes and `openalpaca plugin ...` CLI commands.
+- **MCP servers** (`config/mcp.toml`): the daemon connects out to declared MCP servers at boot (`openalpaca_mcp` crate, stdio or streamable-HTTP transports) and registers their tools in the tool registry as `<server>__<tool>`. Each imported tool provides a capability equal to its namespaced name, so agent templates select MCP tools by listing `<server>__<tool>` in `capabilities` (skills: `requires_capabilities`); the main loop reaches them only with `tool_selection = "full"`. Tools only — MCP resources/prompts are stubbed (not implemented), and serving MCP is a non-goal. Per-server failures are logged, never fatal.
+- **Plugins** (`~/Library/Application Support/OpenAlpaca/plugins/`): out-of-process child programs speaking JSON-RPC 2.0 over stdio, declared by a `plugin.toml` manifest, gated by a first-load approval flow (`.permissions.toml`). Plugin tools register as `<plugin>::<tool>`; plugins can also contribute skills and agent templates. Plugin-contributed skills (`SkillSource::Plugin`) are invokable like file-based skills (slash command or router selection): the orchestrator delegates to the plugin's `PluginSkillExecutor` out-of-process, proxying tool callbacks through the sandboxed execute path (`orchestrator/skill/invocation.rs`). Plugin-contributed agent templates (`AgentSource::Plugin`) execute through the lead-agent subagent spawn path: `runner/plugin_agent.rs` drives the plugin's external reasoning loop (spawn → step polls, 50-iteration cap) and proxies its tool requests through the sandboxed execute path. Connector and LLM-provider plugin bridges exist in code but are not yet wired into `ConnectorManager`/`LlmRouter` — treat those plugin types as non-functional. Managed via `GET/POST /v1/plugins/...` routes and `openalpaca plugin ...` CLI commands.
 
 ## Key Patterns
 
@@ -194,7 +194,7 @@ Two mechanisms extend the tool surface:
 
 ### Storage
 
-Single SQLite connection wrapped in `Arc<Mutex<Connection>>`. WAL mode, `busy_timeout=5000ms`. Schema managed via numbered migrations (currently 33). Memory search is hybrid: FTS5 full-text + sqlite-vec 768-dim KNN with cascading scope (workspace → global).
+Single SQLite connection wrapped in `Arc<Mutex<Connection>>`. WAL mode, `busy_timeout=5000ms`. Schema managed via numbered migrations (currently 34). Memory search is hybrid: FTS5 full-text + sqlite-vec 768-dim KNN with cascading scope (workspace → global).
 
 Data directory: `~/Library/Application Support/OpenAlpaca/` (macOS). DB: `openalpaca.db`, lock: `openalpacad.lock`, discovery: `discovery.json`.
 
@@ -208,7 +208,7 @@ Data directory: `~/Library/Application Support/OpenAlpaca/` (macOS). DB: `openal
 | `config/agents/*.md` | Agent templates — YAML frontmatter (id, capabilities, model, limits) + markdown persona |
 | `config/orchestrator/templates/*_temp.md` | Tracked templates for the persona docs (SOUL, USER, IDENTITY, BOOTSTRAP) |
 | `config/orchestrator/SOUL.md` etc. | Live persona docs — generated at first run from the templates; USER.md is auto-extracted from conversations |
-| `config/skills/*/SKILL.md` | Skill definitions with trigger patterns (routing intents/keywords) and required tools |
+| `config/skills/*/SKILL.md` | Skill definitions with trigger patterns (routing intents/keywords) and required tools; `invoke.cron` schedules the skill via the wake scheduler (`apps/openalpacad/src/scheduled_skills.rs`, kill switch `[orchestrator.routing] scheduled_skills_enabled`) |
 
 Config dir resolution: `OPENALPACA_CONFIG_DIR` env var → walk up from exe looking for `config/llm.toml` → walk up from CWD → fallback `./config`.
 

@@ -51,12 +51,6 @@ impl Orchestrator {
                 Ok(summary) => summary,
                 Err(e) => format!("\u{26a0}\u{fe0f} Send failed / 发送失败: {e}"),
             };
-            self.bus.publish(SystemEvent::AgentResponse {
-                request_id,
-                agent_id: "orchestrator".to_string(),
-                content: response.clone(),
-                timestamp: Utc::now(),
-            });
             return Ok(response);
         }
 
@@ -228,7 +222,13 @@ impl Orchestrator {
                 max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
                 stream_id: stream_id.map(|s| s.to_string()),
                 lane_key: Some(lane_key.to_string()),
-                confirmation_timeout_secs: None,
+                confirmation_timeout_secs: Some(
+                    self.daemon_config
+                        .load()
+                        .execution
+                        .agent_defaults
+                        .confirmation_timeout_secs,
+                ),
                 auto_approve: self.daemon_config.load().security.auto_approve_confirmations,
             });
             config_for_loop = LoopConfig {
@@ -619,8 +619,11 @@ impl Orchestrator {
                 }
                 _ => self.tool_registry.clone(),
             };
-            let mut per_request_sandbox =
-                SandboxManager::with_defaults(loop_registry, self.bus.clone());
+            let mut per_request_sandbox = SandboxManager::new(
+                loop_registry,
+                self.bus.clone(),
+                &self.daemon_config.load().security.circuit_breaker,
+            );
             if let Ok(guard) = self.confirmation_broker.read()
                 && let Some(broker) = guard.as_ref()
             {
@@ -773,14 +776,6 @@ impl Orchestrator {
         } else {
             response_content
         };
-
-        // Emit AgentResponse event
-        self.bus.publish(SystemEvent::AgentResponse {
-            request_id,
-            agent_id: "orchestrator".to_string(),
-            content: validated.clone(),
-            timestamp: Utc::now(),
-        });
 
         Ok(validated)
     }
@@ -1002,13 +997,6 @@ impl Orchestrator {
         }
 
         let response = result.final_content;
-        self.bus.publish(SystemEvent::AgentResponse {
-            request_id,
-            agent_id: "orchestrator".to_string(),
-            content: response.clone(),
-            timestamp: Utc::now(),
-        });
-
         Ok(response)
     }
 }

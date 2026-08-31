@@ -1,5 +1,5 @@
 use crate::prompt_ctx::section::ContextSection;
-use crate::prompt_ctx::sources::{ContextRequest, ContextSource, ExecutionPath};
+use crate::prompt_ctx::sources::{ContextRequest, ContextSource};
 use async_trait::async_trait;
 
 pub struct ConversationSource;
@@ -27,7 +27,4 @@ impl ContextSource for ConversationSource {
         vec![]
     }
 
-    fn active_for(&self, path: &ExecutionPath) -> bool {
-        !matches!(path, ExecutionPath::SocialQuery)
-    }
 }

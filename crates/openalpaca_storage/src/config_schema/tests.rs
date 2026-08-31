@@ -38,9 +38,9 @@ fn test_validate_bool() {
 
 #[test]
 fn test_validate_enum() {
-    assert!(validate("system.debug_level", "info").is_ok());
-    assert!(validate("system.debug_level", "INFO").is_ok());
-    assert!(validate("system.debug_level", "potato").is_err());
+    assert!(validate("daemon.orchestrator.routing.tool_selection", "core_union").is_ok());
+    assert!(validate("daemon.orchestrator.routing.tool_selection", "CORE_UNION").is_ok());
+    assert!(validate("daemon.orchestrator.routing.tool_selection", "potato").is_err());
 }
 
 #[test]
@@ -63,14 +63,18 @@ fn test_normalize_bool() {
 
 #[test]
 fn test_normalize_enum() {
-    assert_eq!(normalize("system.debug_level", "INFO"), "info");
+    assert_eq!(
+        normalize("daemon.orchestrator.routing.tool_selection", "FULL"),
+        "full"
+    );
 }
 
 #[test]
 fn test_categories() {
     let cats = categories();
     assert!(cats.contains(&"Connectors"));
-    assert!(cats.contains(&"System"));
+    // The System category was retired (its keys were parsed-but-dead no-ops).
+    assert!(!cats.contains(&"System"));
     assert!(cats.contains(&"API-Keys"));
     assert!(cats.contains(&"Agents"));
     assert!(cats.contains(&"Daemon"));
@@ -79,17 +83,21 @@ fn test_categories() {
 
 #[test]
 fn test_keys_in_category() {
-    let keys = keys_in_category("System");
-    assert!(keys.iter().any(|d| d.key == "system.debug_level"));
-    // The retired system.max_agents alias no longer exists anywhere.
-    assert!(!keys.iter().any(|d| d.key == "system.max_agents"));
+    // The retired System category has no keys any more.
+    assert!(keys_in_category("System").is_empty());
+    let keys = keys_in_category("Connectors");
+    assert!(keys.iter().any(|d| d.key == "telegram.token"));
 }
 
 #[test]
 fn test_daemon_keys_in_category() {
     let keys = keys_in_category("Daemon");
-    // 48 keys minus the 7 retired DAG/alias keys (Routing V2 Phase 5).
-    assert_eq!(keys.len(), 41);
+    // 41 keys plus the 8 [orchestrator.routing] keys (2026-08-30 wiring audit).
+    assert_eq!(keys.len(), 49);
+    assert!(
+        keys.iter()
+            .any(|d| d.key == "daemon.orchestrator.routing.steering_enabled")
+    );
     assert!(
         keys.iter()
             .any(|d| d.key == "daemon.orchestrator.prompt_recent_messages")
@@ -235,11 +243,12 @@ fn test_subcategories() {
 
     // Daemon subcategories
     let daemon_subs = subcategories_in_category("Daemon");
-    assert_eq!(daemon_subs.len(), 4);
+    assert_eq!(daemon_subs.len(), 5);
     assert!(daemon_subs.contains(&"Orchestrator"));
     assert!(daemon_subs.contains(&"Execution"));
     assert!(daemon_subs.contains(&"Security"));
     assert!(daemon_subs.contains(&"Server"));
+    assert!(daemon_subs.contains(&"Routing"));
 
     // Web Search subcategory is now under AI
     let ai_subs = subcategories_in_category("AI");
@@ -285,8 +294,8 @@ fn test_suggest_key() {
     assert!(suggestions.contains(&"telegram.token"));
     assert!(suggestions.contains(&"telegram.enabled"));
 
-    let suggestions = suggest_key("debug");
-    assert!(suggestions.contains(&"system.debug_level"));
+    let suggestions = suggest_key("routing");
+    assert!(suggestions.contains(&"daemon.orchestrator.routing.tool_selection"));
 }
 
 #[test]

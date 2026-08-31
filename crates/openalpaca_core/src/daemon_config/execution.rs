@@ -79,12 +79,8 @@ impl Default for LeadAgentDefaults {
 pub struct SkillDefaults {
     pub max_rounds: usize,
     pub max_tools_per_round: usize,
-    /// Default permission level for skills without explicit permissions.
-    pub default_permission_level: String,
     /// Global tool deny list (applied to all skills in addition to per-skill deny).
     pub global_tool_deny: Vec<String>,
-    /// Default tool rate limit (calls per minute) if not specified in skill.
-    pub default_tool_rate_limit: u32,
     /// Auto-select score threshold for the skill router.
     pub router_auto_select_threshold: f64,
     /// Suggest score threshold for the skill router.
@@ -96,9 +92,7 @@ impl Default for SkillDefaults {
         Self {
             max_rounds: 6,
             max_tools_per_round: 3,
-            default_permission_level: "readonly".to_string(),
             global_tool_deny: Vec::new(),
-            default_tool_rate_limit: 60,
             router_auto_select_threshold: 0.65,
             router_suggest_threshold: 0.45,
         }
@@ -115,7 +109,6 @@ pub struct ContextBudgetConfig {
     pub autocompact_buffer_ratio: f64,
     pub compaction_target_ratio: f64,
     pub compaction_model: Option<String>,
-    pub max_extractions_per_compaction: usize,
     pub min_recent_messages: usize,
 }
 
@@ -125,7 +118,6 @@ impl Default for ContextBudgetConfig {
             autocompact_buffer_ratio: 0.165,
             compaction_target_ratio: 0.50,
             compaction_model: None,
-            max_extractions_per_compaction: 10,
             min_recent_messages: 4,
         }
     }

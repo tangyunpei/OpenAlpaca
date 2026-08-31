@@ -37,7 +37,4 @@ pub struct AppState {
     pub web_search_config: Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
     pub confirmation_broker: Option<Arc<ConfirmationBroker>>,
     pub plugin_manager: Option<Arc<openalpaca_plugins::PluginManager>>,
-    /// Holder for connected MCP clients. Owns Arc handles for daemon lifetime.
-    /// Registered here so shutdown drops all client Arcs at a single point.
-    pub mcp_client_set: Arc<openalpaca_core::tools::mcp::McpClientSet>,
 }

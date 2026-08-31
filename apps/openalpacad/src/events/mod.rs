@@ -35,25 +35,21 @@ impl EventBroadcaster {
         self.tx.subscribe()
     }
 
+    /// Persist and broadcast a pre-built event.
+    ///
+    /// For event variants constructed outside this module (e.g. the plugin
+    /// lifecycle events emitted by `PluginManager` through its event sink).
+    pub fn broadcast(&self, event: ServerEvent) {
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
     /// Broadcast a heartbeat event (not persisted)
     pub fn heartbeat(&self) {
         let _ = self.tx.send(ServerEvent::Heartbeat {
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         });
-    }
-
-    /// Broadcast a log event and persist it
-    pub fn log(&self, level: &str, message: &str) {
-        let event = ServerEvent::Log {
-            level: level.to_string(),
-            message: message.to_string(),
-            ts: Utc::now(),
-            instance_id: self.instance_id.clone(),
-        };
-
-        self.persist(&event);
-        let _ = self.tx.send(event);
     }
 
     /// Broadcast a command received event and persist it

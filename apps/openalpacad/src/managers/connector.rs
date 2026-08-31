@@ -47,10 +47,6 @@ impl ConnectorManager {
     /// Start all enabled connectors based on configuration
     pub async fn start_all(&self) {
         info!("Starting enabled connectors...");
-        // auto_start_connectors logic is now moved here to support dynamic loading
-        // We will keep auto_start_connectors in openalpaca_connectors for legacy/CLI if needed,
-        // but for Daemon we implement the new logic manually.
-
         let factories = openalpaca_connectors::get_supported_connectors();
         let config_repo = ConfigRepository::new(&self.db);
         let mut handles = HashMap::new();
