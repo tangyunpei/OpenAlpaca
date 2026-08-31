@@ -34,7 +34,7 @@ fn make_skill_entry(request_id: &str, skill_id: &str, status: &str) -> SkillExec
 }
 
 #[test]
-fn test_record_and_get_by_skill() {
+fn test_record() {
     let db = setup_db();
     let repo = SkillExecutionRepository::new(&db);
 
@@ -42,15 +42,16 @@ fn test_record_and_get_by_skill() {
     let id = repo.record(&entry).unwrap();
     assert!(id > 0);
 
-    let results = repo.get_by_skill("code-review", 10).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].request_id, "req-1");
-    assert_eq!(results[0].skill_id, "code-review");
-    assert_eq!(results[0].status, "success");
-    assert_eq!(results[0].duration_ms, 1500);
-    assert_eq!(results[0].rounds_used, Some(3));
-    assert!(results[0].was_auto_selected);
-    assert!(!results[0].repair_attempted);
+    let count: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM skill_execution_log WHERE skill_id = 'code-review'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(count, 1);
 }
 
 #[test]
@@ -70,29 +71,6 @@ fn test_record_tool() {
     };
     let id = repo.record_tool(&entry).unwrap();
     assert!(id > 0);
-}
-
-#[test]
-fn test_get_by_skill_limit() {
-    let db = setup_db();
-    let repo = SkillExecutionRepository::new(&db);
-
-    for i in 0..5 {
-        let entry = make_skill_entry(&format!("req-{i}"), "summarize", "success");
-        repo.record(&entry).unwrap();
-    }
-
-    let results = repo.get_by_skill("summarize", 3).unwrap();
-    assert_eq!(results.len(), 3);
-}
-
-#[test]
-fn test_get_by_skill_empty() {
-    let db = setup_db();
-    let repo = SkillExecutionRepository::new(&db);
-
-    let results = repo.get_by_skill("nonexistent", 10).unwrap();
-    assert!(results.is_empty());
 }
 
 #[test]
@@ -122,8 +100,16 @@ fn test_cleanup_old() {
     assert_eq!(t, 0);
 
     // Verify rows still exist
-    let results = repo.get_by_skill("test-skill", 10).unwrap();
-    assert_eq!(results.len(), 1);
+    let count: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM skill_execution_log WHERE skill_id = 'test-skill'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(count, 1);
 }
 
 #[test]
@@ -141,12 +127,17 @@ fn test_record_with_error() {
     let id = repo.record(&entry).unwrap();
     assert!(id > 0);
 
-    let results = repo.get_by_skill("failing-skill", 10).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].status, "error");
-    assert_eq!(results[0].error_message, Some("LLM timeout".to_string()));
-    assert!(results[0].repair_attempted);
-    assert!(!results[0].repair_succeeded);
+    let (status, error_message): (String, Option<String>) = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT status, error_message FROM skill_execution_log WHERE skill_id = 'failing-skill'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(status, "error");
+    assert_eq!(error_message, Some("LLM timeout".to_string()));
 }
 
 #[test]
@@ -192,25 +183,6 @@ fn test_all_skill_health() {
     // Feedback fields default
     assert!(cr.user_satisfaction_rate.is_none());
     assert_eq!(cr.feedback_count, 0);
-}
-
-#[test]
-fn test_skill_health_single() {
-    let db = setup_db();
-    let repo = SkillExecutionRepository::new(&db);
-
-    let entry = make_skill_entry("req-h1", "test-skill", "success");
-    repo.record(&entry).unwrap();
-
-    let health = repo.skill_health("test-skill").unwrap();
-    assert!(health.is_some());
-    let h = health.unwrap();
-    assert_eq!(h.skill_id, "test-skill");
-    assert_eq!(h.total_invocations, 1);
-
-    // Nonexistent skill
-    let none = repo.skill_health("nonexistent").unwrap();
-    assert!(none.is_none());
 }
 
 #[test]

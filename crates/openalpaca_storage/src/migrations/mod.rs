@@ -171,4 +171,14 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "context_compaction_log",
         sql: include_str!("032_context_compaction_log.sql"),
     },
+    Migration {
+        version: 33,
+        name: "lane_followups",
+        sql: include_str!("033_lane_followups.sql"),
+    },
+    Migration {
+        version: 34,
+        name: "drop_context_compaction_log",
+        sql: include_str!("034_drop_context_compaction_log.sql"),
+    },
 ];

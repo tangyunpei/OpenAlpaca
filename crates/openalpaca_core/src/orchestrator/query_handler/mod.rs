@@ -1,17 +1,27 @@
 use super::Orchestrator;
-use openalpaca_llm::{ChatMessage, ContentPart, ImageSource, Role, ToolChoice, ToolDefinition};
+use openalpaca_llm::{ChatMessage, ContentPart, ImageSource, Role, ToolChoice};
 use openalpaca_storage::repository::PreferenceRepository;
 
 /// Optional overrides for handle_simple_query loop configuration.
-/// Used by the deep_query triage tier to expand budget and provide LLM-suggested tools.
-pub(super) struct LoopOverrides {
-    pub max_rounds: usize,
-    pub max_tools_per_round: usize,
-    /// When non-empty, replaces the keyword-heuristic tool list.
-    pub override_tools: Vec<ToolDefinition>,
+pub(super) enum LoopOverrides {
+    /// Routing V2 main loop: budgets from `[orchestrator.routing]`,
+    /// suggested tools unioned with the per-request core/workflow tool set
+    /// (`start_workflow`, `task_status`, memory tools, and — on lanes with
+    /// active workflows — `steer_workflow`/`queue_followup`).
+    MainLoop {
+        /// Filesystem workspace path from the originating request, threaded
+        /// into `ToolContext` so steer/followup items can restore scope on
+        /// re-entry.
+        workspace_path: Option<String>,
+    },
 }
 
 mod simple_query_handler;
+mod unprocessed_steering;
+mod workflow_context;
+
+pub(super) use unprocessed_steering::take_unprocessed_steering_block;
+pub(super) use workflow_context::render_workflow_context_block;
 
 #[cfg(test)]
 mod tests;
@@ -48,7 +58,7 @@ fn sanitize_parts_for_dispatch(parts: Vec<ContentPart>) -> Vec<ContentPart> {
 /// Hints for whether the send tool should be kept alive across turns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) struct ActiveSendHints {
-    send: bool,
+    pub(in crate::orchestrator) send: bool,
 }
 
 /// Analyze recent conversation to determine whether the send tool should be kept alive.

@@ -16,6 +16,11 @@ use crate::stdio_channel::StdioChannel;
 pub struct PluginProcess {
     pub child: Child,
     pub channel: StdioChannel,
+    /// JSON-RPC notifications ($/event etc.) from the plugin. Delivery is
+    /// best-effort: if this receiver is not drained, notifications beyond the
+    /// channel capacity are dropped (with a warning) instead of blocking the
+    /// transport's reader loop. No consumer exists yet; a notification handler
+    /// can be attached here later.
     pub notification_rx: mpsc::Receiver<Value>,
 }
 

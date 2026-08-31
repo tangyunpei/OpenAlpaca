@@ -41,6 +41,7 @@ impl Orchestrator {
         source: &str,
         skill_name: &str,
         query: &str,
+        lane_key: &str,
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
@@ -58,6 +59,31 @@ impl Orchestrator {
 
         // Permissions preflight: reject early if sandbox config is inconsistent
         preflight_permissions(&skill_doc.frontmatter)?;
+
+        // Plugin-backed skills execute out-of-process via their
+        // PluginSkillExecutor; everything below (compose + agentic loop)
+        // is the file-based path.
+        if let crate::orchestrator::skill::catalog::SkillSource::Plugin {
+            ref plugin_id,
+            ref executor,
+        } = entry.source
+        {
+            return self
+                .invoke_plugin_skill(
+                    request_id,
+                    source,
+                    skill_name,
+                    plugin_id,
+                    executor.clone(),
+                    query,
+                    lane_key,
+                    owner_id,
+                    scope_ctx,
+                    stream_id,
+                    &skill_doc,
+                )
+                .await;
+        }
 
         // Context injection from skill's context.sources (file-based skills only)
         let injected_context = if let Some(ref skill_dir) = entry.skill_dir {
@@ -286,8 +312,14 @@ impl Orchestrator {
                     .map(|n| n as u32),
                 max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
                 stream_id: stream_id.map(|s| s.to_string()),
-                lane_key: None,
-                confirmation_timeout_secs: None,
+                lane_key: Some(lane_key.to_string()),
+                confirmation_timeout_secs: Some(
+                    self.daemon_config
+                        .load()
+                        .execution
+                        .agent_defaults
+                        .confirmation_timeout_secs,
+                ),
                 auto_approve: self
                     .daemon_config
                     .load()
@@ -414,8 +446,6 @@ impl Orchestrator {
             send_tool_context,
             message_source: Some(Arc::<str>::from(source)),
             raw_blocks,
-            planner_agents: None,
-            planner_protocol_v2: false,
             mode: StaticPromptMode::SkillInvocationDefault,
             model_window: model_window as u32,
         };
@@ -553,6 +583,12 @@ impl Orchestrator {
                 workspace_id: scope_ctx.workspace_id.clone(),
                 skill_stack: vec![skill_name.to_string()],
                 effective_constraints: None,
+                lane_key: Some(lane_key.to_string()),
+                source: Some(source.to_string()),
+                request_id: Some(request_id),
+                principal: None,
+                scope: None,
+                workspace_path: None,
             };
             let needs_clone = !skill_doc.frontmatter.scripts.is_empty()
                 || !skill_doc.frontmatter.depends_on.is_empty();
@@ -587,6 +623,17 @@ impl Orchestrator {
                         None,                          // cost_accumulator (top-level)
                         Some(tool_ctx.clone()),         // parent_tool_context
                         config_for_loop.max_cost,       // parent_max_cost
+                        self.daemon_config
+                            .load()
+                            .security
+                            .auto_approve_confirmations, // auto_approve
+                        global_deny.clone(),            // global_tool_deny
+                        self.daemon_config.load().security.circuit_breaker.clone(),
+                        self.daemon_config
+                            .load()
+                            .execution
+                            .agent_defaults
+                            .confirmation_timeout_secs,
                     ));
                     for dep_id in &skill_doc.frontmatter.depends_on {
                         if self.skill_catalog.get(dep_id).is_some() {
@@ -631,8 +678,11 @@ impl Orchestrator {
             } else {
                 self.tool_registry.clone()
             };
-            let mut per_request_sandbox =
-                SandboxManager::with_defaults(registry, self.bus.clone());
+            let mut per_request_sandbox = SandboxManager::new(
+                registry,
+                self.bus.clone(),
+                &self.daemon_config.load().security.circuit_breaker,
+            );
             if let Ok(guard) = self.confirmation_broker.read() {
                 if let Some(broker) = guard.as_ref() {
                     per_request_sandbox.set_confirmation_broker(broker.clone());
@@ -744,13 +794,26 @@ impl Orchestrator {
                 return Err(format!("LLM error: {}", err));
             }
 
-            // Post-hoc guard: detect hallucinated send confirmations
+            // Post-hoc guard: detect hallucinated send confirmations.
+            // Narrowed (Routing V2): only with an actual send-intent signal —
+            // the query suggested send, or recent turns show active send
+            // hints — a skill merely declaring `send` must not trip it.
+            let send_intent_signal = self
+                .intent_parser
+                .suggest_tools(query)
+                .contains(&"send".to_string())
+                || crate::orchestrator::query_handler::detect_active_send_hints(
+                    &ctx.recent_messages,
+                    &sendable_channels,
+                )
+                .send;
             let tool_name_refs: Vec<&str> =
                 resolved_tool_names.iter().map(|s| s.as_str()).collect();
             if detect_hallucinated_send(
                 &tool_name_refs,
                 result.tool_calls_made,
                 &result.final_content,
+                send_intent_signal,
             ) {
                 tracing::warn!(
                     tool_calls = result.tool_calls_made,
@@ -841,14 +904,6 @@ impl Orchestrator {
             validated
         };
 
-        // Emit AgentResponse event
-        self.bus.publish(SystemEvent::AgentResponse {
-            request_id,
-            agent_id: "orchestrator".to_string(),
-            content: validated.clone(),
-            timestamp: Utc::now(),
-        });
-
         Ok(SkillInvocationResult {
             content: validated,
             finish_reason: inv_finish_reason,
@@ -862,5 +917,176 @@ impl Orchestrator {
             repair_succeeded,
             validation_failures,
         })
+    }
+
+    /// Execute a plugin-backed skill out-of-process.
+    ///
+    /// The plugin's `PluginSkillExecutor` drives its own reasoning loop inside
+    /// the plugin process; tool callbacks it requests are proxied through the
+    /// sandboxed execute path (mirroring `runner::plugin_agent`), so plugin
+    /// skills get the same capability checks, confirmation gating, and
+    /// timeouts as file-based skills. Lifecycle events
+    /// (SkillInvocationStarted/Completed/Failed) and execution telemetry are
+    /// emitted by the `handle_skill_invocation` wrapper, which this path
+    /// shares with file-based skills. No LLM router is involved — token and
+    /// cost fields in the result are zero.
+    #[allow(clippy::too_many_arguments)]
+    async fn invoke_plugin_skill(
+        &self,
+        request_id: Uuid,
+        source: &str,
+        skill_name: &str,
+        plugin_id: &str,
+        executor: Arc<dyn openalpaca_api::plugin_traits::PluginSkillExecutor>,
+        query: &str,
+        lane_key: &str,
+        owner_id: Option<&str>,
+        scope_ctx: &MemoryScopeContext,
+        stream_id: Option<&str>,
+        skill_doc: &crate::middleware::skill::SkillDocument,
+    ) -> Result<SkillInvocationResult, String> {
+        let fm = &skill_doc.frontmatter;
+
+        // Allowed tool set: capability-resolved names (same resolution as the
+        // file-based path), falling back to the legacy allow list.
+        let allowed: Vec<String> = if !fm.requires_capabilities.is_empty() {
+            self.tool_registry
+                .tools_for_capabilities(&fm.requires_capabilities)
+                .into_iter()
+                .map(|d| d.name)
+                .collect()
+        } else {
+            fm.tools.allow.clone()
+        };
+        let mut denied: Vec<String> = fm.tools.deny.clone();
+        for g in &self
+            .daemon_config
+            .load()
+            .execution
+            .skill_defaults
+            .global_tool_deny
+        {
+            if !denied.contains(g) {
+                denied.push(g.clone());
+            }
+        }
+
+        let policy = SandboxPolicy {
+            agent_id: format!("plugin:{plugin_id}"),
+            allowed_capabilities: allowed,
+            denied_capabilities: denied,
+            require_confirmation_for: fm.permissions.confirm.tools.clone(),
+            max_tool_calls: fm.tools.rate_limit.max_calls.map(|n| n as u32),
+            max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
+            stream_id: stream_id.map(|s| s.to_string()),
+            lane_key: Some(lane_key.to_string()),
+            confirmation_timeout_secs: Some(
+                self.daemon_config
+                    .load()
+                    .execution
+                    .agent_defaults
+                    .confirmation_timeout_secs,
+            ),
+            auto_approve: self
+                .daemon_config
+                .load()
+                .security
+                .auto_approve_confirmations,
+        };
+
+        let mut sandbox = SandboxManager::new(
+            self.tool_registry.clone(),
+            self.bus.clone(),
+            &self.daemon_config.load().security.circuit_breaker,
+        );
+        if let Ok(guard) = self.confirmation_broker.read() {
+            if let Some(broker) = guard.as_ref() {
+                sandbox.set_confirmation_broker(broker.clone());
+            }
+        }
+
+        let tool_ctx = ToolContext {
+            agent_id: None,
+            task_id: None,
+            owner_id: owner_id.map(|s| s.to_string()),
+            workspace_id: scope_ctx.workspace_id.clone(),
+            skill_stack: vec![skill_name.to_string()],
+            effective_constraints: None,
+            lane_key: Some(lane_key.to_string()),
+            source: Some(source.to_string()),
+            request_id: Some(request_id),
+            principal: None,
+            scope: None,
+            workspace_path: None,
+        };
+
+        let callback = SandboxToolCallback {
+            sandbox,
+            policy,
+            tool_ctx,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        let context = serde_json::json!({
+            "source": source,
+            "lane_key": lane_key,
+            "owner_id": owner_id,
+        });
+
+        tracing::info!(
+            skill = skill_name,
+            plugin = plugin_id,
+            "Invoking plugin-backed skill"
+        );
+        let content = executor
+            .invoke(query, &context, &callback)
+            .await
+            .map_err(|e| format!("Plugin skill '{skill_name}' failed: {e}"))?;
+
+        Ok(SkillInvocationResult {
+            content,
+            finish_reason: LoopFinishReason::Complete,
+            rounds_used: 1,
+            tool_calls_made: callback.calls.load(std::sync::atomic::Ordering::Relaxed),
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 0.0,
+            model_used: None,
+            repair_attempted: false,
+            repair_succeeded: false,
+            validation_failures: Vec::new(),
+        })
+    }
+}
+
+/// Adapter giving a plugin skill sandboxed tool access during `invoke()`.
+///
+/// Every tool call the plugin requests goes through the same sandboxed
+/// execute path as file-based skill tools: capability checks, input
+/// sanitization, confirmation gating, circuit breaker, and timeout.
+struct SandboxToolCallback {
+    sandbox: SandboxManager,
+    policy: SandboxPolicy,
+    tool_ctx: ToolContext,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl openalpaca_api::plugin_traits::ToolCallbackExecutor for SandboxToolCallback {
+    async fn execute_tool(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<String, String> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let call = openalpaca_llm::ToolCall {
+            id: Uuid::new_v4().to_string(),
+            name: tool_name.to_string(),
+            arguments: arguments.clone(),
+        };
+        self.sandbox
+            .execute_tool(&call, &self.policy, &self.tool_ctx)
+            .await
     }
 }

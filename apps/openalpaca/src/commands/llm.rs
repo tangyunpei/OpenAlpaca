@@ -29,8 +29,8 @@ pub enum LlmCommands {
         /// Filter by agent ID
         #[arg(long)]
         agent: Option<String>,
-        /// Filter by date (YYYY-MM-DD)
-        #[arg(long)]
+        /// Filter by date (YYYY-MM-DD); only applies with --daily
+        #[arg(long, requires = "daily")]
         date: Option<String>,
         /// Filter by key ID
         #[arg(long)]

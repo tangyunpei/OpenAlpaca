@@ -66,7 +66,7 @@ fn test_lead_agent_registry_contains_coordination_tools() {
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
     });
-    let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
+    let wait_tool = Arc::new(WaitForSubagentsTool { tracker, steering: None });
 
     register_coordination_tools(
         &registry,
@@ -376,7 +376,7 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
     let check_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
     });
-    let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
+    let wait_tool = Arc::new(WaitForSubagentsTool { tracker, steering: None });
 
     let registry = ToolRegistry::default();
     register_coordination_tools(
@@ -433,7 +433,7 @@ fn test_batch_spawn_tool_present_when_enabled() {
     let check_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
     });
-    let wait_tool = Arc::new(WaitForSubagentsTool { tracker });
+    let wait_tool = Arc::new(WaitForSubagentsTool { tracker, steering: None });
 
     let registry = ToolRegistry::default();
     register_coordination_tools(
@@ -596,6 +596,24 @@ fn test_lead_agent_prompt_includes_batch_spawn_instruction() {
     );
 }
 
+#[test]
+fn test_workflow_contract_suffix_gates_interjection_protocol() {
+    // Steering attached: both sections, interjection protocol first.
+    let with_steering = super::prompt::workflow_contract_suffix(true);
+    assert!(with_steering.contains("<interjection_protocol>"));
+    assert!(with_steering.contains("<user_interjection>"));
+    assert!(with_steering.contains("post_update"));
+    assert!(with_steering.contains("queue_followup"));
+    assert!(with_steering.contains("<completion_report>"));
+
+    // No steering inbox: completion-report contract only (spec §2b is
+    // unconditional; the interjection protocol rides with the rail).
+    let without_steering = super::prompt::workflow_contract_suffix(false);
+    assert!(!without_steering.contains("<interjection_protocol>"));
+    assert!(without_steering.contains("<completion_report>"));
+    assert!(without_steering.contains("user-facing completion report"));
+}
+
 // ── Phase P4: LA-3 prompt template caching test ──
 
 #[test]
@@ -613,4 +631,475 @@ fn test_spawn_subagent_prompt_template_substitution() {
     assert!(result.contains("Tools: search, browse"));
     assert!(!result.contains("{PERSONA}"));
     assert!(!result.contains("{TOOL_GUIDANCE}"));
+}
+
+// ── Routing V2: workflow tools (post_update / queue_followup) ──
+
+/// Drain matching events from a broadcast receiver without blocking.
+fn recv_all(
+    rx: &mut tokio::sync::broadcast::Receiver<crate::events::SystemEvent>,
+) -> Vec<crate::events::SystemEvent> {
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    events
+}
+
+#[tokio::test]
+async fn test_post_update_persists_conversation_and_publishes_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+
+    let tool = PostUpdateTool::new(
+        Some(db.clone()),
+        bus,
+        "task-1".to_string(),
+        "junpei:cli".to_string(),
+        "cli".to_string(),
+    );
+    let result = tool
+        .execute(&serde_json::json!({"message": "Halfway there"}))
+        .await
+        .unwrap();
+    assert!(result.contains("posted"));
+
+    // Persisted as an assistant message on the lane conversation.
+    let conv_repo = openalpaca_storage::ConversationRepository::new(&db);
+    let messages = conv_repo.list_recent_by_lane("junpei:cli", 10).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].role, "assistant");
+    assert_eq!(messages[0].content, "Halfway there");
+    assert_eq!(messages[0].source.as_deref(), Some("cli"));
+
+    // WorkflowProgress published with lane + task identity.
+    let events = recv_all(&mut rx);
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        crate::events::SystemEvent::WorkflowProgress { task_id, lane_key, message, .. }
+            if task_id == "task-1" && lane_key == "junpei:cli" && message == "Halfway there"
+    )));
+}
+
+#[tokio::test]
+async fn test_post_update_rejects_empty_message() {
+    let tool = PostUpdateTool::new(
+        None,
+        EventBus::default(),
+        "task-1".to_string(),
+        "junpei:cli".to_string(),
+        "cli".to_string(),
+    );
+    assert!(tool.execute(&serde_json::json!({})).await.is_err());
+    assert!(tool.execute(&serde_json::json!({"message": "  "})).await.is_err());
+}
+
+#[tokio::test]
+async fn test_queue_followup_inserts_row_and_publishes_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+
+    let tool = QueueFollowupTool::new(
+        Some(db.clone()),
+        bus,
+        "task-1".to_string(),
+        "junpei:cli".to_string(),
+        "junpei".to_string(),
+    );
+    let result = tool
+        .execute(&serde_json::json!({"description": "Also update the docs"}))
+        .await
+        .unwrap();
+    assert!(result.contains("Follow-up queued"));
+
+    // Row inserted with the reconstructed principal and source task.
+    let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+    let rows = repo.list_queued_by_lane("junpei:cli").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, "followup");
+    assert_eq!(rows[0].content, "Also update the docs");
+    assert_eq!(rows[0].source_task_id.as_deref(), Some("task-1"));
+    let principal: crate::security::policy::Principal =
+        serde_json::from_str(&rows[0].principal_json).unwrap();
+    assert_eq!(
+        principal,
+        crate::security::policy::Principal::User {
+            global_id: "junpei".to_string()
+        }
+    );
+
+    // FollowupQueued published with the row id.
+    let events = recv_all(&mut rx);
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        crate::events::SystemEvent::FollowupQueued { lane_key, followup_id, kind, .. }
+            if lane_key == "junpei:cli" && *followup_id == rows[0].id && kind == "followup"
+    )));
+}
+
+#[tokio::test]
+async fn test_queue_followup_system_owner_maps_to_system_principal() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let tool = QueueFollowupTool::new(
+        Some(db.clone()),
+        EventBus::default(),
+        "task-1".to_string(),
+        "system:internal".to_string(),
+        "system".to_string(),
+    );
+    tool.execute(&serde_json::json!({"description": "scheduled follow-up"}))
+        .await
+        .unwrap();
+
+    let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+    let rows = repo.list_queued_by_lane("system:internal").unwrap();
+    let principal: crate::security::policy::Principal =
+        serde_json::from_str(&rows[0].principal_json).unwrap();
+    assert_eq!(principal, crate::security::policy::Principal::System);
+}
+
+#[tokio::test]
+async fn test_queue_followup_main_loop_uses_ctx_identity_and_workspace_path() {
+    // Main-loop variant (Routing V2 Phase 2): identity + workspace path come
+    // from the invocation's ToolContext, no source task recorded.
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let tool = QueueFollowupTool::for_main_loop(
+        Some(db.clone()),
+        EventBus::default(),
+        "junpei:cli".to_string(),
+        "fallback-owner".to_string(),
+    );
+    let ctx = crate::tools::registry::ToolContext {
+        owner_id: Some("junpei".to_string()),
+        principal: Some(crate::security::policy::Principal::User {
+            global_id: "junpei".to_string(),
+        }),
+        workspace_path: Some("/ws/project".to_string()),
+        ..Default::default()
+    };
+    tool.execute_with_context(&serde_json::json!({"description": "Do it later"}), &ctx)
+        .await
+        .unwrap();
+
+    let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+    let rows = repo.list_queued_by_lane("junpei:cli").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].source_task_id, None);
+    assert_eq!(rows[0].workspace_path.as_deref(), Some("/ws/project"));
+    let principal: crate::security::policy::Principal =
+        serde_json::from_str(&rows[0].principal_json).unwrap();
+    assert_eq!(
+        principal,
+        crate::security::policy::Principal::User {
+            global_id: "junpei".to_string()
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_queue_followup_ctx_without_principal_falls_back_to_created_by() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let tool = QueueFollowupTool::for_main_loop(
+        Some(db.clone()),
+        EventBus::default(),
+        "junpei:cli".to_string(),
+        "junpei".to_string(),
+    );
+    tool.execute_with_context(
+        &serde_json::json!({"description": "later"}),
+        &crate::tools::registry::ToolContext::default(),
+    )
+    .await
+    .unwrap();
+
+    let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+    let rows = repo.list_queued_by_lane("junpei:cli").unwrap();
+    let principal: crate::security::policy::Principal =
+        serde_json::from_str(&rows[0].principal_json).unwrap();
+    assert_eq!(
+        principal,
+        crate::security::policy::Principal::User {
+            global_id: "junpei".to_string()
+        }
+    );
+    assert_eq!(rows[0].workspace_path, None);
+}
+
+// ── Routing V2: wait_for_subagents steering interrupt ──────────────
+
+fn wait_steering_msg(text: &str) -> crate::runner::steering::SteeringMsg {
+    crate::runner::steering::SteeringMsg {
+        text: text.to_string(),
+        request_id: uuid::Uuid::new_v4(),
+        principal: crate::security::policy::Principal::System,
+        scope: crate::security::policy::Scope::Global,
+        workspace_path: None,
+        received_at: chrono::Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn test_wait_for_subagents_interrupted_by_steering_push() {
+    // A push while the tool is blocked in its select must break the wait.
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("run-1"); // never completes — wait would block 600s
+    let inbox = Arc::new(crate::runner::steering::SteeringInbox::default());
+    let tool = Arc::new(WaitForSubagentsTool {
+        tracker,
+        steering: Some(inbox.clone()),
+    });
+
+    let waiter = {
+        let tool = tool.clone();
+        tokio::spawn(async move { tool.execute(&serde_json::json!({})).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    inbox.push(wait_steering_msg("adjust course")).unwrap();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+        .await
+        .expect("steering push must interrupt the wait")
+        .unwrap()
+        .unwrap();
+    assert!(result.contains("Wait interrupted"), "got: {result}");
+    assert!(result.contains("1 queued"), "got: {result}");
+}
+
+#[tokio::test]
+async fn test_wait_for_subagents_pre_queued_steering_returns_immediately() {
+    // No lost wakeup: a message pushed BEFORE the wait starts must still
+    // interrupt within the first iteration (the pre-check catches it).
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("run-1"); // never completes
+    let inbox = Arc::new(crate::runner::steering::SteeringInbox::default());
+    inbox.push(wait_steering_msg("queued before wait")).unwrap();
+    let tool = WaitForSubagentsTool {
+        tracker,
+        steering: Some(inbox),
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        tool.execute(&serde_json::json!({})),
+    )
+    .await
+    .expect("pre-queued interjection must interrupt without waiting")
+    .unwrap();
+    assert!(result.contains("Wait interrupted"), "got: {result}");
+}
+
+#[tokio::test]
+async fn test_wait_for_subagents_without_steering_completes_normally() {
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("run-1");
+    tracker.complete("run-1", "done".to_string(), true);
+    let tool = WaitForSubagentsTool {
+        tracker,
+        steering: None,
+    };
+    let result = tool.execute(&serde_json::json!({})).await.unwrap();
+    assert!(result.contains("All subagents finished"));
+}
+
+#[tokio::test]
+async fn test_wait_for_subagents_closed_empty_inbox_does_not_interrupt() {
+    // A closed, empty inbox is treated as absent — the wait completes on
+    // subagent completion instead of spinning or interrupting.
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("run-1");
+    tracker.complete("run-1", "done".to_string(), true);
+    let inbox = Arc::new(crate::runner::steering::SteeringInbox::default());
+    inbox.close_and_drain();
+    let tool = WaitForSubagentsTool {
+        tracker,
+        steering: Some(inbox),
+    };
+    let result = tool.execute(&serde_json::json!({})).await.unwrap();
+    assert!(result.contains("All subagents finished"));
+}
+
+// ── Plugin-backed subagent spawning ─────────────────────────────────
+
+/// Stub plugin executor: accepts the spawn, records the instructions,
+/// and completes on the first step.
+struct CompletingPluginExecutor {
+    instructions: std::sync::Mutex<Option<String>>,
+}
+
+#[async_trait]
+impl openalpaca_api::plugin_traits::PluginAgentExecutor for CompletingPluginExecutor {
+    async fn spawn(
+        &self,
+        _instance_id: &str,
+        _task_id: &str,
+        instructions: &str,
+        _context: &serde_json::Value,
+    ) -> Result<bool, String> {
+        *self.instructions.lock().unwrap() = Some(instructions.to_string());
+        Ok(true)
+    }
+
+    async fn step(
+        &self,
+        _instance_id: &str,
+        _tool_results: Option<&serde_json::Value>,
+    ) -> Result<(String, String, Vec<serde_json::Value>), String> {
+        Ok(("complete".to_string(), "plugin result".to_string(), vec![]))
+    }
+
+    async fn stop(&self, _instance_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn plugin_id(&self) -> &str {
+        "test_plugin"
+    }
+
+    fn agent_id(&self) -> &str {
+        "plugin_researcher"
+    }
+}
+
+#[tokio::test]
+async fn test_spawn_subagent_executes_plugin_backed_template() {
+    use crate::agent::template::{AgentSource, AgentTemplateFrontmatter};
+
+    let executor = Arc::new(CompletingPluginExecutor {
+        instructions: std::sync::Mutex::new(None),
+    });
+    let template = AgentTemplate {
+        frontmatter: AgentTemplateFrontmatter {
+            id: "plugin_researcher".to_string(),
+            name: "Plugin Researcher".to_string(),
+            description: "Plugin-backed research agent".to_string(),
+            icon: None,
+            singleton: false,
+            capabilities: vec![],
+            denied_capabilities: vec![],
+            temperature: 0.5,
+            verbosity: "normal".to_string(),
+            model: None,
+            fallback_models: vec![],
+            max_tool_calls: None,
+            timeout_seconds: None,
+            max_cost_per_task: None,
+            max_rounds: None,
+            require_confirmation_for: vec![],
+        },
+        body: String::new(),
+        sections: HashMap::new(),
+        source: AgentSource::Plugin {
+            plugin_id: "test_plugin".to_string(),
+            executor: executor.clone(),
+        },
+    };
+
+    let shared_context = Arc::new(SharedContext::new());
+    assert!(shared_context.agent_registry.register_template(template));
+
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn_tool = SpawnSubagentTool::new(
+        Arc::new(openalpaca_llm::LlmRouter::new(
+            std::collections::HashMap::new(),
+            openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+            std::collections::HashMap::new(),
+            Arc::new(openalpaca_llm::CostTracker::new(
+                openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+            )),
+            "test-model".to_string(),
+        )),
+        Arc::new(ToolRegistry::default()),
+        shared_context,
+        EventBus::default(),
+        None,
+        "task-1".to_string(),
+        "user-1".to_string(),
+        "test-lead".to_string(),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        None,
+        tracker.clone(),
+        0,
+        DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        None,
+        None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+    );
+
+    let msg = spawn_tool
+        .execute(&serde_json::json!({
+            "agent_id": "plugin_researcher",
+            "objective": "Summarize the design doc"
+        }))
+        .await
+        .unwrap();
+    assert!(msg.contains("spawned"), "got: {msg}");
+
+    // The plugin loop runs in a background task — wait for the tracker.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !tracker.all_done() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "plugin-backed subagent never completed; summary: {}",
+            tracker.summary()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // The result lands in the tracker with the plugin's output.
+    let statuses = tracker.statuses.lock().unwrap();
+    assert_eq!(statuses.len(), 1);
+    let (run_id, status) = statuses.iter().next().unwrap();
+    assert!(
+        run_id.starts_with("plugin_researcher::"),
+        "unexpected run_id: {run_id}"
+    );
+    match status {
+        SubagentStatus::Completed { content, success } => {
+            assert!(success);
+            assert_eq!(content, "plugin result");
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+
+    // The plugin received instructions carrying the objective.
+    let instructions = executor.instructions.lock().unwrap();
+    let instructions = instructions.as_ref().expect("plugin spawn was never called");
+    assert!(
+        instructions.contains("Summarize the design doc"),
+        "instructions missing objective: {instructions}"
+    );
+}
+
+#[test]
+fn test_register_workflow_tools_registers_both() {
+    let registry = ToolRegistry::default();
+    register_workflow_tools(
+        &registry,
+        Arc::new(PostUpdateTool::new(
+            None,
+            EventBus::default(),
+            "task-1".to_string(),
+            "junpei:cli".to_string(),
+            "cli".to_string(),
+        )),
+        Arc::new(QueueFollowupTool::new(
+            None,
+            EventBus::default(),
+            "task-1".to_string(),
+            "junpei:cli".to_string(),
+            "junpei".to_string(),
+        )),
+    );
+    let tools = registry.registered_tool_names();
+    assert!(tools.contains(&"post_update".to_string()));
+    assert!(tools.contains(&"queue_followup".to_string()));
 }

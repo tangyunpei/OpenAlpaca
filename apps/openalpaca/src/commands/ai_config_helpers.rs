@@ -194,7 +194,6 @@ pub(super) fn apply_to_config(
                     provider: String::new(),
                     model: None,
                     dimensions: None,
-                    batch_size: None,
                 })
                 .enabled = value == "true";
         }
@@ -206,7 +205,6 @@ pub(super) fn apply_to_config(
                     provider: String::new(),
                     model: None,
                     dimensions: None,
-                    batch_size: None,
                 })
                 .provider = value.to_string();
         }
@@ -218,7 +216,6 @@ pub(super) fn apply_to_config(
                     provider: String::new(),
                     model: None,
                     dimensions: None,
-                    batch_size: None,
                 })
                 .model = Some(value.to_string());
         }
@@ -234,7 +231,6 @@ pub(super) fn apply_to_config(
                     provider: String::new(),
                     model: None,
                     dimensions: None,
-                    batch_size: None,
                 })
                 .dimensions = Some(dim);
         }
@@ -319,12 +315,10 @@ pub(super) fn apply_to_config(
                         secret_ref: new_secret_ref,
                         secret_encrypted: new_secret_encrypted,
                         tier: None,
-                        monthly_budget: None,
                         priority: Some("primary".to_string()),
                         source: Some(source),
                         notes: None,
                         rate_limit: None,
-                        allowed_models: None,
                     });
                 } else if let Some(ref sref) = new_secret_ref {
                     let _ = store.delete(sref);

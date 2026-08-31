@@ -17,6 +17,7 @@ use tool_helpers::{format_tool_error, format_tool_error_with_hint, truncate_tool
 use tool_helpers::MAX_TOOL_RESULT_SIZE;
 
 use chrono::Utc;
+use crate::runner::steering::SteeringMsg;
 use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::registry::ToolContext;
@@ -33,6 +34,10 @@ use tracing::Instrument;
 
 /// Maximum retries when LLM response is truncated due to max_tokens.
 const MAX_TOKENS_RETRIES: usize = 2;
+
+/// Extra rounds granted per non-empty steering drain. The effective round
+/// budget is capped at `2 * max_rounds` regardless of how many drains occur.
+const STEERING_ROUNDS_BONUS: usize = 5;
 
 /// Accumulates loop execution state and builds `LoopResult` on exit.
 /// Private to this module — avoids repeating the 8-field struct construction
@@ -169,6 +174,17 @@ pub async fn run_agentic_loop_routed(
     .await
 }
 
+/// Return drained-but-unsent steering messages to the inbox on a loop exit
+/// that never delivered them to an LLM call (budget, cancellation, or error
+/// exits), so the cleanup path can convert them to follow-ups.
+fn return_pending_steering(config: &LoopConfig, pending: &mut Vec<SteeringMsg>) {
+    if let Some(ref inbox) = config.steering
+        && !pending.is_empty()
+    {
+        inbox.push_front_all(std::mem::take(pending));
+    }
+}
+
 /// Core agentic loop implementation shared by both Direct and Router backends.
 #[allow(clippy::too_many_arguments)]
 async fn run_agentic_loop_inner(
@@ -188,9 +204,17 @@ async fn run_agentic_loop_inner(
     let cost_acc = cost_accumulator.unwrap_or_default();
     let mut messages: Arc<Vec<ChatMessage>> = Arc::new(initial_messages);
     let tools_arc = Arc::new(tools);
-    let mut known_token_count: u32 = estimate_messages_tokens(&messages);
     let mut consecutive_llm_errors: usize = 0;
     const MAX_LLM_RETRIES: usize = 3;
+
+    // ── Steering state (Routing V2) ────────────────────────────────
+    // `steering_bonus_rounds` extends the round budget by
+    // `STEERING_ROUNDS_BONUS` per non-empty drain, capped at 2× max_rounds.
+    // `pending_steering` holds drained messages until an LLM call consumes
+    // them, so budget exits can re-append unsent messages to the inbox for
+    // follow-up conversion.
+    let mut steering_bonus_rounds: usize = 0;
+    let mut pending_steering: Vec<SteeringMsg> = Vec::new();
 
     // Pre-compute tool token estimate once — avoids re-serializing tool JSON
     // schemas on every Router retry attempt. `None` for Direct backend because
@@ -248,11 +272,20 @@ async fn run_agentic_loop_inner(
                     rounds = state.rounds,
                     "Agentic loop cancelled"
                 );
+                // A prior failed call may have left drained-but-unsent
+                // steering messages pending — return them for follow-up
+                // conversion (Routing V2, widened from the budget exits).
+                return_pending_steering(config, &mut pending_steering);
                 return state.result(LoopFinishReason::Cancelled);
             }
         }
 
         // ── 2. Max rounds check ────────────────────────────────────
+        // Steering drains extend the budget by STEERING_ROUNDS_BONUS each,
+        // capped at 2× max_rounds. With no steering the bonus is 0 and this
+        // is exactly `state.rounds >= config.max_rounds`.
+        let effective_max_rounds = (config.max_rounds + steering_bonus_rounds)
+            .min(config.max_rounds.saturating_mul(2));
         {
             let _span = tracing::info_span!(
                 "loop.step.max_rounds_check",
@@ -261,12 +294,15 @@ async fn run_agentic_loop_inner(
             )
             .entered();
             tracing::trace!("max_rounds_check step entered");
-            if state.rounds >= config.max_rounds {
+            if state.rounds >= effective_max_rounds {
                 tracing::info!(
                     agent_id = agent_id,
                     rounds = state.rounds,
                     "Agentic loop exiting: max rounds reached"
                 );
+                // Return drained-but-unsent steering messages to the inbox
+                // so the cleanup path can convert them to follow-ups.
+                return_pending_steering(config, &mut pending_steering);
                 return state.result(LoopFinishReason::MaxRounds);
             }
         }
@@ -298,6 +334,9 @@ async fn run_agentic_loop_inner(
                     accumulated_cost,
                     "Agentic loop exiting: cost limit exceeded"
                 );
+                // Return drained-but-unsent steering messages to the inbox
+                // so the cleanup path can convert them to follow-ups.
+                return_pending_steering(config, &mut pending_steering);
                 return state.result(LoopFinishReason::CostExceeded);
             }
         }
@@ -401,12 +440,30 @@ async fn run_agentic_loop_inner(
                         timestamp: Utc::now(),
                     });
                 }
-
-                known_token_count = estimate_messages_tokens(&messages);
             }
         }
 
-        let prev_msg_len = messages.len();
+        // ── Steering drain (Routing V2) ────────────────────────────
+        // Placed after the cancellation/budget checks and compaction,
+        // immediately before the request is built — draining any earlier
+        // would lose messages on MaxRounds/CostExceeded exits.
+        if let Some(ref inbox) = config.steering {
+            let drained = inbox.drain_all();
+            if !drained.is_empty() {
+                steering_bonus_rounds += STEERING_ROUNDS_BONUS;
+                tracing::info!(
+                    agent_id = agent_id,
+                    round = state.rounds,
+                    interjections = drained.len(),
+                    "Steering drain: injecting user interjections"
+                );
+                for msg in &drained {
+                    Arc::make_mut(&mut messages)
+                        .push(ChatMessage::user(&msg.to_interjection()));
+                }
+                pending_steering.extend(drained);
+            }
+        }
 
         // ── 5. Build request (pre-LLM-call assembly) ──────────────
         let tool_choice = {
@@ -476,6 +533,10 @@ async fn run_agentic_loop_inner(
                 ).instrument(llm_call_span.clone()) => result,
                 _ = token.cancelled() => {
                     tracing::info!(agent_id = agent_id, round = state.rounds + 1, "LLM call interrupted by cancellation");
+                    // The interrupted call never delivered this round's
+                    // drained steering messages — return them to the inbox
+                    // for follow-up conversion.
+                    return_pending_steering(config, &mut pending_steering);
                     return state.result(LoopFinishReason::Cancelled);
                 }
             }
@@ -502,6 +563,8 @@ async fn run_agentic_loop_inner(
         match llm_result {
             Ok(response) => {
                 consecutive_llm_errors = 0;
+                // Any injected steering messages were consumed by this call.
+                pending_steering.clear();
 
                 // ── 9. Response parse ──────────────────────────────
                 {
@@ -537,15 +600,18 @@ async fn run_agentic_loop_inner(
                             "Model access denied at runtime: {}",
                             violation,
                         );
+                        if let Some(ref bus) = config.event_bus {
+                            bus.publish(crate::events::SystemEvent::ModelAccessDenied {
+                                agent_id: agent_id.to_string(),
+                                model_id: response.model.clone(),
+                                reason: violation.to_string(),
+                                timestamp: Utc::now(),
+                            });
+                        }
                         return state.result(LoopFinishReason::Error(format!(
                             "Model access denied: {}",
                             violation
                         )));
-                    }
-
-                    // Use actual input tokens as ground truth for our estimate
-                    if response.usage.input_tokens > 0 {
-                        known_token_count = response.usage.input_tokens;
                     }
 
                     tracing::debug!(
@@ -720,12 +786,6 @@ async fn run_agentic_loop_inner(
                             .push(ChatMessage::tool_result(&tc.id, &err));
                     }
 
-                    // Update token estimate incrementally for newly-appended messages
-                    if messages.len() > prev_msg_len {
-                        known_token_count +=
-                            estimate_messages_tokens(&messages[prev_msg_len..]);
-                    }
-
                     state.max_tokens_retries = 0;
                     continue;
                 }
@@ -757,6 +817,36 @@ async fn run_agentic_loop_inner(
                         response.content,
                         LoopFinishReason::Truncated,
                     );
+                }
+
+                // ── Steering completion guard (Routing V2) ─────────
+                // A message that arrived during the final round would be
+                // silently dropped by returning Complete — instead, keep the
+                // assistant's answer in history, inject the interjections,
+                // and run another round (budget checks still apply above).
+                if let Some(ref inbox) = config.steering
+                    && !inbox.is_closed()
+                {
+                    let drained = inbox.drain_all();
+                    if !drained.is_empty() {
+                        steering_bonus_rounds += STEERING_ROUNDS_BONUS;
+                        persist_span.in_scope(|| {
+                            tracing::info!(
+                                agent_id = agent_id,
+                                round = state.rounds,
+                                interjections = drained.len(),
+                                "Steering completion guard: continuing loop for late interjections"
+                            );
+                        });
+                        Arc::make_mut(&mut messages)
+                            .push(ChatMessage::assistant(&response.content));
+                        for msg in &drained {
+                            Arc::make_mut(&mut messages)
+                                .push(ChatMessage::user(&msg.to_interjection()));
+                        }
+                        pending_steering.extend(drained);
+                        continue;
+                    }
                 }
 
                 // No tool calls → done
@@ -807,6 +897,7 @@ async fn run_agentic_loop_inner(
                                 () = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
                                 () = token.cancelled() => {
                                     tracing::info!(agent_id = agent_id, rounds = state.rounds, "Agentic loop cancelled during retry backoff");
+                                    return_pending_steering(config, &mut pending_steering);
                                     return state.result(LoopFinishReason::Cancelled);
                                 }
                             }
@@ -823,6 +914,9 @@ async fn run_agentic_loop_inner(
                     error = %e,
                     "Agentic loop exiting: LLM error"
                 );
+                // The failed call never delivered this round's drained
+                // steering messages — return them for follow-up conversion.
+                return_pending_steering(config, &mut pending_steering);
                 return state.result(LoopFinishReason::Error(e.to_string()));
             }
         }

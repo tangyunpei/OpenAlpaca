@@ -488,3 +488,71 @@ fn test_dm_empty_sender_falls_back_to_chat_id() {
     assert_eq!(reply_target, "+15551234567");
     assert!(!reply_is_group);
 }
+
+// --- Tool confirmation: reply-target derivation + intercept/broker roundtrip ---
+
+#[test]
+fn test_confirmation_reply_target_group() {
+    let (target, is_group) = super::routing::confirmation_reply_target("chat12345");
+    assert_eq!(target, "chat12345");
+    assert!(is_group);
+}
+
+#[test]
+fn test_confirmation_reply_target_dm_guid() {
+    // GUID-style DM identifier -> handle extracted, buddy addressing
+    let (target, is_group) =
+        super::routing::confirmation_reply_target("iMessage;-;+15551234567");
+    assert_eq!(target, "+15551234567");
+    assert!(!is_group);
+}
+
+#[test]
+fn test_confirmation_reply_target_dm_plain_handle() {
+    // Plain-handle DM identifier passes through unchanged
+    let (target, is_group) = super::routing::confirmation_reply_target("user@example.com");
+    assert_eq!(target, "user@example.com");
+    assert!(!is_group);
+}
+
+#[test]
+fn test_confirmation_intercept_broker_roundtrip() {
+    use dashmap::DashMap;
+    use openalpaca_core::security::confirmation::{ConfirmationBroker, ConfirmationRequest};
+    use std::collections::VecDeque;
+
+    let broker = ConfirmationBroker::new();
+    let mut rx = broker.request(&ConfirmationRequest {
+        request_id: "req-imsg-1".to_string(),
+        agent_id: "agent-1".to_string(),
+        tool_name: "shell_exec".to_string(),
+        tool_arguments: serde_json::json!({"cmd": "ls"}),
+        stream_id: None,
+        lane_key: Some("global1:imessage".to_string()),
+        timestamp: chrono::Utc::now(),
+    });
+
+    // Simulate the listener queuing the request for a chat
+    let pending: DashMap<String, VecDeque<String>> = DashMap::new();
+    let chat_id = "iMessage;-;+15551234567".to_string();
+    pending
+        .entry(chat_id.clone())
+        .or_default()
+        .push_back("req-imsg-1".to_string());
+
+    // A /no from an unrelated chat falls through to normal processing
+    assert!(crate::common::intercept_confirmation_reply(
+        "/no",
+        &"chat999".to_string(),
+        &broker,
+        &pending
+    )
+    .is_none());
+
+    // A /no in the prompted chat denies via the broker
+    let reply =
+        crate::common::intercept_confirmation_reply("/no", &chat_id, &broker, &pending)
+            .unwrap();
+    assert!(reply.contains("Denied"));
+    assert!(!rx.try_recv().unwrap().approved);
+}

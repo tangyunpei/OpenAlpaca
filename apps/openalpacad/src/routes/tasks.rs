@@ -2,8 +2,12 @@
 //!
 //! POST /v1/tasks           -> create a new task
 //! GET  /v1/tasks           -> list tasks (query: created_by, status, limit)
-//! GET  /v1/tasks/{id}      -> get a single task + assignments
+//! GET  /v1/tasks/{id}      -> get a single task + agent runs
 //! POST /v1/tasks/{id}/action -> perform action (cancel, pause, resume)
+//!
+//! The `assigned_agents` / `assignments` arrays are sourced from
+//! `agent_task_history` (written by the dispatcher's `record_agent_history`),
+//! not the dead-post-V2 `task_agent_assignment` table.
 
 use axum::{
     Json,
@@ -15,14 +19,33 @@ use chrono::Utc;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use openalpaca_core::context::TaskEntryStatus;
 use openalpaca_core::events::SystemEvent;
-use openalpaca_core::lane::TaskLaneStatus;
-use openalpaca_core::orchestrator::parse_outcome;
-use openalpaca_storage::{Task, TaskRepository, TaskStatus};
+use openalpaca_core::orchestrator::{TaskActionError, apply_task_action, parse_outcome};
+use openalpaca_storage::{Database, SubAgentRepository, Task, TaskRepository, TaskStatus};
 
 use super::tasks_types::*;
 use crate::AppState;
+
+// ── Helpers ───────────────────────────────────────────────────────
+
+/// Summarize the agent runs recorded for a task (from `agent_task_history`)
+/// as the `assigned_agents` JSON array served by `GET /v1/tasks`.
+fn agent_runs_summary(db: &Database, task_id: &str) -> Vec<serde_json::Value> {
+    SubAgentRepository::new(db)
+        .get_history_for_task(task_id)
+        .unwrap_or_default()
+        .iter()
+        .map(|run| {
+            serde_json::json!({
+                "agent_id": run.agent_id,
+                "role": run.role,
+                "status": run.status,
+                "runtime_seconds": run.runtime_seconds,
+                "completed_at": run.completed_at,
+            })
+        })
+        .collect()
+}
 
 // ── Handlers ──────────────────────────────────────────────────────
 
@@ -139,21 +162,10 @@ pub async fn list_tasks_handler(
 
     match tasks {
         Ok(tasks) => {
-            let repo = TaskRepository::new(&state.db);
             let enriched: Vec<serde_json::Value> = tasks
                 .iter()
                 .map(|t| {
-                    let assignments = repo.get_assignments(&t.id).unwrap_or_default();
-                    let agents: Vec<serde_json::Value> = assignments
-                        .iter()
-                        .map(|a| {
-                            serde_json::json!({
-                                "agent_id": a.agent_id,
-                                "role": a.role,
-                                "status": a.status.as_str()
-                            })
-                        })
-                        .collect();
+                    let agents = agent_runs_summary(&state.db, &t.id);
                     match serde_json::to_value(t) {
                         Ok(mut v) => {
                             if let Some(obj) = v.as_object_mut() {
@@ -196,14 +208,16 @@ pub async fn get_task_handler(
 
     match repo.get(&id) {
         Ok(Some(task)) => {
-            let assignments = repo.get_assignments(&id).unwrap_or_default();
+            let agents = SubAgentRepository::new(&state.db)
+                .get_history_for_task(&id)
+                .unwrap_or_default();
             let outcome = parse_outcome(&task);
             (
                 StatusCode::OK,
                 Json(
                     serde_json::to_value(TaskResponse {
                         task,
-                        assignments: Some(assignments),
+                        agents: Some(agents),
                         outcome,
                     })
                     .unwrap_or_else(|_| serde_json::json!({"error": "serialization_failed"})),
@@ -221,251 +235,63 @@ pub async fn get_task_handler(
     }
 }
 
-/// GET /v1/tasks/{id}/dag — returns structured DAG state with per-node status
-pub async fn get_task_dag_handler(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    let repo = TaskRepository::new(&state.db);
-
-    let task = match repo.get(&id) {
-        Ok(Some(t)) => t,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "Task not found" })),
-            );
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            );
-        }
-    };
-
-    let state_json = match &task.state_json {
-        Some(sj) => sj,
-        None => {
-            return (
-                StatusCode::OK,
-                Json(serde_json::json!({ "task_id": id, "dag": null })),
-            );
-        }
-    };
-
-    let task_state: openalpaca_core::orchestrator::task_state::TaskState =
-        match serde_json::from_str(state_json) {
-            Ok(s) => s,
-            Err(_) => {
-                return (
-                    StatusCode::OK,
-                    Json(serde_json::json!({ "task_id": id, "dag": null })),
-                );
-            }
-        };
-
-    match task_state.dag {
-        Some(dag) => {
-            let nodes: Vec<serde_json::Value> = dag
-                .nodes
-                .iter()
-                .map(|n| {
-                    serde_json::json!({
-                        "node_id": n.node_id,
-                        "title": n.title,
-                        "description": n.description,
-                        "agent_id": n.agent_id,
-                        "agent_name": n.agent_name,
-                        "depends_on": n.depends_on,
-                        "status": n.status,
-                        "result_summary": n.result_summary,
-                        "workspace_keys": n.workspace_keys,
-                        "output_key": n.output_key,
-                    })
-                })
-                .collect();
-
-            let completed = dag.completed_count();
-            let running = dag
-                .nodes
-                .iter()
-                .filter(|n| {
-                    n.status == openalpaca_core::orchestrator::task_planner::DagNodeStatus::Running
-                })
-                .count();
-            let failed = dag
-                .nodes
-                .iter()
-                .filter(|n| {
-                    n.status == openalpaca_core::orchestrator::task_planner::DagNodeStatus::Failed
-                })
-                .count();
-
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "task_id": id,
-                    "dag": {
-                        "total_nodes": dag.nodes.len(),
-                        "completed_nodes": completed,
-                        "running_nodes": running,
-                        "failed_nodes": failed,
-                        "is_finished": dag.is_finished(),
-                        "nodes": nodes,
-                    }
-                })),
-            )
-        }
-        None => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "task_id": id, "dag": null })),
-        ),
-    }
-}
-
 /// POST /v1/tasks/{id}/action
 pub async fn task_action_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(request): Json<TaskActionRequest>,
 ) -> impl IntoResponse {
-    let repo = TaskRepository::new(&state.db);
-
-    // Fetch current task
-    let task = match repo.get(&id) {
-        Ok(Some(t)) => t,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "Task not found" })),
-            );
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            );
-        }
-    };
-
-    // Validate state transition
-    let new_status = match request.action.as_str() {
-        "cancel" => {
-            if task.status.is_terminal() {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": format!("Cannot cancel a task in '{}' state", task.status)
-                    })),
-                );
-            }
-
-            // Trigger actual cancellation of the running task
-            let cancelled = state.gateway.shared_context.cancel_task(&id);
-            if cancelled {
-                tracing::info!(task_id = %id, "Task cancellation triggered via API");
-            } else {
-                tracing::warn!(task_id = %id, "No cancellation token found — task may have already completed");
-            }
-
-            TaskStatus::Cancelled
-        }
-        "pause" => {
-            if task.status != TaskStatus::Running {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": format!("Can only pause a running task, current state: '{}'", task.status)
-                    })),
-                );
-            }
-            TaskStatus::Paused
-        }
-        "resume" => {
-            if task.status != TaskStatus::Paused {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": format!("Can only resume a paused task, current state: '{}'", task.status)
-                    })),
-                );
-            }
-            TaskStatus::Running
-        }
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": format!("Unknown action: '{}'. Valid: cancel, pause, resume", request.action)
-                })),
-            );
-        }
-    };
-
-    // 1. Update DB
-    if let Err(e) = repo.update_status(&id, new_status) {
-        return (
+    // Shared with the orchestrator chat handler: registry-first resolution with
+    // DB fallback, transition validation, token cancel, persistence, lane sync,
+    // and TaskUpdated event all live in core.
+    match apply_task_action(
+        &state.gateway.shared_context,
+        &state.gateway.lane_manager,
+        &state.gateway.bus,
+        Some(&state.db),
+        &id,
+        &request.action,
+    ) {
+        Ok(new_status) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "task_id": id,
+                "status": new_status.as_str()
+            })),
+        ),
+        Err(TaskActionError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Task not found" })),
+        ),
+        Err(TaskActionError::CannotCancel { current }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("Cannot cancel a task in '{}' state", current)
+            })),
+        ),
+        Err(TaskActionError::CannotPause { current }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("Can only pause a running task, current state: '{}'", current)
+            })),
+        ),
+        Err(TaskActionError::CannotResume { current }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("Can only resume a paused task, current state: '{}'", current)
+            })),
+        ),
+        Err(TaskActionError::UnknownAction) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("Unknown action: '{}'. Valid: cancel, pause, resume", request.action)
+            })),
+        ),
+        Err(TaskActionError::Db(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        );
+            Json(serde_json::json!({ "error": e })),
+        ),
     }
-
-    // 2. Update in-memory registry
-    let entry_status = match new_status {
-        TaskStatus::Queued => TaskEntryStatus::Queued,
-        TaskStatus::Running => TaskEntryStatus::Running,
-        TaskStatus::Completed => TaskEntryStatus::Completed,
-        TaskStatus::Failed => TaskEntryStatus::Failed,
-        TaskStatus::Cancelled => TaskEntryStatus::Cancelled,
-        TaskStatus::Paused => TaskEntryStatus::Paused,
-    };
-    state
-        .gateway
-        .shared_context
-        .task_registry
-        .update_status(&id, entry_status);
-
-    // 3. Update task lane
-    if let Some(lane) = state.gateway.lane_manager.get_task_lane(&id) {
-        let lane_status = match new_status {
-            TaskStatus::Queued => TaskLaneStatus::Queued,
-            TaskStatus::Running => TaskLaneStatus::Running,
-            TaskStatus::Completed => TaskLaneStatus::Completed,
-            TaskStatus::Failed => TaskLaneStatus::Failed,
-            TaskStatus::Cancelled => TaskLaneStatus::Cancelled,
-            TaskStatus::Paused => TaskLaneStatus::Paused,
-        };
-        lane.set_status(lane_status);
-    }
-
-    // 4. Emit event
-    let now = Utc::now();
-    let event = match new_status {
-        TaskStatus::Cancelled => SystemEvent::TaskUpdated {
-            task_id: id.clone(),
-            status: "cancelled".to_string(),
-            progress_current: None,
-            progress_total: None,
-            timestamp: now,
-        },
-        _ => SystemEvent::TaskUpdated {
-            task_id: id.clone(),
-            status: new_status.as_str().to_string(),
-            progress_current: None,
-            progress_total: None,
-            timestamp: now,
-        },
-    };
-    let _ = state.gateway.bus.publish(event);
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "task_id": id,
-            "status": new_status.as_str()
-        })),
-    )
 }
 
 #[cfg(test)]
@@ -612,6 +438,103 @@ mod tests {
         assert!(outcome.artifacts.is_empty());
     }
 
+    fn make_agent_config(id: &str) -> openalpaca_storage::SubAgentConfig {
+        openalpaca_storage::SubAgentConfig {
+            id: id.to_string(),
+            template_id: id.to_string(),
+            name: id.to_string(),
+            description: None,
+            icon: None,
+            status: "idle".to_string(),
+            current_task_id: None,
+            skills_json: "[]".to_string(),
+            preset_json: "{}".to_string(),
+            constraints_json: None,
+            llm_config_json: None,
+            persona: None,
+            created_at: Utc::now(),
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn test_agent_runs_summary_from_seeded_history() {
+        use openalpaca_storage::{AgentTaskHistory, Database};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.db")).unwrap();
+        let task_repo = TaskRepository::new(&db);
+        let mut task = make_test_task();
+        task.id = "task-hist".to_string();
+        task_repo.create(&task).unwrap();
+
+        // No runs yet: the array is empty, not an error.
+        assert!(agent_runs_summary(&db, "task-hist").is_empty());
+
+        // Seed two agent runs (the shape record_agent_history writes).
+        let sub_repo = SubAgentRepository::new(&db);
+        sub_repo.upsert(&make_agent_config("researcher")).unwrap();
+        sub_repo.upsert(&make_agent_config("writer")).unwrap();
+        let base = Utc::now();
+        sub_repo
+            .add_history(&AgentTaskHistory {
+                id: "h1".to_string(),
+                agent_id: "researcher".to_string(),
+                task_id: "task-hist".to_string(),
+                role: "researcher".to_string(),
+                status: "completed".to_string(),
+                runtime_seconds: Some(12),
+                completed_at: base,
+            })
+            .unwrap();
+        sub_repo
+            .add_history(&AgentTaskHistory {
+                id: "h2".to_string(),
+                agent_id: "writer".to_string(),
+                task_id: "task-hist".to_string(),
+                role: "writer".to_string(),
+                status: "failed".to_string(),
+                runtime_seconds: None,
+                completed_at: base + chrono::Duration::seconds(30),
+            })
+            .unwrap();
+
+        let agents = agent_runs_summary(&db, "task-hist");
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0]["agent_id"], "researcher");
+        assert_eq!(agents[0]["status"], "completed");
+        assert_eq!(agents[0]["runtime_seconds"], 12);
+        assert_eq!(agents[1]["agent_id"], "writer");
+        assert_eq!(agents[1]["status"], "failed");
+        assert!(agents[1]["runtime_seconds"].is_null());
+    }
+
+    #[test]
+    fn test_task_response_serializes_agent_runs_under_assignments_key() {
+        use openalpaca_storage::AgentTaskHistory;
+
+        let resp = TaskResponse {
+            task: make_test_task(),
+            agents: Some(vec![AgentTaskHistory {
+                id: "h1".to_string(),
+                agent_id: "researcher".to_string(),
+                task_id: "task-1".to_string(),
+                role: "researcher".to_string(),
+                status: "completed".to_string(),
+                runtime_seconds: Some(7),
+                completed_at: Utc::now(),
+            }]),
+            outcome: None,
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        // Legacy key kept for client compatibility (CLI/GUI parse "assignments").
+        let runs = v["assignments"].as_array().expect("assignments array");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["agent_id"], "researcher");
+        assert_eq!(runs[0]["status"], "completed");
+        assert_eq!(runs[0]["runtime_seconds"], 7);
+    }
+
     #[test]
     fn test_task_serialization_suppresses_internal_fields() {
         let mut task = make_test_task();
@@ -651,7 +574,7 @@ mod tests {
         let outcome = parse_outcome(&task);
         let resp = TaskResponse {
             task,
-            assignments: None,
+            agents: None,
             outcome,
         };
 

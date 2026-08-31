@@ -106,14 +106,15 @@ Controls how the skill is triggered.
 
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
-| `invoke.mode` | `String` | `"manual"` | ENFORCED | `"manual"` — only via slash command or explicit selection. `"auto"` — eligible for auto-routing. `"scheduled"` — reserved for cron triggering. `"disabled"` — skipped at scan time, never enters the catalog. |
+| `invoke.mode` | `String` | `"manual"` | ENFORCED | `"manual"` — only via slash command or explicit selection. `"auto"` — eligible for auto-routing. `"scheduled"` — cron-triggered via `invoke.cron` (a `"scheduled"` skill without a cron expression logs a warning and is never fired automatically). `"disabled"` — skipped at scan time, never enters the catalog. |
 | `invoke.slash` | `Option<String>` | `None` | ENFORCED | Slash command (e.g., `"/review"`). Registered in the catalog's command index. The leading `/` is stripped and the command is lowercased for matching. |
 | `invoke.aliases` | `Vec<String>` | `[]` | ENFORCED | Alternative slash commands. Maintained in a dedicated alias index; `get_by_command()` resolves aliases exactly like the primary slash command (leading `/` stripped, lowercased). |
-| `invoke.hotkey` | `Option<String>` | `None` | PARSED | Keyboard shortcut binding. Reserved for GUI integration. |
-| `invoke.cron` | `Option<String>` | `None` | PARSED | Cron expression for `"scheduled"` mode. Reserved for wake system integration. |
+| `invoke.cron` | `Option<String>` | `None` | ENFORCED | Cron expression (6/7-field, seconds first — e.g. `"0 0 9 * * *"` for 09:00 daily). The daemon registers a wake-scheduler job (`skill:<id>`) at boot and re-syncs it on skill hot-reload; each fire injects the skill's slash command (or `/<skill-id>` when no slash command is declared) as a fresh turn on the local user's `scheduled` lane. Invalid expressions are logged and skipped. Any skill with a cron expression is scheduled, regardless of `invoke.mode`. Gated globally by `[orchestrator.routing] scheduled_skills_enabled` in `daemon.toml` (default `true`). |
 | `invoke.max_depth` | `usize` | `2` | PARSED | Intended maximum skill nesting depth. Currently parsed only — the nested-invocation executor hardcodes a maximum depth of 3 (see Section 8). |
 
-Slash-command conflicts between skills (two skills claiming the same command) are detected at scan time; the later-loaded skill wins and a warning is recorded in the catalog's validation errors (capped at 100 entries).
+Slash-command conflicts between skills (two skills claiming the same command) are detected at scan time; the later-loaded skill wins and a warning is logged.
+
+Command resolution order: primary slash command → alias → skill ID (directory name). The ID fallback means `/<skill-id>` always invokes the skill deterministically, even without an explicit `invoke.slash`; explicit commands and aliases win on conflict.
 
 ### 4.3 `routing` — Auto-Routing Configuration
 
@@ -121,11 +122,10 @@ Controls how the skill is scored against user queries for automatic selection.
 
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
-| `routing.intent` | `Vec<String>` | `[]` | ENFORCED | Intent phrases, used **two ways**: (1) the `SkillRouter` matches each phrase as a case-insensitive substring of the query for scoring; (2) the catalog also compiles each phrase as a case-insensitive regex (`(?i)<phrase>`) into trigger patterns used by `match_triggers()`. Regex metacharacters in a phrase behave as regex in the trigger path; phrases that fail to compile as regex are dropped from triggers with a warning (substring scoring still works). |
+| `routing.intent` | `Vec<String>` | `[]` | ENFORCED | Intent phrases: the `SkillRouter` matches each phrase as a case-insensitive substring of the query for scoring. |
 | `routing.keywords` | `Vec<String>` | `[]` | ENFORCED | Individual keywords matched as case-insensitive substrings. Score contribution is proportional: `(matched / total) * keyword_weight`. |
 | `routing.negative_keywords` | `Vec<String>` | `[]` | ENFORCED | Keywords that penalize the score. Any match subtracts `negative_penalty` (default 0.6). |
 | `routing.weights` | `ScoreWeights` | *(see below)* | ENFORCED | Per-skill weight overrides for the scoring formula. Alias: `routing.score` (backward compatibility). |
-| `routing.examples` | `RoutingExamples` | `{positive: [], negative: []}` | PARSED | Example queries. No runtime effect. |
 
 **`routing.weights` (alias: `routing.score`) sub-fields:**
 
@@ -136,14 +136,8 @@ Controls how the skill is scored against user queries for automatic selection.
 | `routing.weights.keyword_weight` | `f64` | `0.35` | ENFORCED | Maximum score from keyword matching (scaled by match ratio). |
 | `routing.weights.recency_weight` | `f64` | `0.2` | ENFORCED | Score added if the skill was recently used. |
 | `routing.weights.negative_penalty` | `f64` | `0.6` | ENFORCED | Score subtracted when any negative keyword matches. Configurable per skill. |
-| `routing.weights.health_weight` | `f64` | `0.0` | PARSED (dead) | Health-based scoring was never implemented; the router always reports `health_bonus: 0.0`. Kept for serialization compatibility. |
 
-**`routing.examples` sub-fields:**
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `routing.examples.positive` | `Vec<String>` | `[]` | Queries that should trigger this skill. |
-| `routing.examples.negative` | `Vec<String>` | `[]` | Queries that should NOT trigger this skill. |
+> Removed in the 2026-08-30 cleanup (unknown YAML keys are silently ignored, so old skills keep parsing): `invoke.hotkey`, `routing.examples`, `routing.weights.health_weight`, `context.read_when`, `permissions.confirm.message`, `permissions.sandbox.enabled`, `permissions.sandbox.fs_writable`, `tools.rate_limit.window_secs`, `tests.smoke`, and the `shell` context source type.
 
 ### 4.4 `context` — Context Injection
 
@@ -153,7 +147,6 @@ Defines external content to inject into the LLM prompt when the skill is invoked
 |-------|------|---------|--------|-------------|
 | `context.sources` | `Vec<ContextSource>` | `[]` | ENFORCED | List of context sources to inject (see source types below). |
 | `context.summarize` | `SummarizeConfig` | `{enabled: false, max_tokens: null}` | DEPRECATED | Has no runtime effect. Setting `enabled: true` triggers a scan-time deprecation warning ("is deprecated and has no effect"). Use `context.budget_tokens` for context size control. |
-| `context.read_when` | `Vec<String>` | `[]` | PARSED | No runtime effect. |
 | `context.budget_tokens` | `usize` | `0` | ENFORCED | Token budget for both the injected context and the skill-body prompt block (estimated as 1 token ≈ 4 characters). `0` means the default of 4,000 tokens (16,000 characters). |
 
 **Context Source Types** (discriminated by `type` field):
@@ -170,16 +163,12 @@ context:
       max_files: 10          # Default: 10
       max_bytes_each: 200000 # Default: 200,000
 
-    - type: shell            # Run a shell command (DEFERRED — not implemented)
-      command: "git log --oneline -5"
-      max_bytes: 50000       # Default: 50,000
 ```
 
 | Source Type | Required Fields | Optional Fields |
 |-------------|----------------|-----------------|
 | `file` | `path` | `max_bytes` (default: 50,000) |
 | `file_glob` | `pattern` | `max_files` (default: 10), `max_bytes_each` (default: 200,000) |
-| `shell` | `command` | `max_bytes` — **Not implemented**; logs a debug message and is skipped |
 
 The glob matcher is deliberately simple: it supports `**/` (any directory depth) and a single `*` wildcard per pattern; anything else is an exact path match.
 
@@ -190,17 +179,16 @@ Controls what the skill is allowed to do.
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
 | `permissions.level` | `String` | `"readonly"` | ENFORCED | Permission tier. Valid values: `"readonly"`, `"readwrite"`, `"admin"`. Unknown values are rejected at preflight (invocation blocked). |
-| `permissions.confirm` | `ConfirmAction` | `{tools: [], message: null}` | ENFORCED | Tools requiring user confirmation before execution. |
-| `permissions.sandbox` | `SandboxConfig` | `{enabled: false, net: false, fs_writable: []}` | ENFORCED (partial) | `net` is enforced at preflight; `enabled` and `fs_writable` are parsed only. |
+| `permissions.confirm` | `ConfirmAction` | `{tools: []}` | ENFORCED | Tools requiring user confirmation before execution. |
+| `permissions.sandbox` | `SandboxConfig` | `{net: false}` | ENFORCED | `net` is enforced at preflight. |
 
 **`permissions.confirm` sub-fields:**
 
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
 | `permissions.confirm.tools` | `Vec<String>` | `[]` | ENFORCED | Tool names requiring confirmation. Passed to `SandboxPolicy.require_confirmation_for`. |
-| `permissions.confirm.message` | `Option<String>` | `None` | PARSED | Custom confirmation prompt. Not displayed to users. |
 
-> **Interactive Confirmation**: When a tool listed in `confirm.tools` is invoked, the sandbox pauses execution and requests approval through the `ConfirmationBroker` (a `ToolConfirmationRequested` event routed to the active client; approvals come back via `POST /v1/chat/confirmations/{request_id}`). For skill invocations the approval timeout is **fixed at 300 seconds** — the skill path builds its sandbox policy with no timeout override, so the sandbox's hardcoded 300s fallback applies (`execution.agent_defaults.confirmation_timeout_secs` in `daemon.toml` is *not* plumbed into skill invocations). Two escape hatches exist:
+> **Interactive Confirmation**: When a tool listed in `confirm.tools` is invoked, the sandbox pauses execution and requests approval through the `ConfirmationBroker` (a `ToolConfirmationRequested` event routed to the active client; approvals come back via `POST /v1/chat/confirmations/{request_id}`). The approval timeout comes from `execution.agent_defaults.confirmation_timeout_secs` in `daemon.toml` (default 300s). Two escape hatches exist:
 > - `security.auto_approve_confirmations = true` in `daemon.toml` auto-approves all confirmations (logged as `tool_auto_approved`).
 > - If no `ConfirmationBroker` is available (headless/background execution), confirmation-required tools are **fail-closed** — blocked immediately.
 
@@ -208,9 +196,7 @@ Controls what the skill is allowed to do.
 
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
-| `permissions.sandbox.enabled` | `bool` | `false` | PARSED | No runtime effect; sandboxing is policy-driven, not toggle-driven. |
 | `permissions.sandbox.net` | `bool` | `false` | ENFORCED | Preflight rejects the invocation when `tools.allow` contains `web_fetch`, permission level is `readwrite` or `admin`, and `net` is `false`. (The check inspects `tools.allow` only, not capability-resolved tools.) |
-| `permissions.sandbox.fs_writable` | `Vec<String>` | `[]` | PARSED | Reserved; no runtime effect. |
 
 ### 4.6 `tools` — Tool Configuration
 
@@ -221,14 +207,13 @@ Controls which tools the skill can use. **Ignored when `requires_capabilities` i
 | `tools.allow` | `Vec<String>` | `[]` | ENFORCED | Tool allowlist (legacy name-based path). Only these tools are available during the skill's agentic loop. Empty (with no `requires_capabilities`) means no tools. |
 | `tools.deny` | `Vec<String>` | `[]` | ENFORCED | Tool denylist. Removed from the resolved tool set (both resolution paths), combined with the global deny list (`execution.skill_defaults.global_tool_deny` in `daemon.toml`). |
 | `tools.defaults` | `HashMap<String, Value>` | `{}` | DEPRECATED | No runtime effect. A non-empty map triggers a scan-time deprecation warning. |
-| `tools.rate_limit` | `RateLimitConfig` | `{max_calls: null, window_secs: null}` | ENFORCED (partial) | `max_calls` is enforced; `window_secs` is parsed only. |
+| `tools.rate_limit` | `RateLimitConfig` | `{max_calls: null}` | ENFORCED | `max_calls` is enforced as a total cap for the invocation. |
 
 **`tools.rate_limit` sub-fields:**
 
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
 | `tools.rate_limit.max_calls` | `Option<usize>` | `None` | ENFORCED | Propagated to `SandboxPolicy.max_tool_calls`: a **total cap on tool calls for the entire invocation** (there is no time window). |
-| `tools.rate_limit.window_secs` | `Option<u64>` | `None` | PARSED | No runtime effect. |
 
 ### 4.7 `output` — Output Validation
 
@@ -242,13 +227,12 @@ Controls validation and constraints on the skill's output.
 | `output.max_tokens` | `Option<usize>` | `None` | ENFORCED (soft) | Maximum output tokens (estimated as chars/4). Logs a warning if exceeded but does **not** reject or truncate. |
 | `output.auto_repair` | `bool` | `false` | ENFORCED | When `true`, validation failures trigger a deterministic repair attempt — see Section 9. |
 
-### 4.8 `tests` — Smoke Testing
+### 4.8 `tests` — Test Metadata
 
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
 | `tests.inputs` | `Vec<String>` | `[]` | PARSED | Test input strings. Not executed. |
 | `tests.expect` | `ExpectConfig` | `{contains: [], format: null}` | PARSED | Expected output assertions. Not executed. |
-| `tests.smoke` | `Vec<String>` | `[]` | ENFORCED (validation only) | Paths to smoke-test input files, relative to the skill directory. `validate_smoke_config()` checks that each listed file exists (reporting missing files as failed results) but does **not** execute the skill. |
 
 **`tests.expect` sub-fields:**
 
@@ -385,7 +369,7 @@ These fields exist for backward compatibility with older skill definitions. They
 | `auto_load` | `bool` | `false` | `invoke.mode = "auto"` | Only if `invoke.mode` is still `"manual"` |
 | `trigger_patterns` | `Vec<String>` | `[]` | `routing.intent` | Only if `routing.intent` is empty |
 | `tools_required` | `Vec<String>` | `[]` | `tools.allow` | Only if `tools.allow` is empty |
-| `read_when` | `Vec<String>` | `[]` | `context.read_when` | Only if `context.read_when` is empty |
+| `read_when` | `Vec<String>` | `[]` | *(dropped — parsed and ignored)* | — |
 
 **Migration**: New-spec fields always take precedence over legacy fields. If both are present, legacy values are ignored.
 
@@ -492,7 +476,6 @@ When context is injected, a `SkillContextInjected` event is emitted with the byt
 
 1. **File**: The path is resolved relative to the skill directory (`config/skills/<skill-id>/`).
 2. **FileGlob**: The pattern is matched against files within the skill directory tree (up to `max_files`).
-3. **Shell**: **Not implemented** — logs a debug message and is skipped.
 
 ### Security Rules
 
@@ -658,7 +641,7 @@ The daemon's file watcher monitors the skills directory. When a file under `conf
 
 ### Plugin-Backed Skills
 
-The catalog also supports skills registered by plugins (`SkillSource::Plugin`, via `register_plugin_skill()`): they have no `SKILL.md` on disk and execute through a `PluginSkillExecutor`. The plugin host system is not yet shipped; file-based skills are the only kind in practical use today.
+The catalog also supports skills registered by plugins (`SkillSource::Plugin`, via `register_plugin_skill()`): they have no `SKILL.md` on disk. Invocation works like any other skill (slash command or router selection), but instead of running the LLM agentic loop the orchestrator delegates to the plugin's `PluginSkillExecutor` out-of-process; tool callbacks the plugin requests are proxied through the sandboxed execute path (capability checks, confirmation gating, timeouts). The plugin host system is early-stage; file-based skills are the only kind in practical use today.
 
 ---
 
@@ -755,11 +738,6 @@ output:
     - "Summary"
   max_tokens: 3000               # Soft limit — logs warning if exceeded
   auto_repair: true              # Append missing sections deterministically
-
-# ── Testing ───────────────────────────────────────────────────
-tests:
-  smoke:                         # File existence is validated (not executed)
-    - "examples/sample_api.json"
 
 # ── Bundled Scripts ──────────────────────────────────────────
 scripts:                           # Scripts in <skill-dir>/scripts/ exposed as tools

@@ -50,8 +50,6 @@ fn empty_compose_inputs() -> (
         raw_blocks: Vec::new(),
         mode: StaticPromptMode::Default,
         model_window: 200_000,
-        planner_agents: None,
-        planner_protocol_v2: false,
     };
 
     let dynamic_context_input = DynamicContextInput {
@@ -132,9 +130,9 @@ fn test_engine_produces_composed_request_for_all_fingerprints_wired() {
 }
 
 #[test]
-fn test_engine_runs_for_all_eight_variants_without_panic() {
+fn test_engine_runs_for_all_variants_without_panic() {
     // Phase 1 guarantee: `ComposeEngine::compose` runs end-to-end for each of
-    // the eight `ComposeRequest` variants. The stub layers are unaware of the
+    // the five `ComposeRequest` variants. The stub layers are unaware of the
     // variant (that wiring arrives in Phase 3), so the test here simply
     // exercises every variant constructor and confirms `compose` returns a
     // typed `ComposedRequest` without panicking.
@@ -170,53 +168,12 @@ fn test_engine_runs_for_all_eight_variants_without_panic() {
             message_source: Arc::<str>::from("cli"),
             overrides: ComposeOverrides::default(),
         },
-        ComposeRequest::Planner {
-            idle_agents: Arc::new(vec![]),
-            user_message: "plan".to_string(),
-            active_tasks_block: None,
-            overrides: ComposeOverrides::default(),
-        },
-        ComposeRequest::Replanner {
-            current_plan: Arc::new(PlanState::default()),
-            workspace_snapshot: Arc::new(WorkspaceSnapshot::default()),
-            overrides: ComposeOverrides::default(),
-        },
         ComposeRequest::Social {
             lane_key: "lane".to_string(),
             query: "hi".to_string(),
             overrides: ComposeOverrides::default(),
         },
-        // PipelineStep and DagNode need a SubAgent (re-exported as AgentConfig).
-        {
-            let agent = Arc::new(AgentConfig {
-                id: "a".to_string(),
-                template_id: "a".to_string(),
-                name: "A".to_string(),
-                description: None,
-                icon: None,
-                status: crate::agent::subagent::AgentStatus::Idle,
-                current_task: None,
-                capabilities: vec![],
-                preset: crate::agent::subagent::AgentPreset::default(),
-                constraints: crate::agent::subagent::AgentConstraints::default(),
-                llm_config: crate::agent::subagent::AgentLlmConfig::default(),
-            });
-            ComposeRequest::PipelineStep {
-                agent: agent.clone(),
-                step_index: 0,
-                step_description: Arc::<str>::from("desc"),
-                scope_block: Arc::<str>::from("scope"),
-                output_block: Arc::<str>::from("output"),
-                context_package: Arc::new(crate::prompt_ctx::ContextPackage {
-                    sections: vec![],
-                    total_tokens: 0,
-                    budget: 0,
-                    sub_agent_window: 200_000,
-                }),
-                memory_block: None,
-                overrides: ComposeOverrides::default(),
-            }
-        },
+        // DagNode needs a SubAgent (re-exported as AgentConfig).
         {
             let agent = Arc::new(AgentConfig {
                 id: "a".to_string(),
@@ -247,7 +204,7 @@ fn test_engine_runs_for_all_eight_variants_without_panic() {
         },
     ];
 
-    assert_eq!(variants.len(), 8, "all 8 variants must be represented");
+    assert_eq!(variants.len(), 5, "all 5 variants must be represented");
 
     for (idx, req) in variants.iter().enumerate() {
         let (p_in, sp_in, dc_in, h_in) = empty_compose_inputs();
@@ -311,34 +268,7 @@ fn test_compose_request_default_modes_table() {
     assert_eq!(dc, D::Skip);
     assert!(matches!(h, H::Default));
 
-    // Planner: Minimal + PlannerHierarchical + Skip + Skip.
-    let req = ComposeRequest::Planner {
-        idle_agents: Arc::new(vec![]),
-        user_message: "plan this".to_string(),
-        active_tasks_block: None,
-        overrides: ComposeOverrides::default(),
-    };
-    let (p, sp, dc, h) = req.default_modes();
-    assert_eq!(p, P::Minimal);
-    assert_eq!(sp, S::PlannerHierarchical);
-    assert_eq!(dc, D::Skip);
-    assert!(matches!(h, H::Skip));
-
-    // Replanner: Minimal + ReplannerHierarchical + Skip + Default.
-    // History=Default (not Skip) so the canonical "Evaluate..." current_user_turn
-    // flows through Layer 4 into the final messages vec. See Phase 4 Commit 2.
-    let req = ComposeRequest::Replanner {
-        current_plan: Arc::new(PlanState::default()),
-        workspace_snapshot: Arc::new(WorkspaceSnapshot::default()),
-        overrides: ComposeOverrides::default(),
-    };
-    let (p, sp, dc, h) = req.default_modes();
-    assert_eq!(p, P::Minimal);
-    assert_eq!(sp, S::ReplannerHierarchical);
-    assert_eq!(dc, D::Skip);
-    assert!(matches!(h, H::Default));
-
-    // Phase 6: PipelineStep, DagNode, LeadAgent all use
+    // Phase 6: DagNode and LeadAgent both use
     // (Skip, SubagentMinimal, Default, Default). Spec errata (pre-migration
     // emits no SystemPersona content → Skip); StaticPromptMode::SubagentMinimal
     // is the new Phase-6 mode carrying the raw_blocks-only emission order;
@@ -359,7 +289,7 @@ fn test_compose_request_default_modes_table() {
     assert_eq!(dc, D::Default);
     assert!(matches!(h, H::Default));
 
-    // PipelineStep: Skip + SubagentMinimal + Default + Default.
+    // DagNode: Skip + SubagentMinimal + Default + Default.
     use crate::agent::subagent::{
         AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, SubAgent,
     };
@@ -376,28 +306,6 @@ fn test_compose_request_default_modes_table() {
         constraints: AgentConstraints::default(),
         llm_config: AgentLlmConfig::default(),
     });
-    let req = ComposeRequest::PipelineStep {
-        agent: dummy_agent.clone(),
-        step_index: 0,
-        step_description: Arc::<str>::from("desc"),
-        scope_block: Arc::<str>::from("scope"),
-        output_block: Arc::<str>::from("out"),
-        context_package: Arc::new(crate::prompt_ctx::ContextPackage {
-            sections: vec![],
-            total_tokens: 0,
-            budget: 0,
-            sub_agent_window: 200_000,
-        }),
-        memory_block: None,
-        overrides: ComposeOverrides::default(),
-    };
-    let (p, sp, dc, h) = req.default_modes();
-    assert_eq!(p, P::Skip);
-    assert_eq!(sp, S::SubagentMinimal);
-    assert_eq!(dc, D::Default);
-    assert!(matches!(h, H::Default));
-
-    // DagNode: Skip + SubagentMinimal + Default + Default.
     let req = ComposeRequest::DagNode {
         agent: dummy_agent.clone(),
         assignment: Arc::<str>::from("a"),
@@ -598,8 +506,6 @@ fn make_static_prompt_input(
         raw_blocks: Vec::new(),
         mode,
         model_window: 200_000,
-        planner_agents: None,
-        planner_protocol_v2: false,
     }
 }
 
@@ -660,31 +566,6 @@ fn test_static_prompt_layer_social_minimal_mode_matches_inline_format() {
         out.system_message.contains("Tone: Concise and professional"),
         "SocialMinimal must match simple_query_handler's exact Tone string, got: {}",
         &*out.system_message
-    );
-}
-
-#[test]
-fn test_static_prompt_layer_planner_hierarchical_mode() {
-    let persona_out = Arc::new(super::persona::compute(&make_persona_input(
-        1,
-        PersonaMode::Minimal,
-    )));
-    let mut input = make_static_prompt_input(persona_out, StaticPromptMode::PlannerHierarchical);
-    // PlannerHierarchical mode reads `planner_agents` for the `<agents>`
-    // block — populate with an empty list here (the golden tests cover
-    // populated lists end-to-end).
-    input.planner_agents = Some(Arc::new(vec![]));
-    let out = super::static_prompt::compute(&input);
-    // Must produce a non-empty system message (byte-identical structure is
-    // asserted by test_golden_planner_byte_identical_protocol_v1/v2).
-    assert!(
-        !out.system_message.is_empty(),
-        "PlannerHierarchical mode should produce a non-empty system message"
-    );
-    // Planner system prompt always opens with "You are a task planner".
-    assert!(
-        out.system_message.contains("task planner"),
-        "PlannerHierarchical output should match the existing planner prompt structure"
     );
 }
 
@@ -1099,25 +980,6 @@ fn test_history_layer_default_mode_plain_summary_is_not_wrapped() {
     let out = super::history::compute(&input);
     assert_eq!(out.messages.len(), 1);
     assert_eq!(out.messages[0].content, "prior summary");
-}
-
-#[test]
-fn test_history_layer_first_step_only_mode_emits_memory_user_message() {
-    let memory_block: Arc<str> = Arc::from("retrieved memory block");
-    let input = HistoryInput {
-        summary: None,
-        summary_wrap_mode: SummaryWrapMode::Plain,
-        recent_messages: Arc::new(vec![]),
-        current_user_turn: None,
-        lane_tip_fingerprint: [0u8; 32],
-        mode: HistoryMode::FirstStepOnly {
-            memory_block: memory_block.clone(),
-        },
-    };
-    let out = super::history::compute(&input);
-    assert_eq!(out.messages.len(), 1);
-    assert!(matches!(out.messages[0].role, Role::User));
-    assert_eq!(out.messages[0].content, "retrieved memory block");
 }
 
 #[test]
@@ -1700,8 +1562,6 @@ fn test_golden_social_fast_path_byte_identical() {
         send_tool_context: None,
         message_source: None,
         raw_blocks: Vec::new(),
-        planner_agents: None,
-        planner_protocol_v2: false,
         mode: StaticPromptMode::SocialMinimal,
         model_window: 8192,
     };
@@ -1785,606 +1645,6 @@ fn test_golden_social_fast_path_byte_identical() {
     assert_eq!(composed.messages[0].role, Role::System);
     assert_eq!(composed.messages.last().unwrap().role, Role::User);
     assert_eq!(composed.messages.last().unwrap().content, query);
-}
-
-// ──────────────────────────────────────────────────────────────────────────
-// Phase 4 Commit 2 — Replanner migration golden-output test
-// ──────────────────────────────────────────────────────────────────────────
-
-/// Golden-output: asserts the migrated Replanner path produces a byte-identical
-/// system message to what the pre-migration `Replanner::build_replan_prompt`
-/// (orchestrator/replanner/mod.rs lines 109-213) would have produced.
-///
-/// Routing through `compose(ComposeRequest::Replanner{..})` with
-/// `PersonaMode::Minimal` + `StaticPromptMode::ReplannerHierarchical` +
-/// `DynamicContextMode::Skip` + `HistoryMode::Default` (carrying the
-/// canonical "Evaluate…" current_user_turn) must reproduce the pre-migration
-/// system prompt exactly.
-#[test]
-fn test_golden_replanner_byte_identical() {
-    use crate::agent::subagent::{
-        AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, SubAgent,
-    };
-    use openalpaca_llm::Role;
-
-    // Canned inputs mirroring build_replan_prompt signature.
-    let original_objective = "Process customer feedback into a report.";
-    let dag_nodes_text = "\
-- [node_1] \"Extract feedback\" (agent: parser) — COMPLETED — extracted 42 entries\n\
-- [node_2] \"Categorize feedback\" (agent: classifier) — RUNNING\n\
-- [node_3] \"Write report\" (agent: writer) — PENDING (dependencies not met)\n";
-    let workspace_summary = "feedback_entries: 42 items\n";
-    let replans_so_far: usize = 1;
-
-    let make_agent = |id: &str, name: &str, desc: &str| SubAgent {
-        id: id.to_string(),
-        template_id: id.to_string(),
-        name: name.to_string(),
-        description: Some(desc.to_string()),
-        icon: None,
-        status: AgentStatus::Idle,
-        current_task: None,
-        capabilities: vec![],
-        preset: AgentPreset::default(),
-        constraints: AgentConstraints::default(),
-        llm_config: AgentLlmConfig::default(),
-    };
-    let agents: Vec<SubAgent> = vec![
-        make_agent("parser", "Parser", "Parses raw text"),
-        make_agent("writer", "Writer", "Writes reports"),
-    ];
-
-    // === Expected system prompt (mirror of build_replan_prompt output) ===
-    let expected_system = {
-        let mut p = String::from(
-            "You are a task replanner for OpenAlpaca. Evaluate whether the current \
-             execution plan is still on track or needs modification.\n\n",
-        );
-        p.push_str(&format!(
-            "<original_objective>\n{}\n</original_objective>\n\n",
-            original_objective
-        ));
-        p.push_str("<dag_state>\n");
-        p.push_str(dag_nodes_text);
-        p.push_str("</dag_state>\n\n");
-        p.push_str("<workspace>\n");
-        p.push_str(workspace_summary);
-        p.push_str("</workspace>\n\n");
-        // Pre-migration `build_replan_prompt` emitted <available_agents>
-        // BEFORE <context> — mirror that exact order here so the fixture
-        // validates byte-identical preservation (not just internal
-        // consistency).
-        p.push_str("<available_agents>\n");
-        for a in &agents {
-            let desc = a.description.as_deref().unwrap_or("No description");
-            p.push_str(&format!(
-                "- ID: \"{}\", Name: \"{}\", Description: \"{}\"\n",
-                a.id, a.name, desc
-            ));
-        }
-        p.push_str("</available_agents>\n\n");
-        p.push_str(&format!(
-            "<context>\nReplans so far: {} (be conservative — avoid unnecessary changes)\n</context>\n\n",
-            replans_so_far
-        ));
-        p.push_str(
-            r#"<response_format>
-Respond with ONLY a single JSON object. No markdown, no explanation, no other text.
-
-If the plan is on track:
-{"decision": "continue"}
-
-If the plan needs modification (replace remaining PENDING/READY nodes with new nodes):
-{"decision": "modify_dag", "dag": {"nodes": [
-  {"node_id": "new_1", "title": "...", "description": "...", "agent_id": "...", "agent_name": "...", "depends_on": [], "workspace_keys": [], "output_key": "..."},
-  ...
-]}}
-
-If the task should be abandoned:
-{"decision": "abort", "reason": "Explanation of why the task cannot be completed"}
-</response_format>
-
-<rules>
-- Prefer "continue" unless completed results clearly show the remaining plan is wrong
-- A "modify_dag" replaces only PENDING/READY/SKIPPED nodes; COMPLETED/RUNNING nodes are kept
-- New nodes in modify_dag can reference output_keys from already-completed nodes
-- Use exact agent_id values from the Available Agents list
-- 2-8 nodes max in modified DAG
-- Only abort if the task is fundamentally impossible given completed results
-</rules>
-"#,
-        );
-        p
-    };
-
-    // === Via the engine ===
-    let engine = ComposeEngine::new(16);
-
-    let persona_input = PersonaInput {
-        system_persona: Arc::new(SystemPersona::default()),
-        user_document: Arc::new(None),
-        identity_document: Arc::new(Option::<IdentityDocument>::None),
-        persona_version: 0,
-        mode: PersonaMode::Minimal,
-        identity_budget: None,
-        user_budget: None,
-    };
-    let persona_output = Arc::new(super::persona::compute(&persona_input));
-
-    let static_prompt_input = StaticPromptInput {
-        persona_output,
-        agent_persona: None,
-        agent_config_fingerprint: [0u8; 32],
-        skill_block: None,
-        skills_catalog: None,
-        bootstrap: None,
-        tools: Arc::new(Vec::new()),
-        connector_status: Arc::new(Vec::new()),
-        send_tool_context: None,
-        message_source: None,
-        raw_blocks: vec![
-            SystemBlock {
-                name: "original_objective",
-                content: Arc::<str>::from(format!(
-                    "<original_objective>\n{}\n</original_objective>\n\n",
-                    original_objective
-                )),
-                priority: SectionPriority::High,
-            },
-            SystemBlock {
-                name: "dag_state",
-                content: Arc::<str>::from(format!(
-                    "<dag_state>\n{}</dag_state>\n\n",
-                    dag_nodes_text
-                )),
-                priority: SectionPriority::High,
-            },
-            SystemBlock {
-                name: "workspace",
-                content: Arc::<str>::from(format!(
-                    "<workspace>\n{}</workspace>\n\n",
-                    workspace_summary
-                )),
-                priority: SectionPriority::Normal,
-            },
-            SystemBlock {
-                name: "context",
-                content: Arc::<str>::from(format!(
-                    "<context>\nReplans so far: {} (be conservative — avoid unnecessary changes)\n</context>\n\n",
-                    replans_so_far
-                )),
-                priority: SectionPriority::Normal,
-            },
-        ],
-        planner_agents: Some(Arc::new(agents.clone())),
-        planner_protocol_v2: false,
-        mode: StaticPromptMode::ReplannerHierarchical,
-        model_window: 8192,
-    };
-
-    let dynamic_context_input = DynamicContextInput {
-        context_bundle: Arc::new(ContextBundle::empty()),
-        query: Arc::from(""),
-        memory_retrieval_hash: [0u8; 32],
-        path: ExecutionPath::SimpleQuery,
-        reserved_tokens: 0,
-        mode: DynamicContextMode::Skip,
-    };
-
-    let history_input = HistoryInput {
-        lane_tip_fingerprint: [0u8; 32],
-        summary: None,
-        summary_wrap_mode: SummaryWrapMode::Plain,
-        recent_messages: Arc::new(Vec::new()),
-        current_user_turn: Some(ChatMessage::user(
-            "Evaluate the current task progress and decide whether to continue, \
-             modify the plan, or abort.",
-        )),
-        mode: HistoryMode::Default,
-    };
-
-    let request = ComposeRequest::Replanner {
-        current_plan: Arc::new(PlanState::default()),
-        workspace_snapshot: Arc::new(WorkspaceSnapshot::default()),
-        overrides: ComposeOverrides::default(),
-    };
-
-    let composed = engine.compose(
-        &request,
-        persona_input,
-        static_prompt_input,
-        dynamic_context_input,
-        history_input,
-        8192,
-        Arc::new(Vec::new()),
-        None,
-        None,
-    );
-
-    // Byte-identical assertion on the system message.
-    let system_msg = composed
-        .messages
-        .iter()
-        .find(|m| matches!(m.role, Role::System))
-        .expect("expected a system message");
-    assert_eq!(
-        system_msg.content, expected_system,
-        "Replanner migration produced non-byte-identical system prompt"
-    );
-
-    // User message carrying the canonical "Evaluate..." turn.
-    assert!(
-        composed.messages.iter().any(|m| matches!(m.role, Role::User)
-            && m.content.starts_with("Evaluate the current task progress")),
-        "Replanner migration must include the canonical 'Evaluate...' user turn"
-    );
-}
-
-// ──────────────────────────────────────────────────────────────────────────
-// Phase 4 Commit 3 — Planner migration golden-output tests
-// ──────────────────────────────────────────────────────────────────────────
-
-/// Build the pre-migration planner system prompt as it was produced by the
-/// now-deleted `task_planner::prompt::build_hierarchical_prompt(&agents, v2)`.
-/// Kept inline in this test module so the Phase 4 Commit 3 migration is
-/// asserted byte-for-byte against the old helper's output.
-///
-/// The two r#"..."# blocks below are pasted verbatim from the pre-migration
-/// helper (task_planner/prompt.rs:156-263). Any future edit to the Planner
-/// prompt must update this fixture too.
-fn expected_planner_system_message(
-    agents: &[crate::agent::subagent::SubAgent],
-    plan_protocol_v2: bool,
-) -> String {
-    let mut prompt = String::from(
-        "You are a task planner for OpenAlpaca. Classify the user message and, \
-         for complex tasks, decompose into a DAG of sub-tasks.\n\n",
-    );
-
-    // Mirror format_agent_list (pre-migration task_planner/prompt.rs:10-36).
-    prompt.push_str("<agents>\n");
-    if agents.is_empty() {
-        prompt.push_str("No agents are currently available.\n");
-    } else {
-        for agent in agents.iter() {
-            let desc = agent.description.as_deref().unwrap_or("No description");
-            let capabilities_str: Vec<String> = agent
-                .capabilities
-                .iter()
-                .map(|s| format!("{} ({:.1})", s.name, s.proficiency))
-                .collect();
-            prompt.push_str(&format!(
-                "<agent id=\"{}\" name=\"{}\">\n{}\nCapabilities: {}\n</agent>\n",
-                agent.id,
-                agent.name,
-                desc,
-                if capabilities_str.is_empty() {
-                    "none".to_string()
-                } else {
-                    capabilities_str.join(", ")
-                }
-            ));
-        }
-    }
-    prompt.push_str("</agents>\n");
-
-    prompt.push_str(
-        r#"
-<instructions>
-Classify the user's message into one of two categories:
-- "simple_query": greetings, short questions, casual conversation, or anything answerable directly without agent work.
-- "complex_task": multi-step tasks that require one or more agents to execute.
-
-Think step-by-step before producing your JSON response:
-1. Is this a simple greeting, question, or chat message? If yes, classify as "simple_query".
-2. If it is a task, are all steps known upfront and predictable, or is it exploratory/dynamic?
-3. Which available agents have the right skills for the task?
-4. Write your reasoning into the "reasoning" field, then produce the JSON.
-
-For complex tasks, choose exactly one execution strategy:
-- Set "use_lead_agent": true when the task is genuinely exploratory, requires iterative refinement, or when the number of steps cannot be determined (e.g. debugging, open-ended research, creative exploration).
-- Provide a "dag" with nodes when steps are enumerable upfront (even if partially dependent). Use DAG when multiple independent sub-tasks are visible in the user's message.
-- Choose lead agent when the task is genuinely exploratory, adaptive, or requires iterative refinement. If the steps are clear, prefer DAG.
-
-When choosing an execution strategy:
-- lead_agent: Task is exploratory, adaptive, or requires iterative refinement.
-- dag: 2+ steps known upfront; some steps can run in parallel.
-- pipeline (assignments array): Steps are known upfront AND strictly sequential with no parallelism.
-</instructions>
-
-<examples>
-Example 1 — Simple query:
-User: "Hello, how are you?"
-{"classification": "simple_query", "title": null, "assignments": [], "reasoning": "This is a greeting, not a task.", "dag": null, "use_lead_agent": false}
-
-Example 2 — Complex task with lead agent (exploratory):
-User: "Research the best caching strategy for our REST API and recommend one."
-{"classification": "complex_task", "title": "Research API caching strategies", "assignments": [], "reasoning": "This is an open-ended research task. The user wants evaluation of options, which requires iterative exploration. Using lead agent.", "dag": null, "use_lead_agent": true}
-
-Example 3 — Complex task with DAG (predictable steps):
-User: "Translate this document into French, Spanish, and German."
-{"classification": "complex_task", "title": "Translate document into 3 languages", "assignments": [], "reasoning": "All three translations are known upfront and independent. Using a DAG with parallel nodes.", "dag": {"nodes": [
-  {"node_id": "node_1", "title": "Translate to French", "description": "Translate the document into French.", "agent_id": "translator-01", "agent_name": "Translator", "depends_on": [], "workspace_keys": [], "output_key": "french_translation"},
-  {"node_id": "node_2", "title": "Translate to Spanish", "description": "Translate the document into Spanish.", "agent_id": "translator-01", "agent_name": "Translator", "depends_on": [], "workspace_keys": [], "output_key": "spanish_translation"},
-  {"node_id": "node_3", "title": "Translate to German", "description": "Translate the document into German.", "agent_id": "translator-01", "agent_name": "Translator", "depends_on": [], "workspace_keys": [], "output_key": "german_translation"}
-]}, "use_lead_agent": false}
-
-Example 4 — Complex task with DAG (sequential dependencies):
-User: "Read the report, summarize key findings, then send the summary to the team."
-{"classification": "complex_task", "title": "Read, summarize, and send report", "assignments": [], "reasoning": "Three steps with sequential dependencies: read → summarize → send. Using DAG with dependency edges.", "dag": {"nodes": [
-  {"node_id": "n1", "title": "Read report", "description": "Read and extract content from the report.", "agent_id": "general-agent-01", "agent_name": "General Agent", "depends_on": [], "workspace_keys": [], "output_key": "report_content"},
-  {"node_id": "n2", "title": "Summarize findings", "description": "Summarize the key findings from the report.", "agent_id": "general-agent-01", "agent_name": "General Agent", "depends_on": ["n1"], "workspace_keys": ["report_content"], "output_key": "summary"},
-  {"node_id": "n3", "title": "Send summary", "description": "Send the summary to the team.", "agent_id": "general-agent-01", "agent_name": "General Agent", "depends_on": ["n2"], "workspace_keys": ["summary"]}
-]}, "use_lead_agent": false}
-
-Example 5 — Sequential pipeline (strict linear dependency, no parallelism):
-User: "Read the data file, analyze the trends, and write a report."
-{"classification": "complex_task", "title": "Analyze data and write report", "assignments": [
-  {"agent_id": "general-agent-01", "agent_name": "General Agent", "role_description": "Read and parse the data file", "matched_skills": ["file_read"]},
-  {"agent_id": "general-agent-01", "agent_name": "General Agent", "role_description": "Analyze trends in the data", "matched_skills": ["analysis"]},
-  {"agent_id": "general-agent-01", "agent_name": "General Agent", "role_description": "Write the final report", "matched_skills": ["text_generate"]}
-], "reasoning": "Strict linear pipeline: each step depends on the previous. No parallelism opportunity.", "dag": null, "use_lead_agent": false}
-
-</examples>
-
-<critical>
-IMPORTANT: Regardless of the language of the user's message, you MUST ALWAYS respond with
-ONLY a valid JSON object. Never reply conversationally. Never respond in the user's language.
-Your ENTIRE output must be a single JSON object starting with '{' and ending with '}'.
-</critical>
-
-<format>
-Respond with ONLY a single JSON object. No markdown fences, no explanation, no other text.
-
-JSON schema:
-{"classification": "simple_query" | "complex_task", "title": string | null, "assignments": [], "reasoning": "...", "dag": null | {"nodes": [...]}, "use_lead_agent": boolean}
-
-When "classification" is "complex_task", you MUST provide exactly one execution path:
-1. "use_lead_agent": true (with "dag": null) — for exploratory or dynamic tasks
-2. "dag" with 2-8 nodes (with "use_lead_agent": false) — for fully predictable tasks
-Do NOT set both "use_lead_agent": true and "dag" simultaneously.
-Returning "complex_task" with no DAG and use_lead_agent=false is INVALID.
-</format>
-
-<rules>
-DAG construction rules:
-- Each node is a sub-task assigned to one agent (use exact agent_id values from the agents list)
-- "depends_on": list of node_ids that must complete before this node starts
-- Nodes with no shared dependencies run in parallel — express parallelism for independent tasks
-- "workspace_keys": workspace entries this node reads (from other nodes' output_key)
-- "output_key": workspace key where this node writes its result
-- 2-8 nodes maximum
-- Decompose into distinct stages that require different skills
-</rules>
-"#,
-    );
-
-    if plan_protocol_v2 {
-        prompt.push_str(
-            r#"
-
-<v2_protocol>
-Additional optional fields (v2 protocol):
-- "execution_mode": "lead_agent" | "dag" | "pipeline" — explicit execution path.
-  When set, this takes priority over use_lead_agent/dag inference.
-- "predictability_score": 0.0-1.0 — your confidence that all task steps are known upfront.
-  0.0 = fully exploratory, 1.0 = fully predictable.
-
-When you include "execution_mode", you SHOULD also set "predictability_score".
-Example:
-{"classification": "complex_task", "title": "Batch process items", "assignments": [], "reasoning": "...", "dag": {...}, "use_lead_agent": false, "execution_mode": "dag", "predictability_score": 0.9}
-</v2_protocol>
-"#,
-        );
-    }
-
-    prompt
-}
-
-/// Canned SubAgent fixture for the planner golden tests. Mirrors the pattern
-/// used by the Replanner golden test above.
-fn make_planner_test_agent(
-    id: &str,
-    name: &str,
-    desc: &str,
-    caps: Vec<(&str, f32)>,
-) -> crate::agent::subagent::SubAgent {
-    use crate::agent::subagent::{
-        AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Capability, SubAgent,
-    };
-    SubAgent {
-        id: id.to_string(),
-        template_id: id.to_string(),
-        name: name.to_string(),
-        description: Some(desc.to_string()),
-        icon: None,
-        status: AgentStatus::Idle,
-        current_task: None,
-        capabilities: caps
-            .into_iter()
-            .map(|(n, p)| Capability {
-                name: n.to_string(),
-                category: "test".to_string(),
-                proficiency: p,
-            })
-            .collect(),
-        preset: AgentPreset::default(),
-        constraints: AgentConstraints::default(),
-        llm_config: AgentLlmConfig::default(),
-    }
-}
-
-/// Shared setup for both planner golden tests: builds `ComposeRequest::Planner`
-/// + the four layer inputs, invokes `compose()`, and returns the composed
-///   messages. Factoring this out keeps the v1/v2 tests DRY.
-fn run_planner_compose(
-    agents: &[crate::agent::subagent::SubAgent],
-    user_message: &str,
-    plan_protocol_v2: bool,
-) -> ComposedRequest {
-    use crate::prompt_ctx::AgentSummary;
-    use openalpaca_llm::ChatMessage;
-
-    let engine = ComposeEngine::new(16);
-
-    let persona_input = PersonaInput {
-        system_persona: Arc::new(SystemPersona::default()),
-        user_document: Arc::new(None),
-        identity_document: Arc::new(Option::<IdentityDocument>::None),
-        persona_version: 0,
-        mode: PersonaMode::Minimal,
-        identity_budget: None,
-        user_budget: None,
-    };
-    let persona_output = Arc::new(super::persona::compute(&persona_input));
-
-    let static_prompt_input = StaticPromptInput {
-        persona_output,
-        agent_persona: None,
-        agent_config_fingerprint: [0u8; 32],
-        skill_block: None,
-        skills_catalog: None,
-        bootstrap: None,
-        tools: Arc::new(Vec::new()),
-        connector_status: Arc::new(Vec::new()),
-        send_tool_context: None,
-        message_source: None,
-        raw_blocks: Vec::new(),
-        planner_agents: Some(Arc::new(agents.to_vec())),
-        planner_protocol_v2: plan_protocol_v2,
-        mode: StaticPromptMode::PlannerHierarchical,
-        model_window: 8192,
-    };
-
-    let dynamic_context_input = DynamicContextInput {
-        context_bundle: Arc::new(ContextBundle::empty()),
-        query: Arc::from(user_message),
-        memory_retrieval_hash: [0u8; 32],
-        path: ExecutionPath::SimpleQuery,
-        reserved_tokens: 0,
-        mode: DynamicContextMode::Skip,
-    };
-
-    let history_input = HistoryInput {
-        lane_tip_fingerprint: [0u8; 32],
-        summary: None,
-        summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
-        recent_messages: Arc::new(Vec::new()),
-        current_user_turn: Some(ChatMessage::user(user_message)),
-        mode: HistoryMode::Default,
-    };
-
-    let request = ComposeRequest::Planner {
-        idle_agents: Arc::new(
-            agents
-                .iter()
-                .map(|a| AgentSummary {
-                    name: a.name.clone(),
-                    role: a.description.clone().unwrap_or_default(),
-                    step: 0,
-                })
-                .collect(),
-        ),
-        user_message: user_message.to_string(),
-        active_tasks_block: None,
-        overrides: ComposeOverrides::default(),
-    };
-
-    engine.compose(
-        &request,
-        persona_input,
-        static_prompt_input,
-        dynamic_context_input,
-        history_input,
-        8192,
-        Arc::new(Vec::new()),
-        None,
-        None,
-    )
-}
-
-/// Golden-output: asserts the migrated Planner path (via
-/// `compose(ComposeRequest::Planner{..})`) produces a byte-identical system
-/// message to what the now-deleted
-/// `task_planner::prompt::build_hierarchical_prompt(&agents, false)` would
-/// have produced, for a representative set of agents.
-#[test]
-fn test_golden_planner_byte_identical_protocol_v1() {
-    use openalpaca_llm::Role;
-
-    let agents = vec![
-        make_planner_test_agent(
-            "parser",
-            "Parser",
-            "Parses structured data.",
-            vec![("parse_json", 0.9)],
-        ),
-        make_planner_test_agent("writer", "Writer", "Writes reports.", vec![]),
-    ];
-    let user_message = "Translate this document into French, Spanish, and German.";
-
-    let expected_system = expected_planner_system_message(&agents, false);
-
-    let composed = run_planner_compose(&agents, user_message, false);
-
-    let system_msg = composed
-        .messages
-        .iter()
-        .find(|m| matches!(m.role, Role::System))
-        .expect("expected system message");
-    assert_eq!(
-        system_msg.content, expected_system,
-        "Planner migration produced non-byte-identical system prompt for plan_protocol_v2=false"
-    );
-
-    // And the user turn is preserved verbatim.
-    let user_turns: Vec<_> = composed
-        .messages
-        .iter()
-        .filter(|m| matches!(m.role, Role::User))
-        .collect();
-    assert_eq!(user_turns.len(), 1);
-    assert_eq!(user_turns[0].content, user_message);
-}
-
-/// Same as `test_golden_planner_byte_identical_protocol_v1` but with
-/// `planner_protocol_v2 = true`. Expected output has the
-/// `<v2_protocol>...</v2_protocol>` trailer appended.
-#[test]
-fn test_golden_planner_byte_identical_protocol_v2() {
-    use openalpaca_llm::Role;
-
-    let agents = vec![make_planner_test_agent(
-        "solo",
-        "Solo",
-        "Handles everything.",
-        vec![("generalist", 0.7)],
-    )];
-    let user_message = "Please batch-process these items: A, B, C.";
-
-    let expected_system = expected_planner_system_message(&agents, true);
-
-    let composed = run_planner_compose(&agents, user_message, true);
-
-    let system_msg = composed
-        .messages
-        .iter()
-        .find(|m| matches!(m.role, Role::System))
-        .expect("expected system message");
-    assert_eq!(
-        system_msg.content, expected_system,
-        "Planner migration produced non-byte-identical system prompt for plan_protocol_v2=true"
-    );
-
-    // The v2 trailer must be present in the migrated output.
-    assert!(
-        system_msg.content.contains("<v2_protocol>"),
-        "v2_protocol trailer missing in planner_protocol_v2=true output"
-    );
-    assert!(
-        system_msg.content.contains("predictability_score"),
-        "predictability_score missing in planner_protocol_v2=true output"
-    );
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -2511,8 +1771,6 @@ fn test_golden_skill_invocation_byte_identical() {
         send_tool_context: None,
         message_source: Some(Arc::<str>::from(source_text)),
         raw_blocks: Vec::new(),
-        planner_agents: None,
-        planner_protocol_v2: false,
         mode: StaticPromptMode::SkillInvocationDefault,
         model_window: model_window as u32,
     };
@@ -2741,8 +1999,6 @@ fn test_golden_simple_query_text_only_byte_identical() {
         send_tool_context: None,
         message_source: Some(Arc::<str>::from(source_text)),
         raw_blocks: Vec::new(),
-        planner_agents: None,
-        planner_protocol_v2: false,
         mode: StaticPromptMode::Default,
         model_window: model_window as u32,
     };
@@ -2956,8 +2212,6 @@ fn test_golden_simple_query_multimodal_byte_identical() {
         send_tool_context: None,
         message_source: Some(Arc::<str>::from(source_text)),
         raw_blocks: Vec::new(),
-        planner_agents: None,
-        planner_protocol_v2: false,
         mode: StaticPromptMode::Default,
         model_window: model_window as u32,
     };
@@ -3070,407 +2324,6 @@ fn test_golden_simple_query_multimodal_byte_identical() {
     }
     // Sanity: first message is the system prompt.
     assert_eq!(composed.messages[0].role, Role::System);
-}
-
-// ──────────────────────────────────────────────────────────────────────────
-// Phase 6 Commit 1 — Pipeline Step migration golden-output test
-// ──────────────────────────────────────────────────────────────────────────
-
-/// Golden-output: asserts the migrated Pipeline Step path produces
-/// byte-identical `ComposedRequest.messages` to what the pre-migration
-/// `PromptBuilder` chain + manual message construction at
-/// `orchestrator/dispatcher/pipeline_step.rs:341-453` would have produced.
-///
-/// Routing through `compose(ComposeRequest::PipelineStep{..})` with
-/// `PersonaMode::Skip` + `StaticPromptMode::SubagentMinimal` +
-/// `DynamicContextMode::Default` + `HistoryMode::Default` reproduces the
-/// pre-migration PromptBuilder chain output byte-identically.
-///
-/// Scenario: step 0 of 2 (so step_description becomes the current_user_turn
-/// and a non-empty memory block arrives as the immediately-preceding user
-/// message — mirrors pre-migration `messages.push(ChatMessage::user(&block));
-/// messages.push(ChatMessage::user(&pctx.description));`). Includes:
-///   - `agent_identity`, `assignment`, `scope`, `output_format` raw_blocks
-///   - Pre-rendered tools via `format_tool_guidance(...)` — pushed as a
-///     raw_block named "tools" at the same position `.tools(...)` would have
-///     placed it in the pre-migration fluent chain
-///   - Non-empty connector_block → emitted as a raw_block named
-///     "connector_guidance" (not via `.connector_guidance(...)` — pre-migration
-///     code at pipeline_step.rs:362-368 also uses raw_system_block)
-///   - ContextPackage with TaskDescription (SystemPrompt), PredecessorOutput
-///     (UserMessage Untrusted), and WorkspaceArtifact (UserMessage Untrusted).
-///     Migration excludes TaskDescription from the bundle it feeds to Layer 3
-///     and pushes the equivalent content as a raw_block named "task_description"
-///     at the end of raw_blocks (same position the pre-migration `build()`
-///     rendered bundle's SystemPrompt section inline in system_parts).
-#[test]
-fn test_golden_pipeline_step_byte_identical() {
-    use crate::middleware::prompt::format_tool_guidance;
-    use crate::prompt::PromptBuilder;
-    use crate::prompt_ctx::package::{AgentSummary, HandoffContext};
-    use crate::prompt_ctx::{
-        ContextBundle, ContextKey, ContextKind, ContextSection, InjectionMode, PackageSection,
-        PackageSectionKind, TrustLevel,
-    };
-    use openalpaca_llm::Role;
-
-    // ── Canned pipeline-step scene ──────────────────────────────────────
-    // Mirrors the pre-migration arguments at pipeline_step.rs:84-92. The
-    // agent.preset.persona is canned, role_description is canned, step=0,
-    // total_agents=2 (so is_last_step=false), previous_output=Some(...) so
-    // HandoffContext exists, workspace_context=non-empty.
-    let agent_persona_text = "I am a test agent persona.";
-    let role_description = "Analyze the dataset for anomalies.";
-    let step: usize = 0;
-    let total_agents: usize = 2;
-    let memory_block_text = "<memory>prior relevant fact</memory>";
-    let previous_output_text = "Preliminary analysis complete.";
-    let workspace_context_text = "workspace: dataset.csv\n";
-    let connector_block_text =
-        "<connector_status>\n- telegram: active\n</connector_status>";
-    let description = "Find anomalies in sales data.";
-    let model_window: usize = 200_000;
-
-    // Pre-migration output_note branch for non-last step.
-    let output_note =
-        "Your output will be passed to the next agent in the pipeline. Be thorough and \
-         include all relevant details so the next agent can build on your work.";
-
-    // Canned tool definitions.
-    let tool_defs: Vec<ToolDefinition> = vec![ToolDefinition {
-        name: "analyze".to_string(),
-        description: "Analyze a dataset".to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": { "path": { "type": "string" } }
-        }),
-        strict: None,
-        input_examples: None,
-    }];
-
-    // ── Pre-migration reference: PromptBuilder chain. ───────────────────
-    let identity_block = format!("<identity>\n{}\n</identity>", agent_persona_text);
-    let assignment_block = format!(
-        "<assignment>\nRole: {}\nPipeline step: {} of {}\n</assignment>",
-        role_description,
-        step + 1,
-        total_agents
-    );
-    let scope_block = "<scope>\nFocus on completing your assigned role. \
-                        Do not attempt work outside your role description.\n</scope>";
-    let output_block = format!("<output-format>\n{}\n</output-format>", output_note);
-
-    // Pre-migration ContextPackage includes TaskDescription (SystemPrompt),
-    // PredecessorOutput (UserMessage Untrusted), WorkspaceArtifact (UserMessage
-    // Untrusted). We construct both the reference bundle (for the pre-migration
-    // PromptBuilder chain) and the migration bundle (same sections minus
-    // TaskDescription — the migration re-emits TaskDescription content as a
-    // raw_block named "task_description").
-    let handoff = HandoffContext {
-        producer: AgentSummary {
-            name: "unknown".to_string(),
-            role: "pipeline_predecessor".to_string(),
-            step: 0,
-        },
-        task_assigned: description.to_string(),
-        output: previous_output_text.to_string(),
-        decisions: vec![],
-        handoff_notes: None,
-    };
-    let predecessor_content = handoff.format();
-    let predecessor_tokens = handoff.token_estimate();
-
-    let package_sections_ref = vec![
-        PackageSection {
-            kind: PackageSectionKind::TaskDescription,
-            content: role_description.to_string(),
-            token_estimate: role_description.len() / 4,
-            priority: SectionPriority::Critical,
-        },
-        PackageSection {
-            kind: PackageSectionKind::PredecessorOutput,
-            content: predecessor_content.clone(),
-            token_estimate: predecessor_tokens,
-            priority: SectionPriority::High,
-        },
-        PackageSection {
-            kind: PackageSectionKind::WorkspaceArtifact,
-            content: workspace_context_text.to_string(),
-            token_estimate: workspace_context_text.len() / 4,
-            priority: SectionPriority::Normal,
-        },
-    ];
-    let total_tokens_ref: usize =
-        package_sections_ref.iter().map(|s| s.token_estimate).sum();
-    let context_package_ref = crate::prompt_ctx::ContextPackage {
-        sections: package_sections_ref,
-        total_tokens: total_tokens_ref,
-        budget: total_tokens_ref + 1000,
-        sub_agent_window: model_window,
-    };
-    let bundle_ref = context_package_ref.to_bundle();
-
-    let built = PromptBuilder::new(model_window)
-        .raw_system_block("agent_identity", &identity_block, SectionPriority::High)
-        .raw_system_block("assignment", &assignment_block, SectionPriority::Critical)
-        .raw_system_block("scope", scope_block, SectionPriority::Normal)
-        .raw_system_block("output_format", &output_block, SectionPriority::Normal)
-        .tools(&tool_defs)
-        .raw_system_block(
-            "connector_guidance",
-            connector_block_text,
-            SectionPriority::Normal,
-        )
-        .context_bundle(&bundle_ref)
-        .build();
-    let expected_system = built.system_message.clone();
-
-    // Reference messages: [system, ...built.context_messages, memory_user (step 0),
-    // user(description)].
-    let mut expected_messages: Vec<ChatMessage> =
-        Vec::with_capacity(1 + built.context_messages.len() + 2);
-    expected_messages.push(ChatMessage::system(&expected_system));
-    expected_messages.extend(built.context_messages.iter().cloned());
-    expected_messages.push(ChatMessage::user(memory_block_text));
-    expected_messages.push(ChatMessage::user(description));
-
-    // ── Via the engine: PersonaMode::Skip + StaticPromptMode::SubagentMinimal. ──
-    //
-    // Caller pre-renders tools via `format_tool_guidance(...)` and pushes the
-    // result as raw_block "tools". Connector block is pushed as raw_block
-    // "connector_guidance". Task-description text is pushed as raw_block
-    // "task_description" at the end. The bundle fed to Layer 3 omits
-    // TaskDescription (the migration's equivalent of inline-append-to-system
-    // is the "task_description" raw_block).
-    let engine = ComposeEngine::new(16);
-
-    let tools_rendered = format_tool_guidance(&tool_defs);
-    let raw_blocks_for_engine: Vec<SystemBlock> = vec![
-        SystemBlock {
-            name: "agent_identity",
-            content: Arc::<str>::from(identity_block.clone()),
-            priority: SectionPriority::High,
-        },
-        SystemBlock {
-            name: "assignment",
-            content: Arc::<str>::from(assignment_block.clone()),
-            priority: SectionPriority::Critical,
-        },
-        SystemBlock {
-            name: "scope",
-            content: Arc::<str>::from(scope_block.to_string()),
-            priority: SectionPriority::Normal,
-        },
-        SystemBlock {
-            name: "output_format",
-            content: Arc::<str>::from(output_block.clone()),
-            priority: SectionPriority::Normal,
-        },
-        SystemBlock {
-            name: "tools",
-            content: Arc::<str>::from(tools_rendered),
-            priority: SectionPriority::Normal,
-        },
-        SystemBlock {
-            name: "connector_guidance",
-            content: Arc::<str>::from(connector_block_text.to_string()),
-            priority: SectionPriority::Normal,
-        },
-        SystemBlock {
-            name: "task_description",
-            content: Arc::<str>::from(role_description.to_string()),
-            priority: SectionPriority::Critical,
-        },
-    ];
-
-    // Migration bundle: same PredecessorOutput + WorkspaceArtifact sections
-    // as pre-migration, but TaskDescription omitted (it now lives in
-    // raw_blocks as "task_description").
-    let migration_bundle = ContextBundle {
-        sections: vec![
-            ContextSection {
-                source: PackageSectionKind::PredecessorOutput.source_name(),
-                kind: ContextKind::WorkspaceArtifact,
-                content: predecessor_content.clone(),
-                token_estimate: predecessor_tokens,
-                priority: SectionPriority::High,
-                relevance: 1.0,
-                key: ContextKey::Package(
-                    PackageSectionKind::PredecessorOutput.key_name(),
-                ),
-                injection: InjectionMode::UserMessage {
-                    tag: "predecessor_output".to_string(),
-                    trust: TrustLevel::Untrusted,
-                },
-            },
-            ContextSection {
-                source: PackageSectionKind::WorkspaceArtifact.source_name(),
-                kind: ContextKind::WorkspaceArtifact,
-                content: workspace_context_text.to_string(),
-                token_estimate: workspace_context_text.len() / 4,
-                priority: SectionPriority::Normal,
-                relevance: 1.0,
-                key: ContextKey::Package(
-                    PackageSectionKind::WorkspaceArtifact.key_name(),
-                ),
-                injection: InjectionMode::UserMessage {
-                    tag: "workspace_artifact".to_string(),
-                    trust: TrustLevel::Untrusted,
-                },
-            },
-        ],
-        total_tokens: predecessor_tokens + workspace_context_text.len() / 4,
-        available_budget: 1000,
-    };
-
-    // Construct a canned SubAgent for the request variant. Pre-migration
-    // reads `agent.preset.persona`; we mirror that with the canned text.
-    use crate::agent::subagent::{
-        AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, SubAgent,
-    };
-    let agent = Arc::new(SubAgent {
-        id: "test-agent-01".to_string(),
-        template_id: "test-agent".to_string(),
-        name: "Test Agent".to_string(),
-        description: None,
-        icon: None,
-        status: AgentStatus::Idle,
-        current_task: None,
-        capabilities: vec![],
-        preset: AgentPreset {
-            persona: agent_persona_text.to_string(),
-            ..AgentPreset::default()
-        },
-        constraints: AgentConstraints::default(),
-        llm_config: AgentLlmConfig::default(),
-    });
-
-    let persona_input = PersonaInput {
-        system_persona: Arc::new(SystemPersona::default()),
-        user_document: Arc::new(None),
-        identity_document: Arc::new(None),
-        persona_version: 0,
-        mode: PersonaMode::Skip,
-        identity_budget: None,
-        user_budget: None,
-    };
-    let persona_output = Arc::new(super::persona::compute(&persona_input));
-
-    let static_prompt_input = StaticPromptInput {
-        persona_output,
-        agent_persona: None,
-        agent_config_fingerprint: [0u8; 32],
-        skill_block: None,
-        skills_catalog: None,
-        bootstrap: None,
-        tools: Arc::new(tool_defs.clone()),
-        connector_status: Arc::new(Vec::new()),
-        send_tool_context: None,
-        message_source: None,
-        raw_blocks: raw_blocks_for_engine,
-        planner_agents: None,
-        planner_protocol_v2: false,
-        mode: StaticPromptMode::SubagentMinimal,
-        model_window: model_window as u32,
-    };
-
-    let dynamic_context_input = DynamicContextInput {
-        context_bundle: Arc::new(migration_bundle),
-        query: Arc::from(description),
-        memory_retrieval_hash: [0u8; 32],
-        path: ExecutionPath::SimpleQuery,
-        reserved_tokens: 0,
-        mode: DynamicContextMode::Default,
-    };
-
-    // HistoryMode::Default: step-0 memory block arrives as a `recent_messages`
-    // entry (comes BEFORE current_user_turn in Layer 4 Default's emission
-    // order). current_user_turn = user(description) mirrors pre-migration's
-    // final `messages.push(ChatMessage::user(&pctx.description))`.
-    let history_input = HistoryInput {
-        lane_tip_fingerprint: [0u8; 32],
-        summary: None,
-        summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
-        recent_messages: Arc::new(vec![ChatMessage::user(memory_block_text)]),
-        current_user_turn: Some(ChatMessage::user(description)),
-        mode: HistoryMode::Default,
-    };
-
-    let request = ComposeRequest::PipelineStep {
-        agent: agent.clone(),
-        step_index: step,
-        step_description: Arc::<str>::from(description),
-        scope_block: Arc::<str>::from(scope_block),
-        output_block: Arc::<str>::from(output_block.clone()),
-        context_package: Arc::new(crate::prompt_ctx::ContextPackage {
-            sections: vec![],
-            total_tokens: 0,
-            budget: 0,
-            sub_agent_window: model_window,
-        }),
-        memory_block: Some(Arc::<str>::from(memory_block_text)),
-        overrides: ComposeOverrides::default(),
-    };
-
-    let composed = engine.compose(
-        &request,
-        persona_input,
-        static_prompt_input,
-        dynamic_context_input,
-        history_input,
-        model_window as u32,
-        Arc::new(tool_defs.clone()),
-        None,
-        None,
-    );
-
-    // ── Byte-identical assertion. ───────────────────────────────────────
-    assert_eq!(
-        composed.messages.len(),
-        expected_messages.len(),
-        "Pipeline Step migration produced wrong message count: got {} vs expected {}",
-        composed.messages.len(),
-        expected_messages.len()
-    );
-    for (idx, (got, expected)) in composed
-        .messages
-        .iter()
-        .zip(expected_messages.iter())
-        .enumerate()
-    {
-        assert_eq!(
-            got.role, expected.role,
-            "message {idx} role mismatch: got {:?} expected {:?}",
-            got.role, expected.role
-        );
-        assert_eq!(
-            got.content, expected.content,
-            "message {idx} content mismatch:\n--- GOT ---\n{}\n--- EXPECTED ---\n{}\n",
-            got.content, expected.content
-        );
-        assert!(
-            got.parts.is_none(),
-            "message {idx} got parts should be None"
-        );
-        assert!(
-            got.tool_calls.is_none(),
-            "message {idx} got tool_calls should be None"
-        );
-        assert_eq!(
-            got.tool_call_id, expected.tool_call_id,
-            "message {idx} tool_call_id mismatch"
-        );
-    }
-
-    // Sanity: first message is system, last is user(description), and the
-    // memory block lives at the index just before the description.
-    assert_eq!(composed.messages[0].role, Role::System);
-    let last = composed.messages.last().unwrap();
-    assert_eq!(last.role, Role::User);
-    assert_eq!(last.content, description);
-    let second_to_last = &composed.messages[composed.messages.len() - 2];
-    assert_eq!(second_to_last.role, Role::User);
-    assert_eq!(second_to_last.content, memory_block_text);
 }
 
 /// Phase 6 Commit 2 — DAG Node golden fixture.
@@ -3677,8 +2530,6 @@ fn test_golden_dag_node_byte_identical() {
         send_tool_context: None,
         message_source: None,
         raw_blocks: raw_blocks_for_engine,
-        planner_agents: None,
-        planner_protocol_v2: false,
         mode: StaticPromptMode::SubagentMinimal,
         model_window: model_window as u32,
     };
@@ -3688,9 +2539,7 @@ fn test_golden_dag_node_byte_identical() {
         context_bundle: Arc::new(ContextBundle::empty()),
         query: Arc::from(task_description),
         memory_retrieval_hash: [0u8; 32],
-        path: ExecutionPath::DagNode {
-            node_id: "node_1".to_string(),
-        },
+        path: ExecutionPath::LeadAgent,
         reserved_tokens: 0,
         mode: DynamicContextMode::Default,
     };
@@ -4023,8 +2872,6 @@ fn test_golden_lead_agent_byte_identical() {
         send_tool_context: None,
         message_source: None,
         raw_blocks: raw_blocks_for_engine,
-        planner_agents: None,
-        planner_protocol_v2: false,
         mode: StaticPromptMode::SubagentMinimal,
         model_window: model_window as u32,
     };
@@ -4252,8 +3099,6 @@ fn test_golden_lead_agent_spawn_subagent_byte_identical() {
         send_tool_context: None,
         message_source: None,
         raw_blocks: raw_blocks_for_engine,
-        planner_agents: None,
-        planner_protocol_v2: false,
         mode: StaticPromptMode::SubagentMinimal,
         model_window: model_window as u32,
     };

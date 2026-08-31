@@ -395,7 +395,7 @@ pub(super) async fn llm_status(format: OutputFormat) -> Result<()> {
 
 pub(super) async fn llm_usage(
     agent: Option<String>,
-    _date: Option<String>,
+    date: Option<String>,
     key: Option<String>,
     daily: bool,
     format: OutputFormat,
@@ -406,6 +406,9 @@ pub(super) async fn llm_usage(
         let mut path = "/v1/llm/usage/daily?limit=30".to_string();
         if let Some(ref a) = agent {
             path.push_str(&format!("&agent_id={}", a));
+        }
+        if let Some(ref d) = date {
+            path.push_str(&format!("&date={}", d));
         }
         let entries: Vec<DailyUsageEntry> = client.get(&path).await?;
         print_list(&entries, format);

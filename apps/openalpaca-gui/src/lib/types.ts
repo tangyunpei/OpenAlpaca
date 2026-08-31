@@ -42,16 +42,15 @@ export interface ParsedOutcome {
 
 export type AssignmentStatusValue = "pending" | "running" | "completed" | "failed";
 
+/** One agent run on a task (daemon serves agent_task_history rows under the legacy `assignments` key). */
 export interface TaskAgentAssignment {
   id: string;
   task_id: string;
   agent_id: string;
   role: string;
   status: AssignmentStatusValue;
-  step_order: number | null;
-  started_at: string | null;
-  completed_at: string | null;
-  result_output: string | null;
+  runtime_seconds: number | null;
+  completed_at: string;
 }
 
 export interface TaskDetailResponse {
@@ -359,8 +358,6 @@ export interface ChatMessage {
   duration_ms?: number;
   created_at: string;
   attachments?: AttachmentDisplay[];
-  citations?: Citation[];
-  artifacts?: Artifact[];
   /** Raw structured message payload from backend persistence. */
   content_json?: string | null;
   /** Backend-rendered fallback text for attachment-only user turns. */
@@ -404,23 +401,6 @@ export interface ChatStreamDoneData {
   tokens_out: number;
   duration_ms: number;
   attachments_used?: string[];
-  citations?: Citation[];
-  artifacts?: Artifact[];
-}
-
-/** A citation linking a response passage to a source document. */
-export interface Citation {
-  source_file_id: string;
-  page?: number;
-  timestamp_ms?: number;
-  excerpt: string;
-}
-
-/** An artifact produced during the response. */
-export interface Artifact {
-  file_id: string;
-  label: string;
-  mime_type: string;
 }
 
 // ── File / Attachment types ─────────────────────────────────────

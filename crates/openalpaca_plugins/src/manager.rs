@@ -8,6 +8,7 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+use openalpaca_api::events::ServerEvent;
 use openalpaca_core::agent::registry::AgentRegistry;
 use openalpaca_core::agent::template::{AgentSource, AgentTemplate, AgentTemplateFrontmatter};
 use openalpaca_core::middleware::skill::{
@@ -143,6 +144,13 @@ pub struct PluginInfo {
 
 // ── PluginManager ───────────────────────────────────────────────────────
 
+/// Callback through which the `PluginManager` emits lifecycle events
+/// (`ServerEvent::Plugin*` variants). The daemon wires this to its
+/// `EventBroadcaster` so WebSocket clients (e.g. the GUI plugin panel)
+/// see plugin state changes live. A plain callback keeps this crate free
+/// of any dependency on the daemon's event infrastructure.
+pub type PluginEventSink = Arc<dyn Fn(ServerEvent) + Send + Sync>;
+
 /// Core orchestrator for plugin lifecycle: discovery, hot-load/unload,
 /// permission gating, tool registration, and state tracking.
 pub struct PluginManager {
@@ -152,6 +160,7 @@ pub struct PluginManager {
     tool_registry: Arc<ToolRegistry>,
     skill_catalog: Option<Arc<SkillCatalog>>,
     agent_registry: Option<Arc<AgentRegistry>>,
+    event_sink: Option<PluginEventSink>,
 }
 
 impl PluginManager {
@@ -175,6 +184,21 @@ impl PluginManager {
             tool_registry,
             skill_catalog,
             agent_registry,
+            event_sink: None,
+        }
+    }
+
+    /// Attach a lifecycle event sink. Events emitted before this is called
+    /// are dropped, so attach it before [`start`](Self::start).
+    pub fn with_event_sink(mut self, sink: PluginEventSink) -> Self {
+        self.event_sink = Some(sink);
+        self
+    }
+
+    /// Emit a lifecycle event to the attached sink (no-op when absent).
+    fn emit(&self, event: ServerEvent) {
+        if let Some(ref sink) = self.event_sink {
+            sink(event);
         }
     }
 
@@ -261,10 +285,16 @@ impl PluginManager {
             None => {
                 // Never seen — park in WaitingApproval
                 info!(plugin = %name, "plugin awaiting approval");
-                let mut plugins = self.plugins.write().await;
-                if let Some(state) = plugins.get_mut(&name) {
-                    state.status = PluginStatus::WaitingApproval;
+                {
+                    let mut plugins = self.plugins.write().await;
+                    if let Some(state) = plugins.get_mut(&name) {
+                        state.status = PluginStatus::WaitingApproval;
+                    }
                 }
+                self.emit(ServerEvent::PluginPendingApproval {
+                    plugin_id: name.clone(),
+                    capabilities: manifest.capabilities.provides.clone(),
+                });
                 return Ok(());
             }
             Some(false) => {
@@ -290,12 +320,18 @@ impl PluginManager {
                 missing = ?missing,
                 "plugin needs configuration"
             );
-            let mut plugins = self.plugins.write().await;
-            if let Some(state) = plugins.get_mut(&name) {
-                state.status = PluginStatus::NeedsConfig {
-                    missing_keys: missing,
-                };
+            {
+                let mut plugins = self.plugins.write().await;
+                if let Some(state) = plugins.get_mut(&name) {
+                    state.status = PluginStatus::NeedsConfig {
+                        missing_keys: missing.clone(),
+                    };
+                }
             }
+            self.emit(ServerEvent::PluginNeedsConfig {
+                plugin_id: name.clone(),
+                missing_keys: missing,
+            });
             return Ok(());
         }
 
@@ -454,7 +490,7 @@ impl PluginManager {
             if let Some(state) = plugins.get_mut(&name) {
                 state.status = PluginStatus::Running;
                 state.process = Some(process);
-                state.registered_tools = registered_tools;
+                state.registered_tools = registered_tools.clone();
                 state.registered_connector = registered_connector;
                 state.registered_provider = registered_provider;
                 state.registered_models = registered_models;
@@ -464,6 +500,11 @@ impl PluginManager {
                 state.capability_provider_handle = provider_handle;
             }
         }
+
+        self.emit(ServerEvent::PluginLoaded {
+            plugin_id: name.clone(),
+            tools: registered_tools,
+        });
 
         info!(plugin = %name, "plugin loaded successfully");
         Ok(())
@@ -527,6 +568,10 @@ impl PluginManager {
             process.kill();
         }
 
+        self.emit(ServerEvent::PluginUnloaded {
+            plugin_id: name.to_string(),
+        });
+
         info!(plugin = name, "plugin unloaded");
         Ok(())
     }
@@ -556,10 +601,17 @@ impl PluginManager {
     pub async fn deny_plugin(&self, name: &str) -> Result<(), PluginError> {
         self.permission_gate.deny(name)?;
 
-        let mut plugins = self.plugins.write().await;
-        if let Some(state) = plugins.get_mut(name) {
-            state.status = PluginStatus::Disabled;
+        {
+            let mut plugins = self.plugins.write().await;
+            if let Some(state) = plugins.get_mut(name) {
+                state.status = PluginStatus::Disabled;
+            }
         }
+
+        self.emit(ServerEvent::PluginDisabled {
+            plugin_id: name.to_string(),
+            reason: "denied by user".to_string(),
+        });
 
         info!(plugin = name, "plugin denied");
         Ok(())
@@ -628,6 +680,12 @@ impl PluginManager {
         }
 
         self.permission_gate.deny(name)?;
+
+        self.emit(ServerEvent::PluginDisabled {
+            plugin_id: name.to_string(),
+            reason: "disabled by user".to_string(),
+        });
+
         info!(plugin = name, "plugin disabled");
         Ok(())
     }
@@ -1046,6 +1104,165 @@ mod tests {
         assert!(json.is_object());
         assert_eq!(json["key"], "val");
         assert_eq!(json["arr"], serde_json::json!([1, 2]));
+    }
+}
+
+#[cfg(test)]
+mod event_sink_tests {
+    use super::*;
+    use openalpaca_core::tools::ToolRegistry;
+    use std::sync::Mutex as StdMutex;
+
+    /// Stub sink that records every emitted event.
+    fn recording_sink() -> (PluginEventSink, Arc<StdMutex<Vec<ServerEvent>>>) {
+        let events: Arc<StdMutex<Vec<ServerEvent>>> = Arc::new(StdMutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let sink: PluginEventSink = Arc::new(move |event| {
+            events_clone
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(event);
+        });
+        (sink, events)
+    }
+
+    fn write_manifest(plugin_dir: &Path, name: &str, extra: &str) {
+        std::fs::create_dir_all(plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            format!(
+                r#"
+[plugin]
+name = "{name}"
+version = "0.1.0"
+entry = "./nonexistent-entry"
+{extra}
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn manager_with_sink(root: &Path) -> (PluginManager, Arc<StdMutex<Vec<ServerEvent>>>) {
+        let (sink, events) = recording_sink();
+        let manager = PluginManager::new(
+            root.to_path_buf(),
+            Arc::new(ToolRegistry::new().unwrap()),
+            None,
+            None,
+        )
+        .with_event_sink(sink);
+        (manager, events)
+    }
+
+    #[tokio::test]
+    async fn emits_pending_approval_on_first_load_and_unloaded_on_unload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("my-plugin");
+        write_manifest(&plugin_dir, "my-plugin", "");
+
+        let (manager, events) = manager_with_sink(tmp.path());
+
+        // First-time load parks in WaitingApproval and emits PluginPendingApproval.
+        manager.try_load_plugin(&plugin_dir).await.unwrap();
+        {
+            let recorded = events.lock().unwrap();
+            assert_eq!(recorded.len(), 1);
+            match &recorded[0] {
+                ServerEvent::PluginPendingApproval { plugin_id, .. } => {
+                    assert_eq!(plugin_id, "my-plugin");
+                }
+                other => panic!("expected PluginPendingApproval, got {other:?}"),
+            }
+        }
+
+        // Unload emits PluginUnloaded.
+        manager.unload_plugin("my-plugin").await.unwrap();
+        let recorded = events.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        match &recorded[1] {
+            ServerEvent::PluginUnloaded { plugin_id } => {
+                assert_eq!(plugin_id, "my-plugin");
+            }
+            other => panic!("expected PluginUnloaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn emits_needs_config_when_required_keys_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("cfg-plugin");
+        write_manifest(
+            &plugin_dir,
+            "cfg-plugin",
+            r#"
+[config.api_key]
+type = "secret"
+required = true
+"#,
+        );
+
+        let (manager, events) = manager_with_sink(tmp.path());
+
+        // Pre-approve so the load proceeds to config validation.
+        manager
+            .permission_gate
+            .approve("cfg-plugin", &[])
+            .unwrap();
+
+        manager.try_load_plugin(&plugin_dir).await.unwrap();
+
+        let recorded = events.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        match &recorded[0] {
+            ServerEvent::PluginNeedsConfig {
+                plugin_id,
+                missing_keys,
+            } => {
+                assert_eq!(plugin_id, "cfg-plugin");
+                assert_eq!(missing_keys, &vec!["api_key".to_string()]);
+            }
+            other => panic!("expected PluginNeedsConfig, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn emits_disabled_on_deny() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("deny-plugin");
+        write_manifest(&plugin_dir, "deny-plugin", "");
+
+        let (manager, events) = manager_with_sink(tmp.path());
+        manager.try_load_plugin(&plugin_dir).await.unwrap();
+        manager.deny_plugin("deny-plugin").await.unwrap();
+
+        let recorded = events.lock().unwrap();
+        let disabled = recorded.iter().find_map(|e| match e {
+            ServerEvent::PluginDisabled { plugin_id, reason } => {
+                Some((plugin_id.clone(), reason.clone()))
+            }
+            _ => None,
+        });
+        assert_eq!(
+            disabled,
+            Some(("deny-plugin".to_string(), "denied by user".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn no_sink_is_a_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("silent-plugin");
+        write_manifest(&plugin_dir, "silent-plugin", "");
+
+        let manager = PluginManager::new(
+            tmp.path().to_path_buf(),
+            Arc::new(ToolRegistry::new().unwrap()),
+            None,
+            None,
+        );
+        // Must not panic without a sink attached.
+        manager.try_load_plugin(&plugin_dir).await.unwrap();
     }
 }
 

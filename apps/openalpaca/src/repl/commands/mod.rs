@@ -6,38 +6,43 @@ use colored::Colorize;
 
 use super::ReplContext;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlashCommand {
     Help,
-    Status,
     Model,
     Models,
     Agents,
-    Tasks(usize),
     Keys,
     Usage,
     Clear,
     Verbose,
-    Unknown(String),
+    /// Not a client-side command: forward the whole line to the daemon as a
+    /// chat message. Covers the daemon's chat-level commands (`/status`,
+    /// `/tasks`, `/steer`, `/cancel`, `/pause`, `/resume`) and any unknown
+    /// slash command, which may be a skill invocation only the daemon knows.
+    Forward,
 }
 
 impl SlashCommand {
     pub fn parse(input: &str) -> Self {
-        let parts: Vec<&str> = input.splitn(2, ' ').collect();
-        let cmd = parts[0];
-        let arg = parts.get(1).map(|s| s.trim());
+        let cmd = input.split_whitespace().next().unwrap_or(input);
         match cmd {
             "/help" => Self::Help,
-            "/status" => Self::Status,
             "/model" => Self::Model,
             "/models" => Self::Models,
             "/agents" => Self::Agents,
-            "/tasks" => Self::Tasks(arg.and_then(|a| a.parse().ok()).unwrap_or(5)),
             "/keys" => Self::Keys,
             "/usage" => Self::Usage,
             "/clear" => Self::Clear,
             "/verbose" => Self::Verbose,
-            other => Self::Unknown(other.to_string()),
+            _ => Self::Forward,
         }
+    }
+
+    /// True when the line should be sent to the daemon instead of being
+    /// handled locally.
+    pub fn is_forward(&self) -> bool {
+        matches!(self, Self::Forward)
     }
 }
 
@@ -51,11 +56,9 @@ pub async fn execute_line(
             print_help();
             Ok(())
         }
-        SlashCommand::Status => cmd_status(client).await,
         SlashCommand::Model => cmd_model(client).await,
         SlashCommand::Models => cmd_models(client).await,
         SlashCommand::Agents => cmd_agents(client).await,
-        SlashCommand::Tasks(n) => cmd_tasks(client, n).await,
         SlashCommand::Keys => cmd_keys(client).await,
         SlashCommand::Usage => {
             cmd_usage(context);
@@ -69,55 +72,43 @@ pub async fn execute_line(
             cmd_verbose(context);
             Ok(())
         }
-        SlashCommand::Unknown(c) => {
-            println!(
-                "{} Unknown command: {}. Type {}",
-                "?".yellow(),
-                c,
-                "/help".bold()
-            );
-            Ok(())
-        }
+        // Forwarded lines are routed to the chat path by the REPL loop
+        // before this function is reached.
+        SlashCommand::Forward => Ok(()),
     }
 }
 
 fn print_help() {
-    println!("{}", "Commands:".bold());
-    println!("  {} — Active tasks summary", "/status".bold());
+    println!("{}", "Client commands:".bold());
     println!("  {} — Current model info", "/model".bold());
     println!("  {} — List available models", "/models".bold());
     println!("  {} — List agents", "/agents".bold());
-    println!("  {} — Recent tasks (default 5)", "/tasks [n]".bold());
     println!("  {} — API key health per provider", "/keys".bold());
     println!("  {} — Session token usage", "/usage".bold());
     println!("  {} — Clear terminal", "/clear".bold());
     println!("  {} — Toggle thinking indicator", "/verbose".bold());
     println!("  {} — Show this help", "/help".bold());
     println!();
+    println!("{}", "Daemon commands (sent as chat):".bold());
+    println!(
+        "  {} — Active tasks (or one task's status)",
+        "/status [id]".bold()
+    );
+    println!("  {} — Recent tasks", "/tasks".bold());
+    println!(
+        "  {} — Correct the running workflow",
+        "/steer <text>".bold()
+    );
+    println!(
+        "  {} — Control a workflow (bare form targets active ones)",
+        "/cancel|/pause|/resume [id]".bold()
+    );
+    println!(
+        "  {}",
+        "Any other /command is forwarded too (e.g. skill commands like /review).".dimmed()
+    );
+    println!();
     println!("  {} / {} — Exit chat", "exit".bold(), "quit".bold());
-}
-
-async fn cmd_status(client: &DaemonClient) -> anyhow::Result<()> {
-    let tasks: serde_json::Value = client.get("/v1/tasks?limit=5&status=active").await?;
-    if let Some(arr) = tasks.as_array() {
-        if arr.is_empty() {
-            println!("{}", "No active tasks.".dimmed());
-        } else {
-            for t in arr {
-                let id = t["id"].as_str().unwrap_or("-");
-                let title = t["title"].as_str().unwrap_or("-");
-                let status = t["status"].as_str().unwrap_or("-");
-                let short_id = &id[..8.min(id.len())];
-                println!(
-                    "  {} {} - {}",
-                    short_id.dimmed(),
-                    title,
-                    crate::output::status_color(status)
-                );
-            }
-        }
-    }
-    Ok(())
 }
 
 async fn cmd_model(client: &DaemonClient) -> anyhow::Result<()> {
@@ -167,30 +158,6 @@ async fn cmd_agents(client: &DaemonClient) -> anyhow::Result<()> {
                     "  {} {} - {}",
                     short_id.dimmed(),
                     name,
-                    crate::output::status_color(status)
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn cmd_tasks(client: &DaemonClient, n: usize) -> anyhow::Result<()> {
-    let path = format!("/v1/tasks?limit={}", n);
-    let tasks: serde_json::Value = client.get(&path).await?;
-    if let Some(arr) = tasks.as_array() {
-        if arr.is_empty() {
-            println!("{}", "No tasks.".dimmed());
-        } else {
-            for t in arr {
-                let id = t["id"].as_str().unwrap_or("-");
-                let title = t["title"].as_str().unwrap_or("-");
-                let status = t["status"].as_str().unwrap_or("-");
-                let short_id = &id[..8.min(id.len())];
-                println!(
-                    "  {} {} - {}",
-                    short_id.dimmed(),
-                    title,
                     crate::output::status_color(status)
                 );
             }

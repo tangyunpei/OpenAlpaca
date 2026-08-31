@@ -74,7 +74,7 @@ impl Orchestrator {
         }
 
         // 2. Build text-only augmented string for intent classification
-        //    (intent parser and planner only understand text)
+        //    (the intent parser only understands text)
         let mut augmented = String::new();
         for att in &attachments {
             let ctx_block = if let Some(ref text) = att.extracted_text {

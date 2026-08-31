@@ -4,8 +4,10 @@
 
 OpenAlpaca's agentic loop maps 1-to-1 onto Hermes Research's [10-step
 run_conversation loop](https://hermes-agent.nousresearch.com/docs/developer-guide/agent-loop),
-extended with cost budgets, parallel tool execution, three multi-agent
-topologies, and mid-execution replanning.
+extended with cost budgets, parallel tool execution, a lead-agent
+multi-agent topology (subagents spawned singly or in batches), and a
+mid-workflow steering rail. The legacy pipeline/DAG topologies and
+mid-execution replanning were deleted in Routing V2 Phase 5.
 
 ## The Ten Inner Steps
 
@@ -31,17 +33,172 @@ siblings); `cache_markers` lives in the provider layer and carries only
 
 ## How Topologies Invoke the Loop
 
-| Topology | Entry point | Loop invocations per task |
-|---|---|---|
-| Sequential pipeline | `orchestrator/dispatcher/pipeline_step.rs` (`execute_pipeline_step`, called per step from `dispatcher/pipeline.rs`) | One per agent in the pipeline |
-| DAG | `runner/dag_executor/node_runner.rs` — parallelized up to `max_concurrent_agents` | One per DAG node |
-| Lead agent | `runner/lead_agent/mod.rs` | One for the lead + one per subagent spawned via the `spawn_subagent` / `spawn_subagents_batch` (1–8 per call) tools |
+| Topology | Entry point | Loop invocations per task | Status |
+|---|---|---|---|
+| Lead agent | `runner/lead_agent/mod.rs` | One for the lead + one per subagent spawned via the `spawn_subagent` / `spawn_subagents_batch` (1–8 per call) tools | The only multi-agent topology (the legacy sequential pipeline and DAG executor were deleted in Routing V2 Phase 5; batch work goes through `spawn_subagents_batch` + `wait_for_subagents`) |
 
-The loop also runs outside the multi-agent topologies: the simple-query
-handler invokes it directly for tool-enabled simple queries and the
-deep-query path (`orchestrator/query_handler/simple_query_handler.rs`),
-as does skill invocation (`orchestrator/skill/invocation.rs`,
+Subagents can be plugin-backed: when the spawned template's source is
+`AgentSource::Plugin` (contributed by a plugin manifest), the spawn path
+skips the internal loop entirely and `runner/plugin_agent.rs` drives the
+plugin's external reasoning loop instead — `spawn()` with the composed
+instructions, then `step()` polls capped at 50 iterations, with requested
+tool calls proxied through the same `SandboxManager::execute_tool` path
+(capability checks, sanitization, confirmation, timeouts) as internal
+subagents. Depth, concurrency-permit, and cancellation semantics are
+unchanged; the cancel token is checked between steps.
+
+The loop also runs outside the multi-agent topology: the main-loop
+front door (below) IS a direct loop invocation per user turn
+(`orchestrator/query_handler/simple_query_handler.rs`); skill invocation
+invokes it too (`orchestrator/skill/invocation.rs`,
 `orchestrator/skill/invoke_executor.rs`).
+
+## The Main-Loop Front Door (Routing V2)
+
+Routing is a tool call, not a pre-classifier (the only routing since
+Routing V2 Phase 5 deleted the planner ladder and the
+`[orchestrator.routing] mode` key). `handle_message_internal`
+(`orchestrator/handlers.rs`) runs a short deterministic ladder and hands
+everything that survives it to `handle_simple_query` with
+`LoopOverrides::MainLoop` — one agentic-loop invocation per user turn,
+**including while workflows run** (chat-by-default; lanes are never
+captured):
+
+1. **Task ops** — `/status`, `/tasks`, `/cancel|/pause|/resume`. Bare
+   control commands (no task id) resolve against the lane's active
+   workflows (`task_ops.rs::handle_bare_task_control`): exactly one
+   running → act on it; zero → say so; multiple → list ids and ask.
+2. **`/steer <msg>`** — deterministic injection into the lane's sole
+   running workflow, bypassing the model
+   (`task_ops.rs::handle_steer_prefix`; gated on `steering_enabled`).
+3. **Skills** — slash commands and SkillRouter auto-mode, executed in the
+   deterministic tier.
+4. **Bootstrap / forced-simple-query** — unchanged special cases.
+5. **Social fast path** — exact-phrase match, send-hints guarded,
+   answered before the main loop so "thanks" stays cheap mid-workflow.
+6. **Main loop** — everything else. Chat vs. task vs. steer is the
+   model's tool choice.
+
+**Tool surface** (`tools/builtins/main_loop.rs::main_loop_tool_set`):
+the base picks (keyword-suggested tools under
+`tool_selection = "core_union"`, or the whole registry minus the global
+deny list under `"full"`) unioned with a per-request core set —
+`start_workflow`, `task_status`, `memory_store` + `memory_forget`
+(DB-gated), and the globally-registered `memory_search` definition.
+When the lane has active workflows AND steering is enabled,
+`steer_workflow` + `queue_followup` join the surface. Per-request
+instances go into a per-request registry clone, never the global
+registry. Budgets come from `main_loop_max_rounds` /
+`main_loop_max_tools_per_round`.
+
+**Workflow context**: lanes with active workflows get a per-turn
+`<active_workflows>` block (`query_handler/workflow_context.rs`) — task
+id, title, status, progress counters — injected deliberately outside the
+compose-engine layers (Tier-1/Tier-2 caches would serve stale status) —
+plus `<workflow_relay_rules>` relay guidance.
+
+**Delegation contract**: `start_workflow`
+(`tools/builtins/start_workflow.rs`) enforces `max_workflows_per_lane`
+(tool mode only — never inside `dispatch_lead_agent`), dispatches the
+lead agent detached, records the routing decision **unconditionally**
+(`DispatchDecision` reason `model_tool_call`, not gated on
+`dispatch_analysis_enabled`), publishes `WorkflowStarted`, and stores
+the `DispatchOutcome` in a result cell. After the loop the handler reads
+the cell and populates structured `delegation{task_id, title}`
+(Orchestrator `delegation_map` → `HandleResult`/`GatewayResponse` → SSE
+`done`). The model's own text is the ack — there is no canonical ack
+string on this path.
+
+## The Steering Rail
+
+Mid-workflow interjections, gated on `steering_enabled` (default on).
+Lead-only and text-only — subagents never see an inbox.
+
+- **Data** (`runner/steering.rs`): a bounded, closable `SteeringInbox`
+  (cap `steering_inbox_cap`, default 16) registered on `SharedContext`
+  per running lead-agent task, right next to the cancellation token
+  (`dispatcher/lead_agent.rs`). The lane→task index
+  (`workflows_for_lane`) registers unconditionally — it also backs the
+  per-lane cap and the workflow-context block.
+- **Producers**: the `/steer ` prefix (deterministic) and the
+  `steer_workflow` tool (model-routed). Push results: `Ok` reports queue
+  depth; `Full` directs the model to offer `queue_followup`; `Closed`
+  means the workflow already detached.
+- **Two drain points** in the loop body (`runner/agentic_loop/mod.rs`):
+  1. The round-boundary drain — after the cancellation/max-rounds/cost
+     checks and compaction, immediately before `build_request`. Draining
+     any earlier would lose messages on MaxRounds/CostExceeded exits.
+  2. The completion guard — at the no-tool-calls Complete exit: if the
+     inbox is non-empty, keep the assistant's answer in history, inject,
+     and continue (budget checks still apply).
+- **Injection format**: `<user_interjection ts="…">…</user_interjection>`
+  user messages. The compactor exempts them from discard/truncation
+  (`prompt_ctx/compaction/graduated.rs`,
+  `runner/agentic_loop/context.rs`).
+- **Budget**: +5 bonus rounds per non-empty drain
+  (`STEERING_ROUNDS_BONUS`), capped at 2× `max_rounds`. `max_cost` is
+  never extended. Transient-LLM retries also consume rounds, bonus
+  included — accepted.
+- **Wait interrupt**: `WaitForSubagentsTool`
+  (`runner/lead_agent/tools.rs`) selects on the inbox's lost-wakeup-safe
+  `notified()` alongside subagent completion, so a queued interjection
+  breaks the up-to-600s wait instead of sitting until timeout.
+- **Detach**: close-then-drain (closed is set under the queue lock), so
+  a push racing detach gets `Err(Closed)` instead of vanishing. Leftover
+  (drained-but-unsent or never-drained) messages become
+  `unprocessed_steering` rows in `lane_followups` — they are never
+  auto-run. Instead the lane's next main-loop turn injects them as an
+  `<unprocessed_steering>` context block (up to 5 rows per turn,
+  `query_handler/unprocessed_steering.rs`) that tells the model they
+  were NOT acted on, and marks them done so each surfaces exactly once.
+
+## The Completion Report
+
+When a lead-agent workflow finishes
+(`dispatcher/lead_agent.rs`), the lead agent's own final message IS the
+user-facing completion report: the lead prompt carries an unconditional
+`<completion_report>` contract (`runner/lead_agent/prompt.rs`), and the
+spawn persists `LoopResult.final_content` verbatim to the lane
+conversation (`persist_conversation`). The legacy `format_task_result`
+template is only the fallback for empty final content (budget / cancel /
+error exits). Non-`Complete` finish reasons get a one-line status prefix
+either way (`outcome.rs::completion_status_line`). `TaskCompleted`
+events carry a 500-char excerpt; the full report lives in lane history
+and the task outcome record.
+
+## The Follow-up Runner
+
+`queue_followup` (lead-agent tool, plus a main-loop variant on
+workflow-attached lanes) writes `followup` rows into `lane_followups`
+(migration 033) with the originating principal/scope/workspace. When a
+workflow finalizes and `followup_autostart = true` (default), the spawn
+claims the lane's next `followup` row (`FollowupRepository::claim_next`
+— which never claims `unprocessed_steering`; those rows are surfaced by
+the lazy context-block injection described under Steering above) and
+hands it to the
+`FollowupRunner` (trait in `orchestrator/mod.rs`; daemon impl
+`apps/openalpacad/src/followup.rs::GatewayFollowupRunner`). Each item
+re-enters through `Gateway::handle_event` as a fresh turn —
+`EventSource::Internal` with `lane_override` for lane continuity — so it
+can answer inline or start its own workflow through the normal front
+door.
+
+## Routing Mode Strings
+
+`OrchestrationStage.mode` vocabulary after the Routing V2 default flip
+(`planner_ms` is kept in the event schema and is always 0 in tool mode):
+
+| Status | Mode strings |
+|---|---|
+| **Retired** — deleted with the planner ladder in Phase 5; no longer emitted, but may appear in historical `orchestrator_latency` rows | `two_phase_simple`, `two_phase_complex`, `two_phase_deep_query`, `two_phase_triage_failed`, `planner_simple_query`, `planner_complex_task`, `planner_unknown`, `planner_failed`, `fast_path`, `no_llm` |
+| **New** | `main_loop` (the tool-mode front door), `steered` (the deterministic `/steer ` prefix path), `skill_command` (the deterministic skill tier, both modes), `task_ops` (task queries/control, incl. bare `/cancel` etc.) |
+| **Unchanged** | `bootstrap`, `forced_simple_query`, `social_fast_path` |
+
+There is no `workflow_started` mode string: a turn that starts a
+workflow is `main_loop` with `delegation{task_id, title}` on the
+response and a `DispatchDecision` with reason `model_tool_call`.
+Model-routed steering (`steer_workflow`) is likewise a `main_loop` turn;
+only the `/steer ` prefix emits `steered`.
 
 ## Hermes Compliance Matrix
 
@@ -50,7 +207,7 @@ Hermes step      OpenAlpaca      Notes
 ──────────────────────────────────────────────────────────────────────
 1. task_id       Compliant       Pre-loop
 2. append user   Compliant       Arc<Vec<ChatMessage>>
-3. sys prompt    Compliant       Layered compose engine with two-tier memoization (global LRU + per-lane cache); 9 call sites unified via ComposeEngine::compose
+3. sys prompt    Compliant       Layered compose engine with two-tier memoization (global LRU + per-lane cache); 5 call sites unified via ComposeEngine::compose
 4. preflight     Compliant       Graduated compaction
 5. build API     Compliant       3 providers via adapter crate
 6. ephemeral     Compliant       Flag-gated (spec P0)
@@ -121,10 +278,11 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
 
 ## System-Prompt Memoization
 
-Implemented via the layered `ComposeEngine` (`compose/mod.rs`). All nine
-production prompt-assembly call sites (simple query ×2, skill
-invocation, pipeline step, DAG node, lead-agent prompt + subagent spawn,
-planner, replanner) route through `ComposeEngine::compose`, which runs
+Implemented via the layered `ComposeEngine` (`compose/mod.rs`). All
+five production prompt-assembly call sites (simple query + social fast
+path, skill invocation, lead-agent prompt + subagent spawn — the latter
+reusing the `DagNode` compose mode) route through
+`ComposeEngine::compose`, which runs
 five layers — Persona, Static Prompt, Dynamic Context, History, Assembly
 — with two-tier memoization:
 
@@ -144,8 +302,6 @@ Known gaps:
 
 - Layers 3+4 report `MissReason::FirstBuild` on every miss — per-lane
   miss attribution is out of scope for this cycle.
-- The pipeline-step call site passes `lane: None` (no natural lane key),
-  so sequential-pipeline steps get no per-lane caching.
 - The legacy `PromptBuilder` survives only as the internal backend of
   the static-prompt layer (`compose/static_prompt.rs`).
 

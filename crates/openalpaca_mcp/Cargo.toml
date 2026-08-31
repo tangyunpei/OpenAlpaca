@@ -8,7 +8,7 @@ license.workspace = true
 
 [features]
 default = []
-# Enables MockTransport for downstream test consumers (P2).
+# Enables MockTransport and McpClient::disconnected_for_tests for downstream test consumers.
 test-utils = []
 
 [dependencies]

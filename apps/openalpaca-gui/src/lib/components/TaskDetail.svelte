@@ -21,11 +21,6 @@
   let detail = $state<TaskDetailResponse | null>(null);
   let loading = $state(true);
   let actionLoading = $state(false);
-  let expandedAssignment = $state<string | null>(null);
-
-  function toggleAssignment(id: string) {
-    expandedAssignment = expandedAssignment === id ? null : id;
-  }
 
   let hasDetailProgress = $derived(
     detail?.task.progress_current != null &&
@@ -242,47 +237,28 @@
 
       {#if detail.assignments && detail.assignments.length > 0}
         <div class="mb-4">
-          <h4 class="m-0 mb-2 text-[0.85rem] text-muted-foreground uppercase tracking-[0.5px]">Assignments</h4>
+          <h4 class="m-0 mb-2 text-[0.85rem] text-muted-foreground uppercase tracking-[0.5px]">Agent Runs</h4>
           <table class="w-full border-collapse text-[0.85rem]">
             <thead>
               <tr>
-                <th class="text-left text-muted-foreground font-medium px-2 py-1.5 border-b border-white/[0.08]">Step</th>
                 <th class="text-left text-muted-foreground font-medium px-2 py-1.5 border-b border-white/[0.08]">Agent</th>
                 <th class="text-left text-muted-foreground font-medium px-2 py-1.5 border-b border-white/[0.08]">Role</th>
                 <th class="text-left text-muted-foreground font-medium px-2 py-1.5 border-b border-white/[0.08]">Status</th>
-                <th class="text-left text-muted-foreground font-medium px-2 py-1.5 border-b border-white/[0.08]">Output</th>
+                <th class="text-left text-muted-foreground font-medium px-2 py-1.5 border-b border-white/[0.08]">Runtime</th>
+                <th class="text-left text-muted-foreground font-medium px-2 py-1.5 border-b border-white/[0.08]">Completed</th>
               </tr>
             </thead>
             <tbody>
               {#each detail.assignments as a}
                 <tr>
-                  <td class="px-2 py-1.5 border-b border-white/[0.04]">{a.step_order ?? "-"}</td>
-                  <td class="px-2 py-1.5 border-b border-white/[0.04] font-mono text-[0.8rem]">{a.agent_id.slice(0, 8)}</td>
+                  <td class="px-2 py-1.5 border-b border-white/[0.04] font-mono text-[0.8rem]">{a.agent_id}</td>
                   <td class="px-2 py-1.5 border-b border-white/[0.04]">{a.role}</td>
                   <td class="px-2 py-1.5 border-b border-white/[0.04]">
                     <span class="text-[0.65rem] px-1.5 py-px rounded-full uppercase font-bold {statusBadgeClass(a.status)}">{a.status}</span>
                   </td>
-                  <td class="px-2 py-1.5 border-b border-white/[0.04]">
-                    {#if a.result_output?.trim()}
-                      <button
-                        class="bg-violet-500/20 border-none text-violet-400 text-[0.7rem] px-2 py-px rounded-lg cursor-pointer hover:bg-violet-500/35"
-                        onclick={() => toggleAssignment(a.id)}
-                        aria-expanded={expandedAssignment === a.id}
-                      >
-                        {expandedAssignment === a.id ? "Hide" : "View"}
-                      </button>
-                    {:else}
-                      <span class="text-muted-foreground">-</span>
-                    {/if}
-                  </td>
+                  <td class="px-2 py-1.5 border-b border-white/[0.04]">{a.runtime_seconds != null ? `${a.runtime_seconds}s` : "-"}</td>
+                  <td class="px-2 py-1.5 border-b border-white/[0.04]">{formatDateTime(a.completed_at)}</td>
                 </tr>
-                {#if expandedAssignment === a.id && a.result_output?.trim()}
-                  <tr>
-                    <td colspan="5" class="px-2 pb-2 border-b border-white/[0.04]">
-                      <pre class="m-0 px-3.5 py-2.5 bg-black/25 rounded-lg text-[0.8rem] text-foreground whitespace-pre-wrap break-words max-h-[200px] overflow-y-auto leading-relaxed">{a.result_output}</pre>
-                    </td>
-                  </tr>
-                {/if}
               {/each}
             </tbody>
           </table>

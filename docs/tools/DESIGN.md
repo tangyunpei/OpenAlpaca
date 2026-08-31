@@ -603,11 +603,12 @@ protection (canonicalize + prefix check) ensures scripts stay within
 
 ### 8.1 How Tools Reach Agents
 
-| Dispatch Mode | Tool Resolution | Special Tools |
+| Role | Tool Resolution | Special Tools |
 |---------------|----------------|---------------|
-| **Sequential Pipeline** | `resolve_agent_tools()` per agent | Workspace tools (via capabilities) |
-| **DAG Executor** | `resolve_agent_tools()` per node | Workspace tools (via capabilities) |
-| **Lead Agent** | `resolve_agent_tools()` + coordination tools | `spawn_subagent`, `spawn_subagents_batch`, `check_subagent_status`, `wait_for_subagents` |
+| **Lead Agent** | Coordination tools + workspace tools + `memory_search` | `spawn_subagent`, `spawn_subagents_batch`, `check_subagent_status`, `wait_for_subagents`, plus `post_update` / `queue_followup` when steering is enabled |
+| **Subagents** | `resolve_agent_tools()` per spawned agent | Workspace tools (via capabilities) |
+
+(The legacy sequential-pipeline and DAG-executor dispatch modes were deleted in Routing V2 Phase 5; the lead agent is the only multi-agent dispatch mode.)
 
 Coordination tools are registered into the shared registry when the lead
 run starts (`register_coordination_tools`), so they pass through the same

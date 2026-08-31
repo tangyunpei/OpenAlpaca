@@ -41,6 +41,24 @@ pub(super) fn normalize_handle(handle: &str) -> String {
     trimmed.to_lowercase()
 }
 
+/// Derive the send addressing for a tool-confirmation prompt from a
+/// conversation_map chat identifier.
+///
+/// - Group chats (identifier starts with "chat") use chat-id addressing.
+/// - DMs use the participant handle, extracted from GUID-style identifiers
+///   like `iMessage;-;+15551234567` (plain handles pass through unchanged).
+///
+/// Mirrors `handle_message`'s reply_target logic: groups by chat id,
+/// DMs by handle.
+pub(super) fn confirmation_reply_target(chat_id: &str) -> (String, bool) {
+    if chat_id.starts_with("chat") {
+        (chat_id.to_string(), true)
+    } else {
+        let handle = chat_id.rsplit(';').next().unwrap_or(chat_id);
+        (handle.to_string(), false)
+    }
+}
+
 /// Runtime configuration for iMessage message routing.
 pub(super) struct IMessageConfig {
     /// Whether to include self-sent messages in polling.

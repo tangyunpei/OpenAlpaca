@@ -40,7 +40,7 @@ fn test_cancel() {
     assert_eq!(
         intent,
         Intent::TaskControl {
-            task_id: "task-456".to_string(),
+            task_id: Some("task-456".to_string()),
             action: "cancel".to_string()
         }
     );
@@ -52,25 +52,39 @@ fn test_pause() {
     assert_eq!(
         intent,
         Intent::TaskControl {
-            task_id: "task-789".to_string(),
+            task_id: Some("task-789".to_string()),
             action: "pause".to_string()
         }
     );
 }
 
 #[test]
-fn test_complex_multi_skill() {
-    let intent = parser().parse("research about Rust and write a summary");
-    match intent {
-        Intent::ComplexTask {
-            required_skills, ..
-        } => {
-            assert!(required_skills.contains(&"web_search".to_string()));
-            assert!(required_skills.contains(&"text_generate".to_string()));
-            assert!(required_skills.contains(&"summarize".to_string()));
-        }
-        _ => panic!("Expected ComplexTask, got {:?}", intent),
+fn test_bare_task_control_commands() {
+    // Bare commands (no id) resolve against the lane's active workflows.
+    for (cmd, action) in [
+        ("/cancel", "cancel"),
+        ("/pause", "pause"),
+        ("/resume", "resume"),
+        ("/cancel   ", "cancel"), // trailing whitespace, still bare
+    ] {
+        assert_eq!(
+            parser().parse(cmd),
+            Intent::TaskControl {
+                task_id: None,
+                action: action.to_string()
+            },
+            "command: {cmd:?}"
+        );
     }
+}
+
+#[test]
+fn test_task_control_prefix_words_are_not_commands() {
+    // "/cancellation" must not parse as a bare /cancel.
+    assert!(matches!(
+        parser().parse("/cancellation"),
+        Intent::SimpleQuery { .. }
+    ));
 }
 
 #[test]
@@ -97,19 +111,6 @@ fn test_single_keyword_no_signal() {
     let intent = parser().parse("search for cats");
     // "search" matches web_search but no complexity signal -> SimpleQuery
     assert!(matches!(intent, Intent::SimpleQuery { .. }));
-}
-
-#[test]
-fn test_single_keyword_with_signal() {
-    let intent = parser().parse("can you search for cats");
-    match intent {
-        Intent::ComplexTask {
-            required_skills, ..
-        } => {
-            assert!(required_skills.contains(&"web_search".to_string()));
-        }
-        _ => panic!("Expected ComplexTask, got {:?}", intent),
-    }
 }
 
 // --- suggest_tools tests ---
@@ -251,7 +252,7 @@ fn test_suggest_tools_write_readme_no_update_persona() {
     );
 }
 
-// --- parse_with_skills tests ---
+// --- skill catalog helpers ---
 
 use std::io::Write;
 use tempfile::TempDir;
@@ -269,172 +270,6 @@ fn create_test_skill_dir(
     dir
 }
 
-fn make_test_catalog() -> (TempDir, SkillCatalog) {
-    let tmp = TempDir::new().unwrap();
-    create_test_skill_dir(
-        tmp.path(),
-        "code-review",
-        r#"---
-name: "Code Review"
-description: "Review code for bugs"
-command: "review"
-trigger_patterns:
-  - "review.*code"
-  - "code review"
-tools_required:
-  - "file_read"
-auto_load: false
----
-
-## Instructions
-
-Review the code.
-"#,
-    );
-    create_test_skill_dir(
-        tmp.path(),
-        "explain-code",
-        r#"---
-name: "Explain Code"
-description: "Explain what code does"
-command: "explain-code"
-trigger_patterns:
-  - "explain.*code"
-  - "what does.*do"
-auto_load: false
----
-
-## Instructions
-
-Explain step by step.
-"#,
-    );
-    create_test_skill_dir(
-        tmp.path(),
-        "commit-message",
-        r#"---
-name: "Commit Message"
-description: "Generate commit messages"
-command: "commit"
-trigger_patterns:
-  - "commit message"
-  - "git commit"
-auto_load: false
----
-
-## Instructions
-
-Generate a conventional commit.
-"#,
-    );
-
-    let catalog = SkillCatalog::new();
-    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
-    (tmp, catalog)
-}
-
-#[test]
-fn test_parse_with_skills_slash_command_review() {
-    let (_tmp, catalog) = make_test_catalog();
-    let intent = parser().parse_with_skills("/review some code", &catalog);
-    match intent {
-        Intent::SkillInvocation { skill_name, query } => {
-            assert_eq!(skill_name, "Code Review");
-            assert_eq!(query, "some code");
-        }
-        other => panic!("Expected SkillInvocation, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_parse_with_skills_slash_command_explain() {
-    let (_tmp, catalog) = make_test_catalog();
-    let intent = parser().parse_with_skills("/explain-code main.rs", &catalog);
-    match intent {
-        Intent::SkillInvocation { skill_name, query } => {
-            assert_eq!(skill_name, "Explain Code");
-            assert_eq!(query, "main.rs");
-        }
-        other => panic!("Expected SkillInvocation, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_parse_with_skills_slash_command_no_query() {
-    let (_tmp, catalog) = make_test_catalog();
-    let intent = parser().parse_with_skills("/review", &catalog);
-    match intent {
-        Intent::SkillInvocation { skill_name, query } => {
-            assert_eq!(skill_name, "Code Review");
-            assert_eq!(query, "/review"); // full text when no query
-        }
-        other => panic!("Expected SkillInvocation, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_parse_with_skills_trigger_match() {
-    let (_tmp, catalog) = make_test_catalog();
-    let intent = parser().parse_with_skills("please review my code for bugs", &catalog);
-    match intent {
-        Intent::SkillInvocation { skill_name, query } => {
-            assert_eq!(skill_name, "Code Review");
-            assert_eq!(query, "please review my code for bugs");
-        }
-        other => panic!("Expected SkillInvocation, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_parse_with_skills_trigger_commit() {
-    let (_tmp, catalog) = make_test_catalog();
-    let intent = parser().parse_with_skills("generate a git commit message", &catalog);
-    match intent {
-        Intent::SkillInvocation { skill_name, query } => {
-            assert_eq!(skill_name, "Commit Message");
-            assert_eq!(query, "generate a git commit message");
-        }
-        other => panic!("Expected SkillInvocation, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_parse_with_skills_no_match_fallthrough() {
-    let (_tmp, catalog) = make_test_catalog();
-    let intent = parser().parse_with_skills("hello world", &catalog);
-    assert!(
-        matches!(intent, Intent::SimpleQuery { .. }),
-        "Should fall through to SimpleQuery, got {:?}",
-        intent
-    );
-}
-
-#[test]
-fn test_parse_with_skills_unknown_slash_fallthrough() {
-    let (_tmp, catalog) = make_test_catalog();
-    // /status is a built-in command, not a skill — should fall through to parse()
-    let intent = parser().parse_with_skills("/status", &catalog);
-    assert!(
-        matches!(intent, Intent::TaskQuery { .. }),
-        "Should fall through to TaskQuery, got {:?}",
-        intent
-    );
-}
-
-#[test]
-fn test_parse_with_skills_empty_catalog() {
-    let catalog = SkillCatalog::new();
-    let intent = parser().parse_with_skills("/review some code", &catalog);
-    // No skills loaded — slash command won't match, falls through
-    // "/review some code" doesn't match built-in slash commands either
-    // It should become a SimpleQuery
-    assert!(
-        matches!(intent, Intent::SimpleQuery { .. }),
-        "Should fall through to SimpleQuery with empty catalog, got {:?}",
-        intent
-    );
-}
-
 #[test]
 fn test_skill_invocation_intent_type() {
     let intent = Intent::SkillInvocation {
@@ -442,49 +277,6 @@ fn test_skill_invocation_intent_type() {
         query: "test query".to_string(),
     };
     assert_eq!(intent.intent_type(), "skill_invocation");
-}
-
-// --- fast path eligibility tests ---
-
-#[test]
-fn test_fast_path_greeting() {
-    assert!(parser().is_fast_path_eligible("hello"));
-}
-
-#[test]
-fn test_fast_path_short_question() {
-    assert!(parser().is_fast_path_eligible("what time is it?"));
-}
-
-#[test]
-fn test_fast_path_complexity_signal_ineligible() {
-    assert!(!parser().is_fast_path_eligible("can you help me with this?"));
-}
-
-#[test]
-fn test_fast_path_long_content_ineligible() {
-    let long = "a".repeat(201);
-    assert!(!parser().is_fast_path_eligible(&long));
-}
-
-#[test]
-fn test_fast_path_task_verb_ineligible() {
-    assert!(!parser().is_fast_path_eligible("create a task to fix the bug"));
-}
-
-#[test]
-fn test_fast_path_delegation_ineligible() {
-    assert!(!parser().is_fast_path_eligible("delegate this to the researcher"));
-}
-
-#[test]
-fn test_fast_path_step_by_step_ineligible() {
-    assert!(!parser().is_fast_path_eligible("do this step by step"));
-}
-
-#[test]
-fn test_fast_path_multi_skill_ineligible() {
-    assert!(!parser().is_fast_path_eligible("research and summarize this"));
 }
 
 // --- parse_with_skills_and_router tests ---
@@ -567,6 +359,30 @@ fn test_router_slash_command_takes_priority() {
         }
         other => panic!("Expected SkillInvocation, got {:?}", other),
     }
+}
+
+#[test]
+fn test_router_auto_select_records_usage_for_recency() {
+    let (_tmp, catalog) = make_router_test_catalog();
+    let router = SkillRouter::new(0.65, 0.45);
+
+    // Auto-selection at the production site must write the recency tier
+    // via record_usage (wiring audit §2: recency bonus needs a writer).
+    let intent = parser().parse_with_skills_and_router("review code for bugs", &catalog, &router);
+    assert!(matches!(intent, Intent::SkillInvocation { .. }));
+
+    // A subsequent route sees the recency bonus for the selected skill.
+    let result = router.route("review code for bugs", &catalog);
+    let score = result
+        .scores
+        .iter()
+        .find(|s| s.skill_id == "code-review")
+        .expect("code-review must be scored");
+    assert!(
+        score.recency_bonus > 0.0,
+        "auto-select must record usage; recency_bonus = {}",
+        score.recency_bonus
+    );
 }
 
 #[test]
@@ -873,89 +689,6 @@ fn test_suggest_tools_text_send_continuation() {
         "Expected send for '发消息给他': {:?}",
         tools
     );
-}
-
-// --- enhanced pre-screen tests ---
-
-#[test]
-fn test_enhanced_simple_explain_closures() {
-    assert!(parser().is_enhanced_simple_query("Can you explain closures?"));
-}
-
-#[test]
-fn test_enhanced_simple_research_is_not_simple() {
-    assert!(!parser().is_enhanced_simple_query(
-        "Can you research caching strategies?"
-    ));
-}
-
-#[test]
-fn test_enhanced_simple_social_thanks() {
-    assert!(parser().is_enhanced_simple_query("thanks"));
-}
-
-#[test]
-fn test_enhanced_simple_send_message_not_simple() {
-    assert!(!parser().is_enhanced_simple_query(
-        "Please send a message to John"
-    ));
-}
-
-#[test]
-fn test_enhanced_simple_what_time() {
-    assert!(parser().is_enhanced_simple_query("What time is it?"));
-}
-
-#[test]
-fn test_enhanced_simple_fix_bug_not_simple() {
-    assert!(!parser().is_enhanced_simple_query("Fix the bug"));
-}
-
-#[test]
-fn test_enhanced_simple_debug_not_simple() {
-    assert!(!parser().is_enhanced_simple_query("Debug this code"));
-}
-
-#[test]
-fn test_enhanced_simple_deploy_not_simple() {
-    assert!(!parser().is_enhanced_simple_query("Deploy the app"));
-}
-
-#[test]
-fn test_enhanced_simple_analyze_not_simple() {
-    assert!(!parser().is_enhanced_simple_query("Analyze the data"));
-}
-
-#[test]
-fn test_enhanced_simple_chinese_analyze_not_simple() {
-    assert!(!parser().is_enhanced_simple_query("分析这个报告"));
-}
-
-#[test]
-fn test_enhanced_simple_chinese_generate_not_simple() {
-    assert!(!parser().is_enhanced_simple_query("生成一段代码"));
-}
-
-#[test]
-fn test_enhanced_simple_chinese_debug_not_simple() {
-    assert!(!parser().is_enhanced_simple_query("调试这个问题"));
-}
-
-#[test]
-fn test_enhanced_simple_chinese_search_not_simple() {
-    assert!(!parser().is_enhanced_simple_query("搜索相关资料"));
-}
-
-#[test]
-fn test_enhanced_simple_fix_it_not_simple() {
-    // 2-word English with task verb — validates the structural fix
-    assert!(!parser().is_enhanced_simple_query("fix it"));
-}
-
-#[test]
-fn test_enhanced_simple_chinese_question_is_simple() {
-    // Chinese simple query without task verbs still classified correctly
-    assert!(parser().is_enhanced_simple_query("这是什么?"));
 }
 
 // --- is_social_message tests ---

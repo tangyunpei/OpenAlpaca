@@ -23,34 +23,11 @@ fn make_security_gate(bus: &EventBus) -> Arc<SecurityGate> {
 }
 
 fn make_orchestrator() -> Orchestrator {
-    let ctx = Arc::new(SharedContext::new());
-    let lanes = Arc::new(LaneManager::new());
-    let bus = EventBus::default();
-    let gate = make_security_gate(&bus);
-    let registry = make_tool_registry();
-    Orchestrator::new(
-        ctx,
-        lanes,
-        bus,
-        SystemPersona::default(),
-        None,
-        LoopConfig::default(),
-        gate,
-        registry,
-        None,
-        None,
-        Arc::new(skill_catalog::SkillCatalog::new()),
-        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
-        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
-    )
+    make_orchestrator_with_config(DaemonConfig::default())
 }
 
-fn make_orchestrator_with_agents(agents: Vec<SubAgent>) -> Orchestrator {
+fn make_orchestrator_with_config(config: DaemonConfig) -> Orchestrator {
     let ctx = Arc::new(SharedContext::new());
-    for a in &agents {
-        ctx.agent_registry.register_template(template_from_agent(a));
-        ctx.agent_registry.register(a.clone());
-    }
     let lanes = Arc::new(LaneManager::new());
     let bus = EventBus::default();
     let gate = make_security_gate(&bus);
@@ -68,7 +45,7 @@ fn make_orchestrator_with_agents(agents: Vec<SubAgent>) -> Orchestrator {
         None,
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
-        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        Arc::new(ArcSwap::from_pointee(config)),
     )
 }
 
@@ -224,30 +201,6 @@ async fn test_task_query_empty() {
 }
 
 #[tokio::test]
-async fn test_complex_task_dispatch() {
-    let orch = make_orchestrator_with_agents(vec![
-        make_agent("a1", vec!["web_search"]),
-        make_agent("a2", vec!["text_generate"]),
-    ]);
-    let result = orch
-        .handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "please research and write about Rust".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-            None,
-            None,
-        )
-        .await;
-    assert!(result.is_ok());
-    let text = result.unwrap();
-    // Response is now human-readable, not JSON
-    assert!(text.contains("assigned"));
-}
-
-#[tokio::test]
 async fn test_task_control_cancel() {
     let orch = make_orchestrator();
     // Register a task first
@@ -292,54 +245,6 @@ async fn test_permission_denied_external() {
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Permission Denied"));
-}
-
-#[tokio::test]
-async fn test_full_lifecycle_events() {
-    let orch = make_orchestrator_with_agents(vec![make_agent("a1", vec!["web_search"])]);
-    let mut rx = orch.bus.subscribe();
-
-    // Send a complex task
-    let _result = orch
-        .handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "can you search for Rust tutorials".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-            None,
-            None,
-        )
-        .await;
-
-    // Collect events
-    let mut events = Vec::new();
-    while let Ok(event) = rx.try_recv() {
-        events.push(event);
-    }
-
-    // Should have: IntentClassified, AgentStatusChanged, TaskCreated
-    let event_types: Vec<String> = events
-        .iter()
-        .map(|e| match e {
-            SystemEvent::IntentClassified { .. } => "intent_classified".to_string(),
-            SystemEvent::AgentStatusChanged { .. } => "agent_status_changed".to_string(),
-            SystemEvent::TaskCreated { .. } => "task_created".to_string(),
-            other => format!("{:?}", other),
-        })
-        .collect();
-
-    assert!(
-        event_types.contains(&"intent_classified".to_string()),
-        "Missing IntentClassified event. Got: {:?}",
-        event_types
-    );
-    assert!(
-        event_types.contains(&"task_created".to_string()),
-        "Missing TaskCreated event. Got: {:?}",
-        event_types
-    );
 }
 
 #[tokio::test]
@@ -543,92 +448,6 @@ fn make_orchestrator_with_llm_and_agents(
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
     )
-}
-
-#[tokio::test]
-async fn test_llm_planning_complex_task() {
-    let plan_json = r#"{"classification": "complex_task", "title": "Research Rust patterns", "assignments": [{"agent_id": "a1", "agent_name": "Agent a1", "role_description": "Research agent", "matched_skills": ["web_search"]}], "reasoning": "User wants research"}"#;
-    let router = make_planning_mock_llm(plan_json);
-    let orch =
-        make_orchestrator_with_llm_and_agents(router, vec![make_agent("a1", vec!["web_search"])]);
-
-    let result = orch
-        .handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "please research Rust async patterns".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-            None,
-            None,
-        )
-        .await;
-
-    assert!(result.is_ok());
-    let text = result.unwrap();
-    assert!(
-        text.contains("assigned"),
-        "Expected 'assigned' in: {}",
-        text
-    );
-
-    // Verify task is registered
-    assert_eq!(orch.shared_context.task_registry.count(), 1);
-}
-
-#[tokio::test]
-async fn test_llm_planning_simple_query() {
-    let plan_json = r#"{"classification": "simple_query", "title": null, "assignments": [], "reasoning": "This is a greeting"}"#;
-    let router = make_planning_mock_llm(plan_json);
-    let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
-
-    let result = orch
-        .handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "hello".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-            None,
-            None,
-        )
-        .await;
-
-    assert!(result.is_ok());
-    // Should NOT dispatch a task
-    assert_eq!(orch.shared_context.task_registry.count(), 0);
-}
-
-#[tokio::test]
-async fn test_llm_planning_fallback_on_malformed() {
-    // LLM returns garbage — should fall back to keyword heuristic
-    let router = make_planning_mock_llm("this is not valid json at all");
-    let orch =
-        make_orchestrator_with_llm_and_agents(router, vec![make_agent("a1", vec!["web_search"])]);
-
-    let result = orch
-        .handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "can you search for Rust tutorials".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-            None,
-            None,
-        )
-        .await;
-
-    // Should still work via heuristic fallback
-    assert!(result.is_ok());
-    let text = result.unwrap();
-    assert!(
-        text.contains("assigned"),
-        "Expected heuristic fallback to dispatch. Got: {}",
-        text
-    );
 }
 
 #[tokio::test]
@@ -945,37 +764,6 @@ async fn test_tool_intent_but_not_in_registry() {
 
     // Should succeed without error — just proceeds tool-less
     assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
-}
-
-#[tokio::test]
-async fn test_dispatch_error_falls_back_to_simple_query() {
-    // Planner returns complex_task with nonexistent agent → dispatch fails → fallback to simple_query
-    let plan_json = r#"{"classification": "complex_task", "title": "Do something", "assignments": [{"agent_id": "nonexistent_agent", "agent_name": "Ghost", "role_description": "Ghost role", "matched_skills": ["web_search"]}], "reasoning": "complex"}"#;
-    let router = make_planning_mock_llm(plan_json);
-    // No agents registered → dispatch_planned will fail
-    let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
-
-    let result = orch
-        .handle_message(
-            Uuid::new_v4(),
-            "cli".to_string(),
-            "do something complex".to_string(),
-            Principal::System,
-            Scope::Global,
-            "test:cli".to_string(),
-            None,
-            None,
-        )
-        .await;
-
-    // Should succeed via fallback to simple_query (echo stub since mock LLM returns plan JSON)
-    assert!(
-        result.is_ok(),
-        "Expected Ok via fallback, got: {:?}",
-        result
-    );
-    // No tasks should be registered (dispatch failed)
-    assert_eq!(orch.shared_context.task_registry.count(), 0);
 }
 
 fn make_attachment_with_text(extracted_text: &str) -> ResolvedAttachment {
@@ -1308,8 +1096,11 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
 
     let guard = captured_requests.lock().unwrap();
     let req = guard.last().expect("expected captured request");
+    // Tool mode always carries the core set (start_workflow, task_status, …);
+    // the guard is that attachment text must not pull in suggested tools
+    // like file_write.
     assert!(
-        req.tools.is_empty(),
+        !req.tools.iter().any(|t| t.name == "file_write"),
         "Attachment text should not drive tool suggestion; got tools: {:?}",
         req.tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
     );
@@ -1698,4 +1489,1088 @@ fn test_wrap_untrusted_context_ampersand_escaped() {
     assert!(result.contains("Tom &amp; Jerry &lt;/context_data&gt;"));
     // Only 1 real closing tag
     assert_eq!(result.matches("</context_data>").count(), 1);
+}
+
+// --- Deterministic skill tier (Routing V2 Phase 0.5) ---
+
+fn make_review_skill_catalog() -> (tempfile::TempDir, Arc<skill_catalog::SkillCatalog>) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join("code-review");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        r#"---
+name: "Code Review"
+description: "Review code for issues"
+command: "review"
+auto_load: false
+---
+
+## Instructions
+
+Review the code.
+"#,
+    )
+    .unwrap();
+    let catalog = skill_catalog::SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+    (tmp, Arc::new(catalog))
+}
+
+fn make_orchestrator_with_llm_and_skills(
+    router: Arc<LlmRouter>,
+    catalog: Arc<skill_catalog::SkillCatalog>,
+) -> Orchestrator {
+    let ctx = Arc::new(SharedContext::new());
+    let lanes = Arc::new(LaneManager::new());
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let registry = make_tool_registry();
+    Orchestrator::new(
+        ctx,
+        lanes,
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        None,
+        catalog,
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    )
+}
+
+#[tokio::test]
+async fn test_slash_skill_takes_deterministic_tier_with_router() {
+    use openalpaca_llm::{ChatResponse, FinishReason, LlmError, LlmProvider, Usage};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingMockLlm {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CountingMockLlm {
+        fn name(&self) -> &str {
+            "counting-mock"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Ok(ChatResponse {
+                content: "review done".to_string(),
+                tool_calls: vec![],
+                model: "mock-model".to_string(),
+                usage: Usage {
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    ..Default::default()
+                },
+                finish_reason: FinishReason::Stop,
+                thinking: None,
+                parts: None,
+            })
+        }
+    }
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(CountingMockLlm {
+            call_count: call_count.clone(),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let (_tmp, catalog) = make_review_skill_catalog();
+    let orch = make_orchestrator_with_llm_and_skills(Arc::new(router), catalog);
+    let mut rx = orch.bus.subscribe();
+
+    let result = orch
+        .handle_message(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "/review some code".to_string(),
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+            None,
+        )
+        .await;
+
+    assert_eq!(result.unwrap(), "review done");
+    // Exactly one LLM call: the skill's agentic loop. A planner-first route
+    // would have made a planning call before (or instead of) it.
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+    let mut saw_skill_started = false;
+    let mut saw_intent_classified = false;
+    let mut stage_mode = None;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            SystemEvent::SkillInvocationStarted { skill_id, .. } => {
+                assert_eq!(skill_id, "Code Review");
+                saw_skill_started = true;
+            }
+            SystemEvent::IntentClassified { intent_type, .. } => {
+                assert_eq!(intent_type, "skill_invocation");
+                saw_intent_classified = true;
+            }
+            SystemEvent::OrchestrationStage { mode, .. } => stage_mode = Some(mode),
+            _ => {}
+        }
+    }
+    assert!(saw_skill_started, "handle_skill_invocation was not reached");
+    assert!(saw_intent_classified, "IntentClassified was not emitted");
+    assert_eq!(stage_mode.as_deref(), Some("skill_command"));
+}
+
+#[tokio::test]
+async fn test_slash_skill_no_router_still_invokes_skill() {
+    let (_tmp, catalog) = make_review_skill_catalog();
+    let ctx = Arc::new(SharedContext::new());
+    let lanes = Arc::new(LaneManager::new());
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let registry = make_tool_registry();
+    let orch = Orchestrator::new(
+        ctx,
+        lanes,
+        bus,
+        SystemPersona::default(),
+        None,
+        LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        None,
+        catalog,
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    let mut rx = orch.bus.subscribe();
+
+    let result = orch
+        .handle_message(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "/review some code".to_string(),
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+            None,
+        )
+        .await;
+
+    // No router: the skill handler falls back to its echo stub.
+    let content = result.unwrap();
+    assert!(content.contains("Code Review"), "unexpected content: {content}");
+
+    let mut saw_skill_started = false;
+    let mut intent_classified_count = 0;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            SystemEvent::SkillInvocationStarted { .. } => saw_skill_started = true,
+            SystemEvent::IntentClassified { intent_type, .. } => {
+                assert_eq!(intent_type, "skill_invocation");
+                intent_classified_count += 1;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_skill_started, "handle_skill_invocation was not reached");
+    assert_eq!(intent_classified_count, 1, "IntentClassified must be emitted exactly once");
+}
+
+#[tokio::test]
+async fn test_plugin_skill_invoked_via_executor_with_sandboxed_tool_callback() {
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+    use openalpaca_api::plugin_traits::{PluginSkillExecutor, ToolCallbackExecutor};
+
+    // Builtin the plugin skill calls back into through the sandbox.
+    struct EchoTool;
+    #[async_trait]
+    impl BuiltInTool for EchoTool {
+        async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+            Ok(format!(
+                "echo:{}",
+                arguments.get("q").and_then(|v| v.as_str()).unwrap_or("")
+            ))
+        }
+    }
+
+    // Stub out-of-process executor: records the query, requests one tool
+    // callback, and folds the sandboxed result into its final output.
+    struct StubSkillExecutor {
+        received_query: std::sync::Mutex<Option<String>>,
+    }
+    #[async_trait]
+    impl PluginSkillExecutor for StubSkillExecutor {
+        async fn invoke(
+            &self,
+            query: &str,
+            _context: &serde_json::Value,
+            tool_executor: &dyn ToolCallbackExecutor,
+        ) -> Result<String, String> {
+            *self.received_query.lock().unwrap() = Some(query.to_string());
+            let tool_result = tool_executor
+                .execute_tool("echo", &serde_json::json!({"q": "hi"}))
+                .await?;
+            Ok(format!("plugin says: {tool_result}"))
+        }
+        fn plugin_id(&self) -> &str {
+            "test-plugin"
+        }
+        fn skill_id(&self) -> &str {
+            "plugtest"
+        }
+    }
+
+    let registry = Arc::new(ToolRegistry::default());
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "echo".to_string(),
+                description: "Echo tool".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+    let catalog = Arc::new(skill_catalog::SkillCatalog::new());
+    let executor = Arc::new(StubSkillExecutor {
+        received_query: std::sync::Mutex::new(None),
+    });
+    catalog.register_plugin_skill(
+        "plugtest".to_string(),
+        crate::middleware::skill::SkillFrontmatter {
+            name: "Plugin Test Skill".to_string(),
+            description: "Plugin-backed skill".to_string(),
+            invoke: crate::middleware::skill::InvokeConfig {
+                slash: Some("/plugtest".to_string()),
+                ..Default::default()
+            },
+            tools: crate::middleware::skill::ToolsConfig {
+                allow: vec!["echo".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        executor.clone(),
+        "test-plugin".to_string(),
+    );
+
+    let ctx = Arc::new(SharedContext::new());
+    let lanes = Arc::new(LaneManager::new());
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    // No LLM router — a plugin skill must run without one.
+    let orch = Orchestrator::new(
+        ctx,
+        lanes,
+        bus,
+        SystemPersona::default(),
+        None,
+        LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        None,
+        catalog,
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    let mut rx = orch.bus.subscribe();
+
+    let result = orch
+        .handle_message(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "/plugtest do the thing".to_string(),
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+            None,
+        )
+        .await;
+
+    // The plugin executor ran out-of-process logic and its tool callback
+    // went through the sandboxed execute path.
+    assert_eq!(result.unwrap(), "plugin says: echo:hi");
+    assert_eq!(
+        executor.received_query.lock().unwrap().as_deref(),
+        Some("do the thing")
+    );
+
+    // The shared lifecycle wrapper emitted the same events as file skills.
+    let mut saw_started = false;
+    let mut saw_completed = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            SystemEvent::SkillInvocationStarted { skill_id, .. } => {
+                assert_eq!(skill_id, "Plugin Test Skill");
+                saw_started = true;
+            }
+            SystemEvent::SkillCompleted { output_preview, .. } => {
+                assert!(output_preview.contains("plugin says"));
+                saw_completed = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_started, "SkillInvocationStarted was not emitted");
+    assert!(saw_completed, "SkillCompleted was not emitted");
+}
+
+// ── Routing V2: deterministic /steer prefix ──────────────────────────
+
+fn make_steering_orchestrator() -> Orchestrator {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.routing.steering_enabled = true;
+    make_orchestrator_with_config(config)
+}
+
+/// Drain the bus and return the modes of every OrchestrationStage event.
+fn orchestration_modes(rx: &mut tokio::sync::broadcast::Receiver<SystemEvent>) -> Vec<String> {
+    let mut modes = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let SystemEvent::OrchestrationStage { mode, .. } = event {
+            modes.push(mode);
+        }
+    }
+    modes
+}
+
+async fn send_steer(orch: &Orchestrator, content: &str) -> String {
+    orch.handle_message(
+        Uuid::new_v4(),
+        "cli".to_string(),
+        content.to_string(),
+        Principal::User {
+            global_id: "user1".to_string(),
+        },
+        Scope::Global,
+        "user1:cli".to_string(),
+        None,
+        None,
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_steer_prefix_no_active_workflow() {
+    let orch = make_steering_orchestrator();
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, "/steer focus on tests").await;
+    assert!(
+        reply.contains("No running workflow"),
+        "unexpected reply: {reply}"
+    );
+    assert_eq!(orchestration_modes(&mut rx), vec!["steered".to_string()]);
+}
+
+#[tokio::test]
+async fn test_steer_prefix_single_workflow_pushes_and_confirms() {
+    let orch = make_steering_orchestrator();
+    orch.shared_context
+        .task_registry
+        .register("task-1".to_string(), "Build the report".to_string());
+    let inbox = Arc::new(crate::runner::steering::SteeringInbox::default());
+    orch.shared_context
+        .register_steering_inbox("task-1", inbox.clone());
+    orch.shared_context
+        .register_workflow_for_lane("user1:cli", "task-1");
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, "/steer switch to staging").await;
+    assert!(reply.contains("Build the report"), "reply must name the task: {reply}");
+    assert!(reply.contains("task-1"), "reply must include the task id: {reply}");
+    assert!(reply.contains("1 message"), "reply must include queue depth: {reply}");
+
+    let queued = inbox.drain_all();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].text, "switch to staging");
+    assert_eq!(
+        queued[0].principal,
+        Principal::User {
+            global_id: "user1".to_string()
+        }
+    );
+    assert_eq!(orchestration_modes(&mut rx), vec!["steered".to_string()]);
+}
+
+#[tokio::test]
+async fn test_steer_prefix_full_inbox_explains_backlog() {
+    let orch = make_steering_orchestrator();
+    orch.shared_context
+        .task_registry
+        .register("task-1".to_string(), "Busy task".to_string());
+    let inbox = Arc::new(crate::runner::steering::SteeringInbox::new(1));
+    orch.shared_context
+        .register_steering_inbox("task-1", inbox.clone());
+    orch.shared_context
+        .register_workflow_for_lane("user1:cli", "task-1");
+    // Fill the inbox to its cap of 1.
+    let _ = send_steer(&orch, "/steer first").await;
+
+    let reply = send_steer(&orch, "/steer second").await;
+    assert!(reply.contains("full"), "unexpected reply: {reply}");
+    assert!(reply.contains("/cancel task-1"), "reply should suggest /cancel: {reply}");
+    // Only the first message landed.
+    assert_eq!(inbox.drain_all().len(), 1);
+}
+
+#[tokio::test]
+async fn test_steer_prefix_multiple_workflows_asks_which() {
+    let orch = make_steering_orchestrator();
+    for id in ["task-1", "task-2"] {
+        orch.shared_context
+            .task_registry
+            .register(id.to_string(), format!("Title {id}"));
+        orch.shared_context.register_steering_inbox(
+            id,
+            Arc::new(crate::runner::steering::SteeringInbox::default()),
+        );
+        orch.shared_context
+            .register_workflow_for_lane("user1:cli", id);
+    }
+
+    let reply = send_steer(&orch, "/steer hurry up").await;
+    assert!(reply.contains("task-1"), "unexpected reply: {reply}");
+    assert!(reply.contains("task-2"), "unexpected reply: {reply}");
+    assert!(reply.contains("Which task"), "unexpected reply: {reply}");
+    // No push happened on either inbox.
+    for id in ["task-1", "task-2"] {
+        assert!(orch.shared_context.steering_inbox(id).unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn test_steer_prefix_flag_off_routes_unchanged() {
+    // Steering flag off: "/steer x" must route exactly as any other
+    // plain message — same mode sequence, no steering side effects.
+    let mut config = DaemonConfig::default();
+    config.orchestrator.routing.steering_enabled = false;
+    let orch = make_orchestrator_with_config(config);
+    orch.shared_context
+        .task_registry
+        .register("task-1".to_string(), "Some task".to_string());
+    orch.shared_context.register_steering_inbox(
+        "task-1",
+        Arc::new(crate::runner::steering::SteeringInbox::default()),
+    );
+    orch.shared_context
+        .register_workflow_for_lane("user1:cli", "task-1");
+    let mut rx = orch.bus.subscribe();
+
+    // Baseline: a plain message through the no-LLM ladder.
+    let baseline = send_steer(&orch, "hello there").await;
+    let baseline_modes = orchestration_modes(&mut rx);
+
+    let reply = send_steer(&orch, "/steer hello there").await;
+    let steer_modes = orchestration_modes(&mut rx);
+
+    assert_eq!(
+        steer_modes, baseline_modes,
+        "flag-off /steer must produce a byte-identical mode sequence"
+    );
+    // Same echo-stub shape as the baseline (content differs only by the text).
+    let baseline_json: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+    let steer_json: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(baseline_json["status"], steer_json["status"]);
+    assert!(steer_json["echo"].as_str().unwrap().contains("/steer hello there"));
+    // Nothing was pushed to the (manually registered) inbox.
+    assert!(orch.shared_context.steering_inbox("task-1").unwrap().is_empty());
+}
+
+// ── Routing V2: main loop ───────────────────────────────────────────
+
+fn make_orchestrator_with_llm_agents_and_config(
+    router: Arc<openalpaca_llm::LlmRouter>,
+    agents: Vec<SubAgent>,
+    config: DaemonConfig,
+    db: Option<openalpaca_storage::Database>,
+) -> Orchestrator {
+    let ctx = Arc::new(SharedContext::new());
+    for a in &agents {
+        ctx.agent_registry.register_template(template_from_agent(a));
+        ctx.agent_registry.register(a.clone());
+    }
+    let lanes = Arc::new(LaneManager::new());
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let registry = make_tool_registry();
+    Orchestrator::new(
+        ctx,
+        lanes,
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        registry,
+        db,
+        None,
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(config)),
+    )
+}
+
+/// Scripted provider for tool-mode tests: when the request carries the
+/// scripted tool and no tool result has landed yet, emit the tool call;
+/// every other request (round 2, or the detached lead-agent loop, whose
+/// tool surface differs) gets the plain final text.
+struct ToolModeMockLlm {
+    tool_call: Option<(String, serde_json::Value)>,
+    final_text: String,
+    requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for ToolModeMockLlm {
+    fn name(&self) -> &str {
+        "tool-mode-mock"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    async fn chat(
+        &self,
+        request: ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        use openalpaca_llm::{ChatResponse, FinishReason, Usage};
+        self.requests.lock().unwrap().push(request.clone());
+        if let Some((ref name, ref args)) = self.tool_call {
+            let has_tool = request.tools.iter().any(|t| &t.name == name);
+            let has_tool_result = request
+                .messages
+                .iter()
+                .any(|m| matches!(m.role, openalpaca_llm::Role::Tool));
+            if has_tool && !has_tool_result {
+                return Ok(ChatResponse {
+                    content: String::new(),
+                    tool_calls: vec![openalpaca_llm::ToolCall {
+                        id: "tc_1".to_string(),
+                        name: name.clone(),
+                        arguments: args.clone(),
+                    }],
+                    model: "mock-model".to_string(),
+                    usage: Usage {
+                        input_tokens: 20,
+                        output_tokens: 10,
+                        ..Default::default()
+                    },
+                    finish_reason: FinishReason::ToolUse,
+                    thinking: None,
+                    parts: None,
+                });
+            }
+        }
+        Ok(ChatResponse {
+            content: self.final_text.clone(),
+            tool_calls: vec![],
+            model: "mock-model".to_string(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        })
+    }
+}
+
+fn make_tool_mode_orchestrator(
+    tool_call: Option<(String, serde_json::Value)>,
+    final_text: &str,
+    config: DaemonConfig,
+    agents: Vec<SubAgent>,
+) -> (Orchestrator, Arc<std::sync::Mutex<Vec<ChatRequest>>>) {
+    make_tool_mode_orchestrator_with_db(tool_call, final_text, config, agents, None)
+}
+
+fn make_tool_mode_orchestrator_with_db(
+    tool_call: Option<(String, serde_json::Value)>,
+    final_text: &str,
+    config: DaemonConfig,
+    agents: Vec<SubAgent>,
+    db: Option<openalpaca_storage::Database>,
+) -> (Orchestrator, Arc<std::sync::Mutex<Vec<ChatRequest>>>) {
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(ToolModeMockLlm {
+            tool_call,
+            final_text: final_text.to_string(),
+            requests: requests.clone(),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let orch = make_orchestrator_with_llm_agents_and_config(Arc::new(router), agents, config, db);
+    (orch, requests)
+}
+
+async fn send_tool_mode(orch: &Orchestrator, request_id: Uuid, content: &str) -> String {
+    orch.handle_message(
+        request_id,
+        "cli".to_string(),
+        content.to_string(),
+        Principal::User {
+            global_id: "user1".to_string(),
+        },
+        Scope::Global,
+        "user1:cli".to_string(),
+        None,
+        None,
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_tool_mode_chat_answers_inline_without_planner() {
+    let (orch, requests) = make_tool_mode_orchestrator(
+        None,
+        "The borrow checker enforces ownership at compile time.",
+        DaemonConfig::default(),
+        vec![],
+    );
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_tool_mode(
+        &orch,
+        Uuid::new_v4(),
+        "Tell me about the Rust borrow checker in depth",
+    )
+    .await;
+    assert_eq!(reply, "The borrow checker enforces ownership at compile time.");
+
+    // Exactly ONE LLM call — no planner / triage call preceded the loop.
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "planner/triage must be skipped in tool mode");
+
+    // The main loop carried the core tool set (no workflow tools — the lane
+    // has no active workflows), the model-relay guidance, and caching.
+    let tool_names: Vec<&str> = requests[0].tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(tool_names.contains(&"start_workflow"), "tools: {tool_names:?}");
+    assert!(tool_names.contains(&"task_status"), "tools: {tool_names:?}");
+    assert!(!tool_names.contains(&"steer_workflow"), "tools: {tool_names:?}");
+    assert!(requests[0].enable_caching, "caching flip must reach the request");
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|m| m.content.contains("<workflow_relay_rules>")),
+        "relay guidance missing from the main-loop prompt"
+    );
+
+    // OrchestrationStage records the new mode.
+    assert_eq!(orchestration_modes(&mut rx), vec!["main_loop".to_string()]);
+}
+
+#[tokio::test]
+async fn test_tool_mode_task_message_starts_workflow() {
+    let (orch, requests) = make_tool_mode_orchestrator(
+        Some((
+            "start_workflow".to_string(),
+            serde_json::json!({
+                "goal": "Research the Rust borrow checker end to end",
+                "title": "Borrow checker research"
+            }),
+        )),
+        "Started \"Borrow checker research\" in the background — keep chatting while it runs.",
+        DaemonConfig::default(),
+        vec![make_agent("lead", vec!["orchestration"])],
+    );
+    let mut rx = orch.bus.subscribe();
+    let request_id = Uuid::new_v4();
+
+    let reply = send_tool_mode(
+        &orch,
+        request_id,
+        "Please research the Rust borrow checker end to end",
+    )
+    .await;
+
+    // The model's own text IS the reply — no canonical-ack swap.
+    assert_eq!(
+        reply,
+        "Started \"Borrow checker research\" in the background — keep chatting while it runs."
+    );
+
+    // Structured delegation populated from the result cell.
+    let delegation = orch
+        .delegation_map
+        .get(&request_id)
+        .expect("delegation must be recorded for the started workflow");
+    assert_eq!(delegation.title, "Borrow checker research");
+    assert!(!delegation.task_id.is_empty());
+    let task_id = delegation.task_id.clone();
+    drop(delegation);
+
+    // The task registered and both TaskCreated + WorkflowStarted fired.
+    assert_eq!(orch.shared_context.task_registry.count(), 1);
+    let mut saw_task_created = false;
+    let mut saw_workflow_started = false;
+    let mut stage_mode = None;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            SystemEvent::TaskCreated { task_id: tid, .. } => {
+                assert_eq!(tid, task_id);
+                saw_task_created = true;
+            }
+            SystemEvent::WorkflowStarted {
+                request_id: rid,
+                task_id: tid,
+                lane_key,
+                title,
+                ..
+            } => {
+                assert_eq!(rid, request_id);
+                assert_eq!(tid, task_id);
+                assert_eq!(lane_key, "user1:cli");
+                assert_eq!(title, "Borrow checker research");
+                saw_workflow_started = true;
+            }
+            SystemEvent::OrchestrationStage { mode, .. } => stage_mode = Some(mode),
+            _ => {}
+        }
+    }
+    assert!(saw_task_created, "TaskCreated was not published");
+    assert!(saw_workflow_started, "WorkflowStarted was not published");
+    assert_eq!(stage_mode.as_deref(), Some("main_loop"));
+
+    // Round 2 of the MAIN loop saw the tool result naming the task.
+    let requests = requests.lock().unwrap();
+    let round2_has_result = requests.iter().any(|r| {
+        r.messages.iter().any(|m| {
+            matches!(m.role, openalpaca_llm::Role::Tool)
+                && m.content.contains("Workflow started in the background")
+        })
+    });
+    assert!(round2_has_result, "start_workflow tool result never reached the model");
+}
+
+#[tokio::test]
+async fn test_tool_mode_at_cap_start_returns_directive_error_and_model_relays() {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.routing.max_workflows_per_lane = 1;
+    let (orch, requests) = make_tool_mode_orchestrator(
+        Some((
+            "start_workflow".to_string(),
+            serde_json::json!({"goal": "Another big research task"}),
+        )),
+        "One workflow is already running here — I can steer it or queue this as a follow-up.",
+        config,
+        vec![make_agent("lead", vec!["orchestration"])],
+    );
+    // Lane already at the cap.
+    orch.shared_context
+        .task_registry
+        .register("existing-task".to_string(), "Existing work".to_string());
+    orch.shared_context
+        .register_workflow_for_lane("user1:cli", "existing-task");
+    let mut rx = orch.bus.subscribe();
+    let request_id = Uuid::new_v4();
+
+    let reply = send_tool_mode(&orch, request_id, "Please run another big research task").await;
+
+    // The model relays the alternatives in its own words.
+    assert_eq!(
+        reply,
+        "One workflow is already running here — I can steer it or queue this as a follow-up."
+    );
+
+    // Nothing dispatched: no delegation, no WorkflowStarted, no new task.
+    assert!(orch.delegation_map.get(&request_id).is_none());
+    assert_eq!(orch.shared_context.task_registry.count(), 1);
+    while let Ok(event) = rx.try_recv() {
+        assert!(
+            !matches!(event, SystemEvent::WorkflowStarted { .. }),
+            "WorkflowStarted must not fire at the cap"
+        );
+    }
+
+    // The directive error reached the model as the tool result.
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let round2_has_directive = requests[1].messages.iter().any(|m| {
+        matches!(m.role, openalpaca_llm::Role::Tool)
+            && m.content.contains("Workflow limit reached")
+            && m.content.contains("queue_followup")
+    });
+    assert!(round2_has_directive, "directive cap error never reached the model");
+}
+
+#[tokio::test]
+async fn test_tool_mode_steer_workflow_injects_mid_workflow() {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.routing.steering_enabled = true;
+    let (orch, requests) = make_tool_mode_orchestrator(
+        Some((
+            "steer_workflow".to_string(),
+            serde_json::json!({"task_id": "task-1", "message": "focus on unit tests"}),
+        )),
+        "Passed that along to the running research task.",
+        config,
+        vec![],
+    );
+    // A workflow is running on this lane with a live steering inbox.
+    orch.shared_context
+        .task_registry
+        .register("task-1".to_string(), "Research task".to_string());
+    let inbox = Arc::new(crate::runner::steering::SteeringInbox::default());
+    orch.shared_context
+        .register_steering_inbox("task-1", inbox.clone());
+    orch.shared_context
+        .register_workflow_for_lane("user1:cli", "task-1");
+    let request_id = Uuid::new_v4();
+
+    let reply = send_tool_mode(
+        &orch,
+        request_id,
+        "Actually make sure it focuses on unit tests",
+    )
+    .await;
+    assert_eq!(reply, "Passed that along to the running research task.");
+
+    // The interjection landed in the workflow's inbox with the caller identity.
+    let queued = inbox.drain_all();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].text, "focus on unit tests");
+    assert_eq!(
+        queued[0].principal,
+        Principal::User {
+            global_id: "user1".to_string()
+        }
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    // Round 1: workflow-aware tool surface + live workflow context block.
+    let tool_names: Vec<&str> = requests[0].tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(tool_names.contains(&"steer_workflow"), "tools: {tool_names:?}");
+    assert!(tool_names.contains(&"queue_followup"), "tools: {tool_names:?}");
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|m| m.content.contains("<active_workflows>") && m.content.contains("task-1")),
+        "workflow context block missing"
+    );
+    // Round 2: the steer confirmation reached the model as the tool result.
+    assert!(
+        requests[1].messages.iter().any(|m| {
+            matches!(m.role, openalpaca_llm::Role::Tool)
+                && m.content.contains("Steering message queued")
+        }),
+        "steer_workflow tool result never reached the model"
+    );
+}
+
+#[tokio::test]
+async fn test_tool_mode_unprocessed_steering_leftovers_surface_exactly_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (steering_id, followup_id) = {
+        let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+        let steering_id = repo
+            .queue(
+                "user1:cli",
+                openalpaca_storage::repository::FOLLOWUP_KIND_UNPROCESSED_STEERING,
+                "focus on unit tests",
+                "{\"User\":{\"global_id\":\"user1\"}}",
+                None,
+                Some("task-old"),
+            )
+            .unwrap();
+        let followup_id = repo
+            .queue(
+                "user1:cli",
+                openalpaca_storage::repository::FOLLOWUP_KIND_FOLLOWUP,
+                "run the benchmarks after",
+                "{\"User\":{\"global_id\":\"user1\"}}",
+                None,
+                Some("task-old"),
+            )
+            .unwrap();
+        (steering_id, followup_id)
+    };
+
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "Noted — I'll pick those up now.",
+        DaemonConfig::default(),
+        vec![],
+        Some(db.clone()),
+    );
+
+    let reply = send_tool_mode(&orch, Uuid::new_v4(), "hey, how did it go?").await;
+    assert_eq!(reply, "Noted — I'll pick those up now.");
+
+    // Turn 1's request carries the unprocessed-steering block (and makes
+    // clear the messages were not acted on); followup-kind rows are NOT
+    // injected — they belong to the follow-up runner.
+    {
+        let reqs = requests.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        let block_msg = reqs[0]
+            .messages
+            .iter()
+            .find(|m| m.content.contains("<unprocessed_steering>"))
+            .expect("unprocessed steering block missing from turn 1");
+        assert!(block_msg.content.contains("focus on unit tests"), "{}", block_msg.content);
+        assert!(block_msg.content.contains("NOT processed"), "{}", block_msg.content);
+        assert!(
+            !reqs[0].messages.iter().any(|m| m.content.contains("run the benchmarks after")),
+            "followup-kind row must not be injected"
+        );
+    }
+
+    // The surfaced row is done; the followup row stays queued.
+    {
+        let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+        assert_eq!(repo.get(steering_id).unwrap().unwrap().status, "done");
+        assert_eq!(repo.get(followup_id).unwrap().unwrap().status, "queued");
+    }
+
+    // Turn 2 is clean — the block surfaces exactly once.
+    let _ = send_tool_mode(&orch, Uuid::new_v4(), "thanks!").await;
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 2);
+    assert!(
+        !reqs[1].messages.iter().any(|m| m.content.contains("<unprocessed_steering>")),
+        "block must not surface again on the second turn"
+    );
+}
+
+// ── Routing V2 Phase 3: bare task control + task_ops observability ──
+
+#[tokio::test]
+async fn test_bare_cancel_with_single_workflow_cancels_it() {
+    let orch = make_orchestrator();
+    orch.shared_context
+        .task_registry
+        .register("task-1".to_string(), "Long build".to_string());
+    orch.shared_context
+        .register_workflow_for_lane("user1:cli", "task-1");
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, "/cancel").await;
+
+    let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(json["task_id"], "task-1");
+    assert_eq!(json["action"], "cancel");
+    assert_eq!(json["new_status"], "cancelled");
+    assert_eq!(
+        orch.shared_context.task_registry.get("task-1").unwrap().status,
+        crate::context::TaskEntryStatus::Cancelled
+    );
+    // Task ops are observable: OrchestrationStage fires with the new mode.
+    assert_eq!(orchestration_modes(&mut rx), vec!["task_ops".to_string()]);
+}
+
+#[tokio::test]
+async fn test_bare_cancel_with_no_workflow_replies_helpfully() {
+    let orch = make_orchestrator();
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, "/cancel").await;
+    assert_eq!(reply, "No running workflow on this conversation.");
+    assert_eq!(orchestration_modes(&mut rx), vec!["task_ops".to_string()]);
+}
+
+#[tokio::test]
+async fn test_bare_cancel_with_two_workflows_asks_which() {
+    let orch = make_orchestrator();
+    for id in ["task-1", "task-2"] {
+        orch.shared_context
+            .task_registry
+            .register(id.to_string(), format!("Title {id}"));
+        orch.shared_context
+            .register_workflow_for_lane("user1:cli", id);
+    }
+
+    let reply = send_steer(&orch, "/cancel").await;
+    assert!(reply.contains("task-1"), "unexpected reply: {reply}");
+    assert!(reply.contains("task-2"), "unexpected reply: {reply}");
+    assert!(reply.contains("Which task"), "unexpected reply: {reply}");
+    // No action was taken on either task.
+    for id in ["task-1", "task-2"] {
+        assert_ne!(
+            orch.shared_context.task_registry.get(id).unwrap().status,
+            crate::context::TaskEntryStatus::Cancelled,
+            "task {id} must not be cancelled by an ambiguous bare command"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_explicit_cancel_with_id_unchanged() {
+    let orch = make_orchestrator();
+    orch.shared_context
+        .task_registry
+        .register("task-9".to_string(), "Explicit target".to_string());
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, "/cancel task-9").await;
+    let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(json["task_id"], "task-9");
+    assert_eq!(json["new_status"], "cancelled");
+    assert_eq!(orchestration_modes(&mut rx), vec!["task_ops".to_string()]);
+}
+
+#[tokio::test]
+async fn test_task_query_emits_task_ops_stage() {
+    let orch = make_orchestrator();
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, "/status").await;
+    let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert!(json.get("tasks").is_some(), "unexpected reply: {reply}");
+    assert_eq!(orchestration_modes(&mut rx), vec!["task_ops".to_string()]);
+}
+
+#[tokio::test]
+async fn test_bare_pause_resume_resolve_via_lane() {
+    let orch = make_orchestrator();
+    orch.shared_context
+        .task_registry
+        .register("task-1".to_string(), "Runner".to_string());
+    orch.shared_context
+        .task_registry
+        .update_status("task-1", crate::context::TaskEntryStatus::Running);
+    orch.shared_context
+        .register_workflow_for_lane("user1:cli", "task-1");
+
+    let reply = send_steer(&orch, "/pause").await;
+    let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(json["new_status"], "paused");
+
+    let reply = send_steer(&orch, "/resume").await;
+    let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(json["new_status"], "running");
 }

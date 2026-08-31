@@ -322,29 +322,6 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
-    /// Broadcast a task replanned event and persist it
-    pub fn task_replanned(
-        &self,
-        task_id: &str,
-        replan_number: usize,
-        decision: &str,
-        nodes_added: usize,
-        nodes_removed: usize,
-    ) {
-        let event = ServerEvent::TaskReplanned {
-            task_id: task_id.to_string(),
-            replan_number,
-            decision: decision.to_string(),
-            nodes_added,
-            nodes_removed,
-            ts: Utc::now(),
-            instance_id: self.instance_id.clone(),
-        };
-
-        self.persist(&event);
-        let _ = self.tx.send(event);
-    }
-
     /// Broadcast a tool confirmation requested event and persist it
     #[allow(clippy::too_many_arguments)]
     pub fn tool_confirmation_requested(
@@ -363,6 +340,61 @@ impl EventBroadcaster {
             tool_arguments: tool_arguments.clone(),
             stream_id: stream_id.map(|s| s.to_string()),
             lane_key: lane_key.map(|s| s.to_string()),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a workflow started event and persist it
+    pub fn workflow_started(&self, task_id: &str, lane_key: &str, title: &str) {
+        let event = ServerEvent::WorkflowStarted {
+            task_id: task_id.to_string(),
+            lane_key: lane_key.to_string(),
+            title: title.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a workflow steered event and persist it
+    pub fn workflow_steered(&self, task_id: &str, lane_key: &str) {
+        let event = ServerEvent::WorkflowSteered {
+            task_id: task_id.to_string(),
+            lane_key: lane_key.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a workflow progress event and persist it
+    pub fn workflow_progress(&self, task_id: &str, lane_key: &str, message: &str) {
+        let event = ServerEvent::WorkflowProgress {
+            task_id: task_id.to_string(),
+            lane_key: lane_key.to_string(),
+            message: message.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a follow-up queued event and persist it
+    pub fn followup_queued(&self, lane_key: &str, followup_id: i64, kind: &str) {
+        let event = ServerEvent::FollowupQueued {
+            lane_key: lane_key.to_string(),
+            followup_id,
+            kind: kind.to_string(),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };

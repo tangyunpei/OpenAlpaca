@@ -39,7 +39,7 @@ fn test_sink_send_done() {
     let mgr = ChatStreamManager::new();
     let (_stream_id, mut rx, sink) = mgr.create_stream("user:gui");
 
-    sink.send_done("full response", "gpt-4", 100, 200, 500);
+    sink.send_done("full response", "gpt-4", 100, 200, 500, None);
 
     let event = rx.try_recv().unwrap();
     match event {
@@ -49,6 +49,7 @@ fn test_sink_send_done() {
             tokens_in,
             tokens_out,
             duration_ms,
+            delegation,
             ..
         } => {
             assert_eq!(content, "full response");
@@ -56,6 +57,27 @@ fn test_sink_send_done() {
             assert_eq!(tokens_in, 100);
             assert_eq!(tokens_out, 200);
             assert_eq!(duration_ms, 500);
+            assert!(delegation.is_none());
+        }
+        _ => panic!("Expected Done event"),
+    }
+}
+
+#[test]
+fn test_sink_send_done_with_delegation() {
+    let mgr = ChatStreamManager::new();
+    let (_stream_id, mut rx, sink) = mgr.create_stream("user:gui");
+
+    let info = DelegationInfo {
+        task_id: "task-123".to_string(),
+        title: "Research Rust".to_string(),
+    };
+    sink.send_done("ack", "router", 0, 0, 50, Some(info.clone()));
+
+    let event = rx.try_recv().unwrap();
+    match event {
+        ChatStreamEvent::Done { delegation, .. } => {
+            assert_eq!(delegation, Some(info));
         }
         _ => panic!("Expected Done event"),
     }

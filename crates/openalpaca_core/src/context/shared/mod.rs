@@ -1,5 +1,7 @@
 use crate::agent::registry::AgentRegistry;
+use crate::runner::steering::SteeringInbox;
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -32,24 +34,12 @@ impl TaskEntryStatus {
     }
 }
 
-/// Lightweight summary of DAG execution state for in-memory tracking.
-#[derive(Debug, Clone)]
-pub struct DagSummary {
-    pub total_nodes: usize,
-    pub completed_nodes: usize,
-    pub running_nodes: usize,
-    pub failed_nodes: usize,
-}
-
 /// An in-memory task entry tracked by the registry.
 #[derive(Debug, Clone)]
 pub struct TaskEntry {
     pub task_id: String,
     pub title: String,
     pub status: TaskEntryStatus,
-    pub progress_current: Option<i32>,
-    pub progress_total: Option<i32>,
-    pub dag_summary: Option<DagSummary>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -90,9 +80,6 @@ impl TaskRegistry {
                 task_id,
                 title,
                 status: TaskEntryStatus::Queued,
-                progress_current: None,
-                progress_total: None,
-                dag_summary: None,
                 created_at: now,
                 updated_at: now,
             },
@@ -127,27 +114,6 @@ impl TaskRegistry {
         self.lock_tasks().len()
     }
 
-    /// Update progress counters and optional DAG summary for a task.
-    /// Returns false if the task doesn't exist.
-    pub fn update_progress(
-        &self,
-        task_id: &str,
-        progress_current: i32,
-        progress_total: i32,
-        dag_summary: Option<DagSummary>,
-    ) -> bool {
-        let mut tasks = self.lock_tasks();
-        if let Some(entry) = tasks.get_mut(task_id) {
-            entry.progress_current = Some(progress_current);
-            entry.progress_total = Some(progress_total);
-            entry.dag_summary = dag_summary;
-            entry.updated_at = Utc::now();
-            true
-        } else {
-            false
-        }
-    }
-
     /// List all non-terminal (active) task entries.
     pub fn list_active(&self) -> Vec<TaskEntry> {
         self.lock_tasks()
@@ -170,6 +136,10 @@ pub struct SharedContext {
     pub agent_registry: Arc<AgentRegistry>,
     /// Cancellation tokens for running tasks, keyed by task_id.
     cancellation_tokens: Mutex<HashMap<String, CancellationToken>>,
+    /// Steering inboxes for running workflows, keyed by task_id.
+    steering_inboxes: DashMap<String, Arc<SteeringInbox>>,
+    /// Active workflow task_ids per lane, keyed by lane_key.
+    active_workflows_by_lane: DashMap<String, Vec<String>>,
 }
 
 impl SharedContext {
@@ -178,6 +148,8 @@ impl SharedContext {
             task_registry: TaskRegistry::new(),
             agent_registry: Arc::new(AgentRegistry::new()),
             cancellation_tokens: Mutex::new(HashMap::new()),
+            steering_inboxes: DashMap::new(),
+            active_workflows_by_lane: DashMap::new(),
         }
     }
 
@@ -211,6 +183,58 @@ impl SharedContext {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         tokens.remove(task_id);
+    }
+
+    /// Register a steering inbox for a running workflow.
+    pub fn register_steering_inbox(&self, task_id: &str, inbox: Arc<SteeringInbox>) {
+        self.steering_inboxes.insert(task_id.to_string(), inbox);
+    }
+
+    /// Look up the steering inbox for a workflow, if one is registered.
+    pub fn steering_inbox(&self, task_id: &str) -> Option<Arc<SteeringInbox>> {
+        self.steering_inboxes
+            .get(task_id)
+            .map(|entry| Arc::clone(entry.value()))
+    }
+
+    /// Deregister a workflow's steering inbox (cleanup at detach).
+    /// Returns the inbox if it was registered.
+    pub fn remove_steering_inbox(&self, task_id: &str) -> Option<Arc<SteeringInbox>> {
+        self.steering_inboxes.remove(task_id).map(|(_, inbox)| inbox)
+    }
+
+    /// Record a workflow as active on a lane (deduplicated).
+    pub fn register_workflow_for_lane(&self, lane_key: &str, task_id: &str) {
+        let mut entry = self
+            .active_workflows_by_lane
+            .entry(lane_key.to_string())
+            .or_default();
+        if !entry.iter().any(|id| id == task_id) {
+            entry.push(task_id.to_string());
+        }
+    }
+
+    /// Remove a workflow from a lane; drops the lane entry once empty.
+    pub fn deregister_workflow_for_lane(&self, lane_key: &str, task_id: &str) {
+        let now_empty = match self.active_workflows_by_lane.get_mut(lane_key) {
+            Some(mut entry) => {
+                entry.retain(|id| id != task_id);
+                entry.is_empty()
+            }
+            None => return,
+        };
+        if now_empty {
+            self.active_workflows_by_lane
+                .remove_if(lane_key, |_, ids| ids.is_empty());
+        }
+    }
+
+    /// Task ids of workflows currently active on a lane.
+    pub fn workflows_for_lane(&self, lane_key: &str) -> Vec<String> {
+        self.active_workflows_by_lane
+            .get(lane_key)
+            .map(|entry| entry.clone())
+            .unwrap_or_default()
     }
 }
 

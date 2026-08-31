@@ -95,11 +95,7 @@ pub(super) fn build_task_outcome(
                     } else {
                         final_content
                     };
-                    let mut outcome = if state.dag.is_some() {
-                        state.build_outcome_dag(fallback, None)
-                    } else {
-                        state.build_outcome(fallback, None)
-                    };
+                    let mut outcome = state.build_outcome(fallback, None);
                     if !success {
                         outcome.outcome_kind = OutcomeKind::Failed;
                         // Prepend error reason if it's not already in the summary
@@ -304,9 +300,27 @@ pub(super) fn finalize_task(
     }
 }
 
+/// One-line status prefix for the completion conversation message when the
+/// lead-agent loop did not finish cleanly (Routing V2 §2b). `Complete`
+/// finishes carry no prefix — the report speaks for itself.
+pub(super) fn completion_status_line(
+    finish_reason: &crate::runner::LoopFinishReason,
+) -> Option<&'static str> {
+    use crate::runner::LoopFinishReason;
+    match finish_reason {
+        LoopFinishReason::Complete => None,
+        LoopFinishReason::MaxRounds => Some("Task ended early (round budget exhausted):"),
+        LoopFinishReason::CostExceeded => Some("Task ended early (cost budget exhausted):"),
+        LoopFinishReason::Truncated => Some("Task ended early (output truncated):"),
+        LoopFinishReason::Cancelled => Some("Task was cancelled before finishing:"),
+        LoopFinishReason::Error(_) => Some("Task ended with an error:"),
+    }
+}
+
 /// Persist a task result as a conversation message.
+/// `pub(crate)` so the lead-agent `post_update` tool can reuse it.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn persist_conversation(
+pub(crate) fn persist_conversation(
     db: &openalpaca_storage::Database,
     lane_key: &str,
     source: &str,

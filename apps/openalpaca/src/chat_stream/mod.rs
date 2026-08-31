@@ -5,6 +5,7 @@
 use anyhow::Result;
 use colored::Colorize;
 use futures_util::StreamExt;
+use openalpaca_core::gateway::DelegationInfo;
 use serde::Deserialize;
 use std::io::Write;
 
@@ -36,7 +37,7 @@ pub enum StreamResult {
     /// Server delegated to agents — content was printed, poll for results.
     Delegation {
         usage: Option<UsageInfo>,
-        task_title: String,
+        delegation: DelegationInfo,
     },
 }
 
@@ -112,8 +113,9 @@ pub async fn send_and_stream_with_attachments(
 struct SseState {
     usage: Option<UsageInfo>,
     had_delta: bool,
-    /// Accumulated content from done event (used for delegation detection)
-    done_content: Option<String>,
+    /// Structured delegation metadata from the done event, if the server
+    /// delegated the message to a background task.
+    delegation: Option<DelegationInfo>,
 }
 
 async fn stream_sse_events(
@@ -126,7 +128,7 @@ async fn stream_sse_events(
     let mut state = SseState {
         usage: None,
         had_delta: false,
-        done_content: None,
+        delegation: None,
     };
 
     loop {
@@ -160,40 +162,14 @@ async fn stream_sse_events(
         }
     }
 
-    // Check for delegation: zero tokens AND content contains delegation marker
-    if let Some(ref content) = state.done_content
-        && is_delegation(&state.usage, content)
-        && let Some(title) = parse_task_title(content)
-    {
+    if let Some(delegation) = state.delegation {
         return Ok(StreamResult::Delegation {
             usage: state.usage,
-            task_title: title,
+            delegation,
         });
     }
 
     Ok(StreamResult::Response(state.usage))
-}
-
-/// Detect delegation: tokens_in == 0 && tokens_out == 0 AND content contains marker
-fn is_delegation(usage: &Option<UsageInfo>, content: &str) -> bool {
-    let zero_tokens = match usage {
-        Some(u) => u.tokens_in == 0 && u.tokens_out == 0,
-        None => true,
-    };
-    zero_tokens && content.contains("I've created a task")
-}
-
-/// Parse task title from delegation message.
-/// Expected format: "...Task: {title}\nYou'll see..."
-fn parse_task_title(content: &str) -> Option<String> {
-    // Look for "Task: <title>" pattern
-    let marker = "Task: ";
-    let start = content.find(marker)?;
-    let rest = &content[start + marker.len()..];
-    // Title ends at newline or end of string
-    let end = rest.find('\n').unwrap_or(rest.len());
-    let title = rest[..end].trim().to_string();
-    if title.is_empty() { None } else { Some(title) }
 }
 
 /// Check if an SSE event is a tool confirmation request.
@@ -309,39 +285,11 @@ fn process_sse_event(event_text: &str, verbose: bool, state: &mut SseState) -> R
                     print!("{}", content);
                 }
 
-                // Capture content for delegation detection
-                if let Some(content) = parsed["content"].as_str() {
-                    state.done_content = Some(content.to_string());
-                }
-
-                // Print citations if present
-                if let Some(citations) = parsed["citations"].as_array()
-                    && !citations.is_empty()
+                // Capture structured delegation metadata if present
+                if let Some(value) = parsed.get("delegation")
+                    && let Ok(delegation) = serde_json::from_value::<DelegationInfo>(value.clone())
                 {
-                    println!("{}", "Sources:".dimmed());
-                    for (i, cit) in citations.iter().enumerate() {
-                        let excerpt = cit["excerpt"].as_str().unwrap_or("");
-                        let page_str = cit["page"]
-                            .as_u64()
-                            .map(|p| format!(" (p.{})", p))
-                            .unwrap_or_default();
-                        println!(
-                            "  {}",
-                            format!("[{}] {}{}", i + 1, excerpt, page_str).dimmed()
-                        );
-                    }
-                }
-
-                // Print artifacts if present
-                if let Some(artifacts) = parsed["artifacts"].as_array()
-                    && !artifacts.is_empty()
-                {
-                    println!("{}", "Artifacts:".dimmed());
-                    for art in artifacts {
-                        let label = art["label"].as_str().unwrap_or("file");
-                        let mime = art["mime_type"].as_str().unwrap_or("");
-                        println!("  {}", format!("- {} ({})", label, mime).dimmed());
-                    }
+                    state.delegation = Some(delegation);
                 }
 
                 println!();
@@ -376,27 +324,9 @@ fn process_sse_event(event_text: &str, verbose: bool, state: &mut SseState) -> R
 
 /// Poll for task completion after delegation.
 ///
-/// Fetches tasks by title, then polls the matched task until it reaches
-/// a terminal status. Prints the result summary when done.
-pub async fn poll_task_completion(client: &DaemonClient, task_title: &str) -> Result<()> {
-    // Find the task by title
-    let tasks: serde_json::Value = client.get("/v1/tasks?limit=5").await?;
-    let task_id = tasks.as_array().and_then(|arr| {
-        arr.iter().find_map(|t| {
-            let title = t["title"].as_str().unwrap_or("");
-            if title == task_title {
-                t["id"].as_str().map(|s| s.to_string())
-            } else {
-                None
-            }
-        })
-    });
-
-    let task_id = match task_id {
-        Some(id) => id,
-        None => return Ok(()), // Task not found — don't crash
-    };
-
+/// Polls the task by id until it reaches a terminal status.
+/// Prints the result summary when done.
+pub async fn poll_task_completion(client: &DaemonClient, task_id: &str) -> Result<()> {
     eprintln!("{}", "Waiting for task to complete...".dimmed());
 
     let poll_interval = std::time::Duration::from_secs(2);
@@ -446,16 +376,6 @@ pub async fn poll_task_completion(client: &DaemonClient, task_title: &str) -> Re
                 println!("{}", format!("[Task completed{}]", duration_str).green());
                 if !summary.is_empty() {
                     println!("{} {}", "Result:".bold(), summary);
-                }
-                // Print per-assignment results if available
-                if let Some(assignments) = resp["assignments"].as_array() {
-                    for a in assignments {
-                        if let Some(output) = a["result_output"].as_str()
-                            && !output.is_empty()
-                        {
-                            println!("{}", output);
-                        }
-                    }
                 }
                 return Ok(());
             }

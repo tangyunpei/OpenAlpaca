@@ -54,18 +54,6 @@ impl<'a> DispatchDecisionRepository<'a> {
         })
     }
 
-    /// Backfill the task_id after task creation.
-    pub fn update_task_id(&self, decision_id: i64, task_id: &str) -> Result<()> {
-        self.db.with_connection(|conn| {
-            conn.execute(
-                "UPDATE dispatch_decisions SET task_id = ?1 WHERE id = ?2",
-                rusqlite::params![task_id, decision_id],
-            )
-            .context("Failed to update dispatch decision task_id")?;
-            Ok(())
-        })
-    }
-
     /// Query dispatch decisions with optional filters.
     pub fn query(
         &self,

@@ -26,16 +26,9 @@ pub struct LlmUsageQuery {
 #[derive(Debug, Deserialize)]
 pub struct LlmUsageDailyQuery {
     pub agent_id: Option<String>,
-    #[allow(dead_code)] // populated via serde Deserialize
+    /// Exact-match filter on the aggregate date (`YYYY-MM-DD`).
     pub date: Option<String>,
     pub limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CostEstimateQuery {
-    pub model: String,
-    pub input_tokens: u32,
-    pub output_tokens: u32,
 }
 
 #[derive(Serialize)]

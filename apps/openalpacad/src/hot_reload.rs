@@ -40,6 +40,13 @@ pub struct FileWatcherContext {
     pub bus: EventBus,
     pub fs_watch_handle: Option<openalpaca_wake::FileWatchHandle>,
 
+    /// Gateway for injecting scheduled-skill turns (WakeEvent::Timer).
+    pub gateway: Arc<openalpaca_core::gateway::Gateway>,
+    /// Wake manager for re-syncing skill cron jobs on hot-reload.
+    pub wake_manager: Arc<openalpaca_wake::WakeManager>,
+    /// Local user id — scheduled-skill turns run as this principal.
+    pub local_user_id: String,
+
     pub soul_hashes: RecentHashes,
     pub user_hashes: RecentHashes,
     pub identity_hashes: RecentHashes,
@@ -60,6 +67,25 @@ pub fn spawn_file_watcher(
                 _ = cancel.cancelled() => break,
             };
             info!("Received WakeEvent: {:?}", event);
+
+            // Cron timer fires for scheduled skills (job id "skill:{id}").
+            if let openalpaca_api::events::WakeEvent::Timer { job_id, .. } = &event
+                && let Some(skill_id) = crate::scheduled_skills::parse_skill_job_id(job_id)
+            {
+                if scheduled_skills_enabled(&ctx) {
+                    crate::scheduled_skills::spawn_timer_turn(
+                        ctx.gateway.clone(),
+                        ctx.skill_catalog.clone(),
+                        ctx.local_user_id.clone(),
+                        skill_id.to_string(),
+                    );
+                } else {
+                    info!(
+                        skill = %skill_id,
+                        "Ignoring scheduled-skill timer (scheduled_skills_enabled=false)"
+                    );
+                }
+            }
 
             if let openalpaca_api::events::WakeEvent::FileChanged { path, .. } = &event {
                 let changed_path = PathBuf::from(path);
@@ -100,6 +126,14 @@ pub fn spawn_file_watcher(
                         "Daemon config hot-reloaded from {}",
                         ctx.daemon_config_path.display()
                     );
+                    // Re-sync skill cron jobs — picks up scheduled_skills_enabled
+                    // toggles (registers all / deregisters all).
+                    crate::scheduled_skills::sync_all(
+                        &ctx.wake_manager,
+                        &ctx.skill_catalog,
+                        scheduled_skills_enabled(&ctx),
+                    )
+                    .await;
                 }
 
                 // Skills directory hot-reload
@@ -116,6 +150,15 @@ pub fn spawn_file_watcher(
             eb.wake(event);
         }
     });
+}
+
+/// Current value of the scheduled-skills kill switch (hot-reloadable).
+fn scheduled_skills_enabled(ctx: &FileWatcherContext) -> bool {
+    ctx.daemon_config
+        .load()
+        .orchestrator
+        .routing
+        .scheduled_skills_enabled
 }
 
 async fn handle_soul_change(ctx: &FileWatcherContext) {
@@ -352,6 +395,16 @@ async fn handle_skills_change(ctx: &FileWatcherContext, changed_path: &Path) {
             Ok(()) => {
                 let skill_name = skill_folder.as_os_str().to_string_lossy().to_string();
                 info!("Skill hot-reloaded: {}", skill_dir.display());
+                // Re-sync the skill's cron job (catalog keys are lowercased
+                // directory names). Handles add/change/removal of invoke.cron
+                // and skill deletion alike.
+                crate::scheduled_skills::resync_skill(
+                    &ctx.wake_manager,
+                    &ctx.skill_catalog,
+                    &skill_name.to_lowercase(),
+                    scheduled_skills_enabled(ctx),
+                )
+                .await;
                 ctx.bus
                     .publish(openalpaca_core::events::SystemEvent::SkillCatalogUpdated {
                         skill_name,

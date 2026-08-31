@@ -36,8 +36,6 @@ pub struct InvokeConfig {
     pub slash: Option<String>,
     /// Alternative slash commands that also invoke this skill.
     pub aliases: Vec<String>,
-    /// Hotkey binding
-    pub hotkey: Option<String>,
     /// Cron expression for scheduled mode
     pub cron: Option<String>,
     /// Maximum skill nesting depth (default 2: root + 1 child).
@@ -51,7 +49,6 @@ impl Default for InvokeConfig {
             mode: default_invoke_mode(),
             slash: None,
             aliases: Vec::new(),
-            hotkey: None,
             cron: None,
             max_depth: default_invoke_max_depth(),
         }
@@ -85,8 +82,6 @@ pub struct ScoreWeights {
     pub keyword_weight: f64,
     #[serde(default = "default_recency_weight")]
     pub recency_weight: f64,
-    #[serde(default)]
-    pub health_weight: f64,
     /// Penalty applied when a negative keyword matches. Default: 0.6.
     #[serde(default = "default_negative_penalty")]
     pub negative_penalty: f64,
@@ -99,17 +94,9 @@ impl Default for ScoreWeights {
             intent_weight: default_intent_weight(),
             keyword_weight: default_keyword_weight(),
             recency_weight: default_recency_weight(),
-            health_weight: 0.0,
             negative_penalty: default_negative_penalty(),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct RoutingExamples {
-    pub positive: Vec<String>,
-    pub negative: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -124,8 +111,6 @@ pub struct RoutingConfig {
     /// Score weights for routing (also accepts `score` as alias for backward compat).
     #[serde(alias = "score")]
     pub weights: ScoreWeights,
-    /// Example queries for intent classification
-    pub examples: RoutingExamples,
 }
 
 fn default_max_files() -> usize {
@@ -153,11 +138,6 @@ pub enum ContextSource {
         #[serde(default = "default_max_bytes_each")]
         max_bytes_each: usize,
     },
-    Shell {
-        command: String,
-        #[serde(default = "default_max_bytes")]
-        max_bytes: usize,
-    },
 }
 
 /// DEPRECATED: `context.summarize` is parsed for backward compatibility but has
@@ -178,8 +158,6 @@ pub struct ContextConfig {
     pub sources: Vec<ContextSource>,
     /// Summarization settings for context
     pub summarize: SummarizeConfig,
-    /// Controls when the skill description appears in the LLM catalog prompt.
-    pub read_when: Vec<String>,
     /// Token budget for context injection (estimated as chars/4). 0 = default 4000.
     pub budget_tokens: usize,
 }
@@ -192,15 +170,12 @@ fn default_permission_level() -> String {
 #[serde(default)]
 pub struct ConfirmAction {
     pub tools: Vec<String>,
-    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SandboxConfig {
-    pub enabled: bool,
     pub net: bool,
-    pub fs_writable: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -231,7 +206,6 @@ impl Default for PermissionsConfig {
 #[serde(default)]
 pub struct RateLimitConfig {
     pub max_calls: Option<usize>,
-    pub window_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -319,8 +293,6 @@ pub struct TestsConfig {
     pub inputs: Vec<String>,
     /// Expected output conditions
     pub expect: ExpectConfig,
-    /// Smoke test input file paths (relative to skill directory)
-    pub smoke: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -373,9 +345,6 @@ pub struct SkillFrontmatter {
     /// If true, this skill's instructions are always loaded into context. Legacy field.
     #[serde(skip_serializing)]
     pub auto_load: bool,
-    /// Controls when the skill description appears in the LLM catalog prompt. Legacy field.
-    #[serde(skip_serializing)]
-    pub read_when: Vec<String>,
 }
 
 impl SkillFrontmatter {
@@ -398,10 +367,6 @@ impl SkillFrontmatter {
         // tools_required -> tools.allow
         if self.tools.allow.is_empty() && !self.tools_required.is_empty() {
             self.tools.allow = self.tools_required.clone();
-        }
-        // read_when -> context.read_when
-        if self.context.read_when.is_empty() && !self.read_when.is_empty() {
-            self.context.read_when = self.read_when.clone();
         }
     }
 

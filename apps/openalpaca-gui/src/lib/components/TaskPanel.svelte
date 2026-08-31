@@ -1,6 +1,8 @@
 <script lang="ts">
   import { activeTasks, completedTasks, loadTasks, tasksLoading } from "$lib/stores/tasks";
+  import { workflowActivity, workflowFeed, type WorkflowActivityEntry } from "$lib/stores/workflow";
   import type { Task } from "$lib/types";
+  import { formatTime } from "$lib/utils";
   import TaskCard from "./TaskCard.svelte";
   import TaskDetail from "./TaskDetail.svelte";
 
@@ -8,6 +10,24 @@
   let loading = $state(false);
   let displayedTasks = $state<Task[]>([]);
   let selectedTaskId = $state<string | null>(null);
+  let activityMap = $state<Map<string, WorkflowActivityEntry[]>>(new Map());
+  let feed = $state<WorkflowActivityEntry[]>([]);
+
+  // Lightweight lane/lifecycle entries (progress lines render per task card)
+  let lifecycleFeed = $derived(feed.filter((e) => e.kind !== "progress").slice(0, 8));
+
+  function kindLabel(kind: WorkflowActivityEntry["kind"]): string {
+    switch (kind) {
+      case "started":
+        return "started";
+      case "steered":
+        return "steered";
+      case "followup_queued":
+        return "follow-up";
+      default:
+        return kind;
+    }
+  }
 
   // Counts for filter badges
   let activeCount = $state(0);
@@ -31,6 +51,16 @@
 
   $effect(() => {
     const unsub = tasksLoading.subscribe((v) => (loading = v));
+    return unsub;
+  });
+
+  $effect(() => {
+    const unsub = workflowActivity.subscribe((v) => (activityMap = v));
+    return unsub;
+  });
+
+  $effect(() => {
+    const unsub = workflowFeed.subscribe((v) => (feed = v));
     return unsub;
   });
 
@@ -81,7 +111,7 @@
   <div class="p-3">
     {#each displayedTasks as task, idx (task.id)}
       <div style="animation: slideUp 0.35s cubic-bezier(0.16, 1, 0.3, 1) both; animation-delay: {idx * 50}ms;">
-        <TaskCard {task} onclick={() => (selectedTaskId = task.id)} />
+        <TaskCard {task} workflowEntries={activityMap.get(task.id) ?? []} onclick={() => (selectedTaskId = task.id)} />
       </div>
     {:else}
       <div class="flex flex-col items-center justify-center py-16 px-10 text-center animate-fadeIn">
@@ -101,6 +131,33 @@
     {/each}
   </div>
 </div>
+
+{#if lifecycleFeed.length > 0}
+  <div class="oa-panel mt-4">
+    <div class="oa-panel-header flex items-center justify-between">
+      <h2>Workflow Activity</h2>
+      <span class="text-[0.65rem] text-muted-foreground/60 font-mono">{lifecycleFeed.length} recent</span>
+    </div>
+    <ul class="list-none m-0 p-2.5">
+      {#each lifecycleFeed as entry (entry._id)}
+        <li class="flex items-center gap-2.5 px-3 py-2 rounded-lg mb-1 bg-white/2 text-[0.75rem] transition-colors hover:bg-white/4">
+          <span class="text-[0.6rem] px-1.5 py-0.5 rounded-md uppercase font-bold shrink-0 border
+            {entry.kind === 'started'
+              ? 'bg-success/15 text-success border-success/20'
+              : entry.kind === 'steered'
+                ? 'bg-blue-400/15 text-blue-400 border-blue-400/20'
+                : 'bg-violet-500/15 text-violet-400 border-violet-500/20'}"
+            style="letter-spacing: 0.04em;">{kindLabel(entry.kind)}</span>
+          <span class="text-muted-foreground flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{entry.message}</span>
+          {#if entry.task_id}
+            <span class="px-1.5 py-px rounded-md font-mono text-[0.62rem] text-foreground/70 shrink-0" style="background: linear-gradient(135deg, hsl(222 48% 22%) 0%, hsl(222 48% 18%) 100%);">{entry.task_id.slice(0, 8)}</span>
+          {/if}
+          <span class="text-muted-foreground/60 font-mono text-[0.62rem] shrink-0">{formatTime(entry.ts)}</span>
+        </li>
+      {/each}
+    </ul>
+  </div>
+{/if}
 
 {#if selectedTaskId}
   <TaskDetail taskId={selectedTaskId} onClose={() => (selectedTaskId = null)} />

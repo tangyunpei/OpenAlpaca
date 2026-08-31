@@ -7,6 +7,90 @@ pub struct OrchestratorConfig {
     pub memory: MemoryConfig,
     pub costs: CostsConfig,
     pub prompt_budgets: PromptBudgetsConfig,
+    pub routing: RoutingConfig,
+}
+
+/// Routing V2 configuration (`[orchestrator.routing]`).
+///
+/// The main-loop tool ladder is the only routing ladder (the legacy planner
+/// pre-classifier and its `mode` key were deleted in Phase 5).
+///
+/// Every field carries a named `#[serde(default = "...")]` function shared
+/// with the `Default` impl, so a partially-specified table gets the same
+/// values as an absent one (avoids the field-level `#[serde(default)]`
+/// footgun where a bool silently defaults to `false`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingConfig {
+    /// Enable the mid-workflow steering rail (steering inboxes plus the
+    /// `post_update`/`queue_followup` lead-agent tools).
+    #[serde(default = "default_steering_enabled")]
+    pub steering_enabled: bool,
+    /// Maximum queued steering messages per workflow inbox.
+    #[serde(default = "default_steering_inbox_cap")]
+    pub steering_inbox_cap: usize,
+    /// Maximum concurrent workflows per lane (enforced in `start_workflow`).
+    #[serde(default = "default_max_workflows_per_lane")]
+    pub max_workflows_per_lane: usize,
+    /// Auto-start the next queued `followup` item when a workflow finalizes.
+    /// `unprocessed_steering` items never auto-run.
+    #[serde(default = "default_followup_autostart")]
+    pub followup_autostart: bool,
+    /// Max agentic-loop rounds for the tool-mode main loop.
+    #[serde(default = "default_main_loop_max_rounds")]
+    pub main_loop_max_rounds: usize,
+    /// Max tool calls per round for the tool-mode main loop.
+    #[serde(default = "default_main_loop_max_tools_per_round")]
+    pub main_loop_max_tools_per_round: usize,
+    /// Main-loop tool surface: "core_union" (core set ∪ suggested tools)
+    /// or "full" (entire registry — escape hatch).
+    #[serde(default = "default_tool_selection")]
+    pub tool_selection: String,
+    /// Global kill switch for cron-scheduled skills (`invoke.cron` /
+    /// `invoke.mode = "scheduled"` frontmatter). When false, no skill cron
+    /// jobs are registered with the wake scheduler and pending timer fires
+    /// are ignored.
+    #[serde(default = "default_scheduled_skills_enabled")]
+    pub scheduled_skills_enabled: bool,
+}
+
+fn default_steering_enabled() -> bool {
+    true
+}
+fn default_steering_inbox_cap() -> usize {
+    16
+}
+fn default_max_workflows_per_lane() -> usize {
+    3
+}
+fn default_followup_autostart() -> bool {
+    true
+}
+fn default_main_loop_max_rounds() -> usize {
+    8
+}
+fn default_main_loop_max_tools_per_round() -> usize {
+    4
+}
+fn default_tool_selection() -> String {
+    "core_union".to_string()
+}
+fn default_scheduled_skills_enabled() -> bool {
+    true
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            steering_enabled: default_steering_enabled(),
+            steering_inbox_cap: default_steering_inbox_cap(),
+            max_workflows_per_lane: default_max_workflows_per_lane(),
+            followup_autostart: default_followup_autostart(),
+            main_loop_max_rounds: default_main_loop_max_rounds(),
+            main_loop_max_tools_per_round: default_main_loop_max_tools_per_round(),
+            tool_selection: default_tool_selection(),
+            scheduled_skills_enabled: default_scheduled_skills_enabled(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

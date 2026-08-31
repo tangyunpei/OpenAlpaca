@@ -3,7 +3,6 @@ pub mod config;
 pub mod mcp;
 pub mod platform;
 pub mod registry;
-pub mod stats;
 pub mod url_validation;
 
 pub use registry::ToolContext;

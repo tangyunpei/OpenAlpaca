@@ -1,10 +1,10 @@
-//! Startup logic for auto-discovering and spawning connectors.
+//! Connector handles and spawn helpers used by the daemon's ConnectorManager.
 
 use arc_swap::ArcSwap;
 use openalpaca_core::bus::EventBus;
 use openalpaca_core::daemon_config::DaemonConfig;
 use openalpaca_core::gateway::Gateway;
-use openalpaca_storage::{ConfigRepository, Database};
+use openalpaca_storage::Database;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[allow(unused_imports)]
@@ -39,6 +39,7 @@ pub enum ConnectorHandle {
 
 /// Guard that clears a running flag on drop.
 /// Wrap a connector future with this so the flag is cleared on exit.
+#[allow(dead_code)] // constructed only in feature-gated connector spawn paths
 pub(crate) struct RunningGuard(pub Arc<AtomicBool>);
 
 impl Drop for RunningGuard {
@@ -99,114 +100,6 @@ impl ConnectorHandle {
             ConnectorHandle::None => {}
         }
     }
-}
-
-/// Automatically scan environment variables and spawn enabled connectors.
-///
-/// This function returns a map of {connector_name -> handle}.
-pub fn auto_start_connectors(
-    db: Database,
-    bus: EventBus,
-    gateway: Arc<Gateway>,
-    daemon_config: Arc<ArcSwap<DaemonConfig>>,
-) -> std::collections::HashMap<String, ConnectorHandle> {
-    let _ = &bus;
-    let mut started = std::collections::HashMap::new();
-
-    // Initialize Config Repository
-    let config_repo = ConfigRepository::new(&db);
-
-    // --- Telegram ---
-    #[cfg(feature = "telegram")]
-    {
-        // Check "telegram.enabled" first
-        let enabled = match config_repo.get("telegram.enabled") {
-            Ok(Some(v)) => v == "true",
-            Ok(None) => true, // Default to true if not set (legacy behavior, or if token exists)
-            Err(_) => true,
-        };
-
-        if enabled {
-            // Strategy: 1. DB Config -> 2. Env Var -> 3. Skip
-            let token_opt = match config_repo.get("telegram.token") {
-                Ok(Some(t)) => Some(t),
-                Ok(None) => None,
-                Err(e) => {
-                    warn!("Failed to read config: {}. Ignoring DB config.", e);
-                    None
-                }
-            };
-
-            // Fallback to Env Var
-            let (token, source) = if let Some(t) = token_opt {
-                (Some(t), "DB")
-            } else if let Ok(t) = std::env::var("OPENALPACA_TELEGRAM_TOKEN") {
-                (Some(t), "ENV")
-            } else {
-                (None, "")
-            };
-
-            if let Some(token) = token {
-                info!("Autostart: Finding Telegram Token (Source: {})", source);
-
-                // Clone dependencies to keep the originals valid for subsequent connectors
-                let connector = ConnectorBuilder::new(
-                    db.clone(),
-                    bus.clone(),
-                    gateway.clone(),
-                    daemon_config.clone(),
-                )
-                .telegram(token);
-                let (shutdown_token, running) = spawn_telegram(connector);
-                started.insert("telegram".to_string(), ConnectorHandle::Telegram(shutdown_token, running));
-            }
-        } else {
-            info!("Connector 'telegram' is disabled in config.");
-        }
-    }
-
-    // --- iMessage (macOS only) ---
-    #[cfg(all(feature = "imessage", target_os = "macos"))]
-    {
-        let enabled = match config_repo.get("imessage.enabled") {
-            Ok(Some(v)) => v == "true",
-            Ok(None) => false, // Default to disabled — requires explicit opt-in
-            Err(_) => false,
-        };
-
-        if enabled {
-            info!("Autostart: Spawning iMessage connector");
-            let local_user_id = config_repo.get("identity.local_user_id").ok().flatten();
-            let cancel_token = CancellationToken::new();
-            let connector = crate::imessage::IMessageConnector::new(
-                Arc::new(db.clone()),
-                gateway.clone(),
-                daemon_config.clone(),
-                cancel_token.clone(),
-                local_user_id,
-            );
-
-            let running = Arc::new(AtomicBool::new(true));
-            let guard = RunningGuard(running.clone());
-            tokio::spawn(async move {
-                let _guard = guard;
-                if let Err(e) = connector.run_loop().await {
-                    tracing::error!("iMessage connector exited with error: {}", e);
-                }
-            });
-
-            started.insert(
-                "imessage".to_string(),
-                ConnectorHandle::IMessage(cancel_token, running),
-            );
-        } else {
-            info!("Connector 'imessage' is disabled in config.");
-        }
-    }
-
-    // Future: WeChat...
-
-    started
 }
 
 /// Spawn the Telegram connector using a provided token.

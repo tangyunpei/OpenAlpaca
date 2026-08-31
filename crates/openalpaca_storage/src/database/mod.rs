@@ -203,7 +203,6 @@ impl Database {
             tx.execute("DELETE FROM dispatch_decisions", [])?;
             tx.execute("DELETE FROM skill_execution_log", [])?;
             tx.execute("DELETE FROM tool_execution_log", [])?;
-            tx.execute("DELETE FROM context_compaction_log", [])?;
 
             // 0. SubAgent System (FK to agent and task)
             tx.execute("DELETE FROM agent_task_history", [])?;

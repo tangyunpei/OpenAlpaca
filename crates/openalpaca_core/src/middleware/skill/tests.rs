@@ -55,7 +55,6 @@ fn test_parse_skill_frontmatter_only() {
     assert_eq!(fm.tools_required, vec!["file_read"]);
     assert_eq!(fm.tools.allow, vec!["file_read"]);
     assert!(!fm.auto_load);
-    assert_eq!(fm.read_when, vec!["User asks for code review"]);
 }
 
 #[test]
@@ -78,7 +77,6 @@ fn test_parse_minimal_skill() {
     assert!(doc.frontmatter.trigger_patterns.is_empty());
     assert!(doc.frontmatter.tools_required.is_empty());
     assert!(!doc.frontmatter.auto_load);
-    assert!(doc.frontmatter.read_when.is_empty());
     assert!(doc.body.is_empty());
     assert!(doc.sections.is_empty());
 }

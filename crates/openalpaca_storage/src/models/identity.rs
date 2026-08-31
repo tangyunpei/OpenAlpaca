@@ -29,16 +29,6 @@ pub struct ExternalIdentity {
     pub linked_at: Option<DateTime<Utc>>,
 }
 
-/// ConversationMap: Maps a provider's conversation/chat to a global_user
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConversationMap {
-    pub id: i64,
-    pub provider: String,
-    pub provider_conversation_id: String,
-    pub global_user_id: Option<String>,
-    pub lane_key: Option<String>,
-    pub created_at: DateTime<Utc>,
-}
 
 /// LinkToken: Temporary tokens for /link command
 #[derive(Debug, Clone, Serialize, Deserialize)]

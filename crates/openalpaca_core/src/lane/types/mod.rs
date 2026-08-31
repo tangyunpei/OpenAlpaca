@@ -133,11 +133,6 @@ impl ConversationLane {
         self.message_count.load(Ordering::Relaxed)
     }
 
-    /// Get the last time a message was processed on this lane.
-    pub fn last_active_at(&self) -> DateTime<Utc> {
-        *self.last_active_at.lock().unwrap()
-    }
-
     /// Deterministic fingerprint of the lane's current tip state. Advances
     /// on every new message via `record_message`. Feeds
     /// `HistoryInput.lane_tip_fingerprint` so Layer 4's per-lane cache busts
@@ -180,17 +175,14 @@ impl TaskLaneStatus {
 /// A task lane: tracks a single background task.
 pub struct TaskLane {
     pub task_id: String,
-    pub source_lane: Option<LaneKey>,
     pub created_at: DateTime<Utc>,
     status: Mutex<TaskLaneStatus>,
-    assigned_agents: Mutex<Vec<String>>,
 }
 
 impl std::fmt::Debug for TaskLane {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TaskLane")
             .field("task_id", &self.task_id)
-            .field("source_lane", &self.source_lane)
             .field("created_at", &self.created_at)
             .field("status", &*self.status.lock().unwrap())
             .finish()
@@ -201,17 +193,9 @@ impl TaskLane {
     pub fn new(task_id: impl Into<String>) -> Self {
         Self {
             task_id: task_id.into(),
-            source_lane: None,
             created_at: Utc::now(),
             status: Mutex::new(TaskLaneStatus::Queued),
-            assigned_agents: Mutex::new(Vec::new()),
         }
-    }
-
-    /// Set the source lane that originated this task.
-    pub fn with_source(mut self, source: LaneKey) -> Self {
-        self.source_lane = Some(source);
-        self
     }
 
     /// Get the current status.
@@ -222,16 +206,6 @@ impl TaskLane {
     /// Set the status.
     pub fn set_status(&self, status: TaskLaneStatus) {
         *self.status.lock().unwrap() = status;
-    }
-
-    /// Assign an agent to this task.
-    pub fn assign_agent(&self, agent_id: String) {
-        self.assigned_agents.lock().unwrap().push(agent_id);
-    }
-
-    /// Get the list of assigned agents.
-    pub fn assigned_agents(&self) -> Vec<String> {
-        self.assigned_agents.lock().unwrap().clone()
     }
 }
 

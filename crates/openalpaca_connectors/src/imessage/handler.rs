@@ -39,6 +39,23 @@ impl IMessageConnector {
             );
         }
 
+        // Step 0.5: Intercept confirmation responses (/yes, /y, /no, /n)
+        // BEFORE the routing decision, so a bare "/yes" works even when a
+        // trigger prefix is normally required for this chat type.
+        if let Some(broker) = self.confirmation_broker.as_ref()
+            && let Some(reply) = crate::common::intercept_confirmation_reply(
+                &msg.text,
+                &msg.chat_id,
+                broker,
+                &self.pending_confirmations,
+            )
+        {
+            IMessageSender::send(&reply_target, &reply, reply_is_group)
+                .await
+                .map_err(|e| format!("Send failed: {}", e))?;
+            return Ok(());
+        }
+
         // Step 1: Evaluate routing decision
         let content = match should_process(&msg, config) {
             ProcessDecision::Process { content } => {
@@ -147,6 +164,7 @@ impl IMessageConnector {
                 },
                 workspace_path: None,
                 stream_id: None,
+                lane_override: None,
             })
             .await;
 

@@ -75,6 +75,113 @@ pub enum LinkResult {
     InvalidToken,
 }
 
+/// Format the confirmation prompt sent to a chat platform when a
+/// confirm-listed tool awaits interactive approval.
+///
+/// Mirrors the Telegram connector's prompt format (tool name, truncated
+/// arguments, `/yes` / `/no` instructions, queue position hint).
+pub fn format_confirmation_prompt(
+    tool_name: &str,
+    tool_arguments: &serde_json::Value,
+    queue_len: usize,
+) -> String {
+    // Format arguments for display (truncate if too long)
+    let args_display = {
+        let s = serde_json::to_string_pretty(tool_arguments)
+            .unwrap_or_else(|_| tool_arguments.to_string());
+        if s.len() > 500 {
+            format!("{}...", &s[..s.floor_char_boundary(500)])
+        } else {
+            s
+        }
+    };
+
+    let queue_info = if queue_len > 1 {
+        format!(" (1 of {} pending)", queue_len)
+    } else {
+        String::new()
+    };
+
+    format!(
+        "A tool requires your confirmation before executing{queue_info}:\n\n\
+         Tool: {tool_name}\n\
+         Arguments:\n{args_display}\n\n\
+         Reply /yes or /no to approve or deny."
+    )
+}
+
+/// Intercept a potential confirmation reply (`/yes`, `/y`, `/no`, `/n`).
+///
+/// Mirrors the Telegram connector's intercept: pops the oldest pending
+/// request for the conversation (FIFO), delivers the decision to the
+/// [`ConfirmationBroker`](openalpaca_core::security::confirmation::ConfirmationBroker),
+/// and returns the acknowledgment text to send back to the chat.
+///
+/// Returns `None` when the text is not a confirmation command or the
+/// conversation has no pending confirmation — the caller should fall
+/// through to normal message handling.
+pub fn intercept_confirmation_reply<K>(
+    text: &str,
+    key: &K,
+    broker: &openalpaca_core::security::confirmation::ConfirmationBroker,
+    pending: &dashmap::DashMap<K, std::collections::VecDeque<String>>,
+) -> Option<String>
+where
+    K: Eq + std::hash::Hash + std::fmt::Debug,
+{
+    use openalpaca_core::security::confirmation::ConfirmationResponse;
+
+    let text_lower = text.trim().to_lowercase();
+    if !matches!(text_lower.as_str(), "/yes" | "/y" | "/no" | "/n") {
+        return None;
+    }
+
+    // No pending confirmation — fall through to normal handling
+    let request_id = pending.get_mut(key).and_then(|mut q| q.pop_front())?;
+
+    let approved = matches!(text_lower.as_str(), "/yes" | "/y");
+    let remaining = pending.get(key).map(|q| q.len()).unwrap_or(0);
+    let reply = if approved {
+        if remaining > 0 {
+            format!(
+                "Approved. Tool execution will proceed.\n({} more pending — reply /yes or /no)",
+                remaining
+            )
+        } else {
+            "Approved. Tool execution will proceed.".to_string()
+        }
+    } else if remaining > 0 {
+        format!(
+            "Denied. Tool execution has been cancelled.\n({} more pending — reply /yes or /no)",
+            remaining
+        )
+    } else {
+        "Denied. Tool execution has been cancelled.".to_string()
+    };
+
+    match broker.respond(
+        &request_id,
+        ConfirmationResponse {
+            approved,
+            approval_scope: None,
+        },
+    ) {
+        Ok(()) => {
+            tracing::info!(
+                "Confirmation {} for request {} in conversation {:?}",
+                if approved { "approved" } else { "denied" },
+                request_id,
+                key
+            );
+        }
+        Err(e) => {
+            tracing::warn!("Failed to deliver confirmation response: {}", e);
+        }
+    }
+
+    Some(reply)
+}
+
 /// Store an inbound attachment from a connector.
 ///
 /// Computes SHA-256, deduplicates, writes to disk, and inserts a DB row.

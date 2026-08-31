@@ -1,13 +1,11 @@
 //! Orchestrator module: the central message handler.
 //!
-//! Routes user messages through intent classification, skill matching,
-//! and task dispatch pipelines.
+//! Routes user messages through deterministic tiers (task ops, skills,
+//! /steer, social) and the tool-calling main loop (Routing V2).
 
 pub mod dispatcher;
 pub mod intent;
-pub mod replanner;
 pub mod skill;
-pub mod task_planner;
 pub mod task_state;
 
 mod bootstrap;
@@ -22,10 +20,14 @@ mod query_handler;
 mod summary;
 mod task_ops;
 
+pub use task_ops::{TaskActionError, apply_task_action};
+// Routing V2 shared cores, re-exported for the main-loop builtin tools
+// (`memory_store` / `memory_forget` / `task_status`).
+pub(crate) use memory_ops::{forget_memory, store_memory};
+pub(crate) use task_ops::task_status_query;
+
 pub use skill::catalog as skill_catalog;
-pub use skill::matcher as skill_matcher;
 pub use skill::router as skill_router;
-pub use skill::smoke as skill_smoke;
 
 #[cfg(test)]
 mod tests;
@@ -45,7 +47,7 @@ use crate::security::policy::Principal;
 use crate::tools::ToolRegistry;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use openalpaca_llm::{ChatMessage, LlmRouter, Role};
+use openalpaca_llm::{ChatMessage, LlmRouter};
 use openalpaca_storage::{Database, Task};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -91,6 +93,29 @@ pub trait ConnectorSendProvider: Send + Sync {
     }
 }
 
+/// A claimed follow-up item handed to the runner for execution as a fresh
+/// turn through the normal front door (Routing V2).
+#[derive(Debug, Clone)]
+pub struct FollowupItem {
+    /// `lane_followups` row id (the runner marks it done when finished).
+    pub id: i64,
+    pub lane_key: String,
+    pub content: String,
+    pub principal: Principal,
+    pub scope: crate::security::policy::Scope,
+    pub workspace_path: Option<String>,
+    /// Task the item was queued from, if any.
+    pub source_task_id: Option<String>,
+}
+
+/// Executes queued follow-ups. Implemented at daemon level over
+/// `Gateway::handle_event` (same inversion pattern as ConnectorSendProvider).
+pub trait FollowupRunner: Send + Sync {
+    /// Start executing a claimed follow-up item. Must not block — the daemon
+    /// implementation spawns the turn and marks the row done afterwards.
+    fn spawn_followup(&self, item: FollowupItem);
+}
+
 use dispatcher::TaskDispatcher;
 use intent::IntentParser;
 
@@ -109,11 +134,10 @@ pub struct LlmMetadata {
 
 /// The Orchestrator: unified message handler for all user interactions.
 ///
-/// Intent-based routing:
-/// - SimpleQuery → LLM call (or echo stub if no LLM configured)
-/// - TaskQuery → query task registry
-/// - ComplexTask → dispatch to agents via TaskDispatcher
-/// - TaskControl → manage task lifecycle
+/// Routing (Routing V2): deterministic tiers (task ops, `/steer`, skills,
+/// social) answer directly; everything else enters the main loop, where
+/// chat vs. workflow dispatch (`start_workflow`) vs. steering
+/// (`steer_workflow`) is the model's tool choice.
 pub struct Orchestrator {
     pub shared_context: Arc<SharedContext>,
     pub lane_manager: Arc<LaneManager>,
@@ -126,7 +150,9 @@ pub struct Orchestrator {
     pub security_gate: Arc<SecurityGate>,
     pub tool_registry: Arc<ToolRegistry>,
     intent_parser: IntentParser,
-    task_dispatcher: TaskDispatcher,
+    /// Shared so per-request tools (e.g. `start_workflow`) can hold a
+    /// reference into the dispatch family (Routing V2).
+    task_dispatcher: Arc<TaskDispatcher>,
     db: Option<Database>,
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     /// Per-lane turn counter for extraction frequency gating.
@@ -156,6 +182,10 @@ pub struct Orchestrator {
     /// Keyed by request_id to avoid races between concurrent requests.
     /// Populated after LLM response, removed by bridge after reading.
     pub llm_metadata_map: DashMap<Uuid, LlmMetadata>,
+    /// Per-request delegation metadata from dispatch paths → bridge.
+    /// Mirrors `llm_metadata_map`: populated when a dispatch creates a task,
+    /// removed by bridge after reading.
+    pub delegation_map: DashMap<Uuid, crate::gateway::DelegationInfo>,
     /// Optional broker for interactive tool confirmation (set post-construction via `set_confirmation_broker()`).
     pub confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
     /// Context manager for resolving dynamic context (memory, user profile, etc.) via PromptBuilder.
@@ -212,14 +242,6 @@ pub(crate) fn wrap_untrusted_context(
     )
 }
 
-pub(super) fn role_label(role: &Role) -> &'static str {
-    match role {
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::System => "system",
-        Role::Tool => "tool",
-    }
-}
 
 impl Orchestrator {
     #[allow(clippy::too_many_arguments)]
@@ -272,7 +294,7 @@ impl Orchestrator {
         // conversation + task execution paths.
         let compose_engine = Arc::new(crate::compose::ComposeEngine::new(256));
 
-        let task_dispatcher = TaskDispatcher::new(
+        let task_dispatcher = Arc::new(TaskDispatcher::new(
             shared_context.clone(),
             lane_manager.clone(),
             bus.clone(),
@@ -285,7 +307,7 @@ impl Orchestrator {
             connector_status.clone(),
             context_manager.clone(),
             compose_engine.clone(),
-        );
+        ));
         let loop_config = {
             let mut lc = loop_config;
             lc.event_bus = Some(bus.clone());
@@ -318,6 +340,7 @@ impl Orchestrator {
             connector_status,
             connector_sender,
             llm_metadata_map: DashMap::new(),
+            delegation_map: DashMap::new(),
             confirmation_broker: Arc::new(RwLock::new(None)),
             context_manager,
             persona_version: Arc::new(AtomicU64::new(0)),
@@ -334,6 +357,12 @@ impl Orchestrator {
         if let Ok(mut guard) = self.task_dispatcher.confirmation_broker.write() {
             *guard = Some(broker);
         }
+    }
+
+    /// Set the follow-up runner on the TaskDispatcher (post-construction,
+    /// same inversion pattern as set_confirmation_broker).
+    pub fn set_followup_runner(&self, runner: Arc<dyn FollowupRunner>) {
+        self.task_dispatcher.set_followup_runner(runner);
     }
 
     /// Set the path to USER.md for extraction writes.
@@ -484,27 +513,14 @@ pub(super) fn principal_id(principal: &Principal) -> String {
 }
 
 pub(super) fn task_entry_to_json(entry: &TaskEntry) -> String {
-    let mut obj = serde_json::json!({
+    serde_json::json!({
         "task_id": entry.task_id,
         "title": entry.title,
         "status": entry.status.as_str(),
-        "progress_current": entry.progress_current,
-        "progress_total": entry.progress_total,
         "created_at": entry.created_at.to_rfc3339(),
         "updated_at": entry.updated_at.to_rfc3339(),
-    });
-    if let Some(ref dag) = entry.dag_summary {
-        obj.as_object_mut().unwrap().insert(
-            "dag_summary".to_string(),
-            serde_json::json!({
-                "total_nodes": dag.total_nodes,
-                "completed_nodes": dag.completed_nodes,
-                "running_nodes": dag.running_nodes,
-                "failed_nodes": dag.failed_nodes,
-            }),
-        );
-    }
-    obj.to_string()
+    })
+    .to_string()
 }
 
 /// Parsed outcome fields extracted from a Task's outcome_json.
@@ -564,28 +580,6 @@ pub(super) fn db_task_to_json(task: &Task) -> String {
         obj["outcome_summary"] = serde_json::json!(parsed.outcome_summary);
         obj["no_artifact_reason"] = serde_json::json!(parsed.no_artifact_reason);
         obj["artifacts"] = serde_json::json!(parsed.artifacts);
-    }
-
-    // Parse state_json to extract DAG node details if available
-    if let Some(ref sj) = task.state_json
-        && let Ok(state) = serde_json::from_str::<task_state::TaskState>(sj)
-        && let Some(ref dag) = state.dag
-    {
-        let nodes_summary: Vec<serde_json::Value> = dag
-            .nodes
-            .iter()
-            .map(|n| {
-                serde_json::json!({
-                    "node_id": n.node_id,
-                    "title": n.title,
-                    "agent_id": n.agent_id,
-                    "status": n.status,
-                })
-            })
-            .collect();
-        obj.as_object_mut()
-            .unwrap()
-            .insert("dag_nodes".to_string(), serde_json::json!(nodes_summary));
     }
 
     obj.to_string()

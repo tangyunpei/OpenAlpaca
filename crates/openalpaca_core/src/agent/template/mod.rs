@@ -565,6 +565,24 @@ impl AgentTemplate {
                 allowed_capabilities.push(ws_tool.to_string());
             }
         }
+        // Lead agents get the coordination tools registered per-request in
+        // runner/lead_agent — the allowlist must admit them or every
+        // spawn/check/wait call is denied by check_agent_capability.
+        // post_update/queue_followup are the routing-v2 additions.
+        if fm.capabilities.iter().any(|c| c == "orchestration") {
+            for coord_tool in [
+                "spawn_subagent",
+                "spawn_subagents_batch",
+                "check_subagent_status",
+                "wait_for_subagents",
+                "post_update",
+                "queue_followup",
+            ] {
+                if !allowed_capabilities.iter().any(|c| c == coord_tool) {
+                    allowed_capabilities.push(coord_tool.to_string());
+                }
+            }
+        }
         let denied_capabilities = fm.denied_capabilities.clone();
 
         SubAgent {

@@ -110,15 +110,6 @@ pub async fn inject_skill_context(
                     tracing::warn!("Context glob pattern '{}': {}", pattern, e);
                 }
             },
-            ContextSource::Shell { command, max_bytes } => {
-                // Shell context injection is deferred — requires sandbox/permissions check.
-                // Will be gated by permissions.sandbox in a future phase.
-                tracing::debug!(
-                    "Context shell injection deferred (requires sandbox check): {}",
-                    command
-                );
-                let _ = max_bytes;
-            }
         }
     }
     Ok(injected)

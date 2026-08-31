@@ -17,13 +17,6 @@ enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
-    Log {
-        level: String,
-        message: String,
-        ts: DateTime<Utc>,
-        #[allow(dead_code)]
-        instance_id: String,
-    },
     CommandReceived {
         request_id: String,
         command: String,
@@ -122,18 +115,6 @@ fn print_event(event: &ServerEvent) {
                 "heartbeat".cyan(),
                 format!("[{}...]", &instance_id[..8]).dimmed()
             );
-        }
-        ServerEvent::Log {
-            level, message, ts, ..
-        } => {
-            let time = ts.format("%H:%M:%S").to_string();
-            let level_colored = match level.as_str() {
-                "error" => level.red(),
-                "warn" => level.yellow(),
-                "info" => level.green(),
-                _ => level.normal(),
-            };
-            println!("{} 📝 {} {}", time.dimmed(), level_colored, message);
         }
         ServerEvent::CommandReceived {
             request_id,

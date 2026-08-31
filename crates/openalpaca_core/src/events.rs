@@ -11,36 +11,6 @@ pub use openalpaca_api::events::WakeEvent;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum SystemEvent {
-    /// A heartbeat to keep connections alive or signal healthy status
-    Heartbeat { timestamp: DateTime<Utc> },
-    /// An event triggered by the scheduler or file watcher
-    Wake(WakeEvent),
-    /// A raw log message from the system
-    Log {
-        level: String,
-        message: String,
-        timestamp: DateTime<Utc>,
-    },
-    /// A structured request from a user (via Connector or API)
-    UserRequest {
-        request_id: Uuid,
-        source: String, // e.g. "telegram", "http"
-        content: String,
-        timestamp: DateTime<Utc>,
-    },
-    /// A response from an Agent
-    AgentResponse {
-        request_id: Uuid,
-        agent_id: String,
-        content: String,
-        timestamp: DateTime<Utc>,
-    },
-    /// A system error
-    Error {
-        code: String,
-        message: String,
-        timestamp: DateTime<Utc>,
-    },
     /// A connector status change
     ConnectorStatus {
         id: String,
@@ -260,33 +230,14 @@ pub enum SystemEvent {
         reset_after_secs: u64,
         timestamp: DateTime<Utc>,
     },
-    /// A task DAG was replanned during execution
-    TaskReplanned {
-        task_id: String,
-        /// Which replan iteration this was (1-based)
-        replan_number: usize,
-        /// The decision taken: "continue", "modify", or "abort"
-        decision: String,
-        /// How many nodes were added in the new DAG
-        nodes_added: usize,
-        /// How many nodes were removed (replaced) from the old DAG
-        nodes_removed: usize,
-        timestamp: DateTime<Utc>,
-    },
-    /// The LLM planner was bypassed (fast path, bootstrap, no router)
-    PlannerBypassed {
-        request_id: Uuid,
-        /// "fast_path" | "bootstrap" | "no_llm_router"
-        reason: String,
-        timestamp: DateTime<Utc>,
-    },
-    /// Dispatcher analysis decision (Phase 2: decoupled analysis from execution)
+    /// Dispatch decision record (Routing V2 tool path). Historical rows may
+    /// carry retired planner-era mode/reason strings.
     DispatchDecision {
         request_id: String,
         task_id: Option<String>,
-        /// "lead_agent" | "dag_parallel" | "sequential_pipeline"
+        /// "lead_agent"
         mode: String,
-        /// "planner_explicit" | "execution_mode_field" | "empty_assignments_fallback" | "heuristic_fallback" | "heuristic_match_failed"
+        /// "model_tool_call"
         reason: String,
         agent_count: usize,
         dag_node_count: Option<usize>,
@@ -297,8 +248,8 @@ pub enum SystemEvent {
     /// Request-level orchestration stage metrics
     OrchestrationStage {
         request_id: Uuid,
-        /// "fast_path" | "planner_simple_query" | "planner_complex_task" |
-        /// "heuristic_simple_query" | "heuristic_complex_task" | "bootstrap" | "no_llm"
+        /// "task_ops" | "steered" | "skill_command" | "bootstrap" |
+        /// "forced_simple_query" | "social_fast_path" | "main_loop"
         mode: String,
         planner_ms: u64,
         dispatch_ms: u64,
@@ -399,24 +350,6 @@ pub enum SystemEvent {
         summary_tokens: usize,
         timestamp: DateTime<Utc>,
     },
-    /// A single compaction phase completed
-    CompactionPhaseCompleted {
-        request_id: Uuid,
-        phase: String,
-        duration_ms: u64,
-        items_processed: usize,
-        timestamp: DateTime<Utc>,
-    },
-    /// Context package built for sub-agent dispatch
-    ContextPackageBuilt {
-        request_id: Uuid,
-        agent_id: String,
-        sections: Vec<(String, usize)>,
-        total_tokens: usize,
-        budget: usize,
-        sub_agent_window: usize,
-        timestamp: DateTime<Utc>,
-    },
     /// Emitted when a compose-engine layer retrieved its output from cache
     /// (spec section Component 4).
     ComposeLayerCacheHit {
@@ -431,6 +364,36 @@ pub enum SystemEvent {
         fingerprint: [u8; 32],
         reason: crate::compose::MissReason,
         lane_id: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
+    /// A background workflow was started for a lane (Routing V2)
+    WorkflowStarted {
+        request_id: Uuid,
+        task_id: String,
+        lane_key: String,
+        title: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// A steering message was accepted into a running workflow's inbox (Routing V2)
+    WorkflowSteered {
+        task_id: String,
+        lane_key: String,
+        request_id: Uuid,
+        timestamp: DateTime<Utc>,
+    },
+    /// A running workflow posted a user-facing progress update (Routing V2)
+    WorkflowProgress {
+        task_id: String,
+        lane_key: String,
+        message: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// A follow-up item was queued for a lane (Routing V2)
+    FollowupQueued {
+        lane_key: String,
+        followup_id: i64,
+        /// "followup" | "unprocessed_steering"
+        kind: String,
         timestamp: DateTime<Utc>,
     },
 }

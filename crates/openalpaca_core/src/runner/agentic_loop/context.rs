@@ -104,8 +104,22 @@ pub(crate) fn compress_context(
     let mut summary_parts = Vec::new();
     let mut round = 1u32;
     let mut current_round_parts: Vec<String> = Vec::new();
+    // Routing V2: steering interjections are kept verbatim — heuristic
+    // compression must never discard or truncate a mid-workflow correction
+    // (only the LLM-summary tier may absorb them). They are re-inserted
+    // right after the summary message, preserving their relative order.
+    let mut kept_interjections: Vec<ChatMessage> = Vec::new();
 
     for msg in &messages[2..compress_end] {
+        if msg.role == Role::User
+            && msg.parts.is_none()
+            && msg
+                .content
+                .starts_with(crate::runner::steering::USER_INTERJECTION_PREFIX)
+        {
+            kept_interjections.push(msg.clone());
+            continue;
+        }
         // Handle multimodal parts
         if let Some(ref parts) = msg.parts {
             let role_label = match msg.role {
@@ -188,7 +202,7 @@ pub(crate) fn compress_context(
 
     let mut summary = format!(
         "[Context compressed: {} earlier messages in {} rounds]\n{}",
-        compress_end - 2,
+        compress_end - 2 - kept_interjections.len(),
         round,
         summary_parts.join("\n")
     );
@@ -203,10 +217,11 @@ pub(crate) fn compress_context(
         }
     }
 
-    // Replace messages[2..compress_end] with the summary
+    // Replace messages[2..compress_end] with the summary, followed by any
+    // preserved interjections (kept verbatim).
     messages.splice(
         2..compress_end,
-        std::iter::once(ChatMessage::user(&summary)),
+        std::iter::once(ChatMessage::user(&summary)).chain(kept_interjections),
     );
 }
 
@@ -227,6 +242,34 @@ mod tests {
     #[test]
     fn test_estimate_empty_messages_returns_zero() {
         assert_eq!(estimate_messages_tokens(&[]), 0);
+    }
+
+    #[test]
+    fn test_compress_context_preserves_interjections_verbatim() {
+        // Routing V2: a steering interjection inside the compressed range
+        // must survive heuristic compression verbatim — not truncated into
+        // the summary (spec §3 compaction rule).
+        let interjection = "<user_interjection ts=\"2026-08-30T00:00:00Z\">use the staging DB instead</user_interjection>";
+        let mut messages = vec![ChatMessage::system("sys"), ChatMessage::user("query")];
+        for i in 0..10 {
+            messages.push(ChatMessage::assistant(&format!("resp {i}")));
+            messages.push(ChatMessage::user(&"x".repeat(200)));
+            if i == 4 {
+                messages.push(ChatMessage::user(interjection));
+            }
+        }
+
+        compress_context(&mut messages, 1, None); // legacy: keep tail of 3
+
+        // The summary replaces the compressed range…
+        assert!(messages[2].content.starts_with("[Context compressed"));
+        assert!(
+            !messages[2].content.contains("staging DB"),
+            "interjection must not be absorbed into the summary"
+        );
+        // …and the interjection is re-inserted verbatim right after it.
+        assert_eq!(messages[3].content, interjection);
+        assert_eq!(messages[3].role, Role::User);
     }
 
     #[test]

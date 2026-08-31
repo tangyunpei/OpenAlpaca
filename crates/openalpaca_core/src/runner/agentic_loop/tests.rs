@@ -1099,6 +1099,99 @@ async fn test_agentic_loop_routed_completes() {
 }
 
 #[tokio::test]
+async fn test_agentic_loop_routed_publishes_model_access_denied_event() {
+    use crate::agent::subagent::AgentConstraints;
+    use crate::bus::EventBus;
+    use crate::events::SystemEvent;
+
+    // The router "falls back" to a model the agent is not allowed to use:
+    // the response reports a model on the agent's deny list.
+    let provider = Arc::new(MockRouterProvider::new(vec![Ok(ChatResponse {
+        content: "Should be rejected".to_string(),
+        tool_calls: vec![],
+        model: "claude-sonnet-4-20250514".to_string(),
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::Stop,
+        thinking: None,
+        parts: None,
+    })]));
+
+    let router = LlmRouter::single_provider(
+        provider,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let mut constraints = AgentConstraints {
+        denied_models: vec!["claude-sonnet-4-20250514".to_string()],
+        ..Default::default()
+    };
+    constraints.normalize();
+
+    let bus = EventBus::new(16);
+    let mut event_rx = bus.subscribe();
+
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        thinking: None,
+        agent_constraints: Some(constraints),
+        event_bus: Some(bus),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("hello")],
+        vec![],
+        &config,
+        None,          // sandbox
+        "denied-agent", // agent_id
+        None,          // sandbox_policy
+        None,          // task_id
+        None,          // context_budget
+        None,          // cancel_token
+        None,          // tool_context
+        None,          // cost_accumulator
+    )
+    .await;
+
+    // The loop aborts with an access error...
+    match result.finish_reason {
+        LoopFinishReason::Error(ref msg) => {
+            assert!(
+                msg.contains("Model access denied"),
+                "unexpected error message: {msg}"
+            );
+        }
+        other => panic!("expected Error finish reason, got {other:?}"),
+    }
+
+    // ...and publishes SystemEvent::ModelAccessDenied on the bus.
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("timed out waiting for ModelAccessDenied event")
+        .expect("event bus closed");
+    match event {
+        SystemEvent::ModelAccessDenied {
+            agent_id,
+            model_id,
+            reason,
+            ..
+        } => {
+            assert_eq!(agent_id, "denied-agent");
+            assert_eq!(model_id, "claude-sonnet-4-20250514");
+            assert!(!reason.is_empty());
+        }
+        other => panic!("expected ModelAccessDenied, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_agentic_loop_routed_with_tool_calls() {
     // Test that router path handles tool calls properly (two rounds:
     // first returns tool_use, second returns stop).
@@ -1270,8 +1363,7 @@ fn test_nested_skill_context_inheritance() {
         task_id: Some("task-1".into()),
         owner_id: Some("user-1".into()),
         workspace_id: Some("ws-1".into()),
-        skill_stack: vec![],
-        effective_constraints: None,
+        ..Default::default()
     };
 
     let child_ctx = parent_ctx.with_skill_pushed("skill-A");
@@ -1588,4 +1680,455 @@ async fn test_ephemeral_notice_not_persisted_in_messages() {
          got {}",
         system_counts[0]
     );
+}
+
+// ─── Routing V2: steering drain tests ────────────────────────────────
+
+use crate::runner::steering::{SteeringInbox, SteeringMsg};
+use crate::security::policy::{Principal, Scope};
+
+fn steering_msg(text: &str) -> SteeringMsg {
+    SteeringMsg {
+        text: text.to_string(),
+        request_id: uuid::Uuid::new_v4(),
+        principal: Principal::System,
+        scope: Scope::Global,
+        workspace_path: None,
+        received_at: chrono::Utc::now(),
+    }
+}
+
+/// Mock provider that records the full message list of every request and
+/// runs a per-call hook (used to push steering messages "mid-call",
+/// simulating an interjection arriving while the LLM call is in flight).
+struct SteeringHookProvider {
+    responses: Vec<Result<ChatResponse, LlmError>>,
+    call_count: AtomicUsize,
+    requests: std::sync::Mutex<Vec<Vec<ChatMessage>>>,
+    on_call: Box<dyn Fn(usize) + Send + Sync>,
+}
+
+impl SteeringHookProvider {
+    fn new(
+        responses: Vec<Result<ChatResponse, LlmError>>,
+        on_call: Box<dyn Fn(usize) + Send + Sync>,
+    ) -> Self {
+        Self {
+            responses,
+            call_count: AtomicUsize::new(0),
+            requests: std::sync::Mutex::new(Vec::new()),
+            on_call,
+        }
+    }
+
+    fn requests_seen(&self) -> Vec<Vec<ChatMessage>> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+}
+
+#[async_trait]
+impl LlmProvider for SteeringHookProvider {
+    fn name(&self) -> &str {
+        "steering-hook"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(request.messages.to_vec());
+        let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
+        (self.on_call)(idx);
+        if idx < self.responses.len() {
+            self.responses[idx].clone()
+        } else {
+            self.responses
+                .last()
+                .cloned()
+                .unwrap_or(Err(LlmError::NotConfigured))
+        }
+    }
+}
+
+fn contains_interjection(messages: &[ChatMessage], text: &str) -> bool {
+    messages.iter().any(|m| {
+        matches!(m.role, openalpaca_llm::Role::User)
+            && m.content.starts_with("<user_interjection ts=\"")
+            && m.content.contains(text)
+    })
+}
+
+#[tokio::test]
+async fn test_steering_interjection_appears_in_next_request() {
+    // A message pushed during round 1's LLM call must appear as a user
+    // message in round 2's request, wrapped in <user_interjection>.
+    let inbox = Arc::new(SteeringInbox::default());
+    let hook_inbox = Arc::clone(&inbox);
+    let provider = SteeringHookProvider::new(
+        vec![
+            Ok(MockProvider::tool_use_response()),
+            Ok(MockProvider::simple_response("Done.")),
+        ],
+        Box::new(move |idx| {
+            if idx == 0 {
+                hook_inbox.push(steering_msg("change course")).unwrap();
+            }
+        }),
+    );
+    let config = LoopConfig {
+        enable_caching: false,
+        steering: Some(Arc::clone(&inbox)),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("start")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert_eq!(result.rounds_used, 2);
+    let requests = provider.requests_seen();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        !contains_interjection(&requests[0], "change course"),
+        "interjection must not appear before it was pushed"
+    );
+    assert!(
+        contains_interjection(&requests[1], "change course"),
+        "interjection missing from the round-2 request: {:?}",
+        requests[1]
+    );
+    assert!(inbox.is_empty());
+}
+
+#[tokio::test]
+async fn test_steering_completion_guard_continues_loop() {
+    // A message arriving during the final (no-tool-calls) round must not be
+    // dropped: the guard keeps the assistant answer, injects the
+    // interjection, and runs another round.
+    let inbox = Arc::new(SteeringInbox::default());
+    let hook_inbox = Arc::clone(&inbox);
+    let provider = SteeringHookProvider::new(
+        vec![
+            Ok(MockProvider::simple_response("First answer")),
+            Ok(MockProvider::simple_response("Final answer")),
+        ],
+        Box::new(move |idx| {
+            if idx == 0 {
+                hook_inbox.push(steering_msg("one more thing")).unwrap();
+            }
+        }),
+    );
+    let config = LoopConfig {
+        enable_caching: false,
+        steering: Some(Arc::clone(&inbox)),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("start")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert_eq!(result.rounds_used, 2);
+    assert_eq!(result.final_content, "Final answer");
+    let requests = provider.requests_seen();
+    assert_eq!(requests.len(), 2);
+    // Round 2 carries the would-be-final assistant answer plus the interjection.
+    assert!(requests[1].iter().any(|m| {
+        matches!(m.role, openalpaca_llm::Role::Assistant) && m.content == "First answer"
+    }));
+    assert!(contains_interjection(&requests[1], "one more thing"));
+    assert!(inbox.is_empty());
+}
+
+#[tokio::test]
+async fn test_steering_max_rounds_exit_reappends_undelivered() {
+    // max_rounds=1: round 1 completes, the guard drains the interjection and
+    // continues; round 2 completes and the guard drains a second interjection,
+    // but the bonus cap (2× max_rounds = 2) exits the loop before another LLM
+    // call — the drained-but-unsent message must be re-appended to the inbox.
+    let inbox = Arc::new(SteeringInbox::default());
+    let hook_inbox = Arc::clone(&inbox);
+    let provider = SteeringHookProvider::new(
+        vec![Ok(MockProvider::simple_response("Answer"))],
+        Box::new(move |idx| {
+            hook_inbox
+                .push(steering_msg(&format!("msg-{}", idx)))
+                .unwrap();
+        }),
+    );
+    let config = LoopConfig {
+        max_rounds: 1,
+        enable_caching: false,
+        steering: Some(Arc::clone(&inbox)),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("start")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::MaxRounds);
+    assert_eq!(result.rounds_used, 2); // 2× cap of max_rounds=1
+    // msg-1 was drained by the completion guard but never sent — it must be
+    // back in the inbox for follow-up conversion.
+    let leftover = inbox.drain_all();
+    assert_eq!(leftover.len(), 1);
+    assert_eq!(leftover[0].text, "msg-1");
+}
+
+#[tokio::test]
+async fn test_steering_bonus_extends_but_caps_at_double() {
+    // Every LLM call pushes an interjection, so every round grants a +5
+    // bonus — yet the loop must stop at exactly 2× max_rounds.
+    let inbox = Arc::new(SteeringInbox::default());
+    let hook_inbox = Arc::clone(&inbox);
+    let provider = SteeringHookProvider::new(
+        vec![Ok(MockProvider::tool_use_response())],
+        Box::new(move |idx| {
+            // Ignore Full errors — the queue may back up near the cap.
+            let _ = hook_inbox.push(steering_msg(&format!("steer-{}", idx)));
+        }),
+    );
+    let config = LoopConfig {
+        max_rounds: 2,
+        enable_caching: false,
+        steering: Some(Arc::clone(&inbox)),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("start")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::MaxRounds);
+    assert!(
+        result.rounds_used > 2,
+        "bonus should extend past max_rounds, got {}",
+        result.rounds_used
+    );
+    assert_eq!(result.rounds_used, 4, "bonus must cap at 2× max_rounds");
+}
+
+#[tokio::test]
+async fn test_steering_closed_inbox_drains_nothing() {
+    // A closed inbox must be inert: the completion guard skips it even when
+    // it holds leftovers (re-appended via push_front_all, which bypasses the
+    // closed flag), and no interjection is injected into any request.
+    let inbox = Arc::new(SteeringInbox::default());
+    let drained = inbox.close_and_drain();
+    assert!(drained.is_empty());
+    let hook_inbox = Arc::clone(&inbox);
+    let provider = SteeringHookProvider::new(
+        vec![Ok(MockProvider::simple_response("Done."))],
+        Box::new(move |idx| {
+            if idx == 0 {
+                // Regular push is rejected on a closed inbox…
+                assert_eq!(
+                    hook_inbox.push(steering_msg("late")),
+                    Err(crate::runner::steering::SteeringPushError::Closed)
+                );
+                // …but a budget-exit re-append lands even after close.
+                hook_inbox.push_front_all(vec![steering_msg("leftover")]);
+            }
+        }),
+    );
+    let config = LoopConfig {
+        enable_caching: false,
+        steering: Some(Arc::clone(&inbox)),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("start")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert_eq!(result.rounds_used, 1, "completion guard must not fire on a closed inbox");
+    let requests = provider.requests_seen();
+    assert!(
+        requests
+            .iter()
+            .all(|msgs| !contains_interjection(msgs, "leftover")),
+        "closed inbox contents must never be injected"
+    );
+    // The leftover stays queued for the cleanup path.
+    assert_eq!(inbox.drain_all().len(), 1);
+}
+
+#[tokio::test]
+async fn test_steering_error_exit_reappends_undelivered() {
+    // Widened re-append (Routing V2 chunk 3): an interjection drained into a
+    // request whose LLM call FAILS was never seen by the model — the Error
+    // exit must return it to the inbox for follow-up conversion.
+    let inbox = Arc::new(SteeringInbox::default());
+    let hook_inbox = Arc::clone(&inbox);
+    let provider = SteeringHookProvider::new(
+        vec![
+            Ok(MockProvider::tool_use_response()),
+            Err(LlmError::NotConfigured),
+        ],
+        Box::new(move |idx| {
+            if idx == 0 {
+                hook_inbox.push(steering_msg("urgent change")).unwrap();
+            }
+        }),
+    );
+    let config = LoopConfig {
+        enable_caching: false,
+        steering: Some(Arc::clone(&inbox)),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("start")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result.finish_reason, LoopFinishReason::Error(_)));
+    // Round 2's request did carry the interjection, but the call failed.
+    let requests = provider.requests_seen();
+    assert!(contains_interjection(&requests[1], "urgent change"));
+    // The undelivered message is back in the inbox.
+    let leftover = inbox.drain_all();
+    assert_eq!(leftover.len(), 1);
+    assert_eq!(leftover[0].text, "urgent change");
+}
+
+#[tokio::test]
+async fn test_steering_cancel_during_llm_call_reappends_undelivered() {
+    // Widened re-append (Routing V2 chunk 3): cancellation racing the LLM
+    // call that carried a drained interjection must return the message to
+    // the inbox instead of dropping it.
+    use tokio_util::sync::CancellationToken;
+
+    struct CancelSecondCallProvider {
+        inbox: Arc<SteeringInbox>,
+        token: CancellationToken,
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CancelSecondCallProvider {
+        fn name(&self) -> &str {
+            "cancel-second"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if idx == 0 {
+                self.inbox.push(steering_msg("mid-flight fix")).unwrap();
+                Ok(MockProvider::tool_use_response())
+            } else {
+                // Cancel while "in flight", then stall so the select! races
+                // the cancellation branch to victory.
+                self.token.cancel();
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Ok(MockProvider::simple_response("never delivered"))
+            }
+        }
+    }
+
+    let inbox = Arc::new(SteeringInbox::default());
+    let token = CancellationToken::new();
+    let provider = CancelSecondCallProvider {
+        inbox: Arc::clone(&inbox),
+        token: token.clone(),
+        call_count: AtomicUsize::new(0),
+    };
+    let config = LoopConfig {
+        enable_caching: false,
+        steering: Some(Arc::clone(&inbox)),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("start")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        Some(token),
+        None,
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Cancelled);
+    // The interrupted call never delivered the drained message — it must be
+    // back in the inbox for follow-up conversion.
+    let leftover = inbox.drain_all();
+    assert_eq!(leftover.len(), 1);
+    assert_eq!(leftover[0].text, "mid-flight fix");
 }

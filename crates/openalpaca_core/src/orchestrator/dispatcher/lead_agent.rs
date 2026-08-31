@@ -2,15 +2,17 @@ use super::super::task_state::TaskState;
 use super::update_state_with_retry;
 use super::usage;
 use super::{
-    TaskDispatcher, finalize_task_with_outcome, format_task_result, persist_conversation,
-    spawn_task_memory_extraction,
+    DispatchOutcome, TaskDispatcher, finalize_task_with_outcome, format_task_result,
+    persist_conversation, spawn_task_memory_extraction,
 };
 use crate::agent::registry::DestroyOutcome;
 use crate::agent::subagent::SubAgent;
 use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
 use crate::runner::lead_agent::run_lead_agent;
+use crate::runner::steering::SteeringInbox;
 use chrono::Utc;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -26,7 +28,7 @@ impl TaskDispatcher {
         lane_key: &str,
         source: &str,
         workspace_id: Option<String>,
-    ) -> Result<String, String> {
+    ) -> Result<DispatchOutcome, String> {
         let task_id = Uuid::new_v4().to_string();
         let now = Utc::now();
 
@@ -72,8 +74,7 @@ impl TaskDispatcher {
             .register(task_id.clone(), title.clone());
 
         // Create TaskLane
-        let task_lane = self.lane_manager.create_task_lane(&task_id);
-        task_lane.assign_agent(lead_agent.id.clone());
+        self.lane_manager.create_task_lane(&task_id);
 
         // Emit status change — lead agent instance just spawned
         self.bus.publish(SystemEvent::AgentStatusChanged {
@@ -152,12 +153,17 @@ impl TaskDispatcher {
             workspace_id,
         );
 
-        Ok(format!(
+        let ack = format!(
             "I've created a task and assigned it to the Lead Agent for dynamic orchestration:\n\n\
              - Lead Agent will analyze, delegate to subagents, and synthesize results\n\n\
              Task: {}\nYou'll see the results here when the task completes.",
             title
-        ))
+        );
+        Ok(DispatchOutcome {
+            task_id,
+            title,
+            ack,
+        })
     }
 
     /// Spawn the lead agent execution in a background tokio task.
@@ -180,18 +186,40 @@ impl TaskDispatcher {
 
         let bus = self.bus.clone();
         let ctx = self.shared_context.clone();
+        let lane_manager = self.lane_manager.clone();
         let db = self.db.clone();
         let embedder = self.embedder.clone();
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
         let connector_block = self.connector_guidance_block();
         let broker = self.confirmation_broker.read().ok().and_then(|g| g.clone());
+        let followup_runner = self.followup_runner.read().ok().and_then(|g| g.clone());
         let context_manager = self.context_manager.clone();
         let compose_engine = self.compose_engine.clone();
 
         // Create cancellation token for this task
         let cancel_token = CancellationToken::new();
         ctx.register_cancellation_token(&task_id, cancel_token.clone());
+
+        // Routing V2: attach the workflow to its lane unconditionally — the
+        // lane attachment backs the StartWorkflowTool per-lane cap and the
+        // workflow-context block, which must bind in every mode/flag combo.
+        ctx.register_workflow_for_lane(&lane_key, &task_id);
+
+        // The steering inbox itself stays flag-gated: with steering off no
+        // inbox registers and steer paths report "not steerable".
+        let steering_inbox = {
+            let cfg = daemon_config.load();
+            if cfg.orchestrator.routing.steering_enabled {
+                let inbox = Arc::new(SteeringInbox::new(
+                    cfg.orchestrator.routing.steering_inbox_cap,
+                ));
+                ctx.register_steering_inbox(&task_id, inbox.clone());
+                Some(inbox)
+            } else {
+                None
+            }
+        };
 
         tokio::spawn(async move {
             let start_time = std::time::Instant::now();
@@ -244,9 +272,12 @@ impl TaskDispatcher {
                 embedder.clone(),
                 &task_id,
                 &created_by,
+                &lane_key,
+                &source,
                 &daemon_config,
                 workspace_id.clone(),
                 Some(cancel_token),
+                steering_inbox.clone(),
                 &connector_block,
                 broker,
                 context_manager,
@@ -256,6 +287,73 @@ impl TaskDispatcher {
 
             // Cleanup cancellation token
             ctx.remove_cancellation_token(&task_id);
+
+            // Remove the task lane — task lanes are per-execution and would
+            // otherwise accumulate for the daemon's lifetime (slow leak).
+            lane_manager.remove_task_lane(&task_id);
+
+            // Routing V2: detach the lane attachment unconditionally — it
+            // was registered unconditionally at dispatch, independent of the
+            // steering flag.
+            ctx.deregister_workflow_for_lane(&lane_key, &task_id);
+
+            // Detach steering. Close FIRST so a concurrent push gets
+            // Err(Closed) instead of landing after the drain, then
+            // deregister and convert leftovers to `unprocessed_steering`
+            // follow-up rows — injected as a context block on the lane's
+            // next main-loop turn (`query_handler/unprocessed_steering.rs`,
+            // which marks them done), never auto-run (claim_next only
+            // claims kind='followup').
+            if let Some(ref inbox) = steering_inbox {
+                let leftovers = inbox.close_and_drain();
+                ctx.remove_steering_inbox(&task_id);
+                if !leftovers.is_empty() {
+                    if let Some(ref db) = db {
+                        let repo =
+                            openalpaca_storage::repository::FollowupRepository::new(db);
+                        for msg in leftovers {
+                            let principal_json = match serde_json::to_string(&msg.principal)
+                            {
+                                Ok(json) => json,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        task_id = %task_id,
+                                        "Dropping steering leftover with unserializable principal: {e}"
+                                    );
+                                    continue;
+                                }
+                            };
+                            match repo.queue(
+                                &lane_key,
+                                "unprocessed_steering",
+                                &msg.text,
+                                &principal_json,
+                                msg.workspace_path.as_deref(),
+                                Some(&task_id),
+                            ) {
+                                Ok(followup_id) => {
+                                    bus.publish(SystemEvent::FollowupQueued {
+                                        lane_key: lane_key.clone(),
+                                        followup_id,
+                                        kind: "unprocessed_steering".to_string(),
+                                        timestamp: Utc::now(),
+                                    });
+                                }
+                                Err(e) => tracing::warn!(
+                                    task_id = %task_id,
+                                    "Failed to queue steering leftover as follow-up: {e}"
+                                ),
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            dropped = leftovers.len(),
+                            "Dropping unprocessed steering messages: no database"
+                        );
+                    }
+                }
+            }
 
             let now = Utc::now();
             let runtime_secs = start_time.elapsed().as_secs() as i64;
@@ -355,8 +453,24 @@ impl TaskDispatcher {
 
             // Persist final result to conversation before publishing completion,
             // so follow-up turns can immediately read the result from history.
+            //
+            // Routing V2 §2b: the lead agent's own final message IS the
+            // user-facing completion report — persist it verbatim. The legacy
+            // template is the fallback for empty final content (budget /
+            // cancel / error exits); non-Complete finishes get a one-line
+            // status prefix either way.
             if let Some(ref db) = db {
-                let content = format_task_result(&task_title, &final_content, result.success);
+                let report = if result.final_content.is_empty() {
+                    format_task_result(&task_title, &final_content, result.success)
+                } else {
+                    result.final_content.clone()
+                };
+                let content =
+                    match super::outcome::completion_status_line(&result.loop_result.finish_reason)
+                    {
+                        Some(status) => format!("{status}\n\n{report}"),
+                        None => report,
+                    };
                 // Resolve model name for conversation record
                 let default_model = router.default_model();
                 let actual_model = result
@@ -395,6 +509,50 @@ impl TaskDispatcher {
                 &final_content,
                 result.success,
             );
+
+            // Routing V2: auto-start the next queued follow-up for this lane.
+            // Inert unless a runner is wired AND a `followup` row is queued
+            // (only the steering-gated `queue_followup` tool writes those).
+            if daemon_config.load().orchestrator.routing.followup_autostart
+                && let (Some(runner), Some(db)) = (followup_runner, db.as_ref())
+            {
+                let repo = openalpaca_storage::repository::FollowupRepository::new(db);
+                match repo.claim_next(&lane_key) {
+                    Ok(Some(row)) => match serde_json::from_str(&row.principal_json) {
+                        Ok(principal) => {
+                            tracing::info!(
+                                followup_id = row.id,
+                                lane_key = %lane_key,
+                                "Auto-starting queued follow-up"
+                            );
+                            let scope = match row.workspace_path.clone() {
+                                Some(path) => crate::security::policy::Scope::Workspace { path },
+                                None => crate::security::policy::Scope::Global,
+                            };
+                            runner.spawn_followup(crate::orchestrator::FollowupItem {
+                                id: row.id,
+                                lane_key: row.lane_key,
+                                content: row.content,
+                                principal,
+                                scope,
+                                workspace_path: row.workspace_path,
+                                source_task_id: row.source_task_id,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                followup_id = row.id,
+                                "Cancelling follow-up with unparseable principal: {e}"
+                            );
+                            let _ = repo.mark_cancelled(row.id);
+                        }
+                    },
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(lane_key = %lane_key, "Failed to claim follow-up: {e}");
+                    }
+                }
+            }
 
             // Memory extraction from lead agent output (non-blocking)
             if let Some(ref db) = db {

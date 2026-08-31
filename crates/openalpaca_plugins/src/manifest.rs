@@ -13,10 +13,6 @@ pub struct PluginManifest {
     pub types: TypesSection,
     #[serde(default)]
     pub config: HashMap<String, ConfigField>,
-    #[serde(default)]
-    pub connector: Option<ConnectorMeta>,
-    #[serde(default)]
-    pub provider: Option<ProviderMeta>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -44,8 +40,6 @@ fn default_max_concurrent() -> usize { 10 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct CapabilitiesSection {
-    #[serde(default)]
-    pub requires: Vec<String>,
     #[serde(default)]
     pub provides: Vec<String>,
     // NEW P3e:
@@ -87,29 +81,6 @@ pub struct ConfigField {
     pub default: Option<toml::Value>,
     #[serde(default)]
     pub description: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ConnectorMeta {
-    pub platform: String,
-    #[serde(default)]
-    pub supports_files: bool,
-    #[serde(default)]
-    pub supports_reactions: bool,
-    #[serde(default = "default_max_message_length")]
-    pub max_message_length: usize,
-}
-
-fn default_max_message_length() -> usize { 4096 }
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProviderMeta {
-    #[serde(default)]
-    pub supports_streaming: bool,
-    #[serde(default)]
-    pub supports_tools: bool,
-    #[serde(default)]
-    pub default_models: Vec<String>,
 }
 
 impl PluginManifest {

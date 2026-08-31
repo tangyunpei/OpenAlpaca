@@ -13,9 +13,7 @@ pub use crate::middleware::prompt::{AgentPersona, SystemPersona};
 pub use crate::middleware::user::UserDocument;
 
 // Existing context types live in `prompt_ctx`.
-pub use crate::prompt_ctx::{
-    AgentSummary, ContextBundle, ContextPackage, ExecutionPath, SectionPriority,
-};
+pub use crate::prompt_ctx::{ContextBundle, ExecutionPath, SectionPriority};
 
 // Existing agent types — `AgentConfig` as a struct does not exist in this
 // codebase (the runtime uses `SubAgent`; the TOML file mirror is
@@ -31,33 +29,6 @@ pub type StaticPromptFingerprint = [u8; 32];
 pub type DynamicContextFingerprint = [u8; 32];
 pub type HistoryFingerprint = [u8; 32];
 pub type CompositeFingerprint = [u8; 32];
-
-// === Local stand-ins for types that do not yet exist in the codebase ===
-//
-// The spec refers to `PlanState`, `WorkspaceSnapshot`, and `ConnectorSummary`.
-// None of these exist as a concrete struct in `openalpaca_core` as of Phase 1.
-// We introduce slim wrapper structs here so the `ComposeRequest` variants
-// compile; later phases (the loader layer in particular) can either replace
-// these with richer types or keep the wrapper as the stable contract.
-
-/// Slim wrapper for the planner's current-plan snapshot.
-///
-/// Phase 1 placeholder: holds an opaque JSON payload. The replanner migration
-/// (Phase 4) will either swap this for a richer struct or keep it as a
-/// transport envelope around whatever the existing replanner prompt uses.
-#[derive(Debug, Clone, Default)]
-pub struct PlanState {
-    pub payload: Arc<str>,
-}
-
-/// Slim wrapper for the replanner's workspace snapshot.
-///
-/// Phase 1 placeholder: holds an opaque JSON payload. Replaced or kept as
-/// an envelope when the replanner migration lands (Phase 4).
-#[derive(Debug, Clone, Default)]
-pub struct WorkspaceSnapshot {
-    pub payload: Arc<str>,
-}
 
 /// Slim wrapper carrying one connector's status for prompt injection.
 ///
@@ -92,14 +63,7 @@ pub enum PersonaMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StaticPromptMode {
     Default,
-    PlannerHierarchical,
     SocialMinimal,
-    /// Phase 4 Commit 2: Replanner's hierarchical system prompt. Structurally
-    /// different from `PlannerHierarchical` — the replanner takes DAG state +
-    /// workspace snapshot + original objective as loader-serialized
-    /// `raw_blocks`, and emits its own static preamble + response_format/rules
-    /// blocks from within Layer 2. See `static_prompt::build_replanner_hierarchical`.
-    ReplannerHierarchical,
     /// Phase 5 Commit 1: Skill Invocation's pre-migration section order.
     /// Matches `orchestrator/skill/invocation.rs:114-230` PromptBuilder chain:
     ///   persona -> agent_persona -> bootstrap -> skills_catalog -> skill_body
@@ -110,12 +74,11 @@ pub enum StaticPromptMode {
     ///   pre-migration position.
     SkillInvocationDefault,
     /// Phase 6 Commit 1: Minimal "subagent"-shape emission used by
-    /// PipelineStep / DagNode / LeadAgent. Emits only `raw_blocks` in
-    /// registration order — the caller pre-renders tools via
-    /// `format_tool_guidance(...)` and injects it (plus connector guidance,
-    /// task-description text, etc.) as raw_blocks at the correct positions
-    /// relative to the other subagent blocks. Pre-migration at
-    /// `orchestrator/dispatcher/pipeline_step.rs:341-440` never used persona /
+    /// DagNode / LeadAgent. Emits only `raw_blocks` in registration order —
+    /// the caller pre-renders tools via `format_tool_guidance(...)` and
+    /// injects it (plus connector guidance, task-description text, etc.) as
+    /// raw_blocks at the correct positions relative to the other subagent
+    /// blocks. The pre-migration subagent builders never used persona /
     /// agent_persona / identity / bootstrap / skills_catalog / send_context /
     /// message_source, so this mode short-circuits all of those. See
     /// `build_subagent_minimal`.
@@ -132,7 +95,6 @@ pub enum DynamicContextMode {
 pub enum HistoryMode {
     Default,
     Skip,
-    FirstStepOnly { memory_block: Arc<str> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,30 +124,9 @@ pub enum ComposeRequest {
         message_source: Arc<str>,
         overrides: ComposeOverrides,
     },
-    Planner {
-        idle_agents: Arc<Vec<AgentSummary>>,
-        user_message: String,
-        active_tasks_block: Option<Arc<str>>,
-        overrides: ComposeOverrides,
-    },
-    Replanner {
-        current_plan: Arc<PlanState>,
-        workspace_snapshot: Arc<WorkspaceSnapshot>,
-        overrides: ComposeOverrides,
-    },
     Social {
         lane_key: String,
         query: String,
-        overrides: ComposeOverrides,
-    },
-    PipelineStep {
-        agent: Arc<AgentConfig>,
-        step_index: usize,
-        step_description: Arc<str>,
-        scope_block: Arc<str>,
-        output_block: Arc<str>,
-        context_package: Arc<ContextPackage>,
-        memory_block: Option<Arc<str>>,
         overrides: ComposeOverrides,
     },
     DagNode {
@@ -217,15 +158,9 @@ impl std::fmt::Debug for ComposeRequest {
                 .field("lane_key", lane_key)
                 .field("skill_id", skill_id)
                 .finish_non_exhaustive(),
-            Self::Planner { .. } => f.debug_struct("Planner").finish_non_exhaustive(),
-            Self::Replanner { .. } => f.debug_struct("Replanner").finish_non_exhaustive(),
             Self::Social { lane_key, .. } => f
                 .debug_struct("Social")
                 .field("lane_key", lane_key)
-                .finish_non_exhaustive(),
-            Self::PipelineStep { step_index, .. } => f
-                .debug_struct("PipelineStep")
-                .field("step_index", step_index)
                 .finish_non_exhaustive(),
             Self::DagNode { .. } => f.debug_struct("DagNode").finish_non_exhaustive(),
             Self::LeadAgent { .. } => f.debug_struct("LeadAgent").finish_non_exhaustive(),
@@ -255,33 +190,14 @@ impl ComposeRequest {
                 D::Default,
                 H::Default,
             ),
-            Self::Planner { .. } => (P::Minimal, S::PlannerHierarchical, D::Skip, H::Skip),
-            // Replanner: History=Default (not Skip) so the canonical
-            // "Evaluate the current task progress…" current_user_turn is
-            // carried through to the final messages vec. The spec
-            // §Component 2 default-dispatch table lists
-            // (Minimal, PlannerHierarchical, Skip, Skip) — treat that as a
-            // spec errata; the replanner system prompt differs structurally
-            // from the planner's and needs its own mode.
-            Self::Replanner { .. } => (P::Minimal, S::ReplannerHierarchical, D::Skip, H::Default),
             Self::Social { .. } => (P::Minimal, S::SocialMinimal, D::Skip, H::Default),
-            // Phase 6 Commit 1 spec errata: the default-dispatch table lists
-            // (Minimal, Default, Skip, FirstStepOnly|Skip). Pre-migration
+            // Phase 6 Commit 1 spec errata: pre-migration
             // emits NO SystemPersona content at all, so Skip matches
-            // byte-identically. StaticPromptMode::SubagentMinimal is a new
-            // variant (Phase 6) carrying the raw_blocks-only emission order
-            // that Pipeline/DAG/LeadAgent use. DynamicContextMode::Default is
-            // used so the ContextPackage's PredecessorOutput / WorkspaceArtifact
-            // sections flow through Layer 3 as user messages. HistoryMode::Default
-            // lets the caller attach memory-on-step-0 as a `recent_messages`
-            // entry + `current_user_turn = step_description` — FirstStepOnly's
-            // single-message output can't carry both memory AND step_description.
-            Self::PipelineStep { .. } => (
-                P::Skip,
-                S::SubagentMinimal,
-                D::Default,
-                H::Default,
-            ),
+            // byte-identically. StaticPromptMode::SubagentMinimal carries the
+            // raw_blocks-only emission order that DagNode/LeadAgent use.
+            // DynamicContextMode::Default routes caller-supplied bundle
+            // sections through Layer 3 as user messages; HistoryMode::Default
+            // lets the caller attach memory / current_user_turn entries.
             Self::DagNode { .. } => (P::Skip, S::SubagentMinimal, D::Default, H::Default),
             Self::LeadAgent { .. } => (P::Skip, S::SubagentMinimal, D::Default, H::Default),
         }
@@ -357,19 +273,6 @@ pub struct StaticPromptInput {
     pub raw_blocks: Vec<SystemBlock>,
     pub mode: StaticPromptMode,
     pub model_window: u32,
-    /// Planner-mode inputs (addition for `StaticPromptMode::PlannerHierarchical`
-    /// and `StaticPromptMode::ReplannerHierarchical`; ignored by other modes).
-    ///
-    /// Supplies the `<agents>` / `<available_agents>` block's agent list for
-    /// Layer 2's `build_planner_hierarchical` and `build_replanner_hierarchical`
-    /// — the Planner system prompt does not consume persona output or
-    /// raw_blocks, so the agent list is plumbed through via this field.
-    #[doc(hidden)]
-    pub planner_agents: Option<Arc<Vec<AgentConfig>>>,
-    /// Planner v2 protocol flag (see `PlannerLimits.plan_protocol_v2_enabled`).
-    /// Defaults to false when the planner_agents field is None.
-    #[doc(hidden)]
-    pub planner_protocol_v2: bool,
 }
 
 #[derive(Debug, Clone)]

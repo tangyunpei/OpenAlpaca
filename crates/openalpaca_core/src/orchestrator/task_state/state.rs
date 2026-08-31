@@ -1,7 +1,6 @@
 //! Task state, step state, and constraints.
 
 use super::workspace::{TaskWorkspace, WorkspaceEntryType};
-use crate::orchestrator::task_planner::TaskDag;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -13,8 +12,6 @@ pub struct TaskState {
     pub constraints: TaskConstraints,
     #[serde(default)]
     pub workspace: TaskWorkspace,
-    #[serde(default)]
-    pub dag: Option<TaskDag>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -36,16 +33,10 @@ pub struct StepState {
 /// Constraints governing task execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskConstraints {
-    pub max_agents: usize,
     pub pipeline_sequential: bool,
 }
 
 impl StepState {
-    /// Set the result summary for this step (capped at 500 chars).
-    pub fn set_summary(&mut self, summary: &str) {
-        self.result_summary = Some(summary.chars().take(500).collect());
-    }
-
     /// Add an artifact pointer for this step.
     pub fn add_artifact(&mut self, key: &str, label: &str, file_asset_id: Option<&str>) {
         let mut obj = serde_json::json!({"key": key, "label": label});
@@ -53,11 +44,6 @@ impl StepState {
             obj["file_asset_id"] = serde_json::Value::String(id.to_string());
         }
         self.artifact_pointers.push(obj.to_string());
-    }
-
-    /// Whether this step produced any artifacts.
-    pub fn has_artifacts(&self) -> bool {
-        !self.artifact_pointers.is_empty()
     }
 }
 
@@ -85,11 +71,9 @@ impl TaskState {
             objective: objective.to_string(),
             steps,
             constraints: TaskConstraints {
-                max_agents: assignments.len(),
                 pipeline_sequential: true,
             },
             workspace: TaskWorkspace::default(),
-            dag: None,
             created_at: now,
             updated_at: now,
         }
@@ -120,28 +104,6 @@ impl TaskState {
             step.status = "failed".to_string();
             step.result_summary = Some(error.chars().take(500).collect());
             step.completed_at = Some(Utc::now());
-        }
-        self.updated_at = Utc::now();
-    }
-
-    /// Set a step's result summary (convenience wrapper).
-    pub fn set_step_summary(&mut self, step_order: i32, summary: &str) {
-        if let Some(step) = self.steps.iter_mut().find(|s| s.step_order == step_order) {
-            step.set_summary(summary);
-        }
-        self.updated_at = Utc::now();
-    }
-
-    /// Add an artifact pointer to a specific step.
-    pub fn add_step_artifact(
-        &mut self,
-        step_order: i32,
-        key: &str,
-        label: &str,
-        file_asset_id: Option<&str>,
-    ) {
-        if let Some(step) = self.steps.iter_mut().find(|s| s.step_order == step_order) {
-            step.add_artifact(key, label, file_asset_id);
         }
         self.updated_at = Utc::now();
     }

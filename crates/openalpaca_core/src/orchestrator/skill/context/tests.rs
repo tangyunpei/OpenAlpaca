@@ -7,7 +7,6 @@ fn default_context_config() -> ContextConfig {
     ContextConfig {
         sources: Vec::new(),
         summarize: SummarizeConfig::default(),
-        read_when: Vec::new(),
         budget_tokens: 0,
     }
 }

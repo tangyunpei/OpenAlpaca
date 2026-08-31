@@ -13,6 +13,7 @@ mod connector_bridge;
 mod event_bridge;
 mod events;
 mod extraction;
+mod followup;
 mod gateway_bridge;
 mod hot_reload;
 mod managers;
@@ -20,6 +21,7 @@ mod middleware;
 mod notification;
 mod router;
 mod routes;
+mod scheduled_skills;
 mod services;
 mod shutdown;
 mod state;
@@ -185,6 +187,12 @@ async fn async_main(
     let db = Database::open(&db_path).context("Failed to initialize database")?;
     info!("Database initialized: {}", db_path.display());
     bootstrap::migrate_preference_summaries(&db);
+    // Routing V2 Phase 3: fail all orphaned (non-terminal) tasks from the
+    // previous daemon generation. MUST stay here — after the DB opens and
+    // before any ingress starts (WakeManager::start in Step 8,
+    // ConnectorManager::start_all in Step 12), so it can never sweep tasks
+    // created by this run.
+    bootstrap::sweep_orphaned_tasks(&db);
 
     // Step 4: Resolve stable local user ID
     let local_user_id = bootstrap::resolve_local_user_id(&db);
@@ -288,6 +296,10 @@ async fn async_main(
         .await
         .context("Failed to start WakeManager")?;
 
+    // Shared from here on: the scheduled-skills bridge (boot registration +
+    // hot-reload re-sync inside the wake loop) needs scheduler access.
+    let wake_manager = Arc::new(wake_manager);
+
     let fs_watch_handle = wake_manager.fs_watch_handle();
 
     // Step 9: Initialize all core services
@@ -318,12 +330,18 @@ async fn async_main(
     // Initialize PluginManager
     let plugin_dir = paths::app_dir()?.join("plugins");
     std::fs::create_dir_all(&plugin_dir).ok();
-    let plugin_manager = Arc::new(openalpaca_plugins::PluginManager::new(
-        plugin_dir,
-        svcs.tool_registry.clone(),
-        Some(svcs.skill_catalog.clone()),
-        Some(svcs.shared_context.agent_registry.clone()),
-    ));
+    let eb_for_plugins = event_broadcaster.clone();
+    let plugin_manager = Arc::new(
+        openalpaca_plugins::PluginManager::new(
+            plugin_dir,
+            svcs.tool_registry.clone(),
+            Some(svcs.skill_catalog.clone()),
+            Some(svcs.shared_context.agent_registry.clone()),
+        )
+        // Wire lifecycle events (ServerEvent::Plugin*) to the WS broadcaster
+        // so clients like the GUI plugin panel live-update.
+        .with_event_sink(Arc::new(move |event| eb_for_plugins.broadcast(event))),
+    );
     if let Err(e) = plugin_manager.start().await {
         warn!("plugin manager startup: {e}");
     }
@@ -375,6 +393,32 @@ async fn async_main(
         orchestrator.set_bootstrap_path(path.clone());
     }
 
+    // Gateway (needed by the hot-reload wake loop for scheduled-skill turns;
+    // connectors and chat wire onto it in Step 12).
+    let handler = Arc::new(gateway_bridge::OrchestratorHandler::new(
+        orchestrator.clone(),
+    ));
+    let gateway = Arc::new(Gateway::new(
+        svcs.shared_context.clone(),
+        lane_manager,
+        handler,
+        bus.clone(),
+        Some(db.clone()),
+    ));
+
+    // Scheduled skills: register cron jobs for skills with invoke.cron
+    // frontmatter (gated by orchestrator.routing.scheduled_skills_enabled).
+    scheduled_skills::sync_all(
+        &wake_manager,
+        &svcs.skill_catalog,
+        daemon_config
+            .load()
+            .orchestrator
+            .routing
+            .scheduled_skills_enabled,
+    )
+    .await;
+
     // Step 11: Spawn hot-reload watchers
     let recent_soul_hashes = hot_reload::new_recent_hashes();
     let recent_user_hashes = hot_reload::new_recent_hashes();
@@ -400,6 +444,9 @@ async fn async_main(
             web_search_config: web_search_config_for_reload,
             bus: bus.clone(),
             fs_watch_handle,
+            gateway: gateway.clone(),
+            wake_manager: wake_manager.clone(),
+            local_user_id: local_user_id.clone(),
             soul_hashes: recent_soul_hashes.clone(),
             user_hashes: recent_user_hashes.clone(),
             identity_hashes: recent_identity_hashes.clone(),
@@ -432,17 +479,13 @@ async fn async_main(
         cancel_token.clone(),
     );
 
-    // Step 12: Gateway, connectors, notifications, chat
-    let handler = Arc::new(gateway_bridge::OrchestratorHandler::new(
-        orchestrator.clone(),
-    ));
-    let gateway = Arc::new(Gateway::new(
-        svcs.shared_context,
-        lane_manager,
-        handler,
-        bus.clone(),
-        Some(db.clone()),
-    ));
+    // Step 12: Connectors, notifications, chat (gateway created above)
+    // Routing V2: wire the follow-up runner so queued follow-ups re-enter
+    // through the gateway when a workflow finalizes (inert while none are queued).
+    orchestrator.set_followup_runner(Arc::new(followup::GatewayFollowupRunner::new(
+        gateway.clone(),
+        db.clone(),
+    )));
 
     let notif_bus = bus.clone();
     let chat_bus = bus.clone();
@@ -568,7 +611,6 @@ async fn async_main(
         web_search_config: svcs.web_search_config,
         confirmation_broker: Some(confirmation_broker),
         plugin_manager: Some(plugin_manager),
-        mcp_client_set: Arc::new(svcs.mcp_client_set),
     });
 
     let app = router::build_router(state);

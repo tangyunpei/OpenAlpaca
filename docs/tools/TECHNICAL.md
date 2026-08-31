@@ -45,8 +45,7 @@
 | `crates/openalpaca_core/src/tools/mcp/mod.rs` | MCP integration module root |
 | `crates/openalpaca_core/src/tools/mcp/config.rs` | `McpConfig` — `config/mcp.toml` parsing |
 | `crates/openalpaca_core/src/tools/mcp/bridge.rs` | `rmcp_tool_to_registered()`, `serialize_call_result()` |
-| `crates/openalpaca_core/src/tools/mcp/client_set.rs` | `McpClientSet`, `McpServerStatus`, `McpServerSummary` |
-| `crates/openalpaca_core/src/tools/stats.rs` | `ToolStats` — invocation stats over `tool_execution_log` |
+| `crates/openalpaca_core/src/tools/mcp/client_set.rs` | `McpServerStatus`, `McpServerSummary` (bootstrap status types) |
 | `crates/openalpaca_core/src/tools/url_validation.rs` | `validate_url()` SSRF protection |
 | `crates/openalpaca_core/src/tools/platform.rs` | `shell_command()` platform abstraction |
 
@@ -100,7 +99,7 @@
 | `crates/openalpaca_core/src/runner/agentic_loop/cost.rs` | `LoopCostAccumulator` |
 | `crates/openalpaca_core/src/runner/agentic_loop/tests.rs` | Loop tests |
 
-### Lead Agent & DAG
+### Lead Agent
 
 | File | Purpose |
 |------|---------|
@@ -110,10 +109,6 @@
 | `crates/openalpaca_core/src/runner/lead_agent/guard.rs` | `AgentBusyGuard` claim/release |
 | `crates/openalpaca_core/src/runner/lead_agent/prompt.rs` | Lead agent prompt assembly |
 | `crates/openalpaca_core/src/runner/lead_agent/tests.rs` | Lead agent tests |
-| `crates/openalpaca_core/src/runner/dag_executor/mod.rs` | DAG node execution |
-| `crates/openalpaca_core/src/runner/dag_executor/node_runner.rs` | Per-node tool resolution |
-| `crates/openalpaca_core/src/runner/dag_executor/progress.rs` | DAG progress tracking |
-| `crates/openalpaca_core/src/runner/dag_executor/tests.rs` | DAG tests |
 
 ### LLM Types
 
@@ -179,7 +174,7 @@ pub struct ToolCall {
 
 The identity-carrying spine of tool execution.  Lightweight — plain strings,
 no `Arc` dependencies or DB handles.  Built by the caller (query handler,
-DAG node runner, lead agent, skill handler) and threaded through
+lead agent, subagent spawn, skill handler) and threaded through
 `SandboxManager` into `BuiltInTool::execute_with_context()`.
 
 ```rust
@@ -740,10 +735,11 @@ At daemon startup, `register_mcp_servers()`:
 3. Per-server failures (invalid config, connect failure/timeout,
    `list_tools` error) are logged and recorded in the summary — **never
    fatal** to daemon startup.
-4. Returns an `McpClientSet`: a daemon-lifetime holder of client `Arc`s
-   plus per-server `McpServerSummary` records
+4. Registered tools hold `Arc`s to their `McpClient`, which keeps the
+   client connections alive for the daemon's lifetime. Per-server
+   `McpServerSummary` records
    (`status: Connected { server_version, protocol_version } | Failed { reason } | Disabled`,
-   `discovered_tools`).
+   `discovered_tools`) are logged during bootstrap.
 
 ### Tool bridging
 
@@ -754,8 +750,11 @@ At daemon startup, `register_mcp_servers()`:
   other servers.
 - `author = "mcp:<server>"`; `version` comes from the server's reported
   version (or `"unknown"`); `annotations` are taken from the server's tool
-  metadata; `provides_capabilities` starts empty (annotation-derived
-  virtual capabilities still apply).
+  metadata; `provides_capabilities` is the namespaced tool name itself
+  (capability-per-name, same pattern as the workspace builtins), so agent
+  templates and skills that list `<server>__<tool>` in their capabilities
+  resolve the tool through the registry's capability index
+  (annotation-derived virtual capabilities still apply).
 - `serialize_call_result()` flattens a `CallToolResult` into
   `Result<String, String>`: text blocks are concatenated with newlines;
   `is_error = true` becomes a tool error.
@@ -1232,24 +1231,6 @@ Daemon event bridge (apps/openalpacad/src/event_bridge.rs → events/)
          └──► tool_execution_log (SkillExecutionRepository::record_tool)
 ```
 
-### ToolStats Queries
-
-**Location:** `crates/openalpaca_core/src/tools/stats.rs`
-
-```rust
-pub struct ToolStats {
-    pub last_invoked_at: Option<DateTime<Utc>>,
-    pub invocation_count: u64,
-    pub error_count: u64,
-}
-
-ToolStats::for_tool(&db, "tool_name")   // zeros if never invoked
-ToolStats::for_all_tools(&db)           // HashMap keyed by tool name
-```
-
-Thin wrappers over `SkillExecutionRepository::tool_stats[_all]`, which
-aggregate `tool_execution_log`.
-
 ### Retention & Cleanup
 
 `spawn_telemetry_cleanup(db, cancel)`
@@ -1381,8 +1362,7 @@ Markdown files with YAML frontmatter.  Tool access is declared via
 | `tools/builtins/tests.rs` | Built-in registration, definition completeness, workspace tools |
 | `tools/builtins/helpers/tests.rs` | Path validation, backup generation, pruning |
 | `tools/builtins/update_persona/tests.rs` | Persona update logic, backup creation |
-| `tools/mcp/bridge.rs` / `client_set.rs` / `config.rs` (inline) | Namespacing, result serialization, config parsing, server-name validation |
-| `tools/stats.rs` (inline) | Stats aggregation over `tool_execution_log` |
+| `tools/mcp/bridge.rs` / `config.rs` (inline) | Namespacing, capability-per-name, result serialization, config parsing, server-name validation |
 | `tools/url_validation.rs` (inline) | SSRF validation: all blocked categories, public URLs |
 | `tools/platform.rs` (inline) | Shell command creation |
 | `security/sandbox/tests.rs` | Full sandbox flow, capability denial, confirmation, approval cache, timeout |
@@ -1392,7 +1372,6 @@ Markdown files with YAML frontmatter.  Tool access is declared via
 | `security/confirmation.rs` (inline) | Broker lifecycle, approval cache, canonical args hashing |
 | `runner/agentic_loop/tests.rs` | Tool call limiting, budget enforcement, loop behavior |
 | `runner/lead_agent/tests.rs` | Coordination tool behavior, spawn guards |
-| `runner/dag_executor/tests.rs` | DAG node execution |
 
 ### Running Tests
 

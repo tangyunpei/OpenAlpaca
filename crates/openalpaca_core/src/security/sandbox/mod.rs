@@ -110,8 +110,8 @@ impl SandboxManager {
 
     /// Create a new SandboxManager with default circuit breaker settings.
     ///
-    /// Used by internal per-request sandbox instances (query handler, skill handler,
-    /// DAG executor, lead agent) where no custom config is needed.
+    /// Convenience constructor for tests; production sites pass the
+    /// configured `[security.circuit_breaker]` via [`Self::new`].
     pub fn with_defaults(registry: Arc<ToolRegistry>, bus: EventBus) -> Self {
         Self::new(registry, bus, &CircuitBreakerConfig::default())
     }

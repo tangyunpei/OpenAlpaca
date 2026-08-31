@@ -1,13 +1,9 @@
 //! Task dispatcher: creates tasks, assigns agents, starts task lanes.
 
-mod core;
-mod dag;
 pub(crate) mod decision;
 mod lead_agent;
 pub(crate) mod memory;
 pub(crate) mod outcome;
-mod pipeline;
-mod pipeline_step;
 #[cfg(test)]
 mod tests;
 pub(crate) mod usage;
@@ -27,28 +23,34 @@ use openalpaca_storage::Database;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Instant;
-use uuid::Uuid;
 
 use crate::tools::ToolRegistry;
 
-use super::skill_matcher::{SkillMatch, SkillMatcher};
-use super::task_planner::TaskPlan;
 use openalpaca_storage::repository::dispatch_decision::{
     DispatchDecisionRecord, DispatchDecisionRepository,
 };
 
-// Re-export for use by child modules (pipeline, dag, lead_agent)
-pub(super) use memory::{retrieve_memory_block, spawn_task_memory_extraction};
+// Re-export for use by child modules (lead_agent)
+pub(super) use memory::spawn_task_memory_extraction;
 use outcome::{finalize_task_with_outcome, persist_conversation, update_state_with_retry};
 #[cfg(test)]
 use outcome::{build_task_outcome, finalize_task};
+
+/// Result of a successful dispatch: the created task's identity plus the
+/// human-readable ack for the chat reply. Callers that record analytics
+/// must use `task_id` — never the ack prose.
+#[derive(Debug, Clone)]
+pub struct DispatchOutcome {
+    pub task_id: String,
+    pub title: String,
+    pub ack: String,
+}
 
 /// Dispatches complex tasks by matching skills to agents and creating task lanes.
 pub struct TaskDispatcher {
     shared_context: Arc<SharedContext>,
     lane_manager: Arc<LaneManager>,
     bus: EventBus,
-    skill_matcher: SkillMatcher,
     llm_router: Option<Arc<LlmRouter>>,
     _security_gate: Arc<SecurityGate>,
     tool_registry: Arc<ToolRegistry>,
@@ -60,6 +62,9 @@ pub struct TaskDispatcher {
     cached_connector_guidance: std::sync::Mutex<(String, Instant)>,
     /// Optional confirmation broker for interactive tool approval in agent pipelines.
     pub(crate) confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
+    /// Optional follow-up runner for autostarting queued follow-ups after a
+    /// workflow finalizes (Routing V2; set post-construction).
+    followup_runner: Arc<RwLock<Option<Arc<dyn crate::orchestrator::FollowupRunner>>>>,
     /// Context manager for distilling parent context into sub-agent packages.
     pub(crate) context_manager: Arc<ContextManager>,
     /// Layered compose engine. Shared with the owning `Orchestrator` so
@@ -87,7 +92,6 @@ impl TaskDispatcher {
             shared_context,
             lane_manager,
             bus,
-            skill_matcher: SkillMatcher,
             llm_router,
             _security_gate: security_gate,
             tool_registry,
@@ -97,8 +101,17 @@ impl TaskDispatcher {
             connector_status,
             cached_connector_guidance: std::sync::Mutex::new((String::new(), Instant::now())),
             confirmation_broker: Arc::new(RwLock::new(None)),
+            followup_runner: Arc::new(RwLock::new(None)),
             context_manager,
             compose_engine,
+        }
+    }
+
+    /// Set the follow-up runner (post-construction, same pattern as the
+    /// confirmation broker injection).
+    pub fn set_followup_runner(&self, runner: Arc<dyn crate::orchestrator::FollowupRunner>) {
+        if let Ok(mut guard) = self.followup_runner.write() {
+            *guard = Some(runner);
         }
     }
 
@@ -162,327 +175,61 @@ impl TaskDispatcher {
         }
     }
 
-    // ── Shared decision recording helpers ──────────────────────────────
+    // ── Decision recording ─────────────────────────────────────────────
 
-    /// Record a dispatch decision (event + DB). Returns row ID for task_id backfill.
-    fn record_decision(&self, request_id: &str, dd: &decision::DispatchDecision) -> Option<i64> {
-        let dcfg = self.daemon_config.load();
-        if !dcfg.execution.planner.dispatch_analysis_enabled {
-            return None;
-        }
+    /// Record the tool-path dispatch decision (Routing V2 Phase 3).
+    ///
+    /// UNCONDITIONAL — the model's `start_workflow` call IS the routing
+    /// decision, so every dispatch is recorded with the real task id
+    /// (no backfill step: the task already exists when this runs).
+    pub(crate) fn record_tool_dispatch_decision(&self, request_id: &str, task_id: &str) {
+        let mode = decision::DispatchMode::LeadAgent.to_string();
+        let reason = decision::DecisionReason::ModelToolCall.to_string();
 
         tracing::info!(
-            mode = %dd.mode,
-            reason = %dd.reason,
-            agent_count = dd.agent_count,
-            dag_node_count = ?dd.dag_node_count,
-            predictability_score = ?dd.predictability_score,
-            "DispatchDecision analysis"
+            mode = %mode,
+            reason = %reason,
+            task_id = %task_id,
+            "DispatchDecision (tool path)"
         );
 
         self.bus.publish(SystemEvent::DispatchDecision {
             request_id: request_id.to_string(),
-            task_id: None,
-            mode: dd.mode.to_string(),
-            reason: dd.reason.to_string(),
-            agent_count: dd.agent_count,
-            dag_node_count: dd.dag_node_count,
-            predictability_score: dd.predictability_score,
-            error_message: dd.error_message.clone(),
+            task_id: Some(task_id.to_string()),
+            mode: mode.clone(),
+            reason: reason.clone(),
+            agent_count: 0,
+            dag_node_count: None,
+            predictability_score: None,
+            error_message: None,
             timestamp: Utc::now(),
         });
 
         if let Some(ref db) = self.db {
             let repo = DispatchDecisionRepository::new(db);
-            match repo.record(&DispatchDecisionRecord {
+            if let Err(e) = repo.record(&DispatchDecisionRecord {
                 id: None,
                 request_id: request_id.to_string(),
-                task_id: None,
-                mode: dd.mode.to_string(),
-                reason: dd.reason.to_string(),
-                agent_count: dd.agent_count,
-                dag_node_count: dd.dag_node_count,
-                predictability_score: dd.predictability_score,
-                planner_requested_mode: dd.planner_requested_mode.clone(),
-                error_message: dd.error_message.clone(),
+                task_id: Some(task_id.to_string()),
+                mode,
+                reason,
+                agent_count: 0,
+                dag_node_count: None,
+                predictability_score: None,
+                planner_requested_mode: None,
+                error_message: None,
                 timestamp: None,
             }) {
-                Ok(id) => return Some(id),
-                Err(e) => tracing::warn!("Failed to persist dispatch decision: {e}"),
+                tracing::warn!("Failed to persist tool-path dispatch decision: {e}");
             }
         }
-        None
-    }
-
-    /// Backfill task_id after task creation.
-    fn backfill_decision_task_id(&self, decision_id: Option<i64>, task_id: &str) {
-        if let (Some(id), Some(db)) = (decision_id, &self.db) {
-            let repo = DispatchDecisionRepository::new(db);
-            if let Err(e) = repo.update_task_id(id, task_id) {
-                tracing::warn!("Failed to backfill decision task_id: {e}");
-            }
-        }
-    }
-
-    // ── Dispatch methods ────────────────────────────────────────────────
-
-    /// Dispatch a complex task using heuristic skill matching:
-    /// Matches required skills to idle agents, then delegates to dispatch_core.
-    #[allow(clippy::too_many_arguments)]
-    pub fn dispatch(
-        &self,
-        request_id: Uuid,
-        source: &str,
-        description: &str,
-        required_skills: &[String],
-        created_by: &str,
-        lane_key: &str,
-        workspace_id: Option<String>,
-    ) -> Result<String, String> {
-        let matches = match self
-            .skill_matcher
-            .match_skills(required_skills, &self.shared_context.agent_registry)
-        {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(
-                    required_skills = ?required_skills,
-                    description_len = description.len(),
-                    source = source,
-                    "Heuristic skill matching failed: {e}"
-                );
-                // Record the failed attempt so it appears in analytics
-                let dd = decision::DispatchDecision {
-                    mode: decision::DispatchMode::SequentialPipeline,
-                    reason: decision::DecisionReason::HeuristicMatchFailed,
-                    agent_count: 0,
-                    dag_node_count: None,
-                    predictability_score: None,
-                    planner_requested_mode: None,
-                    error_message: Some(e.clone()),
-                    timestamp: Utc::now(),
-                };
-                self.record_decision(&request_id.to_string(), &dd);
-                return Err(e);
-            }
-        };
-
-        // Record heuristic dispatch decision
-        let dd = decision::DispatchDecision {
-            mode: decision::DispatchMode::SequentialPipeline,
-            reason: decision::DecisionReason::HeuristicFallback,
-            agent_count: matches.len(),
-            dag_node_count: None,
-            predictability_score: None,
-            planner_requested_mode: None,
-            error_message: None,
-            timestamp: Utc::now(),
-        };
-        let decision_row_id = self.record_decision(&request_id.to_string(), &dd);
-
-        let title = generate_title(description);
-        let result = self.dispatch_core(
-            description,
-            title,
-            matches,
-            created_by,
-            lane_key,
-            source,
-            workspace_id,
-        );
-        if let Ok(ref task_id) = result {
-            self.backfill_decision_task_id(decision_row_id, task_id);
-        }
-        result
-    }
-
-    /// Dispatch a task directly to the lead agent (heuristic fallback).
-    /// Used when heuristic skill matching fails for ComplexTask intents.
-    pub fn dispatch_lead_agent_heuristic(
-        &self,
-        request_id: Uuid,
-        description: &str,
-        created_by: &str,
-        lane_key: &str,
-        source: &str,
-        workspace_id: Option<String>,
-    ) -> Result<String, String> {
-        // Record heuristic lead-agent dispatch decision
-        let dd = decision::DispatchDecision {
-            mode: decision::DispatchMode::LeadAgent,
-            reason: decision::DecisionReason::HeuristicFallback,
-            agent_count: 0,
-            dag_node_count: None,
-            predictability_score: None,
-            planner_requested_mode: None,
-            error_message: None,
-            timestamp: Utc::now(),
-        };
-        let decision_row_id = self.record_decision(&request_id.to_string(), &dd);
-
-        let title = generate_title(description);
-        let result = self.dispatch_lead_agent(
-            description,
-            title,
-            created_by,
-            lane_key,
-            source,
-            workspace_id,
-        );
-        if let Ok(ref task_id) = result {
-            self.backfill_decision_task_id(decision_row_id, task_id);
-        }
-        result
-    }
-
-    /// Dispatch a complex task using an LLM-generated plan.
-    /// Validates that assigned agents exist and are idle, then delegates to dispatch_core.
-    /// If `plan.use_lead_agent` is true, routes to the Lead Agent orchestration path.
-    #[allow(clippy::too_many_arguments)]
-    pub fn dispatch_planned(
-        &self,
-        request_id: Uuid,
-        description: &str,
-        plan: TaskPlan,
-        created_by: &str,
-        lane_key: &str,
-        source: &str,
-        workspace_id: Option<String>,
-    ) -> Result<String, String> {
-        // ── Dispatch Analysis (Phase 2) ────────────────────────────────
-        let dd = decision::analyze_plan(&plan);
-        let decision_row_id = self.record_decision(&request_id.to_string(), &dd);
-        // ── End Dispatch Analysis ──────────────────────────────────────
-
-        let plan_classification = plan.classification.clone();
-        let plan_title_ref = plan.title.as_deref().unwrap_or("<none>").to_string();
-
-        // 1. Lead Agent path: dynamic orchestration for complex/exploratory tasks
-        if plan.use_lead_agent {
-            tracing::info!(
-                classification = %plan_classification,
-                plan_title = %plan_title_ref,
-                description_len = description.len(),
-                "dispatch_planned: use_lead_agent=true, routing to lead agent"
-            );
-            let title = plan
-                .title
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(|| generate_title(description));
-            let result = self.dispatch_lead_agent(
-                description,
-                title,
-                created_by,
-                lane_key,
-                source,
-                workspace_id,
-            );
-            if let Ok(ref task_id) = result {
-                self.backfill_decision_task_id(decision_row_id, task_id);
-            }
-            return result;
-        }
-
-        // 2. DAG path: planner emits assignments=[] with agent info in dag.nodes[].agent_id.
-        //    Must check DAG presence BEFORE the empty-assignments fallback, otherwise
-        //    DAG plans are silently rerouted to lead agent.
-        if let Some(dag) = plan.dag {
-            tracing::info!(
-                classification = %plan_classification,
-                plan_title = %plan_title_ref,
-                dag_nodes = dag.nodes.len(),
-                has_assignments = !plan.assignments.is_empty(),
-                description_len = description.len(),
-                "dispatch_planned: DAG present, routing to DAG-parallel execution"
-            );
-            let title = plan
-                .title
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(|| generate_title(description));
-            let result = self.dispatch_dag_planned(
-                description,
-                title,
-                dag,
-                created_by,
-                lane_key,
-                source,
-                workspace_id,
-            );
-            if let Ok(ref task_id) = result {
-                self.backfill_decision_task_id(decision_row_id, task_id);
-            }
-            return result;
-        }
-
-        // 3. No DAG and no assignments — fallback to lead agent
-        if plan.assignments.is_empty() {
-            tracing::info!(
-                classification = %plan_classification,
-                plan_title = %plan_title_ref,
-                description_len = description.len(),
-                "dispatch_planned: no agent assignments and no DAG, falling back to lead agent"
-            );
-            let title = plan
-                .title
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(|| generate_title(description));
-            let result = self.dispatch_lead_agent(
-                description,
-                title,
-                created_by,
-                lane_key,
-                source,
-                workspace_id,
-            );
-            if let Ok(ref task_id) = result {
-                self.backfill_decision_task_id(decision_row_id, task_id);
-            }
-            return result;
-        }
-
-        // 4. Sequential pipeline: assignments provided, no DAG
-        tracing::info!(
-            classification = %plan_classification,
-            plan_title = %plan_title_ref,
-            assignment_count = plan.assignments.len(),
-            description_len = description.len(),
-            "dispatch_planned: routing to sequential pipeline"
-        );
-        let matches: Vec<SkillMatch> = plan
-            .assignments
-            .iter()
-            .map(|a| SkillMatch {
-                agent_id: a.agent_id.clone(),
-                agent_name: a.agent_name.clone(),
-                matched_skills: a.matched_skills.clone(),
-                role_description: a.role_description.clone(),
-            })
-            .collect();
-
-        let title = plan
-            .title
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| generate_title(description));
-
-        let result = self.dispatch_core(
-            description,
-            title,
-            matches,
-            created_by,
-            lane_key,
-            source,
-            workspace_id,
-        );
-        if let Ok(ref task_id) = result {
-            self.backfill_decision_task_id(decision_row_id, task_id);
-        }
-        result
     }
 }
 
 /// Generate a concise task title from a description by stripping filler prefixes
 /// and truncating to a reasonable length.
-pub(super) fn generate_title(description: &str) -> String {
+/// `pub(crate)` so `StartWorkflowTool` can default a missing title (Routing V2).
+pub(crate) fn generate_title(description: &str) -> String {
     let lower = description.to_lowercase();
     // Strip filler prefixes
     let cleaned = lower

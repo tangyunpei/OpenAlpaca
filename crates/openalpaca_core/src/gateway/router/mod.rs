@@ -1,11 +1,9 @@
 use crate::bus::EventBus;
 use crate::context::SharedContext;
-use crate::events::SystemEvent;
 use crate::gateway::persistence::GatewayPersistence;
 use crate::lane::{LaneKey, LaneManager};
 use crate::security::policy::{Principal, Scope};
 use async_trait::async_trait;
-use chrono::Utc;
 use openalpaca_api::events::EventSource;
 use openalpaca_storage::Database;
 use std::sync::Arc;
@@ -22,6 +20,14 @@ pub struct ResolvedAttachment {
     pub storage_path: String,
 }
 
+/// Structured metadata for a delegated task, carried alongside the ack text
+/// so clients can track the created task without parsing prose.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DelegationInfo {
+    pub task_id: String,
+    pub title: String,
+}
+
 /// Rich result from message handling, carrying optional LLM metadata.
 ///
 /// Non-LLM paths (task queries, commands, etc.) use `HandleResult::text()` which
@@ -34,6 +40,8 @@ pub struct HandleResult {
     pub tokens_out: Option<u32>,
     /// File IDs of attachments consumed during handling.
     pub attachments_used: Vec<String>,
+    /// Set when handling delegated the message to a background task.
+    pub delegation: Option<DelegationInfo>,
 }
 
 impl HandleResult {
@@ -45,6 +53,7 @@ impl HandleResult {
             tokens_in: None,
             tokens_out: None,
             attachments_used: Vec::new(),
+            delegation: None,
         }
     }
 }
@@ -108,6 +117,12 @@ pub struct GatewayRequest {
     /// SSE stream ID for routing tool confirmation prompts to the active chat stream.
     /// Set by `ChatService::send_message()`, `None` for connector/API requests.
     pub stream_id: Option<String>,
+    /// Optional explicit lane override in canonical "user_id:source" form
+    /// (Routing V2): when set and well-formed, the turn lands on this exact
+    /// lane instead of the one derived from `source`/`principal`. Set by the
+    /// follow-up runner so re-entered turns continue the ORIGINATING
+    /// conversation; `None` everywhere else.
+    pub lane_override: Option<String>,
 }
 
 /// Response from the gateway after handling a message.
@@ -126,6 +141,8 @@ pub struct GatewayResponse {
     pub tokens_out: Option<u32>,
     /// File IDs of attachments consumed during handling.
     pub attachments_used: Vec<String>,
+    /// Set when handling delegated the message to a background task.
+    pub delegation: Option<DelegationInfo>,
 }
 
 /// The unified entry point for all inbound messages.
@@ -164,19 +181,25 @@ impl Gateway {
             user_id = global_id.clone();
         }
 
-        let key = LaneKey::new(&user_id, &source_name);
+        // Lane override (Routing V2): a well-formed override pins the turn to
+        // its originating lane (follow-up re-entry); malformed values fall
+        // back to the derived lane.
+        let key = match req.lane_override.as_deref().and_then(LaneKey::from_str) {
+            Some(overridden) => overridden,
+            None => {
+                if let Some(ref raw) = req.lane_override {
+                    tracing::warn!(
+                        lane_override = %raw,
+                        "Malformed lane_override; falling back to derived lane"
+                    );
+                }
+                LaneKey::new(&user_id, &source_name)
+            }
+        };
         let lane_key_str = key.to_string();
         let lane = self.lane_manager.get_or_create_conversation(key.clone());
 
         let request_id = Uuid::new_v4();
-
-        // Emit UserRequest event
-        self.bus.publish(SystemEvent::UserRequest {
-            request_id,
-            source: source_name.clone(),
-            content: req.content.clone(),
-            timestamp: Utc::now(),
-        });
 
         // Record message on the lane
         lane.record_message();
@@ -259,6 +282,7 @@ impl Gateway {
                     tokens_in: result.tokens_in,
                     tokens_out: result.tokens_out,
                     attachments_used: result.attachments_used,
+                    delegation: result.delegation,
                 }
             }
             Err(e) => GatewayResponse {
@@ -269,29 +293,9 @@ impl Gateway {
                 tokens_in: None,
                 tokens_out: None,
                 attachments_used: Vec::new(),
+                delegation: None,
             },
         }
-    }
-
-    /// Backward-compatible handle_message (delegates to handle_event with defaults).
-    pub async fn handle_message(
-        &self,
-        _user_id: &str,
-        _source: &str,
-        content: &str,
-    ) -> GatewayResponse {
-        self.handle_event(GatewayRequest {
-            source: EventSource::Api {
-                request_id: Uuid::new_v4().to_string(),
-            },
-            content: content.to_string(),
-            attachments: Vec::new(),
-            principal: Principal::System,
-            scope: Scope::Global,
-            workspace_path: None,
-            stream_id: None,
-        })
-        .await
     }
 
     /// Health check.
@@ -307,7 +311,6 @@ fn derive_user_and_source(source: &EventSource) -> (String, String) {
         EventSource::IMessage { sender, .. } => (sender.clone(), "imessage".to_string()),
         EventSource::Discord { user_id, .. } => (user_id.clone(), "discord".to_string()),
         EventSource::Gui { connection_id } => (connection_id.clone(), "gui".to_string()),
-        EventSource::Cli { session_id } => (session_id.clone(), "cli".to_string()),
         EventSource::Api { request_id } => (request_id.clone(), "api".to_string()),
         EventSource::Internal => ("system".to_string(), "internal".to_string()),
     }

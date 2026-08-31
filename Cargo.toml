@@ -14,6 +14,20 @@ members = [
     "apps/openalpaca",
     "apps/openalpaca-gui/src-tauri",
 ]
+# Bare `cargo build` / `cargo test` covers the library crates only; the apps
+# (daemon with all features, CLI, Tauri GUI) build when named with -p or --workspace.
+default-members = [
+    "crates/openalpaca_api",
+    "crates/openalpaca_core",
+    "crates/openalpaca_wake",
+    "crates/openalpaca_storage",
+    "crates/openalpaca_platform",
+    "crates/openalpaca_platform_macos",
+    "crates/openalpaca_connectors",
+    "crates/openalpaca_llm",
+    "crates/openalpaca_mcp",
+    "crates/openalpaca_plugins",
+]
 resolver = "3"
 
 [workspace.package]
@@ -138,3 +152,12 @@ tauri-plugin-fs = "2"
 
 # Internal Crates (continued)
 openalpaca_connectors = { path = "crates/openalpaca_connectors" }
+
+# `cargo test` uses the `test` profile, which inherits from `dev`, so these
+# settings cover both builds and tests. Workspace crates keep file:line info
+# for readable backtraces; external dependencies carry no debug info at all.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

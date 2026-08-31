@@ -171,29 +171,6 @@ fn test_get_or_create_conversation() {
 }
 
 #[test]
-fn test_list_conversations() {
-    let db = test_db();
-    let repo = ConversationRepository::new(&db);
-
-    repo.get_or_create_conversation("user1:gui", "gui").unwrap();
-    repo.get_or_create_conversation("user2:telegram", "telegram")
-        .unwrap();
-    repo.get_or_create_conversation("user3:telegram", "telegram")
-        .unwrap();
-
-    // List all
-    let all = repo.list_conversations(None, 50, 0).unwrap();
-    assert_eq!(all.len(), 3);
-
-    // Filter by source
-    let tg = repo.list_conversations(Some("telegram"), 50, 0).unwrap();
-    assert_eq!(tg.len(), 2);
-
-    let gui = repo.list_conversations(Some("gui"), 50, 0).unwrap();
-    assert_eq!(gui.len(), 1);
-}
-
-#[test]
 fn test_increment_message_count() {
     let db = test_db();
     let repo = ConversationRepository::new(&db);

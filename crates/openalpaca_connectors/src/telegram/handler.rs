@@ -277,6 +277,7 @@ impl TelegramConnector {
                 },
                 workspace_path: None, // Telegram has no workspace context; uses Global scope only
                 stream_id: None,
+                lane_override: None,
             })
             .await;
 
@@ -308,8 +309,6 @@ impl TelegramConnector {
             );
         }
 
-        // Note: EventBus events (UserRequest + AgentResponse) are now emitted
-        // by Gateway and the MessageHandler, not by the connector.
         let _ = bus; // Keep bus in deps for /link events if needed
 
         Ok(())

@@ -44,39 +44,6 @@ fn test_dispatch_decision_record_roundtrip() {
 }
 
 #[test]
-fn test_dispatch_decision_update_task_id() {
-    let db = setup_db();
-    let repo = DispatchDecisionRepository::new(&db);
-
-    let row_id = repo
-        .record(&DispatchDecisionRecord {
-            id: None,
-            request_id: "req-backfill".to_string(),
-            task_id: None,
-            mode: "dag_parallel".to_string(),
-            reason: "execution_mode_field".to_string(),
-            agent_count: 4,
-            dag_node_count: Some(4),
-            predictability_score: Some(0.9),
-            planner_requested_mode: Some("dag".to_string()),
-            error_message: None,
-            timestamp: None,
-        })
-        .unwrap();
-
-    // Initially task_id is NULL
-    let records = repo.query(None, None, None, 10).unwrap();
-    assert!(records[0].task_id.is_none());
-
-    // Backfill task_id
-    repo.update_task_id(row_id, "task-real-uuid-456").unwrap();
-
-    let records = repo.query(None, None, None, 10).unwrap();
-    assert_eq!(records[0].task_id.as_deref(), Some("task-real-uuid-456"));
-    assert_eq!(records[0].request_id, "req-backfill");
-}
-
-#[test]
 fn test_dispatch_decision_null_task_id_query() {
     let db = setup_db();
     let repo = DispatchDecisionRepository::new(&db);
@@ -213,7 +180,7 @@ fn test_dispatch_decision_error_message_roundtrip() {
 #[test]
 fn test_migration_025_creates_error_message_schema() {
     let db = setup_db();
-    assert_eq!(db.schema_version().unwrap(), 32);
+    assert_eq!(db.schema_version().unwrap(), 34);
 
     // Verify request_id column works
     let repo = DispatchDecisionRepository::new(&db);

@@ -598,11 +598,7 @@ async fn test_execute_with_context_defaults_to_execute() {
     };
     let ctx = super::ToolContext {
         agent_id: Some("test-agent".to_string()),
-        task_id: None,
-        owner_id: None,
-        workspace_id: None,
-        skill_stack: vec![],
-        effective_constraints: None,
+        ..Default::default()
     };
     let args = serde_json::json!({"key": "value"});
     let result = tool.execute_with_context(&args, &ctx).await.unwrap();
@@ -897,8 +893,7 @@ fn test_tool_context_push_skill() {
         task_id: Some("task-1".into()),
         owner_id: Some("owner-1".into()),
         workspace_id: Some("ws-1".into()),
-        skill_stack: vec![],
-        effective_constraints: None,
+        ..Default::default()
     };
     let child = ctx.with_skill_pushed("skill-A");
 

@@ -1,7 +1,7 @@
 use crate::prompt_ctx::section::{
     ContextKey, ContextKind, ContextSection, InjectionMode, SectionPriority, TrustLevel,
 };
-use crate::prompt_ctx::sources::{ContextRequest, ContextSource, ExecutionPath};
+use crate::prompt_ctx::sources::{ContextRequest, ContextSource};
 use async_trait::async_trait;
 use openalpaca_storage::{Database, repository::memory::MemoryRepository};
 use std::sync::Arc;
@@ -74,7 +74,4 @@ impl ContextSource for MemorySource {
             .collect()
     }
 
-    fn active_for(&self, path: &ExecutionPath) -> bool {
-        !matches!(path, ExecutionPath::SocialQuery)
-    }
 }

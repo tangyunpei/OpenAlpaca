@@ -35,10 +35,7 @@ fn mode_tag(mode: DynamicContextMode) -> u8 {
 fn path_tag(path: &ExecutionPath) -> u8 {
     match path {
         ExecutionPath::SimpleQuery => 0,
-        ExecutionPath::SocialQuery => 1,
         ExecutionPath::SkillInvocation { .. } => 2,
-        ExecutionPath::PipelineStep { .. } => 3,
-        ExecutionPath::DagNode { .. } => 4,
         ExecutionPath::LeadAgent => 5,
     }
 }

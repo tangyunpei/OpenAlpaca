@@ -25,10 +25,9 @@ impl<'a> EventLogRepository<'a> {
     ) -> Result<i64> {
         self.db.with_connection(|conn| {
             // Store an explicit RFC3339 timestamp so it round-trips through
-            // `row_to_event` (which parses RFC3339) and so `range()`'s string
-            // comparison against `to_rfc3339()` bounds is correct — the column
-            // DEFAULT `datetime('now')` produces a space-separated form that
-            // sorts before the 'T'-separated bounds and fails to parse.
+            // `row_to_event` (which parses RFC3339) — the column DEFAULT
+            // `datetime('now')` produces a space-separated form that fails
+            // to parse as RFC3339.
             conn.execute(
                 "INSERT INTO event_log (event_type, agent_id, detail, result, timestamp) VALUES (?1, ?2, ?3, ?4, ?5)",
                 (
@@ -41,19 +40,6 @@ impl<'a> EventLogRepository<'a> {
             )?;
             Ok(conn.last_insert_rowid())
         })
-    }
-
-    /// Log an event with string result (convenience method)
-    #[deprecated(note = "Use log() with result parameter instead")]
-    pub fn log_with_result(
-        &self,
-        event_type: &str,
-        agent_id: Option<&str>,
-        detail: Option<&serde_json::Value>,
-        result: &str,
-    ) -> Result<i64> {
-        let result_json = serde_json::Value::String(result.to_string());
-        self.log(event_type, agent_id, detail, Some(&result_json))
     }
 
     /// Get recent events
@@ -85,25 +71,6 @@ impl<'a> EventLogRepository<'a> {
 
             let mut events = Vec::new();
             let mut rows = stmt.query([agent_id, &limit.to_string()])?;
-
-            while let Some(row) = rows.next()? {
-                events.push(Self::row_to_event(row)?);
-            }
-
-            Ok(events)
-        })
-    }
-
-    /// Get events in a time range
-    pub fn range(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<EventLog>> {
-        self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, timestamp, agent_id, event_type, detail, result 
-                 FROM event_log WHERE timestamp >= ?1 AND timestamp <= ?2 ORDER BY timestamp DESC",
-            )?;
-
-            let mut events = Vec::new();
-            let mut rows = stmt.query([from.to_rfc3339(), to.to_rfc3339()])?;
 
             while let Some(row) = rows.next()? {
                 events.push(Self::row_to_event(row)?);

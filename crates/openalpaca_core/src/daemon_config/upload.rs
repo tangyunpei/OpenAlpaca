@@ -12,8 +12,6 @@ pub struct UploadConfig {
     pub allowed_mime_prefixes: Vec<String>,
     /// Maximum files per chat message.
     pub max_files_per_message: usize,
-    /// Days to retain orphaned assets.
-    pub retention_days: u32,
     /// Governance sub-section for background processing & cleanup.
     pub governance: UploadGovernanceConfig,
 }
@@ -61,7 +59,6 @@ impl Default for UploadConfig {
                 "application/vnd.apple.".to_string(),
             ],
             max_files_per_message: 10,
-            retention_days: 30,
             governance: UploadGovernanceConfig::default(),
         }
     }

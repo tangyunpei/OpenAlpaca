@@ -55,9 +55,11 @@
 
 ```bash
 # Full workspace
-cargo build                      # debug build (all crates + apps)
+cargo build                      # debug build (library crates only — apps are excluded via default-members)
+cargo build --workspace          # debug build including apps (daemon, CLI, GUI backend)
 cargo build --release            # release build
-cargo test                       # run all tests
+cargo test                       # run library-crate tests
+cargo test --workspace           # run all tests including apps
 cargo clippy                     # lint
 
 # Individual crates
@@ -94,7 +96,7 @@ crates/
   openalpaca_llm/       # LLM router, providers (Anthropic/OpenAI/Ollama), key management
   openalpaca_storage/   # SQLite (rusqlite + sqlite-vec), repositories, migrations
   openalpaca_api/       # Shared event types (WakeEvent) + plugin executor traits
-  openalpaca_wake/      # Cron scheduler + filesystem watcher
+  openalpaca_wake/      # Cron scheduler (drives scheduled skills) + filesystem watcher
   openalpaca_connectors/# Chat platform adapters (Telegram, iMessage, Discord)
   openalpaca_mcp/       # MCP client (rmcp wrapper) — connects out to MCP servers, imports tools
   openalpaca_plugins/   # Out-of-process plugin system (JSON-RPC over stdio, approval gate)
@@ -127,30 +129,28 @@ openalpaca (CLI)        ← openalpaca_core, openalpaca_llm, openalpaca_storage
 openalpaca_gui          ← openalpaca_api, openalpaca_storage
 ```
 
-### Three Execution Modes
+### Execution Topology
 
-The orchestrator dispatches complex tasks via `TaskDispatcher` with three paths:
+The orchestrator dispatches workflows via `TaskDispatcher`. **Lead agent** (`dispatcher/lead_agent.rs`) is the only topology: a single orchestrating agent, spawned from an agent template with the `orchestration` capability (`config/agents/lead_agent.md`), delegates autonomously via `spawn_subagent` / `spawn_subagents_batch` (1–8 per call) / `wait_for_subagents` — batch spawning plus interruptible waiting is the parallel-work story. The legacy planner ladder, sequential pipeline, and DAG executor (and their `orchestrator.routing.mode = "planner"` rollback switch) were deleted in Routing V2 Phase 5.
 
-1. **Sequential Pipeline** (`dispatcher/pipeline.rs`) — agents run in order, each receiving the previous agent's output. One `tokio::spawn` per pipeline.
-2. **DAG Execution** (`dispatcher/dag.rs` + `src/runner/dag_executor/`, the latter directly under the crate root, not under `orchestrator/`) — independent nodes run concurrently up to `max_concurrent_agents` (default 4). Optional replanning after N nodes.
-3. **Lead Agent** (`dispatcher/lead_agent.rs`) — a single orchestrating agent handles delegation autonomously, spawned from an agent template with the `orchestration` capability (`config/agents/lead_agent.md`).
+### Message Routing (Routing V2)
 
-Selection is driven by the task planner's output: `plan.use_lead_agent` → lead agent, `plan.dag` present → DAG, otherwise → sequential pipeline.
+`Orchestrator::handle_message_internal` (`orchestrator/handlers.rs`) routes each message through a short ladder:
 
-### Intent Routing
+1. **Deterministic tier** (no LLM): task ops (`/status`, `/tasks`, `/cancel|/pause|/resume` — bare control commands resolve against the lane's active workflows), the `/steer <msg>` steering override, and slash/router-selected skills.
+2. **Social fast path** — exact-phrase match ("thanks", "ok"), answered before the main loop.
+3. **Main loop** — everything else, *including while workflows run* (chat-by-default; lanes are never captured). `handle_simple_query` runs the agentic loop with the full persona/memory prompt and a per-request tool set: `start_workflow`, `task_status`, memory tools (`memory_store`/`memory_forget`/`memory_search`), plus `steer_workflow`/`queue_followup` while the lane has active workflows (`tools/builtins/main_loop.rs`). Chat vs. task vs. steer is the model's tool choice; a started workflow surfaces as structured `delegation{task_id, title}` on `HandleResult`/`GatewayResponse`/SSE `done`.
 
-The `Orchestrator` classifies incoming messages into intents before dispatch:
-- `SimpleQuery` → direct LLM call
-- `TaskQuery` → query task registry
-- `ComplexTask` → dispatch to agents via `TaskDispatcher`
-- `TaskControl` → manage task lifecycle (cancel/pause/resume)
+The legacy planner ladder (the keyword-classified `ComplexTask`/`RememberCommand`/`ForgetCommand` intents, fast path, two-phase triage, hierarchical planner, replanner) and its `orchestrator.routing.mode` switch were deleted in Routing V2 Phase 5; the retired mode strings (`two_phase_*`, `planner_*`, `fast_path`, `no_llm`) survive only in historical telemetry rows. Memory writes/deletes are now the model's `memory_store`/`memory_forget` tool calls, not "remember ..." prefix commands.
+
+Mid-workflow steering (gated on `steering_enabled`, default on): each running lead-agent task registers a `SteeringInbox` (`runner/steering.rs`) that the agentic loop drains at its round boundary and completion guard, injecting `<user_interjection>` messages. Workflow completion posts a model-authored completion report to the lane (template fallback for empty/budget exits); `queue_followup` items land in `lane_followups` and auto-start when the workflow finalizes (`followup_autostart`). See `docs/agent-loop.md` for the full contract.
 
 ### Extensibility: MCP + Plugins
 
 Two mechanisms extend the tool surface:
 
-- **MCP servers** (`config/mcp.toml`): the daemon connects out to declared MCP servers at boot (`openalpaca_mcp` crate, stdio or streamable-HTTP transports) and registers their tools in the tool registry as `<server>__<tool>`. Tools only — MCP resources/prompts are stubbed (not implemented), and serving MCP is a non-goal. Per-server failures are logged, never fatal.
-- **Plugins** (`~/Library/Application Support/OpenAlpaca/plugins/`): out-of-process child programs speaking JSON-RPC 2.0 over stdio, declared by a `plugin.toml` manifest, gated by a first-load approval flow (`.permissions.toml`). Plugin tools register as `<plugin>::<tool>`; plugins can also contribute skills and agent templates. Connector and LLM-provider plugin bridges exist in code but are not yet wired into `ConnectorManager`/`LlmRouter` — treat those plugin types as non-functional. Managed via `GET/POST /v1/plugins/...` routes and `openalpaca plugin ...` CLI commands.
+- **MCP servers** (`config/mcp.toml`): the daemon connects out to declared MCP servers at boot (`openalpaca_mcp` crate, stdio or streamable-HTTP transports) and registers their tools in the tool registry as `<server>__<tool>`. Each imported tool provides a capability equal to its namespaced name, so agent templates select MCP tools by listing `<server>__<tool>` in `capabilities` (skills: `requires_capabilities`); the main loop reaches them only with `tool_selection = "full"`. Tools only — MCP resources/prompts are stubbed (not implemented), and serving MCP is a non-goal. Per-server failures are logged, never fatal.
+- **Plugins** (`~/Library/Application Support/OpenAlpaca/plugins/`): out-of-process child programs speaking JSON-RPC 2.0 over stdio, declared by a `plugin.toml` manifest, gated by a first-load approval flow (`.permissions.toml`). Plugin tools register as `<plugin>::<tool>`; plugins can also contribute skills and agent templates. Plugin-contributed skills (`SkillSource::Plugin`) are invokable like file-based skills (slash command or router selection): the orchestrator delegates to the plugin's `PluginSkillExecutor` out-of-process, proxying tool callbacks through the sandboxed execute path (`orchestrator/skill/invocation.rs`). Plugin-contributed agent templates (`AgentSource::Plugin`) execute through the lead-agent subagent spawn path: `runner/plugin_agent.rs` drives the plugin's external reasoning loop (spawn → step polls, 50-iteration cap) and proxies its tool requests through the sandboxed execute path. Connector and LLM-provider plugin bridges exist in code but are not yet wired into `ConnectorManager`/`LlmRouter` — treat those plugin types as non-functional. Managed via `GET/POST /v1/plugins/...` routes and `openalpaca plugin ...` CLI commands.
 
 ## Key Patterns
 
@@ -158,7 +158,7 @@ Two mechanisms extend the tool surface:
 
 - **Runtime**: tokio multi-thread (`#[tokio::main]` in both daemon and CLI)
 - **Event bus**: `tokio::sync::broadcast` channel (`EventBus`) for system-wide events
-- **Cancellation**: `tokio_util::sync::CancellationToken` per task, registered in `SharedContext.cancellation_tokens`. Checked before each pipeline step.
+- **Cancellation**: `tokio_util::sync::CancellationToken` per task, registered in `SharedContext.cancellation_tokens`. Checked at the top of every agentic-loop round.
 - **Global LLM concurrency**: `tokio::sync::Semaphore` in `LlmRouter` caps in-flight API calls
 - **Shutdown**: `tokio::sync::mpsc` channel in daemon `AppState`
 
@@ -194,7 +194,7 @@ Two mechanisms extend the tool surface:
 
 ### Storage
 
-Single SQLite connection wrapped in `Arc<Mutex<Connection>>`. WAL mode, `busy_timeout=5000ms`. Schema managed via numbered migrations (currently 32). Memory search is hybrid: FTS5 full-text + sqlite-vec 768-dim KNN with cascading scope (workspace → global).
+Single SQLite connection wrapped in `Arc<Mutex<Connection>>`. WAL mode, `busy_timeout=5000ms`. Schema managed via numbered migrations (currently 34). Memory search is hybrid: FTS5 full-text + sqlite-vec 768-dim KNN with cascading scope (workspace → global).
 
 Data directory: `~/Library/Application Support/OpenAlpaca/` (macOS). DB: `openalpaca.db`, lock: `openalpacad.lock`, discovery: `discovery.json`.
 
@@ -202,13 +202,13 @@ Data directory: `~/Library/Application Support/OpenAlpaca/` (macOS). DB: `openal
 
 | File | Purpose |
 |---|---|
-| `config/daemon.toml` | Execution limits, DAG settings, lead-agent defaults, context compaction, planner, orchestrator cost caps, memory/prompt budgets, server config (chat streams, embedding indexer), telemetry, upload governance, security |
+| `config/daemon.toml` | Execution limits, lead-agent defaults, context compaction, orchestrator cost caps, memory/prompt budgets, routing (`[orchestrator.routing]`: `steering_enabled`, `steering_inbox_cap`, `max_workflows_per_lane`, `followup_autostart`, `main_loop_max_rounds`, `main_loop_max_tools_per_round`, `tool_selection`), server config (chat streams, embedding indexer), telemetry, upload governance, security |
 | `config/llm.toml` | Provider credentials (AES-256-GCM encrypted), model registry with pricing, embedding config, fallback chains — generated on first daemon start, not checked in |
 | `config/mcp.toml` | MCP server declarations (`[servers.<name>]`, stdio/http transports) + connect/request timeouts and reconnect defaults |
 | `config/agents/*.md` | Agent templates — YAML frontmatter (id, capabilities, model, limits) + markdown persona |
 | `config/orchestrator/templates/*_temp.md` | Tracked templates for the persona docs (SOUL, USER, IDENTITY, BOOTSTRAP) |
 | `config/orchestrator/SOUL.md` etc. | Live persona docs — generated at first run from the templates; USER.md is auto-extracted from conversations |
-| `config/skills/*/SKILL.md` | Skill definitions with trigger patterns (routing intents/keywords) and required tools |
+| `config/skills/*/SKILL.md` | Skill definitions with trigger patterns (routing intents/keywords) and required tools; `invoke.cron` schedules the skill via the wake scheduler (`apps/openalpacad/src/scheduled_skills.rs`, kill switch `[orchestrator.routing] scheduled_skills_enabled`) |
 
 Config dir resolution: `OPENALPACA_CONFIG_DIR` env var → walk up from exe looking for `config/llm.toml` → walk up from CWD → fallback `./config`.
 
@@ -221,11 +221,14 @@ LLM secret resolution order: `secret_env` (env var) > `secret_ref` (OS keychain)
 | Agent loop reference doc | `docs/agent-loop.md` |
 | Orchestrator | `crates/openalpaca_core/src/orchestrator/mod.rs` |
 | Intent parsing | `crates/openalpaca_core/src/orchestrator/intent/` |
+| Routing ladder | `crates/openalpaca_core/src/orchestrator/handlers.rs` |
 | Task dispatcher | `crates/openalpaca_core/src/orchestrator/dispatcher/` |
-| Sequential pipeline | `crates/openalpaca_core/src/orchestrator/dispatcher/pipeline.rs` |
-| DAG execution | `crates/openalpaca_core/src/orchestrator/dispatcher/dag.rs` + `crates/openalpaca_core/src/runner/dag_executor/` |
+| Main-loop tools (start/steer workflow, task_status) | `crates/openalpaca_core/src/tools/builtins/` (`start_workflow.rs`, `steer_workflow.rs`, `task_status.rs`, `main_loop.rs`) |
+| Steering rail | `crates/openalpaca_core/src/runner/steering.rs` (drains in `runner/agentic_loop/mod.rs`) |
+| Workflow-context block | `crates/openalpaca_core/src/orchestrator/query_handler/workflow_context.rs` |
+| Follow-up runner | `apps/openalpacad/src/followup.rs` + `crates/openalpaca_storage/src/repository/followup/` |
 | Lead agent dispatch | `crates/openalpaca_core/src/orchestrator/dispatcher/lead_agent.rs` |
-| Task planner | `crates/openalpaca_core/src/orchestrator/task_planner/` |
+| Lead agent runtime | `crates/openalpaca_core/src/runner/lead_agent/` |
 | Prompt composition / persona | `crates/openalpaca_core/src/compose/` |
 | Persona extraction middleware | `crates/openalpaca_core/src/middleware/` (soul/user/identity/bootstrap) |
 | Daemon config types | `crates/openalpaca_core/src/daemon_config/` |

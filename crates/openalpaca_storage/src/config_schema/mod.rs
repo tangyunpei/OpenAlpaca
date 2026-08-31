@@ -2,7 +2,7 @@
 //!
 //! Provides a centralized definition of all known configuration keys,
 //! their types, defaults, and validation rules. Used by the CLI for
-//! validated writes (`set_checked`) and schema-driven TUI.
+//! validated writes and the schema-driven TUI.
 
 mod registry;
 mod types;

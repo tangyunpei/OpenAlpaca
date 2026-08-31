@@ -1,6 +1,6 @@
 //! Repository for message feedback (thumbs up/down)
 
-use crate::models::feedback::{MessageFeedback, SkillSatisfaction};
+use crate::models::feedback::MessageFeedback;
 use crate::Database;
 use anyhow::{Context, Result};
 
@@ -71,38 +71,6 @@ impl<'a> MessageFeedbackRepository<'a> {
         })
     }
 
-    /// Get satisfaction rates per skill by joining feedback with skill execution log.
-    pub fn skill_satisfaction_rates(&self) -> Result<Vec<SkillSatisfaction>> {
-        self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT
-                    sel.skill_id,
-                    COUNT(mf.id) AS fb_count,
-                    CAST(SUM(CASE WHEN mf.feedback = 'positive' THEN 1 ELSE 0 END) AS REAL)
-                        / NULLIF(COUNT(mf.id), 0) AS satisfaction,
-                    COUNT(sel.id) AS total_invocations,
-                    CAST(COUNT(mf.id) AS REAL) / COUNT(sel.id) AS coverage
-                FROM skill_execution_log sel
-                LEFT JOIN message_feedback mf ON mf.message_id = sel.response_message_id
-                GROUP BY sel.skill_id
-                HAVING COUNT(sel.id) >= 5",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok(SkillSatisfaction {
-                    skill_id: row.get(0)?,
-                    feedback_count: row.get::<_, i64>(1)? as u64,
-                    user_satisfaction_rate: row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
-                    total_invocations: row.get::<_, i64>(3)? as u64,
-                    feedback_coverage: row.get(4)?,
-                })
-            })?;
-            let mut results = Vec::new();
-            for row in rows {
-                results.push(row?);
-            }
-            Ok(results)
-        })
-    }
 }
 
 #[cfg(test)]

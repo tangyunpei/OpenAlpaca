@@ -79,11 +79,7 @@ mod tests {
             permissions: PermissionsConfig {
                 level: "readwrite".to_string(),
                 confirm: ConfirmAction::default(),
-                sandbox: SandboxConfig {
-                    enabled: true,
-                    net: false,
-                    fs_writable: Vec::new(),
-                },
+                sandbox: SandboxConfig { net: false },
             },
             tools: ToolsConfig {
                 allow: vec!["web_fetch".to_string()],
@@ -101,7 +97,6 @@ mod tests {
         // Verify the ConfirmAction struct properly holds tools
         let confirm = ConfirmAction {
             tools: vec!["shell_execute".to_string(), "file_write".to_string()],
-            message: Some("Are you sure?".to_string()),
         };
         assert_eq!(confirm.tools.len(), 2);
         assert_eq!(confirm.tools[0], "shell_execute");

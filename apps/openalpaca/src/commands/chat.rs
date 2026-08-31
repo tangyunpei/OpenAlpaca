@@ -48,8 +48,8 @@ async fn single_message(content: &str, files: &[std::path::PathBuf]) -> Result<(
         &Default::default(),
     )
     .await?;
-    if let StreamResult::Delegation { task_title, .. } = &result {
-        chat_stream::poll_task_completion(&client, task_title).await?;
+    if let StreamResult::Delegation { delegation, .. } = &result {
+        chat_stream::poll_task_completion(&client, &delegation.task_id).await?;
     }
     println!();
     Ok(())
@@ -89,8 +89,8 @@ async fn pipe_mode() -> Result<()> {
     }
     let client = DaemonClient::connect()?;
     let result = chat_stream::send_and_stream(&client, input, &Default::default()).await?;
-    if let StreamResult::Delegation { task_title, .. } = &result {
-        chat_stream::poll_task_completion(&client, task_title).await?;
+    if let StreamResult::Delegation { delegation, .. } = &result {
+        chat_stream::poll_task_completion(&client, &delegation.task_id).await?;
     }
     println!();
     Ok(())

@@ -11,10 +11,7 @@ use async_trait::async_trait;
 #[derive(Debug, Clone)]
 pub enum ExecutionPath {
     SimpleQuery,
-    SocialQuery,
     SkillInvocation { skill_id: String },
-    PipelineStep { step: usize, total: usize },
-    DagNode { node_id: String },
     LeadAgent,
 }
 

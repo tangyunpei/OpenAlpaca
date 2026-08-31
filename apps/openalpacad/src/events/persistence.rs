@@ -11,13 +11,6 @@ impl EventBroadcaster {
             let repo = EventLogRepository::new(db);
             let persist_result: Result<i64, _> = match event {
                 ServerEvent::Heartbeat { .. } => Ok(0), // Skip heartbeats
-                ServerEvent::Log { level, message, .. } => {
-                    let detail = serde_json::json!({
-                        "level": level,
-                        "message": message
-                    });
-                    repo.log("log", None, Some(&detail), None)
-                }
                 ServerEvent::CommandReceived {
                     request_id,
                     command,
@@ -264,23 +257,6 @@ impl EventBroadcaster {
                     });
                     repo.log("skill_failed", None, Some(&detail), None)
                 }
-                ServerEvent::TaskReplanned {
-                    task_id,
-                    replan_number,
-                    decision,
-                    nodes_added,
-                    nodes_removed,
-                    ..
-                } => {
-                    let detail = serde_json::json!({
-                        "task_id": task_id,
-                        "replan_number": replan_number,
-                        "decision": decision,
-                        "nodes_added": nodes_added,
-                        "nodes_removed": nodes_removed
-                    });
-                    repo.log("task_replanned", None, Some(&detail), None)
-                }
                 // Log DAG node status changes
                 ServerEvent::DagNodeStatus {
                     task_id,
@@ -327,6 +303,55 @@ impl EventBroadcaster {
                         "backup_path": backup_path
                     });
                     repo.log("soul_updated", None, Some(&detail), None)
+                }
+                // Log workflow lifecycle events (Routing V2)
+                ServerEvent::WorkflowStarted {
+                    task_id,
+                    lane_key,
+                    title,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "task_id": task_id,
+                        "lane_key": lane_key,
+                        "title": title,
+                    });
+                    repo.log("workflow_started", None, Some(&detail), None)
+                }
+                ServerEvent::WorkflowSteered {
+                    task_id, lane_key, ..
+                } => {
+                    let detail = serde_json::json!({
+                        "task_id": task_id,
+                        "lane_key": lane_key,
+                    });
+                    repo.log("workflow_steered", None, Some(&detail), None)
+                }
+                ServerEvent::WorkflowProgress {
+                    task_id,
+                    lane_key,
+                    message,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "task_id": task_id,
+                        "lane_key": lane_key,
+                        "message": message,
+                    });
+                    repo.log("workflow_progress", None, Some(&detail), None)
+                }
+                ServerEvent::FollowupQueued {
+                    lane_key,
+                    followup_id,
+                    kind,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "lane_key": lane_key,
+                        "followup_id": followup_id,
+                        "kind": kind,
+                    });
+                    repo.log("followup_queued", None, Some(&detail), None)
                 }
                 // Plugin lifecycle events
                 ServerEvent::PluginLoaded {

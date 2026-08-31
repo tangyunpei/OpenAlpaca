@@ -140,6 +140,40 @@ impl DaemonConfig {
             10000,
             "user_profile_budget",
         );
+        // ── Orchestrator > Routing ──
+        clamp_val(
+            &mut self.orchestrator.routing.steering_inbox_cap,
+            1,
+            256,
+            "routing.steering_inbox_cap",
+        );
+        clamp_val(
+            &mut self.orchestrator.routing.max_workflows_per_lane,
+            1,
+            16,
+            "routing.max_workflows_per_lane",
+        );
+        clamp_val(
+            &mut self.orchestrator.routing.main_loop_max_rounds,
+            1,
+            100,
+            "routing.main_loop_max_rounds",
+        );
+        clamp_val(
+            &mut self.orchestrator.routing.main_loop_max_tools_per_round,
+            1,
+            50,
+            "routing.main_loop_max_tools_per_round",
+        );
+        if self.orchestrator.routing.tool_selection != "core_union"
+            && self.orchestrator.routing.tool_selection != "full"
+        {
+            tracing::warn!(
+                "Config 'routing.tool_selection': unknown value '{}', resetting to 'core_union'",
+                self.orchestrator.routing.tool_selection
+            );
+            self.orchestrator.routing.tool_selection = "core_union".to_string();
+        }
         // ── Execution > Agent Defaults ──
         clamp_val(
             &mut self.execution.agent_defaults.max_rounds,
@@ -210,12 +244,6 @@ impl DaemonConfig {
             "skill_defaults.max_tools_per_round",
         );
         clamp_val(
-            &mut self.execution.skill_defaults.default_tool_rate_limit,
-            1,
-            1000,
-            "skill_defaults.default_tool_rate_limit",
-        );
-        clamp_val(
             &mut self.execution.skill_defaults.router_auto_select_threshold,
             0.0,
             1.0,
@@ -226,62 +254,6 @@ impl DaemonConfig {
             0.0,
             1.0,
             "skill_defaults.router_suggest_threshold",
-        );
-        // ── Execution > Planner ──
-        clamp_val(
-            &mut self.execution.planner.planning_timeout_secs,
-            5,
-            120,
-            "planner.planning_timeout_secs",
-        );
-        clamp_val(
-            &mut self.execution.planner.max_retries,
-            0,
-            5,
-            "planner.max_retries",
-        );
-        clamp_val(
-            &mut self.execution.planner.max_tokens,
-            256,
-            4096,
-            "planner.max_tokens",
-        );
-        // ── Execution > DAG ──
-        clamp_val(
-            &mut self.execution.dag.max_concurrent_agents,
-            1,
-            32,
-            "dag.max_concurrent_agents",
-        );
-        clamp_val(
-            &mut self.execution.dag.node_timeout_secs,
-            10,
-            3600,
-            "dag.node_timeout_secs",
-        );
-        clamp_val(
-            &mut self.execution.dag.total_timeout_secs,
-            60,
-            7200,
-            "dag.total_timeout_secs",
-        );
-        clamp_val(
-            &mut self.execution.dag.max_retries_per_node,
-            0,
-            10,
-            "dag.max_retries_per_node",
-        );
-        clamp_val(
-            &mut self.execution.dag.replan_after_every_n_nodes,
-            1,
-            50,
-            "dag.replan_after_every_n_nodes",
-        );
-        clamp_val(
-            &mut self.execution.dag.max_replans,
-            0,
-            50,
-            "dag.max_replans",
         );
         // ── Security ──
         clamp_val(
@@ -363,12 +335,6 @@ impl DaemonConfig {
             1,
             50,
             "upload.max_files_per_message",
-        );
-        clamp_val(
-            &mut self.upload.retention_days,
-            1,
-            365,
-            "upload.retention_days",
         );
         // ── Upload > Governance ──
         clamp_val(

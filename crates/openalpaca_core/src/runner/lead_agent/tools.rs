@@ -1,6 +1,6 @@
 use super::guard::AgentBusyGuard;
 use super::tracker::{SubagentStatus, SubagentTracker};
-use crate::agent::template::AgentTemplate;
+use crate::agent::template::{AgentSource, AgentTemplate};
 use crate::bus::EventBus;
 use crate::compose::{
     ComposeOverrides, ComposeRequest, DynamicContextInput, DynamicContextMode, HistoryInput,
@@ -14,6 +14,8 @@ use crate::middleware::prompt::{format_tool_guidance, SystemPersona};
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
 use crate::prompt_ctx::{ExecutionPath, SectionPriority};
+use crate::runner::plugin_agent::{PluginLoopOutcome, run_plugin_agent_loop};
+use crate::runner::steering::SteeringInbox;
 use crate::runner::{LoopConfig, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
@@ -248,8 +250,19 @@ impl BuiltInTool for SpawnSubagentTool {
             workspace_id: self.workspace_id.clone(),
             skill_stack: vec![],
             effective_constraints: None,
+            // Subagents are lane-detached: no lane/request threading here.
+            lane_key: None,
+            source: None,
+            request_id: None,
+            principal: None,
+            scope: None,
+            workspace_path: None,
         };
-        let mut sandbox = SandboxManager::with_defaults(self.tool_registry.clone(), self.bus.clone());
+        let mut sandbox = SandboxManager::new(
+            self.tool_registry.clone(),
+            self.bus.clone(),
+            &self.daemon_config.load().security.circuit_breaker,
+        );
         if let Some(ref broker) = self.confirmation_broker {
             sandbox.set_confirmation_broker(broker.clone());
         }
@@ -362,8 +375,6 @@ impl BuiltInTool for SpawnSubagentTool {
             send_tool_context: None,
             message_source: None,
             raw_blocks,
-            planner_agents: None,
-            planner_protocol_v2: false,
             mode: StaticPromptMode::SubagentMinimal,
             model_window: model_window as u32,
         };
@@ -413,9 +424,31 @@ impl BuiltInTool for SpawnSubagentTool {
         let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
 
         let mut sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
+        sandbox_policy.confirmation_timeout_secs = Some(
+            self.daemon_config
+                .load()
+                .execution
+                .agent_defaults
+                .confirmation_timeout_secs,
+        );
         if self.daemon_config.load().security.auto_approve_confirmations {
             sandbox_policy.auto_approve = true;
         }
+
+        // Plugin-backed template? Resolve the executor + full objective now
+        // so the spawned task can run the external plugin loop instead of
+        // the internal agentic loop (see `runner/plugin_agent.rs`).
+        let plugin_execution = match self
+            .shared_context
+            .agent_registry
+            .get_template(agent_id)
+            .map(|t| t.source)
+        {
+            Some(AgentSource::Plugin { executor, .. }) => {
+                Some((executor, objective.to_string()))
+            }
+            _ => None,
+        };
 
         // 9. Spawn subagent as a background task (non-blocking).
         //    This allows the lead agent to spawn multiple subagents in parallel.
@@ -453,6 +486,100 @@ impl BuiltInTool for SpawnSubagentTool {
             }
 
             tracker.set_status(&run_id_clone, SubagentStatus::Running);
+
+            // ── Plugin-backed template: run the plugin executor loop
+            // instead of the LLM loop. Tool calls are proxied through the
+            // same sandbox as internal subagents; depth/concurrency/
+            // cancellation semantics are unchanged (the permit is held for
+            // the loop's lifetime and the child token is checked between
+            // steps).
+            if let Some((executor, objective_full)) = plugin_execution {
+                tracing::info!(
+                    agent_id = %agent_id_owned,
+                    instance_id = %instance_id,
+                    "Subagent template is plugin-backed — routing to PluginAgentExecutor"
+                );
+                let system_prompt = messages
+                    .first()
+                    .map(|m| m.content.clone())
+                    .unwrap_or_default();
+                let instructions =
+                    format!("{system_prompt}\n\nObjective: {objective_full}");
+                let plugin_ctx = serde_json::json!({
+                    "objective": objective_full,
+                    "task_id": task_id,
+                });
+
+                let outcome = run_plugin_agent_loop(
+                    &executor,
+                    &instance_id,
+                    &task_id,
+                    &instructions,
+                    &plugin_ctx,
+                    &sandbox,
+                    &sandbox_policy,
+                    &subagent_tool_ctx,
+                    child_token.as_ref(),
+                )
+                .await;
+
+                let duration_ms = agent_start.elapsed().as_millis() as u64;
+                busy_guard.restore();
+
+                bus.publish(SystemEvent::DagNodeCompleted {
+                    task_id: task_id.clone(),
+                    node_id: node_id.clone(),
+                    node_title: objective_preview.clone(),
+                    agent_id: instance_id.clone(),
+                    success: outcome.success(),
+                    duration_ms,
+                    output_preview: match &outcome {
+                        PluginLoopOutcome::Completed { content, .. } if !content.is_empty() => {
+                            Some(content.chars().take(200).collect())
+                        }
+                        _ => None,
+                    },
+                    timestamp: Utc::now(),
+                });
+
+                // No LLM usage to record — the plugin runs its own model
+                // calls out-of-process. Agent history still counts the run.
+                if let Some(ref db) = db {
+                    crate::orchestrator::dispatcher::usage::record_agent_history(
+                        db,
+                        &agent_id_owned,
+                        &task_id,
+                        "subagent",
+                        outcome.success(),
+                        duration_ms as i64 / 1000,
+                    );
+                }
+
+                match outcome {
+                    PluginLoopOutcome::Completed {
+                        content,
+                        tool_calls_made,
+                        iterations,
+                    } => {
+                        let content = if content.is_empty() {
+                            format!(
+                                "Plugin agent '{}' completed in {} iterations ({} tool calls) but produced no text output.",
+                                agent_id_owned, iterations, tool_calls_made
+                            )
+                        } else {
+                            content
+                        };
+                        tracker.complete(&run_id_clone, content, true);
+                    }
+                    PluginLoopOutcome::Failed { error, .. } => {
+                        tracker.fail(
+                            &run_id_clone,
+                            format!("Plugin agent '{}' failed: {}", agent_id_owned, error),
+                        );
+                    }
+                }
+                return;
+            }
 
             let result = run_agentic_loop_routed(
                 router.as_ref(),
@@ -774,8 +901,14 @@ pub fn check_subagent_status_tool_definition() -> ToolDefinition {
 
 /// Tool that blocks until all spawned subagents have completed,
 /// then returns a summary of all results.
+///
+/// When a steering inbox is attached (Routing V2), a queued user
+/// interjection interrupts the wait so the loop can drain it at the next
+/// round boundary instead of blocking for up to the full timeout.
 pub struct WaitForSubagentsTool {
     pub(super) tracker: Arc<SubagentTracker>,
+    /// Steering inbox for wait interruption. `None` disables the arm.
+    pub(super) steering: Option<Arc<SteeringInbox>>,
 }
 
 #[async_trait]
@@ -785,6 +918,25 @@ impl BuiltInTool for WaitForSubagentsTool {
         let deadline = tokio::time::Instant::now() + max_wait;
 
         loop {
+            // Steering pre-check BEFORE any wait — a message pushed before
+            // this call started must still interrupt (no lost wakeup:
+            // `SteeringInbox::notified` registers interest before
+            // re-checking emptiness, and this loop re-checks first).
+            if let Some(ref inbox) = self.steering
+                && !inbox.is_empty()
+            {
+                let (queued, running, completed, failed) = self.tracker.status_counts();
+                return Ok(format!(
+                    "Wait interrupted: a user interjection is pending and will be \
+                     delivered next round — address it before resuming the wait. \
+                     Status: {} completed, {} failed, {} queued, {} running.\n\n{}",
+                    completed,
+                    failed,
+                    queued,
+                    running,
+                    self.tracker.summary()
+                ));
+            }
             if self.tracker.all_done() {
                 break;
             }
@@ -802,9 +954,18 @@ impl BuiltInTool for WaitForSubagentsTool {
                     self.tracker.summary()
                 ));
             }
-            // Wait for a subagent status change or timeout
+            // Wait for a subagent status change, a steering push, or timeout.
+            // A closed inbox is treated as absent — its `notified()` returns
+            // immediately, which would otherwise busy-spin this loop.
+            let steering_wakeup = async {
+                match self.steering.as_ref().filter(|i| !i.is_closed()) {
+                    Some(inbox) => inbox.notified().await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 _ = self.tracker.notify.notified() => { /* re-check all_done */ }
+                _ = steering_wakeup => { /* re-check inbox */ }
                 _ = tokio::time::sleep(remaining) => { /* timeout */ }
             }
         }
@@ -843,6 +1004,283 @@ pub fn wait_for_subagents_tool_definition() -> ToolDefinition {
         strict: None,
         input_examples: None,
     }
+}
+
+// ── PostUpdateTool ───────────────────────────────────────────────────
+
+/// Lead-agent tool that posts a user-facing progress update: persists the
+/// message to the lane conversation and publishes `WorkflowProgress` so the
+/// NotificationDispatcher can push it to the originating channel (Routing V2).
+pub struct PostUpdateTool {
+    db: Option<Database>,
+    bus: EventBus,
+    task_id: String,
+    lane_key: String,
+    source: String,
+}
+
+impl PostUpdateTool {
+    pub fn new(
+        db: Option<Database>,
+        bus: EventBus,
+        task_id: String,
+        lane_key: String,
+        source: String,
+    ) -> Self {
+        Self {
+            db,
+            bus,
+            task_id,
+            lane_key,
+            source,
+        }
+    }
+}
+
+#[async_trait]
+impl BuiltInTool for PostUpdateTool {
+    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        let message = arguments
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .ok_or_else(|| "Missing required parameter: message".to_string())?;
+
+        if let Some(ref db) = self.db {
+            crate::orchestrator::dispatcher::outcome::persist_conversation(
+                db,
+                &self.lane_key,
+                &self.source,
+                message.to_string(),
+                None,
+                0,
+                0,
+                0,
+            );
+        }
+        self.bus.publish(SystemEvent::WorkflowProgress {
+            task_id: self.task_id.clone(),
+            lane_key: self.lane_key.clone(),
+            message: message.to_string(),
+            timestamp: Utc::now(),
+        });
+        Ok("Progress update posted to the conversation.".to_string())
+    }
+}
+
+/// Build the tool definition for `post_update`.
+pub fn post_update_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "post_update".to_string(),
+        description: "Post a short, user-facing progress update to the conversation while the \
+                       task is still running. Use sparingly — at meaningful milestones, not \
+                       every step."
+            .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The progress update to show the user"
+                }
+            },
+            "required": ["message"]
+        }),
+        strict: None,
+        input_examples: None,
+    }
+}
+
+// ── QueueFollowupTool ────────────────────────────────────────────────
+
+/// Tool that queues a follow-up item for the lane. The item runs as a fresh
+/// turn after the current workflow completes (Routing V2).
+///
+/// Two construction modes:
+/// - **Lead agent** (`new`): identity from the task's `created_by`, the
+///   running task recorded as `source_task_id`.
+/// - **Main loop** (`for_main_loop`): per-request, no source task — identity
+///   and workspace path come from the invocation's `ToolContext`.
+pub struct QueueFollowupTool {
+    db: Option<Database>,
+    bus: EventBus,
+    /// Task the item is queued from (lead-agent mode); `None` in the main loop.
+    source_task_id: Option<String>,
+    lane_key: String,
+    created_by: String,
+}
+
+impl QueueFollowupTool {
+    pub fn new(
+        db: Option<Database>,
+        bus: EventBus,
+        task_id: String,
+        lane_key: String,
+        created_by: String,
+    ) -> Self {
+        Self {
+            db,
+            bus,
+            source_task_id: Some(task_id),
+            lane_key,
+            created_by,
+        }
+    }
+
+    /// Main-loop variant: no source task; identity resolved per-invocation
+    /// from the `ToolContext` (falling back to `created_by`).
+    pub fn for_main_loop(
+        db: Option<Database>,
+        bus: EventBus,
+        lane_key: String,
+        created_by: String,
+    ) -> Self {
+        Self {
+            db,
+            bus,
+            source_task_id: None,
+            lane_key,
+            created_by,
+        }
+    }
+
+    fn queue(
+        &self,
+        arguments: &serde_json::Value,
+        principal: crate::security::policy::Principal,
+        workspace_path: Option<&str>,
+    ) -> Result<String, String> {
+        let description = arguments
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .ok_or_else(|| "Missing required parameter: description".to_string())?;
+
+        let Some(ref db) = self.db else {
+            return Err("Follow-up queue unavailable: no database configured".to_string());
+        };
+
+        let principal_json = serde_json::to_string(&principal)
+            .map_err(|e| format!("Failed to serialize principal: {e}"))?;
+
+        let repo = openalpaca_storage::repository::FollowupRepository::new(db);
+        let followup_id = repo
+            .queue(
+                &self.lane_key,
+                "followup",
+                description,
+                &principal_json,
+                workspace_path,
+                self.source_task_id.as_deref(),
+            )
+            .map_err(|e| format!("Failed to queue follow-up: {e}"))?;
+
+        self.bus.publish(SystemEvent::FollowupQueued {
+            lane_key: self.lane_key.clone(),
+            followup_id,
+            kind: "followup".to_string(),
+            timestamp: Utc::now(),
+        });
+
+        Ok(format!(
+            "Follow-up queued (id: {}). It will run as a new task after this workflow completes.",
+            followup_id
+        ))
+    }
+
+    /// Reconstruct the originating principal from the constructor-provided
+    /// owner so the follow-up can re-enter the front door with the right
+    /// identity (lead-agent path — no `ToolContext` principal threaded).
+    fn constructed_principal(&self) -> crate::security::policy::Principal {
+        if self.created_by == "system" {
+            crate::security::policy::Principal::System
+        } else {
+            crate::security::policy::Principal::User {
+                global_id: self.created_by.clone(),
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl BuiltInTool for QueueFollowupTool {
+    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        self.queue(arguments, self.constructed_principal(), None)
+    }
+
+    /// Context-aware variant: prefer the invocation's threaded identity and
+    /// workspace path (main-loop path) over the constructor fallback, so
+    /// re-entry scope survives (Routing V2 Phase-1 gap fix).
+    async fn execute_with_context(
+        &self,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
+        let principal = ctx
+            .principal
+            .clone()
+            .unwrap_or_else(|| self.constructed_principal());
+        self.queue(arguments, principal, ctx.workspace_path.as_deref())
+    }
+}
+
+/// Build the tool definition for `queue_followup`.
+pub fn queue_followup_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "queue_followup".to_string(),
+        description: "Queue a follow-up task for after this workflow completes. Use for work \
+                       that is out of scope now but should happen next (e.g. requested \
+                       mid-flight by the user). Returns the queued item's id."
+            .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "A clear, self-contained description of the follow-up work"
+                }
+            },
+            "required": ["description"]
+        }),
+        strict: None,
+        input_examples: None,
+    }
+}
+
+/// Register the Routing V2 workflow tools (`post_update`, `queue_followup`)
+/// into a `ToolRegistry`. Only called when `orchestrator.routing.steering_enabled`.
+pub fn register_workflow_tools(
+    registry: &crate::tools::ToolRegistry,
+    post_update_tool: Arc<PostUpdateTool>,
+    queue_followup_tool: Arc<QueueFollowupTool>,
+) {
+    // Known-good builtin tool definitions — unwrap is safe (same as above).
+    registry
+        .register(RegisteredTool {
+            definition: post_update_tool_definition(),
+            backend: ToolBackend::BuiltIn(post_update_tool),
+            provides_capabilities: vec!["orchestration".to_string()],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            author: "builtin".to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    registry
+        .register(RegisteredTool {
+            definition: queue_followup_tool_definition(),
+            backend: ToolBackend::BuiltIn(queue_followup_tool),
+            provides_capabilities: vec!["orchestration".to_string()],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            author: "builtin".to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
 }
 
 // ── Tool definitions ─────────────────────────────────────────────────

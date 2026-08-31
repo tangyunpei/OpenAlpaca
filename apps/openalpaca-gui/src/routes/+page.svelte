@@ -19,6 +19,7 @@
   import SettingsDrawer from "$lib/components/SettingsDrawer.svelte";
 
   import { loadTasks, subscribeToTaskEvents, activeTasks } from "$lib/stores/tasks";
+  import { subscribeToWorkflowEvents } from "$lib/stores/workflow";
   import { loadAgents, subscribeToAgentEvents } from "$lib/stores/agents";
   import { loadTemplates } from "$lib/stores/templates";
   import { loadInstances, subscribeToInstanceEvents, instanceList } from "$lib/stores/instances";
@@ -59,6 +60,7 @@
   const unsubError = errorMessage.subscribe((v) => (error = v));
 
   let unsubTaskEvents: (() => void) | null = null;
+  let unsubWorkflowEvents: (() => void) | null = null;
   let unsubAgentEvents: (() => void) | null = null;
   let unsubInstanceEvents: (() => void) | null = null;
   let unsubKeyEvents: (() => void) | null = null;
@@ -68,6 +70,7 @@
   onMount(() => {
     connectToDaemon();
     unsubTaskEvents = subscribeToTaskEvents();
+    unsubWorkflowEvents = subscribeToWorkflowEvents();
     unsubAgentEvents = subscribeToAgentEvents();
     unsubInstanceEvents = subscribeToInstanceEvents();
     unsubKeyEvents = subscribeToKeyEvents();
@@ -82,6 +85,7 @@
     unsubEvents();
     unsubError();
     unsubTaskEvents?.();
+    unsubWorkflowEvents?.();
     unsubAgentEvents?.();
     unsubInstanceEvents?.();
     unsubKeyEvents?.();

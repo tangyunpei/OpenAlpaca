@@ -173,13 +173,12 @@ openalpaca agents config <agent_id> [--format table|json]
 openalpaca agents pause <agent_id>
 openalpaca agents resume <agent_id>
 openalpaca agents set <agent_id> <dotted.path> <value>
-openalpaca agents create [--from-file <path>] [--interactive] [--from-chat <desc>]
+openalpaca agents create [--from-file <path>] [--interactive]
 openalpaca agents remove <agent_id>
 ```
 
 Notes:
 - `openalpaca agents` with no subcommand enters interactive creation mode.
-- `--from-chat` is a planned feature: the daemon may return "Not Implemented", in which case the CLI reports it as planned for a future release.
 
 ### `llm`
 
@@ -193,7 +192,7 @@ openalpaca llm keys remove <provider> <key_id>
 openalpaca llm keys validate --provider <name> --secret <key>
 openalpaca llm keys set-primary <provider> <key_id>
 openalpaca llm keys reorder <key_id>...
-openalpaca llm usage [--agent <id>] [--date YYYY-MM-DD] [--key <key_id>] [--daily] [--format table|json]
+openalpaca llm usage [--agent <id>] [--key <key_id>] [--daily [--date YYYY-MM-DD]] [--format table|json]
 openalpaca llm models [--format table|json]
 openalpaca llm strategy --provider <name> <strategy>
 openalpaca llm credentials [--format table|json]
@@ -235,9 +234,10 @@ echo "hello" | openalpaca chat
 
 Notes:
 - `--file <PATH>` is repeatable and uploads the files as message attachments; it requires `--message` (attachments are not supported in interactive or pipe mode).
-- With no `--message` and a TTY on stdin, an interactive REPL opens: streaming replies, tab completion, and slash commands (`/help`, `/status`, `/model`, `/models`, `/agents`, `/tasks [n]`, `/keys`, `/usage`, `/clear`, `/verbose`). Exit with `exit`, `quit`, or Ctrl-D.
+- With no `--message` and a TTY on stdin, an interactive REPL opens: streaming replies, tab completion, and client-side slash commands (`/help`, `/model`, `/models`, `/agents`, `/keys`, `/usage`, `/clear`, `/verbose`). Exit with `exit`, `quit`, or Ctrl-D.
 - If stdin is piped, the CLI reads all of stdin, sends it as one message, and streams the reply.
-- When a reply delegates work to a task, the CLI polls the task and prints the result when it completes.
+- Routing is decided by the daemon: the model answers directly or starts a background workflow via a tool call. When a reply delegates work to a workflow, the daemon returns structured delegation metadata (task id + title) and the CLI polls that task by id, printing the result when it completes (Ctrl-C stops waiting; the task keeps running — check it later with `openalpaca tasks status <task_id>`).
+- The daemon also recognizes chat-level commands with no LLM call: `/status [task_id]`, `/tasks`, `/cancel`/`/pause`/`/resume` (bare forms target the lane's active workflows, or pass an explicit task id), `/steer <text>` (inject a correction into the running workflow), and `/<skill>` invocations. In the interactive REPL, only the client-side commands listed above are handled locally; every other slash line — the daemon commands here and anything unrecognized (which may be a skill command) — is forwarded to the daemon as a chat message, so `/steer focus on the tests` works directly at the prompt. One-shot mode works too: `openalpaca chat --message "/steer focus on the tests"`.
 
 ## Troubleshooting
 

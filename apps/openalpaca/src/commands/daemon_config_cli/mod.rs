@@ -11,7 +11,7 @@ use std::path::PathBuf;
 /// Each entry maps a dotted schema key (as registered in `config_schema.rs`)
 /// to the TOML section path and field name within `daemon.toml`.
 struct TomlMapping {
-    /// Schema key, e.g. `"daemon.dag.max_concurrent_agents"`.
+    /// Schema key, e.g. `"daemon.execution.max_rounds"`.
     schema_key: &'static str,
     /// TOML dotted section path, e.g. `["execution", "dag"]`.
     section: &'static [&'static str],
@@ -70,17 +70,6 @@ static MAPPINGS: &[TomlMapping] = &[
         schema_key: "daemon.execution.lead_max_cost",
         section: &["execution", "lead_agent_defaults"],
         field: "max_cost",
-    },
-    // DAG
-    TomlMapping {
-        schema_key: "daemon.dag.max_concurrent_agents",
-        section: &["execution", "dag"],
-        field: "max_concurrent_agents",
-    },
-    TomlMapping {
-        schema_key: "daemon.dag.total_timeout_secs",
-        section: &["execution", "dag"],
-        field: "total_timeout_secs",
     },
     // Orchestrator: Memory (cont.)
     TomlMapping {
@@ -195,26 +184,46 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["execution", "lead_agent_defaults"],
         field: "max_concurrent_subagents",
     },
-    // DAG (cont.)
+    // Orchestrator: Routing (Routing V2)
     TomlMapping {
-        schema_key: "daemon.dag.node_timeout_secs",
-        section: &["execution", "dag"],
-        field: "node_timeout_secs",
+        schema_key: "daemon.orchestrator.routing.steering_enabled",
+        section: &["orchestrator", "routing"],
+        field: "steering_enabled",
     },
     TomlMapping {
-        schema_key: "daemon.dag.max_retries_per_node",
-        section: &["execution", "dag"],
-        field: "max_retries_per_node",
+        schema_key: "daemon.orchestrator.routing.steering_inbox_cap",
+        section: &["orchestrator", "routing"],
+        field: "steering_inbox_cap",
     },
     TomlMapping {
-        schema_key: "daemon.dag.replan_after_every_n_nodes",
-        section: &["execution", "dag"],
-        field: "replan_after_every_n_nodes",
+        schema_key: "daemon.orchestrator.routing.max_workflows_per_lane",
+        section: &["orchestrator", "routing"],
+        field: "max_workflows_per_lane",
     },
     TomlMapping {
-        schema_key: "daemon.dag.max_replans",
-        section: &["execution", "dag"],
-        field: "max_replans",
+        schema_key: "daemon.orchestrator.routing.followup_autostart",
+        section: &["orchestrator", "routing"],
+        field: "followup_autostart",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.routing.main_loop_max_rounds",
+        section: &["orchestrator", "routing"],
+        field: "main_loop_max_rounds",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.routing.main_loop_max_tools_per_round",
+        section: &["orchestrator", "routing"],
+        field: "main_loop_max_tools_per_round",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.routing.tool_selection",
+        section: &["orchestrator", "routing"],
+        field: "tool_selection",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.routing.scheduled_skills_enabled",
+        section: &["orchestrator", "routing"],
+        field: "scheduled_skills_enabled",
     },
     // Security
     TomlMapping {
@@ -274,12 +283,6 @@ static MAPPINGS: &[TomlMapping] = &[
         schema_key: "daemon.server.embedding_batch_size",
         section: &["server", "embedding_indexer"],
         field: "batch_size",
-    },
-    // Alias: system.max_agents → same as daemon.dag.max_concurrent_agents
-    TomlMapping {
-        schema_key: "system.max_agents",
-        section: &["execution", "dag"],
-        field: "max_concurrent_agents",
     },
 ];
 
@@ -458,11 +461,6 @@ pub fn list_daemon_entries() -> Result<Vec<(String, String, String)>> {
     let mut entries = Vec::new();
 
     for mapping in MAPPINGS {
-        // Skip alias keys to avoid duplicates
-        if mapping.schema_key == "system.max_agents" {
-            continue;
-        }
-
         if let Some(section) = navigate_to_section(&root, mapping.section)
             && let Some(val) = section.get(mapping.field)
         {

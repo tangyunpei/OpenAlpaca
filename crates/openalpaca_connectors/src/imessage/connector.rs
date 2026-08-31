@@ -9,20 +9,27 @@
 //! Prefix requirements are configurable per-chat-type via `direct_require_prefix`
 //! and `group_require_prefix` settings.
 
+use crate::common::format_confirmation_prompt;
 use crate::{Connector, ConnectorError};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use dashmap::DashMap;
 use openalpaca_core::{
+    bus::EventBus,
     daemon_config::DaemonConfig,
+    events::SystemEvent,
     gateway::Gateway,
+    security::confirmation::ConfirmationBroker,
 };
-use openalpaca_storage::Database;
+use openalpaca_storage::{Database, IdentityRepository};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::reader::ChatDbReader;
 use super::routing::{normalize_handle, IMessageConfig};
+use super::sender::IMessageSender;
 
 /// IMessageConnector manages the iMessage integration lifecycle.
 ///
@@ -34,11 +41,18 @@ use super::routing::{normalize_handle, IMessageConfig};
 /// flow is needed.
 pub struct IMessageConnector {
     pub(super) db: Arc<Database>,
+    bus: Arc<EventBus>,
     pub(super) gateway: Arc<Gateway>,
     pub(super) daemon_config: Arc<ArcSwap<DaemonConfig>>,
     cancel_token: CancellationToken,
     chat_db_path: String,
     pub(super) local_user_id: Option<String>,
+    pub(super) confirmation_broker: Option<Arc<ConfirmationBroker>>,
+    /// Maps chat identifier -> queue of request_ids for pending tool
+    /// confirmations. VecDeque allows FIFO processing when multiple tools
+    /// need confirmation. (Same pattern — and same per-conversation-key
+    /// caveat — as Telegram.)
+    pub(super) pending_confirmations: Arc<DashMap<String, VecDeque<String>>>,
 }
 
 impl IMessageConnector {
@@ -49,6 +63,7 @@ impl IMessageConnector {
     /// for all messages (bypassing the heuristic `resolve_owner` fallback).
     pub fn new(
         db: Arc<Database>,
+        bus: Arc<EventBus>,
         gateway: Arc<Gateway>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
         cancel_token: CancellationToken,
@@ -58,12 +73,21 @@ impl IMessageConnector {
         let chat_db_path = format!("{}/Library/Messages/chat.db", home);
         Self {
             db,
+            bus,
             gateway,
             daemon_config,
             cancel_token,
             chat_db_path,
             local_user_id,
+            confirmation_broker: None,
+            pending_confirmations: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Attach a confirmation broker for interactive tool approval.
+    pub fn with_confirmation_broker(mut self, broker: Arc<ConfirmationBroker>) -> Self {
+        self.confirmation_broker = Some(broker);
+        self
     }
 
     /// Main polling loop.
@@ -74,6 +98,12 @@ impl IMessageConnector {
     /// avoid replaying the entire history.
     pub async fn run_loop(&self) -> Result<(), ConnectorError> {
         info!("Starting iMessage connector...");
+
+        // Spawn confirmation listener (if broker available)
+        if self.confirmation_broker.is_some() {
+            self.spawn_confirmation_listener();
+        }
+
         let mut reader =
             ChatDbReader::new(&self.chat_db_path).map_err(ConnectorError::InitFailed)?;
 
@@ -146,6 +176,88 @@ impl IMessageConnector {
                 }
             }
         }
+    }
+
+    /// Spawn a background task that listens for `ToolConfirmationRequested`
+    /// events targeting iMessage lanes and sends confirmation prompts.
+    fn spawn_confirmation_listener(&self) {
+        let mut rx = self.bus.subscribe();
+        let db = self.db.clone();
+        let pending = self.pending_confirmations.clone();
+        let cancel = self.cancel_token.clone();
+        tokio::spawn(async move {
+            loop {
+                let event = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        info!("iMessage confirmation listener shutting down");
+                        break;
+                    }
+                    event = rx.recv() => event,
+                };
+                match event {
+                    Ok(SystemEvent::ToolConfirmationRequested {
+                        request_id,
+                        tool_name,
+                        tool_arguments,
+                        lane_key: Some(ref lane_key),
+                        ..
+                    }) if lane_key.ends_with(":imessage") => {
+                        // Resolve the chat identifier from lane_key via the
+                        // conversation_map (written on every inbound message).
+                        let chat_id = IdentityRepository::new(&db)
+                            .get_conversation_id_str_by_lane_key(lane_key, "imessage")
+                            .ok()
+                            .flatten();
+
+                        let Some(chat_id) = chat_id else {
+                            warn!(
+                                "Could not resolve iMessage chat for lane_key={}, skipping confirmation",
+                                lane_key
+                            );
+                            continue;
+                        };
+
+                        // Derive send addressing: groups use chat-id addressing,
+                        // DMs use the sender handle (same as reply_target logic).
+                        let (target, is_group) = super::routing::confirmation_reply_target(&chat_id);
+
+                        // Store pending confirmation mapping (queue per chat)
+                        pending
+                            .entry(chat_id.clone())
+                            .or_default()
+                            .push_back(request_id.clone());
+                        let queue_len = pending.get(&chat_id).map(|q| q.len()).unwrap_or(1);
+
+                        let prompt =
+                            format_confirmation_prompt(&tool_name, &tool_arguments, queue_len);
+
+                        if let Err(e) = IMessageSender::send(&target, &prompt, is_group).await {
+                            error!(
+                                "Failed to send confirmation prompt to iMessage chat {}: {}",
+                                chat_id, e
+                            );
+                            // Remove the one we just added (last in queue)
+                            if let Some(mut q) = pending.get_mut(&chat_id) {
+                                q.pop_back();
+                            }
+                        } else {
+                            debug!(
+                                "Sent confirmation prompt for request {} to iMessage chat {}",
+                                request_id, chat_id
+                            );
+                        }
+                    }
+                    Ok(_) => {} // ignore other events
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("Confirmation listener lagged by {} events", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        info!("EventBus closed, confirmation listener exiting");
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     /// Persist the ROWID watermark to the database.

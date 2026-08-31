@@ -19,7 +19,11 @@ type PendingMap = HashMap<u64, oneshot::Sender<Result<Value, PluginError>>>;
 /// Uses Content-Length framing (LSP/MCP standard). A single reader task
 /// continuously parses stdout, correlating responses to pending requests via
 /// JSON-RPC `id` fields. Notifications (messages without `id`) are forwarded
-/// to a separate channel.
+/// to a separate channel on a best-effort basis: if the notification receiver
+/// is not being drained and the channel fills, further notifications are
+/// dropped (with a warning) rather than blocking the reader loop — a blocked
+/// reader would stall RPC response correlation and deadlock the plugin's own
+/// in-flight calls.
 #[derive(Clone)]
 pub struct StdioChannel {
     writer: mpsc::Sender<Vec<u8>>,
@@ -186,11 +190,16 @@ async fn writer_task(mut stdin: ChildStdin, mut rx: mpsc::Receiver<Vec<u8>>) {
 /// Background task that reads Content-Length-framed messages from the child's stdout.
 ///
 /// On process exit (EOF), all pending senders receive `ProcessCrashed`.
-async fn reader_task(
-    stdout: ChildStdout,
+///
+/// Generic over the reader so tests can drive it with an in-memory stream;
+/// production passes the child's `ChildStdout`.
+async fn reader_task<R>(
+    stdout: R,
     pending: Arc<Mutex<PendingMap>>,
     notification_tx: mpsc::Sender<Value>,
-) {
+) where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
     let mut reader = BufReader::new(stdout);
 
     // Upper bound on a single framed message. The Content-Length comes from the
@@ -271,9 +280,26 @@ async fn reader_task(
                 warn!(id, "received response for unknown request id");
             }
         } else {
-            // Notification — no `id` field.
-            if notification_tx.send(msg).await.is_err() {
-                debug!("notification receiver dropped, ignoring notification");
+            // Notification — no `id` field. Use try_send so the reader loop can
+            // never block on a full channel: responses for in-flight RPCs are
+            // parsed by this same loop, so blocking here would deadlock the
+            // plugin's own RPC handling once the channel (capacity 64) fills.
+            match notification_tx.try_send(msg) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(dropped)) => {
+                    let method = dropped
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("<unknown>")
+                        .to_string();
+                    warn!(
+                        method,
+                        "notification channel full; dropping plugin notification"
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    debug!("notification receiver dropped, ignoring notification");
+                }
             }
         }
     }
@@ -392,5 +418,50 @@ mod tests {
 
         let result = read_content_length(&mut reader).await;
         assert!(result.is_err());
+    }
+
+    fn frame(body: &str) -> Vec<u8> {
+        format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes()
+    }
+
+    /// Regression test for the notification-receiver liveness hazard: a chatty
+    /// plugin must not be able to block the reader loop (and thereby its own
+    /// RPC response correlation) by filling the never-polled notification
+    /// channel (capacity 64).
+    #[tokio::test]
+    async fn test_reader_loop_survives_unpolled_notification_flood() {
+        let (mut client, server) = tokio::io::duplex(1024 * 1024);
+
+        // Same capacity as StdioChannel::new.
+        let (notification_tx, notification_rx) = mpsc::channel::<Value>(64);
+        let pending: Arc<Mutex<PendingMap>> = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = oneshot::channel();
+        pending.lock().await.insert(1, tx);
+
+        tokio::spawn(reader_task(server, Arc::clone(&pending), notification_tx));
+
+        // Flood with far more notifications than the channel holds, while the
+        // receiver stays alive but is never polled (the production situation).
+        for i in 0..200 {
+            let body = format!(r#"{{"jsonrpc":"2.0","method":"$/event","params":{{"n":{i}}}}}"#);
+            client.write_all(&frame(&body)).await.unwrap();
+        }
+        // Then a response the pending waiter is blocked on.
+        client
+            .write_all(&frame(r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#))
+            .await
+            .unwrap();
+
+        // With the old blocking send().await the reader stalls at notification
+        // 64 and this times out; with try_send it must complete promptly.
+        let result = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("reader loop blocked by unpolled notification channel")
+            .expect("oneshot sender dropped")
+            .expect("expected Ok result");
+        assert_eq!(result, serde_json::json!({"ok": true}));
+
+        // Keep the receiver alive to the end so try_send saw Full (not Closed).
+        drop(notification_rx);
     }
 }

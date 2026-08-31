@@ -129,6 +129,61 @@ fn test_daily_usage_replace() {
 }
 
 #[test]
+fn test_query_daily_usage_date_filter() {
+    let db = setup_db();
+    let repo = LlmUsageRepository::new(&db);
+
+    let day1 = LlmUsageDaily {
+        date: "2026-08-29".to_string(),
+        agent_id: "agent1".to_string(),
+        model: "claude-sonnet-4-5-20250929".to_string(),
+        total_requests: 5,
+        total_input_tokens: 1000,
+        total_output_tokens: 500,
+        total_cost_usd: 0.01,
+    };
+    let day2 = LlmUsageDaily {
+        date: "2026-08-30".to_string(),
+        total_requests: 7,
+        ..day1.clone()
+    };
+    repo.upsert_daily_usage(&day1).unwrap();
+    repo.upsert_daily_usage(&day2).unwrap();
+
+    // No date filter: both rows, newest first.
+    let all = repo.query_daily_usage(None, None, 10).unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].date, "2026-08-30");
+
+    // Date filter selects exactly the matching day.
+    let d1 = repo.query_daily_usage(None, Some("2026-08-29"), 10).unwrap();
+    assert_eq!(d1.len(), 1);
+    assert_eq!(d1[0].date, "2026-08-29");
+    assert_eq!(d1[0].total_requests, 5);
+
+    let d2 = repo.query_daily_usage(None, Some("2026-08-30"), 10).unwrap();
+    assert_eq!(d2.len(), 1);
+    assert_eq!(d2[0].total_requests, 7);
+
+    // Combined agent + date filter.
+    let combined = repo
+        .query_daily_usage(Some("agent1"), Some("2026-08-30"), 10)
+        .unwrap();
+    assert_eq!(combined.len(), 1);
+    assert_eq!(combined[0].date, "2026-08-30");
+
+    // Non-matching filters return nothing.
+    assert!(repo
+        .query_daily_usage(None, Some("2026-01-01"), 10)
+        .unwrap()
+        .is_empty());
+    assert!(repo
+        .query_daily_usage(Some("other-agent"), Some("2026-08-30"), 10)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn test_empty_results() {
     let db = setup_db();
     let repo = LlmUsageRepository::new(&db);
@@ -143,5 +198,5 @@ fn test_empty_results() {
 #[test]
 fn test_schema_version() {
     let db = setup_db();
-    assert_eq!(db.schema_version().unwrap(), 32);
+    assert_eq!(db.schema_version().unwrap(), 34);
 }

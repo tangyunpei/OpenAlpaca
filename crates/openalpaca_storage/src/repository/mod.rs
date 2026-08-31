@@ -9,6 +9,7 @@ pub mod dispatch_decision;
 pub mod event_log;
 pub mod feedback;
 pub mod file_asset;
+pub mod followup;
 pub mod identity;
 pub mod llm_usage;
 pub mod memory;
@@ -25,11 +26,14 @@ pub use dispatch_decision::DispatchDecisionRepository;
 pub use event_log::EventLogRepository;
 pub use feedback::MessageFeedbackRepository;
 pub use file_asset::FileAssetRepository;
+pub use followup::{
+    FOLLOWUP_KIND_FOLLOWUP, FOLLOWUP_KIND_UNPROCESSED_STEERING, FollowupRecord, FollowupRepository,
+};
 pub use identity::IdentityRepository;
 pub use llm_usage::LlmUsageRepository;
 pub use memory::MemoryRepository;
 pub use orchestrator_latency::OrchestratorLatencyRepository;
 pub use preference::PreferenceRepository;
-pub use skill_execution::{SkillExecutionRepository, ToolInvocationStats};
+pub use skill_execution::SkillExecutionRepository;
 pub use subagent::SubAgentRepository;
 pub use task::TaskRepository;

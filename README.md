@@ -1,6 +1,6 @@
 # OpenAlpaca
 
-OpenAlpaca is a local-first, daemon-based personal AI agent orchestrator written as a Rust workspace. A single background daemon (`openalpacad`) owns the SQLite database, the orchestrator/agent runtime, a multi-provider LLM router, chat connectors, and an HTTP/WebSocket/SSE API on localhost; a clap CLI and a Tauri desktop GUI are thin clients that find it via `discovery.json`. Incoming messages are classified by intent and dispatched through one of three execution modes (sequential pipeline, DAG, or lead agent), with persistent hybrid-search memory, a progressive skill system, MCP tool integration, an out-of-process plugin system, and connectors for Telegram, iMessage, and Discord.
+OpenAlpaca is a local-first, daemon-based personal AI agent orchestrator written as a Rust workspace. A single background daemon (`openalpacad`) owns the SQLite database, the orchestrator/agent runtime, a multi-provider LLM router, chat connectors, and an HTTP/WebSocket/SSE API on localhost; a clap CLI and a Tauri desktop GUI are thin clients that find it via `discovery.json`. Incoming messages pass a small deterministic tier (slash commands, skills) and then enter an agentic main loop where the model itself decides — via tool calls — whether to just chat, start a background workflow run by a lead agent with subagents, or steer one already running; all of this sits on persistent hybrid-search memory, a progressive skill system, MCP tool integration, an out-of-process plugin system, and connectors for Telegram, iMessage, and Discord.
 
 This is an evolving personal project. Core paths work; several subsystems are explicitly experimental or partially wired (noted honestly below).
 
@@ -9,8 +9,8 @@ This is an evolving personal project. Core paths work; several subsystems are ex
 **Working:**
 
 - **Multi-provider LLM routing** — Anthropic, OpenAI, and Ollama providers behind one router with key pools, per-key rate limiting (RPM/TPM token buckets), circuit breaking, model fallback chains, and a last-resort fallback to the `claude` / `codex` CLI binaries if present on PATH.
-- **Three execution modes** — sequential agent pipeline, concurrent DAG execution (2–8 nodes, optional replanning), and a lead agent that spawns and coordinates subagents autonomously. Mode selection is driven by an LLM task planner with heuristic fallbacks.
-- **SQLite memory** — single-file DB (rusqlite + sqlite-vec, WAL mode, 32 embedded migrations) with hybrid memory search: FTS5 full-text plus 768-dim vector KNN, scope cascade (workspace → global), importance decay, and dedup/supersession.
+- **Tool-call routing + background workflows** — a deterministic tier handles slash commands with no LLM call (`/status`, `/tasks`, `/cancel`/`/pause`/`/resume` — bare or with a task id — `/steer <text>`, and `/<skill>` invocations); everything else goes to a main loop where the model chooses between answering directly, starting a background workflow (`start_workflow`), steering or queuing follow-ups on a running one, checking task status, and updating memory. Workflows are executed by a lead agent that spawns and coordinates subagents (singly or in batches), accepts mid-run steering, posts a model-authored completion report to the chat lane, and auto-starts queued follow-ups when it finishes.
+- **SQLite memory** — single-file DB (rusqlite + sqlite-vec, WAL mode, 33 embedded migrations) with hybrid memory search: FTS5 full-text plus 768-dim vector KNN, scope cascade (workspace → global), importance decay, and dedup/supersession.
 - **Skills** — markdown `SKILL.md` definitions with YAML frontmatter, slash commands, a weighted skill router, bundled executable scripts, and project-over-user scope overrides.
 - **MCP client (tools only)** — connects out to external MCP servers (stdio or streamable HTTP) declared in `config/mcp.toml`; discovered tools register as `<server>__<tool>` with reconnect/retry handling.
 - **Plugin system (tools, skills, agents)** — out-of-process plugins speaking JSON-RPC 2.0 over stdio, with a manifest schema, first-load approval gate, and per-plugin config. Managed via `openalpaca plugin ...` or `/v1/plugins` routes.
@@ -25,7 +25,7 @@ This is an evolving personal project. Core paths work; several subsystems are ex
 - **Plugin connectors and plugin LLM providers** — declared in the plugin manifest and discovered, but not yet registered with the connector manager or LLM router. Not functional.
 - **MCP resources and prompts** — stubbed; only MCP *tools* work. Server mode (exposing OpenAlpaca over MCP) is an explicit non-goal.
 - **`openalpaca_platform` / `openalpaca_platform_macos`** — empty placeholder crates; nothing depends on them.
-- **Assorted stubs** — agent creation from chat (returns "planned"), `plugin config get` via CLI, DAG replanning and several planner toggles default off, and without any configured LLM provider the daemon degrades to an echo stub.
+- **Assorted stubs** — agent creation from chat (returns "planned"), `plugin config get` via CLI, and without any configured LLM provider the daemon degrades to an echo stub.
 
 ## Architecture
 
@@ -35,7 +35,7 @@ This is an evolving personal project. Core paths work; several subsystems are ex
 
 | Crate | Role |
 |---|---|
-| `crates/openalpaca_core` | The brain: orchestrator, intent routing, task planner/dispatcher, agent registry, agentic loop, tool registry, skills, security gate, event bus |
+| `crates/openalpaca_core` | The brain: orchestrator, message routing, task dispatcher, agent registry, agentic loop, tool registry, skills, security gate, event bus |
 | `crates/openalpaca_llm` | LLM router, providers (Anthropic/OpenAI/Ollama), key pools, rate limiting, cost tracking, embeddings, secret storage, CLI-backend fallback |
 | `crates/openalpaca_storage` | SQLite database, migrations, typed repositories, hybrid memory search, `discovery.json` + app paths + single-instance lock |
 | `crates/openalpaca_api` | Shared event types (`WakeEvent`, `ServerEvent`) and plugin executor traits — dependency-free leaf |
@@ -89,7 +89,7 @@ Config directory resolution: `OPENALPACA_CONFIG_DIR` env var → walk up from th
 
 | File | Purpose |
 |---|---|
-| `config/daemon.toml` | Execution limits, DAG/planner tuning, security, server capacities, upload governance. The repo copy is the full reference; a fresh install seeds a minimal version and relies on compiled-in defaults. |
+| `config/daemon.toml` | Execution limits, routing/steering (`[orchestrator.routing]`), cost caps, security, server capacities, upload governance. The repo copy is the full reference; a fresh install seeds a minimal version and relies on compiled-in defaults. |
 | `config/llm.toml` | Provider keys, model registry/pricing, fallback chains, embeddings, web search. **Gitignored (contains secrets)** — generated on first run from an embedded template. |
 | `config/mcp.toml` | External MCP server declarations (all examples commented out by default). |
 | `config/agents/*.md` | Agent templates: YAML frontmatter (model, capabilities, cost limits) + markdown persona. Nine ship in-repo. |
@@ -119,4 +119,4 @@ Runtime data lives in `~/Library/Application Support/OpenAlpaca/` on macOS (`~/.
 - GUI: Bun + Vite + SvelteKit (Svelte 5 runes) + Tailwind v4, Tauri v2.
 - No CI is currently configured; run `cargo test` and `cargo clippy` locally.
 
-OpenAlpaca is an evolving personal project, not a polished product. Interfaces, config schemas, and the database schema change frequently, and some subsystems (plugins beyond tools/skills/agents, MCP resources/prompts, the platform crates, several planner features) are scaffolding or disabled by default. Read the status notes above before depending on a feature.
+OpenAlpaca is an evolving personal project, not a polished product. Interfaces, config schemas, and the database schema change frequently, and some subsystems (plugins beyond tools/skills/agents, MCP resources/prompts, the platform crates) are scaffolding or disabled by default. Read the status notes above before depending on a feature.

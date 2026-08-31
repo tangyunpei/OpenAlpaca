@@ -1,16 +1,24 @@
 <script lang="ts">
   import type { Task } from "$lib/types";
+  import type { WorkflowActivityEntry } from "$lib/stores/workflow";
   import { formatTime, getStatusColor } from "$lib/utils";
 
   interface Props {
     task: Task;
     onclick: () => void;
+    workflowEntries?: WorkflowActivityEntry[];
   }
 
-  let { task, onclick }: Props = $props();
+  let { task, onclick, workflowEntries = [] }: Props = $props();
 
   let hasProgress = $derived(
     task.progress_current != null && task.progress_total != null && task.progress_total > 0,
+  );
+  let isActive = $derived(
+    task.status === "queued" || task.status === "running" || task.status === "paused",
+  );
+  let latestProgress = $derived(
+    isActive ? (workflowEntries.find((e) => e.kind === "progress") ?? null) : null,
   );
   let progressPercent = $derived(
     hasProgress ? Math.round((task.progress_current! / task.progress_total!) * 100) : 0,
@@ -76,6 +84,13 @@
               style="background: linear-gradient(135deg, rgba(139, 92, 246, 0.1) 0%, rgba(139, 92, 246, 0.05) 100%); color: rgb(167, 139, 250);">{agent.agent_id}</span>
       {/each}
     </div>
+  {/if}
+  {#if latestProgress}
+    <p class="flex items-center gap-1.5 text-[0.72rem] text-muted-foreground/80 mt-1 mb-2 leading-relaxed">
+      <span class="w-1.5 h-1.5 rounded-full bg-accent animate-pulse shrink-0"></span>
+      <span class="overflow-hidden text-ellipsis whitespace-nowrap flex-1">{latestProgress.message}</span>
+      <span class="font-mono text-[0.62rem] text-muted-foreground/50 shrink-0">{formatTime(latestProgress.ts)}</span>
+    </p>
   {/if}
   {#if task.result_summary && (task.status === "completed" || task.status === "failed")}
     <p class="text-[0.75rem] text-muted-foreground/70 mt-1.5 mb-0 line-clamp-2 leading-relaxed">{task.result_summary}</p>

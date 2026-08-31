@@ -42,10 +42,7 @@ requires_capabilities:
 permissions:
   level: readwrite
   sandbox:
-    enabled: true
     net: false
-    fs_writable:
-      - "./config/skills/"
 
 tools:
   allow:

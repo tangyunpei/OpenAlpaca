@@ -124,7 +124,7 @@ Inside `Configuration` tab (`SettingsPanel`):
 
 - Plugin list with lifecycle actions: approve, deny, enable, disable
 - Endpoints: `GET /v1/plugins`, `POST /v1/plugins/{name}/approve|deny|enable|disable`
-- Plugin lifecycle events (`plugin_loaded`, `plugin_crashed`, `plugin_pending_approval`, `plugin_needs_config`, ...) arrive over the events WebSocket
+- Plugin lifecycle events (`plugin_loaded`, `plugin_unloaded`, `plugin_disabled`, `plugin_pending_approval`, `plugin_needs_config`) arrive over the events WebSocket and auto-refresh the plugin panel (`plugin_crashed` is defined but never emitted — no crash monitor exists yet)
 
 ### Connectors
 

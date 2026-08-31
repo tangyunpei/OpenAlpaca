@@ -35,7 +35,7 @@ impl Orchestrator {
         source: &str,
         skill_name: &str,
         query: &str,
-        _lane_key: &str,
+        lane_key: &str,
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
@@ -55,7 +55,8 @@ impl Orchestrator {
 
         let result = self
             .handle_skill_invocation_inner(
-                request_id, source, skill_name, query, ctx, owner_id, scope_ctx, stream_id,
+                request_id, source, skill_name, query, lane_key, ctx, owner_id, scope_ctx,
+                stream_id,
             )
             .await;
 

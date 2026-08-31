@@ -130,19 +130,6 @@ fn test_update_status_nonexistent() {
 }
 
 #[test]
-fn test_update_progress() {
-    let db = setup_db();
-    let repo = TaskRepository::new(&db);
-
-    repo.create(&make_task("t1", "Task")).unwrap();
-    assert!(repo.update_progress("t1", 5, 10).unwrap());
-
-    let task = repo.get("t1").unwrap().unwrap();
-    assert_eq!(task.progress_current, Some(5));
-    assert_eq!(task.progress_total, Some(10));
-}
-
-#[test]
 fn test_set_result() {
     let db = setup_db();
     let repo = TaskRepository::new(&db);
@@ -162,41 +149,6 @@ fn test_delete() {
     repo.create(&make_task("t1", "Task")).unwrap();
     repo.delete("t1").unwrap();
     assert!(repo.get("t1").unwrap().is_none());
-}
-
-#[test]
-fn test_assignments() {
-    let db = setup_db();
-    let repo = TaskRepository::new(&db);
-
-    repo.create(&make_task("t1", "Task")).unwrap();
-
-    let assignment = TaskAgentAssignment {
-        id: "a1".to_string(),
-        task_id: "t1".to_string(),
-        agent_id: "agent-1".to_string(),
-        role: "executor".to_string(),
-        status: AssignmentStatus::Pending,
-        step_order: Some(1),
-        started_at: None,
-        completed_at: None,
-        result_output: None,
-    };
-    repo.create_assignment(&assignment).unwrap();
-
-    let assignments = repo.get_assignments("t1").unwrap();
-    assert_eq!(assignments.len(), 1);
-    assert_eq!(assignments[0].agent_id, "agent-1");
-    assert_eq!(assignments[0].status, AssignmentStatus::Pending);
-
-    // Update assignment status
-    assert!(
-        repo.update_assignment_status("a1", AssignmentStatus::Running)
-            .unwrap()
-    );
-    let assignments = repo.get_assignments("t1").unwrap();
-    assert_eq!(assignments[0].status, AssignmentStatus::Running);
-    assert!(assignments[0].started_at.is_some());
 }
 
 #[test]
@@ -264,31 +216,6 @@ fn test_list_active_by_creator() {
     assert!(active.iter().all(|t| t.created_by == "user1"));
     // Should be active statuses only
     assert!(active.iter().all(|t| !t.status.is_terminal()));
-}
-
-#[test]
-fn test_delete_cascades_assignments() {
-    let db = setup_db();
-    let repo = TaskRepository::new(&db);
-
-    repo.create(&make_task("t1", "Task")).unwrap();
-    let assignment = TaskAgentAssignment {
-        id: "a1".to_string(),
-        task_id: "t1".to_string(),
-        agent_id: "agent-1".to_string(),
-        role: "executor".to_string(),
-        status: AssignmentStatus::Pending,
-        step_order: None,
-        started_at: None,
-        completed_at: None,
-        result_output: None,
-    };
-    repo.create_assignment(&assignment).unwrap();
-
-    // Delete task -> should cascade to assignments
-    repo.delete("t1").unwrap();
-    let assignments = repo.get_assignments("t1").unwrap();
-    assert!(assignments.is_empty());
 }
 
 #[test]
@@ -376,4 +303,64 @@ fn test_set_outcome_updates_existing() {
         !task.outcome_json.as_ref().unwrap().contains("First"),
         "outcome_json should not contain old summary"
     );
+}
+
+#[test]
+fn test_fail_all_non_terminal_sweeps_only_live_rows() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    // One row per status.
+    for (id, status) in [
+        ("queued", TaskStatus::Queued),
+        ("running", TaskStatus::Running),
+        ("paused", TaskStatus::Paused),
+        ("completed", TaskStatus::Completed),
+        ("failed", TaskStatus::Failed),
+        ("cancelled", TaskStatus::Cancelled),
+    ] {
+        let mut task = make_task(id, id);
+        task.status = status;
+        repo.create(&task).unwrap();
+    }
+    // A running row with an existing summary must keep it.
+    let mut with_summary = make_task("running-with-summary", "has summary");
+    with_summary.status = TaskStatus::Running;
+    with_summary.result_summary = Some("partial progress".to_string());
+    repo.create(&with_summary).unwrap();
+
+    let swept = repo
+        .fail_all_non_terminal("daemon restarted — task orphaned")
+        .unwrap();
+    assert_eq!(swept, 4, "queued + running + paused + running-with-summary");
+
+    // Non-terminal rows flipped to Failed with the reason + completed_at.
+    for id in ["queued", "running", "paused"] {
+        let task = repo.get(id).unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Failed, "task {id}");
+        assert_eq!(
+            task.result_summary.as_deref(),
+            Some("daemon restarted — task orphaned"),
+            "task {id}"
+        );
+        assert!(task.completed_at.is_some(), "task {id}");
+    }
+    // Existing summary preserved.
+    let task = repo.get("running-with-summary").unwrap().unwrap();
+    assert_eq!(task.status, TaskStatus::Failed);
+    assert_eq!(task.result_summary.as_deref(), Some("partial progress"));
+
+    // Terminal rows untouched.
+    for (id, status) in [
+        ("completed", TaskStatus::Completed),
+        ("failed", TaskStatus::Failed),
+        ("cancelled", TaskStatus::Cancelled),
+    ] {
+        let task = repo.get(id).unwrap().unwrap();
+        assert_eq!(task.status, status, "terminal task {id} must be untouched");
+        assert!(task.result_summary.is_none(), "terminal task {id}");
+    }
+
+    // Idempotent: a second sweep finds nothing.
+    assert_eq!(repo.fail_all_non_terminal("again").unwrap(), 0);
 }

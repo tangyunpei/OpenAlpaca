@@ -12,13 +12,13 @@ mod tools;
 mod tracker;
 
 // External API (unchanged)
-pub(crate) use guard::AgentBusyGuard;
 pub use prompt::build_lead_agent_prompt_from_templates;
 pub use tools::{
-    check_subagent_status_tool_definition, register_coordination_tools,
+    check_subagent_status_tool_definition, post_update_tool_definition,
+    queue_followup_tool_definition, register_coordination_tools, register_workflow_tools,
     spawn_subagent_tool_definition_from_templates,
     spawn_subagents_batch_tool_definition, wait_for_subagents_tool_definition,
-    CheckSubagentStatusTool, SpawnSubagentTool,
+    CheckSubagentStatusTool, PostUpdateTool, QueueFollowupTool, SpawnSubagentTool,
     SpawnSubagentsBatchTool, WaitForSubagentsTool,
 };
 pub use tracker::{SubagentStatus, SubagentTracker};
@@ -81,9 +81,12 @@ pub async fn run_lead_agent(
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     task_id: &str,
     created_by: &str,
+    lane_key: &str,
+    source: &str,
     daemon_config: &Arc<ArcSwap<DaemonConfig>>,
     workspace_id: Option<String>,
     cancel_token: Option<CancellationToken>,
+    steering_inbox: Option<Arc<crate::runner::steering::SteeringInbox>>,
     connector_guidance: &str,
     confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
     context_manager: Arc<ContextManager>,
@@ -124,6 +127,13 @@ pub async fn run_lead_agent(
     }
     tools.push(check_subagent_status_tool_definition());
     tools.push(wait_for_subagents_tool_definition());
+    // Routing V2 workflow tools (post_update, queue_followup) — gated so the
+    // lead prompt/tool surface stays byte-identical while steering is off.
+    let steering_enabled = daemon_config.load().orchestrator.routing.steering_enabled;
+    if steering_enabled {
+        tools.push(post_update_tool_definition());
+        tools.push(queue_followup_tool_definition());
+    }
     tools.extend(crate::tools::builtins::workspace_tool_definitions());
     // Add memory_search so the lead agent can query user memories directly
     if let Some(mem_tool) = tool_registry.get("memory_search") {
@@ -167,6 +177,7 @@ pub async fn run_lead_agent(
     });
     let wait_tool = Arc::new(WaitForSubagentsTool {
         tracker: tracker.clone(),
+        steering: steering_inbox.clone(),
     });
 
     let tool_ctx = ToolContext {
@@ -176,6 +187,12 @@ pub async fn run_lead_agent(
         workspace_id: workspace_id.clone(),
         skill_stack: vec![],
         effective_constraints: None,
+        lane_key: Some(lane_key.to_string()),
+        source: Some(source.to_string()),
+        request_id: None,
+        principal: None,
+        scope: None,
+        workspace_path: None,
     };
 
     // Build a per-request ToolRegistry containing the base tools plus
@@ -202,14 +219,44 @@ pub async fn run_lead_agent(
         check_subagent_status_tool_definition(),
         wait_for_subagents_tool_definition(),
     );
+    if steering_enabled {
+        register_workflow_tools(
+            &lead_registry,
+            Arc::new(PostUpdateTool::new(
+                db.clone(),
+                bus.clone(),
+                task_id.to_string(),
+                lane_key.to_string(),
+                source.to_string(),
+            )),
+            Arc::new(QueueFollowupTool::new(
+                db.clone(),
+                bus.clone(),
+                task_id.to_string(),
+                lane_key.to_string(),
+                created_by.to_string(),
+            )),
+        );
+    }
     let lead_registry = Arc::new(lead_registry);
 
     // 5. Build SandboxManager with lead agent's policy
-    let mut sandbox = SandboxManager::with_defaults(lead_registry, bus.clone());
+    let mut sandbox = SandboxManager::new(
+        lead_registry,
+        bus.clone(),
+        &daemon_config.load().security.circuit_breaker,
+    );
     if let Some(ref broker) = confirmation_broker {
         sandbox.set_confirmation_broker(broker.clone());
     }
     let mut sandbox_policy = SandboxPolicy::from_constraints(&lead_agent.id, &lead_agent.constraints);
+    sandbox_policy.confirmation_timeout_secs = Some(
+        daemon_config
+            .load()
+            .execution
+            .agent_defaults
+            .confirmation_timeout_secs,
+    );
     if daemon_config.load().security.auto_approve_confirmations {
         sandbox_policy.auto_approve = true;
     }
@@ -226,7 +273,13 @@ pub async fn run_lead_agent(
     } else {
         String::new()
     };
-    let full_system = format!("{}{}{}", system_prompt, tool_guidance, connector_suffix);
+    // Routing V2 workflow contract: interjection protocol (steering runs
+    // only) + completion-report contract (always — spec §2b).
+    let workflow_suffix = prompt::workflow_contract_suffix(steering_inbox.is_some());
+    let full_system = format!(
+        "{}{}{}{}",
+        system_prompt, tool_guidance, connector_suffix, workflow_suffix
+    );
 
     // 7. Build messages (with proactive memory injection)
     let mut messages = vec![ChatMessage::system(&full_system)];
@@ -329,6 +382,8 @@ pub async fn run_lead_agent(
     loop_config.event_bus = Some(bus.clone());
     loop_config.experimental_ephemeral_pressure =
         daemon_config.load().experimental.ephemeral_pressure_layer;
+    // Routing V2: the loop drains this inbox at its round boundary.
+    loop_config.steering = steering_inbox;
 
     // Instantiate ContextBudgetManager for budget-aware compaction
     let context_budget = {

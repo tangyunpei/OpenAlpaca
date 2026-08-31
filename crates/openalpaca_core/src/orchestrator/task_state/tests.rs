@@ -26,7 +26,6 @@ fn test_initial_state() {
     assert_eq!(state.steps[0].status, "pending");
     assert_eq!(state.steps[1].step_order, 1);
     assert_eq!(state.steps[1].agent_id, "a2");
-    assert_eq!(state.constraints.max_agents, 2);
     assert!(state.constraints.pipeline_sequential);
 }
 
@@ -309,7 +308,7 @@ fn test_backward_compat_no_workspace_field() {
 fn test_step_add_artifact() {
     let mut state = TaskState::initial("obj", &make_assignments());
     state.mark_step_running(0);
-    state.add_step_artifact(0, "report.pdf", "Final report", None);
+    state.steps[0].add_artifact("report.pdf", "Final report", None);
     assert_eq!(state.steps[0].artifact_pointers.len(), 1);
     // Stored as JSON to avoid delimiter ambiguity
     let stored: serde_json::Value =
@@ -323,12 +322,12 @@ fn test_collect_artifacts_from_completed_steps_only() {
     let mut state = TaskState::initial("obj", &make_assignments());
     // Step 0: completed with artifact
     state.mark_step_running(0);
-    state.add_step_artifact(0, "data.csv", "Raw data", None);
+    state.steps[0].add_artifact("data.csv", "Raw data", None);
     state.mark_step_completed(0, "Gathered data");
 
     // Step 1: failed with artifact (should NOT be collected)
     state.mark_step_running(1);
-    state.add_step_artifact(1, "draft.txt", "Draft", None);
+    state.steps[1].add_artifact("draft.txt", "Draft", None);
     state.mark_step_failed(1, "Failed");
 
     let artifacts = state.collect_artifacts();
@@ -358,7 +357,7 @@ fn test_build_outcome_text_only() {
 fn test_build_outcome_artifact_only() {
     let mut state = TaskState::initial("obj", &make_assignments());
     state.mark_step_running(0);
-    state.add_step_artifact(0, "output.zip", "Results", None);
+    state.steps[0].add_artifact("output.zip", "Results", None);
     // Complete with empty summary
     state.mark_step_completed(0, "");
 
@@ -374,7 +373,7 @@ fn test_build_outcome_artifact_only() {
 fn test_build_outcome_mixed() {
     let mut state = TaskState::initial("obj", &make_assignments());
     state.mark_step_running(0);
-    state.add_step_artifact(0, "report.pdf", "Report", None);
+    state.steps[0].add_artifact("report.pdf", "Report", None);
     state.mark_step_completed(0, "Report generated successfully");
 
     let outcome = state.build_outcome("fallback", None);
@@ -568,7 +567,7 @@ fn test_scan_workspace_artifacts_avoids_duplicates() {
     state.mark_step_completed(0, "Done");
 
     // Add artifact pointer manually
-    state.add_step_artifact(0, "report.pdf", "Report", None);
+    state.steps[0].add_artifact("report.pdf", "Report", None);
 
     // Write the same key to workspace as Artifact
     state
@@ -580,92 +579,6 @@ fn test_scan_workspace_artifacts_avoids_duplicates() {
 
     // Should still have only 1 artifact pointer (no duplicate)
     assert_eq!(state.steps[0].artifact_pointers.len(), 1);
-}
-
-// ── PR-06: DAG outcome tests ────────────────────────────────────
-
-use crate::orchestrator::task_planner::{DagNode, DagNodeStatus, TaskDag};
-
-fn make_dag_node(id: &str, status: DagNodeStatus, summary: Option<&str>) -> DagNode {
-    DagNode {
-        node_id: id.to_string(),
-        title: format!("Node {id}"),
-        description: format!("Description for {id}"),
-        agent_id: format!("agent_{id}"),
-        agent_name: format!("Agent {id}"),
-        depends_on: Vec::new(),
-        status,
-        result_summary: summary.map(|s| s.to_string()),
-        workspace_keys: Vec::new(),
-        output_key: None,
-    }
-}
-
-#[test]
-fn test_build_outcome_dag_aggregates_node_summaries() {
-    let mut state = TaskState::initial("obj", &make_assignments());
-    state.dag = Some(TaskDag {
-        nodes: vec![
-            make_dag_node("n1", DagNodeStatus::Completed, Some("Researched topic")),
-            make_dag_node("n2", DagNodeStatus::Completed, Some("Wrote summary")),
-            make_dag_node("n3", DagNodeStatus::Failed, Some("Network error")),
-        ],
-    });
-
-    let outcome = state.build_outcome_dag("fallback", None);
-    // Two completed summaries should be numbered
-    assert!(outcome.summary.contains("1. Researched topic"));
-    assert!(outcome.summary.contains("2. Wrote summary"));
-    // Failed node summary should NOT appear in the output
-    assert!(!outcome.summary.contains("Network error"));
-    // Not all failed, so should be TextOnly (no artifacts)
-    assert_eq!(outcome.outcome_kind, OutcomeKind::TextOnly);
-}
-
-#[test]
-fn test_build_outcome_dag_all_failed() {
-    let mut state = TaskState::initial("obj", &make_assignments());
-    state.dag = Some(TaskDag {
-        nodes: vec![
-            make_dag_node("n1", DagNodeStatus::Failed, Some("Error 1")),
-            make_dag_node("n2", DagNodeStatus::Skipped, None),
-        ],
-    });
-
-    let outcome = state.build_outcome_dag("All failed fallback", None);
-    assert_eq!(outcome.outcome_kind, OutcomeKind::Failed);
-    // No completed summaries → uses fallback
-    assert_eq!(outcome.summary, "All failed fallback");
-}
-
-#[test]
-fn test_build_outcome_dag_single_node_no_numbering() {
-    let mut state = TaskState::initial("obj", &make_assignments());
-    state.dag = Some(TaskDag {
-        nodes: vec![make_dag_node(
-            "n1",
-            DagNodeStatus::Completed,
-            Some("Single result"),
-        )],
-    });
-
-    let outcome = state.build_outcome_dag("fallback", None);
-    // Single node: raw text, no "1." prefix
-    assert_eq!(outcome.summary, "Single result");
-    assert!(!outcome.summary.starts_with("1."));
-}
-
-#[test]
-fn test_build_outcome_dag_falls_back_when_no_dag() {
-    let mut state = TaskState::initial("obj", &make_assignments());
-    state.mark_step_running(0);
-    state.mark_step_completed(0, "Step summary");
-    // dag is None → should delegate to build_outcome()
-    assert!(state.dag.is_none());
-
-    let outcome = state.build_outcome_dag("fallback", None);
-    // Should use step-based summary from build_outcome
-    assert!(outcome.summary.contains("Step summary"));
 }
 
 #[test]
@@ -692,45 +605,6 @@ fn test_collect_artifacts_from_workspace() {
     assert_eq!(artifacts[0].agent_id, "a1");
     assert_eq!(artifacts[1].key, "chart.png");
     assert_eq!(artifacts[1].agent_id, "a2");
-}
-
-// ── Issue #3/#4: DAG state persistence & artifact consistency tests ──
-
-#[test]
-fn test_build_outcome_dag_with_workspace_artifacts() {
-    // Simulates the scenario where DAG nodes completed and workspace has
-    // Artifact entries. build_outcome_dag() should produce Mixed kind
-    // and collect workspace artifacts even when steps are not "completed".
-    let mut state = TaskState::initial("dag task", &make_assignments());
-    state.dag = Some(TaskDag {
-        nodes: vec![make_dag_node(
-            "n1",
-            DagNodeStatus::Completed,
-            Some("Analysis finished"),
-        )],
-    });
-
-    // Write an Artifact entry to workspace (as if agent wrote during DAG execution)
-    state
-        .workspace
-        .write(
-            "results.csv",
-            "col1,col2\n1,2",
-            "agent_n1",
-            WorkspaceEntryType::Artifact,
-            &[],
-        )
-        .unwrap();
-
-    let outcome = state.build_outcome_dag("fallback", None);
-    // Should be Mixed: has both text summary from node and artifact from workspace
-    assert_eq!(outcome.outcome_kind, OutcomeKind::Mixed);
-    assert_eq!(outcome.artifacts.len(), 1);
-    assert_eq!(outcome.artifacts[0].key, "results.csv");
-    assert_eq!(outcome.artifacts[0].agent_id, "agent_n1");
-    assert_eq!(outcome.artifacts[0].step_order, -1); // workspace-sourced
-    assert!(outcome.summary.contains("Analysis finished"));
-    assert!(outcome.no_artifact_reason.is_none());
 }
 
 #[test]

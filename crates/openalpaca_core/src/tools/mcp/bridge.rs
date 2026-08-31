@@ -36,7 +36,7 @@ pub fn rmcp_tool_to_registered(
         .unwrap_or_else(|_| serde_json::json!({ "type": "object", "properties": {} }));
 
     let definition = openalpaca_llm::ToolDefinition {
-        name: namespaced_name,
+        name: namespaced_name.clone(),
         description,
         parameters,
         strict: None,
@@ -52,7 +52,11 @@ pub fn rmcp_tool_to_registered(
     RegisteredTool {
         definition,
         backend,
-        provides_capabilities: Vec::new(),
+        // Capability-per-name (same pattern as the workspace builtins): an agent
+        // template or skill that lists the namespaced tool name (e.g.
+        // "fs__read_file") in its `capabilities` resolves this tool via the
+        // registry's capability index.
+        provides_capabilities: vec![namespaced_name],
         exempt_from_timeout: false,
         annotations: tool.annotations,
         version: server_version.to_string(),
@@ -147,6 +151,53 @@ mod tests {
         let result = CallToolResult::success(vec![text_content("ok")]);
         let out = serialize_call_result(result).unwrap();
         assert_eq!(out, "ok");
+    }
+
+    #[test]
+    fn registered_mcp_tool_provides_capability_per_name() {
+        let client = Arc::new(McpClient::disconnected_for_tests("srv"));
+        let tool = Tool::new("echo", "Echo tool", serde_json::Map::new());
+        let registered = rmcp_tool_to_registered("srv", "1.0", tool, client);
+        assert_eq!(registered.definition.name, "srv__echo");
+        assert_eq!(registered.provides_capabilities, vec!["srv__echo".to_string()]);
+    }
+
+    #[test]
+    fn template_capability_listing_mcp_tool_name_resolves_tool_def() {
+        // An agent template that lists the namespaced MCP tool name in its
+        // `capabilities` resolves the tool definition through the same
+        // capability-index path builtins use (resolve_agent_tools).
+        use crate::agent::{AgentConstraints, AgentLlmConfig, AgentPreset, AgentStatus, Capability, SubAgent};
+        use crate::tools::{ToolRegistry, resolve_agent_tools};
+
+        let client = Arc::new(McpClient::disconnected_for_tests("srv"));
+        let tool = Tool::new("echo", "Echo tool", serde_json::Map::new());
+        let registered = rmcp_tool_to_registered("srv", "1.0", tool, client);
+
+        let registry = Arc::new(ToolRegistry::default());
+        registry.register(registered).expect("register MCP tool");
+
+        let agent = SubAgent {
+            id: "test_agent".into(),
+            template_id: "test_agent".into(),
+            name: "Test Agent".into(),
+            description: None,
+            icon: None,
+            status: AgentStatus::Idle,
+            current_task: None,
+            capabilities: vec![Capability {
+                name: "srv__echo".into(),
+                category: "mcp".into(),
+                proficiency: 1.0,
+            }],
+            preset: AgentPreset::default(),
+            constraints: AgentConstraints::default(),
+            llm_config: AgentLlmConfig::default(),
+        };
+
+        let defs = resolve_agent_tools(&agent, &registry);
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "srv__echo");
     }
 
     #[test]

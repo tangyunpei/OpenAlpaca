@@ -100,6 +100,7 @@ apps/openalpaca-gui/src-tauri/gen/
 !docs/Skill_Template_Reference.md
 !docs/agent-loop.md
 !docs/tools/*.md
+!scripts/eval/steer_routing/README.md
 !docs/api/*
 !docs/plans/Unified_Memory_System.md
 !config/agents/*.md

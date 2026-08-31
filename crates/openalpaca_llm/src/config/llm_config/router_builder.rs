@@ -1,7 +1,7 @@
 use crate::LlmProvider;
 use crate::error::LlmError;
 use crate::keys::key_pool::{
-    ApiKey, KeyPool, KeyPriority, KeySource, ProviderType, SelectionStrategy,
+    ApiKey, KeyPool, ProviderType, SelectionStrategy,
 };
 use crate::routing::cost_tracker::CostTracker;
 use crate::routing::model_registry::ModelRegistry;
@@ -186,30 +186,10 @@ fn build_router_from_hierarchical(
 
                     let mut api_key =
                         ApiKey::new(key_config.id.clone(), provider_type.clone(), secret.clone());
-                    api_key.tier = key_config.tier.clone();
-                    api_key.monthly_budget = key_config.monthly_budget;
-                    api_key.rate_limit = key_config.rate_limit;
-                    if let Some(ref models) = key_config.allowed_models {
-                        api_key.allowed_models = models.clone();
-                    }
-
-                    // Parse priority
-                    api_key.priority = match key_config.priority.as_deref() {
-                        Some("fallback") => KeyPriority::Fallback,
-                        _ => KeyPriority::Primary,
-                    };
-
-                    // Parse source
-                    api_key.source = match key_config.source.as_deref() {
-                        Some("api_console") => KeySource::ApiConsole,
-                        Some("claude_code") => KeySource::ClaudeCode,
-                        Some("claude_max_pro") => KeySource::ClaudeMaxPro,
-                        Some("codex") => KeySource::Codex,
-                        Some("environment") => KeySource::Environment,
-                        _ => KeySource::Other,
-                    };
-
-                    api_key.notes = key_config.notes.clone();
+                    crate::config::key_pool_builder::apply_key_config_metadata(
+                        &mut api_key,
+                        key_config,
+                    );
                     api_keys.push(api_key);
                 }
             }

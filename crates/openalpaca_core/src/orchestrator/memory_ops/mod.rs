@@ -1,113 +1,120 @@
-use super::Orchestrator;
+use crate::daemon_config::DaemonConfig;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::memory::task_extraction::{PersistResult, persist_memory_item};
+use arc_swap::ArcSwap;
+use openalpaca_storage::Database;
 use openalpaca_storage::models::memory::{MemoryKind, MemoryScope, MemorySource};
 use openalpaca_storage::repository::MemoryRepository;
+use std::sync::Arc;
 
-impl Orchestrator {
-    /// Handle "remember X" commands by storing in Memory v2 as a Preference.
-    /// Checks for semantically similar existing memories and supersedes if found.
-    ///
-    /// Supports `--workspace` flag to scope the memory to the current project workspace.
-    /// Default (no flag) stores as Global scope.
-    pub(super) async fn handle_remember_command(
-        &self,
-        content: &str,
-        owner_id: Option<&str>,
-        scope_ctx: &MemoryScopeContext,
-    ) -> Result<String, String> {
-        let oid = owner_id.ok_or_else(|| "Cannot store memory without an owner_id".to_string())?;
+/// Store a "remember X" item in Memory v2 as a Preference (shared core).
+///
+/// Checks for semantically similar existing memories and supersedes if found.
+/// Supports a `--workspace` flag in `content` to scope the memory to the
+/// current project workspace; default (no flag) stores as Global scope.
+///
+/// Used by the `memory_store` builtin tool (Routing V2).
+pub(crate) async fn store_memory(
+    db: Option<&Database>,
+    embedder: &Option<Arc<dyn openalpaca_llm::Embedder>>,
+    daemon_config: &Arc<ArcSwap<DaemonConfig>>,
+    content: &str,
+    owner_id: Option<&str>,
+    scope_ctx: &MemoryScopeContext,
+) -> Result<String, String> {
+    let oid = owner_id.ok_or_else(|| "Cannot store memory without an owner_id".to_string())?;
 
-        if let Some(ref db) = self.db {
-            let repo = MemoryRepository::new(db);
-            let dcfg = self.daemon_config.load();
-            let supersession_threshold = dcfg.orchestrator.memory.supersession_distance_threshold;
-            let jaccard_threshold = dcfg.orchestrator.memory.fts_jaccard_threshold;
+    if let Some(db) = db {
+        let repo = MemoryRepository::new(db);
+        let dcfg = daemon_config.load();
+        let supersession_threshold = dcfg.orchestrator.memory.supersession_distance_threshold;
+        let jaccard_threshold = dcfg.orchestrator.memory.fts_jaccard_threshold;
 
-            // Parse --workspace flag from content
-            let (text, scope, scope_id) = parse_remember_scope(content, scope_ctx);
+        // Parse --workspace flag from content
+        let (text, scope, scope_id) = parse_remember_scope(content, scope_ctx);
 
-            let result = persist_memory_item(
-                &repo,
-                &self.embedder,
-                oid,
-                &text,
-                MemoryKind::Preference,
-                scope,
-                &scope_id,
-                MemorySource::Conversation,
-                0.9,
-                1.0,
-                None,
-                supersession_threshold,
-                jaccard_threshold,
-            )
-            .await;
+        let result = persist_memory_item(
+            &repo,
+            embedder,
+            oid,
+            &text,
+            MemoryKind::Preference,
+            scope,
+            &scope_id,
+            MemorySource::Conversation,
+            0.9,
+            1.0,
+            None,
+            supersession_threshold,
+            jaccard_threshold,
+        )
+        .await;
 
-            let scope_label = match scope {
-                MemoryScope::Global => "",
-                MemoryScope::Workspace => " (workspace)",
-                MemoryScope::Lane => " (lane)",
-            };
+        let scope_label = match scope {
+            MemoryScope::Global => "",
+            MemoryScope::Workspace => " (workspace)",
+            MemoryScope::Lane => " (lane)",
+        };
 
-            match result {
-                PersistResult::Superseded { old_content, .. } => Ok(format!(
-                    "Got it, I've updated my memory{} (was: \"{}\"): {}",
-                    scope_label,
-                    old_content.chars().take(50).collect::<String>(),
-                    text
-                )),
-                PersistResult::Inserted(_) => Ok(format!(
-                    "Got it, I'll remember that{}: {}",
-                    scope_label, text
-                )),
-                PersistResult::Duplicate => Ok("I already have that noted.".to_string()),
-                PersistResult::Error(e) => Err(format!("Failed to store memory: {}", e)),
-            }
-        } else {
-            Err("Memory system is not available.".to_string())
+        match result {
+            PersistResult::Superseded { old_content, .. } => Ok(format!(
+                "Got it, I've updated my memory{} (was: \"{}\"): {}",
+                scope_label,
+                old_content.chars().take(50).collect::<String>(),
+                text
+            )),
+            PersistResult::Inserted(_) => Ok(format!(
+                "Got it, I'll remember that{}: {}",
+                scope_label, text
+            )),
+            PersistResult::Duplicate => Ok("I already have that noted.".to_string()),
+            PersistResult::Error(e) => Err(format!("Failed to store memory: {}", e)),
         }
+    } else {
+        Err("Memory system is not available.".to_string())
     }
+}
 
-    /// Handle "forget X" commands by searching and removing from Memory v2.
-    pub(super) async fn handle_forget_command(
-        &self,
-        content: &str,
-        owner_id: Option<&str>,
-    ) -> Result<String, String> {
-        let oid = owner_id.ok_or_else(|| "Cannot search memory without an owner_id".to_string())?;
+/// Search for and delete the best-matching Preference memory (shared core).
+///
+/// Used by the `memory_forget` builtin tool (Routing V2).
+pub(crate) fn forget_memory(
+    db: Option<&Database>,
+    content: &str,
+    owner_id: Option<&str>,
+) -> Result<String, String> {
+    let oid = owner_id.ok_or_else(|| "Cannot search memory without an owner_id".to_string())?;
 
-        if let Some(ref db) = self.db {
-            let repo = MemoryRepository::new(db);
+    if let Some(db) = db {
+        let repo = MemoryRepository::new(db);
 
-            // Search for matching memories
-            let memories = repo
-                .search_fts(
-                    oid,
-                    content,
-                    5,
-                    Some(openalpaca_storage::models::memory::MemoryKind::Preference),
-                    None,
-                    None,
-                )
-                .map_err(|e| format!("Failed to search memory: {}", e))?;
+        // Search for matching memories
+        let memories = repo
+            .search_fts(
+                oid,
+                content,
+                5,
+                Some(openalpaca_storage::models::memory::MemoryKind::Preference),
+                None,
+                None,
+            )
+            .map_err(|e| format!("Failed to search memory: {}", e))?;
 
-            if memories.is_empty() {
-                return Ok(format!("I don't have any memory matching: {}", content));
-            }
-
-            // Delete the best match (first result)
-            let best_match = &memories[0];
-            repo.delete(best_match.id)
-                .map_err(|e| format!("Failed to delete memory: {}", e))?;
-
-            Ok(format!(
-                "Done, I've forgotten: {}",
-                best_match.content.chars().take(100).collect::<String>()
-            ))
-        } else {
-            Err("Memory system is not available.".to_string())
+        if memories.is_empty() {
+            return Ok(format!("I don't have any memory matching: {}", content));
         }
+
+        // Delete the best match (first result)
+        let best_match = &memories[0];
+        repo.delete(best_match.id)
+            .map_err(|e| format!("Failed to delete memory: {}", e))?;
+
+        Ok(format!(
+            "Done, I've forgotten: {}",
+            best_match.content.chars().take(100).collect::<String>()
+        ))
+    } else {
+        Err("Memory system is not available.".to_string())
     }
 }
 

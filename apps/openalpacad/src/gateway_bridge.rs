@@ -29,6 +29,11 @@ impl OrchestratorHandler {
             .llm_metadata_map
             .remove(&request_id)
             .map(|(_, v)| v);
+        let delegation = self
+            .orchestrator
+            .delegation_map
+            .remove(&request_id)
+            .map(|(_, v)| v);
 
         let content = content?;
 
@@ -38,6 +43,7 @@ impl OrchestratorHandler {
             tokens_in: meta.as_ref().map(|m| m.tokens_in),
             tokens_out: meta.as_ref().map(|m| m.tokens_out),
             attachments_used,
+            delegation,
         })
     }
 }
