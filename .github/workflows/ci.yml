@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  rust:
+    name: Build & test (Rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.0
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # The Tauri GUI backend needs system webkit libs and a staged daemon
+      # sidecar binary, so it is excluded here (validated by the gui job's
+      # type check and by local builds on macOS).
+      - name: Build
+        run: cargo build --workspace --exclude openalpaca_gui
+      - name: Test
+        run: cargo test --workspace --exclude openalpaca_gui
+      - name: Clippy
+        run: cargo clippy --workspace --exclude openalpaca_gui --all-targets
+
+  gui:
+    name: Type check (GUI frontend)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/openalpaca-gui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install
+        run: bun install --frozen-lockfile
+      - name: svelte-check
+        run: bun run check
