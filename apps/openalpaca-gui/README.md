@@ -9,7 +9,7 @@ The Rust side is deliberately thin — it discovers a running `openalpacad` daem
 | Concern      | Choice                                                                                                                                                 |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Shell        | Tauri 2 (`src-tauri/`, unchanged by the UI rework)                                                                                                     |
-| UI           | React 19, TypeScript 5.9 (`strict`), Vite 7                                                                                                            |
+| UI           | React 19, TypeScript 7 (native compiler, `strict`), Vite 7                                                                                             |
 | Styling      | Tailwind CSS 4 via `@tailwindcss/vite`, CSS-first `@theme` in `src/styles.css`                                                                         |
 | Server state | TanStack Query v5                                                                                                                                      |
 | Client state | Zustand v5                                                                                                                                             |

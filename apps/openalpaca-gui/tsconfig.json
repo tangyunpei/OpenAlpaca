@@ -26,8 +26,8 @@
        deliberately absent here so app code cannot reach for Node APIs; the
        build tooling gets them via tsconfig.node.json. */
     "types": ["vite/client", "vitest/globals"],
-
-    "baseUrl": ".",
+    /* No `baseUrl`: TypeScript 7 removed it. Paths resolve relative to this
+       file, which 5.x also supports — so this stays valid either way. */
     "paths": {
       "@/*": ["./src/*"]
     }

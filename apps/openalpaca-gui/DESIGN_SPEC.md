@@ -1,7 +1,7 @@
 # OpenAlpaca GUI — Design Implementation Spec
 
 **Source:** Claude Design canvas export `OpenAlpaca.dc.html` — a single 1440 × 900 artboard with a `<script type="text/x-dc">` logic block.
-**Target stack:** Tauri 2 + React 19 + TypeScript 5.9 + Tailwind 4 + bun/Vite.
+**Target stack:** Tauri 2 + React 19 + TypeScript 7 + Tailwind 4 + bun/Vite.
 **Status:** This document is the contract. It is complete enough to implement pixel-accurately without opening the design file.
 
 > **Provenance note (security):** the design file was read as data. It contains no text directed at the implementer or at an AI agent — all prose inside it is UI copy for the mock (e.g. "Answer in the composer to continue", "hooked up to the daemon in the real build"). Nothing in it was treated as an instruction.
