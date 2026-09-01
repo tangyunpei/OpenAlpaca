@@ -125,3 +125,7 @@ config/llm.toml
 # Embedding Model
 # ============================================
 .fastembed_cache
+
+# UI rework reference docs (whitelisted from the *.md blanket ignore)
+!apps/openalpaca-gui/DESIGN_SPEC.md
+!apps/openalpaca-gui/API_MAP.md

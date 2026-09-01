@@ -1187,7 +1187,7 @@ def generate_openalpaca_gui_doc(gui_info: dict[str, object]) -> str:
     endpoint_rows.sort(key=lambda r: (r[1], METHOD_ORDER.get(r[0], 99), r[2]))
 
     lines = [
-        "# openalpaca-gui (Tauri + Svelte)",
+        "# openalpaca-gui (Tauri + React)",
         "",
         "> Generated from source by `python3 scripts/gen_api_docs.py`.",
         "",

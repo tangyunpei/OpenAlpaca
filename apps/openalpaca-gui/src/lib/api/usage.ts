@@ -1,56 +1,81 @@
-/**
- * REST API client for LLM usage endpoints.
- */
+/** `/v1/llm/usage*`. */
 
-import { ensureConnection } from "./connection";
-import type { LlmCallLog, LlmUsageDaily } from "../types";
+import { apiFetch } from "../http";
+import type { LlmCallLog, LlmUsageDaily } from "./types";
 
-/** GET /v1/llm/usage — query LLM call logs */
-export async function getLlmUsage(
-  agentId?: string,
-  keyId?: string,
-  limit?: number,
-): Promise<LlmCallLog[]> {
-  const conn = await ensureConnection();
-  const params = new URLSearchParams();
-  if (agentId !== undefined) params.set("agent_id", agentId);
-  if (keyId !== undefined) params.set("key_id", keyId);
-  if (limit !== undefined) params.set("limit", String(limit));
-  const qs = params.toString();
-
-  const response = await fetch(
-    `${conn.baseUrl}/v1/llm/usage${qs ? `?${qs}` : ""}`,
-    { headers: { Authorization: `Bearer ${conn.token}` } },
-  );
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to fetch usage: ${response.statusText}`);
-  }
-  return await response.json();
+export interface LlmUsageQuery {
+  agentId?: string;
+  keyId?: string;
+  limit?: number;
+  /**
+   * GAP-08.1: the repository has `get_task_usage` but the route's query struct
+   * accepts only `{ agent_id, key_id, limit }`, so this is ignored today. Sent
+   * anyway — serde drops unknown params and the day it lands the UI is correct.
+   */
+  taskId?: string;
 }
 
-/** GET /v1/llm/usage/daily — query daily usage aggregates */
+/** `GET /v1/llm/usage` */
+export async function getLlmUsage(
+  query: LlmUsageQuery = {},
+  signal?: AbortSignal,
+): Promise<LlmCallLog[]> {
+  return await apiFetch<LlmCallLog[]>("/v1/llm/usage", {
+    query: {
+      agent_id: query.agentId,
+      key_id: query.keyId,
+      limit: query.limit,
+      task_id: query.taskId,
+    },
+    signal,
+  });
+}
+
+/** `GET /v1/llm/usage/daily` */
 export async function getLlmUsageDaily(
-  agentId?: string,
-  date?: string,
-  limit?: number,
+  query: { agentId?: string; date?: string; limit?: number } = {},
+  signal?: AbortSignal,
 ): Promise<LlmUsageDaily[]> {
-  const conn = await ensureConnection();
-  const params = new URLSearchParams();
-  if (agentId !== undefined) params.set("agent_id", agentId);
-  if (date !== undefined) params.set("date", date);
-  if (limit !== undefined) params.set("limit", String(limit));
-  const qs = params.toString();
+  return await apiFetch<LlmUsageDaily[]>("/v1/llm/usage/daily", {
+    query: { agent_id: query.agentId, date: query.date, limit: query.limit },
+    signal,
+  });
+}
 
-  const response = await fetch(
-    `${conn.baseUrl}/v1/llm/usage/daily${qs ? `?${qs}` : ""}`,
-    { headers: { Authorization: `Bearer ${conn.token}` } },
+export interface DailySpend {
+  date: string;
+  costUsd: number;
+  tokensIn: number;
+  tokensOut: number;
+  requests: number;
+}
+
+/** Local `YYYY-MM-DD`, which is what the `date` query param expects. */
+export function todayIsoDate(now: Date = new Date()): string {
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Sum a day's per-agent/per-model rows into one figure.
+ *
+ * GAP-08.2 is why this exists client-side: `GET /v1/orchestrator/config`
+ * reports `daily_cost_usd` but the handler hardcodes `0.0`.
+ */
+export function summarizeDailyUsage(
+  date: string,
+  rows: LlmUsageDaily[],
+): DailySpend {
+  return rows.reduce<DailySpend>(
+    (acc, row) => ({
+      date: acc.date,
+      costUsd: acc.costUsd + row.total_cost_usd,
+      tokensIn: acc.tokensIn + row.total_input_tokens,
+      tokensOut: acc.tokensOut + row.total_output_tokens,
+      requests: acc.requests + row.total_requests,
+    }),
+    { date, costUsd: 0, tokensIn: 0, tokensOut: 0, requests: 0 },
   );
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to fetch daily usage: ${response.statusText}`);
-  }
-  return await response.json();
 }

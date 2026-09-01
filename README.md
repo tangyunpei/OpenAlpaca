@@ -50,7 +50,7 @@ This is an evolving personal project. Core paths work; several subsystems are ex
 |---|---|
 | `apps/openalpacad` | The daemon: owns everything, serves HTTP + WebSocket + SSE on a dynamic localhost port, bearer-token auth |
 | `apps/openalpaca` | CLI: daemon lifecycle, chat REPL, tasks/agents/keys/plugins management, offline config editor |
-| `apps/openalpaca-gui` | Tauri v2 desktop app (SvelteKit + Tailwind); bundles the daemon as a sidecar |
+| `apps/openalpaca-gui` | Tauri v2 desktop app (React 19 + Tailwind v4); bundles the daemon as a sidecar |
 
 ### How the pieces connect
 
@@ -116,7 +116,7 @@ Runtime data lives in `~/Library/Application Support/OpenAlpaca/` on macOS (`~/.
 ## Toolchain & project status
 
 - Rust **1.93.0** (edition 2024, resolver v3), pinned in `rust-toolchain.toml`; `rustfmt` and `clippy` components included.
-- GUI: Bun + Vite + SvelteKit (Svelte 5 runes) + Tailwind v4, Tauri v2.
-- No CI is currently configured; run `cargo test` and `cargo clippy` locally.
+- GUI: Bun + Vite 7 + React 19 + TypeScript 5.9 (strict) + Tailwind v4, Tauri v2.
+- CI (`.github/workflows/ci.yml`) builds/tests/lints the Rust workspace and type-checks, tests and builds the GUI frontend.
 
 OpenAlpaca is an evolving personal project, not a polished product. Interfaces, config schemas, and the database schema change frequently, and some subsystems (plugins beyond tools/skills/agents, MCP resources/prompts, the platform crates) are scaffolding or disabled by default. Read the status notes above before depending on a feature.

@@ -1,98 +1,107 @@
-/**
- * REST API client for chat endpoints.
- */
+/** `/v1/chat*` — history, confirmations, feedback. Sending lives in `chat-stream.ts`. */
 
-import { get } from "svelte/store";
-import { connectionInfo, type ConnectionInfo } from "../daemon";
-import { ensureConnection } from "./connection";
+import { ApiError, apiFetch } from "../http";
 import type {
-  ChatSendRequest,
-  ChatSendResponse,
-  ChatHistoryResponse,
+  ApprovalScope,
   ChatDeleteResponse,
-} from "../types";
+  ChatHistoryResponse,
+  FeedbackResponse,
+  FeedbackValue,
+} from "./types";
 
-/** POST /v1/chat — send a message */
-export async function sendMessage(req: ChatSendRequest): Promise<ChatSendResponse> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/chat`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${conn.token}`,
+export interface ChatHistoryQuery {
+  limit?: number;
+  offset?: number;
+  /** Omit to let the daemon answer for `state.default_lane_key` and echo it back (GAP-16). */
+  laneKey?: string;
+}
+
+/** `GET /v1/chat/history` */
+export async function getChatHistory(
+  query: ChatHistoryQuery = {},
+  signal?: AbortSignal,
+): Promise<ChatHistoryResponse> {
+  return await apiFetch<ChatHistoryResponse>("/v1/chat/history", {
+    query: {
+      limit: query.limit,
+      offset: query.offset,
+      lane_key: query.laneKey,
     },
-    body: JSON.stringify(req),
+    signal,
   });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to send message: ${response.statusText}`);
-  }
-  return await response.json();
 }
 
-/** GET /v1/chat/history — fetch conversation history */
-export async function getChatHistory(limit?: number, offset?: number, laneKey?: string): Promise<ChatHistoryResponse> {
-  const conn = await ensureConnection();
-  const params = new URLSearchParams();
-  if (limit !== undefined) params.set("limit", String(limit));
-  if (offset !== undefined) params.set("offset", String(offset));
-  if (laneKey !== undefined) params.set("lane_key", laneKey);
-  const qs = params.toString();
-
-  const response = await fetch(
-    `${conn.baseUrl}/v1/chat/history${qs ? `?${qs}` : ""}`,
-    { headers: { Authorization: `Bearer ${conn.token}` } },
-  );
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to fetch history: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** DELETE /v1/chat/history — clear conversation history */
-export async function clearChatHistory(): Promise<ChatDeleteResponse> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/chat/history`, {
+/** `DELETE /v1/chat/history` — clears messages and the conversation summary. */
+export async function clearChatHistory(
+  laneKey?: string,
+): Promise<ChatDeleteResponse> {
+  return await apiFetch<ChatDeleteResponse>("/v1/chat/history", {
     method: "DELETE",
-    headers: { Authorization: `Bearer ${conn.token}` },
+    query: { lane_key: laneKey },
   });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to clear history: ${response.statusText}`);
-  }
-  return await response.json();
 }
 
-/** POST /v1/chat/confirmations/:requestId — respond to a tool confirmation */
-export async function respondToConfirmation(requestId: string, approved: boolean): Promise<void> {
-  const conn = await ensureConnection();
-  const response = await fetch(
-    `${conn.baseUrl}/v1/chat/confirmations/${encodeURIComponent(requestId)}`,
+export interface RespondToConfirmationInput {
+  requestId: string;
+  approved: boolean;
+  /**
+   * GAP-01: the daemon's `ConfirmationBody` is `{ approved }` only, so this is
+   * dropped server-side. Serde ignores unknown fields, so sending it is safe
+   * and makes the client correct the day the route is widened.
+   */
+  approvalScope?: ApprovalScope;
+}
+
+/** `POST /v1/chat/confirmations/{request_id}` — 200 with an empty body. */
+export async function respondToConfirmation(
+  input: RespondToConfirmationInput,
+): Promise<void> {
+  await apiFetch<void>(
+    `/v1/chat/confirmations/${encodeURIComponent(input.requestId)}`,
     {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${conn.token}`,
+      body: {
+        approved: input.approved,
+        ...(input.approvalScope === undefined
+          ? {}
+          : { approval_scope: input.approvalScope }),
       },
-      body: JSON.stringify({ approved }),
     },
   );
+}
 
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to respond to confirmation: ${response.statusText}`);
+/** `PUT /v1/chat/messages/{id}/feedback` */
+export async function setMessageFeedback(
+  messageId: number,
+  feedback: FeedbackValue,
+  comment?: string,
+): Promise<FeedbackResponse> {
+  return await apiFetch<FeedbackResponse>(
+    `/v1/chat/messages/${messageId}/feedback`,
+    {
+      method: "PUT",
+      body: { feedback, comment: comment ?? null },
+    },
+  );
+}
+
+/** `GET /v1/chat/messages/{id}/feedback` — `null` when none is recorded. */
+export async function getMessageFeedback(
+  messageId: number,
+): Promise<FeedbackResponse | null> {
+  try {
+    return await apiFetch<FeedbackResponse>(
+      `/v1/chat/messages/${messageId}/feedback`,
+    );
+  } catch (error) {
+    if (error instanceof ApiError && error.isNotFound) return null;
+    throw error;
   }
 }
 
-/** Create an EventSource for SSE chat streaming */
-export function createChatStream(streamId: string): EventSource | null {
-  const conn = get(connectionInfo);
-  if (!conn) return null;
-
-  const url = `${conn.baseUrl}/v1/chat/stream/${encodeURIComponent(streamId)}?token=${encodeURIComponent(conn.token)}`;
-  return new EventSource(url);
+/** `DELETE /v1/chat/messages/{id}/feedback` */
+export async function deleteMessageFeedback(messageId: number): Promise<void> {
+  await apiFetch<void>(`/v1/chat/messages/${messageId}/feedback`, {
+    method: "DELETE",
+  });
 }

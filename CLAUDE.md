@@ -71,11 +71,13 @@ cargo test -p openalpaca_storage
 cargo run -p openalpacad         # start daemon
 cargo run -p openalpaca          # CLI (use -- <subcommand> for args)
 
-# GUI (Tauri + SvelteKit frontend)
+# GUI (Tauri + React frontend)
 cd apps/openalpaca-gui
 bun install                      # install JS deps
 bun run tauri dev                # dev mode (hot-reload frontend + Rust rebuild)
 bun run dev                      # frontend-only dev server
+bun run check                    # tsc --noEmit (what CI runs)
+bun run test                     # vitest
 bun run build                    # production frontend build
 bun run prepare:sidecar:dev      # bundle the daemon as a Tauri sidecar (or :release)
 ```
@@ -90,7 +92,7 @@ Toolchain: Rust 1.93.0 (edition 2024, resolver v3). Pinned in `rust-toolchain.to
 apps/
   openalpacad/          # Daemon binary — axum HTTP/WS server, manages all services
   openalpaca/           # CLI binary — clap, connects to daemon via discovery.json
-  openalpaca-gui/       # Tauri v2 desktop app — SvelteKit + Tailwind frontend
+  openalpaca-gui/       # Tauri v2 desktop app — React 19 + TypeScript + Tailwind v4 frontend
 crates/
   openalpaca_core/      # Orchestrator, agents, tools, runtime, bus, security, prompt composition
   openalpaca_llm/       # LLM router, providers (Anthropic/OpenAI/Ollama), key management
@@ -251,7 +253,7 @@ LLM secret resolution order: `secret_env` (env var) > `secret_ref` (OS keychain)
 | Agent definitions | `crates/openalpaca_core/src/agent/` |
 | Daemon routes | `apps/openalpacad/src/routes/` |
 | CLI commands | `apps/openalpaca/src/commands/` |
-| GUI (Tauri) | `apps/openalpaca-gui/src-tauri/` (Rust) + `apps/openalpaca-gui/src/` (SvelteKit) |
+| GUI (Tauri) | `apps/openalpaca-gui/src-tauri/` (Rust) + `apps/openalpaca-gui/src/` (React); specs: `DESIGN_SPEC.md`, `API_MAP.md` |
 | Wake/scheduler | `crates/openalpaca_wake/src/` |
 | Connectors | `crates/openalpaca_connectors/src/` |
 

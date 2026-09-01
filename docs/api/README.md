@@ -28,7 +28,7 @@ so run `python3 scripts/gen_api_docs.py` locally to produce them.
 |---|---|
 | `apps/openalpacad.md` | Daemon HTTP API: endpoint table parsed from `apps/openalpacad/src/router.rs`, request/query types, streaming notes |
 | `apps/openalpaca.md` | CLI: endpoints used, request/response shapes, command source map |
-| `apps/openalpaca-gui.md` | Tauri + Svelte GUI: Tauri commands and API module map |
+| `apps/openalpaca-gui.md` | Tauri + React GUI: Tauri commands and API module map |
 
 ### Crates
 

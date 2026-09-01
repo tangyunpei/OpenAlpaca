@@ -1,92 +1,31 @@
-/**
- * REST API client for plugin endpoints.
- */
+/** `/v1/plugins*`. */
 
-import { ensureConnection } from "./connection";
+import { apiFetch } from "../http";
+import type { PluginAction, PluginInfo } from "./types";
 
-export interface PluginInfo {
-  name: string;
-  version: string;
-  status: string;
-  tools: string[];
-  connector: string | null;
-  provider: string | null;
-  models: string[];
+/** `GET /v1/plugins` — bare array. */
+export async function listPlugins(signal?: AbortSignal): Promise<PluginInfo[]> {
+  return await apiFetch<PluginInfo[]>("/v1/plugins", { signal });
 }
 
-/** GET /v1/plugins */
-export async function getPlugins(): Promise<PluginInfo[]> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/plugins`, {
-    headers: { Authorization: `Bearer ${conn.token}` },
+/** `POST /v1/plugins/{name}/{approve|deny|enable|disable}` */
+export async function performPluginAction(
+  name: string,
+  action: PluginAction,
+): Promise<void> {
+  await apiFetch<void>(`/v1/plugins/${encodeURIComponent(name)}/${action}`, {
+    method: "POST",
   });
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch plugins: ${response.statusText}`);
-  }
-  return await response.json();
 }
 
-/** POST /v1/plugins/{name}/approve */
-export async function approvePlugin(name: string): Promise<void> {
-  const conn = await ensureConnection();
-  const response = await fetch(
-    `${conn.baseUrl}/v1/plugins/${encodeURIComponent(name)}/approve`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${conn.token}` },
-    },
-  );
-
-  if (!response.ok) {
-    throw new Error(`Failed to approve plugin: ${response.statusText}`);
-  }
-}
-
-/** POST /v1/plugins/{name}/deny */
-export async function denyPlugin(name: string): Promise<void> {
-  const conn = await ensureConnection();
-  const response = await fetch(
-    `${conn.baseUrl}/v1/plugins/${encodeURIComponent(name)}/deny`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${conn.token}` },
-    },
-  );
-
-  if (!response.ok) {
-    throw new Error(`Failed to deny plugin: ${response.statusText}`);
-  }
-}
-
-/** POST /v1/plugins/{name}/enable */
-export async function enablePlugin(name: string): Promise<void> {
-  const conn = await ensureConnection();
-  const response = await fetch(
-    `${conn.baseUrl}/v1/plugins/${encodeURIComponent(name)}/enable`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${conn.token}` },
-    },
-  );
-
-  if (!response.ok) {
-    throw new Error(`Failed to enable plugin: ${response.statusText}`);
-  }
-}
-
-/** POST /v1/plugins/{name}/disable */
-export async function disablePlugin(name: string): Promise<void> {
-  const conn = await ensureConnection();
-  const response = await fetch(
-    `${conn.baseUrl}/v1/plugins/${encodeURIComponent(name)}/disable`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${conn.token}` },
-    },
-  );
-
-  if (!response.ok) {
-    throw new Error(`Failed to disable plugin: ${response.statusText}`);
-  }
+/** `POST /v1/plugins/{name}/config` */
+export async function setPluginConfig(
+  name: string,
+  key: string,
+  value: string,
+): Promise<void> {
+  await apiFetch<void>(`/v1/plugins/${encodeURIComponent(name)}/config`, {
+    method: "POST",
+    body: { key, value },
+  });
 }

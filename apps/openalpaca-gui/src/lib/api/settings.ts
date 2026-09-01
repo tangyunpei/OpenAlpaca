@@ -1,224 +1,123 @@
-/**
- * REST API client for LLM settings endpoints.
- */
+/** `/v1/settings/llm*` and `/v1/models*`. */
 
-import { ensureConnection } from "./connection";
+import { apiFetch } from "../http";
 import type {
-  LlmSettingsResponse,
   AddKeyRequest,
+  CliBackendStatus,
+  DiscoveredCredentialInfo,
+  KeyStatusMap,
+  KeyValidationResult,
+  LlmSettingsResponse,
+  ModelEntry,
+  ProviderUsageSummary,
   ReorderKeysRequest,
   SetKeyPriorityRequest,
   ValidateKeyRequest,
-  KeyValidationResult,
-  KeyStatusMap,
-  ModelEntry,
-  DiscoveredCredentialInfo,
-  CliBackendStatus,
-  ProviderUsageSummary,
-} from "../types";
+} from "./types";
 
-/** GET /v1/settings/llm */
-export async function getLlmSettings(): Promise<LlmSettingsResponse> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/settings/llm`, {
-    headers: { Authorization: `Bearer ${conn.token}` },
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to fetch settings: ${response.statusText}`);
-  }
-  return await response.json();
+/** `GET /v1/settings/llm` — the full (redacted) LlmConfig. */
+export async function getLlmSettings(
+  signal?: AbortSignal,
+): Promise<LlmSettingsResponse> {
+  return await apiFetch<LlmSettingsResponse>("/v1/settings/llm", { signal });
 }
 
-/** PUT /v1/settings/llm — add/update key */
-export async function addOrUpdateKey(req: AddKeyRequest): Promise<void> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/settings/llm`, {
+/** `PUT /v1/settings/llm` — upsert one key. */
+export async function upsertKey(req: AddKeyRequest): Promise<void> {
+  await apiFetch<void>("/v1/settings/llm", { method: "PUT", body: req });
+}
+
+/** `DELETE /v1/settings/llm/keys/{provider}/{keyId}` */
+export async function removeKey(
+  provider: string,
+  keyId: string,
+): Promise<void> {
+  await apiFetch<void>(
+    `/v1/settings/llm/keys/${encodeURIComponent(provider)}/${encodeURIComponent(keyId)}`,
+    { method: "DELETE" },
+  );
+}
+
+/** `PUT /v1/settings/llm/keys/reorder` */
+export async function reorderKeys(req: ReorderKeysRequest): Promise<void> {
+  await apiFetch<void>("/v1/settings/llm/keys/reorder", {
     method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${conn.token}`,
-    },
-    body: JSON.stringify(req),
+    body: req,
   });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to add key: ${response.statusText}`);
-  }
 }
 
-/** DELETE /v1/settings/llm/keys/{provider}/{keyId} */
-export async function removeKey(provider: string, keyId: string): Promise<void> {
-  const conn = await ensureConnection();
-  const response = await fetch(
-    `${conn.baseUrl}/v1/settings/llm/keys/${encodeURIComponent(provider)}/${encodeURIComponent(keyId)}`,
+/** `PUT /v1/settings/llm/keys/priority` */
+export async function setKeyPriority(
+  req: SetKeyPriorityRequest,
+): Promise<void> {
+  await apiFetch<void>("/v1/settings/llm/keys/priority", {
+    method: "PUT",
+    body: req,
+  });
+}
+
+/** `POST /v1/settings/llm/validate` */
+export async function validateKey(
+  req: ValidateKeyRequest,
+): Promise<KeyValidationResult> {
+  return await apiFetch<KeyValidationResult>("/v1/settings/llm/validate", {
+    method: "POST",
+    body: req,
+  });
+}
+
+/** `GET /v1/settings/llm/status` — per-key health. */
+export async function getKeyStatus(
+  signal?: AbortSignal,
+): Promise<KeyStatusMap> {
+  return await apiFetch<KeyStatusMap>("/v1/settings/llm/status", { signal });
+}
+
+/** `GET /v1/settings/llm/credentials` */
+export async function getDiscoveredCredentials(
+  signal?: AbortSignal,
+): Promise<DiscoveredCredentialInfo[]> {
+  return await apiFetch<DiscoveredCredentialInfo[]>(
+    "/v1/settings/llm/credentials",
+    { signal },
+  );
+}
+
+/** `POST /v1/settings/llm/credentials/rescan` */
+export async function rescanCredentials(): Promise<DiscoveredCredentialInfo[]> {
+  return await apiFetch<DiscoveredCredentialInfo[]>(
+    "/v1/settings/llm/credentials/rescan",
     {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${conn.token}` },
+      method: "POST",
     },
   );
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to remove key: ${response.statusText}`);
-  }
 }
 
-/** PUT /v1/settings/llm/keys/reorder */
-export async function reorderKeys(req: ReorderKeysRequest): Promise<void> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/settings/llm/keys/reorder`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${conn.token}`,
-    },
-    body: JSON.stringify(req),
+/** `GET /v1/settings/llm/cli-backends` */
+export async function getCliBackends(
+  signal?: AbortSignal,
+): Promise<CliBackendStatus[]> {
+  return await apiFetch<CliBackendStatus[]>("/v1/settings/llm/cli-backends", {
+    signal,
   });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to reorder keys: ${response.statusText}`);
-  }
 }
 
-/** PUT /v1/settings/llm/keys/priority — update a key's priority */
-export async function setKeyPriority(req: SetKeyPriorityRequest): Promise<void> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/settings/llm/keys/priority`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${conn.token}`,
-    },
-    body: JSON.stringify(req),
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(
-      data.error?.message || `Failed to set key priority: ${response.statusText}`,
-    );
-  }
+/** `GET /v1/settings/llm/providers/usage` — `health` is hardcoded, `total_tokens` is lifetime. */
+export async function getProviderUsage(
+  signal?: AbortSignal,
+): Promise<ProviderUsageSummary[]> {
+  return await apiFetch<ProviderUsageSummary[]>(
+    "/v1/settings/llm/providers/usage",
+    { signal },
+  );
 }
 
-/** POST /v1/settings/llm/validate */
-export async function validateKey(req: ValidateKeyRequest): Promise<KeyValidationResult> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/settings/llm/validate`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${conn.token}`,
-    },
-    body: JSON.stringify(req),
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Validation failed: ${response.statusText}`);
-  }
-  return await response.json();
+/** `GET /v1/models` — API-discovered models only. */
+export async function listModels(signal?: AbortSignal): Promise<ModelEntry[]> {
+  return await apiFetch<ModelEntry[]>("/v1/models", { signal });
 }
 
-/** GET /v1/settings/llm/status */
-export async function getKeyStatus(): Promise<KeyStatusMap> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/settings/llm/status`, {
-    headers: { Authorization: `Bearer ${conn.token}` },
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to fetch status: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** GET /v1/models — list all available models */
-export async function getAvailableModels(): Promise<ModelEntry[]> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/models`, {
-    headers: { Authorization: `Bearer ${conn.token}` },
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to fetch models: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** POST /v1/models/refresh — refresh models from provider APIs */
-export async function refreshAvailableModels(): Promise<ModelEntry[]> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/models/refresh`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${conn.token}` },
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to refresh models: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** GET /v1/settings/llm/credentials — list discovered OAuth credentials */
-export async function getDiscoveredCredentials(): Promise<DiscoveredCredentialInfo[]> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/settings/llm/credentials`, {
-    headers: { Authorization: `Bearer ${conn.token}` },
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to fetch credentials: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** POST /v1/settings/llm/credentials/rescan — rescan for OAuth credentials */
-export async function rescanCredentials(): Promise<DiscoveredCredentialInfo[]> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/settings/llm/credentials/rescan`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${conn.token}` },
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to rescan credentials: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** GET /v1/settings/llm/cli-backends — list CLI backend status */
-export async function getCliBackends(): Promise<CliBackendStatus[]> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/settings/llm/cli-backends`, {
-    headers: { Authorization: `Bearer ${conn.token}` },
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to fetch CLI backends: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** GET /v1/settings/llm/providers/usage — provider-level usage summaries */
-export async function getProviderUsage(): Promise<ProviderUsageSummary[]> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/settings/llm/providers/usage`, {
-    headers: { Authorization: `Bearer ${conn.token}` },
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to fetch provider usage: ${response.statusText}`);
-  }
-  return await response.json();
+/** `POST /v1/models/refresh` */
+export async function refreshModels(): Promise<ModelEntry[]> {
+  return await apiFetch<ModelEntry[]>("/v1/models/refresh", { method: "POST" });
 }
