@@ -1,64 +1,293 @@
-# Daemon API Fix Plan — project-scoped artifacts + the 23 GUI gaps
+# Daemon Fix Plan — rev 2: single root, artifact store, sessions, the 23 GUI gaps
 
-**Status:** design, approved-pending-decisions. No production code written. · **Date:** 2026-09-01 · **Branch:** `feat/ui-rework`
-**Inputs:** `tasks/gui-api-requirements.md` (the 23-gap brief) · `apps/openalpaca-gui/src/lib/unavailable.ts` (23-entry registry, verified) · `apps/openalpaca-gui/src/lib/api/unbacked.ts` (client contract for the proposed resources) · `apps/openalpaca-gui/API_MAP.md` §3
-**Evidence appendices (untracked — `.gitignore:92` blanket-ignores `*.md`; only `tasks/api-fix-plan.md` and `tasks/gui-api-requirements.md` are whitelisted):**
-`tasks/research/A-artifact-store.md` · `tasks/research/B-run-data.md` · `tasks/research/C-surface.md`
+**Status:** design, rev 2 — decisions resolved. No production code written. · **Date:** 2026-09-01 · **Branch:** `feat/ui-rework`
+**Inputs:** `tasks/gui-api-requirements.md` (the 23-gap brief) · `apps/openalpaca-gui/src/lib/unavailable.ts` (23-entry registry, verified) · `apps/openalpaca-gui/src/lib/api/unbacked.ts` (client contract) · `apps/openalpaca-gui/API_MAP.md` §3 · rev 1 of this document
+**Evidence appendices (untracked — `.gitignore:92` blanket-ignores `*.md`):**
+`tasks/research/A-artifact-store.md` · `tasks/research/B-run-data.md` · `tasks/research/C-surface.md` · `tasks/research/R-root-taxonomy.md` (root move, taxonomy, purge) · `tasks/research/S-sessions.md` (session persistence)
 
-**Spine:** the user's directive — *artifacts of all kinds live on disk in a project directory under a `.openalpaca/` convention; path naming expanded so files are findable by a human; the DB stores only the address.* §1 designs that. §2–§9 hang the 23 gaps off it.
+**Spine — three directives, all now decided:**
 
-**Verified against the tree** (not taken from the briefs): migration head is **034** (`crates/openalpaca_storage/src/migrations/mod.rs`, tail `Migration { version: 34, name: "drop_context_compaction_log" }`); `unavailable.ts` holds exactly 23 gap ids; `walk_up_for_marker` prefers `.alpaca` then `.git` (`crates/openalpaca_core/src/memory/workspace.rs:43-56`); `workspace_id_from_root` returns the **canonical path string**, not a hash (`workspace.rs:60-65`); `chat.rs:462` is a literal `approval_scope: None`; `settings.rs:314` is a literal `daily_cost_usd = 0.0`; `list_orphaned` has no `origin` predicate (`repository/file_asset/mod.rs:95-112`); `total_storage_bytes` sums **all** rows (`mod.rs:76-85`); `SystemEvent::DagNodeStarted` **is still produced** at `runner/lead_agent/tools.rs:232-240` — the brief's "producer was deleted" claim is wrong.
+1. **Artifacts of all kinds live on disk under a `.openalpaca/` convention**, human-findable paths, DB stores only the address (rev 1's spine, kept).
+2. **The app is not distributed.** Legacy-compatibility measures are **deleted from the code**, not merely avoided going forward (§3).
+3. **New pillar: session persistence** — local persistence of session + project association + session recovery: SQLite tables + a per-session append-only JSONL event log + filesystem tiers (§5).
+
+The `.openalpaca/` directory structure is designed as an **extensible contract** (§1): namespaces reserved deliberately, one Rust module owning every path, new content kinds added only through one enum.
+
+**Verified against the tree** (not taken from any brief): migration head is **034** (`crates/openalpaca_storage/src/migrations/mod.rs`, tail `Migration { version: 34, name: "drop_context_compaction_log" }`); `unavailable.ts` holds exactly 23 gap ids; `walk_up_for_marker` prefers `.alpaca` then `.git` (`crates/openalpaca_core/src/memory/workspace.rs:43-56`); `workspace_id_from_root` returns the **canonical path string**, not a hash (`workspace.rs:60-65`); `app_dir()` = `directories::ProjectDirs::from("","","OpenAlpaca").data_dir()` and everything (`discovery_path`, `lock_path`, `database_path`, `assets_dir`) hangs off it (`crates/openalpaca_storage/src/paths.rs:10-83`); `conversations.lane_key` carries a **column-level `UNIQUE`** (`migrations/011_unified_conversations.sql:3-12`) — the single reason multi-conversation doesn't exist; `conversation_messages` is keyed by `lane_key`, not conversation id (`009_conversation_messages.sql`); the boot orphan sweep marks every non-terminal task `failed` (`apps/openalpacad/src/bootstrap/migration.rs:21-27` → `repository/task/mod.rs:187-202`); the agentic loop's transcript is memory-only (`runner/agentic_loop/mod.rs:205`, `LoopResult` returns no transcript — `runner/agentic_loop/config.rs:263-276`); `tool_execution_log` stores **no arguments and no results** (`030_skill_tool_execution_log.sql:29-40`); `chat.rs:462` is a literal `approval_scope: None`; `settings.rs:314` is a literal `daily_cost_usd = 0.0`; `list_orphaned` has no `origin` predicate (`repository/file_asset/mod.rs:95-112`); `total_storage_bytes` sums **all** rows (`mod.rs:76-85`); `SystemEvent::DagNodeStarted` is still produced at `runner/lead_agent/tools.rs:232-240`. The complete `paths.rs` consumer inventory and the session-side ground truth live in appendices R §0 and S §1 — every claim there carries a checked file:line.
 
 ---
 
-## 0. Decisions the user must make (do not bury these)
+## 0. Decisions (resolved)
 
-Everything else in this document is settled. These five are genuine either-way calls; the plan is written against the **Recommended** column and each alternative is a bounded delta.
+Rev 1 §0 posed five either-way calls. All five are decided. The plan below is written against these; no alternatives are carried.
 
-| # | Question | Recommended | The alternative, and what it costs |
+| # | Decision | Consequence the plan pays |
+|---|---|---|
+| **D1** | **`app_dir()` itself moves to `~/.openalpaca/`** — a single root for everything: DB, `discovery.json`, lock, master key, `plugins/`, upload assets, config, artifacts, sessions. | A live-DB relocation at boot. Paid cleanly by the one boot-time mover (§2.2): per-entry atomic rename, idempotent resume, live-daemon guard, WAL sidecars before the DB file, abort-on-first-failure — ~80 lines replacing `migrate_legacy_app_dir()` in the same call slot. Plus an **atomic three-binary rebuild** (daemon + CLI + GUI in one commit); no compatibility window exists and none is designed. |
+| **D2** | **Chat/connector uploads also move into `.openalpaca/`** — human-named under `uploads/`, not content-addressed. | New uploads write via `upload_dir()`/`upload_file_name()`; dedup keys off the existing owner-scoped `sha256` DB query (`routes/files.rs:172-185`), not the path. Existing content-addressed blobs park at `state/assets/` (mover) with a boot-time `storage_path` prefix UPDATE; the full re-home into `uploads/` is a Phase 8 item (§6, Phase 8.3). The connector's duplicated sha/dedup write path (`connectors/src/common/mod.rs:213-262`) collapses into the single writer first. |
+| **D3** | **`extracted_text` stays in the DB** — a derived text index, bounded at 50 000 chars (`daemon_config/upload.rs:28`), on the prompt-assembly hot path. | Nothing; this was already the schema in §4.4. |
+| **D4** | **`~/.openalpaca/`**, with an **`OPENALPACA_HOME_STORE`** env override (absolute paths only — a relative value is rejected; it would re-introduce CWD-dependence). | One resolution function, `home_root()` (§2.1). |
+| **D5** | **`start` keeps the same task id** (200). | `dispatch_lead_agent_with_id` + idempotent `TaskRepository::upsert_queued` — acknowledged as the least clean code in the plan; isolated and named in review (§6 Phase 5, risk table §9). |
+
+Two calls carried from rev 1, still standing:
+
+- **`daily_cost_usd` comes from the DB** (`query_daily_usage` for today), not `CostTracker::total_cost()` — the tracker means *since boot*.
+- **`calls_7d` is renamed `messages_7d`** (GAP-17). The only measurable number is inbound user messages by `conversation_messages.source`.
+
+### Genuinely new either-way calls raised by rev 2 (few, as expected)
+
+| # | Question | Default if unanswered |
+|---|---|---|
+| **N1** | **Connector session boundaries.** Telegram/iMessage lanes get one perpetual `active` session. Is an idle-auto-archive (e.g. 72 h) wanted, and/or an in-chat `/new` command? The config knob (`[orchestrator.sessions] idle_archive_hours`) is reserved either way. | Perpetual session; knob reserved, off. |
+| **N2** | **`GET /v1/status.log_path`.** Rev 1 shipped `null` unconditionally (the daemon writes no log). After the move, the *CLI-managed* start pipes daemon output to `state/logs/daemon.log` (`apps/openalpaca/src/manager.rs:38`). Serve that path when the file exists, or keep `null` until GAP-14 Phase B? | Serve it when present; `null` for GUI-sidecar daemons. |
+| **N3** | **Early S0.** If the GUI wants multi-conversation before the artifact Library completes, sessions Phase 7a can be pulled ahead of Phase 3 — its only hard prerequisite is Phase 6's `#[derive(Default)]` churn payment, which can be paid early. | Ship in the §6 order. |
+
+Two **implementer pre-checks** (verify, not decide): (a) bundled SQLite ≥ 3.35 for `ALTER TABLE … DROP COLUMN` in migration 035 — else use the 024-style table rebuild; (b) before deleting the legacy flat `llm.toml` branch (P4), confirm `LlmConfig` and `build_provider_with_runtime` have no non-legacy consumers.
+
+---
+
+## 1. The `.openalpaca/` taxonomy — the contract
+
+This section is normative. Every path in the system is built by one module (§1.4) and appears in one of the two trees below. New content kinds exist **only** when added to the `ContentKind` enum — the reservation mechanism is a code review on one enum, and `grep ContentKind::` enumerates every kind in the system.
+
+### 1.1 `~/.openalpaca/` — the home root (app state *and* no-project content store)
+
+```
+~/.openalpaca/                        ← home_root(); OPENALPACA_HOME_STORE overrides (D4)
+  README.md                           ← seeded once; explains every entry below
+  .layout                             ← one line: "1" — layout-version marker
+  state/                              ← MACHINE STATE — opaque, never user-edited, never committed
+    openalpaca.db  (+ -wal, -shm)
+    discovery.json
+    openalpacad.lock
+    .master_key                       (0600)
+    assets/                           ← interim: relocated content-addressed uploads, until the D2 re-home (Phase 8)
+    logs/
+      daemon.log                      ← CLI-managed start (manager.rs:38); GAP-14 Phase B appender lands here too
+  config/                             ← USER-EDITED runtime config (GUI/CLI-managed daemons):
+                                        llm.toml, daemon.toml, mcp.toml, agents/, skills/, orchestrator/, tools/
+  plugins/                            ← user-dropped plugin dirs + .permissions.toml
+  artifacts/                          ← content store, home scope (no-project fallback) — §4 grammar
+  uploads/                            ← content store, home scope (D2: uploads with no project signal)
+  sessions/                           ← content store, home scope — session event logs (§5); ALL sessions live
+                                        here, never in a project dir (transcripts must not be git-committable)
+  memory/  skills/  scratch/  cache/  ← RESERVED names (§1.3); not created until used
+```
+
+The organising rule: **`state/` is the machine's; everything else at the root is the human's.** `config/` and `plugins/` stay top-level because the user edits and drops files there. The content-store kinds (`artifacts/`, `uploads/`, `sessions/`, …) sit flat at the root so the home root *is itself* a store with exactly the project-store shape — `content_dir(scope, kind)` is `root/kind` for both scopes, one code path, no special cases.
+
+- **`.layout`** — a single integer, written by `ensure_store()`, read at boot. A future restructure gets the §2.2 mover pattern with a version gate instead of heuristics. Both roots carry one.
+- **`README.md`** — seeded once per root; documents the state/content split, the reserved names, and "delete `state/` = factory reset; delete a content dir = lose those files only".
+
+### 1.2 `<project>/.openalpaca/` — the project store
+
+```
+<project>/.openalpaca/
+  README.md                           ← seeded once
+  .gitignore                          ← store-owned, committable (contents below)
+  .layout                             ← "1"
+  artifacts/                          ← §4.2 grammar:
+    <YYYY-MM-DD>-<task-slug≤48>-<taskid8>/NN-<slug>.<ext>
+    loose/<YYYY-MM-DD>/…
+    …/.versions/<stem>/vN.<ext>
+  uploads/                            ← D2: chat uploads carrying x-workspace-path
+    <YYYY-MM-DD>/NN-<orig-name-slug>.<ext>
+  sessions/                           ← RESERVED, deliberately unused: session logs live under the HOME root
+                                        only (§5.4); the name is reserved so nothing else ever claims it
+  memory/                             ← RESERVED: future memory exports / project memory packs
+  skills/                             ← RESERVED: future project-scope skills — this is the `project_dir` that
+                                        SkillCatalog::scan_multi_scope + SkillScope::Project already implement
+                                        and nothing calls (orchestrator/skill/catalog/mod.rs:150-169); whoever
+                                        wires project skills points it HERE — do not invent a second resolution
+  config/                             ← RESERVED: future per-project config overrides (daemon.toml fragments)
+  scratch/                            ← RESERVED: agent working space that is neither artifact nor session
+  cache/                              ← RESERVED: derived/regenerable data; always ignorable, always deletable
+```
+
+**Store-owned `.gitignore`** (supersedes rev 1's single-line `.versions/`):
+
+```gitignore
+/.layout
+/uploads/
+/sessions/
+/scratch/
+/cache/
+.versions/
+```
+
+Rationale per line: artifact **heads stay committable** (rev 1's decision, kept — a produced `findings.md` is a document and git is strictly better history than `.versions/`); `uploads/` are copies of files the user already has elsewhere; `sessions/` would be private transcripts if anything ever landed there; `scratch/` and `cache/` are by definition regenerable; `.versions/` (unanchored — it appears per-run under `artifacts/`) is OpenAlpaca's private history. `memory/` and `skills/` are deliberately **not** ignored: an exported memory pack or a project skill is exactly what a project wants in git. The `.gitignore` is committable so the rules travel with the repo; `ensure_store()` writes it only when absent, so user edits stick.
+
+### 1.3 Naming rules and namespace reservation
+
+1. Top-level entries in either store root match `^[a-z][a-z0-9-]*$` — lowercase, no spaces or underscores; plural nouns for content collections. Dot-prefixed names (`.layout`, `.gitignore`, `.versions`) are reserved for store metadata, forever.
+2. **A new content kind exists when and only when it is added to `ContentKind`** (§1.4). No crate ever joins a literal directory name onto a store root.
+3. Unknown directories found in a store root are left untouched and never swept — the store never deletes what it did not create (extends §4.5's "produced artifacts are never garbage-collected" to the whole tree).
+4. `state/` never gains user-facing content; content kinds never gain machine state. A future "machine state per project" kind (if one ever exists) gets a reserved `state/` name under the project store — reserved now, unused.
+
+### 1.4 The single Rust module — `crates/openalpaca_storage/src/store/mod.rs`
+
+`paths.rs` is **deleted, not aliased** (purge P1). Every path in both roots is built here and nowhere else. The rename fan-out is exactly the consumer inventory in appendix R §0 — every site is mechanical (`paths::app_dir()` → a specific accessor) and the compiler enumerates them.
+
+```rust
+// ── roots ────────────────────────────────────────────────────────────────
+pub fn home_root() -> anyhow::Result<PathBuf>;          // $OPENALPACA_HOME_STORE (absolute) or ~/.openalpaca
+pub fn state_dir() -> anyhow::Result<PathBuf>;          // home_root()/state — creates it
+pub fn database_path() -> anyhow::Result<PathBuf>;      // state/openalpaca.db
+pub fn discovery_path() -> anyhow::Result<PathBuf>;     // state/discovery.json
+pub fn lock_path() -> anyhow::Result<PathBuf>;          // state/openalpacad.lock
+pub fn master_key_dir() -> anyhow::Result<PathBuf>;     // = state_dir(); passed to KeyEncryptor::ensure_at
+pub fn logs_dir() -> anyhow::Result<PathBuf>;           // state/logs — creates it
+pub fn interim_assets_dir() -> anyhow::Result<PathBuf>; // state/assets — dies with the D2 re-home (Phase 8)
+pub fn plugins_dir() -> anyhow::Result<PathBuf>;        // home_root()/plugins (replaces main.rs:331's inline join)
+pub fn runtime_config_dir() -> anyhow::Result<PathBuf>; // home_root()/config (GUI/CLI-managed OPENALPACA_CONFIG_DIR value)
+
+// ── content stores (both scopes share one shape) ─────────────────────────
+pub enum StoreScope { Project(PathBuf), Home }
+pub enum ContentKind { Artifacts, Uploads, Sessions, Memory, Skills, Scratch, Cache }
+pub fn store_root(scope: &StoreScope) -> anyhow::Result<PathBuf>;    // <project>/.openalpaca | home_root()
+pub fn ensure_store(scope: &StoreScope) -> anyhow::Result<PathBuf>;  // creates + seeds README/.gitignore/.layout
+pub fn content_dir(scope: &StoreScope, kind: ContentKind) -> anyhow::Result<PathBuf>;
+pub fn layout_version(root: &Path) -> anyhow::Result<Option<u32>>;
+
+// ── artifact grammar (rev 1 §1.3, carried; ArtifactScope → StoreScope) ───
+pub fn run_dir(scope: &StoreScope, created: DateTime<Utc>, task_title: &str, task_id: &str) -> anyhow::Result<PathBuf>;
+pub fn loose_dir(scope: &StoreScope, created: DateTime<Utc>) -> anyhow::Result<PathBuf>;
+pub fn artifact_file_name(seq: u32, title: &str, ext: &str) -> String;
+pub fn slugify(input: &str, max_bytes: usize) -> String;             // pure, total, never empty
+pub fn version_file_path(head_path: &Path, version: u32) -> anyhow::Result<PathBuf>;
+pub fn artifact_extension(kind: ArtifactKind, mime: Option<&str>, name_hint: Option<&str>) -> String;
+pub fn confine_to_root(root: &Path, candidate: &Path) -> anyhow::Result<PathBuf>;
+
+// ── D2 upload placement ──────────────────────────────────────────────────
+pub fn upload_dir(scope: &StoreScope, created: DateTime<Utc>) -> anyhow::Result<PathBuf>;  // uploads/<YYYY-MM-DD>
+pub fn upload_file_name(seq: u32, original_name: &str) -> String;    // NN-<slug(orig,60)>.<ext>
+
+// ── session paths (§5) ───────────────────────────────────────────────────
+pub fn sessions_dir() -> anyhow::Result<PathBuf>;                    // content_dir(Home, Sessions)
+pub fn session_dir(id: &str) -> anyhow::Result<PathBuf>;
+pub fn session_log_path(id: &str) -> anyhow::Result<PathBuf>;
+pub fn session_result_path(id: &str, seq: u64, tool: &str, ext: &str) -> anyhow::Result<PathBuf>;
+
+// ── the mover (store/migrate.rs) ─────────────────────────────────────────
+pub fn move_app_root();                                  // §2.2; called from main.rs at the old :71 slot
+pub fn rebase_asset_paths(db: &Database);                // §2.2 step 6; called from bootstrap after DB open
+```
+
+`asset_storage_path(sha256)` (`paths.rs:75-83`) is **deleted**: under D2 new uploads are human-named, dedup keys off the `sha256` column, and existing blobs at `interim_assets_dir()` are addressed purely via their stored `storage_path` until the Phase 8 re-home deletes even that.
+
+---
+
+## 2. The move to `~/.openalpaca/`
+
+### 2.1 Root resolution
+
+```rust
+/// $OPENALPACA_HOME_STORE if set (absolute path), else <home>/.openalpaca — every platform.
+pub fn home_root() -> anyhow::Result<PathBuf>;
+```
+
+- Read on every call, like `app_dir()` today — no caching, so tests set it per-process. Non-absolute values are rejected.
+- Home dir via `directories::BaseDirs::home_dir()` (already a workspace dep — `crates/openalpaca_storage/Cargo.toml:14`). `ProjectDirs` survives only inside the mover, to compute the *old* root.
+- `OPENALPACA_CONFIG_DIR` **semantics are untouched** (`bootstrap/config.rs:14-61`). Only the *value* the GUI/CLI pass changes automatically — both compute `app_dir()/config` → now `home_root()/config` (`apps/openalpaca-gui/src-tauri/src/lib.rs:114`, `apps/openalpaca/src/manager.rs:217`). Dev runs from the repo keep resolving `./config` via the exe/CWD walk-up and never notice the move — dev-run LLM keys and persona docs are entirely unaffected.
+
+### 2.2 The one boot-time mover — `store::migrate::move_app_root()`
+
+Replaces `migrate_legacy_app_dir()` at the same call slot (`main.rs:70-71`): **after logging, before the singleton lock** — the same ordering constraint documented at `paths.rs:24-27`, because the lock file itself moves and the DB must not be open mid-rename. `old` = `ProjectDirs::from("","","OpenAlpaca").data_dir()` (exactly today's `app_dir()`, per platform); `new` = `home_root()`.
+
+Algorithm — every step idempotent, the whole function re-runnable:
+
+1. **Fresh install / already moved:** `old` absent ⇒ return. `old == new` (paranoia under `OPENALPACA_HOME_STORE`) ⇒ return.
+2. **Live-daemon guard:** non-blocking `file_lock` probe on `old/openalpacad.lock` (same mechanism as `discovery/mod.rs:201-217`). Held ⇒ abort startup: "an old daemon is still running from `<old>`; stop it first". This is the one race the mover refuses to paper over — renaming a WAL-mode DB out from under a live process is corruption.
+3. **Entry ledger**, each moved by `std::fs::rename` (same volume on all three platforms, so rename is atomic; an `EXDEV` error aborts with a message rather than falling back to a non-atomic copy):
+
+   | Old entry | New location | Note |
+   |---|---|---|
+   | `openalpaca.db-wal`, `openalpaca.db-shm`, then `openalpaca.db` | `state/` | **Sidecars first**: a crash mid-trio leaves split halves; the resume on next boot reunites them *before* `Database::open` runs — SQLite pairs WAL with DB only at open time, and the mover always completes before the open (`main.rs:186`) |
+   | `.master_key` | `state/` | Replaces the inline legacy-key copy at `main.rs:102-127` (deleted — P2) |
+   | `config/` | `config/` | **Per-child merge**, not skip-if-dir-exists: a rebuilt GUI pre-creates `home_root()/config` *before* spawning the daemon (`src-tauri/lib.rs:114-115`), so the destination existing is expected; each child (`llm.toml` with its encrypted keys, `daemon.toml`, `orchestrator/`, `skills/`, …) moves if absent at the destination. Runs before `seed_default_configs` (`main.rs:92`), so the moved `llm.toml` wins over a fresh seed |
+   | `plugins/` | `plugins/` | Same per-child merge; carries the user-approved `.permissions.toml` files |
+   | `assets/` | `state/assets/` | Interim home; the D2 re-home into `uploads/` is Phase 8's job, not the mover's |
+   | `daemon.log` | `state/logs/daemon.log` | CLI-managed-start log (`manager.rs:38`) |
+   | `discovery.json`, `openalpacad.lock` | **deleted** | Regenerated every boot (`main.rs:178-183`); moving a stale discovery file would only confuse `ensure_not_expired` |
+
+4. **Partial failure:** every entry is one atomic rename, guarded by skip-if-destination-exists. The first failure **aborts startup** with the failing path in the error. No rollback, and none needed — the next boot resumes exactly where it stopped, and no consumer opens any of these files before the mover finishes.
+5. **Old root disposal:** `remove_dir(old)` if empty; otherwise log a warning listing leftovers and leave them. No `MOVED.txt` ceremony — single user, one machine.
+6. **Post-open fixup** — `rebase_asset_paths(db)`, called in bootstrap immediately after `Database::open`, before any ingress, beside `sweep_orphaned_tasks` (`main.rs:188-193`): one idempotent statement repairing the stored absolute paths broken by the move:
+
+   ```sql
+   UPDATE file_assets
+      SET storage_path = replace(storage_path, '<old>/assets/', '<new>/state/assets/')
+    WHERE storage_path LIKE '<old>/assets/%'
+   ```
+
+   Not a numbered migration — the prefixes are runtime-computed. Runs every boot, matches zero rows after the first. It keeps §4.3's "readers need zero changes" promise intact through the move.
+7. **The `com.openalpaca` leg is not carried forward.** `migrate_legacy_app_dir` chained `com.openalpaca.OpenAlpaca → OpenAlpaca` (`paths.rs:28-51`); that rename has long since happened on the only machine that matters. The new mover reads only today's root; a surviving `com.openalpaca.*` dir would simply be ignored.
+
+### 2.3 Rebuild coordination, and why the mover exists at all
+
+**Discovery consumers need zero code changes** — everything goes through `openalpaca_storage::{paths,discovery}` (full inventory: appendix R §0). They need a **rebuild, atomic across daemon + CLI + GUI**: an old GUI binary would read discovery from the old root, conclude no daemon runs, and spawn-loop forever. One commit, all three binaries; no compatibility window is designed — deliberate (directive 2, single user).
+
+Skipping the mover would not *malfunction* — the daemon would boot fresh — but it would lose: the entire DB (conversations, memories, tasks, telemetry, and the persisted `identity.local_user_id`, so the lane key changes); installed plugins and their approval state; uploaded bytes; and, for GUI/CLI-managed setups, the runtime `config/` with the encrypted LLM keys and live persona docs. The mover is ~80 lines and removes that worst case entirely.
+
+---
+
+## 3. The legacy purge — Phase 1's deletion list
+
+Directive 2: previously-added legacy measures are **cleared from the code**. Verdicts: **DELETE** (this branch, Phase 1 unless noted), **DELETE-AFTER** (safe once a named dependency lands), **KEEP** (looks legacy, is load-bearing), **OWN-TASK** (a real refactor, not a deletion). Serde's general ignore-unknown-fields behaviour is not listed — it is load-bearing correctness.
+
+| # | Item | Where | Verdict |
 |---|---|---|---|
-| **D1** | Does `app_dir()` move to `~/.openalpaca/`? | **No — split the roots.** `app_dir()` stays `~/Library/Application Support/OpenAlpaca/` for the DB, `discovery.json`, the lock, `plugins/`, upload assets. A **new, artifacts-only** root is added. | Moving it costs a second `migrate_legacy_app_dir()`-style rename (`paths.rs:24-49`) that must run before the singleton lock and before the DB opens, over a live `plugins/` dir holding user-approved `.permissions.toml`. Users never open `openalpaca.db` by hand; they *do* open artifacts. The directive's findability argument applies to artifacts, not to runtime state. Cost of the split: two "OpenAlpaca directories" to explain — mitigated by a `README.md` dropped in `.openalpaca/` and by `GET /v1/status` reporting both roots. |
-| **D2** | Do **chat/connector uploads** also move into `.openalpaca/`, or only agent-produced artifacts? | **Produced-only in phase 1.** One table, one id space, two placements selected by an `origin` column. | Neither inbound path has a workspace signal: `POST /v1/files/upload` reads no header (`routes/files.rs:24-27`) and the connector path is a Telegram/Discord message (`connectors/src/common/mod.rs:213-262`). Owner-scoped sha256 dedup (`files.rs:172-185`) is load-bearing and would become scope-local. Re-homing has no user-visible payoff — the user still has the original. **This is the one place the plan may read "artifacts of ALL kinds" more narrowly than intended.** Phase-2 delta if you disagree: read `x-workspace-path` on the upload route, write to `<store>/uploads/`, leave old rows alone. No re-design; the schema already supports it. Note it is **two** writers, not one — collapse the connector duplication into `ArtifactStore` first. |
-| **D3** | Does `extracted_text` stay in the DB? | **Yes, relabelled as a derived text index.** Bounded at 50 000 chars (`daemon_config/upload.rs:28`), on the prompt-assembly hot path. | It is arguably "content in the DB" and the directive could be read as excluding it. Moving it to `<store>/.text/<id>.txt` adds an I/O round trip to every attachment turn. Reversible in one column drop plus a path helper; nothing else in the design moves. |
-| **D4** | Home fallback: `~/.openalpaca/` (hidden) or `~/OpenAlpaca/` (visible)? | **`~/.openalpaca/`**, matching the directive's wording, with an `OPENALPACA_HOME_STORE` env override. | A hidden dot-dir in `~` is only marginally more findable than `~/Library/Application Support/`. If genuine findability beats the wording, use `~/OpenAlpaca/`. One-line change in `home_store_dir()`. |
-| **D5** | `POST /v1/tasks/{id}/action {"action":"start"}` — same task id, or a new one? | **Same id** (200). A row created by `POST /v1/tasks` is user-authored and visible in the Work list; having it vanish and be replaced on "Start now" is bad UX. | Same-id needs `dispatch_lead_agent_with_id` plus an idempotent persist (`TaskRepository::upsert_queued`) instead of `create`. That is the least clean code in the whole plan. The alternative (`start` returns a new id, like `rerun`) is materially cleaner Rust and a small client change. |
+| P1 | `migrate_legacy_app_dir()` + the `com`/`openalpaca` qualifier constants | `paths.rs:24-51`, call at `main.rs:70-71` | **DELETE** — replaced by `move_app_root()` in the same slot (§2.2). `paths.rs` tests move to `store/`; `test_paths_are_consistent` (`paths.rs:89-102`) re-targets `state_dir()`. |
+| P2 | Inline legacy master-key copy (`config_base_dir/.master_key` → `app_dir`) | `main.rs:102-127` | **DELETE** — the mover's `.master_key → state/` entry owns relocation; no config dir on the machine still holds a key. |
+| P3 | `.alpaca` marker preference | `memory/workspace.rs:43-49` (incl. the redundant `.exists() \|\| .is_dir()`), tests `:108,125` | **DELETE — recognise `.openalpaca` first, `.git` second, `.alpaca` never.** Honest cost: a directory that was a workspace root *only* via a hand-made `.alpaca` stops resolving, and memories scoped to it (workspace id = canonical path) go quiet until the user runs `mv .alpaca .openalpaca` once. State it in the commit message. Tests flip to `.openalpaca`. |
+| P4 | Legacy flat `llm.toml` format branch | `crates/openalpaca_llm/src/config/llm_config/router_builder.rs:26-53` (`build_router_from_legacy`) | **DELETE** — the seeded template has been hierarchical (`[providers.*]`, `scripts/release/templates/config/llm.toml:8-21`) for as long as `seed_default_configs` has existed. **Pre-check §0(b)** before removing `LlmConfig`/`build_provider_with_runtime` with the branch. Drop the "auto-detects format" doc comment. |
+| P5 | Skill frontmatter legacy fields + bridge: `command`, `trigger_patterns`, `tools_required`, `auto_load`, `apply_legacy_compat()`, legacy half of `effective_slash_command()` | `crates/openalpaca_core/src/middleware/skill/types.rs:335-347,352-371,384-392`; call sites `skill/mod.rs:55,65`; tests `skill/tests.rs:44-54,117,262-289` | **DELETE** — no tracked skill uses them (grep over `config/skills/` empty); plugin-contributed skills build the *new* sections + `..Default::default()` (`openalpaca_plugins/src/manager.rs:940-956`), so they compile unchanged. |
+| P6 | `TaskConstraints.pipeline_sequential` | `orchestrator/task_state/state.rs:36,74`; tests `task_state/tests.rs:29,295`, `dispatcher/tests.rs:531` | **DELETE** — serde vestige of the deleted sequential pipeline; zero non-test readers. Old `state_json` rows deserialize fine (unknown-field ignore). `test_backward_compat_no_workspace_field` stays (the DB genuinely holds pre-workspace rows); its fixture drops the key. |
+| P7 | `planner_ms`/`dispatch_ms` schema-stability zeros, `mean_planner_ms`, `dispatch_decisions.planner_requested_mode` | event `events.rs:250-260`; writers `handlers.rs:155-157,365-395`, `event_bridge.rs:330-341`; repo+tables `repository/orchestrator_latency/mod.rs:13,36-63,141-161,183` (022), `repository/dispatch_decision/mod.rs:18,38-48,68,103` (024); `dispatcher/mod.rs:223`; GUI `lib/api/types.ts:432,446,462` | **DELETE end-to-end** — they exist only "for schema stability" (`handlers.rs:156-157`, verbatim) and **no GUI view renders them** (verified: only `types.ts`/`orchestrator.ts`/`useOrchestrator.ts` carry the types). **Migration 035** (`035_drop_planner_telemetry.sql`): `DROP COLUMN` ×3 (pre-check §0(a); else 024-style rebuild). Retired mode *strings* in historical rows are data — untouched. Tests: `orchestrator_latency/tests.rs:55-85`, `dispatch_decision/tests.rs:23-77`. |
+| P8 | Legacy `assignments`/`assigned_agents` task payload | `routes/tasks_types.rs:35-36`, `routes/tasks.rs:8,32,173,513-531`; CLI reader `commands/tasks.rs:115-133` | **DELETE-AFTER Phase 4** — `subagent_span` + `GET /v1/tasks/{id}/timeline` replace the data. When the timeline lands, the `assignments` key, its serde rename, the GUI/CLI parsers, and `test_task_response_serializes_agent_runs_under_assignments_key` are deleted in the same PR; GAP-20's run counts re-point at `subagent_span`. A Phase 4 **exit criterion**, not a deferred maybe. |
+| P9 | `DagNodeStatus`/`DagNodeStarted` double emission | producers `runner/lead_agent/tools.rs:232-240`; GUI `components/work/run-events.ts:63-71` | **DELETE-AFTER the GUI switches to `SubagentSpan`** (Phase 8). No soak ceremony. |
+| P10 | Backward-compat re-exports in the LLM crate root | `crates/openalpaca_llm/src/lib.rs:12-23` (the TODO says exactly this) | **DELETE** — fix consumers to canonical `routing::…` paths; the compiler enumerates them. |
+| P11 | `resolve_local_user_id`'s legacy `gui_user:gui` adoption | `bootstrap/migration.rs:40-60` | **DELETE the fallback branch** — `identity.local_user_id` is persisted on the only real install; fresh DBs mint a UUID. Keep the persisted-id read. |
+| P12 | `migrate_preference_summaries` (one-time summary migration that runs every boot) | `bootstrap/migration.rs:80-…`, called `main.rs:190` | **DELETE** — completed one-time data migration; matches zero rows every boot. |
+| P13 | Legacy second-precision persona-backup filename parsing | prune logic, `tools/builtins/helpers/tests.rs:125-145` | **DELETE the legacy parse arm** — old-format backups are simply never pruned (kept forever); harmless, note in commit. XS. |
+| P14 | CLI key-removal "exactly one key (legacy)" fallback | `apps/openalpaca/src/commands/ai_config.rs:194-199` | **DELETE** — every key on the machine post-dates `{provider}_cli` naming. XS. |
+| P15 | Dual timestamp formats in `event_log` | `repository/event_log/mod.rs:96-105` | **Optional one-time normalising `UPDATE` in migration 035.** Id-based pagination (Phase 4) stays regardless — the right key even with clean timestamps. |
+| P16 | `secret_encrypted` "legacy encrypted (read-only)" tier | `router_builder.rs:151-160`, `config/llm_config/migration.rs:8-40` | **KEEP** — despite the comment it is the functional no-keychain fallback (the CI dbus dance exists precisely because keychains are environmental), and CLAUDE.md documents the three-tier resolution as a feature. Relabel the comment; delete nothing. |
+| P17 | `AgentConfigFile` TOML shape + "legacy instance" registration | `agent/config_service.rs:160-247`, `agent/config/mod.rs:14-66`, `routes/agents.rs:496,539`, `routes/agents_types.rs:28-40` | **OWN-TASK** — the "legacy" shape is the *live* HTTP contract: the GUI posts `AgentConfigFile` JSON today (`lib/api/agents.ts:31-48,93-97`) and the idle-instance registration backs `/v1/agents`. Collapsing template-vs-instance duality is an API redesign; flagged, not swept into this purge. |
+| P18 | CLI structured-delegation fallback; retired routing-mode strings in GUI label maps | `apps/openalpaca/src/chat_stream/mod.rs:288-293`; GUI grep | **NOTHING TO PURGE — verified.** The CLI parses only the structured `delegation` object; no GUI label map carries the retired mode strings (only the P7 type fields). Recorded so nobody hunts again. |
+| P19 | `/v1/conversations` routes | `router.rs:144-150` | **DELETE-AFTER Phase 7** — deleted, not aliased, in the sessions PR; `/v1/sessions` replaces them (§5.7) and rev 1's GAP-21 is built **once**, on sessions. GUI/CLI callers updated same PR; nothing outside this repo calls them. |
+| P20 | `GET /v1/events/history` bare-array compat | rev 1 Phase 3 spec (never built) | **NEVER BUILT — revises rev 1.** Always return the envelope; update the one CLI call site (`apps/openalpaca/src/commands/tasks.rs:310`) in the same PR. The dual-shape route and its risk row are gone. |
 
-Two further calls are **made** here rather than surfaced, because the evidence is one-sided:
+**Explicitly not legacy — do not clear:** `conversation_map` (live platform-chat-id → lane mapping used by every connector), `lane_key` on `conversation_messages` (still the routing address and the index the prompt window reads — `context_builder.rs:30-38`), and `event_log` (system audit, §5.6).
 
-- **`daily_cost_usd` comes from the DB, not the cost tracker.** The brief says "`await` the tracker" (GAP-08a). `CostTracker::total_cost()` is never reset at local midnight, so on a long-running daemon it means *since boot*. Shipping that would put a number in Settings that disagrees with what the GUI already computes correctly (`hooks/useUsage.ts:33-42`). Serve `query_daily_usage` for today.
-- **`calls_7d` is renamed `messages_7d`** (GAP-17). The only measurable number is inbound user messages grouped by `conversation_messages.source`. Shipping a message count under a call-count name is a fabrication; the rename is a one-line client edit.
+**Rev 1 hedges the move dissolves:** `storage_path` staying an absolute resolved path survives — but as a *convenience with a boot-time rebase* (§2.2.6), no longer a compat constraint; `asset_storage_path` "unchanged" is reversed by D2; rev 1 §1.11's "no files move" is reversed wholesale (§4.10).
+
+**Documentation sweep** (same PR as the mover): `docs/QuickStart_Manual.md:48`, `docs/GUI_Manual.md:41-42`, `docs/Installation_Manual.md:111-113,145,167,192`, `docs/Daemon_Manual.md:42-45`, `docs/CLI_Manual.md:47,96,222`, `apps/openalpaca-gui/README.md:126-127`, `apps/openalpaca-gui/API_MAP.md:37,777-778,932`, `scripts/release/install.sh:135`, `scripts/release/uninstall.sh:43`, CLAUDE.md's "Data directory" paragraph — all name `~/Library/Application Support/OpenAlpaca`. Pleasant side effect: the doc bug at `apps/openalpaca/src/commands/plugin.rs:225,230` (claiming `~/.openalpaca/plugins/.config/`) becomes *almost true* — fix only the spurious `.config` suffix.
 
 ---
 
-## 1. The artifact store (the spine)
+## 4. The artifact store
 
-### 1.1 Layout
+### 4.1 Layout
+
+The store trees are §1.1/§1.2. The artifact-specific shape, unchanged from rev 1:
 
 ```
-<project>/.openalpaca/                      ← when a project root resolves
-  README.md                                 ← written once; explains the directory
-  .gitignore                                ← contains exactly ".versions/"
-  artifacts/
-    2026-09-01-connector-audit-3f2a1b7c/    ← <YYYY-MM-DD>-<task-slug≤48>-<taskid8>
-      01-connector-audit-findings.md        ← HEAD, currently v2
-      02-migration-plan.md                  ← HEAD, v1
-      03-screenshot-settings-drawer.png
-      .versions/
-        01-connector-audit-findings/
-          v1.md                             ← SUPERSEDED only; head is never duplicated
-    loose/2026-09-01/
-      01-weekly-report.html                 ← produced outside any task (main loop)
-
-~/.openalpaca/                              ← fallback when no project resolves (D4)
-  artifacts/  README.md
-
-~/Library/Application Support/OpenAlpaca/   ← UNCHANGED (D1)
-  openalpaca.db  discovery.json  openalpacad.lock  assets/  plugins/  config seeds
+artifacts/
+  2026-09-01-connector-audit-3f2a1b7c/    ← <YYYY-MM-DD>-<task-slug≤48>-<taskid8>
+    01-connector-audit-findings.md        ← HEAD, currently v2
+    02-migration-plan.md                  ← HEAD, v1
+    03-screenshot-settings-drawer.png
+    .versions/
+      01-connector-audit-findings/
+        v1.md                             ← SUPERSEDED only; head is never duplicated
+  loose/2026-09-01/
+    01-weekly-report.html                 ← produced outside any task (main loop)
 ```
 
-**The daemon CWD is never used to place an artifact.** Under a Tauri sidecar or a LaunchAgent it is arbitrary; landing files there is worse than the status quo. CWD-derived workspace ids remain fine for memory scoping (existing behaviour at `orchestrator/handlers.rs:90-97`) but must not decide where bytes land.
+**The daemon CWD is never used to place an artifact.** Under a Tauri sidecar or a LaunchAgent it is arbitrary. CWD-derived workspace ids remain fine for memory scoping (existing behaviour at `orchestrator/handlers.rs:90-97`) but must not decide where bytes land. The no-project fallback is the **home root's own content dirs** (single root — same shape, same code path).
 
-### 1.2 Path grammar
+### 4.2 Path grammar
 
 ```
 run_dir  := <YYYY-MM-DD> "-" slug(task_title, 48) "-" taskid[0..8]      ≤ 68 bytes
@@ -68,55 +297,33 @@ ext      := [a-z0-9]{1,8}
 version  := <run_dir>/.versions/<stem>/v<N>.<ext>
 ```
 
-- **Date first** so `ls` sorts chronologically. **UUID8 suffix** so a run dir is collision-free and greppable from a task id (task ids are UUIDv4, `dispatcher/lead_agent.rs:32`).
-- **`NN-` sequence prefix** assigned at first creation and retained across versions, so `ls` shows production order and a re-write does not reshuffle. Two digits, widening to three past 99.
-- **Head lives at the clean path.** This is what makes `open`, Reveal in Finder, `grep` and `git diff` work — and it lets `POST /v1/files/{id}/open` skip the `$TMPDIR` staging copy (`routes/files_types.rs:92-118`), which exists *only* because content-addressed paths have no extension.
-- **Superseded versions go to `.versions/<stem>/vN.<ext>`.** Rejected: `name.v1.md` siblings (clutters the directory the human browses); an all-versions subdir including head (doubles bytes, makes "which file do I open" ambiguous).
-- **Slugification:** NFKD → drop combining marks → transliterate to ASCII → **lowercase** (required, not cosmetic: APFS is case-insensitive, so `Findings.md` and `findings.md` are the same file) → collapse non-`[a-z0-9]` runs to a single `-` → trim → truncate to 60 bytes on a char boundary → empty ⇒ `artifact` → Windows reserved device names (`con`, `prn`, `aux`, `nul`, `com1..9`, `lpt1..9`) get a `_` prefix.
-- **Traversal safety falls out of the grammar** — `/`, `\`, `.`, `..`, NUL and control chars are all removed, so a slug cannot contain a separator. Belt and braces: confine the final path to the store root with the canonicalize-the-parent technique already used at `tools/builtins/helpers/mod.rs:65-117` (it handles the not-yet-existing-file case correctly).
-- **Write protocol:** write `.<stem>.tmp` → `fsync` → rename current head into `.versions/<stem>/v<N-1>.<ext>` → rename tmp to head. Rename-based, so a crash leaves either the old head or the new one, never a truncated file.
+- **Date first** so `ls` sorts chronologically; **UUID8 suffix** so a run dir is collision-free and greppable from a task id (task ids are UUIDv4, `dispatcher/lead_agent.rs:32`).
+- **`NN-` sequence prefix** assigned at first creation, retained across versions, so `ls` shows production order. Two digits, widening to three past 99.
+- **Head lives at the clean path** — what makes `open`, Reveal in Finder, `grep` and `git diff` work, and lets `POST /v1/files/{id}/open` skip its `$TMPDIR` staging copy (`routes/files_types.rs:92-118`), which exists only because content-addressed paths have no extension.
+- **Slugification:** NFKD → drop combining marks → transliterate to ASCII → **lowercase** (required: APFS is case-insensitive) → collapse non-`[a-z0-9]` runs to `-` → trim → truncate to 60 bytes on a char boundary → empty ⇒ `artifact` → Windows reserved device names (`con`, `prn`, `aux`, `nul`, `com1..9`, `lpt1..9`) get a `_` prefix.
+- **Traversal safety falls out of the grammar** — separators cannot survive slugification. Belt and braces: confine the final path to the store root with the canonicalize-the-parent technique at `tools/builtins/helpers/mod.rs:65-117`.
+- **Write protocol:** write `.<stem>.tmp` → `fsync` → rename current head into `.versions/<stem>/v<N-1>.<ext>` → rename tmp to head. A crash leaves either the old head or the new one, never a truncated file.
 
-**`.gitignore` decision, stated plainly: do not ignore `.openalpaca/` wholesale.** Ignore only `.versions/`. A produced `findings.md` is a document; versioning it in git is strictly better than versioning it in OpenAlpaca's private history, and hiding it from the tool the user already has defeats the directive.
+**Upload grammar (D2):** `uploads/<YYYY-MM-DD>/NN-<slug(original_name,60)>.<ext>` — same slugifier, same confinement, same write protocol. Dedup is the existing owner-scoped sha256 *query*, not the path.
 
-**Marker precedence** (`memory/workspace.rs:43-56`) gains `.openalpaca` ahead of `.alpaca` and `.git`. Safe — no install has one yet. **Deliberate side effect to document:** writing the first artifact makes that directory a workspace root for memory scoping. This is desirable — the artifact write is exactly the moment the directory becomes an OpenAlpaca project — but it must be intentional, not incidental. (Drop the redundant `.exists() || .is_dir()` on the `.alpaca` arm while in there.)
+**Marker precedence** (`memory/workspace.rs:43-56`): `.openalpaca` first, `.git` second, `.alpaca` **deleted** (P3). Deliberate side effect, documented: writing the first artifact makes that directory a workspace root for memory scoping — desirable (the artifact write is exactly the moment the directory becomes an OpenAlpaca project), and intentional.
 
-### 1.3 New surface in `crates/openalpaca_storage/src/paths.rs`
+### 4.3 The DB holds addresses
 
-```rust
-pub enum ArtifactScope { Project(PathBuf), Home }
+Principle: **`project_root` + `rel_path` are the address of record; `storage_path` stays the resolved absolute path** so `routes/files.rs:315`, `files_types.rs:142-145` and `background.rs:339` need zero changes — kept valid across the root move by `rebase_asset_paths` (§2.2.6).
 
-pub fn home_store_dir() -> anyhow::Result<PathBuf>;              // ~/.openalpaca, honours OPENALPACA_HOME_STORE
-pub fn project_store_dir(project_root: &Path) -> PathBuf;        // pure; no I/O
-pub fn artifacts_dir(scope: &ArtifactScope) -> anyhow::Result<PathBuf>;  // creates + seeds README/.gitignore
-pub fn run_dir(scope: &ArtifactScope, created: DateTime<Utc>, task_title: &str, task_id: &str) -> anyhow::Result<PathBuf>;
-pub fn loose_dir(scope: &ArtifactScope, created: DateTime<Utc>) -> anyhow::Result<PathBuf>;
-pub fn artifact_file_name(seq: u32, title: &str, ext: &str) -> String;
-pub fn slugify(input: &str, max_bytes: usize) -> String;         // pure, total, never empty
-pub fn version_file_path(head_path: &Path, version: u32) -> anyhow::Result<PathBuf>;
-pub fn artifact_extension(kind: ArtifactKind, mime: Option<&str>, name_hint: Option<&str>) -> String;
-pub fn confine_to_root(root: &Path, candidate: &Path) -> anyhow::Result<PathBuf>;
-```
-
-`asset_storage_path` (`paths.rs:72-81`) is **unchanged** — per D2 uploads stay content-addressed. Its doc comment gains a line saying it is the *upload* path.
-
-Extension precedence: (1) an extension already on the model-supplied name if allow-listed; (2) mapped from `kind`; (3) mapped from `mime_type`; (4) `.bin`. `markdown→md`, `plan→md`, `terminal→log`, `table→csv`, `html→html`, `image→` from mime, `code`/`binary`→ from the name else `txt`/`bin`. `ArtifactKind`'s `serde(rename_all="snake_case")` spellings must match `unbacked.ts:28-38` exactly.
-
-### 1.4 The DB holds addresses
-
-Principle: **`project_root` + `rel_path` are the address of record; `storage_path` stays the resolved absolute path** so `routes/files.rs:315`, `files_types.rs:142-145` and `background.rs:339` need zero changes.
-
-**One table, not two.** `file_assets` is extended; there is **no** parallel `artifacts` table. This is the first cross-lens conflict and it is resolved in favour of extension:
+**One table, not two.** `file_assets` is extended; there is **no** parallel `artifacts` table:
 
 - One content route, one id space, one client `Artifact` type — no client-side merge of uploads and produced files in the Library.
-- It unblocks GAP-23 for free: `conversation_message_attachments.file_id REFERENCES file_assets(id)` (`migrations/028_message_attachments.sql`) can carry artifact links via its existing `role TEXT NOT NULL DEFAULT 'attachment'` column. A separate `artifacts` table would have had that FK block reuse and force a sibling link table.
+- It unblocks GAP-23 for free: `conversation_message_attachments.file_id REFERENCES file_assets(id)` (`migrations/028_message_attachments.sql`) carries artifact links via its existing `role TEXT NOT NULL DEFAULT 'attachment'` column.
 - `origin` (`'upload' | 'produced'`) selects the placement strategy; everything else is shared.
 
-**Note the real blob-in-DB offender is not `file_assets`.** It is `TaskWorkspace`: `WorkspaceEntry { content: String, .. }` capped at `max_entry_size: 32768` × `max_entries: 50` (`orchestrator/task_state/workspace.rs:20-47`), persisted as one `state_json` TEXT column (`migrations/016_task_state.sql:1`) that is rewritten under optimistic locking on **every** workspace mutation. Up to 1.6 MB per task. Fixing that (§1.6) is the directive's core win.
+**The real blob-in-DB offender is `TaskWorkspace`**: `WorkspaceEntry { content: String, .. }` capped at 32 768 × 50 entries (`orchestrator/task_state/workspace.rs:20-47`), persisted as one `state_json` TEXT column rewritten under optimistic locking on every mutation — up to 1.6 MB per task. §4.6's spill is the directive's core win. (§5 deliberately adds nothing to `state_json`.)
 
-### 1.5 Migration 035 — `035_artifact_store.sql`
+### 4.4 Migration 036 — `036_artifact_store.sql`
 
 ```sql
--- Migration 035: project-scoped artifact store.
+-- Migration 036: project-scoped artifact store.
 -- Extends file_assets into the unified artifact record; adds version history.
 
 -- Ownership and attribution (GAP-04)
@@ -128,7 +335,7 @@ ALTER TABLE file_assets ADD COLUMN agent_template_id TEXT;   -- "review_agent"
 
 -- The address (the directive)
 ALTER TABLE file_assets ADD COLUMN project_root TEXT;        -- NULL => home store
-ALTER TABLE file_assets ADD COLUMN rel_path TEXT;            -- HEAD path relative to <store>/artifacts
+ALTER TABLE file_assets ADD COLUMN rel_path TEXT;            -- HEAD path relative to <store>/artifacts (or /uploads)
 
 -- Versions (GAP-05)
 ALTER TABLE file_assets ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
@@ -160,26 +367,24 @@ CREATE TABLE IF NOT EXISTS artifact_versions (
 );
 CREATE INDEX IF NOT EXISTS idx_artifact_versions_artifact ON artifact_versions(artifact_id, version DESC);
 
--- The project a run belonged to. Resolves Lens B's open Q2; makes `rerun` faithful
--- and lets the Library filter by project without a join through file_assets.
+-- The project a run belonged to; makes `rerun` faithful and lets the Library
+-- filter by project without a join through file_assets.
 ALTER TABLE task ADD COLUMN workspace_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_task_workspace ON task(workspace_id);
 
-UPDATE schema_version SET version = 35 WHERE version = 34;
+UPDATE schema_version SET version = 36 WHERE version = 35;
 ```
 
-Registered as `Migration { version: 35, name: "artifact_store", sql: include_str!("035_artifact_store.sql") }`.
+SQLite legality, checked: `ADD COLUMN` with `REFERENCES` is legal only with a NULL default (which `task_id` has; `foreign_keys = ON` at `database/mod.rs:62` enforces it); `NOT NULL DEFAULT` is legal for the rest; partial unique indexes need ≥ 3.8.0.
 
-SQLite legality, checked: `ADD COLUMN` with `REFERENCES` is legal **only with a NULL default**, which `task_id` has — and `foreign_keys = ON` (`database/mod.rs:62`), so it is enforced. `ADD COLUMN … NOT NULL DEFAULT` is legal for the non-NULL columns. Partial unique indexes need SQLite ≥ 3.8.0.
+### 4.5 Two mandatory same-PR bug fixes
 
-### 1.6 Two mandatory same-PR bug fixes
-
-Migration 035 creates two live defects the moment it lands. **Both must be in the same commit as the migration.**
+Migration 036 creates two live defects the moment it lands. **Both must be in the same commit as the migration.**
 
 ```sql
 -- repository/file_asset/mod.rs:95-112 — orphan sweep (background.rs:308-357, every 6 h, 24 h grace).
--- WITHOUT THIS the sweep deletes every produced artifact AND its file, because a
--- produced artifact is never linked to a conversation message.
+-- WITHOUT THIS the sweep deletes every produced artifact AND its file — a produced
+-- artifact is never linked to a conversation message.
    WHERE a.id IS NULL
      AND f.origin = 'upload'      -- ← ADD
      AND f.pinned = 0             -- ← ADD
@@ -193,45 +398,47 @@ Migration 035 creates two live defects the moment it lands. **Both must be in th
 SELECT COALESCE(SUM(size_bytes), 0) FROM file_assets WHERE origin = 'upload'
 ```
 
-Produced artifacts are **never** garbage-collected. They live in the user's project and are the user's files. If retention is ever wanted it goes behind an explicit config key, defaulted off.
+Produced artifacts are **never** garbage-collected — they are the user's files. If retention is ever wanted it goes behind an explicit config key, defaulted off. The sweep's file-deletion path (`background.rs:341`) deletes under `state/assets/` (interim) or `uploads/` (post re-home) through the same `storage_path` mechanism — no extra change.
 
-### 1.7 The producer — where artifacts actually come from
+### 4.6 The producer
 
-Today **nothing** creates a `FileAsset` for agent output; the only two producers are the HTTP upload route (`routes/files.rs:220-247`) and the connector attachment path. Two additions:
+Today nothing creates a `FileAsset` for agent output; the only producers are the upload route (`routes/files.rs:220-247`) and the connector attachment path. Two additions:
 
-1. **`artifact_write(name, kind, content, note?, summary?, metadata?) -> { artifact_id, path, version }`** — a new builtin next to `file_write`, capability `artifact_write`. **Critical detail:** it must resolve its scope from `ToolContext.workspace_id`, **not** from the startup-captured `workspace_root` that `file_write` uses (`services/tools.rs:37-39` → `tools/builtins/mod.rs:249-251`). This is the first per-request file writer in the codebase. Attribution comes from `ToolContext.task_id` / `agent_id`.
+1. **`artifact_write(name, kind, content, note?, summary?, metadata?) -> { artifact_id, path, version }`** — a builtin next to `file_write`, capability `artifact_write`. **Critical:** it resolves its scope from `ToolContext.workspace_id` via `StoreScope`/`content_dir`, **not** the startup-captured `workspace_root` that `file_write` uses (`services/tools.rs:37-39` → `tools/builtins/mod.rs:249-251`) — the first per-request file writer in the codebase. Attribution from `ToolContext.task_id`/`agent_id`.
 2. **`workspace_write(entry_type="artifact")` spills.** Content goes to the store; the entry keeps `file_asset_id` plus a 512-char preview for prompt assembly (`format_for_prompt` truncates at 2000 anyway — `task_state/workspace.rs:157`).
 
-The payoff chain: `ArtifactPointer.file_asset_id` (`task_state/outcome.rs:148-161`) resolves for the first time → `task.artifact_count` becomes meaningful → `GET /v1/tasks/{id}` gains real artifact references → **and `deliver_artifacts` (`apps/openalpacad/src/notification/artifacts.rs:55-110`) starts working.** That function already walks `outcome.artifacts`, resolves each `file_asset_id` and sends the file to file-capable connector channels; it silently `continue`s today because the id is always `None`. Already-written, currently-dead feature, switched on for free.
+Payoff chain: `ArtifactPointer.file_asset_id` (`task_state/outcome.rs:148-161`) resolves for the first time → `task.artifact_count` becomes meaningful → `GET /v1/tasks/{id}` gains real artifact references → **`deliver_artifacts` (`apps/openalpacad/src/notification/artifacts.rs:55-110`) starts working** — already-written, currently-dead feature (it silently `continue`s because the id is always `None`), switched on for free.
 
-New caps in `[execution.artifacts]`: `max_artifact_bytes` default **10 MB** (matching `file_write`'s `MAX_FILE_WRITE_SIZE` at `tools/builtins/file_ops.rs:102-110`, **not** the 50 MB upload cap — this content comes out of a model's context window), `max_versions_per_artifact` default 20 (prune the oldest `.versions/` file and its row; head is never pruned).
+New caps in `[execution.artifacts]`: `max_artifact_bytes` default **10 MB** (matching `file_write`'s cap at `tools/builtins/file_ops.rs:102-110`, not the 50 MB upload cap — this content comes out of a context window), `max_versions_per_artifact` default 20 (prune the oldest `.versions/` file + row; head never pruned).
 
-### 1.8 The prerequisite nobody wrote down: where does the project come from?
+### 4.7 Where the project comes from (prerequisite)
 
-**A project-scoped store needs a project, and no client sends one today.** `POST /v1/chat` reads `x-workspace-path` (`routes/chat.rs:65-68`) and `POST /v1/command` reads a `workspace_path` field (`routes/command.rs:78-80`), but grepping `apps/openalpaca-gui/src` and `apps/openalpaca/src` finds only the *definition* at `lib/chat-stream.ts:349-366` — **no call site sets it**, and the CLI never sends one. So `handlers.rs:90-97` always takes the else branch.
+**No client sends a workspace today.** `POST /v1/chat` reads `x-workspace-path` (`routes/chat.rs:65-68`) and `POST /v1/command` reads `workspace_path` (`routes/command.rs:78-80`), but no call site sets either (grep of `apps/openalpaca-gui/src` and `apps/openalpaca/src`: only the definition at `lib/chat-stream.ts:349-366`). So `handlers.rs:90-97` always takes the else branch. Ship, in order:
 
-Phase 2 must therefore ship, in this order:
+1. Home-root fallback for placement; never the daemon CWD. *(store-side, required)*
+2. **The GUI sends `x-workspace-path`** on `POST /v1/chat` when a project is chosen — plumbing exists, only the caller is missing. The CLI sends `workspace_path` on `/v1/command` (Phase 7 CLI work completes this for both clients).
+3. `task.workspace_id` persisted at dispatch (036) so a run remembers its project across restart and rerun.
+4. `GET /v1/status` reports `home_root`, `state_dir`, `db_path`, and the resolved project dir.
+5. **(D2)** `POST /v1/files/upload` reads `x-workspace-path` like `/v1/chat` does (the route currently reads no header — `routes/files.rs:24-27`) and writes via `upload_dir(scope, …)`; connector uploads have no project signal and take `StoreScope::Home`. **Collapse the connector's duplicated sha/dedup write path (`connectors/src/common/mod.rs:213-262`) into the same writer first** — it is two writers today, and D2 makes that a bug factory.
 
-1. `home_store_dir()` fallback, and never the daemon CWD for placement. *(store-side, required)*
-2. **The GUI sends `x-workspace-path`** on `POST /v1/chat` when the user has chosen a project. The plumbing exists; only a caller is missing.
-3. `task.workspace_id` persisted at dispatch (migration 035) so a run remembers its project across a restart and a rerun.
-4. `GET /v1/status` reports the resolved project dir alongside `data_dir` / `db_path`.
+A fuller project concept (`GET /v1/projects`, activation) stays **out of scope** (§10). Whoever adds it must reconcile with `SkillCatalog::scan_multi_scope`/`SkillScope` (`orchestrator/skill/catalog/mod.rs:154`) — and point project skills at `.openalpaca/skills/` (§1.2), not a second resolution.
 
-A fuller project concept (`GET /v1/projects` over `DISTINCT project_root`, `POST /v1/projects/activate`) is **explicitly out of scope** (§9) — items 1–4 are sufficient for the Library. Whoever adds it later must reconcile with `SkillCatalog::scan_multi_scope(user_dir, project_dir)` and `SkillScope` (`orchestrator/skill/catalog/mod.rs:154`), which already implement a project-vs-user scoping mechanism, rather than inventing a second path resolution.
-
-### 1.9 Integrity and lifecycle
+### 4.8 Integrity and lifecycle
 
 | Concern | Design |
 |---|---|
-| File missing | `resolve_content` stats before serving; on absence sets `missing_since` and returns **410** `{error:{code:"ARTIFACT_GONE",message,path}}`. List rows carry `missing:true` so the Library strikes them out instead of 404-ing a whole view. |
+| File missing | `resolve_content` stats before serving; on absence sets `missing_since`, returns **410** `{error:{code:"ARTIFACT_GONE",…}}`. List rows carry `missing:true`; `?include_missing=` (default `false`). |
 | Project moved | `rel_path` + `project_root` make re-basing one statement: `ArtifactStore::rebase_project(old,new)`. |
-| Project deleted | Rows survive as `missing`. No auto-deletion — deleting a project is not a request to lose the index of what was made. `?include_missing=` (default `false`) keeps the Library clean. |
-| User edits a file by hand | Explicitly supported; it is the point. `sha256`/`size_bytes` go stale; the next `put` (or `verify`) detects the mismatch and records the edit as a version with `author_agent_id = NULL`. **Phase 6** — it is what makes "committable artifacts" honest. |
-| Concurrent writes | Two agents writing the same name in one run serialize on `ArtifactStore::put`: version rotate inside one `with_connection` transaction, tmp+rename for the bytes. Last writer is head; both survive in `.versions/`. |
-| Size accounting | Two numbers, never one: `upload_bytes` (quota-bearing) and `produced_bytes` (informational, per project). Both on `GET /v1/status`. |
-| Two daemons on one project | Not designed for. The unique index is per-DB, so two daemons over a shared volume each hold half the index. A singleton lock already prevents two per machine (`paths.rs:57-59`). Documented limitation. |
+| Home root moved | Impossible by construction — the home root *is* the address baseline (`project_root = NULL`); `OPENALPACA_HOME_STORE` changes are a config event, not data. |
+| Project deleted | Rows survive as `missing`. No auto-deletion. |
+| User edits a file by hand | Explicitly supported — the point. `sha256`/`size_bytes` go stale; next `put` (or `verify`) records the edit as a version with `author_agent_id = NULL` (Phase 8). |
+| Concurrent writes | Serialize on `ArtifactStore::put`: version rotate inside one `with_connection` transaction, tmp+rename for the bytes. Last writer is head; both survive in `.versions/`. |
+| Size accounting | Two numbers, never one: `upload_bytes` (quota-bearing regardless of placement) and `produced_bytes` (informational, per project). Both on `GET /v1/status`. |
+| Two daemons on one project | Not designed for; the unique index is per-DB. The singleton lock prevents two per machine. Documented limitation. |
 
-### 1.10 HTTP surface
+`ArtifactStore` (in `crates/openalpaca_storage/src/artifacts/mod.rs`) is **the one writer** for produced rows: `put / get / list / resolve_content / versions / diff / set_pinned / rebase_project / verify` (signatures: rev 1 §3.4, unchanged). `FileAssetRepository` keeps owning uploads with `origin` defaulted; the two coexist on one table.
+
+### 4.9 HTTP surface
 
 ```http
 GET  /v1/artifacts?task_id=&kind=&origin=&project_root=&pinned=&q=&include_missing=&limit=&offset=
@@ -245,322 +452,423 @@ PUT  /v1/artifacts/{id}/pin  {"pinned":true}               200 { "id", "pinned" 
 GET  /v1/files/{id}/content?token=<bearer>                 ← same ?token= change on the existing route
 ```
 
-`Artifact` is a **superset** of `unbacked.ts:39-56`, so the client type compiles unchanged. The additive fields are `origin`, `pinned`, `missing`, and — the payoff of the directive — **`path`, `project_root`, `rel_path`**:
+`Artifact` is a **superset** of `unbacked.ts:39-56` (client type compiles unchanged); additive fields `origin`, `pinned`, `missing`, and the directive's payoff — `path`, `project_root`, `rel_path`. `ArtifactVersion`/`ArtifactDiff` match `unbacked.ts:62-77` field-for-field (route coalesces `note: NULL → ""`). Diffs are text-only: `kind ∈ {image, binary}` → 409 `NOT_DIFFABLE`. `added_lines`/`removed_lines` computed at **write** time and stored. `ArtifactKind`'s snake_case spellings match `unbacked.ts:28-38` exactly; extension precedence: allow-listed extension on the model-supplied name → `kind` map → `mime_type` map → `.bin`.
+
+**New workspace dependency: `similar`** (MIT, pure Rust, no build script) in `openalpaca_storage` — the workspace has no diff crate. Alternative: ~120-line hand-rolled LCS unified diff.
+
+**New event** `ServerEvent::ArtifactWritten { artifact_id, task_id, agent_id, name, kind, version, path, ts, instance_id }` — carrying `ts`/`instance_id` from the start. Feeds the chat inline artifact card, the per-run event log (GAP-10), and the session log's `artifact_written` record (§5.5).
+
+**GAP-11 mechanics:** move **only** the content routes (`/v1/files/{id}/content`, `/v1/artifacts/{id}/content`) out of `protected_routes` into a third merged sub-router beside `chat_sse` (`router.rs:268-280`), validating `?token=` inline exactly as `chat_stream_handler` does (`routes/chat.rs:104-113`). Authorization is not lost — `routes/files.rs:287-313` already 404s on `owner_id` mismatch; only authentication moves. Accept **both** header and query so `lib/api/files.ts:23-30` is unaffected. `/v1/files/{id}` (metadata) and `/open` stay header-authenticated.
+
+### 4.10 What changes on disk (honest version of rev 1 §1.11)
+
+1. Existing `file_assets` rows take column defaults (`origin='upload'`, `rel_path=NULL`, …); `storage_path` values are **rewritten once** by `rebase_asset_paths` after the root move, then again per-row by the Phase 8 uploads re-home.
+2. **Files move — once, at boot, atomically, resumably** (§2.2). Rollback is not automated: the old root's layout is reconstructible by reversing the entry ledger, but pre-release + single user, nobody builds that.
+3. `/v1/files/*` is unchanged in shape; `/v1/files/{id}/content` gains `?token=`.
+4. `/v1/artifacts` lists uploads too, `kind` inferred from `mime_type` at read time for legacy rows. No backfill.
+5. **Rollback to schema 35** loses the columns and `artifact_versions`; produced artifact *files* survive on disk as a folder of readably-named documents. The store degrades to "a folder", not to nothing.
+
+---
+
+## 5. Session persistence — the new pillar
+
+Full evidence and rejected alternatives: appendix S. This section is the executable design.
+
+### 5.1 The concept
+
+> **A session is one conversation transcript: an epoch of a lane, bound to at most one workspace, with a lifecycle (`active` → `archived`) and a durable event log.**
+
+The existing `conversations` table already *is* the session table minus three defects: a column-level `UNIQUE(lane_key)` (one conversation per lane, forever — `011_unified_conversations.sql:3-12`), no workspace column, no lifecycle. It is **rebuilt as `session`** (migration 039). Rejected: session = workflow run (that object is `task`); session = client connection (connector lanes are connectionless); a new table beside `conversations` (two overlapping transcript containers). Mapping to the Claude Code model the sketch pointed at: session ↔ `session` row; project ↔ `workspace_id` (= canonical root path, already the memory-scoping key); transcript ↔ `conversation_messages` (now session-keyed) + the session's JSONL for loop detail; run-inside-a-session ↔ `task` row + `subagent_span`; `--resume` ↔ `POST /v1/sessions/{id}/activate` + pickers.
+
+**Runtime stays lane-keyed; persistence becomes session-keyed.** `SharedContext` (steering inboxes, cancellation tokens, `active_workflows_by_lane`, followup claiming) does not change; the gateway resolves `lane_key → active session id` once per turn at persist time. This keeps the change surface out of the loop's hot path and out of the steering rail entirely.
+
+**Lifecycle.** Created explicitly (`POST /v1/sessions`, GUI "New chat") or implicitly on first message to a lane with no active session (`get_or_create_active_session`, evolving `get_or_create_conversation` — `repository/conversation/mod.rs:146`). Creation archives the lane's previously-active session; a **partial unique index makes one-active-per-lane a DB invariant**, not a convention. Workspace binding: set from the first `x-workspace-path` seen, `PATCH`-updatable; one workspace per session — changing project = new session; `NULL` = none. Archived sessions are fully readable and re-activatable. Connector lanes: one perpetual active session (N1; knob reserved, off).
+
+### 5.2 Migration 039 — `039_sessions.sql`
+
+```sql
+-- Migration 039: sessions. Rebuilds `conversations` as `session`
+-- (drops the column-level UNIQUE(lane_key); adds workspace + lifecycle),
+-- keys messages/tasks/followups by session, and turns tool_execution_log
+-- into the tool-call index for the session event log.
+
+CREATE TABLE session (
+    id             TEXT PRIMARY KEY,               -- UUIDv4 (same ids carried over)
+    lane_key       TEXT NOT NULL,                  -- routing address, no longer UNIQUE
+    source         TEXT NOT NULL,
+    title          TEXT DEFAULT '',
+    workspace_id   TEXT,                           -- canonical project root; NULL = none
+    status         TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','archived')),
+    message_count  INTEGER DEFAULT 0,
+    last_message_at TEXT,
+    summary        TEXT NOT NULL DEFAULT '',       -- carried from 014
+    summary_version INTEGER NOT NULL DEFAULT 0,
+    last_summarized_message_id INTEGER NOT NULL DEFAULT 0,
+    summary_updated_at TEXT,
+    ended_at       TEXT,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT INTO session (id, lane_key, source, title, workspace_id, status, message_count,
+                     last_message_at, summary, summary_version, last_summarized_message_id,
+                     summary_updated_at, created_at, updated_at)
+SELECT id, lane_key, source, title, NULL, 'active', message_count,
+       last_message_at, summary, summary_version, last_summarized_message_id,
+       summary_updated_at, created_at, updated_at
+FROM conversations;
+DROP TABLE conversations;
+
+-- The invariant: at most one active session per lane.
+CREATE UNIQUE INDEX idx_session_active_lane ON session(lane_key) WHERE status = 'active';
+CREATE INDEX idx_session_workspace ON session(workspace_id, updated_at DESC);
+CREATE INDEX idx_session_updated   ON session(updated_at DESC);
+CREATE INDEX idx_session_source    ON session(source);
+
+ALTER TABLE conversation_messages ADD COLUMN session_id TEXT;
+UPDATE conversation_messages
+   SET session_id = (SELECT s.id FROM session s WHERE s.lane_key = conversation_messages.lane_key);
+CREATE INDEX idx_conv_msg_session ON conversation_messages(session_id, id);
+
+ALTER TABLE task ADD COLUMN session_id TEXT;
+CREATE INDEX idx_task_session ON task(session_id);
+
+-- Follow-ups remember the conversation they came from (§5.3).
+ALTER TABLE lane_followups ADD COLUMN session_id TEXT;
+
+-- tool_execution_log → the tool-call index. Payloads live in the session
+-- JSONL (or its results/ spill tier); rows hold previews and the pointer.
+ALTER TABLE tool_execution_log ADD COLUMN session_id TEXT;
+ALTER TABLE tool_execution_log ADD COLUMN task_id TEXT;
+ALTER TABLE tool_execution_log ADD COLUMN log_seq INTEGER;      -- seq of the tool_call record
+ALTER TABLE tool_execution_log ADD COLUMN args_preview TEXT;    -- ≤ 2048 chars
+ALTER TABLE tool_execution_log ADD COLUMN result_preview TEXT;  -- ≤ 2048 chars
+ALTER TABLE tool_execution_log ADD COLUMN result_ref TEXT;      -- 'log:<seq>' | 'file:results/<...>'
+CREATE INDEX idx_tel_session ON tool_execution_log(session_id, id);
+CREATE INDEX idx_tel_task    ON tool_execution_log(task_id, id);
+
+UPDATE schema_version SET version = 39 WHERE version = 38;
+```
+
+Honestly stated:
+
+- **The table rebuild is the unavoidable cost of breaking `UNIQUE(lane_key)`** — SQLite cannot drop a column constraint. Since the copy happens anyway, the rename to `session` costs only the SQL strings in `ConversationRepository` (one 376-line file) plus a handful of raw references in daemon routes. **Rust type names (`Conversation`, `ConversationRepository`, `ConversationMessage`) do not rename in this PR** — churn with zero behaviour change; opportunistic or never.
+- **Struct churn is already paid**: migration 038's PR adds `#[derive(Default)]` to `ConversationMessage` (§6 Phase 6); `session_id` lands as `..Default::default()`-absorbed. **039 therefore sequences after 038.**
+- **No FKs on the new columns**; session deletion is repo-level transactional (one transaction: session row, its messages, null `task.session_id`) — same posture rev 1's GAP-21 guidance found for 011's missing cascade.
+- Backfill: one `active` session per existing lane — exactly today's semantics; nothing observable changes until a client creates a second session.
+- **No `plans` table.** Post-planner-deletion a "plan" is `task.description` (the spec) + plan-kind artifacts (`ArtifactKind::Plan` → `.md`) + `task.outcome_json` and the completion-report message (linked via 038's `task_id`). A plans table would rebuild the deleted DAG planner's storage with no producer. A first-class step checklist, if ever wanted, is a `WorkspaceEntryType` addition — reserved.
+- **No new `tool_calls`/`tool_results` tables.** The single writer already exists at the single right place — the sandboxed execute path every tool call funnels through (same sites Phase 4's GAP-10 instruments). A call has at most one result; two tables buy a join and nothing else. Payloads don't belong in rows: previews serve list views, `log_seq`/`result_ref` address the authoritative record, and GAP-18's `invocations_today` aggregation works unchanged.
+- `agents`/`memories` from the sketch: already exist (`agent`/`agent_metrics`/`agent_task_history` + 037's `subagent_span`; `memory` with workspace scoping). Nothing added.
+
+### 5.3 Follow-ups pin their session
+
+A queued follow-up is a promise to continue *that* conversation: **the follow-up turn runs in its originating session** — `spawn_followup` re-activates `lane_followups.session_id` if archived (one `UPDATE … status='active'` + archive of the usurper, inside the claim transaction). Without this, a follow-up queued in conversation A silently appends to whatever conversation B the user opened since. Pre-039 rows (`session_id IS NULL`) fall back to the lane's active session. Likewise the **workflow completion report persists into the originating session** (`task.session_id`), not the lane's currently-active one (`dispatcher/lead_agent.rs:463-494` today writes by lane).
+
+### 5.4 The JSONL event log
+
+```
+~/.openalpaca/sessions/<session-id>/     ← HOME root always, never the project dir: transcripts carry
+  log.jsonl                                persona/memory/cross-project content and must not be
+  log.<first_seq>-<last_seq>.jsonl         git-committable; the project link is session.workspace_id
+  results/                               ← spilled tool results: <seq>-<tool-slug>.<ext>
+  snapshots/                             ← reserved (Phase 8: file_write pre-edit images)
+```
+
+**Envelope** — one JSON object per line:
 
 ```json
-{ "id":"8f3c…", "name":"connector-audit-findings.md", "kind":"markdown",
-  "mime_type":"text/markdown", "size_bytes":4120,
-  "task_id":"3f2a1b7c-…", "task_title":"Audit the connector layer",
-  "agent_id":"review_agent::a1b2c3d4", "agent_template_id":"review_agent",
-  "version":2, "version_count":2, "summary":"+41 −6", "metadata":{"added":41,"removed":6},
-  "created_at":"2026-09-01T10:04:11Z", "updated_at":"2026-09-01T10:22:03Z",
-  "origin":"produced", "pinned":false, "missing":false,
-  "path":"/Users/x/dev/proj/.openalpaca/artifacts/2026-09-01-audit-3f2a1b7c/01-connector-audit-findings.md",
-  "project_root":"/Users/x/dev/proj",
-  "rel_path":"2026-09-01-audit-3f2a1b7c/01-connector-audit-findings.md" }
+{"v":1,"seq":184,"ts":"2026-09-01T10:22:03.114Z","type":"tool_result",
+ "task_id":"3f2a1b7c-…","agent":"research_agent::a1b2c3d4","data":{…}}
 ```
 
-`path` is impossible to serve from a content-addressed sha path. It is what Reveal in Finder, Copy path, and a git-aware user need.
+`seq` — per-session, strictly monotonic, gap-free, assigned by the single writer task; the resume cursor for `/events` and the target of `tool_execution_log.log_seq`. `task_id` present on workflow-interior records, absent on main-loop/chat records. `data` hard-capped at 64 KB; larger payloads spill and `data` carries `{"spill":{"rel":"results/000184-web_fetch.json","bytes":…,"sha256":"…"}}`.
 
-`ArtifactVersion` and `ArtifactDiff` match `unbacked.ts:62-77` field-for-field (the route coalesces `note: NULL → ""`, since the client types it non-null). Diffs are text-only: `kind ∈ {image, binary}` → **409 `NOT_DIFFABLE`**, and the History tab stands alone. `added_lines`/`removed_lines` are computed at **write** time and stored, so only the Diff tab touches a diff engine.
+**Event catalog** (`type` → payload essentials): `session_start`/`session_end`; `user_msg`/`assistant_msg` (msg_id, ≤512 preview, attachment file_ids, model — content stays in the DB); `delegation` (task_id, title); `round` (round #, model, tokens, stop reason, assistant text, **`tool_use` blocks verbatim** — id, name, full input JSON); `tool_call`/`tool_result` (tool_use_id, full args/result or spill ref, duration); `steering`/`steering_drained` (text/request_ids); `confirmation_req`/`confirmation_res`; `subagent_open`/`subagent_close` (span id = 037 span id, template, label, state); `compaction`; `artifact_written`; `followup_queued`; `workflow_done`; `error`. `round` carrying `tool_use` verbatim is what makes replay-resume possible — both sides of the assistant(`tool_use`)/user(`tool_result`) alternation must be reconstructible bit-for-bit.
 
-**New workspace dependency: `similar`** (MIT, pure Rust, no build script) in `openalpaca_storage`. The workspace has no diff crate at all today. Alternative if a new dep is unwelcome: a hand-rolled ~120-line LCS unified diff.
+**One source of truth per event class — nothing is written twice:**
 
-**New event** `ServerEvent::ArtifactWritten { artifact_id, task_id, agent_id, name, kind, version, path, ts, instance_id }` — carrying `ts`/`instance_id` from the start, unlike the six plugin variants of GAP-22. Feeds the chat transcript's inline artifact card, the `artifact` tag in the per-run event log (GAP-10), and the design's "`v2 written`" line.
+| Event class | Source of truth | Others carry |
+|---|---|---|
+| Chat message **content** | `conversation_messages` row | JSONL: msg_id + preview only |
+| Task current state / outcome | `task` row | JSONL narrates transitions; WS streams them |
+| Tool call/result **payloads** | **JSONL** (or `results/` spill) | `tool_execution_log`: previews + `log_seq` pointer |
+| Loop narrative (rounds, steering drains, compaction, errors) | **JSONL** | WS streams live; `event_log` grows **no** new copies |
+| Subagent span state | `subagent_span` (037) | JSONL open/close reference the span id — narrative, not state |
+| System audit (connectors, keys, wake, commands) | `event_log` | unchanged; sessions don't touch it |
+| Artifact content/addresses | filesystem + `file_assets` (§4) | JSONL references artifact_id |
 
-**GAP-11 mechanics:** move **only** the content routes (`/v1/files/{id}/content` and `/v1/artifacts/{id}/content`) out of `protected_routes` into a third merged sub-router beside `chat_sse` (`router.rs:268-280`), validating `?token=` inline exactly as `chat_stream_handler` does at `routes/chat.rs:104-113`. **Authorization is not lost** — `routes/files.rs:287-313` already checks `asset.owner_id != state.local_user_id → 404`; only authentication moves, and `?token=` restores it. Accept **both** header and query so `lib/api/files.ts:23-30` is unaffected. Keep `/v1/files/{id}` (metadata) and `/v1/files/{id}/open` header-authenticated.
+Consequence for Phase 4 (GAP-10): **unchanged and unblocked** — `event_log.task_id` ships first and keeps serving `GET /v1/events/history?task_id=` from rows that already exist. Once the JSONL is live, payload-bearing per-run detail moves to `GET /v1/sessions/{id}/events`; `event_log` stays what it structurally is — a small-detail audit table. No writer added, none removed.
 
-### 1.11 What is *not* a breaking change
+**Durability mechanics:** spill threshold 64 KB (tmp+rename, like the artifact store). Rotation at 64 MB → `log.<first>-<last>.jsonl`; readers list segments, sort by first seq, stream — most sessions never rotate. **fsync policy:** the writer task owns a `BufWriter`; flush (write syscall) after every record; `sync_data` only on `session_start`, `assistant_msg`, `workflow_done`, `confirmation_res`, `session_end`, and a 5 s timer while dirty. Crash exposure: at most the current round's tail — acceptable; the DB is WAL-synced independently and replay tolerates a truncated tail. **Never per token** — the token stream never touches the log. Torn tails: readers treat an unparseable final line as end-of-log; the writer truncates a torn tail before appending on reopen. `DELETE /v1/sessions/{id}` removes row (transactionally) then dir; a rowless leftover dir is swept opportunistically at boot. No other GC — session logs are the user's history.
 
-1. Existing `file_assets` rows take column defaults: `origin='upload'`, `kind=NULL`, `project_root=NULL`, `rel_path=NULL`, `version=1`, `version_count=1`, `pinned=0`. `storage_path` untouched.
-2. **No files move.** `assets/<ab>/<cd>/<sha256>` stays exactly where it is. No data migration, no copy, no rollback risk on bytes.
-3. `/v1/files/*` is unchanged in shape; `/v1/files/{id}/content` only *gains* `?token=`.
-4. `/v1/artifacts` lists uploads too, with `kind` inferred from `mime_type` at read time for legacy rows. No backfill needed.
-5. **Rollback to schema 34** loses the columns and `artifact_versions`. Produced artifact *files* survive on disk as a folder of readably-named documents. The store degrades to "a folder", not to nothing — itself an argument for this layout.
+### 5.5 The write path
 
----
+1. **`SessionLogService`** (new, `crates/openalpaca_core/src/session_log/`): `DashMap<SessionId, SessionLogHandle>`; `handle_for(session_id)` lazily spawns the per-session writer task (mpsc → BufWriter; seq assignment, rotation, spill, fsync per §5.4); idle-close after N minutes. `SessionLogHandle::emit(Record)` is a non-blocking `try_send`; a full channel drops with a `tracing::warn!` counter — the log is an observability record; stalling the loop for it is the wrong trade.
+2. **Gateway:** `GatewayPersistence` resolves the active session once per turn, writes `conversation_messages.session_id`, emits `user_msg`/`assistant_msg` (+ `delegation` beside where `result.delegation` is read, `gateway/router/mod.rs:285`).
+3. **Loop:** `LoopConfig` gains `session_log: Option<SessionLogHandle>` next to the existing `steering` field — the identical pattern. Emit points in `run_agentic_loop_inner`: after each LLM response (`round`); around tool dispatch in the sandbox path (`tool_call`/`tool_result` — the same sites GAP-10 instruments); at the steering drain; on compaction; at every exit. The lead runner adds `subagent_open`/`subagent_close` beside the 037 span writes. Main-loop turns log identically with `task_id` absent.
+4. **Steering:** `push_steering` (`runner/steering.rs:61-79`) additionally emits `steering` to the task's session log — one line, and crash recovery of interjections exists.
+5. **Dispatch:** `dispatch_lead_agent` (`dispatcher/lead_agent.rs:23-32`) takes `session_id` (gateway-resolved) and persists it on the task row.
 
-## 2. Phase 0 — Bugs and one-liners *(no migration; ship first)*
+### 5.6 Recovery
 
-Highest value per line in the document. Each item is independently mergeable.
+**(a) Chat lanes** — already durable; recovery is an *identity* fix. After 039 the GUI lists sessions per workspace, reopens the active one, fetches by `session_id` instead of one endless per-lane history. The in-memory lane is caches-only (`lane/types/mod.rs:93-100`) and rebuilds lazily as today.
 
-1. **GAP-01 — `approval_scope`.** `ConfirmationBody` (`routes/chat_types.rs:90-93`) gains `#[serde(default)] pub approval_scope: Option<ApprovalScope>`; `chat.rs:462` passes `body.approval_scope` instead of `None`. `ApprovalScope::{TheseArgs,EntireTool}` already exists with `rename_all="snake_case"` (`security/confirmation.rs:87-97`) and the sandbox already honours it (`security/sandbox/mod.rs:248-256`). **The entire enforcement path is complete; only the HTTP hop drops the field.** The "Always allow" button silently approves once today.
-2. **GAP-07 — empty `title`/`name`.** Add `title: String` to the three task variants and `name: String` to `AgentStatusChanged` in `crates/openalpaca_core/src/events.rs`. **Do not** pass `SharedContext` into the bridge as the brief suggests — the bridge spawns at `main.rs:245`, *before* `SharedContext` exists at `main.rs:306`. There are five non-test producer sites and every one already has the value or a `SharedContext` in scope (`task_ops.rs:153-159`, `dispatcher/lead_agent.rs:237-243`, `dispatcher/outcome.rs:268-275` and `:294-299`, `dispatcher/mod.rs:171-176`). Known limit to doc-comment: after a restart a DB-only task has no registry entry and falls back to `""` — today's behaviour, never worse.
-3. **GAP-08a — `daily_cost_usd`.** Replace the literal `0.0` at `settings.rs:314` with a `LlmUsageRepository::query_daily_usage` sum for today (**not** `cost_tracker.total_cost()` — see §0).
-4. **GAP-08b — `task_id` on `GET /v1/llm/usage`.** `LlmUsageRepository::get_task_usage` already exists (`repository/llm_usage/mod.rs:95-110`) over an indexed column (`migrations/008_llm_usage.sql:8,22`). Add `task_id` to `LlmUsageQuery` (`settings_types.rs:19-24`) and branch on it first in `get_llm_usage`. The GUI already sends the param (`lib/api/usage.ts:8-16`) — zero client change. **Also add `cost_for_tasks(&[String]) -> Vec<TaskCost>`** (one grouped query) and enrich `GET /v1/tasks`, because the Work list needs a per-row cost and cannot issue one request per row.
-5. **GAP-16 — `GET /v1/me`.** `AppState` already holds `local_user_id` and `default_lane_key` (`state.rs:32-33`). `sources[]` = distinct `conversations.source` for lanes this user owns, via `list_conversations_for_owner`, documented in a doc comment. *(Ambiguous field: it could equally mean registered connectors, which `GET /v1/connectors` already serves — the conversations reading is chosen and stated.)*
-6. **GAP-22 — `ts`/`instance_id` on the six plugin events.** Add both to all six variants in `openalpaca_api/src/events/mod.rs:250-280`; add `instance_id` to `PluginManager` with a `with_instance_id` builder mirroring `with_event_sink`, defaulted to `String::new()` so no test breaks; chain it at `main.rs:334-343`; add `..` to the four test match arms in `manager.rs`. **Rejected:** stamping inside the daemon's sink closure — it re-matches all six variants in `main.rs` and leaves the crate emitting structurally-invalid events for any other embedder. Note `PluginCrashed` has no emit site in the manager; confirm whether that path is dead.
-7. **Consistency groundwork.** Add one shared `pub(crate) fn api_error(status, code, message)` in `routes/mod.rs` producing `{error:{code,message}}`, collapsing the byte-identical duplicate at `chat_types.rs:101-111` / `files_types.rs:174-184`. **Every new route in this document uses it.** Fix the plain-text 401 in `middleware.rs` to JSON — it is the only non-JSON response on the wire and the first thing a new client hits. **Do not retrofit the ~30 existing `{error:"string"}` sites** (§8).
+**(b) In-flight workflows — Phase 7b: honest interruption.** The boot sweep stops lying: non-terminal tasks become **`interrupted`** (new `TaskStatus` variant; code-only — `models/task.rs:9-16` has no CHECK constraint blocking it) instead of `failed` with a fabricated message. `interrupted` is terminal for lane bookkeeping but carries a `restartable` affordance: the GUI's "Restart" is Phase 5's `rerun` (new id, `source_task_id` link). The sweep additionally **reads each open session's JSONL tail**: `steering` records with no subsequent `steering_drained` containing their request_id are converted to `lane_followups(kind='unprocessed_steering', session_id=…)` — the exact rows the graceful path already writes (`dispatcher/lead_agent.rs:300-355`) — so a crash no longer silently eats interjections. Idempotent via a request_id uniqueness guard on insert; the before-ingress ordering guarantee (`bootstrap/migration.rs:13-18`) is preserved.
 
-*Verify:* unit test on `ConfirmationBody` deserialization for all three bodies — the existing `ChatView.test.tsx:288-298` flips from gap-documentation to a real contract test for free; extend the bridge test at `event_bridge.rs:540-560` with a `TaskUpdated` case asserting a non-empty title; full-workspace rebuild (GAP-22 touches `openalpaca_api`, which everything depends on).
+**(c) Phase 8: replay resume (opt-in).** For an `interrupted` task with a complete record chain, `POST /v1/tasks/{id}/action {"action":"resume"}` rebuilds the loop's messages from the log — compose persona layers fresh (they are regenerated every dispatch anyway); seed the objective from `task.description`; append each `round`'s assistant message (text + verbatim `tool_use`) and each `tool_result` as the corresponding user message (inlining spills); stop at the last *complete* round (all its results present — the model re-does at most one round); append a synthetic `<user_interjection>`: "the daemon restarted; you are resuming — verify the state of any side effects from your last round before repeating them" (side effects between the last durable record and the crash are unknowable; telling the model beats pretending); re-enter `run_agentic_loop_routed` under the **same task id** (D5's philosophy), `interrupted → running`, steering inbox re-registered fresh. Gated by `[orchestrator.sessions] resume_enabled` (default off until trusted); `rerun` remains the fallback; a gutted log is a clean 409 pointing at `rerun`.
 
----
+**(d) Clients after restart** recover from the DB, not daemon memory: `GET /v1/sessions?workspace_id=` + `/{id}/messages` + `GET /v1/tasks?status=interrupted`. The GUI reopens its last session (localStorage id, server list fallback); the CLI gains `--resume`/`--session`.
 
-## 3. Phase 1 — Artifact store foundations *(migration 035)*
+### 5.7 HTTP surface (replaces `/v1/conversations` — P19)
 
-**Depends on:** nothing. **Blocks:** Phase 2, and the artifact half of Phase 5.
+```http
+GET    /v1/sessions?workspace_id=&source=&status=&q=&limit=&offset=   200 { "sessions": [SessionView], "total": n }
+POST   /v1/sessions {source?, workspace_path?, title?}                201 SessionView   (archives the lane's previous active)
+GET    /v1/sessions/{id}                                              200 SessionView | 404
+GET    /v1/sessions/{id}/messages?limit=&before_id=                   200 { "messages": […], "total": n }
+GET    /v1/sessions/{id}/events?after_seq=&types=&limit=              200 { "events": [envelope…], "next_after_seq": n }
+POST   /v1/sessions/{id}/activate                                     200   (archives the current active on that lane)
+POST   /v1/sessions/{id}/archive                                      200
+PATCH  /v1/sessions/{id} {title?, workspace_path?}                    200
+DELETE /v1/sessions/{id}                                              204 | 409 SESSION_HAS_ACTIVE_WORKFLOWS
+```
 
-1. Migration 035 (§1.5) + **the two query fixes of §1.6 in the same commit** + `ArtifactKind`/`ArtifactOrigin` in a new `models/artifact.rs`, in the style of `FileAssetStatus` (`models/file_asset.rs:15-33`).
-2. `paths.rs` additions (§1.3). Pure functions, heavily unit-tested.
-3. `.openalpaca` added to `walk_up_for_marker` ahead of `.alpaca`/`.git` (§1.2).
-4. `ArtifactStore` in `crates/openalpaca_storage/src/artifacts/mod.rs` — **the one writer** for produced rows:
-   ```rust
-   pub struct ArtifactStore<'a> { db: &'a Database }
-   impl<'a> ArtifactStore<'a> {
-       pub fn put(&self, new: NewArtifact<'_>) -> Result<(ArtifactRecord, bool)>;  // create or supersede
-       pub fn get(&self, id: &str, owner_id: &str) -> Result<Option<ArtifactRecord>>;
-       pub fn list(&self, q: &ArtifactQuery) -> Result<(Vec<ArtifactRecord>, i64)>;
-       pub fn resolve_content(&self, id: &str, version: Option<u32>) -> Result<PathBuf>;
-       pub fn versions(&self, id: &str) -> Result<Vec<ArtifactVersionRow>>;
-       pub fn diff(&self, id: &str, from: u32, to: u32) -> Result<ArtifactDiff>;
-       pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<()>;
-       pub fn rebase_project(&self, old_root: &str, new_root: &str) -> Result<usize>;
-       pub fn verify(&self, project_root: Option<&str>) -> Result<usize>;
-   }
-   ```
-   `FileAssetRepository` keeps its current surface and keeps owning uploads with `origin` defaulted; the two coexist on one table.
-5. `artifact_write` tool + the `workspace_write` spill bridge (§1.7), `[execution.artifacts]` config.
-6. `task.workspace_id` written at dispatch; **the GUI sends `x-workspace-path`** (§1.8).
+- `SessionView`: id, lane_key, source, title, workspace_id, status, message_count, last_message_at, created_at + derived `active_task_count` (from `SharedContext::active_workflows_by_lane`) and `interrupted_task_count` (one grouped query). Envelopes and errors follow §7's rules.
+- **`POST /v1/chat` gains optional `session_id`** — appends to that session, auto-activating it (409 if it belongs to a different lane than the principal's). Absent ⇒ the lane's active session, created on demand — today's behaviour exactly.
+- **`GET /v1/chat/history` retargets** to the lane's active session — same shape, correct scoping. The GUI transcript view moves to `/v1/sessions/{id}/messages`; the everyday path needs **no JSONL** — `/events` powers only the expanded turn view.
+- **Rev 1's GAP-21 re-homes here**: rename = `PATCH`, delete = `DELETE` (transactional; 409 on active workflows). Built once, on sessions; `/v1/conversations` handlers deleted, not aliased (P19), GUI/CLI callers updated same PR.
+- New `ServerEvent::SessionChanged { session_id, lane_key, status, ts, instance_id }` keeps a second window honest.
+- **CLI:** `openalpaca sessions [--workspace <path>] [--all]`; `openalpaca chat --resume` (activate + continue the cwd workspace's most recent session), `--session <id>`; both print a transcript tail first. The CLI starts sending `workspace_path` on `/v1/command`, completing §4.7's client story.
+- **GUI:** session sidebar per workspace; "Interrupted" badge + Restart on `status=interrupted`; expanded-turn tool timeline from `/events`.
 
-*Verify:* `slugify` property tests (traversal `../`, unicode NFKD, case-folding, Windows reserved names, 60-byte truncation on a char boundary, empty→`artifact`); `confine_to_root` rejects symlinked-parent escapes; a `put`→`put` round trip leaves head at the clean path and v1 in `.versions/`; **a crash-injection test that kills between rename steps and asserts the head is either fully old or fully new**; an orphan-sweep test asserting a `produced` row survives 25 simulated hours; a quota test asserting produced bytes do not count; an end-to-end lead-agent run that writes an artifact and lands it under `<project>/.openalpaca/artifacts/`.
+**Filesystem tiers from the sketch, resolved:** `attachments/` **is D2's uploads area** — no per-session copies (owner-scoped sha256 dedup at `routes/files.rs:172-185` is load-bearing; a copy breaks it and multiplies bytes); sessions link attachments via `conversation_message_attachments.file_id`, and `user_msg` records carry the file ids. `large-tool-results/` is the session's `results/` dir. `snapshots/` is reserved; the one real thing specified (Phase 8): pre-edit images of user files `file_write` overwrites — copy target to `snapshots/<seq>-<slug>` + a `file_snapshot` record; task-state checkpoints (redundant with `state_json`) and whole-workspace snapshots (git's job) are deliberately not designed.
 
 ---
 
-## 4. Phase 2 — Artifact API, previews, versions *(unblocks the whole Library)*
+## 6. Phases
 
-**Depends on:** Phase 1.
+Order rationale: root move + purge first (everything else builds on the new paths and the deletions shrink every later diff); artifact store next (the Library is the biggest blocked surface); run observability and message links next (sessions **reuse** their instrumentation — the sandbox `ctx.task_id` passthrough and the `#[derive(Default)]` churn payment — so sessions sequence after them, per appendix S §8); sessions; then the long tail.
 
-1. All routes of §1.10 on the protected router, except the two content routes which move to the third merged sub-router with inline `?token=` (**GAP-11**).
-2. `ServerEvent::ArtifactWritten` through all four layers (event → bridge → broadcaster → persistence).
+### Phase 0 — Bugs and one-liners *(no migration; ship first)*
+
+Unchanged from rev 1; each item independently mergeable.
+
+1. **GAP-01 — `approval_scope`.** `ConfirmationBody` (`routes/chat_types.rs:90-93`) gains `#[serde(default)] pub approval_scope: Option<ApprovalScope>`; `chat.rs:462` passes it. `ApprovalScope` exists (`security/confirmation.rs:87-97`) and the sandbox honours it (`security/sandbox/mod.rs:248-256`) — only the HTTP hop drops the field; "Always allow" silently approves once today.
+2. **GAP-07 — empty `title`/`name`.** Add `title: String` to the three task variants and `name: String` to `AgentStatusChanged` in `events.rs`. **Not** `SharedContext` into the bridge (spawns at `main.rs:245`, before `SharedContext` exists at `:306`). Five producer sites all have the value (`task_ops.rs:153-159`, `dispatcher/lead_agent.rs:237-243`, `dispatcher/outcome.rs:268-275,:294-299`, `dispatcher/mod.rs:171-176`). Post-restart DB-only tasks fall back to `""` — today's behaviour, never worse.
+3. **GAP-08a** — replace `settings.rs:314`'s `0.0` with `query_daily_usage` for today (§0).
+4. **GAP-08b** — `task_id` on `LlmUsageQuery` (`settings_types.rs:19-24`), branch first in `get_llm_usage` (`get_task_usage` exists, indexed — `repository/llm_usage/mod.rs:95-110`); **also `cost_for_tasks(&[String])`** (one grouped query) enriching `GET /v1/tasks` — the Work list needs per-row cost.
+5. **GAP-16 — `GET /v1/me`.** `AppState` has `local_user_id`/`default_lane_key` (`state.rs:32-33`); `sources[]` = distinct `conversations.source` (post-039: `session.source`) via `list_conversations_for_owner`. Reading chosen and stated.
+6. **GAP-22 — `ts`/`instance_id` on the six plugin events** (`openalpaca_api/src/events/mod.rs:250-280`) + `PluginManager::with_instance_id` builder chained at `main.rs:334-343`; `..` on the four test match arms. Rejected: stamping in the daemon sink (leaves the crate emitting invalid events for other embedders). Confirm whether `PluginCrashed`'s emit path is dead.
+7. **Consistency groundwork.** Shared `pub(crate) fn api_error(status, code, message)` in `routes/mod.rs` (collapses the byte-identical duplicate at `chat_types.rs:101-111`/`files_types.rs:174-184`); every new route uses it. Fix the plain-text 401 in `middleware.rs` to JSON. Do **not** retrofit the ~30 `{error:"string"}` sites (§7). Do the cheap half of the task-shape normalisation: typed `TaskSummaryResponse` replacing `list_tasks_handler`'s `as_object_mut()` post-injection.
+
+*Verify:* `ConfirmationBody` deserialization for all three bodies (`ChatView.test.tsx:288-298` flips to a real contract test); bridge test (`event_bridge.rs:540-560`) asserts non-empty title; full-workspace rebuild (GAP-22 touches `openalpaca_api`).
+
+### Phase 1 — Root move + legacy purge *(migration 035)*
+
+**Depends on:** nothing. **Blocks:** everything after it (paths).
+
+1. `store/mod.rs` + `store/migrate.rs` (§1.4, §2): `home_root`, `state_dir`, `content_dir`/`ContentKind`, `ensure_store` seeding README/.gitignore/.layout, the mover, `rebase_asset_paths`. `paths.rs` deleted (P1); consumer fan-out fixed mechanically (compiler-enumerated; inventory in appendix R §0). **Atomic three-binary rebuild in one commit** (§2.3).
+2. Marker change: `.openalpaca` → `.git`, `.alpaca` deleted (P3), including the redundant-condition cleanup.
+3. Purge items P2, P4, P5, P6, P10, P11, P12, P13, P14 — plus **migration 035** `035_drop_planner_telemetry.sql` (P7: `DROP COLUMN planner_ms/dispatch_ms` on `orchestrator_latency`, `planner_requested_mode` on `dispatch_decisions`; optional P15 timestamp normalise). Pre-checks §0(a)/(b) run first.
+4. Documentation sweep (§3, last block).
+
+*Verify:* mover unit tests — fresh install no-op; idempotent resume after a simulated kill between any two ledger entries; live-daemon guard aborts; per-child config merge preserves a GUI-pre-created `config/`; WAL/SHM+DB reunite before `Database::open`; `rebase_asset_paths` matches zero rows on second boot. Full workspace build + `cargo test --workspace` green with `paths.rs` gone. A dev-run from the repo still resolves `./config`.
+
+### Phase 2 — Artifact store foundations *(migration 036)*
+
+**Depends on:** Phase 1 (store module). **Blocks:** Phase 3, and the artifact half of Phase 6.
+
+1. Migration 036 (§4.4) + **the two §4.5 fixes in the same commit** + `ArtifactKind`/`ArtifactOrigin` in `models/artifact.rs`.
+2. Artifact grammar functions in `store/` (§1.4) — pure, heavily unit-tested.
+3. `ArtifactStore` (§4.8) — the one writer for produced rows.
+4. `artifact_write` tool + `workspace_write` spill bridge (§4.6), `[execution.artifacts]` config.
+5. `task.workspace_id` written at dispatch; **the GUI sends `x-workspace-path`** (§4.7 items 1-4).
+6. **D2 upload placement:** connector writer collapse first, then `POST /v1/files/upload` reads `x-workspace-path` and writes via `upload_dir` (§4.7 item 5). New uploads only; existing blobs stay at `state/assets/` until Phase 8.
+
+*Verify:* `slugify` property tests (traversal, NFKD, case-folding, reserved names, truncation, empty); `confine_to_root` rejects symlinked-parent escapes; `put`→`put` leaves head clean + v1 in `.versions/`; **crash-injection between rename steps leaves head fully old or fully new**; a `produced` row survives 25 simulated sweep-hours; produced bytes don't count against quota; an upload with `x-workspace-path` lands in `<project>/.openalpaca/uploads/<date>/`; end-to-end lead-agent run lands an artifact under `<project>/.openalpaca/artifacts/`.
+
+### Phase 3 — Artifact API, previews, versions *(unblocks the Library)*
+
+**Depends on:** Phase 2. Unchanged from rev 1:
+
+1. §4.9 routes; content routes on the third merged sub-router with inline `?token=` (**GAP-11**).
+2. `ServerEvent::ArtifactWritten` through all four layers.
 3. **GAP-05** versions + diff; add `similar`.
-4. **GAP-12** pins: the column and `PUT …/pin` ship, but the client's `localStorage` (`views/library/LibraryDetail.tsx:43-44`) stays authoritative until it opts in — `unbacked.ts`'s `Artifact` has no `pinned` field, and an extra wire field is ignored by a TS structural type.
-5. **CSP** — `apps/openalpaca-gui/src-tauri/tauri.conf.json:22` becomes
-   `img-src 'self' data: blob: http://127.0.0.1:* http://localhost:*;`
-   Both halves are needed and they are **not** the same change: `blob:` for object-URL previews, the loopback origins for direct `<img src=…?token=>`. CSP does not inherit from `connect-src` once `img-src` is explicitly set. **Do not loosen anything until a preview actually ships.**
-6. `POST /v1/files/{id}/open` skips its `$TMPDIR` staging for produced artifacts (they now have real extensions).
+4. **GAP-12** pins (column + `PUT …/pin`; client `localStorage` stays authoritative until it opts in).
+5. **CSP** — `tauri.conf.json:22` → `img-src 'self' data: blob: http://127.0.0.1:* http://localhost:*;` (both halves needed: `blob:` for object-URLs, loopback for direct `<img src=…?token=>`; CSP doesn't inherit from `connect-src`). Land **with** the preview, never before.
+6. `POST /v1/files/{id}/open` skips `$TMPDIR` staging for produced artifacts (real extensions now).
 
-*Verify:* `?token=` accepted **and** the `Authorization` header still accepted on both content routes; a wrong token is 401; an artifact owned by another user is 404 (ownership check unchanged); 410 on a deleted head file with `missing_since` set as a side effect; `GET /v1/artifacts?task_id=` returns the run's files; the Library renders end-to-end with `unavailable.ts`'s GAP-04/05/11/12 entries deleted.
+*Verify:* `?token=` and `Authorization` both accepted; wrong token 401; other-owner artifact 404; 410 sets `missing_since`; `?task_id=` returns the run's files; Library renders end-to-end with GAP-04/05/11/12 deleted from `unavailable.ts`. **Deferred:** HTML artifact previews (`frame-src`/sandbox is a security review, not a CSP tweak).
 
-**Explicitly deferred, not solved here:** HTML artifact previews (`ArtifactKind = "html"`) need `frame-src`/`sandbox` handling. That is a materially larger security decision than a CSP tweak and gets its own review.
+### Phase 4 — Run observability *(migration 037)*
 
----
+**Depends on:** Phase 0 (GAP-07 bridge work). GAP-09 and GAP-10 share the sandbox `task_id` passthrough — do them together. Phase 7 reuses these exact instrumentation sites.
 
-## 5. Phase 3 — Run observability *(migration 036)*
+Migration 037 — `037_run_observability.sql`: `subagent_span` table (id = spawn's node_id; task_id FK CASCADE; template_id, agent_instance_id, label unique-per-task, objective, `state CHECK IN ('running','done','failed','blocked','cancelled')`, detail, started_at, ended_at, duration_ms, output_preview; two indexes) · `ALTER TABLE event_log ADD COLUMN task_id TEXT` + index · `ALTER TABLE task ADD COLUMN source_task_id TEXT` + index · `UPDATE schema_version SET version = 37 WHERE version = 36`. (Full SQL: rev 1 §5, unchanged but renumbered.)
 
-**Depends on:** Phase 0 (GAP-07's bridge work). **Shares** the sandbox `task_id` passthrough between GAP-10 and GAP-09 — do them together.
+**GAP-09 — subagent timeline.** Do **not** extend `agent_task_history` (FK-bound to `agent(id)`, timezone-less `completed_at`, backs the legacy payload). Correction that changes the work: **no row exists until completion** — `record_agent_history` (`dispatcher/usage.rs:76-101`) is called only after the subagent's loop returns (`runner/lead_agent/tools.rs:548-556`, `:642-650`); an in-flight span is *absent*, not underivable. Write sites, all in `runner/lead_agent/tools.rs` (`self.db` is a field at `:48`): **open** after the `DagNodeStarted` publish (`:232-240`), reusing `node_id` as span id; **close** at both completion sites (`:524-543` plugin, `:610-628` LLM — map `Cancelled` explicitly; `agent_success` at `:598-604` folds it into `false` today and the UI has separate copy); **close** the cancelled-before-start early return (`:477-486`). Labels unique per run (`<short template>·<ordinal>`; `ParallelWork.tsx:129,170` keys by label). **Lead span** in `spawn_lead_agent_execution` (`dispatcher/lead_agent.rs:224-246`), closed at `finalize_task_with_outcome` (`:507-512`). `blocked` is **derived**: `ConfirmationBroker.pending` becomes `DashMap<String,(ConfirmationRequest, Sender)>` with `pending_requests()`; `ConfirmationRequest` gains `task_id`/`agent_instance_id` (built at `sandbox/mod.rs:212-220`). **Add `agent_instance_id` to `ToolContext`; do not repurpose `ToolContext.agent_id`** (it is the template id, reported in capability violations). Route `GET /v1/tasks/{id}/timeline` matches `TimelineLane` (`unbacked.ts:121-141`) field-for-field; terminal tasks report stale `running` spans as `cancelled`/`"interrupted"`; `close_orphans` runs once at boot. New `SubagentSpan` event through all four layers. **Keep `DagNodeStatus` emitting alongside** (GUI consumes it — `run-events.ts:63-71`); delete in Phase 8 (P9).
 
-### Migration 036 — `036_run_observability.sql`
+**GAP-10 — per-run event log.** `ctx.task_id` is already at every emit site inside `SandboxManager::execute_tool` (`security/sandbox/mod.rs:134-139`). Add `task_id: Option<String>` to `ToolExecuted`, `SecurityViolation`, `ToolConfirmationRequested`, `CircuitBreakerTripped`, `LlmCallCompleted`; `emit_security_violation`/`emit_tool_executed` each take one `Option<&str>`. Retro-fit the six already-persisted variants that carry the id buried in `detail` JSON (`events/persistence.rs:59-80,260-275,308-341,343-354`) to `log_for_task`. Route: `GET /v1/events/history?task_id=&event_type=&before=&limit=` → `{events, next_before}` — **always the envelope** (P20; the CLI call site at `commands/tasks.rs:310` updates in the same PR). Paginate on autoincrement `id`, not the dual-format timestamp.
 
-```sql
-CREATE TABLE IF NOT EXISTS subagent_span (
-    id                TEXT PRIMARY KEY,          -- = the spawn's node_id (UUID)
-    task_id           TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
-    template_id       TEXT NOT NULL,
-    agent_instance_id TEXT NOT NULL,
-    label             TEXT NOT NULL,             -- "review·2" — unique per task
-    objective         TEXT NOT NULL,             -- first 200 chars
-    state             TEXT NOT NULL DEFAULT 'running'
-                      CHECK(state IN ('running','done','failed','blocked','cancelled')),
-    detail            TEXT,
-    started_at        TEXT NOT NULL,             -- RFC 3339
-    ended_at          TEXT,
-    duration_ms       INTEGER,
-    output_preview    TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_subagent_span_task  ON subagent_span(task_id, started_at);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_subagent_span_label ON subagent_span(task_id, label);
+**Exit criterion (P8):** the `assignments`/`assigned_agents` payload, its serde rename, and the GUI/CLI parsers are deleted in the timeline PR; GAP-20's run counts re-point at `subagent_span`.
 
-ALTER TABLE event_log ADD COLUMN task_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_event_log_task ON event_log(task_id, id DESC);
+*Verify:* two-subagent run → two uniquely-labelled spans + a lead span, correct start/end; cancelled subagent reports `cancelled`; a pending confirmation flips exactly one lane to `blocked`; daemon kill mid-run → `close_orphans` reports `interrupted`; `?task_id=` filters; the envelope is returned with and without filters (CLI updated).
 
-ALTER TABLE task ADD COLUMN source_task_id TEXT;   -- set only by rerun (Phase 4)
-CREATE INDEX IF NOT EXISTS idx_task_source ON task(source_task_id);
+### Phase 5 — Run control *(no migration)*
 
-UPDATE schema_version SET version = 36 WHERE version = 35;
-```
+**Depends on:** Phase 4 (`source_task_id`), Phase 2 (`workspace_id`). Unchanged from rev 1:
 
-### GAP-09 — subagent timeline
+1. **GAP-02 — `POST /v1/tasks/{id}/steer {message}`.** Pure reuse: `push_steering` (`runner/steering.rs:60-77`) is task-addressed and already emits `WorkflowSteered`. Lane from `task.source_lane` — the GUI addresses a run, not a lane. `200 {task_id, accepted, inbox_depth, lane_key}`; 409 `STEERING_INBOX_FULL` / `TASK_NOT_STEERABLE`; 503 `STEERING_DISABLED`. Leave the `/steer ` chat prefix alone (CLI/Telegram's only channel). Optional `workspace_path` defaulted from `task.workspace_id` so an `unprocessed_steering` leftover re-enters scoped to the same project.
+2. **GAP-03 — follow-up routes.** `GET/POST /v1/lanes/{lane_key}/followups`, `DELETE …/{id}`. Never serialize `FollowupRecord` (carries `principal_json` — `repository/followup/mod.rs:19-34`); return `FollowupView` matching `unbacked.ts:225-235`. Add `cancel_if_queued` (CAS on status — unconditional `mark_cancelled` races the autostart at `dispatcher/lead_agent.rs:527-542`). Clients never mint `unprocessed_steering` (`claim_next` never claims it; the row would sit forever). Publish `FollowupQueued` on POST, `FollowupCancelled` on DELETE. Validate `lane_key`.
+3. **GAP-06 — `rerun` and `start`.** `Orchestrator::rerun_task(task_id)` (not `TaskDispatcher` on `AppState`): read row → `dispatch_lead_agent` with `description`/`title`/`created_by`/`source_lane`/`workspace_id` → `set_source_task(new, old)`; 404/409/422; **201 with a new id** — deliberate asymmetry with `start`. `start` (D5, same id): intercepted in the route before `apply_task_action` (`task_ops.rs:107` would swallow it); `dispatch_lead_agent_with_id` + idempotent `upsert_queued`; 409 if `cancellation_tokens` holds the id (already live). Update the `UnknownAction` message (`routes/tasks.rs:287`).
 
-**Do not extend `agent_task_history`.** It is FK-bound to `agent(id)` with template ids and `foreign_keys=ON` (`007_subagents.sql:29`, `database/mod.rs:62`), it writes a timezone-less `completed_at` (`repository/subagent/mod.rs:232`), and it backs the legacy `assignments`/`assigned_agents` payload on `GET /v1/tasks(/{id})`. Widening it drags that contract along.
+*Verify:* steering a running task injects at the next round boundary; steering a finished task is 409; DELETE after `claim_next` is 409 and the turn runs; `rerun` id survives restart; `start` on a dispatched row is 409.
 
-**Correction to the brief that changes the work:** the brief says `agent_task_history` merely lacks `started_at`. In fact **no row exists until completion** — `record_agent_history` (`dispatcher/usage.rs:76-101`) is called only from `runner/lead_agent/tools.rs:548-556` and `:642-650`, both after the subagent's loop returns. An in-flight span is not underivable, it is *absent*. A `started_at` column alone fixes nothing.
+### Phase 6 — Message → run links *(migration 038)*
 
-Write sites, all in `runner/lead_agent/tools.rs` (`self.db` is already a field at `:48`, so no signature changes):
-
-- **Open** immediately after the existing `DagNodeStarted` publish (`:232-240`), reusing `node_id` as the span id so socket events and the fetched timeline share a key.
-- **Close** at both completion sites (`:524-543` plugin path, `:610-628` LLM path), where `duration_ms`, success and an output preview are already computed. Map `Cancelled` explicitly — `agent_success` at `:598-604` folds cancellation into `false` today, and the UI has separate copy for each (`ParallelWork.tsx:52-57`).
-- **Close** the cancelled-before-start early return (`:477-486`), or those spans stay `running` forever.
-- **Labels must be unique within a run** — `ParallelWork.tsx:129,170` keys lanes by `label`. Use `<short template>·<ordinal>` (`research_agent` → `research·1`) via `next_ordinal(task_id, template_id)`; the unique index makes a collision an error to retry once.
-- **Write a `lead` span** in `spawn_lead_agent_execution` (`dispatcher/lead_agent.rs:224-246`), closing it where `finalize_task_with_outcome` is called (`:507-512`). ~10 lines, and it makes the lead lane's state honest rather than approximated at the route. `steps_current`/`steps_total` come from `task.progress_current`/`progress_total`, already published at `:240-241`.
-
-**`blocked` is derived, not persisted** — it is inherently ephemeral. Requires two small changes: `ConfirmationBroker.pending` becomes `DashMap<String, (ConfirmationRequest, oneshot::Sender<_>)>` with a `pending_requests()` accessor (it stores only the sender today — `security/confirmation.rs:39-41`), and `ConfirmationRequest` gains `task_id` / `agent_instance_id` (built at `sandbox/mod.rs:212-220`, where `ctx.task_id` is in scope). **Add `agent_instance_id` to `ToolContext`; do NOT repurpose `ToolContext.agent_id`** — it is the *template* id and is what `CapabilityManager::check_agent_capability` reports in violations (`security/capabilities/mod.rs:91-116`).
-
-Route `GET /v1/tasks/{id}/timeline` returns `{task_id, started_at, now, completed_at, lanes:[…]}` matching `TimelineLane` (`unbacked.ts:121-141`) field-for-field, so `getTaskTimeline` becomes a real fetch with **no view changes**. If the task is terminal, any span still `running` is stale (daemon crash) — report it `cancelled` with `detail:"interrupted"`, and run `close_orphans` once at boot.
-
-New `SystemEvent::SubagentSpan` / `ServerEvent::SubagentSpan { task_id, lane_id, label, template_id, agent_instance_id, phase, state, detail, started_at, ended_at, ts, instance_id }`, emitted at open, blocked/unblocked, and close.
-
-**Keep `DagNodeStatus` emitting alongside.** It is live today and the GUI consumes it (`components/work/run-events.ts:63-71`). Its two halves are unjoinable — `DagNodeStarted` passes the *template* id and `DagNodeCompleted` the *instance* id (`tools.rs:236` vs `:618`) — which is why it cannot back the swimlanes, but that is no reason to break it mid-flight. **Delete it in Phase 6**, one phase after the client switches. (The app is pre-release; no release-soak ceremony.)
-
-### GAP-10 — per-run event log
-
-Cheaper than the brief describes. `ctx.task_id` is already at every emit site inside `SandboxManager::execute_tool` (`security/sandbox/mod.rs:134-139`). Add `task_id: Option<String>` to `ToolExecuted`, `SecurityViolation`, `ToolConfirmationRequested`, `CircuitBreakerTripped` (`ctx.task_id`) and `LlmCallCompleted` (already a parameter at `dispatcher/usage.rs:19`). `emit_security_violation` (`:352`) and `emit_tool_executed` (`:379`) each take one new `Option<&str>` param, passed from seven call sites all inside `execute_tool`.
-
-**The bulk of the value is retro-fitting rows that already exist.** `TaskStatus` (`events/persistence.rs:59-80`), `DagNodeStatus` (`:260-275`), `WorkflowStarted`/`WorkflowSteered`/`WorkflowProgress` (`:308-341`) and `FollowupQueued` (`:343-354`) **already carry the task id** — buried in the `detail` JSON blob with `agent_id = None`. Switch them to `log_for_task` with the id in the new column, and the `steer` / `run` rows the design shows become queryable without a JSON scan.
-
-```
-GET /v1/events/history?task_id=&event_type=&before=&limit=
-200 { "events": [EventLog], "next_before": 8791 }
-```
-
-**Paginate on the autoincrement `id`, not `timestamp`** — the timestamp column holds two different formats (`repository/event_log/mod.rs:96-105`). **Back-compat:** return the envelope **only** when `task_id` or `before` is present; the un-filtered call keeps returning a bare array, because the CLI parses it that way. Slightly ugly, honestly smallest; the alternative is a `/v2` route.
-
-*Verify:* a lead-agent run with two subagents produces two spans with unique labels, correct start/end, and a lead span; a cancelled subagent reports `cancelled`, not `failed`; a pending confirmation flips exactly one lane to `blocked`; killing the daemon mid-run leaves spans that `close_orphans` reports as `interrupted`; `?task_id=` returns only that run's rows and `?limit=` alone still returns a bare array (CLI regression).
-
----
-
-## 6. Phase 4 — Run control
-
-**Depends on:** Phase 3 (`task.source_task_id`, and `task.workspace_id` from 035). No new migration.
-
-1. **GAP-02 — `POST /v1/tasks/{id}/steer {message}`.** Pure reuse: `push_steering` (`runner/steering.rs:60-77`) is **already task-addressed** and already emits `WorkflowSteered`, which the GUI already renders. Read the lane key from `task.source_lane` — do not require the caller to supply one; the GUI addresses a run, not a lane. `200 {task_id, accepted, inbox_depth, lane_key}`; `409 STEERING_INBOX_FULL` with `cap` from `steering_inbox_cap`; `409 TASK_NOT_STEERABLE` on a closed inbox; `503 STEERING_DISABLED`. **Leave the `/steer ` chat prefix alone** — it is the CLI's and Telegram's only channel. Accept an optional `workspace_path` so a leftover converted to `unprocessed_steering` at workflow exit (`dispatcher/lead_agent.rs:316-350`) re-enters the front door scoped to the same project; default it from `task.workspace_id`.
-2. **GAP-03 — follow-up queue routes.** Storage, the CAS claim protocol, the runner and the event all exist (`migrations/033_lane_followups.sql`, `repository/followup/mod.rs`); only HTTP is missing. `GET/POST /v1/lanes/{lane_key}/followups`, `DELETE …/{id}`. Three non-obvious requirements:
-   - **Never serialize `FollowupRecord`.** It derives `Serialize` including `principal_json`, an identity blob (`repository/followup/mod.rs:19-34`). Return a `FollowupView` that drops it and `workspace_path`, matching `unbacked.ts:225-235`.
-   - **Add `cancel_if_queued` (CAS on status, mirroring `claim_next`).** The existing `mark_cancelled` (`:172`) is unconditional, so a naive DELETE races the autostart at `dispatcher/lead_agent.rs:527-542` and marks a row cancelled whose turn is already running.
-   - **Never let a client mint `unprocessed_steering`.** The CHECK constraint would accept it but `claim_next` deliberately never claims that kind — a client-created row would sit forever. Kind is always `"followup"`.
-   Publish `FollowupQueued` on POST (so a second window updates) and add a symmetric `FollowupCancelled` on DELETE. Validate `lane_key` (non-empty, no `/`); the client must `encodeURIComponent` the `:` in `"user:gui"`.
-3. **GAP-06 — `rerun` and `start`.** Add `pub fn rerun_task(&self, task_id) -> Result<DispatchOutcome, RerunError>` on `Orchestrator` rather than exposing `TaskDispatcher` on `AppState` — the "read the old row" logic stays with the dispatcher and the route is a thin HTTP translation. `rerun` = read the row → `dispatch_lead_agent` with its `description`/`title`/`created_by`/`source_lane`/`workspace_id` → `TaskRepository::set_source_task(new, old)`. 404 no row; 409 unless terminal; 422 if `description` is NULL. Returns **201 with a new id** — deliberate asymmetry with `start`. `start` (D5) is intercepted in the route **before** `apply_task_action` (whose match at `task_ops.rs:107` would swallow it) and needs `dispatch_lead_agent_with_id` + an idempotent persist. Guard the race: if `shared_context.cancellation_tokens` holds the id, the task is already live → 409. Update the `UnknownAction` message at `routes/tasks.rs:287` to list all five verbs.
-
-*Verify:* steering a running task injects an `<user_interjection>` at the next round boundary (existing loop test rig); steering a finished task is 409 not 500; a queued follow-up DELETE'd after `claim_next` is 409 and the turn still runs; `rerun` of a completed task produces a new id whose `source_task_id` survives a restart; `start` on an already-dispatched row is 409.
-
----
-
-## 7. Phase 5 — Message → run links *(migration 037)*
-
-**Depends on:** Phases 1 and 3.
+**Depends on:** Phases 2 and 4.
 
 ```sql
--- 037_message_run_links.sql
+-- 038_message_run_links.sql
 ALTER TABLE conversation_messages ADD COLUMN task_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_conv_msg_task ON conversation_messages(task_id);
-UPDATE schema_version SET version = 37 WHERE version = 36;
+UPDATE schema_version SET version = 38 WHERE version = 37;
 ```
 
-**GAP-23 needs no new link table** — the §1.4 decision to extend `file_assets` rather than create an `artifacts` table settles Lens B's hardest coordination point. `conversation_message_attachments` already carries `role TEXT NOT NULL DEFAULT 'attachment'` (`migrations/028_message_attachments.sql:7`); outputs get `role='artifact'` via a new `link_to_message_with_role`, with the existing `link_to_message` becoming a wrapper.
+**GAP-23 needs no link table** — `conversation_message_attachments.role` (default `'attachment'`, `028:7`) carries `role='artifact'` via `link_to_message_with_role`. **Two links, because a turn cannot know its own artifacts:** the delegating message gets `task_id` (`persist_assistant_message` at `gateway/router/mod.rs:260`, `result.delegation` read at `:285` — same match arm, add one param); the completion-report message gets `task_id` **plus** `role='artifact'` links (by then `file_assets` has rows for the task — this is the message `RunReportCard` renders). `ConversationMessage` gains a field = wide struct-literal change: **add `#[derive(Default)]` and `..Default::default()` in the same commit** (`gateway/persistence.rs:34-46,:106-119,:156-168` + repo mappers) — this is the churn payment Phase 7 reuses. History query joins the link table so the client gets `artifact_ids: string[]` in one round trip.
 
-**Two links, not one, because a turn cannot know its own artifacts:**
+*Verify:* a delegating turn persists `task_id` across reload; the completion message carries resolvable `artifact_ids`; `role='attachment'` rows unaffected.
 
-- **The delegating message gets `task_id`.** `persist_assistant_message` is called at `gateway/router/mod.rs:260` and `result.delegation` is read at `:285` — eleven lines apart, same match arm. Add a `task_id: Option<&str>` param and pass `result.delegation.as_ref().map(|d| d.task_id.as_str())`. This answers "which turn started this run" after a reload.
-- **The completion-report message gets `task_id` **plus** `role='artifact'` links.** The delegation fires when the workflow *starts*; by the time the model-authored completion report is persisted, `file_assets` has rows with `task_id = <this task>`. That is the message `RunReportCard` actually renders — it is a *finished*-run card.
+### Phase 7 — Sessions *(migration 039)*
 
-`ConversationMessage` (`models/conversation.rs:7-20`) gaining a field is a **wide struct-literal change**: `gateway/persistence.rs:34-46, :106-119, :156-168`, the repository inserts and the row mappers. Add `#[derive(Default)]` and switch those literals to `..Default::default()` in the same commit. Read path needs no route change — `GET /v1/chat/history` serializes the model directly. Join the link table in the history query so the client gets `artifact_ids: string[]` without a second round trip.
+**Depends on:** Phase 6 (the `Default` churn payment), Phase 4 (sandbox passthrough + span ids, which the log references), Phase 1 (the `sessions/` dir lives under the moved root). Design: §5.
 
-*Verify:* a chat turn that starts a workflow persists `task_id` and survives a reload; the completion message carries resolvable `artifact_ids`; `role='attachment'` rows (inputs) are unaffected.
+**7a — schema + surface (S0):** migration 039 (§5.2); `get_or_create_active_session`; `/v1/sessions` family + `POST /v1/chat session_id` + `chat/history` retarget (§5.7); `task.session_id` at dispatch; completion report into the originating session; follow-up session pinning (§5.3); **`/v1/conversations` deleted (P19)** and GAP-21 built here once; GUI session sidebar; CLI `sessions`/`--resume` + `workspace_path` on `/v1/command`. Effort **L**.
 
----
+**7b — the log (S1):** `SessionLogService` + writer; emit points (gateway, loop, lead runner, steering — §5.5); `tool_execution_log` columns used; `results/` spill; `GET …/events`; **`interrupted` status + sweep rewrite** (mark interrupted + JSONL steering recovery — §5.6b); `SessionChanged` event. Effort **L**.
 
-## 8. Phase 6 — Config, catalog, long tail
+*Verify:* 7a — two sessions on one lane produce two clean transcripts; the partial unique index rejects a second `active`; a completion report lands in its originating (archived) session; follow-up autostart re-activates its session. 7b — a two-subagent run yields a well-formed log (seq gap-free; every `tool_call` matched by `tool_result` or the loop exit); a >64 KB result spills and `result_ref` resolves; `kill -9` mid-round leaves a parseable log (torn tail truncated on reopen), the sweep marks the task `interrupted` and recovers an undrained steering message into `lane_followups`.
 
-Independently orderable; each is its own commit. Ordered by value per hour.
+### Phase 8 — Config, catalog, long tail
 
-1. **GAP-14 — `GET /v1/status`, Phase A only.** `started_at` on `AppState` captured at the **top of `run()`** (process start, not HTTP-ready), `uptime_secs`, `schema_version` from the existing `Database::schema_version()` (**not** `MIGRATIONS.len()` — the DB is the truth), `data_dir`, `db_path`, **and the resolved project dir from §1.8**. Register inside `protected_routes`, **not** public — it leaks filesystem paths. Leave `/v1/health` untouched; the GUI liveness dot needs it unauthenticated. **`log_path` ships as `Option<String>` = `None`.** The daemon writes no log file anywhere: `main.rs:57` is stdout-only, there is no `tracing-appender` in the workspace, and the GUI sidecar discards stdout (`src-tauri/src/lib.rs:128,152`). Phase B (appender + rotation + retention + un-discarding the sidecar's stdout) is a separate day+ task. Widen the client's `log_path` to `string | null` and keep "Copy log path" honestly disabled.
-2. **GAP-21 — conversation rename/delete.** Two repository methods (`update_title`, `delete_conversation`) + two handlers. `delete_conversation` must run both statements in one transaction — migration 011 declares no FK cascade between `conversations` and `conversation_messages`, so an untransacted delete orphans messages. `router.rs:6` needs `patch` added to its `routing::{…}` import. **Semantics: "forget the transcript", not "tear down the lane"** — deleting the row clears neither `lane_followups` nor the in-memory lane, and the next message recreates it via `get_or_create_conversation`. Return **409 when the lane has active workflows**.
-3. **GAP-18 — `GET /v1/tools`, `GET /v1/skills`.** The data all exists; the blocker is plumbing. **Neither registry reaches `AppState`**, and `svcs.tool_registry` is *moved* into `Orchestrator::new` at `main.rs:373` (the skill catalog is `.clone()`d at `:376`, the registry is not). Clone the `Arc` before the move and add two `AppState` fields. Then: `RegisteredTool.author` is already `"built-in" | "mcp:<server>" | "plugin:<id>"`; `destructive_hint == Some(true)` gives `requires_confirmation` (`sandbox/mod.rs:398-417`); `global_tool_deny` gives `denied`; one grouped query over `tool_execution_log` gives `invocations_today`. **Sort both lists by name** — `DashMap` iteration is unordered and jittery rows are a bug. Bare arrays, matching the sibling `/v1/skills/health` (§8 rule). The design's per-tool *enable switch* is only half-served: `denied` is readable, but writing `global_tool_deny` would need `PUT /v1/settings/tools/{name}/enabled` against `daemon.toml` — **out of scope; the toggle ships disabled rather than lying.**
-4. **GAP-15 — provider enable/disable.** Mostly already built: `ProviderConfig.enabled` exists in `llm.toml` (`router_config.rs:65-66`), is honoured at build time (`router_builder.rs:98-102`), and is already served by `GET /v1/settings/llm` (`settings_service.rs:169-178`). **Only the write route is missing.** Use `LlmRouter::deregister_provider` for a hot disable — note it also strips models from the `ModelRegistry`, so enable must re-register **and** `refresh_models()`. Extract the write-lock half of `persist_and_reload` into `persist_only(mutate)` rather than duplicating lock handling. **Add a 409 guard when disabling the provider that serves the current `default_model`** — a silent capability loss is worse than a refused toggle.
-5. **GAP-20 — template run counts** (counts only). One SQL join: `agent_task_history ⨝ agent ON a.id = h.agent_id GROUP BY a.template_id`, using the `template_id` backfilled by migration 020. **State in the response docs that these are *completed* runs** — rows are written at completion (see §5's correction). `GET /v1/agent-templates?window=7d`, rejecting unknown windows with 400. **The `enabled` toggle is out of scope for this phase**: `AgentTemplateFrontmatter` has no such field, the recommended home is the existing `preference` KV store (no migration, and it works for plugin-contributed templates that have no file), but the real cost is *enforcement* in the lead-agent spawn path — without it the toggle is decorative. Day+, its own task.
-6. **GAP-17 — connector detail.** Add `source` ("builtin"|"plugin"), `registered`, and **`messages_7d`** (renamed from `calls_7d`, §0): `SELECT source, COUNT(*) FROM conversation_messages WHERE created_at >= datetime('now','-7 days') AND role='user' GROUP BY source`. The **"unwired" badge needs nothing server-side** — `hooks/useConnectors.ts:33-44` already derives it correctly by joining the plugin manifest against `list_status()`. Fix the hardcoded name match while in there (`connectors.rs:34-38` knows only `telegram`/`imessage`; Discord falls through to the raw id). "Connect service" wires to the existing `POST /v1/connectors/{id}/config` + `/action`; no new endpoint.
-7. **GAP-08c — `GET /v1/usage/summary?window=today`.** Totals from `query_daily_usage`; caps as a **nested `caps` object** so the client cannot mistake a per-run cap for a daily one. Derive `by_provider` from `llm_call_log` for today rather than `cost_tracker.all_provider_usage()`, which is **lifetime, not today**. Echo the authoritative `date` in the payload: `llm_usage_daily.date` is written from a UTC date (`main.rs:328`) while `todayIsoDate()` in the client is local (`lib/api/usage.ts:52-57`) — they disagree for up to 12 hours a day. **Product question, not an API one:** `execution.lead_agent_defaults.max_cost = 5.0` is a *per-workflow* cap, but the Settings panel reads "`$X of $5.00 cap`" as a daily budget. Either add a real daily cap to `[orchestrator.costs]` or relabel the UI.
-8. **GAP-13 — per-chat model override.** Rated `M` in the registry; it is `day+`. **Do not add a 9th positional arg to `MessageHandler::handle`** — it already takes 8 with `#[allow(clippy::too_many_arguments)]` (`gateway/router/mod.rs:63-73`). Introduce a `HandleRequest` struct (a mechanical refactor across `gateway_bridge.rs:52,81`, `followup.rs:87`, `scheduled_skills.rs:324` and two test stubs) and carry the override through the existing `LoopOverrides::MainLoop` seam (`query_handler/mod.rs:6-17`) into `LoopConfig.model`. **Validate the model id** via `router.model_registry().get_model_info()` and 400 `UNKNOWN_MODEL` — `simple_query_handler.rs:256-260` resolves the context window from `config_for_loop.model`, so a bogus id silently degrades the trimming budget to the 200 000 fallback. **Ship request-scoped only.** Lane persistence is a follow-up needing no migration (the `preference` table is already a versioned KV store, key `lane_model:{lane_key}`); shipping both at once turns an afternoon into a week. `ChatSendRequest` has no `deny_unknown_fields`, so the client's `model` field is silently dropped today — forward-compatible, confirmed.
-9. **GAP-19 — plugin install, `source: "path"` only.** Copy a local directory into `plugin_dir`, then call the already-public `try_load_plugin`, which parks the plugin in `WaitingApproval` and emits `PluginPendingApproval` — **install does not grant capabilities**; the existing approve gate still governs. Use a serde-tagged enum so `archive` is additive later. Needs one upstream addition: `PluginManager::plugin_dir()` has no getter. Hardening is the real work: parse `plugin.toml` *before* copying, reject name collisions (409), reject a path already inside `plugin_dir`, refuse symlinks escaping the source root. **Explicitly decline `source: "url"`.** Downloading untrusted executable code needs its own security review — signatures, allowlists, TOFU — not a line in this plan. The GUI already has `tauri_plugin_dialog` for a native directory picker.
-10. **Delete `DagNodeStatus`** once the GUI has switched to `SubagentSpan` (§5).
-11. **Artifact phase 2** (§1.9): user-edit detection recorded as a version with `author_agent_id = NULL`; `ArtifactStore::rebase_project` wired to the project picker; uploads into `<store>/uploads/` **only if D2 is answered "yes"**.
-12. **Pre-existing doc bug, one line:** `apps/openalpaca/src/commands/plugin.rs:225,230` and `docs/CLI_Manual.md:222` tell users plugins live in `~/.openalpaca/plugins/.config/`, but `main.rs:331` puts them in `app_dir()/plugins`. Harmless today; **actively confusing once `~/.openalpaca/` really exists**.
+Independently orderable; each its own commit. Ordered by value per hour.
 
----
-
-## 9. Cross-cutting: envelopes, list shapes, task shape
-
-**Three error envelopes plus a plain-text 401 coexist**, not two as the brief says: `{error:{code,message}}` (`chat_types.rs:101-111` and a byte-identical duplicate at `files_types.rs:174-184`), `{error:{code,status,message}}` (`settings_types.rs:6-17`), `{error:"string"}` (~30 ad-hoc `json!` sites in `tasks.rs`, `agents.rs`, `plugins.rs`, `connectors.rs`), and `(401, "Invalid token")` in `middleware.rs`.
-
-- **New routes use the shared `api_error()` from Phase 0.** Drop `status` — it duplicates the HTTP status and invites drift.
-- **Do not retrofit the `{error:"string"}` sites now.** Both in-repo clients already absorb all four shapes (`lib/http.ts:72-107`, `apps/openalpaca/src/client.rs:147-153`), so the retrofit is pure churn with a real regression surface. Its own commit, after the GUI work lands.
-- **Do not normalise list shapes.** The bare-array/envelope split already follows a legible rule — **paginated ⇒ `{items,total}`; unbounded ⇒ bare array**. Codify the rule; change nothing. Under it, `/v1/tools` and `/v1/skills` are bare arrays.
-- **`GET /v1/tasks` vs `GET /v1/tasks/{id}` normalisation is deferred to Phase 3's timeline work**, where the representation of agent runs is being rethought anyway. Doing it in isolation breaks both the GUI (`types.ts:60-61, :83-87`) and the CLI (`commands/tasks.rs:82,97`), which each encode both shapes, for zero new capability. **Do the cheap half in Phase 0:** replace `list_tasks_handler`'s stringly-typed `as_object_mut()` post-injection with a typed `TaskSummaryResponse` — same JSON, no behaviour change, and the later normalisation becomes a one-file diff.
+1. **GAP-14 — `GET /v1/status`, Phase A.** `started_at` at the top of `run()`, `uptime_secs`, `schema_version` from `Database::schema_version()` (the DB is the truth, not `MIGRATIONS.len()`), **`home_root`/`state_dir`/`db_path`** + resolved project dir (§4.7.4), `upload_bytes`/`produced_bytes` (§4.8). Protected route (leaks paths); `/v1/health` untouched. `log_path`: per **N2** — `state/logs/daemon.log` when the CLI-managed log exists, else `null`; Phase B (appender + rotation + un-discarding the sidecar's stdout, `src-tauri/src/lib.rs:128,152`) stays a separate day+ task.
+2. **GAP-18 — `GET /v1/tools`, `/v1/skills`.** Clone the tool-registry `Arc` before its move into `Orchestrator::new` (`main.rs:373`); two `AppState` fields. `author` exists; `destructive_hint` → `requires_confirmation` (`sandbox/mod.rs:398-417`); `global_tool_deny` → `denied`; grouped `tool_execution_log` query → `invocations_today`. Sort by name (`DashMap` iteration jitters). Bare arrays (§7 rule). Per-tool enable *writes* stay out of scope — the toggle ships disabled rather than lying.
+3. **D2 uploads re-home (final).** Existing `state/assets/` blobs → `uploads/<created-date>/NN-<name>.<ext>`: per-row move + `storage_path`/`rel_path` UPDATE, resumable, then delete `interim_assets_dir()`. Same mover discipline as §2.2.
+4. **GAP-15 — provider enable/disable.** Only the write route is missing (`enabled` exists end-to-end: `router_config.rs:65-66`, `router_builder.rs:98-102`, served at `settings_service.rs:169-178`). `deregister_provider` for hot disable (strips models — enable must re-register **and** `refresh_models()`); extract `persist_only(mutate)` from `persist_and_reload`; **409 when disabling the default model's provider**.
+5. **GAP-20 — template run counts** (counts only): `agent_task_history ⨝ agent GROUP BY template_id` — after P8, prefer `subagent_span`. Document that counts are *completed* runs. `?window=7d`, 400 on unknown windows. The `enabled` toggle stays deferred (enforcement in the spawn path is the real cost).
+6. **GAP-17 — connector detail.** `source`, `registered`, **`messages_7d`** (§0). The "unwired" badge needs nothing server-side (`hooks/useConnectors.ts:33-44`). Fix the hardcoded name match (`connectors.rs:34-38` — Discord falls through to the raw id).
+7. **GAP-08c — `GET /v1/usage/summary?window=today`.** Totals from `query_daily_usage`; nested `caps` object; `by_provider` from `llm_call_log` for today (not the lifetime `all_provider_usage()`); echo the authoritative UTC `date` (client's `todayIsoDate()` is local — they disagree up to 12 h/day). Product question stands: `max_cost = 5.0` is per-workflow; the Settings panel reads it as daily. Add a real daily cap to `[orchestrator.costs]` or relabel.
+8. **GAP-13 — per-chat model override.** `HandleRequest` struct (not a 9th positional arg on `MessageHandler::handle` — `gateway/router/mod.rs:63-73`; mechanical across `gateway_bridge.rs:52,81`, `followup.rs:87`, `scheduled_skills.rs:324`, two stubs) → `LoopOverrides::MainLoop` seam → `LoopConfig.model`. Validate via `model_registry().get_model_info()`, 400 `UNKNOWN_MODEL` (a bogus id silently degrades the trimming budget — `simple_query_handler.rs:256-260`). Request-scoped only; lane persistence later via the `preference` KV (`lane_model:{lane_key}`).
+9. **GAP-19 — plugin install, `source:"path"` only.** Copy into `plugin_dir` (add the missing getter) → `try_load_plugin` → `WaitingApproval` — install grants nothing; the approve gate governs. Hardening is the work: parse `plugin.toml` before copying, 409 on collisions, reject paths inside `plugin_dir`, refuse escaping symlinks. **`source:"url"` declined** — its own security review.
+10. **Delete `DagNodeStatus`** once the GUI renders `SubagentSpan` (P9).
+11. **Artifact phase 2:** user-edit detection as a version with `author_agent_id = NULL`; `rebase_project` wired to the project picker.
+12. **S2 — replay resume** (§5.6c): the algorithm, `action:"resume"`, `resume_enabled` config, synthetic resume interjection. The only speculative piece in the plan; everything before it is useful without it. Day+.
+13. **S3 — snapshots** (§5.7 tail): `file_write` pre-edit images. M, deferrable indefinitely.
+14. **Doc fix:** `plugin.rs:225,230` / `CLI_Manual.md:222` — drop the spurious `.config` suffix (now otherwise true).
 
 ---
 
-## 10. Gap disposition — all 23
+## 7. Cross-cutting: envelopes, list shapes, task shape
+
+Three error envelopes plus a plain-text 401 coexist: `{error:{code,message}}` (`chat_types.rs:101-111` = `files_types.rs:174-184`), `{error:{code,status,message}}` (`settings_types.rs:6-17`), `{error:"string"}` (~30 ad-hoc sites), `(401, "Invalid token")` (`middleware.rs`).
+
+- **New routes use Phase 0's shared `api_error()`.** Drop `status` from the envelope — it duplicates the HTTP status.
+- **Do not retrofit the `{error:"string"}` sites now.** Both clients absorb all shapes (`lib/http.ts:72-107`, `client.rs:147-153`); the retrofit is churn with a real regression surface — its own commit after the GUI work. (Deliberately *not* part of the §3 purge: this is churn-avoidance, not legacy-compat.)
+- **List shapes follow the existing legible rule** — paginated ⇒ `{items,total}`; unbounded ⇒ bare array. Codified, nothing changed. `/v1/tools` and `/v1/skills` are bare arrays; `/v1/sessions*` and `/v1/events/history` are envelopes (the latter *always*, per P20).
+- **`GET /v1/tasks` vs `/{id}` normalisation** happens in Phase 4 with P8, where the agent-run representation is being replaced anyway. Phase 0 does the cheap half (typed `TaskSummaryResponse`).
+
+---
+
+## 8. Gap disposition — all 23, plus the session pillar
 
 | Gap | Phase | Needs | Effort |
 |---|---|---|---|
-| **GAP-01** approval_scope | 0 | Two lines: `ConfirmationBody` field + `chat.rs:462`. Enforcement path already complete. | XS |
-| **GAP-07** empty title/name | 0 | `title`/`name` on 4 `SystemEvent` variants; 5 producer sites all have the value. Not `SharedContext` in the bridge. | XS |
-| **GAP-08a** daily_cost | 0 | `query_daily_usage` for today, **not** the since-boot cost tracker. | XS |
-| **GAP-08b** cost by task | 0 | `task_id` on `LlmUsageQuery` + `cost_for_tasks()` grouped query on `GET /v1/tasks`. | S |
-| **GAP-16** `/v1/me` | 0 | `AppState` already has both fields; `sources[]` = distinct `conversations.source`. | XS |
-| **GAP-22** plugin event ts/id | 0 | 6 variants + `PluginManager::with_instance_id`; full-workspace rebuild (touches `openalpaca_api`). | S |
-| **GAP-04** artifact API | 1 → 2 | Migration 035, `ArtifactStore`, `artifact_write`, `/v1/artifacts*`. **The Library's whole blocker.** | L |
-| **GAP-05** versions & diff | 2 | `artifact_versions` (in 035) + `similar` dep + `/versions`, `/diff`. | M |
-| **GAP-11** `?token=` content | 2 | Third merged sub-router; inline token check copied from `chat.rs:104-113`; CSP. | S |
-| **GAP-12** server-side pins | 2 | `pinned` column (in 035) + `PUT …/pin`. Client `localStorage` stays authoritative. | XS |
-| **GAP-09** subagent timeline | 3 | Migration 036 `subagent_span`; ~6 edit sites in `tools.rs`; lead span; `ConfirmationBroker` metadata; `ToolContext.agent_instance_id`; route; event through 4 layers. **Largest single item after the store.** | L |
-| **GAP-10** per-run event log | 3 | `event_log.task_id` (036) + `ctx.task_id` passthrough + retro-fit 6 already-persisted variants. | M |
-| **GAP-02** steer endpoint | 4 | Pure reuse of `push_steering`; lane read from `task.source_lane`. | S |
-| **GAP-03** follow-up routes | 4 | `list_by_lane` + `cancel_if_queued` (CAS) + 3 handlers + `FollowupView`. | M |
-| **GAP-06** rerun / start | 4 | `Orchestrator::rerun_task`; `task.source_task_id` (036); `dispatch_lead_agent_with_id` for `start` (D5). | M |
-| **GAP-23** message→run links | 5 | Migration 037; `persist_assistant_message` param; `role='artifact'` on the completion message. | M |
-| **GAP-14** `/v1/status` | 6 | Phase A only. `log_path: null` — the daemon writes no log file. | S / day+ |
-| **GAP-21** conversation CRUD | 6 | 2 repo methods (transactional delete), 2 handlers, `patch` import. | S |
-| **GAP-18** `/v1/tools`, `/v1/skills` | 6 | Clone the tool-registry `Arc` before the move at `main.rs:373`; 2 `AppState` fields. | M |
-| **GAP-15** provider toggle | 6 | `set_provider_enabled` + `deregister_provider` round trip + 409 on the default model's provider. | M |
-| **GAP-17** connector detail | 6 | `source`/`registered`/**`messages_7d`**; badge already client-side. | M |
-| **GAP-20** template metrics | 6 | Counts only (one join). `enabled` deferred — no home in the model, and enforcement is the real cost. | M / day+ |
-| **GAP-13** per-chat model | 6 | `HandleRequest` refactor (5 hops) + `LoopOverrides` seam. Request-scoped only. | day+ |
-| **GAP-19** plugin install | 6 | `source:"path"` only; hardening is the work. **URL install declined.** | day+ |
+| **GAP-01** approval_scope | 0 | Two lines; enforcement path already complete. | XS |
+| **GAP-07** empty title/name | 0 | `title`/`name` on 4 event variants; 5 producer sites have the value. | XS |
+| **GAP-08a** daily_cost | 0 | `query_daily_usage`, not the since-boot tracker. | XS |
+| **GAP-08b** cost by task | 0 | `task_id` on `LlmUsageQuery` + `cost_for_tasks()` on `GET /v1/tasks`. | S |
+| **GAP-16** `/v1/me` | 0 | Fields exist on `AppState`; `sources[]` = distinct session source. | XS |
+| **GAP-22** plugin event ts/id | 0 | 6 variants + `with_instance_id`; full-workspace rebuild. | S |
+| **GAP-04** artifact API | 2 → 3 | Migration 036, `ArtifactStore`, `artifact_write`, `/v1/artifacts*`. The Library's whole blocker. | L |
+| **GAP-05** versions & diff | 3 | `artifact_versions` (036) + `similar` + `/versions`, `/diff`. | M |
+| **GAP-11** `?token=` content | 3 | Third merged sub-router; inline token check; CSP with the preview. | S |
+| **GAP-12** server-side pins | 3 | `pinned` (036) + `PUT …/pin`. | XS |
+| **GAP-09** subagent timeline | 4 | Migration 037 `subagent_span`; ~6 edit sites; lead span; broker metadata; `ToolContext.agent_instance_id`; route + event. Largest single item after the store. | L |
+| **GAP-10** per-run event log | 4 | `event_log.task_id` (037) + `ctx.task_id` passthrough + retro-fit 6 variants. Envelope always (P20). | M |
+| **GAP-02** steer endpoint | 5 | Pure reuse of `push_steering`; lane from `task.source_lane`. | S |
+| **GAP-03** follow-up routes | 5 | `list_by_lane` + `cancel_if_queued` (CAS) + 3 handlers + `FollowupView`. | M |
+| **GAP-06** rerun / start | 5 | `rerun_task`; `source_task_id` (037); `dispatch_lead_agent_with_id` for `start` (D5). | M |
+| **GAP-23** message→run links | 6 | Migration 038; `persist_assistant_message` param; `role='artifact'` on the completion message. | M |
+| **GAP-21** conversation CRUD | **7a** | **Re-homed onto sessions** — `PATCH`/`DELETE /v1/sessions/{id}`; built once; `/v1/conversations` deleted (P19). | S (inside 7a) |
+| **GAP-14** `/v1/status` | 8 | Phase A; single-root fields; `log_path` per N2. | S / day+ |
+| **GAP-18** `/v1/tools`, `/v1/skills` | 8 | Clone the registry `Arc` before the move; 2 `AppState` fields. | M |
+| **GAP-15** provider toggle | 8 | Write route + `deregister_provider` round trip + 409 on the default model's provider. | M |
+| **GAP-17** connector detail | 8 | `source`/`registered`/`messages_7d`. | M |
+| **GAP-20** template metrics | 8 | Counts only; source flips to `subagent_span` post-P8. `enabled` deferred. | M / day+ |
+| **GAP-13** per-chat model | 8 | `HandleRequest` refactor + `LoopOverrides` seam. Request-scoped only. | day+ |
+| **GAP-19** plugin install | 8 | `source:"path"` only; hardening is the work; URL declined. | day+ |
+| **SES-01** session identity + surface | 7a | Migration 039; `/v1/sessions` family; chat `session_id`; follow-up pinning; report into originating session. | L |
+| **SES-02** session event log | 7b | `SessionLogService`; loop/gateway/steering emit points; spill; `/events`. | L |
+| **SES-03** honest interruption + steering recovery | 7b | `interrupted` status; sweep rewrite reading JSONL tails. | M (inside 7b) |
+| **SES-04** replay resume | 8.12 | §5.6c; `resume_enabled` gated, off by default. | day+ |
+| **SES-05** file_write snapshots | 8.13 | Pre-edit images + `file_snapshot` records. | M, deferrable |
 
 ---
 
-## 11. Risks and breaking changes
+## 9. Risks and breaking changes
 
 | Risk | Reality | Mitigation |
 |---|---|---|
-| **Orphan sweep eats every artifact** | Real and immediate the moment 035 lands: produced artifacts are never linked to a message, and `background.rs:308-357` deletes the row **and the file** after 24 h. | §1.6 fix in the same commit. Test: a produced row survives 25 simulated hours. |
-| **Upload quota starts rejecting uploads** | Real: `total_storage_bytes` sums all rows against a 500 MB cap. Agent output in the user's own project would count. | §1.6 fix in the same commit. |
-| **`.openalpaca/` silently changes memory scoping** | Writing the first artifact creates a workspace-root marker where none existed, so `resolve_workspace_id` starts resolving that directory. | Deliberate and desirable, but **document it** and land the marker change and the store together so it is never a surprise. |
-| **Everything lands in `~/.openalpaca/`** | Certain, until a client sends `x-workspace-path`. No client does today. | §1.8 items 1–4 are in Phase 1/2 scope, not "later". Without them the store is built and unused. |
-| **Existing installs** | No schema is dropped, no file moves, no route changes shape. Every 035/036/037 column is nullable or defaulted. | Rollback to 34 leaves artifacts on disk as a readable folder. |
-| **CSP loosening** | `blob:` and the loopback origins in `img-src` widen the webview's image surface. | Land it **with** the preview, never before. HTML artifact previews are a separate `frame-src`/sandbox review, explicitly not covered. |
-| **`?token=` in a URL** | The daemon token is long-lived and grants everything; a URL-embedded token lands in webview history and any `Referer`. | Pre-existing posture — `/v1/chat/stream` already does this. Add `Referrer-Policy: no-referrer` on the content response. A short-lived per-asset token is the real fix, deferred. |
-| **`ConversationMessage` struct-literal churn** | Adding `task_id` breaks every construction site (`gateway/persistence.rs` ×3 plus repository mappers). | Add `#[derive(Default)]` and `..Default::default()` in the same commit. |
-| **`start` id-injection** | The messiest code in the plan: `create`-or-`update` in the dispatcher's persist step. | Isolate it in `TaskRepository::upsert_queued` and call it out explicitly in review. Or take D5's alternative. |
-| **New `similar` dependency** | The workspace has no diff crate today. | MIT, pure Rust, no build script, in `openalpaca_storage` only. Alternative: ~120-line hand-rolled LCS. |
-| **`GET /v1/events/history` dual shape** | The same route returns a bare array or an envelope depending on the query. | Deliberate, to keep the CLI working. Documented; regression-tested both ways. |
-| **`DagNodeStatus` double emission** | Two event families describe the same spawns for one phase. | Bounded: deleted in Phase 6 once the client switches. Pre-release, so no soak ceremony. |
+| **The live-DB root move** (top risk) | The mover renames a WAL-mode SQLite DB, the master key, user-approved plugin permissions, and the encrypted-keys `config/` — at boot, on the only real install. | Five-part mitigation, all in §2.2: (1) **live-daemon guard** — non-blocking lock probe on the old root aborts rather than racing a running process; (2) **per-entry atomic rename** on the same volume, `EXDEV` aborts rather than degrading to copy; (3) **idempotent resume** — skip-if-destination-exists, abort-on-first-failure, next boot continues where it stopped; (4) **WAL/SHM sidecars move before the `.db`**, and the mover always completes before `Database::open` in the same boot, so SQLite never pairs a split trio; (5) **`rebase_asset_paths`** repairs stored absolute paths idempotently after open. Worst case if all else fails: the DB trio is intact at one root or the other, never half-open. |
+| **Atomic three-binary rebuild** | An old GUI/CLI binary reads discovery from the old root and concludes no daemon runs (the GUI would spawn-loop). | One commit rebuilds daemon + CLI + GUI; no compatibility window by design (directive 2). Verified consumer inventory (appendix R §0) shows discovery consumers need no code changes, only the rebuild. |
+| **`.alpaca` roots go quiet** (P3) | A directory that was a workspace root only via hand-made `.alpaca` stops resolving; its memories go quiet. | One-time `mv .alpaca .openalpaca` by the user; stated in the commit message. |
+| **Orphan sweep eats every produced artifact** | Real the moment 036 lands (`background.rs:308-357` deletes row **and file** after 24 h). | §4.5 fix in the same commit; test: a produced row survives 25 simulated hours. |
+| **Upload quota starts rejecting uploads** | `total_storage_bytes` sums all rows against 500 MB. | §4.5 fix in the same commit. |
+| **`conversations` → `session` table rebuild** (039) | A data-copying migration over the primary chat table on the live DB. | Runs inside the migration transaction like every numbered migration; the copy is column-for-column with verified defaults; backfill preserves today's semantics exactly (one active session per lane). Rollback to 38 loses only the session columns — messages are untouched (`conversation_messages` is only `ALTER`ed). |
+| **Session log overhead in the loop** | A new write on every round/tool call. | Non-blocking `try_send` to a per-session writer; drops (counted) over stalls; `sync_data` only at declared boundaries + 5 s timer; never per token (§5.4). |
+| **`.openalpaca/` silently changes memory scoping** | The first artifact write creates a workspace-root marker where none existed. | Deliberate and desirable; documented; the marker change and the store land together. |
+| **Everything lands in the home root** | Certain until a client sends `x-workspace-path`; none does today. | §4.7 items are Phase 2/3 scope, not "later". |
+| **CSP loosening** | `blob:` + loopback origins widen the webview's image surface. | Land with the preview, never before; HTML previews are a separate review. |
+| **`?token=` in a URL** | Long-lived token in webview history / `Referer`. | Pre-existing posture (`/v1/chat/stream`); add `Referrer-Policy: no-referrer` on content responses; short-lived per-asset tokens deferred. |
+| **`start` id-injection** (D5) | The messiest code in the plan: create-or-update in the dispatcher's persist step. | Isolated in `TaskRepository::upsert_queued`, called out in review. |
+| **New `similar` dependency** | Workspace has no diff crate. | MIT, pure Rust, no build script, `openalpaca_storage` only; alternative: hand-rolled LCS. |
+| **`DagNodeStatus` double emission** | Two event families describe the same spawns for a phase. | Bounded: deleted in Phase 8 once the client switches (P9). |
 
 ---
 
-## 12. Explicitly out of scope
+## 10. Explicitly out of scope
 
-- **A full project concept** (`GET /v1/projects`, `POST /v1/projects/activate`, a project switcher). §1.8 items 1–4 are enough for the Library. Whoever adds it must reconcile with `SkillCatalog::scan_multi_scope` / `SkillScope`, which already implement project-vs-user scoping — do not invent a second path resolution.
-- **Moving `app_dir()`** (D1). Rejected with reasons.
-- **Re-homing existing uploads** (D2). Phase-2 delta if the user disagrees; note it is two writers, and the connector's duplicated sha/dedup logic should collapse into `ArtifactStore` first.
-- **Daemon file logging** (GAP-14 Phase B). `tracing-appender` + rotation + retention + un-discarding the GUI sidecar's stdout is a real feature, not a field.
-- **Per-tool enable writes** (`global_tool_deny` via HTTP) and **agent-template `enabled`** (GAP-20 part 2). Both need enforcement in the spawn path, without which the toggles are decorative.
-- **Remote plugin install** (`source: "url"`). Needs its own security review.
-- **HTML artifact previews.** `frame-src`/sandbox is a security decision, not a CSP tweak.
-- **Retrofitting the ~30 `{error:"string"}` sites** and **normalising list shapes** (§9). Churn with a regression surface and no user-visible benefit.
-- **`GET /v1/tasks` vs `/{id}` normalisation.** Deferred to Phase 3, where it is a natural consequence rather than a gratuitous break.
-- **A `resync_needed` WS signal.** `routes/events.rs` logs and continues on `RecvError::Lagged(n)`, so clients silently lose events; the UI treats the socket as additive and refetches. Worth doing, not blocking any surface.
-- **Two daemons over one shared project directory.** Documented limitation.
+- **A full project concept** (`GET /v1/projects`, activation, a switcher). §4.7's items suffice for the Library and sessions. Whoever adds it reconciles with `SkillCatalog::scan_multi_scope`/`SkillScope` and points project skills at `.openalpaca/skills/` (§1.2).
+- **Daemon file logging** (GAP-14 Phase B): `tracing-appender` + rotation + retention + un-discarding the GUI sidecar's stdout.
+- **Per-tool enable writes** and **agent-template `enabled`** (GAP-20 part 2) — both need enforcement in the spawn path, without which the toggles are decorative.
+- **Remote plugin install** (`source:"url"`) — its own security review.
+- **HTML artifact previews** — `frame-src`/sandbox is a security decision.
+- **Retrofitting the ~30 `{error:"string"}` sites** and **normalising list shapes** (§7) — churn with a regression surface.
+- **The `AgentConfigFile` template-vs-instance redesign** (P17) — flagged OWN-TASK; the "legacy" shape is the live GUI contract.
+- **Connector idle-auto-archive / in-chat `/new`** (N1) — knob reserved (`[orchestrator.sessions] idle_archive_hours`), off; needs a product call.
+- **Full-content `assistant_msg` JSONL records** (log-only session export) — decided *no*: the DB is authoritative for content; revisit only if export-a-session-as-one-file becomes a feature.
+- **Session `results/` retention** — never GC'd; if the root measurably grows, a size-capped LRU over *archived* sessions' `results/` (never `log.jsonl`), config-gated, default off.
+- **Whole-workspace snapshots / task-state checkpoints** — a VCS's job / redundant with `state_json`.
+- **A `resync_needed` WS signal** (`routes/events.rs` drops on `Lagged`) — worth doing, not blocking any surface.
+- **Two daemons over one shared project directory** — documented limitation.
+- **Automated reverse-mover** (rollback of §2.2) — the entry ledger is reversible by hand; pre-release, single user.
 
 ---
 
-## 13. Migration ledger
+## 11. Migration ledger
+
+One ledger, no conflicts. Each file ends with its own `UPDATE schema_version`; `database/tests.rs:11` asserts the head version and updates with each.
 
 | # | File | Phase | Contents |
 |---|---|---|---|
 | 034 | *(head today — verified)* | — | `drop_context_compaction_log` |
-| **035** | `035_artifact_store.sql` | 1 | 11 `file_assets` columns · 4 indexes · `artifact_versions` · `task.workspace_id` |
-| **036** | `036_run_observability.sql` | 3 | `subagent_span` · `event_log.task_id` · `task.source_task_id` |
-| **037** | `037_message_run_links.sql` | 5 | `conversation_messages.task_id` |
+| **035** | `035_drop_planner_telemetry.sql` | 1 | P7: `DROP COLUMN` `orchestrator_latency.planner_ms`/`dispatch_ms`, `dispatch_decisions.planner_requested_mode` (pre-check: SQLite ≥ 3.35, else 024-style rebuild) · optional P15 `event_log` timestamp normalise |
+| **036** | `036_artifact_store.sql` | 2 | 11 `file_assets` columns · 4 indexes · `artifact_versions` · `task.workspace_id` |
+| **037** | `037_run_observability.sql` | 4 | `subagent_span` · `event_log.task_id` · `task.source_task_id` |
+| **038** | `038_message_run_links.sql` | 6 | `conversation_messages.task_id` |
+| **039** | `039_sessions.sql` | 7a | `conversations` → `session` rebuild (drops `UNIQUE(lane_key)`; workspace + lifecycle; partial unique active index) · `session_id` on `conversation_messages`/`task`/`lane_followups` · `tool_execution_log` index columns |
 
-Lens A's and Lens B's numbering claims conflicted (A wanted 035 for everything artifact-shaped, B assumed 035+036 for artifacts and claimed 037/038). **Arbitrated:** artifacts are one migration, so everything shifts down one from B's assumption. Each file ends with its own `UPDATE schema_version`. `database/tests.rs:11` asserts the head version and must be updated with each.
+Two **unnumbered boot-time fixups**, listed for completeness but explicitly not schema migrations: `move_app_root()` (filesystem, §2.2 — idempotent, resumable) and `rebase_asset_paths()` (runtime-prefix UPDATE, §2.2.6 — idempotent, zero rows after first boot).
+
+Sequencing constraints encoded above: 035 before everything path-dependent lands beside the mover; 039 **after** 038 (the `#[derive(Default)]` churn payment) and after 037 (the span ids and sandbox passthrough the session log references). Rev 1's numbering (artifacts=035…links=037) shifts up one because the purge migration takes the first slot; Lens R's "038_drop_planner_telemetry" and Lens S's "038_sessions" collided — resolved by phase order: the purge migrates first, sessions last.
