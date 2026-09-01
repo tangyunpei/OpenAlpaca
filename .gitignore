@@ -129,3 +129,4 @@ config/llm.toml
 # UI rework reference docs (whitelisted from the *.md blanket ignore)
 !apps/openalpaca-gui/DESIGN_SPEC.md
 !apps/openalpaca-gui/API_MAP.md
+!tasks/gui-api-requirements.md

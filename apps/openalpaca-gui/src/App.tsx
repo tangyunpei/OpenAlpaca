@@ -33,7 +33,12 @@ import {
   useCommandCatalog,
   useCommandShortcuts,
 } from "@/components/overlays";
-import { AppShell, NavRail, useGlobalKeys } from "@/components/shell";
+import {
+  AppShell,
+  NavRail,
+  useGlobalKeys,
+  ViewBoundary,
+} from "@/components/shell";
 import { QueryProvider } from "@/lib/query-provider";
 import { useConfirmationStore } from "@/stores/confirmation";
 import { useUiStore, type View } from "@/stores/ui";
@@ -72,9 +77,11 @@ export function AppFrame() {
     <AppShell>
       <NavRail blockedRunId={pending?.runId ?? null} />
 
-      <Suspense fallback={<div className="min-w-0 flex-1 bg-main" />}>
-        {renderView(view, pending?.runId ?? null)}
-      </Suspense>
+      <ViewBoundary resetKey={view}>
+        <Suspense fallback={<div className="min-w-0 flex-1 bg-main" />}>
+          {renderView(view, pending?.runId ?? null)}
+        </Suspense>
+      </ViewBoundary>
 
       <CommandPalette />
       <ToastHost />

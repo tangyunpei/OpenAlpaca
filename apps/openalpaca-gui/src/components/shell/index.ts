@@ -10,3 +10,4 @@ export * from "./Resizer";
 export * from "./RunningNowSection";
 export * from "./TrafficLights";
 export * from "./useGlobalKeys";
+export { ViewBoundary } from "./ViewBoundary";
