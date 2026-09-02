@@ -133,3 +133,4 @@ config/llm.toml
 !tasks/api-fix-plan.md
 !tasks/research/
 !tasks/research/*.md
+!tasks/bug-main-loop-cost-lockout.md
