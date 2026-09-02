@@ -33,3 +33,13 @@ Option 1 is the likely correct fix: the bug is that a per-turn budget is being c
 ## Verification plan
 
 Reproduce first — start the daemon, chat until `llm_usage` for today under `agent_id = 'orchestrator'` exceeds $1.00, confirm the next turn returns `CostExceeded` with zero LLM calls. Then fix, and add a regression test that seeds the tracker with a non-zero bucket before running one main-loop turn.
+
+## Decision — DECIDED 2026-09-02
+
+**Fix shape: option 1** — seed the per-turn baseline from the cost tracker *before* round 0, so the first round's delta is that round's spend and not the day's cumulative total. No daily budget is added (N4: the cap is per-workflow, relabel-only; ADR-028). No change to attribution rows.
+
+Verified anchors (2026-09-02): `LoopState.last_cost` is initialised to `0.0` at `crates/openalpaca_core/src/runner/agentic_loop/mod.rs:68`; the delta block is `:312-317` (`round_cost = backend.agent_cost(..)` → `cost_delta = (round_cost - state.last_cost).max(0.0)` → `cost_acc.add_usd` → `state.last_cost = round_cost`). Because `agent_cost()` returns the tracker's *cumulative* figure for the agent id (boot-seeded from `repo.get_today_usage()`, `apps/openalpacad/src/services/llm.rs:205-235`) and the main loop passes the literal `"orchestrator"` id with no accumulator, round 0's delta equals the whole day's spend.
+
+**Scheduled:** `tasks/api-fix-plan.md` Phase 0 item **A5** (with its *Verify* clause: after more than $1 of cumulative `orchestrator` spend, a fresh chat turn still runs). Standalone-fixable; no dependency on the extension-enable design.
+
+**Related, not part of this fix:** whether the $5 per-workflow cap should count subagent spend is an open owner decision (lessons doc §6 T13; plan §0 pending table) — it is new enforcement, not a relabel, and nothing ships until decided.
