@@ -34,13 +34,13 @@ Two calls carried from rev 1, still standing:
 - **`daily_cost_usd` comes from the DB** (`query_daily_usage` for today), not `CostTracker::total_cost()` — the tracker means *since boot*.
 - **`calls_7d` is renamed `messages_7d`** (GAP-17). The only measurable number is inbound user messages by `conversation_messages.source`.
 
-### Genuinely new either-way calls raised by rev 2 (few, as expected)
+### New calls raised by rev 2 — **RESOLVED 2026-09-01: all three take their default.**
 
-| # | Question | Default if unanswered |
+| # | Question | Decision |
 |---|---|---|
-| **N1** | **Connector session boundaries.** Telegram/iMessage lanes get one perpetual `active` session. Is an idle-auto-archive (e.g. 72 h) wanted, and/or an in-chat `/new` command? The config knob (`[orchestrator.sessions] idle_archive_hours`) is reserved either way. | Perpetual session; knob reserved, off. |
-| **N2** | **`GET /v1/status.log_path`.** Rev 1 shipped `null` unconditionally (the daemon writes no log). After the move, the *CLI-managed* start pipes daemon output to `state/logs/daemon.log` (`apps/openalpaca/src/manager.rs:38`). Serve that path when the file exists, or keep `null` until GAP-14 Phase B? | Serve it when present; `null` for GUI-sidecar daemons. |
-| **N3** | **Early S0.** If the GUI wants multi-conversation before the artifact Library completes, sessions Phase 7a can be pulled ahead of Phase 3 — its only hard prerequisite is Phase 6's `#[derive(Default)]` churn payment, which can be paid early. | Ship in the §6 order. |
+| **N1** | **Connector session boundaries.** Telegram/iMessage lanes get one perpetual `active` session. Is an idle-auto-archive (e.g. 72 h) wanted, and/or an in-chat `/new` command? The config knob (`[orchestrator.sessions] idle_archive_hours`) is reserved either way. | **Perpetual session.** Knob reserved (`idle_archive_hours`), off. |
+| **N2** | **`GET /v1/status.log_path`.** Rev 1 shipped `null` unconditionally (the daemon writes no log). After the move, the *CLI-managed* start pipes daemon output to `state/logs/daemon.log` (`apps/openalpaca/src/manager.rs:38`). Serve that path when the file exists, or keep `null` until GAP-14 Phase B? | **Serve it when present**; `null` for GUI-sidecar daemons. |
+| **N3** | **Early S0.** If the GUI wants multi-conversation before the artifact Library completes, sessions Phase 7a can be pulled ahead of Phase 3 — its only hard prerequisite is Phase 6's `#[derive(Default)]` churn payment, which can be paid early. | **Ship in the §6 order.** |
 
 Two **implementer pre-checks** (verify, not decide): (a) bundled SQLite ≥ 3.35 for `ALTER TABLE … DROP COLUMN` in migration 035 — else use the 024-style table rebuild; (b) before deleting the legacy flat `llm.toml` branch (P4), confirm `LlmConfig` and `build_provider_with_runtime` have no non-legacy consumers.
 
@@ -598,7 +598,17 @@ A queued follow-up is a promise to continue *that* conversation: **the follow-up
 
 Consequence for Phase 4 (GAP-10): **unchanged and unblocked** — `event_log.task_id` ships first and keeps serving `GET /v1/events/history?task_id=` from rows that already exist. Once the JSONL is live, payload-bearing per-run detail moves to `GET /v1/sessions/{id}/events`; `event_log` stays what it structurally is — a small-detail audit table. No writer added, none removed.
 
-**Durability mechanics:** spill threshold 64 KB (tmp+rename, like the artifact store). Rotation at 64 MB → `log.<first>-<last>.jsonl`; readers list segments, sort by first seq, stream — most sessions never rotate. **fsync policy:** the writer task owns a `BufWriter`; flush (write syscall) after every record; `sync_data` only on `session_start`, `assistant_msg`, `workflow_done`, `confirmation_res`, `session_end`, and a 5 s timer while dirty. Crash exposure: at most the current round's tail — acceptable; the DB is WAL-synced independently and replay tolerates a truncated tail. **Never per token** — the token stream never touches the log. Torn tails: readers treat an unparseable final line as end-of-log; the writer truncates a torn tail before appending on reopen. `DELETE /v1/sessions/{id}` removes row (transactionally) then dir; a rowless leftover dir is swept opportunistically at boot. No other GC — session logs are the user's history.
+**Durability mechanics:** spill threshold 64 KB (tmp+rename, like the artifact store). Rotation at 64 MB → `log.<first>-<last>.jsonl`; readers list segments, sort by first seq, stream — most sessions never rotate. **fsync policy:** the writer task owns a `BufWriter`; flush (write syscall) after every record; `sync_data` only on `session_start`, `assistant_msg`, `workflow_done`, `confirmation_res`, `session_end`, and a 5 s timer while dirty. Crash exposure: at most the current round's tail — acceptable; the DB is WAL-synced independently and replay tolerates a truncated tail. **Never per token** — the token stream never touches the log. Torn tails: readers treat an unparseable final line as end-of-log; the writer truncates a torn tail before appending on reopen. `DELETE /v1/sessions/{id}` removes row (transactionally) then dir; a rowless leftover dir is swept opportunistically at boot.
+
+**Size limits (decided 2026-09-01 — the log is bounded, not unbounded history).** Three caps, all config-driven under `[orchestrator.sessions]`:
+
+| Key | Default | Effect |
+|---|---|---|
+| `log_max_session_bytes` | 256 MB | Per session. On exceed, drop whole **oldest** segments (never the live one) and write a `log_trimmed` record naming the dropped seq range. |
+| `log_max_total_bytes` | 2 GB | Across all sessions. Evict oldest-touched **archived** sessions' logs first, LRU; an active session's log is never evicted. |
+| `log_retention_days` | 0 (off) | Optional age-based sweep of archived session logs. |
+
+Trimming the oldest segments is safe because of §5.3's source-of-truth split: chat content lives in SQLite, so a trim loses loop-interior detail (rounds, tool payloads) — not the conversation. Replay resume (§5.6c) only ever reads the **tail**, so a trimmed head cannot break it; a session whose *live* segment is gone answers 409 and points at `rerun`, exactly as a gutted log already does. Enforcement runs in the writer task on rotation (cheap, no scan) and once at boot for the global cap.
 
 ### 5.5 The write path
 
@@ -752,7 +762,7 @@ UPDATE schema_version SET version = 38 WHERE version = 37;
 
 Independently orderable; each its own commit. Ordered by value per hour.
 
-1. **GAP-14 — `GET /v1/status`, Phase A.** `started_at` at the top of `run()`, `uptime_secs`, `schema_version` from `Database::schema_version()` (the DB is the truth, not `MIGRATIONS.len()`), **`home_root`/`state_dir`/`db_path`** + resolved project dir (§4.7.4), `upload_bytes`/`produced_bytes` (§4.8). Protected route (leaks paths); `/v1/health` untouched. `log_path`: per **N2** — `state/logs/daemon.log` when the CLI-managed log exists, else `null`; Phase B (appender + rotation + un-discarding the sidecar's stdout, `src-tauri/src/lib.rs:128,152`) stays a separate day+ task.
+1. **GAP-14 — `GET /v1/status`, Phase A.** `started_at` at the top of `run()`, `uptime_secs`, `schema_version` from `Database::schema_version()` (the DB is the truth, not `MIGRATIONS.len()`), **`home_root`/`state_dir`/`db_path`** + resolved project dir (§4.7.4), `upload_bytes`/`produced_bytes` (§4.8). Protected route (leaks paths); `/v1/health` untouched. `log_path`: per **N2 (resolved: serve it)** — `state/logs/daemon.log` when the CLI-managed log exists, else `null`. **Bound it in the same change:** `apps/openalpaca/src/manager.rs:38` opens the file in plain append mode with no rotation, so it grows forever. Before opening, rotate when it exceeds `16 MB` (`daemon.log` → `daemon.log.1`, keeping 3), which is ~15 lines at the call site and needs no new dependency. Phase B (a real in-daemon appender + un-discarding the sidecar's stdout, `src-tauri/src/lib.rs:128,152`) stays a separate day+ task and inherits the same limits.
 2. **GAP-18 — `GET /v1/tools`, `/v1/skills`.** Clone the tool-registry `Arc` before its move into `Orchestrator::new` (`main.rs:373`); two `AppState` fields. `author` exists; `destructive_hint` → `requires_confirmation` (`sandbox/mod.rs:398-417`); `global_tool_deny` → `denied`; grouped `tool_execution_log` query → `invocations_today`. Sort by name (`DashMap` iteration jitters). Bare arrays (§7 rule). Per-tool enable *writes* stay out of scope — the toggle ships disabled rather than lying.
 3. **D2 uploads re-home (final).** Existing `state/assets/` blobs → `uploads/<created-date>/NN-<name>.<ext>`: per-row move + `storage_path`/`rel_path` UPDATE, resumable, then delete `interim_assets_dir()`. Same mover discipline as §2.2.
 4. **GAP-15 — provider enable/disable.** Only the write route is missing (`enabled` exists end-to-end: `router_config.rs:65-66`, `router_builder.rs:98-102`, served at `settings_service.rs:169-178`). `deregister_provider` for hot disable (strips models — enable must re-register **and** `refresh_models()`); extract `persist_only(mutate)` from `persist_and_reload`; **409 when disabling the default model's provider**.
@@ -846,7 +856,7 @@ Three error envelopes plus a plain-text 401 coexist: `{error:{code,message}}` (`
 - **HTML artifact previews** — `frame-src`/sandbox is a security decision.
 - **Retrofitting the ~30 `{error:"string"}` sites** and **normalising list shapes** (§7) — churn with a regression surface.
 - **The `AgentConfigFile` template-vs-instance redesign** (P17) — flagged OWN-TASK; the "legacy" shape is the live GUI contract.
-- **Connector idle-auto-archive / in-chat `/new`** (N1) — knob reserved (`[orchestrator.sessions] idle_archive_hours`), off; needs a product call.
+- **Connector idle-auto-archive / in-chat `/new`** (N1) — **resolved**: perpetual session, knob reserved and off. Revisit only if connector lanes grow unwieldy.
 - **Full-content `assistant_msg` JSONL records** (log-only session export) — decided *no*: the DB is authoritative for content; revisit only if export-a-session-as-one-file becomes a feature.
 - **Session `results/` retention** — never GC'd; if the root measurably grows, a size-capped LRU over *archived* sessions' `results/` (never `log.jsonl`), config-gated, default off.
 - **Whole-workspace snapshots / task-state checkpoints** — a VCS's job / redundant with `state_json`.
