@@ -3,6 +3,10 @@
 Rules written after corrections, so the same mistake is not made twice. Newest first.
 Each entry: what went wrong → the rule that prevents it.
 
+## 2026-09-01 — A "default" that adds an enforcement point is a decision
+**What happened:** N4 settled the cost cap as *relabel-only* (per-workflow $5, per-turn $1, no new enforcement). A research lesson proposed "charge subagent spend to the lead's accumulator so per-workflow means what it says", and I listed it to the owner under "defaults I'll apply unless you say otherwise". A critic caught it: folding subagent dollars into the lead's cap is **new enforcement** — workflows die sooner, and each subagent dollar counts against its own $1 turn cap *and* the lead's $5. Same family: a "watcher auto-reloads an enabled server on config change" lesson widened a component's job without an owner row.
+**Rule:** Before calling anything a default, ask: does it add an enforcement point, widen a component's job, or reverse a row in an accepted design? If yes, it is an owner decision — present it with a recommendation, never as a default. "Corroborated, not contested" applies to the *semantics* of a decision, not to a proposal that changes its *mechanism*.
+
 ## 2026-09-01 — Design against prior art before designing from scratch
 **What happened:** The tool allow/enable design was drafted from first principles (ADR-029) and superseded the same day; its successor's warning path did not reach the default lane. Claude Code — which runs on this machine — had already solved both: per-server/per-plugin toggles, needs-auth as a first-class actionable state, failure caching with a retry window, and operational state rendered *into the agent's context* at turn boundaries instead of emitted as events.
 **Rule:** For any subsystem Claude Code also has (MCP lifecycle, plugins, permissions, sessions/home layout, tool-result spill, context budget, cost), read Claude Code's docs and inspect `~/.claude/` (shape-only, no values) **before** proposing a mechanism. Cite it. Write "what not to copy" too. Research of record: `tasks/research/claude-code-design-lessons.md`.
