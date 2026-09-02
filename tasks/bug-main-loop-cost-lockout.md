@@ -22,7 +22,7 @@ The design intent is visible in the code comment — *"agent-scoped: the per-age
 
 Tests use a mock router whose `CostTracker` bucket starts empty, so `cost_delta` on round 0 is ~0 and the check never trips. It needs real accumulated spend under one agent id.
 
-## Candidate fixes (not yet chosen)
+## Candidate fixes (option 1 chosen — see Decision below)
 
 1. **Baseline the delta** — capture `agent_cost()` once before the loop and initialise `state.last_cost` with it, so only *this turn's* spend accumulates. Smallest change; keeps the tracker as the source.
 2. **Per-turn agent id** — give each main-loop turn a unique id (e.g. `orchestrator:{request_id}`), making the bucket genuinely per-turn. Changes cost attribution in `llm_usage` rows and the Settings usage view.
