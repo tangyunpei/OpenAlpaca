@@ -131,6 +131,8 @@ config/llm.toml
 !apps/openalpaca-gui/API_MAP.md
 !tasks/gui-api-requirements.md
 !tasks/api-fix-plan.md
+!tasks/lessons.md
+!tasks/extension-enable-design.md
 !tasks/research/
 !tasks/research/*.md
 !tasks/bug-main-loop-cost-lockout.md
