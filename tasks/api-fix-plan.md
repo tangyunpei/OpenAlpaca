@@ -1,6 +1,7 @@
 # Daemon Fix Plan — rev 2: single root, artifact store, sessions, the 23 GUI gaps
 
-**Status:** design, rev 2 — decisions resolved. No production code written. · **Date:** 2026-09-01 · **Branch:** `feat/ui-rework`
+**Status:** design, rev 2 — **complete and ready to implement.** Every decision (D1–D5, N1–N3) is resolved; no alternatives are carried. No production code written. · **Date:** 2026-09-01 · **Branch:** `feat/ui-rework`
+**Before starting:** two implementer pre-checks in §0 (verify, don't decide) — bundled SQLite ≥ 3.35, and `LlmConfig` consumers before P4.
 **Inputs:** `tasks/gui-api-requirements.md` (the 23-gap brief) · `apps/openalpaca-gui/src/lib/unavailable.ts` (23-entry registry, verified) · `apps/openalpaca-gui/src/lib/api/unbacked.ts` (client contract) · `apps/openalpaca-gui/API_MAP.md` §3 · rev 1 of this document
 **Evidence appendices (untracked — `.gitignore:92` blanket-ignores `*.md`):**
 `tasks/research/A-artifact-store.md` · `tasks/research/B-run-data.md` · `tasks/research/C-surface.md` · `tasks/research/R-root-taxonomy.md` (root move, taxonomy, purge) · `tasks/research/S-sessions.md` (session persistence)
@@ -604,7 +605,7 @@ Consequence for Phase 4 (GAP-10): **unchanged and unblocked** — `event_log.tas
 
 | Key | Default | Effect |
 |---|---|---|
-| `log_max_session_bytes` | 256 MB | Per session. On exceed, drop whole **oldest** segments (never the live one) and write a `log_trimmed` record naming the dropped seq range. |
+| `log_max_session_bytes` | 256 MB | Per session, counting `log.jsonl` segments **plus** `results/`. On exceed, drop whole **oldest** segments and the spill files they reference (never the live segment), and write a `log_trimmed` record naming the dropped seq range. |
 | `log_max_total_bytes` | 2 GB | Across all sessions. Evict oldest-touched **archived** sessions' logs first, LRU; an active session's log is never evicted. |
 | `log_retention_days` | 0 (off) | Optional age-based sweep of archived session logs. |
 
@@ -858,7 +859,7 @@ Three error envelopes plus a plain-text 401 coexist: `{error:{code,message}}` (`
 - **The `AgentConfigFile` template-vs-instance redesign** (P17) — flagged OWN-TASK; the "legacy" shape is the live GUI contract.
 - **Connector idle-auto-archive / in-chat `/new`** (N1) — **resolved**: perpetual session, knob reserved and off. Revisit only if connector lanes grow unwieldy.
 - **Full-content `assistant_msg` JSONL records** (log-only session export) — decided *no*: the DB is authoritative for content; revisit only if export-a-session-as-one-file becomes a feature.
-- **Session `results/` retention** — never GC'd; if the root measurably grows, a size-capped LRU over *archived* sessions' `results/` (never `log.jsonl`), config-gated, default off.
+- **Session `results/` retention beyond the §5.4 caps** — `results/` is evicted *with* its session's log under `log_max_total_bytes` (a spill file is part of the log it belongs to, and orphaning one from its `log.jsonl` would leave an unreadable pointer). A finer-grained policy — evicting spill payloads while keeping the records that reference them — is deliberately not designed; revisit only if spill dominates the root.
 - **Whole-workspace snapshots / task-state checkpoints** — a VCS's job / redundant with `state_json`.
 - **A `resync_needed` WS signal** (`routes/events.rs` drops on `Lagged`) — worth doing, not blocking any surface.
 - **Two daemons over one shared project directory** — documented limitation.
