@@ -3,6 +3,10 @@
 Rules written after corrections, so the same mistake is not made twice. Newest first.
 Each entry: what went wrong → the rule that prevents it.
 
+## 2026-09-02 — Scope a revise-loop's re-run to the artefact whose lens failed
+**What happened:** A reconcile loop's readiness predicate required *all four* critics (three on the design, one on the plan/KB) to say ready. Round 1: the three design lenses passed rev 6; only the plan lens failed (a missing Phase 0 slot). The loop re-ran the *design* reviser anyway, producing rev 7 — which applied ten more lesson rows and introduced three fresh blockers into a document that had just passed. A plan-side gap cost a design regression and a full extra round.
+**Rule:** In a revise-until-ready loop over several artefacts, key the re-run on *which* lens failed: re-edit only the artefact that failed, and re-run only its lenses. Never re-run an editor over an artefact whose own lenses passed. Also: an aggregation that counts "None found" prose as a finding is a bug — require empty arrays in the schema.
+
 ## 2026-09-01 — A "default" that adds an enforcement point is a decision
 **What happened:** N4 settled the cost cap as *relabel-only* (per-workflow $5, per-turn $1, no new enforcement). A research lesson proposed "charge subagent spend to the lead's accumulator so per-workflow means what it says", and I listed it to the owner under "defaults I'll apply unless you say otherwise". A critic caught it: folding subagent dollars into the lead's cap is **new enforcement** — workflows die sooner, and each subagent dollar counts against its own $1 turn cap *and* the lead's $5. Same family: a "watcher auto-reloads an enabled server on config change" lesson widened a component's job without an owner row.
 **Rule:** Before calling anything a default, ask: does it add an enforcement point, widen a component's job, or reverse a row in an accepted design? If yes, it is an owner decision — present it with a recommendation, never as a default. "Corroborated, not contested" applies to the *semantics* of a decision, not to a proposal that changes its *mechanism*.
