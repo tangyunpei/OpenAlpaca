@@ -316,6 +316,30 @@ pub fn project_root_of(scope: &StoreScope) -> Result<Option<String>> {
     }
 }
 
+/// [`project_root_of`] for bytes that have already been placed: the address
+/// component for a store whose root is `store_root` — *canonicalized*, i.e. the
+/// directory the bytes actually landed under rather than the path the caller
+/// named.
+///
+/// `None` when that is the home root (the address baseline); otherwise the
+/// directory holding the store. Deriving the address from the resolved root is
+/// what keeps placement identity and address identity the same thing: a
+/// `<project>/.openalpaca` symlinked at another store resolves to *that* store's
+/// address, so it cannot open a second sequence space over a directory that
+/// already has one. [`confine_to_root`] cannot see that case — the symlink is
+/// *at* the root it canonicalizes, not under it.
+pub fn project_root_at(store_root: &Path) -> Result<Option<String>> {
+    let home = home_root()?;
+    let home = home.canonicalize().unwrap_or(home);
+    if store_root == home {
+        return Ok(None);
+    }
+    let project = store_root
+        .parent()
+        .with_context(|| format!("Store root has no parent: {}", store_root.display()))?;
+    Ok(Some(project.to_string_lossy().to_string()))
+}
+
 /// `path` relative to `root`, with `/` separators — the `rel_path` column.
 pub fn relative_to(root: &Path, path: &Path) -> Result<String> {
     let rel = path

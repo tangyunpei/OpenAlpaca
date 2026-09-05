@@ -290,6 +290,75 @@ fn a_completed_write_leaves_no_temp_file() {
 }
 
 // ============================================================================
+// The head is never clobbered
+// ============================================================================
+
+/// Rows are the source of truth for the *number*, but disk gets a veto over the
+/// *name*. A file can outlive its row — a sweep whose `remove_file` failed, or a
+/// crash between the rename and the commit — and its number is then handed out
+/// again. The writer must take the next free one rather than rename over it.
+#[test]
+fn a_stray_file_at_the_next_slot_is_never_overwritten() {
+    let fx = Fixture::new();
+    let scope = fx.project_scope();
+
+    let day_dir = fx.uploads_root(&scope).join("2026-09-05");
+    std::fs::create_dir_all(&day_dir).unwrap();
+    let stray = day_dir.join("01-notes.txt");
+    std::fs::write(&stray, b"bytes with no row").unwrap();
+
+    let stored = fx.put_in(&scope, "owner-1", "notes.txt", b"hello");
+
+    assert_eq!(
+        std::fs::read(&stray).unwrap(),
+        b"bytes with no row",
+        "the stray file must be left exactly as it was"
+    );
+    assert!(
+        stored.asset.storage_path.ends_with("/02-notes.txt"),
+        "the upload takes the next free slot: {}",
+        stored.asset.storage_path
+    );
+    assert_eq!(std::fs::read(&stored.asset.storage_path).unwrap(), b"hello");
+}
+
+/// Placement identity *is* address identity. A `<project>/.openalpaca` symlinked
+/// at another store — the home store here — puts both scopes' bytes in one
+/// directory, so they must share one sequence space; keying the sequence off the
+/// path the caller named would restart it at `01` and rename over a live file
+/// whose row still points at it. `confine_to_root` cannot catch that: the
+/// symlink is *at* the root it canonicalizes, not under it.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_store_root_cannot_open_a_second_sequence_space() {
+    let fx = Fixture::new();
+    std::os::unix::fs::symlink(fx.home_root(), fx.project_root().join(".openalpaca")).unwrap();
+
+    let home = fx.put("owner-1", "notes.txt", b"hello");
+    let project = fx.put_in(&fx.project_scope(), "owner-2", "notes.txt", b"other bytes");
+
+    assert!(
+        home.asset.storage_path.ends_with("/01-notes.txt"),
+        "{}",
+        home.asset.storage_path
+    );
+    assert!(
+        project.asset.storage_path.ends_with("/02-notes.txt"),
+        "the second write shares the first's sequence space: {}",
+        project.asset.storage_path
+    );
+    assert_eq!(std::fs::read(&home.asset.storage_path).unwrap(), b"hello");
+    assert_eq!(
+        std::fs::read(&project.asset.storage_path).unwrap(),
+        b"other bytes"
+    );
+
+    // One directory, one address space: the row records the store the bytes
+    // reached, not the path the caller named.
+    assert_eq!(fx.address(&project.asset.id).0, None);
+}
+
+// ============================================================================
 // Dedup
 // ============================================================================
 

@@ -38,14 +38,30 @@
 //! ## Write protocol (§4.2)
 //!
 //! ```text
-//! 1. write  <dir>/.<stem>.tmp
-//! 2. fsync  the tmp file
-//! 3. rename <dir>/.<stem>.tmp -> <dir>/<NN-stem.ext>
+//! 0. create  <dir>/<NN-stem.ext>  with O_EXCL — the head name is *claimed*
+//! 1. write   <dir>/.<stem>.tmp
+//! 2. fsync   the tmp file
+//! 3. rename  <dir>/.<stem>.tmp -> <dir>/<NN-stem.ext>
 //! ```
 //!
 //! No rotation step: an upload is bytes that arrived once, so it has no
-//! versions to supersede. Every failure path removes the tmp file, and the
-//! rename is followed by an `fsync` of the directory it changed.
+//! versions to supersede. Every failure path removes the tmp file and the
+//! reservation, and the rename is followed by an `fsync` of the directory it
+//! changed.
+//!
+//! Step 0 is what makes the write refuse to clobber. `rename` replaces its
+//! destination silently, so a file that outlived its row — a crash orphan, or
+//! one the sweep could not remove — would otherwise be destroyed the moment its
+//! number came round again. Claiming the name with `O_EXCL` first turns that
+//! into a bumped sequence (or, past [`MAX_HEAD_PROBES`], an `IO_ERROR`).
+//!
+//! ## The address is the store the bytes reached
+//!
+//! `project_root` and the sequence lookup are both derived from the
+//! *canonicalized* store root (`store::project_root_at`), never from the path
+//! the caller named. A `<project>/.openalpaca` symlinked at another store
+//! therefore addresses that store, and shares its sequence space, instead of
+//! restarting at `01` over its live files.
 //!
 //! Everything from the dedup query to the committed row runs inside one
 //! `with_connection` transaction, which holds the database mutex for its whole
@@ -70,7 +86,7 @@ use crate::models::ArtifactOrigin;
 use crate::models::file_asset::{FileAsset, FileAssetStatus};
 use crate::repository::file_asset::{FILE_ASSET_COLUMNS, row_to_file_asset};
 use crate::store::{
-    ContentKind, StoreScope, confine_to_root, content_dir, leading_sequence, project_root_of,
+    ContentKind, StoreScope, confine_to_root, content_dir, leading_sequence, project_root_at,
     relative_to, upload_dir, upload_file_name,
 };
 
@@ -188,7 +204,15 @@ impl<'a> UploadStore<'a> {
         let uploads_root = uploads_root.canonicalize().map_err(path_error)?;
         let dir = upload_dir(new.scope, new.created).map_err(path_error)?;
         let rel_dir = relative_to(&uploads_root, &dir).map_err(path_error)?;
-        let project_root = project_root_of(new.scope).map_err(path_error)?;
+        // The address is the store the bytes *reach*, not the path the caller
+        // named — see `project_root_at`. Both the row and the sequence lookup
+        // take it, so two scopes that resolve to one directory share one
+        // sequence space instead of both starting at `01`.
+        let store_root = uploads_root
+            .parent()
+            .with_context(|| format!("{} has no parent store root", uploads_root.display()))
+            .map_err(path_error)?;
+        let project_root = project_root_at(store_root).map_err(path_error)?;
         let project_key = project_root.clone().unwrap_or_default();
 
         self.db.with_connection(|conn| {
@@ -206,15 +230,18 @@ impl<'a> UploadStore<'a> {
             }
             // Same content, different owner — fall through and create a new row.
 
-            let seq = next_sequence(&tx, &project_key, &rel_dir)?;
-            let head_name = upload_file_name(seq, new.filename);
-            let head_path =
-                confine_to_root(&uploads_root, &dir.join(&head_name)).map_err(path_error)?;
-            let rel_path = format!("{rel_dir}/{head_name}");
-
             fs::create_dir_all(&dir)
                 .map_err(|e| io_error(format!("Failed to create storage directory: {e}")))?;
-            write_bytes(&uploads_root, &dir, &head_path, &head_name, new.data)?;
+
+            let seq = next_sequence(&tx, &project_key, &rel_dir)?;
+            let (head_name, head_path) = reserve_head(&uploads_root, &dir, seq, new.filename)?;
+            let rel_path = format!("{rel_dir}/{head_name}");
+
+            if let Err(e) = write_bytes(&uploads_root, &dir, &head_path, &head_name, new.data) {
+                // Only ever our own reservation: nothing else could have created it.
+                remove_best_effort(&head_path);
+                return Err(e);
+            }
 
             let id = uuid::Uuid::new_v4().to_string();
             let insert = tx.execute(
@@ -282,12 +309,59 @@ fn load_by_id(conn: &Connection, id: &str) -> Result<Option<FileAsset>> {
     }
 }
 
+/// How far past the row-implied sequence the writer probes for a free name
+/// before giving up. Reaching it means dozens of files in one day directory
+/// outlived their rows — a broken store, not a busy one, and an `IO_ERROR` the
+/// user should see rather than a silent overwrite.
+const MAX_HEAD_PROBES: u32 = 32;
+
+/// Claim the head file itself, with `O_EXCL`, before a byte is written: the one
+/// thing that makes the write refuse to clobber.
+///
+/// `fs::rename` replaces its destination without a word, so the *only* way the
+/// final rename cannot destroy a file is for this writer to own the name first.
+/// A name already taken — a crash orphan, or a file whose row the sweep removed
+/// while `remove_file` failed — costs the upload its number, not the file its
+/// bytes. The reservation is an empty file that the rename in [`write_bytes`]
+/// then replaces atomically; every failure path removes it.
+fn reserve_head(
+    uploads_root: &Path,
+    dir: &Path,
+    first_seq: u32,
+    filename: &str,
+) -> Result<(String, std::path::PathBuf)> {
+    for seq in first_seq..first_seq.saturating_add(MAX_HEAD_PROBES) {
+        let head_name = upload_file_name(seq, filename);
+        let head_path = confine_to_root(uploads_root, &dir.join(&head_name)).map_err(path_error)?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&head_path)
+        {
+            Ok(_) => return Ok((head_name, head_path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(io_error(format!(
+                    "Failed to create {}: {e}",
+                    head_path.display()
+                )));
+            }
+        }
+    }
+    Err(io_error(format!(
+        "No free upload slot in {} after {MAX_HEAD_PROBES} attempts from {first_seq}",
+        dir.display()
+    )))
+}
+
 /// The next free `NN` in a day directory: one past the highest sequence any
 /// upload row already addresses there.
 ///
-/// Rows, not directory entries, are the source of truth — the same rule
-/// `ArtifactStore` follows — so a file the sweep deleted alongside its row
-/// frees its number, and a file left behind without one does not reserve it.
+/// Rows, not directory entries, are the source of truth for the number — the
+/// same rule `ArtifactStore` follows — so a file the sweep deleted alongside its
+/// row frees its number. A file that outlived its row does not reserve its
+/// number here, but it does keep its *name*: [`reserve_head`] probes forward
+/// from this answer rather than renaming over anything.
 /// Two digits, widening past 99, because [`upload_file_name`] formats it.
 ///
 /// `rel_dir` is a `<YYYY-MM-DD>` day directory: digits and hyphens only, so it
