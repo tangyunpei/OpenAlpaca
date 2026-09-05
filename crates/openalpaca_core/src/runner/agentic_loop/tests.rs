@@ -1,6 +1,6 @@
 use super::*;
 use async_trait::async_trait;
-use openalpaca_llm::{ChatResponse, LlmError, LlmRouter, ProviderType, Usage};
+use openalpaca_llm::{CallRecord, ChatResponse, LlmError, LlmRouter, ProviderType, Usage};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::orchestrator::skill::constraints::*;
@@ -1324,6 +1324,164 @@ async fn test_agentic_loop_routed_respects_max_rounds() {
 
     assert_eq!(result.finish_reason, LoopFinishReason::MaxRounds);
     assert_eq!(result.rounds_used, 3);
+}
+
+// ─── A5: main-loop cost lockout (bug-main-loop-cost-lockout.md, option 1) ──
+//
+// The main loop reuses a literal `"orchestrator"` agent id across every chat
+// turn and passes no `cost_accumulator` (a fresh zeroed `LoopCostAccumulator`
+// each turn). `LlmBackend::agent_cost()` for the Router backend returns the
+// cost tracker's *cumulative* total for that agent id, not this turn's
+// spend. Before the fix, `LoopState::new()` seeded `last_cost` at `0.0`, so
+// round 0's delta equaled the agent's entire lifetime spend — once that
+// crossed `max_cost` every fresh turn exited `CostExceeded` before its first
+// LLM call. These tests exercise the real routed loop (`LlmRouter` +
+// `CostTracker`, not just the local `LoopCostAccumulator`) to reproduce and
+// then guard against that mechanism.
+
+#[tokio::test]
+async fn main_loop_turn_with_prior_agent_spend_does_not_exit_cost_exceeded() {
+    // Seed the cost tracker's "orchestrator" bucket with prior cumulative
+    // spend well above the default $1 max_cost — as the main loop's fixed
+    // agent id would accumulate across earlier turns today — then run one
+    // fresh turn exactly as the main loop does (agent_id = "orchestrator",
+    // cost_accumulator = None). The turn must still make its LLM call
+    // instead of exiting CostExceeded at round 0.
+    let provider = Arc::new(MockRouterProvider::new(vec![Ok(ChatResponse {
+        content: "Hello there.".to_string(),
+        tool_calls: vec![],
+        model: "claude-sonnet-4-20250514".to_string(),
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::Stop,
+        thinking: None,
+        parts: None,
+    })]));
+
+    let router = LlmRouter::single_provider(
+        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    // Prior cumulative spend under the shared "orchestrator" bucket — well
+    // over the default $1.00 max_cost.
+    router
+        .cost_tracker
+        .record(&CallRecord {
+            agent_id: "orchestrator".to_string(),
+            task_id: None,
+            model: "claude-sonnet-4-20250514".to_string(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 5.00,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+        })
+        .await;
+
+    let messages = vec![ChatMessage::user("hello")];
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        thinking: None,
+        ..Default::default() // max_cost defaults to $1.00
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        messages,
+        vec![],
+        &config,
+        None,           // sandbox
+        "orchestrator", // agent_id — matches the main loop's fixed id
+        None,           // sandbox_policy
+        None,           // task_id
+        None,           // context_budget
+        None,           // cancel_token
+        None,           // tool_context
+        None,           // cost_accumulator — matches the main loop's fresh accumulator each turn
+    )
+    .await;
+
+    assert_ne!(
+        result.finish_reason,
+        LoopFinishReason::CostExceeded,
+        "prior cumulative agent spend must not lock out a fresh turn"
+    );
+    assert!(
+        provider.call_count.load(Ordering::SeqCst) >= 1,
+        "expected at least one LLM call, got {}",
+        provider.call_count.load(Ordering::SeqCst)
+    );
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert_eq!(result.final_content, "Hello there.");
+}
+
+#[tokio::test]
+async fn per_turn_cap_still_trips_within_one_turn() {
+    // Regression guard: baselining `last_cost` from prior cumulative spend
+    // must not defeat in-turn enforcement — a turn whose OWN rounds spend
+    // past max_cost still exits CostExceeded, same as before the fix.
+    let expensive_tool_use = ChatResponse {
+        content: "Using tool.".to_string(),
+        tool_calls: vec![openalpaca_llm::ToolCall {
+            id: "tc_1".to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({}),
+        }],
+        model: "claude-sonnet-4-20250514".to_string(),
+        usage: Usage {
+            input_tokens: 500_000,
+            output_tokens: 200_000,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::ToolUse,
+        thinking: None,
+        parts: None,
+    };
+    let provider = Arc::new(MockRouterProvider::new(vec![Ok(expensive_tool_use)]));
+
+    let router = LlmRouter::single_provider(
+        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let messages = vec![ChatMessage::user("expensive query")];
+    let config = LoopConfig {
+        max_cost: 1.00,
+        max_rounds: 5,
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        thinking: None,
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        messages,
+        vec![],
+        &config,
+        None,           // sandbox
+        "orchestrator", // agent_id
+        None,           // sandbox_policy
+        None,           // task_id
+        None,           // context_budget
+        None,           // cancel_token
+        None,           // tool_context
+        None,           // cost_accumulator — same as production main-loop calls
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::CostExceeded);
+    assert_eq!(
+        result.rounds_used, 1,
+        "only round 0's LLM call should complete before the cap trips on round 1's cost check"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -201,6 +201,15 @@ async fn run_agentic_loop_inner(
     cost_accumulator: Option<LoopCostAccumulator>,
 ) -> LoopResult {
     let mut state = LoopState::new();
+    // Baseline the agent-scoped cumulative cost BEFORE round 0's LLM call.
+    // `agent_cost()` (Router backend) returns the cost tracker's cumulative
+    // total for `agent_id`, not this turn's spend — the main loop reuses a
+    // literal id ("orchestrator") across every turn with no accumulator, so
+    // without this baseline round 0's delta would equal the agent's entire
+    // lifetime spend, tripping CostExceeded before the first LLM call once
+    // that total passes max_cost (A5, bug-main-loop-cost-lockout.md option 1).
+    // Only the baseline changes; the delta arithmetic below is unchanged.
+    state.last_cost = backend.agent_cost(0, 0).await;
     let cost_acc = cost_accumulator.unwrap_or_default();
     let mut messages: Arc<Vec<ChatMessage>> = Arc::new(initial_messages);
     let tools_arc = Arc::new(tools);
