@@ -30,10 +30,13 @@
 //! content-addressed blobs under `state/assets/` — keep resolving exactly as
 //! they did. Re-homing those is Phase 8's job, not this writer's.
 //!
-//! **Dedup is the owner-scoped sha256 query, never the path.** Two uploads of
-//! the same bytes by the same owner resolve to the first row and write nothing —
-//! including when that first row is a pre-D2 content-addressed one. The same
-//! bytes from a different owner get their own row and their own file.
+//! **Dedup is a sha256 query scoped to this owner's uploads, never the path.**
+//! Two uploads of the same bytes by the same owner resolve to the first row and
+//! write nothing — including when that first row is a pre-D2 content-addressed
+//! one. The same bytes from a different owner get their own row and their own
+//! file, and a byte-identical *produced* artifact never answers at all: it is
+//! not an upload, and handing it back would put it under the upload quota and
+//! on the end of a chat message.
 //!
 //! ## Write protocol (§4.2)
 //!
@@ -218,17 +221,17 @@ impl<'a> UploadStore<'a> {
         self.db.with_connection(|conn| {
             let tx = conn.unchecked_transaction()?;
 
-            // Dedup: the owner-scoped sha256 query, never the path. A pre-D2
-            // content-addressed row answers it just as well as a new one.
-            if let Some(existing) = load_by_sha256(&tx, &sha256)?
-                && existing.owner_id == new.owner_id
-            {
+            // Dedup: the owner- and origin-scoped sha256 query, never the path.
+            // A pre-D2 content-addressed row answers it just as well as a new
+            // one — it carries `origin = 'upload'` from 036's column default.
+            if let Some(existing) = load_by_sha256(&tx, &sha256, new.owner_id)? {
                 return Ok(StoredUpload {
                     asset: existing,
                     deduped: true,
                 });
             }
-            // Same content, different owner — fall through and create a new row.
+            // Same content, another owner's — or produced, not uploaded. Fall
+            // through and create a new row.
 
             fs::create_dir_all(&dir)
                 .map_err(|e| io_error(format!("Failed to create storage directory: {e}")))?;
@@ -287,11 +290,22 @@ impl<'a> UploadStore<'a> {
 // Internals
 // ============================================================================
 
-fn load_by_sha256(conn: &Connection, sha256: &str) -> Result<Option<FileAsset>> {
+/// The dedup answer: this owner's own *upload* row for these bytes, if it has
+/// one.
+///
+/// Every predicate is in the SQL, because `idx_file_assets_sha256` is not
+/// unique and `LIMIT 1` picks a row rather than *the* row. Filtering the owner
+/// in Rust afterwards meant a second owner was handed the first owner's row,
+/// failed the check, and wrote a new row and a new file every single time.
+/// `origin` is here for the same reason: a produced artifact can be
+/// byte-identical to an upload, and answering with it would hand the uploader a
+/// row that is not an upload.
+fn load_by_sha256(conn: &Connection, sha256: &str, owner_id: &str) -> Result<Option<FileAsset>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {FILE_ASSET_COLUMNS} FROM file_assets WHERE sha256 = ?1 LIMIT 1"
+        "SELECT {FILE_ASSET_COLUMNS} FROM file_assets
+         WHERE sha256 = ?1 AND owner_id = ?2 AND origin = 'upload' LIMIT 1"
     ))?;
-    let mut rows = stmt.query(rusqlite::params![sha256])?;
+    let mut rows = stmt.query(rusqlite::params![sha256, owner_id])?;
     match rows.next()? {
         Some(row) => Ok(Some(row_to_file_asset(row)?)),
         None => Ok(None),

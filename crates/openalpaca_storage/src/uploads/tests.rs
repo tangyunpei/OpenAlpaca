@@ -421,6 +421,63 @@ fn the_same_bytes_from_another_owner_get_their_own_row() {
     assert!(theirs.asset.storage_path.ends_with("/02-notes.txt"));
 }
 
+/// The owner test belongs in the SQL. `sha256` is a non-unique index, so a
+/// `LIMIT 1` that only matched the hash handed back whichever row sorted first
+/// — always the *first* owner's — and the second owner then failed the Rust-side
+/// check and wrote a new row and a new file on every upload of those bytes,
+/// never once deduping against its own row.
+#[test]
+fn an_owner_dedups_against_its_own_row_when_another_owners_row_sorts_first() {
+    let fx = Fixture::new();
+    let mine = fx.put("owner-1", "notes.txt", b"hello");
+    let theirs = fx.put("owner-2", "notes.txt", b"hello");
+    assert_ne!(theirs.asset.id, mine.asset.id, "dedup is owner-scoped");
+
+    let again = fx.put("owner-2", "notes-again.txt", b"hello");
+
+    assert!(
+        again.deduped,
+        "the second owner must dedup against its own row"
+    );
+    assert_eq!(again.asset.id, theirs.asset.id);
+    assert_eq!(
+        fx.repo().total_storage_bytes().unwrap(),
+        10,
+        "two rows, not three"
+    );
+}
+
+/// A produced artifact and an upload can be byte-identical, and `ArtifactStore`
+/// writes `sha256` on its rows too. Answering an upload's dedup with one would
+/// make the "upload" refer to a file an agent produced: it would escape the
+/// `origin = 'upload'` quota, be linked to a chat message, and become sweepable
+/// as an orphan. The dedup query is scoped to uploads.
+#[test]
+fn a_produced_artifact_never_answers_an_upload_dedup() {
+    let fx = Fixture::new();
+    let sha = crate::content_io::sha256_hex(b"report");
+    fx.db
+        .with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO file_assets
+                    (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path,
+                     status, origin)
+                 VALUES ('produced-1', 'owner-1', ?1, '01-report.md', 'text/markdown', 6,
+                         '/nowhere/01-report.md', 'ready', 'produced')",
+                rusqlite::params![sha],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let stored = fx.put("owner-1", "report.md", b"report");
+
+    assert!(!stored.deduped, "a produced row is not an upload");
+    assert_ne!(stored.asset.id, "produced-1");
+    assert_eq!(fx.origin(&stored.asset.id), "upload");
+    assert_eq!(std::fs::read(&stored.asset.storage_path).unwrap(), b"report");
+}
+
 // ============================================================================
 // The rows that predate D2
 // ============================================================================
