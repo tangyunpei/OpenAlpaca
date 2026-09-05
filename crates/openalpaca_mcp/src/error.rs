@@ -8,6 +8,15 @@ pub enum McpError {
     #[error("transport closed unexpectedly")]
     TransportClosed,
 
+    /// The client was deliberately closed (see [`crate::McpClient::disconnect`])
+    /// and is sealed: it will never reconnect and never respawn its child.
+    ///
+    /// Terminal *by type* — deliberately **not** in [`McpError::is_retriable`]'s
+    /// set, so a retry loop cannot spin a sealed client back to life. Distinct
+    /// from [`Self::TransportClosed`], which means "closed unexpectedly".
+    #[error("client closed deliberately; no reconnect will be attempted")]
+    Closed,
+
     #[error("transport I/O error: {0}")]
     Transport(#[from] std::io::Error),
 
@@ -55,6 +64,10 @@ pub enum ErrorCategory {
 
 impl McpError {
     /// Returns `true` for errors that a caller should retry after reconnection.
+    ///
+    /// [`Self::Closed`] is intentionally absent: a sealed client must never be
+    /// retried, or the retry loop would respawn the child the owner just
+    /// disabled.
     pub fn is_retriable(&self) -> bool {
         matches!(
             self,
@@ -73,9 +86,10 @@ impl McpError {
     /// Coarse category for telemetry / error routing.
     pub fn category(&self) -> ErrorCategory {
         match self {
-            Self::TransportClosed | Self::Transport(_) | Self::ReconnectExhausted(_) => {
-                ErrorCategory::Transport
-            }
+            Self::TransportClosed
+            | Self::Closed
+            | Self::Transport(_)
+            | Self::ReconnectExhausted(_) => ErrorCategory::Transport,
             Self::HandshakeFailed(_) | Self::VersionMismatch { .. } => ErrorCategory::Handshake,
             Self::JsonRpc { .. } | Self::ToolNotFound(_) | Self::InvalidArguments(_) => {
                 ErrorCategory::Protocol
@@ -133,6 +147,8 @@ mod tests {
     fn is_retriable_classification() {
         let cases = [
             (McpError::TransportClosed, true),
+            // A deliberately closed (sealed) client must never be retried.
+            (McpError::Closed, false),
             (
                 McpError::Transport(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
                 true,
@@ -178,6 +194,7 @@ mod tests {
             McpError::TransportClosed.category(),
             ErrorCategory::Transport
         );
+        assert_eq!(McpError::Closed.category(), ErrorCategory::Transport);
         assert_eq!(
             McpError::ReconnectExhausted(3).category(),
             ErrorCategory::Transport

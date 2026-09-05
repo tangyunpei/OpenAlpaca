@@ -17,6 +17,7 @@ mod lifecycle;
 
 pub use client::{McpClient, McpClientConfig};
 pub use error::{ErrorCategory, McpError};
+pub use lifecycle::ConnectionSnapshot;
 pub use transport::{HttpAuth, StdioTransport, Transport, TransportKind};
 
 // Re-exports from rmcp — data types pass through unchanged.
