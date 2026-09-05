@@ -2,8 +2,9 @@
 //!
 //! `file_assets` is one table with two writers by `origin`:
 //!
-//! - [`crate::FileAssetRepository`] keeps owning **uploads** (`origin` defaulted
-//!   to `'upload'` by migration 036) — its surface is untouched.
+//! - [`crate::UploadStore`] is the only thing that writes **upload** bytes and
+//!   upload rows (`origin` defaulted to `'upload'` by migration 036);
+//!   [`crate::FileAssetRepository`] remains their read/CRUD surface, untouched.
 //! - `ArtifactStore` is the only thing in the workspace that ever writes
 //!   `origin = 'produced'`, and the only thing that writes `artifact_versions`.
 //!
@@ -70,9 +71,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
-use sha2::{Digest, Sha256};
 
 use crate::Database;
+use crate::content_io::{fsync_dir, remove_best_effort, sha256_hex};
 use crate::models::file_asset::FileAssetStatus;
 use crate::models::{ArtifactKind, ArtifactOrigin};
 use crate::store::{
@@ -1131,34 +1132,6 @@ fn write_bytes_steps(
     Ok(rotated_rel)
 }
 
-/// `fsync` a directory so a rename that just happened is durable.
-///
-/// An addition to the plan's literal §4.2 protocol, which forces only the tmp
-/// file's *data*: a rename is a directory-metadata change, and without this the
-/// rotate and the head rename could persist out of order under power loss.
-/// Best-effort — the bytes are already durable, so a filesystem that will not
-/// let us open or sync a directory must not fail the write.
-fn fsync_dir(dir: &Path) {
-    match fs::File::open(dir) {
-        Ok(handle) => {
-            if let Err(e) = handle.sync_all() {
-                tracing::debug!("Failed to fsync {}: {e}", dir.display());
-            }
-        }
-        Err(e) => tracing::debug!("Failed to open {} for fsync: {e}", dir.display()),
-    }
-}
-
-/// Deletes a file that may not be there. A stray file is a leak, never a reason
-/// to fail a write whose bytes are already in place.
-fn remove_best_effort(path: &Path) {
-    if let Err(e) = fs::remove_file(path)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!("Failed to remove {}: {e}", path.display());
-    }
-}
-
 /// Deletes the oldest version rows beyond `max_versions`, returning their
 /// `rel_path`s so the caller can delete the files. The head has the highest
 /// version and `max_versions >= 1`, so it is never a candidate.
@@ -1250,12 +1223,6 @@ fn default_mime(kind: ArtifactKind) -> &'static str {
 /// §4.9: diffs are text-only — `kind ∈ {image, binary}` is not.
 fn is_text_kind(kind: ArtifactKind) -> bool {
     !matches!(kind, ArtifactKind::Image | ArtifactKind::Binary)
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
 }
 
 /// Escapes the `LIKE` metacharacters for a pattern used with `ESCAPE '\'`.

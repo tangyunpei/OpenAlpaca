@@ -5,12 +5,14 @@
 
 pub mod artifacts;
 pub mod config_schema;
+mod content_io;
 pub mod database;
 pub mod discovery;
 pub mod migrations;
 pub mod models;
 pub mod repository;
 pub mod store;
+pub mod uploads;
 
 #[cfg(test)]
 pub(crate) mod test_util;
@@ -39,3 +41,4 @@ pub use repository::{
     SkillExecutionRepository, SubAgentRepository, TaskRepository,
 };
 pub use repository::llm_usage::LlmUsageDaily;
+pub use uploads::{NewUpload, StoredUpload, UploadError, UploadStore};

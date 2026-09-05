@@ -1,12 +1,8 @@
 //! Common utilities shared across all connectors.
 
-use openalpaca_core::security::policy::Principal;
-use openalpaca_storage::IdentityRepository;
-
-#[cfg(any(feature = "telegram", feature = "imessage", feature = "discord"))]
 use openalpaca_core::gateway::ResolvedAttachment;
-#[cfg(any(feature = "telegram", feature = "imessage", feature = "discord"))]
-use openalpaca_storage::{Database, FileAsset, FileAssetRepository, FileAssetStatus};
+use openalpaca_core::security::policy::Principal;
+use openalpaca_storage::{Database, IdentityRepository, NewUpload, UploadStore};
 
 /// Resolve a Principal from an external identity.
 ///
@@ -184,9 +180,11 @@ where
 
 /// Store an inbound attachment from a connector.
 ///
-/// Computes SHA-256, deduplicates, writes to disk, and inserts a DB row.
-/// Returns a `ResolvedAttachment` ready for `GatewayRequest`.
-#[cfg(any(feature = "telegram", feature = "imessage", feature = "discord"))]
+/// Validates the bytes (defence in depth for connector-sourced files), then
+/// hands them to [`UploadStore`] — the one upload writer, shared with
+/// `POST /v1/files/upload`. Hashing, the owner-scoped sha256 dedup, placement
+/// and the row all live there; this function owns only the validation policy
+/// and the `ResolvedAttachment` shape `GatewayRequest` wants.
 pub fn store_attachment(
     db: &Database,
     owner_id: &str,
@@ -197,9 +195,7 @@ pub fn store_attachment(
     max_image_dimension: u32,
 ) -> Result<ResolvedAttachment, String> {
     use openalpaca_core::security::sanitizer::InputSanitizer;
-    use sha2::{Digest, Sha256};
 
-    // Validate upload (defense-in-depth for connector-sourced files)
     if let Err(violation) = InputSanitizer::validate_upload_with_image_limit(
         filename,
         data,
@@ -210,65 +206,22 @@ pub fn store_attachment(
         return Err(format!("Upload validation failed: {violation}"));
     }
 
-    // 1. Compute SHA-256
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let sha256 = format!("{:x}", hasher.finalize());
+    let stored = UploadStore::new(db)
+        .put(NewUpload {
+            owner_id,
+            filename,
+            mime_type,
+            data,
+        })
+        .map_err(|e| format!("Failed to store attachment: {e}"))?;
 
-    // 2. Dedup: check if asset with same SHA-256 already exists for this owner
-    let repo = FileAssetRepository::new(db);
-    if let Ok(Some(existing)) = repo.get_by_sha256(&sha256)
-        && existing.owner_id == owner_id
-    {
-        return Ok(ResolvedAttachment {
-            file_id: existing.id,
-            filename: existing.filename,
-            mime_type: existing.mime_type,
-            size_bytes: existing.size_bytes,
-            extracted_text: existing.extracted_text,
-            storage_path: existing.storage_path,
-        });
-    }
-
-    // 3. Compute sharded storage path
-    let storage_path = openalpaca_storage::store::interim_asset_storage_path(&sha256)
-        .map_err(|e| format!("Failed to compute storage path: {e}"))?;
-
-    // 4. Write file to disk
-    if let Some(parent) = storage_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create asset directory: {e}"))?;
-    }
-    std::fs::write(&storage_path, data).map_err(|e| format!("Failed to write asset file: {e}"))?;
-
-    // 5. Insert DB row
-    let file_id = uuid::Uuid::new_v4().to_string();
-    let asset = FileAsset {
-        id: file_id.clone(),
-        owner_id: owner_id.to_string(),
-        sha256,
-        filename: filename.to_string(),
-        mime_type: mime_type.to_string(),
-        size_bytes: data.len() as i64,
-        storage_path: storage_path.to_string_lossy().to_string(),
-        status: FileAssetStatus::Uploaded,
-        extracted_text: None,
-        extract_error: None,
-        metadata_json: None,
-        created_at: String::new(), // set by DB default
-        updated_at: String::new(), // set by DB default
-    };
-    repo.insert(&asset)
-        .map_err(|e| format!("Failed to insert file asset: {e}"))?;
-
-    // 6. Return ResolvedAttachment
     Ok(ResolvedAttachment {
-        file_id,
-        filename: filename.to_string(),
-        mime_type: mime_type.to_string(),
-        size_bytes: data.len() as i64,
-        extracted_text: None,
-        storage_path: storage_path.to_string_lossy().to_string(),
+        file_id: stored.asset.id,
+        filename: stored.asset.filename,
+        mime_type: stored.asset.mime_type,
+        size_bytes: stored.asset.size_bytes,
+        extracted_text: stored.asset.extracted_text,
+        storage_path: stored.asset.storage_path,
     })
 }
 

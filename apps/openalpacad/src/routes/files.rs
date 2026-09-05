@@ -12,8 +12,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
 };
-use openalpaca_storage::{FileAsset, FileAssetRepository, FileAssetStatus};
-use sha2::{Digest, Sha256};
+use openalpaca_storage::{FileAssetRepository, NewUpload, UploadError, UploadStore};
 use std::sync::Arc;
 use tokio_util::io::ReaderStream;
 
@@ -162,96 +161,52 @@ pub async fn upload_file_handler(
         }
     }
 
-    // Compute SHA-256
-    let mut hasher = Sha256::new();
-    hasher.update(&data);
-    let sha256 = format!("{:x}", hasher.finalize());
-
-    let repo = FileAssetRepository::new(&state.db);
-
-    // Dedup: check if file with same hash already exists and is owned by this user
-    if let Ok(Some(existing)) = repo.get_by_sha256(&sha256)
-        && existing.owner_id == state.local_user_id
-    {
-        return Json(FileUploadResponse {
-            id: existing.id,
-            filename: existing.filename,
-            mime_type: existing.mime_type,
-            size_bytes: existing.size_bytes,
-            status: existing.status.as_str().to_string(),
+    // One writer: hashing, the owner-scoped sha256 dedup, placement and the row
+    // all live in `UploadStore`, which the connector attachment path shares —
+    // so upload placement can never mean two different things (D2).
+    //
+    // It writes files and talks to SQLite, so it runs on the blocking pool.
+    let writer_state = state.clone();
+    let owner_id = state.local_user_id.clone();
+    let write_name = filename.clone();
+    let write_mime = content_type.clone();
+    let stored = tokio::task::spawn_blocking(move || {
+        UploadStore::new(&writer_state.db).put(NewUpload {
+            owner_id: &owner_id,
+            filename: &write_name,
+            mime_type: &write_mime,
+            data: &data,
         })
-        .into_response();
-    }
-    // Same content but different owner — fall through to create a new record
+    })
+    .await;
 
-    // Compute storage path
-    let storage_path = match openalpaca_storage::store::interim_asset_storage_path(&sha256) {
-        Ok(p) => p,
+    let stored = match stored {
+        Ok(Ok(stored)) => stored,
+        Ok(Err(e)) => {
+            // The writer's typed failures carry the codes this route has always
+            // returned; anything else is an I/O failure by elimination.
+            let code = e
+                .downcast_ref::<UploadError>()
+                .map_or("IO_ERROR", UploadError::code);
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, code, &e.to_string())
+                .into_response();
+        }
         Err(e) => {
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "PATH_ERROR",
-                &format!("Failed to compute storage path: {e}"),
+                "IO_ERROR",
+                &format!("Upload task failed: {e}"),
             )
             .into_response();
         }
     };
 
-    // Create parent directories and write file (async to avoid blocking executor)
-    if let Some(parent) = storage_path.parent()
-        && let Err(e) = tokio::fs::create_dir_all(parent).await
-    {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "IO_ERROR",
-            &format!("Failed to create storage directory: {e}"),
-        )
-        .into_response();
-    }
-    if let Err(e) = tokio::fs::write(&storage_path, &data).await {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "IO_ERROR",
-            &format!("Failed to write file: {e}"),
-        )
-        .into_response();
-    }
-
-    // Insert into database
-    let id = uuid::Uuid::new_v4().to_string();
-    let asset = FileAsset {
-        id: id.clone(),
-        owner_id: state.local_user_id.clone(),
-        sha256,
-        filename: filename.clone(),
-        mime_type: content_type.clone(),
-        size_bytes: data.len() as i64,
-        storage_path: storage_path.to_string_lossy().to_string(),
-        status: FileAssetStatus::Uploaded,
-        extracted_text: None,
-        extract_error: None,
-        metadata_json: None,
-        created_at: String::new(),
-        updated_at: String::new(),
-    };
-
-    if let Err(e) = repo.insert(&asset) {
-        // Clean up written file on DB error
-        let _ = tokio::fs::remove_file(&storage_path).await;
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "DB_ERROR",
-            &format!("Failed to insert file record: {e}"),
-        )
-        .into_response();
-    }
-
     Json(FileUploadResponse {
-        id,
-        filename,
-        mime_type: content_type,
-        size_bytes: data.len() as i64,
-        status: "uploaded".to_string(),
+        id: stored.asset.id,
+        filename: stored.asset.filename,
+        mime_type: stored.asset.mime_type,
+        size_bytes: stored.asset.size_bytes,
+        status: stored.asset.status.as_str().to_string(),
     })
     .into_response()
 }
@@ -365,7 +320,7 @@ pub async fn open_file_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openalpaca_storage::Database;
+    use openalpaca_storage::{Database, FileAsset, FileAssetStatus};
     use tempfile::TempDir;
 
     // Real file signatures to exercise infer-based MIME detection.

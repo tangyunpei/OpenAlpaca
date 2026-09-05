@@ -4178,7 +4178,6 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha2",
  "teloxide",
  "tempfile",
  "thiserror 2.0.20",
