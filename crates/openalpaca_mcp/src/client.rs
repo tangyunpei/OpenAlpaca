@@ -12,6 +12,20 @@ use crate::error::McpError;
 use crate::lifecycle::{ConnectionSnapshot, ConnectionState};
 use crate::transport::{Transport, TransportConnection, TransportInner, TransportKind};
 
+/// How long a deliberate [`McpClient::disconnect`] waits for rmcp to finish the
+/// graceful close (cancel the service task, close the transport, reap the child).
+/// The caller asked for this teardown and is waiting on its result, so it is
+/// worth waiting out a slow server.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The shorter bound used when closing a service nobody will ever use: one
+/// spawned by a handshake that finished after the client was sealed, or the
+/// superseded service dropped at the start of a reconnect. Nothing downstream
+/// depends on the result, rmcp's `DropGuard` finishes the teardown regardless,
+/// and both call sites sit on a latency path (a handshake, a retry), so they
+/// must not stall on a wedged child.
+const ABANDONED_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Configuration for [`McpClient::connect`].
 #[derive(Clone, Debug)]
 pub struct McpClientConfig {
@@ -160,7 +174,7 @@ impl McpClient {
     /// service and closes it normally; or disconnect-then-install, where this
     /// closes the service it was handed. No interleaving leaves a live child
     /// attached to a sealed client.
-    pub(crate) async fn install_service(
+    async fn install_service(
         &self,
         mut running: RunningService<RoleClient, ()>,
     ) -> Result<(), McpError> {
@@ -172,15 +186,31 @@ impl McpClient {
                 server_name = %self.inner.config.server_name,
                 "MCP handshake completed after disconnect; closing the service it spawned"
             );
-            // `close_with_timeout` takes `&mut self`; the result is best-effort —
-            // rmcp finishes the teardown on drop either way.
-            let _ = running.close_with_timeout(Duration::from_secs(2)).await;
+            // `close_with_timeout` takes `&mut self`. The outcome cannot change
+            // what happens next — the service is abandoned either way, and
+            // rmcp's `DropGuard` finishes the teardown when `running` drops —
+            // but a close that fails on the seal path is exactly what an
+            // incident would need to see.
+            if let Err(e) = running.close_with_timeout(ABANDONED_CLOSE_TIMEOUT).await {
+                tracing::warn!(
+                    server_name = %self.inner.config.server_name,
+                    error = ?e,
+                    "closing the abandoned MCP service failed; rmcp's drop guard will finish the teardown"
+                );
+            }
             return Err(McpError::Closed);
         }
+        // Publish the service and record the state **under the same guard**.
+        // Releasing the lock in between would let a `disconnect` seal, take and
+        // close the service and write `Disconnected`, only for the write below
+        // to overwrite it back to `Connected` — a sealed, service-less client
+        // reporting a live connection. (Lock order is service → state
+        // throughout the client: `disconnect` does the same, and no path takes
+        // them the other way round, so there is no inversion here.)
         *guard = Some(running);
-        drop(guard);
         *self.inner.state.write().await = ConnectionState::Connected;
         self.inner.attempt_counter.store(0, Ordering::Relaxed);
+        drop(guard);
         Ok(())
     }
 
@@ -229,14 +259,21 @@ impl McpClient {
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
         let mut guard = self.inner.service.lock().await;
-        if let Some(mut service) = guard.take() {
+        let service = guard.take();
+        // Record the state before the close, not after: once the service has
+        // been taken out of a sealed client there is no outcome of the close
+        // that makes the client anything other than disconnected, and a close
+        // that errors must not leave `connection_state()` reporting the
+        // connection it just tore down. Still under the service guard, so a
+        // handshake finishing concurrently cannot interleave with it.
+        *self.inner.state.write().await = ConnectionState::Disconnected;
+        if let Some(mut service) = service {
             // `close_with_timeout` takes `&mut self`; swallow JoinError into `Sdk`.
             service
-                .close_with_timeout(Duration::from_secs(5))
+                .close_with_timeout(CLOSE_TIMEOUT)
                 .await
                 .map_err(|e| McpError::Sdk(format!("close failed: {e:?}")))?;
         }
-        *self.inner.state.write().await = ConnectionState::Disconnected;
         Ok(())
     }
 
@@ -293,7 +330,7 @@ impl McpClient {
 
         // Drop the old service (if any) so its subprocess/HTTP connection is released.
         if let Some(mut old) = self.inner.service.lock().await.take() {
-            let _ = old.close_with_timeout(Duration::from_secs(2)).await;
+            let _ = old.close_with_timeout(ABANDONED_CLOSE_TIMEOUT).await;
         }
         *self.inner.state.write().await = ConnectionState::Reconnecting {
             attempt,
@@ -613,6 +650,114 @@ mod tests {
         true
     }
 
+    /// Wraps a transport so a test can tell a real `close()` from a bare drop,
+    /// and can make that close fail.
+    ///
+    /// Only `close_with_timeout` awaits the rmcp service task to completion, and
+    /// that task calls `Transport::close` on its way out — so `closed` is
+    /// guaranteed to be set by the time the call that closed the service
+    /// returns. A bare `drop(running)` tears the service down asynchronously
+    /// (rmcp's `DropGuard`), leaving the flag false at that instant. That is
+    /// what makes an assertion on this flag mutation-proof where an assertion
+    /// on the peer's EOF is not: both a close and a drop end in EOF eventually.
+    struct WatchedTransport<T> {
+        inner: T,
+        closed: Arc<AtomicBool>,
+        /// When set, `close()` panics — the rmcp service task then ends in a
+        /// `JoinError`, which is the one way `close_with_timeout` is observably
+        /// fallible (a timeout is reported as `Ok(None)`).
+        fail_close: bool,
+    }
+
+    /// What the client end of an rmcp connection reads.
+    type ClientRx = Option<rmcp::service::RxJsonRpcMessage<RoleClient>>;
+
+    impl<T> rmcp::transport::Transport<RoleClient> for WatchedTransport<T>
+    where
+        T: rmcp::transport::Transport<RoleClient> + Send,
+    {
+        type Error = T::Error;
+
+        fn send(
+            &mut self,
+            item: rmcp::service::TxJsonRpcMessage<RoleClient>,
+        ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
+            self.inner.send(item)
+        }
+
+        fn receive(&mut self) -> impl std::future::Future<Output = ClientRx> + Send {
+            self.inner.receive()
+        }
+
+        fn close(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
+            self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+            let fail = self.fail_close;
+            let inner = self.inner.close();
+            async move {
+                let result = inner.await;
+                assert!(
+                    !fail,
+                    "WatchedTransport: deliberate close failure (expected by this test)"
+                );
+                result
+            }
+        }
+    }
+
+    fn watched<T, E, A>(
+        transport: T,
+        closed: Arc<AtomicBool>,
+        fail_close: bool,
+    ) -> WatchedTransport<impl rmcp::transport::Transport<RoleClient, Error = E> + 'static>
+    where
+        T: rmcp::transport::IntoTransport<RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        WatchedTransport {
+            inner: transport.into_transport(),
+            closed,
+            fail_close,
+        }
+    }
+
+    /// A genuine, completed rmcp handshake against the in-process stub.
+    struct LiveService {
+        running: RunningService<RoleClient, ()>,
+        /// Resolves to `true` once the client end has gone away.
+        server: tokio::task::JoinHandle<bool>,
+        /// Set the moment the transport is really closed (see [`WatchedTransport`]).
+        closed: Arc<AtomicBool>,
+    }
+
+    async fn live_service(fail_close: bool) -> LiveService {
+        let (client_end, server_end) = tokio::io::duplex(8 * 1024);
+        let server = tokio::spawn(stub_initialize_server(server_end));
+        let closed = Arc::new(AtomicBool::new(false));
+        let transport = watched(client_end, closed.clone(), fail_close);
+        let running = ().serve(transport).await.expect("stub handshake");
+        assert!(
+            running.peer_info().is_some(),
+            "handshake should have peer info"
+        );
+        LiveService {
+            running,
+            server,
+            closed,
+        }
+    }
+
+    fn test_client(server_name: &str, state: ConnectionState) -> McpClient {
+        McpClient {
+            inner: Arc::new(ClientInner::new(
+                McpClientConfig {
+                    server_name: server_name.into(),
+                    ..McpClientConfig::default()
+                },
+                state,
+            )),
+        }
+    }
+
     /// Bug D: a client the owner disabled must not resurrect its child. After
     /// `disconnect`, a held clone's `call_tool` refuses with the non-retriable
     /// `Closed` and never reaches `transport.connect()`.
@@ -683,24 +828,10 @@ mod tests {
     /// spawned instead of publishing it into the sealed client.
     #[tokio::test]
     async fn handshake_finishing_after_disconnect_never_installs_a_live_service() {
-        let client = McpClient {
-            inner: Arc::new(ClientInner::new(
-                McpClientConfig {
-                    server_name: "raced".into(),
-                    ..McpClientConfig::default()
-                },
-                ConnectionState::Connected,
-            )),
-        };
+        let client = test_client("raced", ConnectionState::Connected);
 
         // A genuine, completed rmcp handshake — the service is live.
-        let (client_end, server_end) = tokio::io::duplex(8 * 1024);
-        let server = tokio::spawn(stub_initialize_server(server_end));
-        let running = ().serve(client_end).await.expect("stub handshake");
-        assert!(
-            running.peer_info().is_some(),
-            "handshake should have peer info"
-        );
+        let live = live_service(false).await;
 
         // The race: `disconnect` takes and releases the service lock while the
         // handshake is still in flight (service is `None`, so it sees nothing to
@@ -708,9 +839,17 @@ mod tests {
         client.clone().disconnect().await.expect("disconnect");
 
         let err = client
-            .install_service(running)
+            .install_service(live.running)
             .await
             .expect_err("install into a sealed client must be refused");
+        // Checked before anything else awaits: the sealed branch must have
+        // *closed* the service — `close_with_timeout` awaits the service task,
+        // which sets this flag on its way out. A bare drop would only cancel in
+        // the background and leave the flag false here.
+        assert!(
+            live.closed.load(std::sync::atomic::Ordering::SeqCst),
+            "the sealed install must close the service it was handed, not merely drop it"
+        );
         assert!(
             matches!(err, McpError::Closed),
             "expected Closed, got {err:?}"
@@ -726,13 +865,110 @@ mod tests {
         );
 
         // The service was closed, not leaked: its peer sees the connection go away.
-        let closed = tokio::time::timeout(Duration::from_secs(5), server)
+        let closed = tokio::time::timeout(Duration::from_secs(5), live.server)
             .await
             .expect("the just-spawned service should have been closed")
             .expect("stub server task");
         assert!(
             closed,
             "the just-spawned service must be closed, not installed"
+        );
+    }
+
+    /// Finding 1(a). Publishing a service and recording `Connected` must be one
+    /// step as far as `disconnect` is concerned: both happen under the service
+    /// guard. Otherwise a `disconnect` can slot in between them — seal, take and
+    /// close the service, write `Disconnected` — and the publish then overwrites
+    /// the state back to `Connected`, so `connection_state()` reports
+    /// `Connected` for a sealed, service-less client.
+    ///
+    /// The overwrite itself cannot be forced from a test: tokio's `RwLock` is
+    /// FIFO, so a `disconnect` that queues on the state write always lands after
+    /// a publish that queued first, and the only real interleaving is a thread
+    /// preemption between the guard drop and the state write. The guard is the
+    /// invariant that closes the window, so that is what this asserts — while
+    /// the publish is unfinished, the lock a racing `disconnect` must take first
+    /// is not available.
+    #[tokio::test]
+    async fn install_publishes_the_service_and_its_state_under_one_guard() {
+        let client = test_client("racy-publish", ConnectionState::Connecting);
+        let live = live_service(false).await;
+
+        // Park the publish on its state write by holding the state lock.
+        let state_guard = client.inner.state.write().await;
+        let installer = tokio::spawn({
+            let client = client.clone();
+            let running = live.running;
+            async move { client.install_service(running).await }
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            client.inner.service.try_lock().is_err(),
+            "the publish must still hold the service lock while its state write is pending; \
+             a `disconnect` that got the lock here would be overwritten back to Connected"
+        );
+
+        // Now let the two race for real: the disconnect seals immediately and
+        // blocks on the service lock the publish holds.
+        let disconnecter = tokio::spawn({
+            let client = client.clone();
+            async move { client.disconnect().await }
+        });
+        drop(state_guard);
+
+        installer
+            .await
+            .expect("installer task")
+            .expect("install must succeed: the seal came after it took the lock");
+        disconnecter
+            .await
+            .expect("disconnecter task")
+            .expect("disconnect");
+
+        assert_eq!(
+            client.connection_state().await,
+            ConnectionSnapshot::Disconnected,
+            "a publish racing a disconnect must not leave the client reporting Connected"
+        );
+        assert!(
+            client.inner.service.lock().await.is_none(),
+            "the disconnect must have taken the published service"
+        );
+        assert!(
+            live.closed.load(std::sync::atomic::Ordering::SeqCst),
+            "the published service must have been closed by the disconnect"
+        );
+    }
+
+    /// Finding 1(b). A `disconnect` whose close fails still reports a
+    /// disconnected client: the error must not skip the state write on a client
+    /// that is sealed and service-less either way.
+    #[tokio::test]
+    async fn disconnect_reports_disconnected_even_when_the_close_fails() {
+        let client = test_client("bad-close", ConnectionState::Connected);
+        let live = live_service(true).await;
+        *client.inner.service.lock().await = Some(live.running);
+
+        let err = client
+            .clone()
+            .disconnect()
+            .await
+            .expect_err("the rigged close must fail");
+        assert!(
+            matches!(err, McpError::Sdk(_)),
+            "expected Sdk(close failed), got {err:?}"
+        );
+        assert_eq!(
+            client.connection_state().await,
+            ConnectionSnapshot::Disconnected,
+            "a failed close must still leave a sealed client reporting Disconnected"
+        );
+        assert!(
+            client.inner.service.lock().await.is_none(),
+            "the service must be gone even when its close failed"
         );
     }
 
