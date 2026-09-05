@@ -467,7 +467,11 @@ mod tests {
     fn a_sweep_whose_file_is_already_gone_still_removes_the_row() {
         let dir = tempfile::tempdir().unwrap();
         let db = test_db(&dir);
-        orphan_row(&db, "orphan-1", dir.path().join("gone.txt").to_str().unwrap());
+        orphan_row(
+            &db,
+            "orphan-1",
+            dir.path().join("gone.txt").to_str().unwrap(),
+        );
 
         assert_eq!(sweep_orphaned_uploads(&db, 24), 1);
         assert!(

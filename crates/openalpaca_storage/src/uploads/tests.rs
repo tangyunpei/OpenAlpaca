@@ -475,7 +475,10 @@ fn a_produced_artifact_never_answers_an_upload_dedup() {
     assert!(!stored.deduped, "a produced row is not an upload");
     assert_ne!(stored.asset.id, "produced-1");
     assert_eq!(fx.origin(&stored.asset.id), "upload");
-    assert_eq!(std::fs::read(&stored.asset.storage_path).unwrap(), b"report");
+    assert_eq!(
+        std::fs::read(&stored.asset.storage_path).unwrap(),
+        b"report"
+    );
 }
 
 // ============================================================================
