@@ -13,6 +13,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use openalpaca_plugins::PluginError;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -24,6 +25,25 @@ use crate::AppState;
 pub struct SetConfigRequest {
     pub key: String,
     pub value: serde_json::Value,
+}
+
+// ── Error mapping ────────────────────────────────────────────────
+
+/// HTTP status for a failed plugin lifecycle call.
+///
+/// A failed *write* is the daemon's fault, not the caller's: the plugin root
+/// is unwritable, `.permissions.toml` is a directory, the disk is full. Design
+/// §3.2 (W-deny) requires a consent decision that cannot be persisted to
+/// answer `500` and change nothing — reporting it as `400` would tell the
+/// client to fix a request that was never the problem.
+///
+/// Everything else stays `400`: an unknown plugin name, a load refused because
+/// the plugin still holds a live handle, a manifest that will not parse.
+fn plugin_error_status(error: &PluginError) -> StatusCode {
+    match error {
+        PluginError::Io(_) | PluginError::Json(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        _ => StatusCode::BAD_REQUEST,
+    }
 }
 
 // ── Handlers ─────────────────────────────────────────────────────
@@ -76,7 +96,7 @@ pub async fn approve_plugin_handler(
             Json(serde_json::json!({ "status": "approved", "name": name })),
         ),
         Err(e) => (
-            StatusCode::BAD_REQUEST,
+            plugin_error_status(&e),
             Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
@@ -100,7 +120,7 @@ pub async fn deny_plugin_handler(
             Json(serde_json::json!({ "status": "denied", "name": name })),
         ),
         Err(e) => (
-            StatusCode::BAD_REQUEST,
+            plugin_error_status(&e),
             Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
@@ -124,7 +144,7 @@ pub async fn enable_plugin_handler(
             Json(serde_json::json!({ "status": "enabled", "name": name })),
         ),
         Err(e) => (
-            StatusCode::BAD_REQUEST,
+            plugin_error_status(&e),
             Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
@@ -148,7 +168,7 @@ pub async fn disable_plugin_handler(
             Json(serde_json::json!({ "status": "disabled", "name": name })),
         ),
         Err(e) => (
-            StatusCode::BAD_REQUEST,
+            plugin_error_status(&e),
             Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
@@ -180,7 +200,7 @@ pub async fn set_plugin_config_handler(
             })),
         ),
         Err(e) => (
-            StatusCode::BAD_REQUEST,
+            plugin_error_status(&e),
             Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
@@ -211,5 +231,52 @@ fn json_to_toml(v: &serde_json::Value) -> toml::Value {
             toml::Value::Table(map)
         }
         serde_json::Value::Null => toml::Value::String(String::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openalpaca_core::tools::ToolRegistry;
+    use openalpaca_plugins::PluginManager;
+
+    /// Design §3.2 W-deny: a consent decision that cannot be persisted must
+    /// answer `500`. The failure is the daemon's — here `.permissions.toml` is
+    /// a directory, so every write to it fails — and reporting it as `400`
+    /// tells the client to fix a request that was fine.
+    #[tokio::test]
+    async fn a_denial_that_cannot_be_persisted_is_a_500() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".permissions.toml")).unwrap();
+        let manager = PluginManager::new(
+            tmp.path().to_path_buf(),
+            Arc::new(ToolRegistry::new().unwrap()),
+            None,
+            None,
+        );
+
+        let error = manager.deny_plugin("some-plugin").await.unwrap_err();
+
+        assert!(
+            matches!(error, PluginError::Io(_)),
+            "expected the failed write to surface as Io, got {error:?}"
+        );
+        assert_eq!(
+            plugin_error_status(&error),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a failed permissions write was reported as a client error"
+        );
+    }
+
+    /// The caller's own mistakes stay `400`, so the split is a real one.
+    #[test]
+    fn a_caller_mistake_is_still_a_400() {
+        for error in [
+            PluginError::Unavailable("no such plugin".into()),
+            PluginError::HandleHeld("echo".into()),
+            PluginError::InvalidManifest("bad toml".into()),
+        ] {
+            assert_eq!(plugin_error_status(&error), StatusCode::BAD_REQUEST);
+        }
     }
 }

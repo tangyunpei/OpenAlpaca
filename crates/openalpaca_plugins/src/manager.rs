@@ -135,6 +135,81 @@ pub struct PluginState {
     pub capability_provider_handle: Option<ProviderHandle>,
 }
 
+impl PluginState {
+    /// A handle-free entry: no child process, no capability provider, nothing
+    /// registered. Every entry starts as one — a load's `Loading` claim, and
+    /// the entry a teardown re-parks so the plugin still appears in listings.
+    fn handle_free(
+        manifest: PluginManifest,
+        plugin_dir: PathBuf,
+        status: PluginStatus,
+    ) -> Self {
+        Self {
+            manifest,
+            status,
+            process: None,
+            registered_tools: Vec::new(),
+            registered_connector: None,
+            registered_provider: None,
+            registered_models: Vec::new(),
+            registered_skills: Vec::new(),
+            registered_agents: Vec::new(),
+            restart_count: 0,
+            last_health: None,
+            plugin_dir,
+            capability_provider_handle: None,
+        }
+    }
+
+    /// Is another load or a live plugin using this entry?
+    ///
+    /// True while it holds a live handle — a child process or a capability
+    /// provider (ruling R3: the guard keys on the handle, not the status
+    /// word) — and also while it is `Loading`, the window between a load's
+    /// claim and the step 8 that fills those handles in. Both mean "replacing
+    /// this entry would orphan something", which is what a load's claim and a
+    /// teardown's re-park must refuse (design §2.2).
+    fn is_in_flight(&self) -> bool {
+        self.process.is_some()
+            || self.capability_provider_handle.is_some()
+            || matches!(self.status, PluginStatus::Loading)
+    }
+
+    /// Is this entry a load's outstanding claim — `Loading`, holding nothing?
+    ///
+    /// A load's step 8 writes its handles in only when it still finds its own
+    /// claim in the slot. The claim is unique while it stands (nothing else
+    /// can insert over an in-flight entry), so anything else found there
+    /// means a teardown took the claim away.
+    fn is_pending_claim(&self) -> bool {
+        matches!(self.status, PluginStatus::Loading)
+            && self.process.is_none()
+            && self.capability_provider_handle.is_none()
+    }
+}
+
+/// Outcome of trying to claim a plugin's map slot for a load.
+enum LoadClaim {
+    /// The slot was free and now holds this load's `Loading` state.
+    Claimed,
+    /// Someone else owns it — a running plugin or a load already in flight.
+    /// Nothing was changed; the reported status is theirs.
+    InFlight { status: String },
+}
+
+/// What a load does when it loses the claim to another load.
+#[derive(Clone, Copy)]
+enum OnInFlight {
+    /// Refuse loudly with [`PluginError::HandleHeld`]. The scan and the config
+    /// retry use this: they load a plugin they believe is not loaded, so a
+    /// collision is a real conflict worth an `error!` line.
+    Refuse,
+    /// Answer success without reloading — design §3.3 E0 for the consent
+    /// paths (`approve`, `enable`), whose caller asked for "make it run",
+    /// which it already is or is about to be.
+    Succeed,
+}
+
 // ── PluginInfo ──────────────────────────────────────────────────────
 
 /// Summary of a loaded plugin returned by [`PluginManager::list_plugins`].
@@ -260,50 +335,82 @@ impl PluginManager {
     /// 6. Discover tools via `tools/list` RPC
     /// 7. Register discovered tools in the shared `ToolRegistry`
     /// 8. Track the plugin as `Running`
+    ///
+    /// Refuses with [`PluginError::HandleHeld`] when the plugin is already
+    /// running or another load is in flight; the consent paths
+    /// ([`approve_plugin`](Self::approve_plugin),
+    /// [`enable_plugin`](Self::enable_plugin)) answer that case with success
+    /// instead.
     pub async fn try_load_plugin(&self, plugin_dir: &Path) -> Result<(), PluginError> {
+        self.load_plugin(plugin_dir, OnInFlight::Refuse).await
+    }
+
+    /// Claim the map slot for `name`, or report who owns it.
+    ///
+    /// The compare-and-set the whole load path turns on (design §3.3 E0): the
+    /// check and the `Loading` insert happen under a *single* write
+    /// acquisition, so two overlapping loads cannot both conclude the slot is
+    /// free. A check-then-act here is not enough — a claimed entry holds no
+    /// handles until step 8, so the loser would spawn a second child and
+    /// overwrite the winner's process and capability provider.
+    async fn claim_load_slot(
+        &self,
+        name: &str,
+        manifest: &PluginManifest,
+        plugin_dir: &Path,
+    ) -> LoadClaim {
+        let mut plugins = self.plugins.write().await;
+        if let Some(existing) = plugins.get(name)
+            && existing.is_in_flight()
+        {
+            return LoadClaim::InFlight {
+                status: existing.status.to_string(),
+            };
+        }
+        plugins.insert(
+            name.to_string(),
+            PluginState::handle_free(
+                manifest.clone(),
+                plugin_dir.to_path_buf(),
+                PluginStatus::Loading,
+            ),
+        );
+        LoadClaim::Claimed
+    }
+
+    /// The load itself; `on_in_flight` decides what losing the claim means.
+    async fn load_plugin(
+        &self,
+        plugin_dir: &Path,
+        on_in_flight: OnInFlight,
+    ) -> Result<(), PluginError> {
         // Step 1: Parse manifest
         let manifest = PluginManifest::from_dir(plugin_dir)?;
         let name = manifest.plugin.name.clone();
         info!(plugin = %name, "loading plugin");
 
-        // Insert initial Loading state.
-        //
-        // Refuse to replace an entry that still holds a live handle — a child
-        // process or a capability provider. Overwriting it would orphan both:
-        // the provider is only released through `unload_plugin`, and the child
-        // would die incidentally, if at all. Every legitimate load path (boot
-        // scan, approve, enable, config retry) reaches this point with nothing
-        // held, so this is a guard, not a branch (design §2.2).
+        // Claim the slot (atomic check + `Loading` insert).
+        if let LoadClaim::InFlight { status } =
+            self.claim_load_slot(&name, &manifest, plugin_dir).await
         {
-            let mut plugins = self.plugins.write().await;
-            if let Some(existing) = plugins.get(&name)
-                && (existing.process.is_some() || existing.capability_provider_handle.is_some())
-            {
-                error!(
-                    plugin = %name,
-                    status = %existing.status,
-                    "refusing to load over a plugin that still holds a process or capability provider"
-                );
-                return Err(PluginError::HandleHeld(name));
-            }
-            plugins.insert(
-                name.clone(),
-                PluginState {
-                    manifest: manifest.clone(),
-                    status: PluginStatus::Loading,
-                    process: None,
-                    registered_tools: Vec::new(),
-                    registered_connector: None,
-                    registered_provider: None,
-                    registered_models: Vec::new(),
-                    registered_skills: Vec::new(),
-                    registered_agents: Vec::new(),
-                    restart_count: 0,
-                    last_health: None,
-                    plugin_dir: plugin_dir.to_path_buf(),
-                    capability_provider_handle: None,
-                },
-            );
+            return match on_in_flight {
+                OnInFlight::Succeed => {
+                    info!(
+                        plugin = %name,
+                        %status,
+                        "plugin is already loaded or loading; not reloading"
+                    );
+                    Ok(())
+                }
+                OnInFlight::Refuse => {
+                    error!(
+                        plugin = %name,
+                        %status,
+                        "refusing to load over a plugin that is running or already loading"
+                    );
+                    Err(PluginError::HandleHeld(name))
+                }
+            };
         }
 
         // Step 2: Check approval
@@ -510,21 +617,50 @@ impl PluginManager {
             None
         };
 
-        // Step 8: Track state as Running
-        {
+        // Step 8: Track state as Running — if this load still owns the slot.
+        let loaded = PluginState {
+            process: Some(process),
+            registered_tools: registered_tools.clone(),
+            registered_connector,
+            registered_provider,
+            registered_models,
+            registered_skills,
+            registered_agents,
+            last_health: Some(Instant::now()),
+            capability_provider_handle: provider_handle,
+            ..PluginState::handle_free(
+                manifest,
+                plugin_dir.to_path_buf(),
+                PluginStatus::Running,
+            )
+        };
+        // A teardown (deny/disable) that ran while this load was spawning has
+        // removed the claim, and something else may already own the slot.
+        // Writing the handles in anyway would either orphan that owner's or
+        // hide this load's, so the load that lost releases what it registered
+        // instead of leaving a live, untracked child behind (S2).
+        let orphaned = {
             let mut plugins = self.plugins.write().await;
-            if let Some(state) = plugins.get_mut(&name) {
-                state.status = PluginStatus::Running;
-                state.process = Some(process);
-                state.registered_tools = registered_tools.clone();
-                state.registered_connector = registered_connector;
-                state.registered_provider = registered_provider;
-                state.registered_models = registered_models;
-                state.registered_skills = registered_skills;
-                state.registered_agents = registered_agents;
-                state.last_health = Some(Instant::now());
-                state.capability_provider_handle = provider_handle;
+            match plugins.get(&name) {
+                // The claim is still standing: this load owns the slot.
+                Some(claim) if claim.is_pending_claim() => {
+                    plugins.insert(name.clone(), loaded);
+                    None
+                }
+                // Gone (a teardown removed it) or replaced (re-parked, or
+                // another load finished into the freed slot) — not ours.
+                _ => Some(loaded),
             }
+        };
+        if let Some(state) = orphaned {
+            warn!(
+                plugin = %name,
+                "plugin was torn down while loading; releasing what the load registered"
+            );
+            self.release_state(&name, state).await;
+            return Err(PluginError::Unavailable(format!(
+                "plugin '{name}' was torn down while loading"
+            )));
         }
 
         self.emit(ServerEvent::PluginLoaded {
@@ -538,11 +674,36 @@ impl PluginManager {
 
     /// Unload a plugin: unregister tools, send shutdown RPC, kill process.
     pub async fn unload_plugin(&self, name: &str) -> Result<(), PluginError> {
-        let mut plugins = self.plugins.write().await;
-        let state = plugins.remove(name).ok_or_else(|| {
-            PluginError::Unavailable(format!("plugin '{}' not found", name))
-        })?;
+        // Take the entry out of the map and release the lock straight away:
+        // the teardown below awaits a shutdown RPC and up to
+        // `CHILD_EXIT_TIMEOUT` for the child to exit, and holding the map
+        // across that queues every `list_plugins()` — i.e. `GET /v1/plugins`,
+        // which the GUI polls — behind a deny or a disable.
+        let state = {
+            let mut plugins = self.plugins.write().await;
+            plugins.remove(name).ok_or_else(|| {
+                PluginError::Unavailable(format!("plugin '{}' not found", name))
+            })?
+        };
 
+        self.release_state(name, state).await;
+
+        self.emit(ServerEvent::PluginUnloaded {
+            plugin_id: name.to_string(),
+        });
+
+        info!(plugin = name, "plugin unloaded");
+        Ok(())
+    }
+
+    /// Release everything a load registered, given the state that holds it:
+    /// the capability provider, the tools, the skills, the agent templates and
+    /// the child process.
+    ///
+    /// Takes the state by value, so the map lock is never held here — the
+    /// caller has already removed the entry ([`unload_plugin`](Self::unload_plugin))
+    /// or never installed it (a load that lost its claim at step 8).
+    async fn release_state(&self, name: &str, state: PluginState) {
         // P3e: remove capability provider FIRST — triggers index rebuild before
         // per-tool removals start. Ensures plugin virtual caps are scrubbed cleanly.
         if let Some(handle) = state.capability_provider_handle {
@@ -607,16 +768,14 @@ impl PluginManager {
                 ),
             }
         }
-
-        self.emit(ServerEvent::PluginUnloaded {
-            plugin_id: name.to_string(),
-        });
-
-        info!(plugin = name, "plugin unloaded");
-        Ok(())
     }
 
     /// Approve a plugin and trigger loading.
+    ///
+    /// Approving a plugin that is already running — or that a concurrent
+    /// request is already loading — records the approval and answers success
+    /// without reloading (design §3.3 E0), rather than refusing or spawning a
+    /// second child.
     pub async fn approve_plugin(&self, name: &str) -> Result<(), PluginError> {
         // Look up the manifest to get capabilities for the approval record
         let (capabilities, plugin_dir) = {
@@ -634,7 +793,7 @@ impl PluginManager {
         info!(plugin = name, "plugin approved, loading");
 
         // Re-trigger load
-        self.try_load_plugin(&plugin_dir).await
+        self.load_plugin(&plugin_dir, OnInFlight::Succeed).await
     }
 
     /// Deny a plugin: record the refusal, then tear the plugin down.
@@ -669,18 +828,27 @@ impl PluginManager {
 
     /// Re-enable a disabled plugin and trigger loading.
     ///
-    /// Enabling a plugin that is already running is a no-op success, never a
-    /// reload (design §3.3 E0): a reload would insert a fresh `PluginState`
-    /// over the live one and orphan the capability provider it holds, which
-    /// only [`unload_plugin`](Self::unload_plugin) can release.
+    /// Enabling a plugin that is already running — or that another request is
+    /// already loading — is a no-op success, never a reload (design §3.3 E0):
+    /// a reload would insert a fresh `PluginState` over the live one and
+    /// orphan the capability provider it holds, which only
+    /// [`unload_plugin`](Self::unload_plugin) can release.
+    ///
+    /// The check below is the cheap half; the decision that binds is the CAS
+    /// in [`claim_load_slot`](Self::claim_load_slot), which two overlapping
+    /// enables cannot both win.
     pub async fn enable_plugin(&self, name: &str) -> Result<(), PluginError> {
         let (plugin_dir, capabilities) = {
             let plugins = self.plugins.read().await;
             let state = plugins.get(name).ok_or_else(|| {
                 PluginError::Unavailable(format!("plugin '{}' not found", name))
             })?;
-            if matches!(state.status, PluginStatus::Running) {
-                info!(plugin = name, "plugin is already running, enable is a no-op");
+            if matches!(state.status, PluginStatus::Running | PluginStatus::Loading) {
+                info!(
+                    plugin = name,
+                    status = %state.status,
+                    "plugin is already running or loading, enable is a no-op"
+                );
                 return Ok(());
             }
             (
@@ -693,7 +861,7 @@ impl PluginManager {
         self.permission_gate.approve(name, &capabilities)?;
 
         info!(plugin = name, "plugin re-enabled, loading");
-        self.try_load_plugin(&plugin_dir).await
+        self.load_plugin(&plugin_dir, OnInFlight::Succeed).await
     }
 
     /// Disable a plugin: unload it and mark as disabled.
@@ -723,6 +891,12 @@ impl PluginManager {
     /// and kills the child — followed by a re-insert carrying no handles, so
     /// the plugin still appears in listings under its new status.
     ///
+    /// The re-insert re-acquires the lock and re-checks: `unload_plugin`
+    /// released the entry, so a load may have claimed the free slot in the
+    /// meantime. Parking over it would orphan the child and provider that
+    /// load is about to hold — the same hazard the load's own claim refuses
+    /// (design §2.2) — so the newer entry is left alone.
+    ///
     /// Returns `false` (and does nothing) when the plugin is not tracked;
     /// callers decide whether that is an error.
     async fn unload_and_park(
@@ -743,23 +917,20 @@ impl PluginManager {
         self.unload_plugin(name).await?;
 
         let mut plugins = self.plugins.write().await;
+        if let Some(existing) = plugins.get(name)
+            && existing.is_in_flight()
+        {
+            warn!(
+                plugin = name,
+                status = %existing.status,
+                new_status = %status,
+                "a load claimed the plugin during teardown; leaving its entry in place"
+            );
+            return Ok(true);
+        }
         plugins.insert(
             name.to_string(),
-            PluginState {
-                manifest,
-                status,
-                process: None,
-                registered_tools: Vec::new(),
-                registered_connector: None,
-                registered_provider: None,
-                registered_models: Vec::new(),
-                registered_skills: Vec::new(),
-                registered_agents: Vec::new(),
-                restart_count: 0,
-                last_health: None,
-                plugin_dir,
-                capability_provider_handle: None,
-            },
+            PluginState::handle_free(manifest, plugin_dir, status),
         );
         Ok(true)
     }
@@ -1388,6 +1559,43 @@ mcp_compatible = true
         dir
     }
 
+    /// Make the stub's startup slow and countable.
+    ///
+    /// The entry becomes a wrapper that appends a line to `spawns.log` and
+    /// sleeps before it `exec`s the stub. The log counts *every* child the
+    /// plugin ever started, including one that was orphaned and reaped, which
+    /// the manager's own bookkeeping cannot show; the sleep stretches the
+    /// window between a load's `Loading` claim and its step 8, which is where
+    /// two overlapping loads collide.
+    fn slow_the_entry(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let wrapper = dir.join("slow-entry.sh");
+        // The child's cwd is its plugin directory (`PluginProcess::spawn`),
+        // so both relative paths resolve there.
+        std::fs::write(
+            &wrapper,
+            "#!/bin/sh\necho spawned >> spawns.log\nsleep 0.5\nexec ./echo-server.sh\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let manifest = dir.join("plugin.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        std::fs::write(
+            &manifest,
+            text.replace("./echo-server.sh", "./slow-entry.sh"),
+        )
+        .unwrap();
+    }
+
+    /// How many children the plugin at `dir` has spawned (see `slow_the_entry`).
+    fn spawn_count(dir: &Path) -> usize {
+        std::fs::read_to_string(dir.join("spawns.log"))
+            .map(|log| log.lines().count())
+            .unwrap_or(0)
+    }
+
     struct Harness {
         manager: PluginManager,
         tools: Arc<ToolRegistry>,
@@ -1597,7 +1805,7 @@ mcp_compatible = true
             providers,
             "redundant enable registered a second capability provider"
         );
-        assert_eq!(h.stub_caps(), 1, "the stub's virtual cap is now duplicated");
+        assert_eq!(h.stub_caps(), 1, "the stub's virtual cap is duplicated");
         assert_eq!(
             h.provider_handle("echo-test").await,
             handle,
@@ -1635,6 +1843,67 @@ mcp_compatible = true
         assert_eq!(info.status, "running");
         assert_eq!(info.tools, vec!["echo-test::echo".to_string()]);
         assert_eq!(h.child_pid("echo-test").await, pid);
+    }
+
+    /// A2, the atomic half (design §3.3 E0 is a *CAS*, not a check-then-act):
+    /// two enables that overlap must load the plugin once.
+    ///
+    /// A `Loading` entry holds no handles yet, so before the claim was atomic
+    /// both requests passed the held-handle guard, both spawned a child, and
+    /// the second's step 8 overwrote the first's `process` and
+    /// `capability_provider_handle` — bug C's leak exactly, reached through
+    /// two requests (a double-clicked GUI toggle) instead of one. `join!`
+    /// interleaves them at the await points, which is where the window is and
+    /// how axum runs two concurrent handlers.
+    #[tokio::test]
+    async fn concurrent_enables_load_the_plugin_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\n\n[capabilities.virtual]\nprovides = [\"annotation:echo_stub\"]\n",
+        );
+        slow_the_entry(&dir);
+        let h = Harness::new(tmp.path());
+
+        // Track the plugin in the state enable acts on — off, never started.
+        h.manager.try_load_plugin(&dir).await.unwrap();
+        h.manager.disable_plugin("echo-test").await.unwrap();
+        assert_eq!(h.info("echo-test").await.status, "disabled");
+        assert_eq!(spawn_count(&dir), 0, "nothing has spawned yet");
+        let providers = h.tools.provider_handles().len();
+
+        let (first, second) = tokio::join!(
+            h.manager.enable_plugin("echo-test"),
+            h.manager.enable_plugin("echo-test"),
+        );
+        // E0: the request that loses the CAS answers success, never a reload.
+        first.unwrap();
+        second.unwrap();
+
+        assert_eq!(
+            spawn_count(&dir),
+            1,
+            "two overlapping enables spawned more than one child"
+        );
+        assert_eq!(
+            h.tools.provider_handles().len(),
+            providers + 1,
+            "two overlapping enables registered more than one capability provider"
+        );
+        assert_eq!(h.stub_caps(), 1, "the stub's virtual cap is duplicated");
+
+        let info = h.info("echo-test").await;
+        assert_eq!(info.status, "running");
+        assert_eq!(info.tools, vec!["echo-test::echo".to_string()]);
+        let pid = h.child_pid("echo-test").await;
+        assert!(pid_alive(pid), "the tracked child is not running");
+
+        // Decisive: a provider orphaned by the loser's step 8 has no handle
+        // left anywhere, so it would survive the unload.
+        h.manager.unload_plugin("echo-test").await.unwrap();
+        assert_eq!(h.stub_caps(), 0, "a capability provider outlived the plugin");
+        assert!(!pid_alive(pid), "the tracked child outlived the unload");
     }
 }
 
