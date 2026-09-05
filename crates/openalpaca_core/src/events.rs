@@ -27,6 +27,10 @@ pub enum SystemEvent {
     /// A task was updated (status change, progress update)
     TaskUpdated {
         task_id: String,
+        /// The task's title. Empty for post-restart DB-only tasks whose
+        /// in-memory registry entry (and thus title) was lost (GAP-07).
+        #[serde(default)]
+        title: String,
         status: String,
         progress_current: Option<i32>,
         progress_total: Option<i32>,
@@ -35,6 +39,10 @@ pub enum SystemEvent {
     /// A task completed successfully
     TaskCompleted {
         task_id: String,
+        /// The task's title. Empty for post-restart DB-only tasks whose
+        /// in-memory registry entry (and thus title) was lost (GAP-07).
+        #[serde(default)]
+        title: String,
         result_summary: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome_kind: Option<String>,
@@ -48,6 +56,10 @@ pub enum SystemEvent {
     /// A task failed
     TaskFailed {
         task_id: String,
+        /// The task's title. Empty for post-restart DB-only tasks whose
+        /// in-memory registry entry (and thus title) was lost (GAP-07).
+        #[serde(default)]
+        title: String,
         error: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome_kind: Option<String>,
@@ -69,6 +81,10 @@ pub enum SystemEvent {
         instance_id: String,
         /// The template this instance was spawned from (e.g. "code_agent").
         template_id: String,
+        /// The agent's human-readable display name (e.g. "Code Agent").
+        /// Empty when the instance could not be resolved (GAP-07).
+        #[serde(default)]
+        name: String,
         /// Lifecycle status string.
         status: String,
         current_task_id: Option<String>,

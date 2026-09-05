@@ -218,6 +218,7 @@ impl BuiltInTool for SpawnSubagentTool {
             agent_id: instance_id.clone(),
             instance_id: instance_id.clone(),
             template_id: agent_id.to_string(),
+            name: agent.name.clone(),
             status: "spawned".to_string(),
             current_task_id: Some(self.task_id.clone()),
             timestamp: Utc::now(),

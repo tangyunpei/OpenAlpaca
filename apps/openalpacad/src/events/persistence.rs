@@ -60,6 +60,7 @@ impl EventBroadcaster {
                 // Log task status changes
                 ServerEvent::TaskStatus {
                     task_id,
+                    title,
                     status,
                     progress_current,
                     progress_total,
@@ -71,6 +72,7 @@ impl EventBroadcaster {
                 } => {
                     let detail = serde_json::json!({
                         "task_id": task_id,
+                        "title": title,
                         "status": status,
                         "progress_current": progress_current,
                         "progress_total": progress_total,

@@ -247,6 +247,13 @@ pub(super) fn finalize_task(
     outcome_summary: Option<&str>,
 ) {
     let now = chrono::Utc::now();
+    // Title comes from the in-memory registry; a DB-only task resurrected
+    // after a restart (no registry entry) falls back to "" (GAP-07).
+    let title = ctx
+        .task_registry
+        .get(task_id)
+        .map(|e| e.title)
+        .unwrap_or_default();
     if success {
         ctx.task_registry
             .update_status(task_id, crate::context::TaskEntryStatus::Completed);
@@ -267,6 +274,7 @@ pub(super) fn finalize_task(
         }
         bus.publish(crate::events::SystemEvent::TaskCompleted {
             task_id: task_id.to_string(),
+            title,
             result_summary: Some(summary.to_string()),
             outcome_kind: outcome_kind.map(|k| k.as_str().to_string()),
             artifact_count,
@@ -293,6 +301,7 @@ pub(super) fn finalize_task(
         }
         bus.publish(crate::events::SystemEvent::TaskFailed {
             task_id: task_id.to_string(),
+            title,
             error: summary.to_string(),
             outcome_kind: outcome_kind.map(|k| k.as_str().to_string()),
             timestamp: now,

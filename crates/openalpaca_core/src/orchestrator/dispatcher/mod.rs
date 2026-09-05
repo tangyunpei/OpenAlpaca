@@ -168,8 +168,15 @@ impl TaskDispatcher {
                         );
                     }
                 }
+                let title = self
+                    .shared_context
+                    .task_registry
+                    .get(task_id)
+                    .map(|e| e.title)
+                    .unwrap_or_default();
                 self.bus.publish(crate::events::SystemEvent::TaskFailed {
                     task_id: task_id.to_string(),
+                    title,
                     error: "No LLM router configured".to_string(),
                     outcome_kind: None,
                     timestamp: chrono::Utc::now(),

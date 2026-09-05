@@ -1314,6 +1314,7 @@ fn test_parse_outcome_malformed_json() {
 fn test_system_event_task_completed_serde_roundtrip() {
     let event = SystemEvent::TaskCompleted {
         task_id: "t1".to_string(),
+        title: "Test task".to_string(),
         result_summary: Some("Done".to_string()),
         outcome_kind: Some("mixed".to_string()),
         artifact_count: Some(2),
@@ -1369,6 +1370,7 @@ fn test_system_event_task_completed_without_new_fields() {
 fn test_system_event_task_failed_serde_roundtrip() {
     let event = SystemEvent::TaskFailed {
         task_id: "t2".to_string(),
+        title: "Test task".to_string(),
         error: "Network timeout".to_string(),
         outcome_kind: Some("failed".to_string()),
         timestamp: chrono::Utc::now(),

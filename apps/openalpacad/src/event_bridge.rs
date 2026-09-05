@@ -41,6 +41,7 @@ pub fn spawn_event_bridge(
                 }
                 openalpaca_core::events::SystemEvent::TaskUpdated {
                     task_id,
+                    title,
                     status,
                     progress_current,
                     progress_total,
@@ -48,7 +49,7 @@ pub fn spawn_event_bridge(
                 } => {
                     eb.task_status(
                         &task_id,
-                        "",
+                        &title,
                         &status,
                         progress_current,
                         progress_total,
@@ -60,6 +61,7 @@ pub fn spawn_event_bridge(
                 }
                 openalpaca_core::events::SystemEvent::TaskCompleted {
                     task_id,
+                    title,
                     result_summary,
                     outcome_kind,
                     artifact_count,
@@ -67,15 +69,15 @@ pub fn spawn_event_bridge(
                     ..
                 } => {
                     eb.task_status(
-                        &task_id, "", "completed", None, None, result_summary,
+                        &task_id, &title, "completed", None, None, result_summary,
                         outcome_kind, artifact_count, outcome_summary,
                     );
                 }
                 openalpaca_core::events::SystemEvent::TaskFailed {
-                    task_id, error, outcome_kind, ..
+                    task_id, title, error, outcome_kind, ..
                 } => {
                     eb.task_status(
-                        &task_id, "", "failed", None, None, Some(error),
+                        &task_id, &title, "failed", None, None, Some(error),
                         outcome_kind, None, None,
                     );
                 }
@@ -83,13 +85,14 @@ pub fn spawn_event_bridge(
                     agent_id,
                     instance_id,
                     template_id,
+                    name,
                     status,
                     current_task_id,
                     ..
                 } => {
                     eb.agent_status(
                         &agent_id,
-                        "",
+                        &name,
                         &status,
                         current_task_id,
                         &instance_id,
@@ -626,6 +629,125 @@ mod tests {
                 assert_eq!(kind, "followup");
             }
             other => panic!("Expected FollowupQueued, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    // ── GAP-07: task/agent events must carry a non-empty title/name ────
+
+    #[tokio::test]
+    async fn test_task_updated_bridged_carries_title() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::TaskUpdated {
+            task_id: "t-updated".into(),
+            title: "Sync the repo".into(),
+            status: "running".into(),
+            progress_current: Some(1),
+            progress_total: Some(4),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::TaskStatus {
+                task_id,
+                title,
+                status,
+                ..
+            } => {
+                assert_eq!(task_id, "t-updated");
+                assert_eq!(title, "Sync the repo");
+                assert!(!title.is_empty());
+                assert_eq!(status, "running");
+            }
+            other => panic!("Expected TaskStatus, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_task_completed_bridged_carries_title() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::TaskCompleted {
+            task_id: "t-completed".into(),
+            title: "Generate the report".into(),
+            result_summary: Some("Done".into()),
+            outcome_kind: None,
+            artifact_count: None,
+            outcome_summary: None,
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::TaskStatus {
+                task_id,
+                title,
+                status,
+                ..
+            } => {
+                assert_eq!(task_id, "t-completed");
+                assert_eq!(title, "Generate the report");
+                assert!(!title.is_empty());
+                assert_eq!(status, "completed");
+            }
+            other => panic!("Expected TaskStatus, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_task_failed_bridged_carries_title() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::TaskFailed {
+            task_id: "t-failed".into(),
+            title: "Deploy the release".into(),
+            error: "Network timeout".into(),
+            outcome_kind: None,
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::TaskStatus {
+                task_id,
+                title,
+                status,
+                result_summary,
+                ..
+            } => {
+                assert_eq!(task_id, "t-failed");
+                assert_eq!(title, "Deploy the release");
+                assert!(!title.is_empty());
+                assert_eq!(status, "failed");
+                assert_eq!(result_summary, Some("Network timeout".to_string()));
+            }
+            other => panic!("Expected TaskStatus, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_agent_status_changed_bridged_carries_name() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::AgentStatusChanged {
+            agent_id: "code_agent::a1b2c3d4".into(),
+            instance_id: "code_agent::a1b2c3d4".into(),
+            template_id: "code_agent".into(),
+            name: "Code Agent".into(),
+            status: "spawned".into(),
+            current_task_id: Some("t-1".into()),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::AgentStatus {
+                agent_id,
+                name,
+                status,
+                template_id,
+                ..
+            } => {
+                assert_eq!(agent_id, "code_agent::a1b2c3d4");
+                assert_eq!(name, "Code Agent");
+                assert!(!name.is_empty());
+                assert_eq!(status, "spawned");
+                assert_eq!(template_id, "code_agent");
+            }
+            other => panic!("Expected AgentStatus, got {other:?}"),
         }
         cancel.cancel();
     }
