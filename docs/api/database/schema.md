@@ -6,7 +6,7 @@
 
 - DB path resolver: `openalpaca_storage::paths::database_path()`
 - Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`
-- Registered migrations: 35
+- Registered migrations: 36
 
 ## Tables
 
@@ -58,6 +58,24 @@ role TEXT NOT NULL
 status TEXT NOT NULL
 runtime_seconds INTEGER
 completed_at TEXT DEFAULT (datetime('now'))
+```
+
+### `artifact_versions` (table)
+
+Source migration: `036_artifact_store.sql`
+
+```sql
+artifact_id TEXT NOT NULL REFERENCES file_assets(id) ON DELETE CASCADE
+version INTEGER NOT NULL
+rel_path TEXT NOT NULL
+sha256 TEXT NOT NULL
+size_bytes INTEGER NOT NULL
+note TEXT
+author_agent_id TEXT
+added_lines INTEGER
+removed_lines INTEGER
+created_at TEXT NOT NULL DEFAULT (datetime('now'))
+PRIMARY KEY (artifact_id, version)
 ```
 
 ### `conversation_map` (table)
@@ -191,7 +209,7 @@ UNIQUE(provider, provider_user_id)
 
 ### `file_assets` (table)
 
-Source migration: `027_file_assets.sql`
+Source migration: `036_artifact_store.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -207,6 +225,18 @@ extract_error TEXT
 metadata_json TEXT
 created_at TEXT NOT NULL DEFAULT (datetime('now'))
 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+origin TEXT NOT NULL DEFAULT 'upload'
+kind TEXT
+task_id TEXT REFERENCES task(id) ON DELETE SET NULL
+agent_id TEXT
+agent_template_id TEXT
+project_root TEXT
+rel_path TEXT
+version INTEGER NOT NULL DEFAULT 1
+version_count INTEGER NOT NULL DEFAULT 1
+pinned INTEGER NOT NULL DEFAULT 0
+summary TEXT
+missing_since TEXT
 ```
 
 ### `global_user` (table)
@@ -403,7 +433,7 @@ updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 
 ### `task` (table)
 
-Source migration: `029_task_outcome.sql`
+Source migration: `036_artifact_store.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -424,6 +454,7 @@ state_version INTEGER NOT NULL DEFAULT 0
 outcome_json TEXT
 outcome_kind TEXT
 artifact_count INTEGER NOT NULL DEFAULT 0
+workspace_id TEXT
 ```
 
 ### `task_agent_assignment` (table)
@@ -463,6 +494,7 @@ timestamp TEXT DEFAULT (datetime('now'))
 |---|---|---|---|---|
 | `idx_agent_status` | `agent` | `INDEX` | `status` | `007_subagents.sql` |
 | `idx_agent_task_history` | `agent_task_history` | `INDEX` | `agent_id, completed_at DESC` | `007_subagents.sql` |
+| `idx_artifact_versions_artifact` | `artifact_versions` | `INDEX` | `artifact_id, version DESC` | `036_artifact_store.sql` |
 | `idx_conversation_map_provider` | `conversation_map` | `INDEX` | `provider, provider_conversation_id` | `003_identity.sql` |
 | `idx_msg_attach_message` | `conversation_message_attachments` | `INDEX` | `message_id` | `028_message_attachments.sql` |
 | `idx_conv_msg_created` | `conversation_messages` | `INDEX` | `created_at` | `009_conversation_messages.sql` |
@@ -479,8 +511,11 @@ timestamp TEXT DEFAULT (datetime('now'))
 | `idx_event_log_type` | `event_log` | `INDEX` | `event_type` | `001_init.sql` |
 | `idx_external_identity_global_user` | `external_identity` | `INDEX` | `global_user_id` | `003_identity.sql` |
 | `idx_external_identity_provider` | `external_identity` | `INDEX` | `provider, provider_user_id` | `003_identity.sql` |
+| `idx_file_assets_origin` | `file_assets` | `INDEX` | `origin, created_at DESC` | `036_artifact_store.sql` |
 | `idx_file_assets_owner` | `file_assets` | `INDEX` | `owner_id` | `027_file_assets.sql` |
+| `idx_file_assets_project` | `file_assets` | `INDEX` | `project_root` | `036_artifact_store.sql` |
 | `idx_file_assets_sha256` | `file_assets` | `INDEX` | `sha256` | `027_file_assets.sql` |
+| `idx_file_assets_task` | `file_assets` | `INDEX` | `task_id` | `036_artifact_store.sql` |
 | `idx_lane_followups_lane_status` | `lane_followups` | `INDEX` | `lane_key, status, id` | `033_lane_followups.sql` |
 | `idx_link_token_token` | `link_token` | `INDEX` | `token` | `003_identity.sql` |
 | `idx_llm_call_log_agent` | `llm_call_log` | `INDEX` | `agent_id, timestamp DESC` | `008_llm_usage.sql` |
@@ -506,6 +541,7 @@ timestamp TEXT DEFAULT (datetime('now'))
 | `idx_sel_status` | `skill_execution_log` | `INDEX` | `skill_id, status` | `030_skill_tool_execution_log.sql` |
 | `idx_task_created_by` | `task` | `INDEX` | `created_by` | `006_tasks.sql` |
 | `idx_task_status` | `task` | `INDEX` | `status` | `006_tasks.sql` |
+| `idx_task_workspace` | `task` | `INDEX` | `workspace_id` | `036_artifact_store.sql` |
 | `idx_task_agent_task` | `task_agent_assignment` | `INDEX` | `task_id` | `006_tasks.sql` |
 | `idx_tel_request` | `tool_execution_log` | `INDEX` | `request_id` | `030_skill_tool_execution_log.sql` |
 | `idx_tel_tool_ts` | `tool_execution_log` | `INDEX` | `tool_name, timestamp DESC` | `030_skill_tool_execution_log.sql` |

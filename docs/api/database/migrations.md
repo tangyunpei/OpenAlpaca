@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Total registered migrations: 35
+- Total registered migrations: 36
 - Migration SQL directory: `crates/openalpaca_storage/src/migrations`
 
 ## Files
@@ -46,3 +46,4 @@
 | 33 | `lane_followups` | `033_lane_followups.sql` | Lane follow-up queue (Routing V2): explicit `queue_followup` items and |
 | 34 | `drop_context_compaction_log` | `034_drop_context_compaction_log.sql` | Drop context_compaction_log: the table was added in migration 032 but no |
 | 35 | `drop_planner_telemetry` | `035_drop_planner_telemetry.sql` | Migration 035: drop the planner telemetry columns. |
+| 36 | `artifact_store` | `036_artifact_store.sql` | Migration 036: project-scoped artifact store. |

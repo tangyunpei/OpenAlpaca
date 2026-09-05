@@ -72,11 +72,16 @@ impl<'a> FileAssetRepository<'a> {
         })
     }
 
-    /// Get total storage bytes used across all file assets.
+    /// Get total storage bytes used by uploads.
+    ///
+    /// Read at `routes/files.rs` against the 500 MB upload cap, so it counts
+    /// only what the user uploaded: agent output written into the user's own
+    /// project (`origin = 'produced'`) is not upload traffic and must never
+    /// start rejecting uploads.
     pub fn total_storage_bytes(&self) -> Result<i64> {
         self.db.with_connection(|conn| {
             let total: i64 = conn.query_row(
-                "SELECT COALESCE(SUM(size_bytes), 0) FROM file_assets",
+                "SELECT COALESCE(SUM(size_bytes), 0) FROM file_assets WHERE origin = 'upload'",
                 [],
                 |row| row.get(0),
             )?;
@@ -91,14 +96,23 @@ impl<'a> FileAssetRepository<'a> {
         })
     }
 
-    /// List orphaned assets (not linked to any message and older than grace period).
+    /// List orphaned *uploads* (not linked to any message and older than the
+    /// grace period).
+    ///
+    /// The caller deletes the row **and** the file on disk, so the predicate is
+    /// deliberately narrow: a produced artifact is the user's own file and is
+    /// never linked to a conversation message, and a pinned upload is one the
+    /// user asked to keep. Neither is ever garbage-collected.
     pub fn list_orphaned(&self, older_than_hours: i64) -> Result<Vec<FileAsset>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT f.id, f.owner_id, f.sha256, f.filename, f.mime_type, f.size_bytes, f.storage_path, f.status, f.extracted_text, f.extract_error, f.metadata_json, f.created_at, f.updated_at
                  FROM file_assets f
                  LEFT JOIN conversation_message_attachments a ON f.id = a.file_id
-                 WHERE a.id IS NULL AND f.created_at < datetime('now', ?1)
+                 WHERE a.id IS NULL
+                   AND f.origin = 'upload'
+                   AND f.pinned = 0
+                   AND f.created_at < datetime('now', ?1)
                  LIMIT 100",
             )?;
             let hours_param = format!("-{older_than_hours} hours");
@@ -163,6 +177,9 @@ impl<'a> FileAssetRepository<'a> {
         })
     }
 
+    /// Every read above names its columns explicitly, so the artifact-store
+    /// columns migration 036 adds (`origin`, `kind`, `project_root`, …) never
+    /// shift these indexes.
     fn row_to_asset(row: &rusqlite::Row<'_>) -> Result<FileAsset> {
         let status_str: String = row.get(7)?;
         Ok(FileAsset {
@@ -182,3 +199,6 @@ impl<'a> FileAssetRepository<'a> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

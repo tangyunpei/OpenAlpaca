@@ -186,4 +186,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "drop_planner_telemetry",
         sql: include_str!("035_drop_planner_telemetry.sql"),
     },
+    Migration {
+        version: 36,
+        name: "artifact_store",
+        sql: include_str!("036_artifact_store.sql"),
+    },
 ];

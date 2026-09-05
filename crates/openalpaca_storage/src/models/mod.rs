@@ -2,6 +2,7 @@
 //!
 //! Organizes core, identity, and task models into a single module.
 
+pub mod artifact;
 pub mod conversation;
 mod core;
 pub mod feedback;
@@ -13,6 +14,7 @@ pub mod skill_health;
 pub mod subagent;
 pub mod task;
 
+pub use artifact::{ArtifactKind, ArtifactOrigin};
 pub use conversation::{Conversation, ConversationMessage};
 pub use core::{Agent, EventLog, Memory, MemoryRole};
 pub use file_asset::{AttachmentRef, FileAsset, FileAssetStatus};
