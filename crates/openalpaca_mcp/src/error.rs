@@ -17,6 +17,17 @@ pub enum McpError {
     #[error("client closed deliberately; no reconnect will be attempted")]
     Closed,
 
+    /// The server rejected the daemon's credentials with an HTTP `401` or
+    /// `403` (extension design §3.6 item 1, §4.2).
+    ///
+    /// Terminal *by type*, like [`Self::Closed`]: it is deliberately **not** in
+    /// [`McpError::is_retriable`]'s set, which takes an expired token out of
+    /// `call_tool`'s reconnect ladder at the source — otherwise a mid-session
+    /// 401 burns the four reconnect entries and ends as `Failed{Crashed}` with
+    /// a Retry button that cannot help.
+    #[error("server rejected the daemon's credentials (HTTP {0})")]
+    Unauthorized(u16),
+
     #[error("transport I/O error: {0}")]
     Transport(#[from] std::io::Error),
 
@@ -67,7 +78,8 @@ impl McpError {
     ///
     /// [`Self::Closed`] is intentionally absent: a sealed client must never be
     /// retried, or the retry loop would respawn the child the owner just
-    /// disabled.
+    /// disabled. So is [`Self::Unauthorized`]: a retry cannot succeed until the
+    /// owner fixes the credential.
     pub fn is_retriable(&self) -> bool {
         matches!(
             self,
@@ -90,6 +102,8 @@ impl McpError {
             | Self::Closed
             | Self::Transport(_)
             | Self::ReconnectExhausted(_) => ErrorCategory::Transport,
+            // The server answered — it answered "no".
+            Self::Unauthorized(_) => ErrorCategory::Server,
             Self::HandshakeFailed(_) | Self::VersionMismatch { .. } => ErrorCategory::Handshake,
             Self::JsonRpc { .. } | Self::ToolNotFound(_) | Self::InvalidArguments(_) => {
                 ErrorCategory::Protocol
@@ -113,6 +127,30 @@ impl McpError {
 //
 // Best-effort classification; unknown (`#[non_exhaustive]`) variants fall
 // through to `Sdk(...)` with a warn log so we notice rmcp additions.
+/// The one place an HTTP status survives into this crate.
+///
+/// rmcp's reqwest-backed streamable-HTTP client maps a `401` carrying a
+/// `www-authenticate` header to [`StreamableHttpError::AuthRequired`] and a
+/// `403` carrying one to [`StreamableHttpError::InsufficientScope`]
+/// (`rmcp-0.16.0/src/transport/common/reqwest/streamable_http_client.rs:130`,
+/// `:145`); every other status is folded into an untyped response error before
+/// it reaches us. So this recovers exactly the two the design classifies
+/// (§4.2) and nothing else — no string matching, no guessing.
+///
+/// Returns `None` for the stdio transport, which cannot carry a status at all:
+/// a stdio server that exits on an expired token is indistinguishable from one
+/// that crashed and classifies as `Unreachable` (§4.2).
+pub(crate) fn unauthorized_status(
+    error: &(dyn std::error::Error + Send + Sync + 'static),
+) -> Option<u16> {
+    use rmcp::transport::streamable_http_client::StreamableHttpError;
+    match error.downcast_ref::<StreamableHttpError<reqwest::Error>>()? {
+        StreamableHttpError::AuthRequired(_) => Some(401),
+        StreamableHttpError::InsufficientScope(_) => Some(403),
+        _ => None,
+    }
+}
+
 impl From<rmcp::service::ServiceError> for McpError {
     fn from(e: rmcp::service::ServiceError) -> Self {
         use rmcp::service::ServiceError as S;
@@ -122,6 +160,15 @@ impl From<rmcp::service::ServiceError> for McpError {
                 message: err.message.to_string(),
             },
             S::TransportSend(err) => {
+                // The streamable-HTTP client is the one transport that can
+                // report an authorization failure as a *typed* error, and it is
+                // the only place a status code survives anywhere in this crate.
+                // Recover it here rather than flattening a 401 into a retriable
+                // `TransportClosed` (design §3.6 item 1, X-7).
+                if let Some(status) = unauthorized_status(err.error.as_ref()) {
+                    tracing::debug!(error = %err, status, "MCP server rejected our credentials");
+                    return Self::Unauthorized(status);
+                }
                 tracing::debug!(error = %err, "rmcp transport send error");
                 Self::TransportClosed
             }
@@ -149,6 +196,9 @@ mod tests {
             (McpError::TransportClosed, true),
             // A deliberately closed (sealed) client must never be retried.
             (McpError::Closed, false),
+            // Nor may an authorization failure enter the reconnect ladder.
+            (McpError::Unauthorized(401), false),
+            (McpError::Unauthorized(403), false),
             (
                 McpError::Transport(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
                 true,
@@ -195,6 +245,7 @@ mod tests {
             ErrorCategory::Transport
         );
         assert_eq!(McpError::Closed.category(), ErrorCategory::Transport);
+        assert_eq!(McpError::Unauthorized(401).category(), ErrorCategory::Server);
         assert_eq!(
             McpError::ReconnectExhausted(3).category(),
             ErrorCategory::Transport

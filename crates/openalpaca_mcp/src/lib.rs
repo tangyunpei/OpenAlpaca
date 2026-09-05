@@ -15,7 +15,7 @@ pub mod transport;
 mod client;
 mod lifecycle;
 
-pub use client::{McpClient, McpClientConfig};
+pub use client::{McpClient, McpClientConfig, NotifyingHandler, ServerChange};
 pub use error::{ErrorCategory, McpError};
 pub use lifecycle::ConnectionSnapshot;
 pub use transport::{HttpAuth, StdioTransport, Transport, TransportKind};

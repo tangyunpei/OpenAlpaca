@@ -4,13 +4,92 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::time::Duration;
 
+use rmcp::handler::client::ClientHandler;
 use rmcp::model::{ClientRequest, Implementation, PingRequest, ProtocolVersion};
-use rmcp::service::{RoleClient, RunningService, ServiceExt};
+use rmcp::service::{NotificationContext, RoleClient, RunningService, ServiceExt};
 use tokio::sync::Mutex;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::error::McpError;
 use crate::lifecycle::{ConnectionSnapshot, ConnectionState};
 use crate::transport::{Transport, TransportConnection, TransportInner, TransportKind};
+
+/// Something the *server* changed about itself mid-session, announced over one
+/// of MCP's `notifications/*_list_changed` methods.
+///
+/// rmcp receives all three today and OpenAlpaca's unit handler discarded them
+/// (`impl ClientHandler for () {}`), which left two silent holes: a tool the
+/// server added answered an unattributed *"not found"*, and one it dropped
+/// answered a raw JSON-RPC error on every call (extension design §3.7, X-35).
+///
+/// Only [`Self::ToolList`] has a consumer: MCP resources and prompts are
+/// stubbed. The other two variants exist so that un-stubbing them is a
+/// supervisor change, never a second refresh route (§2.3, X-36).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerChange {
+    ToolList,
+    ResourceList,
+    PromptList,
+}
+
+/// The `ClientHandler` every connection is served with: it forwards the three
+/// list-changed notifications onto the client's own channel and does nothing
+/// else (design §3.7 "Client (C2)").
+///
+/// **The sender is not created per handshake.** `do_handshake` runs on
+/// `connect` *and* on every in-session `reconnect`, each time building a fresh
+/// `RunningService` and therefore a fresh handler; a per-handshake sender would
+/// mean the first respawn dropped the only sender and ended the supervisor's
+/// receiver while the server was still enabled. The pair lives on
+/// [`ClientInner`] and every handshake clones the sender into the handler it
+/// serves.
+#[derive(Clone)]
+pub struct NotifyingHandler {
+    server_name: String,
+    tx: Option<UnboundedSender<ServerChange>>,
+}
+
+impl NotifyingHandler {
+    fn send(&self, change: ServerChange) {
+        let Some(tx) = &self.tx else { return };
+        if tx.send(change).is_err() {
+            // The receiver is gone: either nobody took it (`changes()` is a
+            // take-once accessor) or the supervisor's reader task has exited.
+            // Neither is an error — the notification simply has no consumer.
+            tracing::debug!(
+                server_name = %self.server_name,
+                ?change,
+                "MCP server change dropped: no receiver"
+            );
+        }
+    }
+}
+
+impl ClientHandler for NotifyingHandler {
+    fn on_tool_list_changed(
+        &self,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl std::future::Future<Output = ()> + Send + '_ {
+        self.send(ServerChange::ToolList);
+        std::future::ready(())
+    }
+
+    fn on_resource_list_changed(
+        &self,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl std::future::Future<Output = ()> + Send + '_ {
+        self.send(ServerChange::ResourceList);
+        std::future::ready(())
+    }
+
+    fn on_prompt_list_changed(
+        &self,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl std::future::Future<Output = ()> + Send + '_ {
+        self.send(ServerChange::PromptList);
+        std::future::ready(())
+    }
+}
 
 /// How long a deliberate [`McpClient::disconnect`] waits for rmcp to finish the
 /// graceful close (cancel the service task, close the transport, reap the child).
@@ -70,10 +149,18 @@ pub(crate) struct ClientInner {
     pub(crate) state: tokio::sync::RwLock<ConnectionState>,
     /// Holds the rmcp RunningService for the current connection.
     /// `Option` so we can take() it on reconnect/disconnect (RunningService consumes self on close).
-    pub(crate) service: Mutex<Option<RunningService<RoleClient, ()>>>,
+    pub(crate) service: Mutex<Option<RunningService<RoleClient, NotifyingHandler>>>,
     pub(crate) server_info: tokio::sync::OnceCell<Implementation>,
     pub(crate) protocol_version: tokio::sync::OnceCell<ProtocolVersion>,
     pub(crate) attempt_counter: AtomicU32,
+    /// The sender half of the server-change channel, created **once** with the
+    /// client and cloned into every handshake's handler. `disconnect` `take()`s
+    /// it beside the service, so the supervisor's receiver ends when — and only
+    /// when — T4 closes the client (design §3.7).
+    pub(crate) changes_tx: Mutex<Option<UnboundedSender<ServerChange>>>,
+    /// The receiver half, parked here between `connect` and E2 and handed out
+    /// once by [`McpClient::changes`].
+    pub(crate) changes_rx: Mutex<Option<UnboundedReceiver<ServerChange>>>,
     /// The close seal. Set once, in [`McpClient::disconnect`], **before** that
     /// method takes the service lock; never cleared. A sealed client refuses to
     /// reconnect and refuses to publish a service, so a clone that outlives the
@@ -84,7 +171,13 @@ pub(crate) struct ClientInner {
 
 impl ClientInner {
     /// A fresh inner in `state`, never sealed.
+    ///
+    /// The server-change channel is created here so that both constructors —
+    /// [`McpClient::connect`] and `disconnected_for_tests` — carry an
+    /// identically initialised pair, and so that it outlives every in-session
+    /// `reconnect` (design §3.7).
     pub(crate) fn new(config: McpClientConfig, state: ConnectionState) -> Self {
+        let (changes_tx, changes_rx) = unbounded_channel();
         Self {
             config,
             state: tokio::sync::RwLock::new(state),
@@ -93,6 +186,8 @@ impl ClientInner {
             protocol_version: tokio::sync::OnceCell::new(),
             attempt_counter: AtomicU32::new(0),
             closed: AtomicBool::new(false),
+            changes_tx: Mutex::new(Some(changes_tx)),
+            changes_rx: Mutex::new(Some(changes_rx)),
         }
     }
 
@@ -142,9 +237,27 @@ impl McpClient {
             "MCP handshake starting"
         );
 
-        let running = serve_with_conn(conn)
-            .await
-            .map_err(|e| McpError::HandshakeFailed(format!("rmcp serve() failed: {e:?}")))?;
+        // Clone — never create — the sender: a per-handshake channel would be
+        // severed by the first in-session reconnect (design §3.7).
+        let handler = NotifyingHandler {
+            server_name: self.inner.config.server_name.clone(),
+            tx: self.inner.changes_tx.lock().await.clone(),
+        };
+
+        let running = serve_with_conn(conn, handler).await.map_err(|e| {
+            // A handshake against a streamable-HTTP server that rejected our
+            // credentials is the one bring-up failure that carries a status
+            // (design §4.2); everything else stays a handshake failure.
+            match &e {
+                rmcp::service::ClientInitializeError::TransportError { error, .. } => {
+                    match crate::error::unauthorized_status(error.error.as_ref()) {
+                        Some(status) => McpError::Unauthorized(status),
+                        None => McpError::HandshakeFailed(format!("rmcp serve() failed: {e:?}")),
+                    }
+                }
+                _ => McpError::HandshakeFailed(format!("rmcp serve() failed: {e:?}")),
+            }
+        })?;
 
         // Record server identity (first-time only; immutable across reconnects).
         if let Some(peer_info) = running.peer_info() {
@@ -176,7 +289,7 @@ impl McpClient {
     /// attached to a sealed client.
     async fn install_service(
         &self,
-        mut running: RunningService<RoleClient, ()>,
+        mut running: RunningService<RoleClient, NotifyingHandler>,
     ) -> Result<(), McpError> {
         use std::sync::atomic::Ordering;
         let mut guard = self.inner.service.lock().await;
@@ -225,6 +338,40 @@ impl McpClient {
         ConnectionSnapshot::from(&*self.inner.state.read().await)
     }
 
+    /// Take the server-change receiver. **Once** — a second call returns
+    /// `None`.
+    ///
+    /// The supervisor calls this at E2, with the client, and spawns the
+    /// per-server reader task on the result. The channel ends when `disconnect`
+    /// takes the sender at T4, so a notification can never outlive the load
+    /// that produced it, while a `reconnect` *inside* that load keeps
+    /// delivering (design §3.7, §3.3 E5).
+    pub async fn changes(&self) -> Option<UnboundedReceiver<ServerChange>> {
+        self.inner.changes_rx.lock().await.take()
+    }
+
+    /// One-shot `tools/list`: the `op` future of [`Self::list_tools`] under
+    /// `request_timeout`, returning the typed error and **never entering
+    /// `reconnect()`**.
+    ///
+    /// Two callers, for the same reason — bounded latency:
+    ///
+    /// * **E3**, where a client that has just handshaken has no reconnect to
+    ///   make, so bring-up stays bounded by `connect_timeout_secs` plus one
+    ///   `request_timeout` rather than up to four reconnect cycles under the
+    ///   supervisor's per-extension mutex;
+    /// * **§3.7 step 2**, the tool-list refresh, where the plain `list_tools`
+    ///   would hold its handles for minutes against a dying server.
+    pub async fn list_tools_once(&self) -> Result<Vec<rmcp::model::Tool>, McpError> {
+        let op = async {
+            let guard = self.inner.service.lock().await;
+            let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
+            let result = running.list_all_tools().await.map_err(McpError::from)?;
+            Ok::<_, McpError>(result)
+        };
+        with_cancel_and_timeout(op, None, self.inner.config.request_timeout).await
+    }
+
     /// Server identity from the last successful handshake.
     pub fn server_info(&self) -> Option<&Implementation> {
         self.inner.server_info.get()
@@ -260,6 +407,10 @@ impl McpClient {
 
         let mut guard = self.inner.service.lock().await;
         let service = guard.take();
+        // Take the change sender beside the service: dropping the last sender
+        // ends the supervisor's receiver, which is how the per-server reader
+        // task learns the load is over (design §3.7, §3.3 E-FAIL).
+        drop(self.inner.changes_tx.lock().await.take());
         // Record the state before the close, not after: once the service has
         // been taken out of a sealed client there is no outcome of the close
         // that makes the client anything other than disconnected, and a close
@@ -550,13 +701,15 @@ fn build_transport(cfg: &McpClientConfig) -> Result<Box<dyn Transport>, McpError
     }
 }
 
-/// Internal: hand a TransportConnection to rmcp's serve().
+/// Internal: hand a TransportConnection to rmcp's serve(), with the handler
+/// that forwards the server's list-changed notifications (design §3.7).
 async fn serve_with_conn(
     conn: TransportConnection,
-) -> Result<RunningService<RoleClient, ()>, Box<dyn std::error::Error + Send + Sync>> {
+    handler: NotifyingHandler,
+) -> Result<RunningService<RoleClient, NotifyingHandler>, rmcp::service::ClientInitializeError> {
     match conn.inner {
-        TransportInner::Stdio(child) => Ok(().serve(child).await?),
-        TransportInner::Http(http) => Ok(().serve(http).await?),
+        TransportInner::Stdio(child) => handler.serve(child).await,
+        TransportInner::Http(http) => handler.serve(http).await,
     }
 }
 
@@ -722,7 +875,7 @@ mod tests {
 
     /// A genuine, completed rmcp handshake against the in-process stub.
     struct LiveService {
-        running: RunningService<RoleClient, ()>,
+        running: RunningService<RoleClient, NotifyingHandler>,
         /// Resolves to `true` once the client end has gone away.
         server: tokio::task::JoinHandle<bool>,
         /// Set the moment the transport is really closed (see [`WatchedTransport`]).
@@ -730,11 +883,22 @@ mod tests {
     }
 
     async fn live_service(fail_close: bool) -> LiveService {
+        live_service_with(fail_close, None).await
+    }
+
+    async fn live_service_with(
+        fail_close: bool,
+        tx: Option<UnboundedSender<ServerChange>>,
+    ) -> LiveService {
         let (client_end, server_end) = tokio::io::duplex(8 * 1024);
         let server = tokio::spawn(stub_initialize_server(server_end));
         let closed = Arc::new(AtomicBool::new(false));
         let transport = watched(client_end, closed.clone(), fail_close);
-        let running = ().serve(transport).await.expect("stub handshake");
+        let handler = NotifyingHandler {
+            server_name: "stub".into(),
+            tx,
+        };
+        let running = handler.serve(transport).await.expect("stub handshake");
         assert!(
             running.peer_info().is_some(),
             "handshake should have peer info"
@@ -1036,6 +1200,79 @@ mod tests {
         assert_eq!(
             client.connection_state().await,
             ConnectionSnapshot::Disconnected
+        );
+    }
+
+    /// §3.7: the receiver is handed out **once**, and the notification the
+    /// server pushes reaches it through the handler every handshake clones.
+    #[tokio::test]
+    async fn changes_is_a_take_once_accessor_that_carries_the_notification() {
+        let client = test_client("notifier", ConnectionState::Connected);
+        let mut rx = client.changes().await.expect("first take");
+        assert!(
+            client.changes().await.is_none(),
+            "the receiver is handed out once"
+        );
+
+        // A handler built the way `do_handshake` builds one.
+        let handler = NotifyingHandler {
+            server_name: "notifier".into(),
+            tx: client.inner.changes_tx.lock().await.clone(),
+        };
+        handler.send(ServerChange::ToolList);
+        handler.send(ServerChange::ResourceList);
+        assert_eq!(rx.recv().await, Some(ServerChange::ToolList));
+        assert_eq!(rx.recv().await, Some(ServerChange::ResourceList));
+    }
+
+    /// The sender lives on `ClientInner`, not on the per-handshake handler, so
+    /// an in-session reconnect — the same incarnation — keeps delivering, and
+    /// only `disconnect` ends the receiver (§3.7, §3.3 E5).
+    #[tokio::test]
+    async fn the_change_channel_survives_a_reconnect_and_ends_only_at_disconnect() {
+        let client = test_client("notifier", ConnectionState::Connected);
+        let mut rx = client.changes().await.expect("take");
+
+        // Two successive handshakes' handlers, both cloning the same sender.
+        for _ in 0..2 {
+            let handler = NotifyingHandler {
+                server_name: "notifier".into(),
+                tx: client.inner.changes_tx.lock().await.clone(),
+            };
+            handler.send(ServerChange::ToolList);
+            assert_eq!(rx.recv().await, Some(ServerChange::ToolList));
+            drop(handler);
+        }
+
+        client.clone().disconnect().await.expect("disconnect");
+        assert_eq!(
+            rx.recv().await,
+            None,
+            "disconnect takes the sender, so the reader task's receiver ends"
+        );
+    }
+
+    /// The one-shot fetch never enters `reconnect()`: no child is spawned even
+    /// though the client is live and the error is retriable (§3.7 step 2).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_tools_once_never_reconnects() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (script, log) = spawn_recording_server(tmp.path());
+        let client = stdio_client(&script, ConnectionState::Connected);
+
+        let err = client
+            .list_tools_once()
+            .await
+            .expect_err("no service is installed");
+        assert!(
+            matches!(err, McpError::TransportClosed),
+            "expected the typed error, got {err:?}"
+        );
+        assert_eq!(
+            spawn_count(&log),
+            0,
+            "list_tools_once must not spawn a child"
         );
     }
 
