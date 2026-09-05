@@ -1,6 +1,6 @@
 //! Types and validation helpers for file upload/retrieval routes.
 
-use axum::{Json, http::StatusCode, response::IntoResponse};
+use axum::{http::StatusCode, response::IntoResponse};
 use serde::Serialize;
 use std::path::{Path as FsPath, PathBuf};
 
@@ -160,27 +160,11 @@ pub(super) async fn open_asset_for_user(
     })
 }
 
-#[derive(Serialize)]
-pub(super) struct ErrorResponse {
-    pub error: ErrorDetail,
-}
-
-#[derive(Serialize)]
-pub(super) struct ErrorDetail {
-    pub code: String,
-    pub message: String,
-}
-
+/// Delegates to the shared `{"error":{"code","message"}}` envelope in
+/// `routes::api_error` — collapses what used to be a byte-identical copy of
+/// the struct + builder duplicated in `chat_types.rs`.
 pub(super) fn error_response(status: StatusCode, code: &str, message: &str) -> impl IntoResponse {
-    (
-        status,
-        Json(ErrorResponse {
-            error: ErrorDetail {
-                code: code.to_string(),
-                message: message.to_string(),
-            },
-        }),
-    )
+    super::api_error(status, code, message)
 }
 
 pub(super) fn open_file_error_response(err: OpenFileApiError) -> axum::response::Response {

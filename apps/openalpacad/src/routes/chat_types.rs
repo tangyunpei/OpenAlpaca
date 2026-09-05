@@ -1,6 +1,6 @@
 //! Request/response types and helpers for chat endpoints.
 
-use axum::{Json, http::StatusCode, response::IntoResponse};
+use axum::{http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -58,17 +58,6 @@ pub struct ChatDeleteResponse {
     pub deleted: u64,
 }
 
-#[derive(Serialize)]
-pub(super) struct ErrorResponse {
-    pub error: ErrorDetail,
-}
-
-#[derive(Serialize)]
-pub(super) struct ErrorDetail {
-    pub code: String,
-    pub message: String,
-}
-
 #[derive(Deserialize)]
 pub struct FeedbackRequest {
     pub feedback: String, // "positive" | "negative"
@@ -98,14 +87,9 @@ pub(super) fn is_lane_owned_by(lane_key: &str, user_id: &str) -> bool {
     lane_key.starts_with(&format!("{}:", user_id))
 }
 
+/// Delegates to the shared `{"error":{"code","message"}}` envelope in
+/// `routes::api_error` — collapses what used to be a byte-identical copy of
+/// the struct + builder duplicated in `files_types.rs`.
 pub(super) fn error_response(status: StatusCode, code: &str, message: &str) -> impl IntoResponse {
-    (
-        status,
-        Json(ErrorResponse {
-            error: ErrorDetail {
-                code: code.to_string(),
-                message: message.to_string(),
-            },
-        }),
-    )
+    super::api_error(status, code, message)
 }

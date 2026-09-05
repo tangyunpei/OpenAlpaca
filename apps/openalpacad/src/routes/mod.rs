@@ -1,5 +1,12 @@
 //! Route handlers for daemon HTTP API
 
+use axum::{
+    Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
+use serde::Serialize;
+
 pub mod agents;
 mod agents_types;
 pub mod auth;
@@ -74,3 +81,40 @@ pub use tasks::{
     create_task_handler, get_task_handler, list_tasks_handler,
     task_action_handler,
 };
+
+// ── Shared error envelope ────────────────────────────────────────────
+//
+// Canonical `{"error":{"code":..,"message":..}}` JSON error body. This was
+// previously duplicated byte-for-byte in `chat_types.rs` and `files_types.rs`
+// (each with its own private `ErrorResponse`/`ErrorDetail`/`error_response`);
+// both now delegate here. New routes should call `api_error` directly rather
+// than reintroducing a local copy.
+//
+// Deliberately not applied to the ~30 pre-existing `{"error":"<string>"}`
+// sites scattered across the route handlers (plan §7) — that retrofit is
+// its own follow-up commit, not part of this cleanup.
+
+#[derive(Serialize)]
+struct ApiErrorBody {
+    error: ApiErrorDetail,
+}
+
+#[derive(Serialize)]
+struct ApiErrorDetail {
+    code: String,
+    message: String,
+}
+
+/// Build a JSON error response: `{"error":{"code":<code>,"message":<message>}}`.
+pub(crate) fn api_error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(ApiErrorBody {
+            error: ApiErrorDetail {
+                code: code.to_string(),
+                message: message.into(),
+            },
+        }),
+    )
+        .into_response()
+}

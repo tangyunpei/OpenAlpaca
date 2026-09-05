@@ -38,3 +38,23 @@ pub struct TaskResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<ParsedOutcomeFields>,
 }
+
+/// Row shape served by `GET /v1/tasks` — a `Task`'s own fields flattened to
+/// the top level (matching `Task`'s `#[serde(skip)]`s on the internal
+/// `state_json`/`outcome_json` columns), plus the two fields the handler
+/// used to post-inject via `serde_json::Value::as_object_mut()`:
+/// `assigned_agents` (always present, possibly empty) and `outcome` (present
+/// only when the task's `outcome_json` parses — see `parse_outcome`).
+///
+/// This is the "cheap half" of task-shape normalisation (plan §7); the full
+/// `GET /v1/tasks` vs `/{id}` unification lands in Phase 4 with P8. A later
+/// task adds a per-row `cost_usd` field here.
+#[derive(Debug, Serialize)]
+pub struct TaskSummaryResponse {
+    #[serde(flatten)]
+    pub task: Task,
+    /// Sourced from `agent_task_history`; see `agent_runs_summary` in `tasks.rs`.
+    pub assigned_agents: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<ParsedOutcomeFields>,
+}
