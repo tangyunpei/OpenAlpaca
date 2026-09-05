@@ -334,13 +334,11 @@ pub fn spawn_event_bridge(
                 openalpaca_core::events::SystemEvent::OrchestrationStage {
                     request_id,
                     mode,
-                    planner_ms,
-                    dispatch_ms,
                     ack_ms,
                     ..
                 } => {
                     tracing::debug!(
-                        "Orchestration: request={request_id}, mode={mode}, planner={planner_ms}ms, dispatch={dispatch_ms}ms, ack={ack_ms}ms"
+                        "Orchestration: request={request_id}, mode={mode}, ack={ack_ms}ms"
                     );
                 }
 

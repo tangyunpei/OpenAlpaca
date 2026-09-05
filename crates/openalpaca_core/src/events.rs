@@ -267,8 +267,6 @@ pub enum SystemEvent {
         /// "task_ops" | "steered" | "skill_command" | "bootstrap" |
         /// "forced_simple_query" | "social_fast_path" | "main_loop"
         mode: String,
-        planner_ms: u64,
-        dispatch_ms: u64,
         ack_ms: u64,
         fallback_reason: Option<String>,
         auto_promotion_reason: Option<String>,

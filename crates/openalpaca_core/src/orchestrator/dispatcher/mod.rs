@@ -227,7 +227,6 @@ impl TaskDispatcher {
                 agent_count: 0,
                 dag_node_count: None,
                 predictability_score: None,
-                planner_requested_mode: None,
                 error_message: None,
                 timestamp: None,
             }) {

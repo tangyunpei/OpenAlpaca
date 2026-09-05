@@ -439,8 +439,6 @@ export interface OrchestratorLatencyRecord {
   id: number;
   request_id: string;
   mode: string;
-  planner_ms: number;
-  dispatch_ms: number;
   ack_ms: number;
   fallback_reason: string | null;
   auto_promotion_reason: string | null;
@@ -453,8 +451,6 @@ export interface LatencyAggregate {
   p50_total_ms: number;
   p95_total_ms: number;
   p99_total_ms: number;
-  mean_planner_ms: number;
-  mean_dispatch_ms: number;
   mean_ack_ms: number;
   auto_promotion_count: number;
   fallback_count: number;
@@ -469,7 +465,6 @@ export interface DispatchDecisionRecord {
   agent_count: number;
   dag_node_count: number | null;
   predictability_score: number | null;
-  planner_requested_mode: string | null;
   error_message: string | null;
   timestamp: string;
 }

@@ -198,7 +198,7 @@ fn test_empty_results() {
 #[test]
 fn test_schema_version() {
     let db = setup_db();
-    assert_eq!(db.schema_version().unwrap(), 34);
+    assert_eq!(db.schema_version().unwrap(), 35);
 }
 
 fn call_log_for_task(task_id: &str, cost_usd: f64) -> LlmCallLog {

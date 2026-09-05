@@ -15,7 +15,6 @@ pub struct DispatchDecisionRecord {
     pub agent_count: usize,
     pub dag_node_count: Option<usize>,
     pub predictability_score: Option<f64>,
-    pub planner_requested_mode: Option<String>,
     pub error_message: Option<String>,
     pub timestamp: Option<String>,
 }
@@ -35,8 +34,8 @@ impl<'a> DispatchDecisionRepository<'a> {
         self.db.with_connection(|conn| {
             conn.execute(
                 "INSERT INTO dispatch_decisions \
-                 (request_id, task_id, mode, reason, agent_count, dag_node_count, predictability_score, planner_requested_mode, error_message) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 (request_id, task_id, mode, reason, agent_count, dag_node_count, predictability_score, error_message) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     record.request_id,
                     record.task_id,
@@ -45,7 +44,6 @@ impl<'a> DispatchDecisionRepository<'a> {
                     record.agent_count as i64,
                     record.dag_node_count.map(|v| v as i64),
                     record.predictability_score,
-                    record.planner_requested_mode,
                     record.error_message,
                 ],
             )
@@ -65,7 +63,7 @@ impl<'a> DispatchDecisionRepository<'a> {
         self.db.with_connection(|conn| {
             let mut sql = String::from(
                 "SELECT id, request_id, task_id, mode, reason, agent_count, dag_node_count, \
-                 predictability_score, planner_requested_mode, error_message, timestamp \
+                 predictability_score, error_message, timestamp \
                  FROM dispatch_decisions WHERE 1=1",
             );
             let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -100,9 +98,8 @@ impl<'a> DispatchDecisionRepository<'a> {
                         agent_count: row.get::<_, i64>(5)? as usize,
                         dag_node_count: row.get::<_, Option<i64>>(6)?.map(|v| v as usize),
                         predictability_score: row.get(7)?,
-                        planner_requested_mode: row.get(8)?,
-                        error_message: row.get(9)?,
-                        timestamp: row.get(10)?,
+                        error_message: row.get(8)?,
+                        timestamp: row.get(9)?,
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
