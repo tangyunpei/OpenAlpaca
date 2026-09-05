@@ -45,12 +45,21 @@ use openalpaca_core::{
 use openalpaca_storage::{Database, discovery, store};
 use openalpaca_wake::manager::WakeManager;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+
+/// How long graceful shutdown gets before the process is forced out.
+///
+/// It is the only bound the whole shutdown sequence has, which is why
+/// [`Extensions::shutdown_all`](crate::managers::extensions::Extensions::shutdown_all)
+/// derives its sweep budget from what is left of it rather than from a literal
+/// of its own.
+const FORCE_EXIT_GRACE: Duration = Duration::from_secs(10);
 
 fn main() -> Result<()> {
     // Initialize logging (before tokio, so resolve_config_base_dir() can use tracing)
@@ -360,8 +369,11 @@ async fn async_main(
 
     // The ENABLE axis's one handle (extension design §6.2 #15): the routes, the
     // CLI and the shutdown path all reach both supervisors through it.
-    let extensions =
-        crate::managers::extensions::Extensions::new(mcp_supervisor.clone(), plugin_manager.clone());
+    let extensions = crate::managers::extensions::Extensions::new(
+        mcp_supervisor.clone(),
+        plugin_manager.clone(),
+        daemon_config.clone(),
+    );
     let extensions_for_shutdown = extensions.clone();
 
     // Step 10: Create ConfirmationBroker and construct Orchestrator
@@ -669,12 +681,21 @@ async fn async_main(
         cancel_for_server.cancel();
     });
 
-    // Force-exit watchdog: if graceful shutdown takes too long, exit the process.
+    // Force-exit watchdog: if graceful shutdown takes too long, exit the
+    // process. The instant it starts counting is published so the extension
+    // sweep can bound itself by what is *left* of the window rather than by a
+    // literal of its own.
+    let force_exit_at: Arc<OnceLock<Instant>> = Arc::new(OnceLock::new());
     let watchdog_cancel = cancel_token.clone();
+    let watchdog_deadline = force_exit_at.clone();
     tokio::spawn(async move {
         watchdog_cancel.cancelled().await;
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-        warn!("Graceful shutdown timed out after 10s, forcing exit");
+        let _ = watchdog_deadline.set(Instant::now() + FORCE_EXIT_GRACE);
+        tokio::time::sleep(FORCE_EXIT_GRACE).await;
+        warn!(
+            "Graceful shutdown timed out after {}s, forcing exit",
+            FORCE_EXIT_GRACE.as_secs()
+        );
         std::process::exit(1);
     });
 
@@ -693,7 +714,13 @@ async fn async_main(
     // design §3.5). `Extensions::shutdown_all` bounds the sweep, so a busy
     // server cannot hold the exit open indefinitely.
     info!("Shutting down extensions...");
-    extensions_for_shutdown.shutdown_all().await;
+    // What is left of the force-exit window. Unset means the watchdog has not
+    // observed the cancellation yet, so nothing has been spent.
+    let window = force_exit_at
+        .get()
+        .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+        .unwrap_or(FORCE_EXIT_GRACE);
+    extensions_for_shutdown.shutdown_all(window).await;
 
     // Shutdown connectors
     info!("Shutting down connectors...");

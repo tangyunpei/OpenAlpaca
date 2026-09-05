@@ -62,7 +62,9 @@ use openalpaca_llm::{SecretStore, ToolDefinition};
 use crate::bridge::{PluginAgentBridge, PluginSkillBridge, PluginToolProxy};
 use crate::error::PluginError;
 use crate::manifest::PluginManifest;
-use crate::permission_gate::{PermissionGate, PermissionTable, SecretReference, secret_reference};
+use crate::permission_gate::{
+    PermissionGate, PermissionTable, REDACTED, SecretReference, secret_reference,
+};
 use crate::process_pool::PluginProcess;
 
 /// How long a teardown waits for a killed plugin child to actually exit
@@ -1870,7 +1872,13 @@ impl PluginManager {
         }
     }
 
-    async fn known(&self, ext: &ExtensionId) -> Result<(), ExtensionError> {
+    /// Is this a plugin the daemon has heard of — scanned, or remembered by a
+    /// ledger record? `NotFound` otherwise, which the routes answer `404`.
+    ///
+    /// Public because the config pair guards on it too (design §8): a `GET` on
+    /// an unknown id would otherwise be indistinguishable from one on a plugin
+    /// with no configuration.
+    pub async fn known(&self, ext: &ExtensionId) -> Result<(), ExtensionError> {
         if self.plugins.read().await.contains_key(&ext.name) || self.ledger.record(ext).is_some() {
             Ok(())
         } else {
@@ -1997,10 +2005,30 @@ impl PluginManager {
         Ok(())
     }
 
-    /// The plugin's configuration as a reader should see it: every secret
-    /// reference replaced by `<redacted>` (design §8).
-    pub fn plugin_config_redacted(&self, name: &str) -> HashMap<String, toml::Value> {
-        self.permission_gate.redacted_plugin_config(name)
+    /// The plugin's configuration as a reader should see it (design §8): the
+    /// **union** of the two facts that make a value secret is replaced by
+    /// `<redacted>`.
+    ///
+    /// * the stored *shape* — the value is a `secret_ref`/`secret_encrypted`
+    ///   reference table, which the gate resolves on its own;
+    /// * the manifest's *declaration* — `[config.<key>] sensitive = true`,
+    ///   which only this type can see.
+    ///
+    /// The declaration half is not redundant. A sensitive value never reaches
+    /// the TOML through a daemon write — [`set_plugin_config`](Self::set_plugin_config)
+    /// refuses it — but the CLI that C6 replaced told the owner to manage
+    /// plugin config by editing `plugins/.config/<name>.toml` by hand, so a
+    /// hand-typed token under a sensitive key is a state an existing install
+    /// can hold, and the config route is the first thing to serve that file
+    /// over HTTP. Redacting by shape alone would hand it back in the clear.
+    pub async fn plugin_config_redacted(&self, name: &str) -> HashMap<String, toml::Value> {
+        let mut config = self.permission_gate.redacted_plugin_config(name);
+        for (key, value) in config.iter_mut() {
+            if self.is_sensitive(name, key).await {
+                *value = toml::Value::String(REDACTED.to_string());
+            }
+        }
+        config
     }
 
     async fn is_sensitive(&self, name: &str, key: &str) -> bool {

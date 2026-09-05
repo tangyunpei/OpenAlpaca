@@ -105,7 +105,11 @@ impl Harness {
             None,
             None,
         ));
-        let extensions = Extensions::new(Arc::clone(&mcp), Arc::clone(&plugins));
+        let extensions = Extensions::new(
+            Arc::clone(&mcp),
+            Arc::clone(&plugins),
+            Arc::new(arc_swap::ArcSwap::from_pointee(DaemonConfig::default())),
+        );
 
         Self {
             _home: home,
@@ -146,13 +150,47 @@ impl Harness {
     /// A plugin directory with a manifest and nothing else — enough to be
     /// scanned, gated on consent, and never spawned.
     fn write_plugin(&self, name: &str) {
+        self.write_plugin_with(name, "");
+    }
+
+    /// The same, plus extra manifest sections — `[config.<key>]` blocks for the
+    /// config route's tests.
+    fn write_plugin_with(&self, name: &str, extra: &str) {
         let dir = self.plugins_root.path().join(name);
         std::fs::create_dir_all(&dir).expect("plugin dir");
         std::fs::write(
             dir.join("plugin.toml"),
-            format!("[plugin]\nname = \"{name}\"\nversion = \"1.4.0\"\nentry = \"./nope\"\n"),
+            format!(
+                "[plugin]\nname = \"{name}\"\nversion = \"1.4.0\"\nentry = \"./nope\"\n{extra}"
+            ),
         )
         .expect("plugin manifest");
+    }
+
+    fn plugin_config_dir(&self) -> std::path::PathBuf {
+        self.plugins_root.path().join(".config")
+    }
+
+    fn plugin_config_path(&self, name: &str) -> std::path::PathBuf {
+        self.plugin_config_dir().join(format!("{name}.toml"))
+    }
+
+    async fn get_config(&self, kind: &str, id: &str) -> (StatusCode, serde_json::Value) {
+        split(super::get_config(self.extensions.clone(), kind, id).await).await
+    }
+
+    async fn set_config(
+        &self,
+        kind: &str,
+        id: &str,
+        key: &str,
+        value: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let request = SetConfigRequest {
+            key: key.to_string(),
+            value,
+        };
+        split(super::set_config(self.extensions.clone(), kind, id, request).await).await
     }
 
     fn permissions_path(&self) -> std::path::PathBuf {
@@ -728,6 +766,214 @@ async fn the_listing_is_one_sorted_array_over_both_kinds() {
     sorted.sort();
     assert_eq!(ids, sorted, "the array must be sorted: {ids:?}");
     assert_eq!(rows, h.rows(false).await, "two reads must agree");
+}
+
+// ============================================================================
+// GET / POST …/config — the pair design §8 adds in this commit
+// ============================================================================
+
+/// An MCP server has no daemon-managed config file — its declaration *is* its
+/// block in `config/mcp.toml` — so both verbs are `409 unsupported_for_kind`,
+/// and a `{kind}` word that is neither is the family's `404`.
+#[tokio::test]
+async fn config_on_an_mcp_server_is_409_unsupported_for_kind_on_both_verbs() {
+    let h = Harness::new();
+    h.declare_stub("srv", 0);
+    h.mcp.reconcile_all().await;
+
+    let (status, body) = h.get_config("mcp", "srv").await;
+    assert_eq!(status, StatusCode::CONFLICT, "GET: {body}");
+    assert_eq!(error_word(&body), "unsupported_for_kind");
+
+    let (status, body) = h.set_config("mcp", "srv", "key", serde_json::json!("v")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "POST: {body}");
+    assert_eq!(error_word(&body), "unsupported_for_kind");
+
+    let (status, _) = h.get_config("banana", "srv").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an unknown kind names no resource, exactly as it does on a verb"
+    );
+}
+
+/// A `GET` that answered `200 {}` could not be told from a plugin with no
+/// configuration, and the `POST` half wrote `.config/<typo>.toml` for a plugin
+/// that does not exist.
+#[tokio::test]
+async fn config_on_an_unknown_plugin_is_a_404_on_both_verbs() {
+    let h = Harness::new();
+    h.write_plugin("present");
+    h.plugins.start().await.expect("plugin scan");
+
+    let (status, _) = h.get_config("plugin", "never-existed").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "GET on an unknown plugin");
+
+    let (status, _) = h
+        .set_config("plugin", "never-existed", "endpoint", serde_json::json!("x"))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "POST on an unknown plugin");
+    assert!(
+        !h.plugin_config_path("never-existed").exists(),
+        "the refused write created a config file for a plugin that does not exist"
+    );
+}
+
+/// The `400` half of the pair, asserted rather than inferred:
+/// `set_plugin_config` refuses a key the manifest declares `sensitive`
+/// (`PluginError::PermissionDenied`), and `plugin_error_status`'s catch-all is
+/// what turns that into a caller mistake.
+#[tokio::test]
+async fn a_sensitive_key_is_a_400_and_writes_nothing() {
+    let h = Harness::new();
+    h.write_plugin_with(
+        "vault",
+        "\n[config.api_key]\ntype = \"secret\"\nsensitive = true\n",
+    );
+    h.plugins.start().await.expect("plugin scan");
+
+    let (status, body) = h
+        .set_config("plugin", "vault", "api_key", serde_json::json!("sk-live"))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a sensitive key is the caller's mistake, not the daemon's: {body}"
+    );
+    assert!(
+        error_word(&body).contains("sensitive"),
+        "the refusal should name why: {body}"
+    );
+    assert!(
+        !h.plugin_config_path("vault").exists(),
+        "the refused write created the file anyway"
+    );
+}
+
+/// **Design §8: the `GET` "redacts sensitive keys".** Both halves of the
+/// predicate: a stored secret *reference*, and a plaintext value under a key
+/// the manifest *declares* sensitive — which is what a hand-edited
+/// `.config/<name>.toml` from the pre-C6 CLI holds.
+#[tokio::test]
+async fn the_config_get_redacts_a_sensitive_key_however_it_is_stored() {
+    let h = Harness::new();
+    h.write_plugin_with(
+        "vault",
+        "\n[config.api_key]\ntype = \"secret\"\nsensitive = true\n\n\
+         [config.endpoint]\ntype = \"string\"\n",
+    );
+    h.plugins.start().await.expect("plugin scan");
+
+    std::fs::create_dir_all(h.plugin_config_dir()).expect("config dir");
+    std::fs::write(
+        h.plugin_config_path("vault"),
+        "api_key = \"sk-hand-typed\"\n\
+         token = { secret_ref = \"openalpaca-plugin-vault-token\" }\n\
+         endpoint = \"https://example.test\"\n",
+    )
+    .expect("hand-written plugin config");
+
+    let (status, body) = h.get_config("plugin", "vault").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["api_key"], "<redacted>",
+        "a plaintext value under a declared-sensitive key: {body}"
+    );
+    assert_eq!(
+        body["token"], "<redacted>",
+        "a stored secret reference: {body}"
+    );
+    assert_eq!(
+        body["endpoint"], "https://example.test",
+        "a key that is neither is served as stored: {body}"
+    );
+}
+
+/// The `200` half, end to end: the write lands and the redacting `GET` reads it
+/// back.
+#[tokio::test]
+async fn a_config_write_is_a_200_and_the_get_reads_it_back() {
+    let h = Harness::new();
+    h.write_plugin("present");
+    h.plugins.start().await.expect("plugin scan");
+
+    let (status, body) = h
+        .set_config(
+            "plugin",
+            "present",
+            "endpoint",
+            serde_json::json!("https://example.test"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["name"], "present");
+    assert_eq!(body["key"], "endpoint");
+
+    let (status, body) = h.get_config("plugin", "present").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["endpoint"], "https://example.test");
+}
+
+/// A write the daemon could not perform is a `500`: nothing about the request
+/// was wrong (design §8's write-first rule, the same split the verbs use).
+#[tokio::test]
+async fn a_config_write_that_fails_is_a_500() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = Harness::new();
+    h.write_plugin("present");
+    h.plugins.start().await.expect("plugin scan");
+
+    std::fs::create_dir_all(h.plugin_config_dir()).expect("config dir");
+    std::fs::set_permissions(
+        h.plugin_config_dir(),
+        std::fs::Permissions::from_mode(0o555),
+    )
+    .expect("chmod config dir");
+    let (status, body) = h
+        .set_config("plugin", "present", "endpoint", serde_json::json!("x"))
+        .await;
+    std::fs::set_permissions(
+        h.plugin_config_dir(),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .expect("restore config dir");
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(
+        error_word(&body).contains("write failed"),
+        "the body should name the failed write: {body}"
+    );
+    assert!(
+        !h.plugin_config_path("present").exists(),
+        "a failed write must leave no file behind"
+    );
+}
+
+/// The catch-all arm `plugin_error_status` ends with is the one that silently
+/// reclassifies a new variant, so the four cases the config pair can produce
+/// are pinned here. `StoreUnreadable` is not reachable through this pair today
+/// — the write path never reads `.permissions.toml` — but the mapping is
+/// shared with `/v1/plugins*` and is what the route table promises.
+#[test]
+fn the_plugin_error_status_map_is_the_one_the_config_route_promises() {
+    assert_eq!(
+        plugin_error_status(&PluginError::StoreUnreadable("x".to_string())),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        plugin_error_status(&PluginError::StoreWriteFailed("x".to_string())),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        plugin_error_status(&PluginError::PermissionDenied("sensitive".to_string())),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        plugin_error_status(&PluginError::MissingConfig(vec!["api_key".to_string()])),
+        StatusCode::BAD_REQUEST
+    );
 }
 
 // ============================================================================

@@ -1690,7 +1690,7 @@ mcp_compatible = true
         assert!(raw.contains("secret_encrypted"), "{raw}");
 
         // A read redacts it.
-        let shown = h.manager.plugin_config_redacted("echo-test");
+        let shown = h.manager.plugin_config_redacted("echo-test").await;
         assert_eq!(
             shown.get("api_key"),
             Some(&toml::Value::String("<redacted>".to_string()))
@@ -1704,6 +1704,51 @@ mcp_compatible = true
         assert_eq!(
             resolved.get("api_key"),
             Some(&toml::Value::String("sk-live".to_string()))
+        );
+    }
+
+    /// **Redaction is the manifest's declaration, not the stored shape.**
+    ///
+    /// Design §8 says the `GET` *"redacts sensitive keys"*. Redacting only
+    /// values that parse as a secret reference is a proxy for that: a plain
+    /// string sitting under a key the manifest marks `sensitive` reads back in
+    /// the clear. That state is realistic rather than hypothetical — the CLI
+    /// C6 replaced told the owner to manage plugin config by editing
+    /// `plugins/.config/<name>.toml` by hand, and C6 is the commit that first
+    /// serves that file over HTTP. The predicate is the **union**: a secret
+    /// reference ∪ a key the manifest declares sensitive.
+    #[tokio::test]
+    async fn a_hand_typed_value_under_a_sensitive_key_is_redacted_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\n\n[config.api_key]\ntype = \"secret\"\nsensitive = true\n\n\
+             [config.endpoint]\ntype = \"string\"\n",
+        );
+        let h = Harness::new(tmp.path());
+        h.scan().await;
+
+        // Hand-written exactly as the pre-C6 CLI instructed: a plaintext token
+        // under the sensitive key, no reference table anywhere in the file.
+        std::fs::create_dir_all(tmp.path().join(".config")).unwrap();
+        std::fs::write(
+            tmp.path().join(".config/echo-test.toml"),
+            "api_key = \"sk-hand-typed\"\nendpoint = \"https://example.test\"\n",
+        )
+        .unwrap();
+
+        let shown = h.manager.plugin_config_redacted("echo-test").await;
+        assert_eq!(
+            shown.get("api_key"),
+            Some(&toml::Value::String("<redacted>".to_string())),
+            "a key the manifest declares sensitive must be redacted however it \
+             is stored: {shown:?}"
+        );
+        assert_eq!(
+            shown.get("endpoint"),
+            Some(&toml::Value::String("https://example.test".to_string())),
+            "a key that is not sensitive is served as stored: {shown:?}"
         );
     }
 

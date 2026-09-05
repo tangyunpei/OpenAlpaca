@@ -329,29 +329,63 @@ pub async fn delete_extension_handler(
     }
 }
 
+/// The config pair's two guards, in the order the rest of the family checks
+/// them.
+///
+/// * `{kind}` — an unknown word is the same `404` `run_verb` answers, and
+///   `mcp` is `409 unsupported_for_kind`: an MCP server's configuration is its
+///   own block in `config/mcp.toml`, which the daemon does not edit key by key.
+/// * `{id}` — a plugin the daemon has never heard of is a `404` on **both**
+///   verbs. Without it a `GET` on a typo answers `200 {}` (an empty config is
+///   indistinguishable from a missing plugin) and a `POST` writes
+///   `.config/<typo>.toml` for a plugin that does not exist.
+async fn require_config_target(
+    extensions: &Extensions,
+    kind: &str,
+    id: &str,
+) -> Result<(), Response> {
+    let Some(kind) = Extensions::parse_kind(kind) else {
+        return Err(unknown_kind(kind));
+    };
+    let ext = ExtensionId {
+        kind,
+        name: id.to_string(),
+    };
+    extensions
+        .known_plugin(&ext)
+        .await
+        .map_err(|e| extension_error(&e))
+}
+
 /// `GET /v1/extensions/plugin/{id}/config` — the redacting read (design §8).
+pub(crate) async fn get_config(extensions: Arc<Extensions>, kind: &str, id: &str) -> Response {
+    if let Err(refusal) = require_config_target(&extensions, kind, id).await {
+        return refusal;
+    }
+    let config = extensions.plugins().plugin_config_redacted(id).await;
+    (StatusCode::OK, Json(config_json(&config))).into_response()
+}
+
+/// `GET /v1/extensions/{kind}/{id}/config`
 pub async fn get_extension_config_handler(
     State(state): State<Arc<AppState>>,
     Path((kind, id)): Path<(String, String)>,
 ) -> Response {
-    if kind != "plugin" {
-        return extension_error(&ExtensionError::UnsupportedForKind);
-    }
-    let config = state.extensions.plugins().plugin_config_redacted(&id);
-    (StatusCode::OK, Json(config_json(&config))).into_response()
+    get_config(state.extensions.clone(), &kind, &id).await
 }
 
 /// `POST /v1/extensions/plugin/{id}/config`
-pub async fn set_extension_config_handler(
-    State(state): State<Arc<AppState>>,
-    Path((kind, id)): Path<(String, String)>,
-    Json(request): Json<SetConfigRequest>,
+pub(crate) async fn set_config(
+    extensions: Arc<Extensions>,
+    kind: &str,
+    id: &str,
+    request: SetConfigRequest,
 ) -> Response {
-    if kind != "plugin" {
-        return extension_error(&ExtensionError::UnsupportedForKind);
+    if let Err(refusal) = require_config_target(&extensions, kind, id).await {
+        return refusal;
     }
+    let id = id.to_string();
     let value = json_to_toml(&request.value);
-    let extensions = state.extensions.clone();
     let key = request.key.clone();
     let name = id.clone();
     // R18 again: the write is followed by the `enable` verb when the row was
@@ -383,6 +417,15 @@ pub async fn set_extension_config_handler(
         )
             .into_response(),
     }
+}
+
+/// `POST /v1/extensions/{kind}/{id}/config`
+pub async fn set_extension_config_handler(
+    State(state): State<Arc<AppState>>,
+    Path((kind, id)): Path<(String, String)>,
+    Json(request): Json<SetConfigRequest>,
+) -> Response {
+    set_config(state.extensions.clone(), &kind, &id, request).await
 }
 
 // ── TOML ⇄ JSON ──────────────────────────────────────────────────

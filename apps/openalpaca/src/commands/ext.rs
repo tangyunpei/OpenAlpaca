@@ -182,12 +182,20 @@ impl TableRow for ExtensionRow {
     }
 }
 
+/// Fit a cell to `max` **characters**, ellipsis included.
+///
+/// Char-safe by construction: byte-slicing `&s[..max - 3]` panics whenever the
+/// cut lands inside a multibyte character, and every string here — a server id,
+/// a plugin directory name, a daemon-generated `reason` — can hold one. `ext`
+/// is the surface an operator reaches for when something is already wrong, so
+/// it must not be the thing that panics.
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    } else {
-        s.to_string()
+    if s.chars().count() <= max {
+        return s.to_string();
     }
+    let keep = max.saturating_sub(3);
+    let head: String = s.chars().take(keep).collect();
+    format!("{head}...")
 }
 
 /// `mcp` and `plugin` are the only kinds. Refused here rather than sent, so the
@@ -484,5 +492,23 @@ mod tests {
         assert_eq!(row.toggle(), "on");
         assert_eq!(row.tools, vec!["notion::create_page".to_string()]);
         assert_eq!(row.skills, vec!["daily-digest".to_string()]);
+    }
+
+    /// A cell whose cut lands inside a multibyte character used to panic —
+    /// `ext list` is the surface an operator reaches for when an extension has
+    /// already gone wrong, and both the id and the daemon-generated `reason`
+    /// can hold one.
+    #[test]
+    fn truncate_cuts_on_character_boundaries() {
+        assert_eq!(truncate("short", 21), "short");
+        // Exactly the width: untouched.
+        assert_eq!(truncate("abcde", 5), "abcde");
+        // Over the width: 3 chars of ellipsis, `max - 3` chars kept.
+        assert_eq!(truncate("abcdefgh", 5), "ab...");
+        // Multibyte, cut mid-character under the old byte slice.
+        assert_eq!(truncate("ünïcödé-server-name", 8), "ünïcö...");
+        assert_eq!(truncate("日本語のサーバー", 6), "日本語...");
+        // Every emoji is 4 bytes; the old code panicked on all of these.
+        assert_eq!(truncate("🙂🙂🙂🙂🙂🙂", 4), "🙂...");
     }
 }

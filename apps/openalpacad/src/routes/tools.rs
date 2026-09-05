@@ -37,11 +37,18 @@ pub async fn list_tools_handler(State(state): State<Arc<AppState>>) -> Response 
 /// also lags a call by one bus hop: the sandbox publishes
 /// `SystemEvent::ToolExecuted` and the daemon's event persistence writes the
 /// row.
+///
+/// `.earliest()`, not `.single()`: in a zone whose DST transition lands at
+/// 00:00 the local midnight is ambiguous or does not exist at all (Cuba, Chile,
+/// Lord Howe and others), and `.single()` returns `None` there — which would
+/// report `invocations_today: 0` for every tool for that whole day. The
+/// earliest candidate is at worst an hour early, which is a count that starts
+/// slightly too soon rather than no data.
 fn invocations_today(db: &openalpaca_storage::Database) -> HashMap<String, i64> {
     let Some(local_midnight) = Local::now()
         .date_naive()
         .and_hms_opt(0, 0, 0)
-        .and_then(|naive| Local.from_local_datetime(&naive).single())
+        .and_then(|naive| Local.from_local_datetime(&naive).earliest())
     else {
         tracing::warn!("could not resolve local midnight; reporting no invocations today");
         return HashMap::new();
