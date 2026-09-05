@@ -770,3 +770,29 @@ fn test_artifact_pointer_file_asset_id_backward_compat() {
     let ptr2: ArtifactPointer = serde_json::from_str(json_with_id).unwrap();
     assert_eq!(ptr2.file_asset_id.as_deref(), Some("file_abc123"));
 }
+
+/// T24 re-review carry-over. `write` resets `truncated` on upsert but used to
+/// leave `file_asset_id` behind, so rewriting a previously spilled key as an
+/// ordinary text entry left the old artifact id on it — and `workspace_read`
+/// now hands that id to other agents alongside `truncated: false`, i.e. "this
+/// content is whole and it is that artifact", which is false on both counts.
+/// The id belongs to the content it was spilled from; new content invalidates
+/// it. (The spill's own rewrite is unaffected: it calls `set_file_asset_id`
+/// after `write` in the same state mutation.)
+#[test]
+fn rewriting_a_spilled_key_drops_the_stale_artifact_id() {
+    let mut ws = TaskWorkspace::default();
+    ws.write("draft", "the long body", "agent_a", WorkspaceEntryType::Artifact, &[])
+        .unwrap();
+    ws.set_file_asset_id("draft", "art-1", true);
+    assert_eq!(ws.entries[0].file_asset_id.as_deref(), Some("art-1"));
+
+    ws.write("draft", "a short note", "agent_b", WorkspaceEntryType::Text, &[])
+        .unwrap();
+
+    assert_eq!(
+        ws.entries[0].file_asset_id, None,
+        "the artifact id described the content that was just replaced"
+    );
+    assert!(!ws.entries[0].truncated);
+}

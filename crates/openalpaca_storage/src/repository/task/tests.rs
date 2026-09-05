@@ -27,6 +27,7 @@ fn make_task(id: &str, title: &str) -> Task {
         outcome_json: None,
         outcome_kind: None,
         artifact_count: 0,
+        workspace_id: None,
     }
 }
 
@@ -363,4 +364,39 @@ fn test_fail_all_non_terminal_sweeps_only_live_rows() {
 
     // Idempotent: a second sweep finds nothing.
     assert_eq!(repo.fail_all_non_terminal("again").unwrap(), 0);
+}
+
+/// Migration 036's `task.workspace_id` — the project a run belonged to, so a
+/// rerun and the Library can filter by project. It is the *request's*
+/// workspace root (never the daemon CWD, ruling R22), and `NULL` for every
+/// turn that arrived without one.
+#[test]
+fn workspace_id_round_trips_and_defaults_to_none() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    let mut in_project = make_task("t-project", "Ship the release");
+    in_project.workspace_id = Some("/Users/dev/openalpaca".to_string());
+    repo.create(&in_project).unwrap();
+    repo.create(&make_task("t-loose", "Answer a Telegram question"))
+        .unwrap();
+
+    assert_eq!(
+        repo.get("t-project").unwrap().unwrap().workspace_id.as_deref(),
+        Some("/Users/dev/openalpaca")
+    );
+    assert_eq!(repo.get("t-loose").unwrap().unwrap().workspace_id, None);
+
+    // Every list path reads the same column, so a Library filter sees it too.
+    let listed = repo.list_by_creator("user1", 10).unwrap();
+    let project_row = listed.iter().find(|t| t.id == "t-project").unwrap();
+    assert_eq!(
+        project_row.workspace_id.as_deref(),
+        Some("/Users/dev/openalpaca")
+    );
+    let recent = repo.list_recent(10).unwrap();
+    assert_eq!(
+        recent.iter().find(|t| t.id == "t-loose").unwrap().workspace_id,
+        None
+    );
 }

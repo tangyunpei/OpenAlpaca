@@ -25,7 +25,7 @@ use openalpaca_plugins::PluginManager;
 use tempfile::TempDir;
 
 use crate::managers::mcp::McpSupervisor;
-use crate::managers::mcp::tests::HomeStoreGuard;
+use crate::test_util::HomeStoreGuard;
 
 // ============================================================================
 // Harness

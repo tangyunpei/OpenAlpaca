@@ -258,6 +258,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         // Tool catalog (GAP-18) — read-only; no per-tool toggle (S1)
         .route("/v1/tools", get(crate::routes::list_tools_handler))
+        // Where the daemon keeps things (§4.7 item 4) — protected because it
+        // names absolute paths; `/v1/health` stays the public liveness probe.
+        .route("/v1/status", get(crate::routes::status_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::middleware::auth_middleware,

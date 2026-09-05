@@ -25,6 +25,8 @@ mod scheduled_skills;
 mod services;
 mod shutdown;
 mod state;
+#[cfg(test)]
+mod test_util;
 
 pub use state::AppState;
 

@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 73.
+- Total documented method/path endpoints: 74.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -86,6 +86,7 @@
 | GET | `/v1/settings/llm/status` | `bearer` | `get_key_status` | - | - | `apps/openalpacad/src/routes/settings.rs` |
 | POST | `/v1/settings/llm/validate` | `bearer` | `validate_key` | `ValidateKeyRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
 | GET | `/v1/skills/health` | `bearer` | `skill_health_handler` | - | - | `apps/openalpacad/src/routes/skills.rs` |
+| GET | `/v1/status` | `bearer` | `status_handler` | - | - | `apps/openalpacad/src/routes/status.rs` |
 | GET | `/v1/tasks` | `bearer` | `list_tasks_handler` | - | `ListTasksQuery` | `apps/openalpacad/src/routes/tasks.rs` |
 | POST | `/v1/tasks` | `bearer` | `create_task_handler` | `CreateTaskRequest` | - | `apps/openalpacad/src/routes/tasks.rs` |
 | GET | `/v1/tasks/{id}` | `bearer` | `get_task_handler` | - | - | `apps/openalpacad/src/routes/tasks.rs` |

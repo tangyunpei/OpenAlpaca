@@ -118,6 +118,12 @@ impl TaskDispatcher {
                 outcome_json: None,
                 outcome_kind: None,
                 artifact_count: 0,
+                // §4.7 item 3: the project this run belonged to. The request's
+                // workspace root and nothing else — `workspace_id` on the same
+                // context falls back to the daemon CWD for memory scoping, and
+                // recording *that* would claim a Telegram run belonged to
+                // whatever repository the daemon started in (R22).
+                workspace_id: workspace.request_workspace_root.clone(),
             };
             if let Err(e) = repo.create(&task) {
                 tracing::warn!("Failed to persist lead agent task to DB: {e}");

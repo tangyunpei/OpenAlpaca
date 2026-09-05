@@ -14,9 +14,7 @@
 
 use super::*;
 
-use std::ffi::OsString;
 use std::path::Path;
-use std::sync::MutexGuard;
 
 use openalpaca_core::agent::AgentRegistry;
 use openalpaca_core::orchestrator::skill_catalog::SkillCatalog;
@@ -30,36 +28,9 @@ use tempfile::TempDir;
 /// The config writer rotates the replaced version into `state/backups/`, which
 /// resolves through `OPENALPACA_HOME_STORE` on every call. Tests that write the
 /// store must therefore not run concurrently, and no test ever touches the real
-/// `~/.openalpaca`.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-pub(crate) struct HomeStoreGuard {
-    _lock: MutexGuard<'static, ()>,
-    prev: Option<OsString>,
-}
-
-impl HomeStoreGuard {
-    pub(crate) fn set(path: &Path) -> Self {
-        let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let prev = std::env::var_os(openalpaca_storage::store::HOME_STORE_ENV);
-        // SAFETY: serialized by ENV_LOCK; these are the only tests in this
-        // binary that touch the variable.
-        unsafe { std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, path) };
-        Self { _lock: lock, prev }
-    }
-}
-
-impl Drop for HomeStoreGuard {
-    fn drop(&mut self) {
-        // SAFETY: as above — still holding ENV_LOCK.
-        match self.prev.take() {
-            Some(v) => unsafe {
-                std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, v)
-            },
-            None => unsafe { std::env::remove_var(openalpaca_storage::store::HOME_STORE_ENV) },
-        }
-    }
-}
+/// `~/.openalpaca`. The guard (and the one lock behind it) lives in
+/// `crate::test_util` so every module in this binary shares the same lock.
+use crate::test_util::HomeStoreGuard;
 
 // ============================================================================
 // The stub MCP server

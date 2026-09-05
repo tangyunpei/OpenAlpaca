@@ -200,6 +200,7 @@ mod tests {
                 outcome_json: None,
                 outcome_kind: None,
                 artifact_count: 0,
+                workspace_id: None,
             })
             .unwrap();
     }

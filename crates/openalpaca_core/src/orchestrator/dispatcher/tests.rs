@@ -504,6 +504,7 @@ fn test_build_task_outcome_with_db_and_state_json() {
         outcome_json: None,
         outcome_kind: None,
         artifact_count: 0,
+        workspace_id: None,
     };
     repo.create(&task).unwrap();
 
@@ -597,6 +598,7 @@ fn test_finalize_task_with_outcome_persists_and_reads_back() {
         outcome_json: None,
         outcome_kind: None,
         artifact_count: 0,
+        workspace_id: None,
     };
     repo.create(&task).unwrap();
 
@@ -907,5 +909,79 @@ async fn test_lead_agent_completion_report_empty_falls_back_to_template_with_sta
         msg.content.contains("**Task failed: Doomed task**"),
         "missing template fallback: {}",
         msg.content
+    );
+}
+
+/// §4.7 item 3 — the run remembers its project across restart and rerun.
+///
+/// The value persisted is the **request's** workspace root, the field ruling
+/// R22 created for exactly this: a lane that sent no workspace leaves the
+/// column `NULL` rather than inheriting the daemon's current directory.
+#[test]
+fn dispatch_persists_the_requests_workspace_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_config_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        Some(db.clone()),
+    );
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Ship the release",
+            "Ship the release".to_string(),
+            "user1",
+            "user1:gui",
+            "gui",
+            MemoryScopeContext {
+                workspace_id: Some("/Users/dev/openalpaca".to_string()),
+                request_workspace_root: Some("/Users/dev/openalpaca".to_string()),
+            },
+        )
+        .unwrap();
+
+    let task = openalpaca_storage::repository::TaskRepository::new(&db)
+        .get(&outcome.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        task.workspace_id.as_deref(),
+        Some("/Users/dev/openalpaca"),
+        "the run must remember the project the request named"
+    );
+}
+
+/// The connector shape: a CWD-derived `workspace_id` for memory scoping and no
+/// request root. The column stays `NULL` — a Telegram run belongs to no
+/// project, whatever directory the daemon was started in (R22).
+#[test]
+fn dispatch_without_a_request_workspace_leaves_workspace_id_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_config_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        Some(db.clone()),
+    );
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Answer the question",
+            "Answer the question".to_string(),
+            "user1",
+            "user1:telegram",
+            "telegram",
+            MemoryScopeContext::new(Some("/where/the/daemon/started".to_string())),
+        )
+        .unwrap();
+
+    let task = openalpaca_storage::repository::TaskRepository::new(&db)
+        .get(&outcome.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        task.workspace_id, None,
+        "the daemon CWD must never be recorded as the run's project"
     );
 }

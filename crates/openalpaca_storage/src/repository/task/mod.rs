@@ -22,8 +22,8 @@ impl<'a> TaskRepository<'a> {
     pub fn create(&self, task: &Task) -> Result<()> {
         self.db.with_connection(|conn| {
             conn.execute(
-                "INSERT INTO task (id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                "INSERT INTO task (id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count, workspace_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                 rusqlite::params![
                     task.id,
                     task.title,
@@ -43,6 +43,7 @@ impl<'a> TaskRepository<'a> {
                     task.outcome_json,
                     task.outcome_kind.map(|k| k.as_str().to_string()),
                     task.artifact_count,
+                    task.workspace_id,
                 ],
             )
             .context("Failed to create task")?;
@@ -54,7 +55,7 @@ impl<'a> TaskRepository<'a> {
     pub fn get(&self, id: &str) -> Result<Option<Task>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count
+                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count, workspace_id
                  FROM task WHERE id = ?",
             )?;
             let task = stmt
@@ -69,7 +70,7 @@ impl<'a> TaskRepository<'a> {
     pub fn list_by_creator(&self, created_by: &str, limit: usize) -> Result<Vec<Task>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count
+                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count, workspace_id
                  FROM task WHERE created_by = ? ORDER BY created_at DESC LIMIT ?",
             )?;
             let rows = stmt.query_map(rusqlite::params![created_by, limit as i64], |row| {
@@ -87,7 +88,7 @@ impl<'a> TaskRepository<'a> {
     pub fn list_by_status(&self, status: TaskStatus, limit: usize) -> Result<Vec<Task>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count
+                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count, workspace_id
                  FROM task WHERE status = ? ORDER BY created_at DESC LIMIT ?",
             )?;
             let rows = stmt.query_map(rusqlite::params![status.as_str(), limit as i64], |row| {
@@ -105,7 +106,7 @@ impl<'a> TaskRepository<'a> {
     pub fn list_active(&self, limit: usize) -> Result<Vec<Task>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count
+                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count, workspace_id
                  FROM task WHERE status IN ('queued', 'running', 'paused') ORDER BY priority DESC, created_at ASC LIMIT ?",
             )?;
             let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
@@ -125,7 +126,7 @@ impl<'a> TaskRepository<'a> {
             let mut stmt = conn.prepare(
                 "SELECT id, title, description, status, priority, progress_current, progress_total,
                         result_summary, created_by, source_lane, created_at, updated_at, completed_at,
-                        state_json, state_version, outcome_json, outcome_kind, artifact_count
+                        state_json, state_version, outcome_json, outcome_kind, artifact_count, workspace_id
                  FROM task
                  WHERE created_by = ? AND status IN ('queued', 'running', 'paused')
                  ORDER BY priority DESC, created_at ASC LIMIT ?",
@@ -143,7 +144,7 @@ impl<'a> TaskRepository<'a> {
     pub fn list_recent(&self, limit: usize) -> Result<Vec<Task>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count
+                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count, workspace_id
                  FROM task ORDER BY created_at DESC LIMIT ?",
             )?;
             let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
@@ -302,6 +303,7 @@ impl<'a> TaskRepository<'a> {
                 .as_deref()
                 .and_then(|s| s.parse().ok()),
             artifact_count: row.get(17)?,
+            workspace_id: row.get(18)?,
         })
     }
 

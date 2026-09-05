@@ -119,5 +119,15 @@ pub struct Task {
     pub outcome_json: Option<String>,
     pub outcome_kind: Option<OutcomeKind>,
     pub artifact_count: i32,
+    /// The project this run belonged to — the workspace root the *request*
+    /// supplied (`x-workspace-path` on `POST /v1/chat`, `workspace_path` on
+    /// `POST /v1/command`), already resolved to its root.
+    ///
+    /// `None` for every turn that arrived without one: connector lanes,
+    /// scheduled skills, and any client that sends no workspace. Never derived
+    /// from the daemon's current directory (ruling R22) — a CWD-derived value
+    /// here would claim a run belonged to whatever repository the daemon
+    /// happened to start in. Column added by migration 036.
+    pub workspace_id: Option<String>,
 }
 

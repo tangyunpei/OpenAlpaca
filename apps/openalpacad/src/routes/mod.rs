@@ -24,6 +24,7 @@ pub mod orchestrator_latency;
 pub mod settings;
 mod settings_types;
 pub mod skills;
+pub mod status;
 pub mod tasks;
 mod tasks_types;
 pub mod tools;
@@ -78,6 +79,7 @@ pub use settings::{
     upsert_key, validate_key,
 };
 pub use skills::skill_health_handler;
+pub use status::status_handler;
 pub use tasks::{
     create_task_handler, get_task_handler, list_tasks_handler,
     task_action_handler,

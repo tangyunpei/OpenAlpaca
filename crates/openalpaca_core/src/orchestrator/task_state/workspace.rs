@@ -98,8 +98,14 @@ impl TaskWorkspace {
             existing.author_agent_id = author_agent_id.to_string();
             existing.entry_type = entry_type;
             existing.updated_at = now;
-            // The content just written is whole until a spill says otherwise.
+            // The content just written is whole until a spill says otherwise,
+            // and the asset that backed the *previous* content no longer
+            // describes this entry. Both are re-set by `set_file_asset_id`
+            // when this write is a spill (the caller does it in the same state
+            // mutation); a plain rewrite must not leave a reader holding an id
+            // for bytes that are gone.
             existing.truncated = false;
+            existing.file_asset_id = None;
             return Ok(());
         }
 

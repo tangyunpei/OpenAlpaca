@@ -94,6 +94,11 @@ pub async fn create_task_handler(
         outcome_json: None,
         outcome_kind: None,
         artifact_count: 0,
+        // `CreateTaskRequest` carries no workspace and this route is not a
+        // dispatch — the project is recorded where a run actually starts
+        // (`dispatch_lead_agent`, §4.7 item 3). `None` says "no project", which
+        // is true of a row created here.
+        workspace_id: None,
     };
 
     // 1. Persist to DB
@@ -316,6 +321,7 @@ mod tests {
             outcome_json: None,
             outcome_kind: None,
             artifact_count: 0,
+            workspace_id: None,
         }
     }
 
@@ -674,5 +680,39 @@ mod tests {
         assert!(actual.get("outcome").is_none());
         // assigned_agents is still present, just empty — not omitted.
         assert_eq!(actual["assigned_agents"], serde_json::json!([]));
+    }
+
+    /// §4.7 item 3 — the row shape both task routes serve carries the project
+    /// the run belonged to, so `rerun` (Phase 5) and the Library can filter by
+    /// it. Always present, `null` for a run that had no project: an omitted
+    /// key would be indistinguishable from an older daemon.
+    #[test]
+    fn task_rows_carry_the_runs_workspace_id() {
+        let mut task = make_test_task();
+        task.workspace_id = Some("/Users/dev/openalpaca".to_string());
+
+        // GET /v1/tasks — the flattened summary row.
+        let summary = TaskSummaryResponse {
+            task: task.clone(),
+            assigned_agents: Vec::new(),
+            outcome: None,
+            cost_usd: 0.0,
+        };
+        let v = serde_json::to_value(&summary).unwrap();
+        assert_eq!(v["workspace_id"], "/Users/dev/openalpaca");
+
+        // GET /v1/tasks/{id} — the nested `task` object.
+        let single = TaskResponse {
+            task,
+            agents: None,
+            outcome: None,
+        };
+        let v = serde_json::to_value(&single).unwrap();
+        assert_eq!(v["task"]["workspace_id"], "/Users/dev/openalpaca");
+
+        // A run with no project reports an explicit null, not a missing key.
+        let v = serde_json::to_value(make_test_task()).unwrap();
+        assert!(v.get("workspace_id").is_some());
+        assert!(v["workspace_id"].is_null());
     }
 }
