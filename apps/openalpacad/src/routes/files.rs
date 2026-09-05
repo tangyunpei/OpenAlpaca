@@ -7,9 +7,8 @@
 
 use axum::{
     Json,
-    body::Body,
-    extract::{Multipart, Path, State},
-    http::{HeaderMap, StatusCode, header},
+    extract::{Multipart, Path, Query, State},
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use chrono::Utc;
@@ -17,7 +16,6 @@ use openalpaca_storage::store::StoreScope;
 use openalpaca_storage::{FileAssetRepository, NewUpload, UploadError, UploadStore};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio_util::io::ReaderStream;
 
 use super::files_types::*;
 use crate::AppState;
@@ -262,15 +260,28 @@ pub async fn get_file_metadata_handler(
     }
 }
 
-/// GET /v1/files/{id}/content — Stream file content
-pub async fn get_file_content_handler(
-    Path(id): Path<String>,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let repo = FileAssetRepository::new(&state.db);
-    let asset = match repo.get_by_id(&id) {
+/// `GET /v1/files/{id}/content` — stream file content.
+///
+/// GAP-11: this route left the bearer middleware, so it validates the token
+/// itself — as `?token=` or as `Authorization: Bearer` — and only then does the
+/// owner check it always did. The 401 body is the plain text
+/// `/v1/chat/stream` answers with; the 404 envelope is unchanged.
+pub(crate) async fn file_content(
+    db: &openalpaca_storage::Database,
+    owner_id: &str,
+    expected_token: &str,
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+    id: &str,
+) -> axum::response::Response {
+    if !super::content_token_ok(headers, query_token, expected_token) {
+        return super::invalid_token();
+    }
+
+    let repo = FileAssetRepository::new(db);
+    let asset = match repo.get_by_id(id) {
         Ok(Some(a)) => {
-            if a.owner_id != state.local_user_id {
+            if a.owner_id != owner_id {
                 tracing::debug!(file_id = %id, owner = %a.owner_id, "File owner mismatch — returning 404");
                 return error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found")
                     .into_response();
@@ -291,36 +302,29 @@ pub async fn get_file_content_handler(
         }
     };
 
-    let file = match tokio::fs::File::open(&asset.storage_path).await {
-        Ok(f) => f,
-        Err(e) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "IO_ERROR",
-                &format!("Failed to open file: {e}"),
-            )
-            .into_response();
-        }
-    };
+    super::content_response(
+        std::path::Path::new(&asset.storage_path),
+        &asset.mime_type,
+        &asset.filename,
+    )
+    .await
+}
 
-    let stream = ReaderStream::new(file);
-    let body = Body::from_stream(stream);
-
-    let mut headers = HeaderMap::new();
-    if let Ok(ct) = asset.mime_type.parse() {
-        headers.insert(header::CONTENT_TYPE, ct);
-    }
-    // Sanitize filename to prevent Content-Disposition header injection
-    let safe_filename: String = asset
-        .filename
-        .chars()
-        .filter(|c| *c != '"' && *c != '\\' && *c != '\r' && *c != '\n')
-        .collect();
-    if let Ok(cd) = format!("inline; filename=\"{}\"", safe_filename).parse() {
-        headers.insert(header::CONTENT_DISPOSITION, cd);
-    }
-
-    (headers, body).into_response()
+pub async fn get_file_content_handler(
+    Path(id): Path<String>,
+    Query(params): Query<super::TokenParams>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    file_content(
+        &state.db,
+        &state.local_user_id,
+        &state.token,
+        &headers,
+        params.token.as_deref(),
+        &id,
+    )
+    .await
 }
 
 /// POST /v1/files/{id}/open — Open file with system default app
@@ -470,12 +474,27 @@ mod tests {
         assert!(result.is_ok(), "PPT (CFB container) should be allowed");
     }
 
-    fn open_ok(_path: &str, _file_id: &str, _filename: &str) -> Result<(), String> {
+    fn open_ok(_path: &str, _file_id: &str, _filename: &str, _stage: bool) -> Result<(), String> {
         Ok(())
     }
 
-    fn open_fail(_path: &str, _file_id: &str, _filename: &str) -> Result<(), String> {
+    fn open_fail(_path: &str, _file_id: &str, _filename: &str, _stage: bool) -> Result<(), String> {
         Err("open failed".to_string())
+    }
+
+    /// Reports the staging decision back through the result: `Ok` only when the
+    /// caller asked to open the stored path directly (Phase 3 item 6).
+    fn open_only_if_direct(
+        _path: &str,
+        _file_id: &str,
+        _filename: &str,
+        stage: bool,
+    ) -> Result<(), String> {
+        if stage {
+            Err("staged".to_string())
+        } else {
+            Ok(())
+        }
     }
 
     fn test_db() -> (TempDir, Database) {
@@ -554,6 +573,54 @@ mod tests {
                 status: "opened".to_string(),
             }
         );
+    }
+
+    // --- Phase 3 item 6: which rows still go through `$TMPDIR` staging ---
+
+    /// A **produced** artifact already lives at a real path with a real
+    /// extension (§4.2's grammar), so `/open` hands the system opener that path
+    /// directly — no copy, and "Open" acts on the file the user actually has.
+    #[tokio::test]
+    async fn test_open_asset_for_a_produced_artifact_skips_staging() {
+        use openalpaca_storage::store::StoreScope;
+        use openalpaca_storage::{ArtifactKind, ArtifactStore, NewArtifact};
+
+        let home = tempfile::tempdir().expect("home root");
+        let _guard =
+            crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().expect("canonical"));
+        let project = tempfile::tempdir().expect("project root");
+        let (_dir, db) = test_db();
+
+        let scope = StoreScope::Project(project.path().canonicalize().expect("canonical"));
+        let row = ArtifactStore::new(&db)
+            .put(NewArtifact::new(
+                "user1",
+                &scope,
+                ArtifactKind::Markdown,
+                "Notes",
+                b"hello\n".as_slice(),
+            ))
+            .expect("put artifact")
+            .0;
+
+        open_asset_for_user(&db, &row.id, "user1", open_only_if_direct)
+            .await
+            .expect("a produced artifact must open its own path");
+    }
+
+    /// An **upload** keeps the staging copy: it is stored under a
+    /// content-addressed name, so the opener has no extension to dispatch on.
+    #[tokio::test]
+    async fn test_open_asset_for_an_upload_still_stages() {
+        let (_dir, db) = test_db();
+        let repo = FileAssetRepository::new(&db);
+        repo.insert(&sample_asset("f4", "user1"))
+            .expect("insert asset");
+
+        let err = open_asset_for_user(&db, "f4", "user1", open_only_if_direct)
+            .await
+            .expect_err("an upload must still be staged");
+        assert_eq!(err, OpenFileApiError::OpenFailed("staged".to_string()));
     }
 
     #[tokio::test]

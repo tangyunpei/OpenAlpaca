@@ -58,7 +58,16 @@ pub struct FileOpenResponse {
     pub status: String,
 }
 
-pub(super) type OpenFileFn = fn(&str, &str, &str) -> Result<(), String>;
+/// `(storage_path, file_id, filename, stage)`.
+///
+/// `stage` is the Phase 3 item 6 decision, taken by [`open_asset_for_user`] from
+/// the row's `origin` and passed down rather than re-derived: an **upload** is
+/// stored under a content-addressed name with no usable extension, so it must
+/// be copied to `$TMPDIR/openalpaca-open/<id>-<name>` before the system opener
+/// can pick an application; a **produced** artifact already lives at a real
+/// path with a real extension (§4.2's grammar), so it opens in place — no copy,
+/// and "Open" reveals the file the user actually has.
+pub(super) type OpenFileFn = fn(&str, &str, &str, bool) -> Result<(), String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum OpenFileApiError {
@@ -111,8 +120,13 @@ pub(super) fn open_with_system_default(
     storage_path: &str,
     file_id: &str,
     filename: &str,
+    stage: bool,
 ) -> Result<(), String> {
-    let target = prepare_open_target_path(storage_path, file_id, filename)?;
+    let target = if stage {
+        prepare_open_target_path(storage_path, file_id, filename)?
+    } else {
+        PathBuf::from(storage_path)
+    };
     opener::open(target).map_err(|e| e.to_string())
 }
 
@@ -122,28 +136,26 @@ pub(super) async fn open_asset_for_user(
     local_user_id: &str,
     open_file_fn: OpenFileFn,
 ) -> Result<FileOpenResponse, OpenFileApiError> {
-    let repo = openalpaca_storage::FileAssetRepository::new(db);
-    let asset = match repo.get_by_id(file_id) {
-        Ok(Some(asset)) => {
-            if asset.owner_id != local_user_id {
-                tracing::debug!(
-                    file_id = %file_id,
-                    owner = %asset.owner_id,
-                    "File owner mismatch — returning 404"
-                );
-                return Err(OpenFileApiError::NotFound);
-            }
-            asset
+    // The owner-scoped read of `file_assets` that also carries `origin` — the
+    // one column this route needs and `FileAsset` does not have. Both writers
+    // fill the same table, so an upload reads back here exactly as before.
+    let asset = match openalpaca_storage::ArtifactStore::new(db).get(file_id, local_user_id) {
+        Ok(Some(asset)) => asset,
+        Ok(None) => {
+            tracing::debug!(file_id = %file_id, "File not found for this owner — returning 404");
+            return Err(OpenFileApiError::NotFound);
         }
-        Ok(None) => return Err(OpenFileApiError::NotFound),
         Err(e) => return Err(OpenFileApiError::Db(e.to_string())),
     };
 
+    let stage = asset.origin != openalpaca_storage::ArtifactOrigin::Produced;
     let storage_path = asset.storage_path;
-    let filename = asset.filename;
+    let filename = asset.name;
     let asset_id = asset.id;
-    match tokio::task::spawn_blocking(move || open_file_fn(&storage_path, &asset_id, &filename))
-        .await
+    match tokio::task::spawn_blocking(move || {
+        open_file_fn(&storage_path, &asset_id, &filename, stage)
+    })
+    .await
     {
         Ok(Ok(())) => {}
         Ok(Err(e)) => return Err(OpenFileApiError::OpenFailed(e)),

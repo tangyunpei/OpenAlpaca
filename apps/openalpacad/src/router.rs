@@ -124,13 +124,27 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/files/{id}",
             get(crate::routes::get_file_metadata_handler),
         )
-        .route(
-            "/v1/files/{id}/content",
-            get(crate::routes::get_file_content_handler),
-        )
+        // `/v1/files/{id}/content` is NOT here — GAP-11 moved it to the
+        // `content` sub-router below, which authenticates inline.
         .route(
             "/v1/files/{id}/open",
             post(crate::routes::open_file_handler),
+        )
+        // Artifact routes (plan §4.9). The content routes are likewise on the
+        // `content` sub-router; everything that returns JSON stays here.
+        .route("/v1/artifacts", get(crate::routes::list_artifacts_handler))
+        .route("/v1/artifacts/{id}", get(crate::routes::get_artifact_handler))
+        .route(
+            "/v1/artifacts/{id}/versions",
+            get(crate::routes::list_artifact_versions_handler),
+        )
+        .route(
+            "/v1/artifacts/{id}/diff",
+            get(crate::routes::get_artifact_diff_handler),
+        )
+        .route(
+            "/v1/artifacts/{id}/pin",
+            put(crate::routes::pin_artifact_handler),
         )
         // Chat routes (Phase 5.6)
         .route("/v1/chat", post(crate::routes::send_chat_handler))
@@ -275,11 +289,31 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         get(crate::routes::chat_stream_handler),
     );
 
+    // Content routes (GAP-11): the bytes a webview `<img src>`/`<iframe src>`
+    // must be able to load, which cannot carry a request header. Each handler
+    // validates the token inline — `?token=` *or* `Authorization: Bearer` — and
+    // then applies the same owner check it always did, so only authentication
+    // moved off the middleware. Metadata and `/open` stay protected.
+    let content = Router::new()
+        .route(
+            "/v1/files/{id}/content",
+            get(crate::routes::get_file_content_handler),
+        )
+        .route(
+            "/v1/artifacts/{id}/content",
+            get(crate::routes::get_artifact_content_handler),
+        )
+        .route(
+            "/v1/artifacts/{id}/versions/{n}/content",
+            get(crate::routes::get_artifact_version_content_handler),
+        );
+
     // Merge all routes
     public
         .merge(protected_routes)
         .merge(websocket)
         .merge(chat_sse)
+        .merge(content)
         .with_state(state)
         .layer(CorsLayer::permissive())
 }

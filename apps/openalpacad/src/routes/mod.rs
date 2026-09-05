@@ -10,6 +10,7 @@ use serde::Serialize;
 
 pub mod agents;
 mod agents_types;
+pub mod artifacts;
 pub mod auth;
 pub mod chat;
 mod chat_types;
@@ -47,6 +48,11 @@ pub use agents::{
     list_templates_handler,
     update_agent_config_handler,
     update_template_handler,
+};
+pub use artifacts::{
+    get_artifact_content_handler, get_artifact_diff_handler, get_artifact_handler,
+    get_artifact_version_content_handler, list_artifact_versions_handler, list_artifacts_handler,
+    pin_artifact_handler,
 };
 pub use auth::{generate_link_token_handler, get_me_handler};
 pub use chat::{
@@ -122,6 +128,88 @@ pub(crate) fn api_error(status: StatusCode, code: &str, message: impl Into<Strin
         }),
     )
         .into_response()
+}
+
+// ── The content routes' inline auth (GAP-11) ─────────────────────────────
+//
+// `/v1/files/{id}/content`, `/v1/artifacts/{id}/content` and
+// `/v1/artifacts/{id}/versions/{n}/content` sit outside the bearer middleware
+// so a webview `<img src>`/`<iframe src>` — which cannot set a request header —
+// can load bytes. They authenticate inline instead, accepting the token in
+// *either* form. Authorization is untouched: each handler still 404s a row this
+// owner cannot see.
+
+/// `?token=<bearer>` — the query half of a content route's inline auth. Shared
+/// by `/v1/files/{id}/content` and `/v1/artifacts/{id}/versions/{n}/content`;
+/// the artifact head's content route adds `?version=` and has its own type.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct TokenParams {
+    pub token: Option<String>,
+}
+
+/// Whether a content request carries the daemon token, as `?token=<t>` (the way
+/// `/v1/chat/stream` does) or as `Authorization: Bearer <t>` (the way every
+/// other route does, so the GUI's existing `apiFetchBlob` keeps working).
+pub(crate) fn content_token_ok(
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+    expected: &str,
+) -> bool {
+    if query_token == Some(expected) {
+        return true;
+    }
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|token| token == expected)
+}
+
+/// The plain-text `401` the other inline-auth route answers with
+/// (`chat_stream_handler`), so the two speak with one voice.
+pub(crate) fn invalid_token() -> Response {
+    (StatusCode::UNAUTHORIZED, "Invalid token").into_response()
+}
+
+/// Stream a file as a content response: its MIME type, an inline
+/// `Content-Disposition` with the filename sanitised against header injection,
+/// and `Referrer-Policy: no-referrer` — the §9 mitigation for a bearer token
+/// that can now ride in a URL, which must be on *every* content response, not
+/// only the ones reached with `?token=`.
+pub(crate) async fn content_response(
+    path: &std::path::Path,
+    mime_type: &str,
+    filename: &str,
+) -> Response {
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "IO_ERROR",
+                format!("Failed to open file: {e}"),
+            );
+        }
+    };
+
+    let mut headers = HeaderMap::new();
+    if let Ok(value) = mime_type.parse() {
+        headers.insert(axum::http::header::CONTENT_TYPE, value);
+    }
+    let safe_filename: String = filename
+        .chars()
+        .filter(|c| *c != '"' && *c != '\\' && *c != '\r' && *c != '\n')
+        .collect();
+    if let Ok(value) = format!("inline; filename=\"{safe_filename}\"").parse() {
+        headers.insert(axum::http::header::CONTENT_DISPOSITION, value);
+    }
+    headers.insert(
+        axum::http::header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("no-referrer"),
+    );
+
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file));
+    (headers, body).into_response()
 }
 
 // ── The request's project (plan §4.7) ────────────────────────────────────

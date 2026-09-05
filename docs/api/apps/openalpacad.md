@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 74.
+- Total documented method/path endpoints: 81.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -13,6 +13,7 @@
 - `none`: public endpoints (`/`, `/v1/health`).
 - `bearer`: `Authorization: Bearer <token>` from discovery metadata.
 - `query_token`: token via query string for streaming (`/v1/events`, `/v1/chat/stream/{stream_id}`).
+- `bearer_or_query_token`: content routes validate the token inline and accept either form, so a webview `<img src>`/`<iframe src>` can load bytes (GAP-11).
 
 ## Endpoints
 
@@ -33,6 +34,13 @@
 | POST | `/v1/agents/{id}/action` | `bearer` | `agent_action_handler` | `AgentActionRequest` | - | `apps/openalpacad/src/routes/agents.rs` |
 | GET | `/v1/agents/{id}/config` | `bearer` | `get_agent_config_handler` | - | - | `apps/openalpacad/src/routes/agents.rs` |
 | PUT | `/v1/agents/{id}/config` | `bearer` | `update_agent_config_handler` | `UpdateAgentConfigRequest` | - | `apps/openalpacad/src/routes/agents.rs` |
+| GET | `/v1/artifacts` | `bearer` | `list_artifacts_handler` | - | `artifacts::ListArtifactsParams` | `apps/openalpacad/src/routes/artifacts.rs` |
+| GET | `/v1/artifacts/{id}` | `bearer` | `get_artifact_handler` | - | - | `apps/openalpacad/src/routes/artifacts.rs` |
+| GET | `/v1/artifacts/{id}/content` | `bearer_or_query_token` | `get_artifact_content_handler` | - | `artifacts::ContentParams` | `apps/openalpacad/src/routes/artifacts.rs` |
+| GET | `/v1/artifacts/{id}/diff` | `bearer` | `get_artifact_diff_handler` | - | `artifacts::DiffParams` | `apps/openalpacad/src/routes/artifacts.rs` |
+| PUT | `/v1/artifacts/{id}/pin` | `bearer` | `pin_artifact_handler` | `artifacts::PinRequest` | - | `apps/openalpacad/src/routes/artifacts.rs` |
+| GET | `/v1/artifacts/{id}/versions` | `bearer` | `list_artifact_versions_handler` | - | - | `apps/openalpacad/src/routes/artifacts.rs` |
+| GET | `/v1/artifacts/{id}/versions/{n}/content` | `bearer_or_query_token` | `get_artifact_version_content_handler` | - | `super::TokenParams` | `apps/openalpacad/src/routes/artifacts.rs` |
 | POST | `/v1/auth/link` | `bearer` | `generate_link_token_handler` | - | - | `apps/openalpacad/src/routes/auth.rs` |
 | POST | `/v1/chat` | `bearer` | `send_chat_handler` | `ChatSendRequest` | - | `apps/openalpacad/src/routes/chat.rs` |
 | POST | `/v1/chat/confirmations/{request_id}` | `bearer` | `confirm_tool` | `ConfirmationBody` | - | `apps/openalpacad/src/routes/chat.rs` |
@@ -61,7 +69,7 @@
 | POST | `/v1/extensions/{kind}/{id}/{verb}` | `bearer` | `extension_action_handler` | - | - | `apps/openalpacad/src/routes/extensions.rs` |
 | POST | `/v1/files/upload` | `bearer` | `upload_file_handler` | - | - | `apps/openalpacad/src/routes/files.rs` |
 | GET | `/v1/files/{id}` | `bearer` | `get_file_metadata_handler` | - | - | `apps/openalpacad/src/routes/files.rs` |
-| GET | `/v1/files/{id}/content` | `bearer` | `get_file_content_handler` | - | - | `apps/openalpacad/src/routes/files.rs` |
+| GET | `/v1/files/{id}/content` | `bearer_or_query_token` | `get_file_content_handler` | - | `super::TokenParams` | `apps/openalpacad/src/routes/files.rs` |
 | POST | `/v1/files/{id}/open` | `bearer` | `open_file_handler` | - | - | `apps/openalpacad/src/routes/files.rs` |
 | GET | `/v1/health` | `none` | `health_handler` | - | - | `apps/openalpacad/src/router.rs` |
 | GET | `/v1/llm/usage` | `bearer` | `get_llm_usage` | - | `LlmUsageQuery` | `apps/openalpacad/src/routes/settings.rs` |
@@ -195,6 +203,52 @@
 
 - External or generic type; see handler source.
 
+### `artifacts::ContentParams`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/artifacts.rs`
+
+| Field | Type |
+|---|---|
+| `token` | `Option<String>` |
+| `version` | `Option<u32>` |
+
+### `artifacts::DiffParams`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/artifacts.rs`
+
+| Field | Type |
+|---|---|
+| `from` | `u32` |
+| `to` | `u32` |
+
+### `artifacts::ListArtifactsParams`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/artifacts.rs`
+
+| Field | Type |
+|---|---|
+| `task_id` | `Option<String>` |
+| `kind` | `Option<String>` |
+| `origin` | `Option<String>` |
+| `project_root` | `Option<String>` |
+| `pinned` | `Option<bool>` |
+| `q` | `Option<String>` |
+| `include_missing` | `bool` |
+| `limit` | `Option<i64>` |
+| `offset` | `Option<i64>` |
+
+### `artifacts::PinRequest`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/artifacts.rs`
+
+| Field | Type |
+|---|---|
+| `pinned` | `bool` |
+
 ### `command::CommandRequest`
 
 - Kind: `struct`
@@ -295,6 +349,10 @@
 | `from` | `Option<String>` |
 | `to` | `Option<String>` |
 | `limit` | `Option<usize>` |
+
+### `super::TokenParams`
+
+- External or generic type; see handler source.
 
 ## Response Shapes
 

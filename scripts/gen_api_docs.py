@@ -426,11 +426,20 @@ def extract_route_calls(text: str) -> list[str]:
     return out
 
 
+CONTENT_ROUTES = {
+    "/v1/files/{id}/content",
+    "/v1/artifacts/{id}/content",
+    "/v1/artifacts/{id}/versions/{n}/content",
+}
+
+
 def endpoint_auth(path: str) -> str:
     if path in {"/", "/v1/health"}:
         return "none"
     if path in {"/v1/events", "/v1/chat/stream/{stream_id}"}:
         return "query_token"
+    if path in CONTENT_ROUTES:
+        return "bearer_or_query_token"
     return "bearer"
 
 
@@ -1004,6 +1013,7 @@ def generate_openalpacad_doc(
         "- `none`: public endpoints (`/`, `/v1/health`).",
         "- `bearer`: `Authorization: Bearer <token>` from discovery metadata.",
         "- `query_token`: token via query string for streaming (`/v1/events`, `/v1/chat/stream/{stream_id}`).",
+        "- `bearer_or_query_token`: content routes validate the token inline and accept either form, so a webview `<img src>`/`<iframe src>` can load bytes (GAP-11).",
         "",
         "## Endpoints",
         "",
