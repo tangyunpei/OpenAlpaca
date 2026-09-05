@@ -94,7 +94,25 @@ A file watcher reloads configuration without restart:
 
 ## MCP Servers
 
-Servers declared in `config/mcp.toml` are connected at boot; per-server failures are logged, never fatal. Each remote tool registers in the tool registry as `<server>__<tool>` and provides a capability equal to that namespaced name. Installed MCP and plugin tools are available by default to the assistant's main conversational loop (under both `tool_selection` modes) and to the lead agent orchestrating background workflows; list a namespaced name in `execution.skill_defaults.global_tool_deny` (`config/daemon.toml`) to opt a tool out of both surfaces. Subagents remain template-scoped — they see only the capabilities their template declares. To expose an MCP tool to an agent, list the namespaced name in the agent template's `capabilities` frontmatter (for skills: `requires_capabilities`). MCP resources and prompts are not implemented, and serving MCP is a non-goal.
+Servers declared in `config/mcp.toml` are connected at boot; per-server failures are logged, never fatal. Each remote tool registers in the tool registry as `<server>__<tool>` and provides a capability equal to that namespaced name. Installed MCP and plugin tools are available by default to the assistant's main conversational loop (under both `tool_selection` modes) and to the lead agent orchestrating background workflows. Subagents remain template-scoped — they see only the capabilities their template declares. To expose an MCP tool to an agent, list the namespaced name in the agent template's `capabilities` frontmatter (for skills: `requires_capabilities`). MCP resources and prompts are not implemented, and serving MCP is a non-goal.
+
+There is **no per-tool switch**: a whole server (or plugin) is turned off with `openalpaca ext disable mcp <server>` — see Extensions below. A disabled server's tools leave every surface and the gate refuses them.
+
+## Extensions (MCP servers + plugins)
+
+The ENABLE axis is one toggle per install unit: per MCP server (`config/mcp.toml`'s `enabled`) and per plugin (`enabled` in the plugins root's `.permissions.toml`). Builtins are never toggled, and there is no per-tool toggle or deny list. Disabled means unloaded: the plugin child is killed, the MCP connection dropped, and no reconnect is attempted. A tool whose extension is disabled is refused at the gate, with a warning in the log and — where a surface asked for it — in the run.
+
+Verbs (`openalpaca ext …`, and `POST /v1/extensions/{kind}/{id}/{verb}`):
+
+| Verb | Effect |
+|---|---|
+| `enable` | Writes the bit, then loads. A plugin that has not been approved records the bit and stays `Unapproved` — consent pre-empts the switch. |
+| `disable` | Writes the bit, drains in-flight calls (`[extensions] drain_timeout_secs`, default 10 s), then unloads. |
+| `reload` | Re-applies an edited declaration or a rotated credential: unload, then load from what is on disk. |
+| `approve` / `deny` | Plugins only — records consent, or refuses and unloads. `approve` alone does not turn a plugin on. |
+| `remove` (`DELETE`) | Drops the permissions entry of an orphaned plugin (directory gone). |
+
+`openalpaca ext list` / `info` render the same rows the GUI's Extensions view uses; `openalpaca ext list --include-orphaned` adds plugins whose directory has disappeared. `openalpaca plugin …` remains as the plugin-shaped shortcut over the same routes, including `plugin config get|set` (values stored as secret references read back `<redacted>`). `GET /v1/tools` lists the tool catalog read-only — each row carries its `origin` (`kind`, `id`, `enabled`, `state`) for extension tools and `null` for builtins; there is no per-tool write.
 
 ## Discovery and Auth Model
 
@@ -128,7 +146,8 @@ Major groups:
 - Orchestrator: metrics (latency and decisions) and config (`GET|PUT /v1/orchestrator/config`)
 - Daemon provider config endpoints (`GET /v1/daemon/config/providers`, `PUT /v1/daemon/config/providers/web-search`)
 - Skills: `GET /v1/skills/health`
-- Plugins: `GET /v1/plugins`; `POST /v1/plugins/{name}/approve|deny|enable|disable|config` (plugins are loaded from `<app_dir>/plugins`; the plugin system is early-stage)
+- Extensions: `GET /v1/extensions`; `POST /v1/extensions/{kind}/{id}/{verb}` (`enable|disable|reload|approve|deny`); `GET|POST /v1/extensions/{kind}/{id}/config` (plugins only); `DELETE /v1/extensions/{kind}/{id}` (orphaned plugins). Plugins are loaded from `<app_dir>/plugins`; the plugin system is early-stage. The former `/v1/plugins*` routes were removed.
+- Tools: `GET /v1/tools` (read-only catalog; no per-tool toggle)
 
 ## Message Routing (Orchestrator)
 
@@ -180,7 +199,7 @@ Representative server event types include:
 - `security_violation`, `circuit_breaker_tripped`, `tool_executed`
 - `llm_call_completed`, `skill_catalog_updated`, `soul_updated`
 - `skill_invocation_started`, `skill_completed`, `skill_failed`
-- `plugin_loaded`, `plugin_unloaded`, `plugin_disabled`, `plugin_pending_approval`, `plugin_needs_config` (`plugin_crashed` is defined but never emitted — there is no crash monitor yet)
+- `extension_state_changed` (an MCP server or plugin changed state), `extension_capability_withheld` (a surface asked for a tool a disabled extension owns), `extension_capability_withdrawn` (a disable/crash took tools away, with the affected templates, skills and cron skills)
 
 ## Background Tasks
 

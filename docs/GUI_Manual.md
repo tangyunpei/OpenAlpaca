@@ -59,24 +59,35 @@ Current default layout has two regions:
 - Right pane: switcher between:
   - `Tasks` (with active-task count badge)
   - `Agents` (with instance count badge)
-  - `Skills`
-  - `Plugins` (with plugin count badge)
 
 Header includes daemon connection indicator and settings drawer toggle.
 
+Tools and extensions are not right-pane tabs: they are Settings sections (see
+below).
+
 ## Settings Drawer (Primary Operations Surface)
 
-The right-side drawer contains vertical tabs:
+The Settings surface has eight sections
+(`apps/openalpaca-gui/src/views/settings/sections.ts`):
 
-- `Configuration`
-- `Agents`
-- `Connectors`
-- `Conversations`
-- `Event Log`
+- `Connection` — daemon status, endpoint and today's spend against the cap
+- `Models & keys` — providers the router can reach, in priority order
+- `Connectors` — external services the agents may read and write
+- `Tools` — capabilities the agents can invoke, and whether each asks first
+- `Extensions` — MCP servers and out-of-process plugins, and what each contributes
+- `Agents` — templates the orchestrator spawns from
+- `Conversations` — stored lanes
+- `Event log` — everything the daemon emitted, newest first
 
-### Configuration Sub-Tabs
+The two sections this manual describes in full below are `Tools` and
+`Extensions`; the rest of this section predates the UI rework and is being
+revised separately.
 
-Inside `Configuration` tab (`SettingsPanel`):
+### Configuration Sub-Tabs (pre-rework description)
+
+The API families the configuration surfaces front — these moved into
+`Connection` and `Models & keys` in the rework; the endpoint list is still
+accurate, the tab names are not:
 
 - `Configuration`: fronts the full `/v1/settings/llm/*` and `/v1/models*` API families plus daemon provider settings:
   - Provider key management: add/remove keys, reorder, primary/fallback priority (`/v1/settings/llm`, `/v1/settings/llm/keys/*`)
@@ -115,16 +126,21 @@ Inside `Configuration` tab (`SettingsPanel`):
 - Orchestrator config editing (default model, fallback models) from the drawer Agents tab: `GET`/`PUT /v1/orchestrator/config`
 - Core endpoints include `/v1/agent-templates*`, `/v1/agent-instances*`, `/v1/agents*`
 
-### Skills
+### Tools
 
-- Skill health metrics panel (right-pane `Skills` tab)
-- Endpoint: `GET /v1/skills/health`
+- The tool catalog: name, description, provenance, whether the tool asks first, and how often it ran today
+- **No per-tool switch anywhere.** A builtin row renders no control at all (builtins are governed by agent configuration, not a switch); an extension tool renders a read-only provenance chip — "via MCP `github` — enabled" — that leads to its Extensions row. Availability is derived — (the agent's capabilities) ∩ (its extension being enabled) — never asserted per tool
+- Skill health keeps a subsection inside this section (`GET /v1/skills/health`); those rows read as ids because no skill *listing* endpoint exists yet
+- Endpoints: `GET /v1/tools`, `GET /v1/skills/health`
 
-### Plugins
+### Extensions
 
-- Plugin list with lifecycle actions: approve, deny, enable, disable
-- Endpoints: `GET /v1/plugins`, `POST /v1/plugins/{name}/approve|deny|enable|disable`
-- Plugin lifecycle events (`plugin_loaded`, `plugin_unloaded`, `plugin_disabled`, `plugin_pending_approval`, `plugin_needs_config`) arrive over the events WebSocket and auto-refresh the plugin panel (`plugin_crashed` is defined but never emitted — no crash monitor exists yet)
+- One list over both kinds — MCP servers and plugins — each row carrying a `kind` chip, because both are governed by the same one-bit ENABLE axis
+- Row controls: the enable toggle, plus `Reload`, `Approve`/`Deny` (plugins awaiting consent), `Remove` (a plugin whose directory is gone), plugin config, and — for a server that answered 401/403 with an authorization URL — the URL to authorize at
+- The list asks for `?include_orphaned=true`, so a plugin whose directory disappeared is visible here and can be removed
+- Installing an extension is still a directory copy or a hand-written `[servers.<name>]` block (GAP-24) — the section says so rather than offering a control that does nothing
+- Endpoints: `GET /v1/extensions`, `POST /v1/extensions/{kind}/{id}/{verb}` (`enable|disable|reload|approve|deny`), `GET|POST /v1/extensions/{kind}/{id}/config`, `DELETE /v1/extensions/{kind}/{id}`
+- Extension events (`extension_state_changed`, `extension_capability_withheld`, `extension_capability_withdrawn`) arrive over the events WebSocket and refresh the affected rows
 
 ### Connectors
 
