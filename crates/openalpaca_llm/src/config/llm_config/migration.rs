@@ -5,7 +5,8 @@ use super::{read_config, write_config};
 
 /// Resolve a secret from a `KeyConfig` using the given secret store.
 ///
-/// Resolution order: `secret_env` > `secret_ref` (keychain) > `secret_encrypted` (legacy).
+/// Resolution order: `secret_env` > `secret_ref` (keychain) > `secret_encrypted`
+/// (AES-256-GCM local encryption — the fallback when no OS keychain is usable).
 pub fn resolve_key_from_config(
     key_config: &KeyConfig,
     secret_store: Option<&dyn crate::keys::secret_store::SecretStore>,

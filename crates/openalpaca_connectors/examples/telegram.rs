@@ -15,7 +15,7 @@ use openalpaca_core::{
     lane::LaneManager,
     security::policy::{Principal, Scope},
 };
-use openalpaca_storage::{Database, store};
+use openalpaca_storage::store;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -28,11 +28,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let token =
         std::env::var("TELOXIDE_TOKEN").expect("TELOXIDE_TOKEN environment variable not set");
 
-    // 3. Connect to the real system database (shared with Daemon)
-    let db_path = store::database_path()?;
-    println!("Using Database: {}", db_path.display());
+    // 3. Connect to the real system database (shared with Daemon).
+    //    Through the store mover: `Database::open` creates what it does not
+    //    find, so opening the destination directly could pre-create an empty
+    //    database in the way of the one the mover is about to relocate.
+    println!("Using Database: {}", store::database_path()?.display());
 
-    let db = Database::open(&db_path)?;
+    let db = store::migrate::open_store_database()?;
     let bus = EventBus::default();
 
     println!("Starting Telegram Connector Example...");

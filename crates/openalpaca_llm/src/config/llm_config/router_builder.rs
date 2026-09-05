@@ -112,7 +112,8 @@ fn build_router_from_hierarchical(
                             None
                         }
                     } else if let Some(ref encrypted) = key_config.secret_encrypted {
-                        // 3. Legacy encrypted (read-only, for pre-migration compat)
+                        // 3. AES-256-GCM local encryption — the no-keychain
+                        //    fallback tier, not a compat shim (P16).
                         if crate::keys::key_encryption::KeyEncryptor::is_encrypted(encrypted) {
                             match crate::keys::key_encryption::KeyEncryptor::from_env() {
                                 Ok(enc) => match enc.decrypt(encrypted) {
