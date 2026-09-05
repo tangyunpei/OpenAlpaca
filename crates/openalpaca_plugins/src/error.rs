@@ -27,6 +27,16 @@ pub enum PluginError {
     HandleHeld(String),
     #[error("config missing required keys: {0:?}")]
     MissingConfig(Vec<String>),
+    /// `.permissions.toml` does not parse. Fail-closed: nothing loads, nothing
+    /// is written, and every verb on an affected row is `409 store_unreadable`
+    /// (extension design §4, §5.1).
+    #[error("permissions store unreadable: {0}")]
+    StoreUnreadable(String),
+    /// Step W could not persist. No CAS was taken and nothing changed, so the
+    /// route answers `500` and the row still reads what the disk says
+    /// (extension design §3.2 W).
+    #[error("extension store write failed: {0}")]
+    StoreWriteFailed(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]

@@ -21,7 +21,7 @@ pub mod describe;
 mod ledger;
 
 pub use describe::{Audience, Described};
-pub use ledger::{CallGuard, ExtensionLedger, ExtensionRecord, Transition};
+pub use ledger::{CallGuard, ExtensionLedger, ExtensionRecord, ScopedRun, Transition};
 
 // ============================================================================
 // Identity
@@ -100,6 +100,56 @@ impl fmt::Display for ExtensionId {
 /// The owner's persisted toggle. `enabled` in `mcp.toml` / `.permissions.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Disposition(pub bool);
+
+/// The plugin consent axis, reported as the API row's `consent` field and
+/// `null` for MCP — writing a server into your own `config/mcp.toml` *is* the
+/// consent (design §8, §3.3 E1).
+///
+/// It is deliberately a **separate** word from the disposition: `denied` is a
+/// consent decision, never the toggle position `disabled` (design §2.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Consent {
+    Approved,
+    /// No decision has been recorded — a decision-less entry, or none at all.
+    Pending,
+    Denied,
+}
+
+impl Consent {
+    pub fn word(&self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Pending => "pending",
+            Self::Denied => "denied",
+        }
+    }
+
+    /// The tri-state `approved` field of a `.permissions.toml` entry read as a
+    /// consent word: `None` is *pending* for a missing entry and for a
+    /// decision-less one alike (design §5).
+    pub fn from_approved(approved: Option<bool>) -> Self {
+        match approved {
+            Some(true) => Self::Approved,
+            Some(false) => Self::Denied,
+            None => Self::Pending,
+        }
+    }
+}
+
+/// What a plugin's manifest **declares**, read at scan and never a cache of
+/// runtime discovery (design §8, X-19).
+///
+/// It is what lets an `unapproved`/`disabled`/`failed` row show what the plugin
+/// asks for without inventing tool names: manifest declarations are static and
+/// cannot go stale the way discovered names can.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclaredContributions {
+    pub capabilities: Vec<String>,
+    pub virtual_capabilities: Vec<String>,
+    /// `plugin.toml`'s `[types]` table, as declared.
+    pub types: std::collections::BTreeMap<String, bool>,
+}
 
 /// What class of thing an extension contributed. Tools are the only class
 /// registered today; MCP resources and prompts are stubbed. The ledger's

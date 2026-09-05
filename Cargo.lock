@@ -4307,6 +4307,7 @@ version = "0.1.0"
 name = "openalpaca_plugins"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "chrono",
  "notify",
@@ -4314,12 +4315,14 @@ dependencies = [
  "openalpaca_connectors",
  "openalpaca_core",
  "openalpaca_llm",
+ "openalpaca_storage",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
+ "toml_edit 0.25.13+spec-1.1.0",
  "tracing",
  "uuid",
 ]

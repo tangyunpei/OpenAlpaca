@@ -25,9 +25,9 @@
 - `pub use bridge::PluginSkillBridge;`
 - `pub use bridge::PluginToolProxy;`
 - `pub use error::PluginError;`
-- `pub use manager::{PluginEventSink, PluginInfo, PluginManager, PluginStatus};`
+- `pub use manager::{PluginEventSink, PluginInfo, PluginManager, SecretStorage, legacy_status_word};`
 - `pub use manifest::PluginManifest;`
-- `pub use permission_gate::PermissionGate;`
+- `pub use permission_gate::{PermissionGate, PermissionTable, SecretReference};`
 - `pub use process_pool::PluginProcess;`
 - `pub use stdio_channel::StdioChannel;`
 

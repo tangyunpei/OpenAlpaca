@@ -19,8 +19,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::describe::{Audience, Described};
 use super::{
-    ContributionKind, Disposition, ExtensionId, ExtensionKind, ExtensionState, FailureReason,
-    Moment, WithdrawalCause,
+    Consent, ContributionKind, DeclaredContributions, Disposition, ExtensionId, ExtensionKind,
+    ExtensionState, FailureReason, Moment, WithdrawalCause,
 };
 use crate::bus::EventBus;
 use crate::events::SystemEvent;
@@ -64,6 +64,36 @@ impl Drop for CallGuard {
     fn drop(&mut self) {
         if let Some(counter) = &self.counter {
             counter.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+// ============================================================================
+// Scoped run outcomes
+// ============================================================================
+
+/// What [`ExtensionLedger::run_scoped`] needs of an out-of-process run's
+/// outcome: whether it failed, and how to replace that failure's text with the
+/// S4 refusal (design §3.2 T3(b), layer 2).
+///
+/// Two implementors, and the second is the reason the trait exists: the plugin
+/// **agent** loop reports `PluginLoopOutcome::Failed { error }` rather than an
+/// `Err`, so a `Result`-only wrapper would let a raw channel string through on
+/// exactly the path §3.2 calls out.
+pub trait ScopedRun {
+    fn is_failure(&self) -> bool;
+    fn rewrite_failure(self, refusal: String) -> Self;
+}
+
+impl<T> ScopedRun for Result<T, String> {
+    fn is_failure(&self) -> bool {
+        self.is_err()
+    }
+
+    fn rewrite_failure(self, refusal: String) -> Self {
+        match self {
+            Ok(value) => Ok(value),
+            Err(_) => Err(refusal),
         }
     }
 }
@@ -115,6 +145,35 @@ pub struct ExtensionRecord {
     /// snapshot always reads empty. The supervisor fills it in on the record it
     /// hands back from the verb that produced the warning.
     pub warnings: Vec<String>,
+
+    // ── Supervisor-side row data (design §8) ─────────────────────────────
+    //
+    // None of it is ledger state either: the ledger is pure bookkeeping and
+    // holds no manifest, no process and no permissions entry. Each field is
+    // filled in by the owning supervisor on the record it returns, exactly as
+    // `warnings` is, and a bare ledger snapshot reads the empty value.
+    /// `false` on a row whose disposition **cannot be read** — every plugin
+    /// while `.permissions.toml` is unreadable, and the `config/mcp.toml`
+    /// pseudo-record. C6 renders those rows' `enabled` as `null` and answers
+    /// every verb on them with `409 store_unreadable` (design §4).
+    pub disposition_readable: bool,
+    /// Plugins only — the tri-state consent word; `None` for MCP.
+    pub consent: Option<Consent>,
+    /// Plugins only — what `plugin.toml` declares, read at scan (X-19).
+    pub declared: Option<DeclaredContributions>,
+    /// Plugins only — contributed skill ids, live when `Enabled`.
+    pub skills: Vec<String>,
+    /// Plugins only — contributed agent-template ids, live when `Enabled`.
+    pub agents: Vec<String>,
+    /// Plugins only — the contributed connector platform. A `disabled` row with
+    /// a non-null `connector` is a T2 bug (design §3.2, §8).
+    pub connector: Option<String>,
+    /// Plugins only — the contributed LLM provider. Same rule as `connector`.
+    pub provider: Option<String>,
+    /// Required config keys that are not set — the `Failed{NeedsConfig}` list.
+    pub missing_config_keys: Vec<String>,
+    /// A URL or a key name the owner can act on. Never free-form detail.
+    pub hint: Option<String>,
 }
 
 impl ExtensionRecord {
@@ -194,6 +253,15 @@ impl LedgerEntry {
             // Never ledger state — the supervisor attaches these to the record
             // it returns from the verb that produced them.
             warnings: Vec::new(),
+            disposition_readable: true,
+            consent: None,
+            declared: None,
+            skills: Vec::new(),
+            agents: Vec::new(),
+            connector: None,
+            provider: None,
+            missing_config_keys: Vec::new(),
+            hint: None,
         }
     }
 }
@@ -363,13 +431,24 @@ impl ExtensionLedger {
     /// Own the exit of an out-of-process run: a run torn down at the drain
     /// deadline fails with the S4 refusal, never with a broken-pipe string
     /// (design §3.2 T3(b), layer 2).
-    pub async fn run_scoped<T, F>(&self, ext: &ExtensionId, fut: F) -> Result<T, String>
+    ///
+    /// It is generic over [`ScopedRun`] rather than over `Result` because
+    /// `run_plugin_agent_loop` returns a `PluginLoopOutcome`, not a `Result`:
+    /// a kill mid-`step` yields `PluginLoopOutcome::Failed { error: "plugin
+    /// agent step failed: …process crashed" }`, and a `Result`-only wrapper
+    /// would never see it.
+    pub async fn run_scoped<O, F>(&self, ext: &ExtensionId, fut: F) -> O
     where
-        F: std::future::Future<Output = Result<T, String>>,
+        O: ScopedRun,
+        F: std::future::Future<Output = O>,
     {
-        match fut.await {
-            Ok(value) => Ok(value),
-            Err(raw) => Err(self.refusal_if_not_enabled(ext, None).unwrap_or(raw)),
+        let outcome = fut.await;
+        if !outcome.is_failure() {
+            return outcome;
+        }
+        match self.refusal_if_not_enabled(ext, None) {
+            Some(refusal) => outcome.rewrite_failure(refusal),
+            None => outcome,
         }
     }
 

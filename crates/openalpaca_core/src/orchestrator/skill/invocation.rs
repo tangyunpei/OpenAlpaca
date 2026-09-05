@@ -950,6 +950,18 @@ impl Orchestrator {
     ) -> Result<SkillInvocationResult, String> {
         let fm = &skill_doc.frontmatter;
 
+        // The run-guard (design §3.2 T3(b)), taken at the only in-process entry
+        // point into the plugin's own `skill/invoke` loop — which never enters
+        // `ToolRegistry` for the run itself, only for the tool callbacks it
+        // makes. Pre-flight refuses a run against a plugin that is not
+        // `Enabled`, or against a *previous load* of an enabled one, before the
+        // first RPC is sent; the guard it returns is what T3's drain waits on,
+        // so a multi-minute `skill/invoke` is no longer invisible to a disable.
+        let extension =
+            crate::tools::extensions::ExtensionId::plugin(plugin_id.to_string());
+        let ledger = Arc::clone(self.tool_registry.extensions());
+        let _run_guard = ledger.begin_run(&extension, executor.generation())?;
+
         let allowed = plugin_skill_allowlist(skill_name, fm, &self.tool_registry)?;
         let mut denied: Vec<String> = fm.tools.deny.clone();
         for g in &self
@@ -1031,8 +1043,12 @@ impl Orchestrator {
             plugin = plugin_id,
             "Invoking plugin-backed skill"
         );
-        let content = executor
-            .invoke(query, &context, &callback)
+        // `run_scoped` owns the exit: a run torn down at the drain deadline
+        // fails with the S4 refusal, never with a broken-pipe string. The
+        // bridge rewrites the common cases itself; this is the belt-and-braces
+        // catch for any path that surfaced a raw one (design §3.2 T3(b)).
+        let content = ledger
+            .run_scoped(&extension, executor.invoke(query, &context, &callback))
             .await
             .map_err(|e| format!("Plugin skill '{skill_name}' failed: {e}"))?;
 

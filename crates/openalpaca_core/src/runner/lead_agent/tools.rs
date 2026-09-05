@@ -14,10 +14,11 @@ use crate::middleware::prompt::{format_tool_guidance, SystemPersona};
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
 use crate::prompt_ctx::{ExecutionPath, SectionPriority};
-use crate::runner::plugin_agent::{PluginLoopOutcome, run_plugin_agent_loop};
+use crate::runner::plugin_agent::{PluginLoopOutcome, PluginRunScope, run_plugin_agent_loop};
 use crate::runner::steering::SteeringInbox;
 use crate::runner::{LoopConfig, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+use crate::tools::extensions::ExtensionId;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use crate::tools::ToolRegistry;
 use arc_swap::ArcSwap;
@@ -445,8 +446,21 @@ impl BuiltInTool for SpawnSubagentTool {
             .get_template(agent_id)
             .map(|t| t.source)
         {
-            Some(AgentSource::Plugin { executor, .. }) => {
-                Some((executor, objective.to_string()))
+            Some(AgentSource::Plugin {
+                plugin_id,
+                executor,
+            }) => {
+                // The run-guard's scope (design §3.2 T3(b)): the plugin id, the
+                // ledger, and the **bridge's** generation — an in-flight
+                // subagent holds a cloned executor, so a lead that spawns from
+                // this template after a disable → re-enable must be refused at
+                // pre-flight rather than at its first RPC.
+                let scope = PluginRunScope {
+                    ledger: Arc::clone(self.tool_registry.extensions()),
+                    extension: ExtensionId::plugin(plugin_id),
+                    generation: executor.generation(),
+                };
+                Some((executor, objective.to_string(), scope))
             }
             _ => None,
         };
@@ -494,7 +508,7 @@ impl BuiltInTool for SpawnSubagentTool {
             // cancellation semantics are unchanged (the permit is held for
             // the loop's lifetime and the child token is checked between
             // steps).
-            if let Some((executor, objective_full)) = plugin_execution {
+            if let Some((executor, objective_full, scope)) = plugin_execution {
                 tracing::info!(
                     agent_id = %agent_id_owned,
                     instance_id = %instance_id,
@@ -511,18 +525,42 @@ impl BuiltInTool for SpawnSubagentTool {
                     "task_id": task_id,
                 });
 
-                let outcome = run_plugin_agent_loop(
-                    &executor,
-                    &instance_id,
-                    &task_id,
-                    &instructions,
-                    &plugin_ctx,
-                    &sandbox,
-                    &sandbox_policy,
-                    &subagent_tool_ctx,
-                    child_token.as_ref(),
-                )
-                .await;
+                // The run-guard (design §3.2 T3(b)): pre-flight refuses a run
+                // against a plugin that is not `Enabled` or against a previous
+                // load of one, **before** `spawn` is ever sent; the guard it
+                // returns is held for the whole run, so T3's drain waits for
+                // this loop the way it waits for a tool call.
+                let outcome = match scope
+                    .ledger
+                    .begin_run(&scope.extension, scope.generation)
+                {
+                    Ok(guard) => {
+                        let ledger = Arc::clone(&scope.ledger);
+                        let outcome = ledger
+                            .run_scoped(
+                                &scope.extension,
+                                run_plugin_agent_loop(
+                                    &executor,
+                                    &instance_id,
+                                    &task_id,
+                                    &instructions,
+                                    &plugin_ctx,
+                                    &sandbox,
+                                    &sandbox_policy,
+                                    &subagent_tool_ctx,
+                                    child_token.as_ref(),
+                                    Some(&scope),
+                                ),
+                            )
+                            .await;
+                        drop(guard);
+                        outcome
+                    }
+                    Err(refusal) => PluginLoopOutcome::Failed {
+                        error: refusal,
+                        tool_calls_made: 0,
+                    },
+                };
 
                 let duration_ms = agent_start.elapsed().as_millis() as u64;
                 busy_guard.restore();

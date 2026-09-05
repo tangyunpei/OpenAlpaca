@@ -332,12 +332,24 @@ async fn async_main(
             Some(svcs.shared_context.agent_registry.clone()),
         )
         // Wire lifecycle events (ServerEvent::Plugin*) to the WS broadcaster
-        // so clients like the GUI plugin panel live-update.
-        .with_event_sink(Arc::new(move |event| eb_for_plugins.broadcast(event))),
+        // so clients like the GUI plugin panel live-update. Superseded by the
+        // bus below; both fire until C7 deletes the legacy route.
+        .with_event_sink(Arc::new(move |event| eb_for_plugins.broadcast(event)))
+        // T5/E5 publish `SystemEvent::ExtensionStateChanged` here, which the
+        // event bridge forwards to the `ServerEvent` peer C2 added
+        // (extension design §7.3). C4 moves this onto the ledger itself.
+        .with_event_bus(bus.clone())
+        // `[extensions] drain_timeout_secs` bounds T3.
+        .with_daemon_config(daemon_config.clone()),
     );
+    // The crash reaper: one sequential task draining `mark_failed`'s channel
+    // (extension design §3.6). Started before the scan, so a plugin that dies
+    // during boot is reaped.
+    plugin_manager.spawn_reaper();
     if let Err(e) = plugin_manager.start().await {
         warn!("plugin manager startup: {e}");
     }
+    let plugin_manager_for_shutdown = plugin_manager.clone();
 
     // Step 10: Create ConfirmationBroker and construct Orchestrator
     let confirmation_broker = Arc::new(openalpaca_core::security::confirmation::ConfirmationBroker::new());
@@ -657,6 +669,15 @@ async fn async_main(
     // (extension design §3.5). C6 moves this behind `Extensions::shutdown_all`.
     info!("Shutting down MCP servers...");
     openalpaca_core::tools::extensions::ExtensionSupervisor::shutdown_all(&*mcp_supervisor).await;
+
+    // And every plugin child. Nothing tore these down before either:
+    // `kill_on_drop` does not fire on `process::exit`, so a plugin's child
+    // could outlive the daemon (extension design §3.5).
+    info!("Shutting down plugins...");
+    openalpaca_core::tools::extensions::ExtensionSupervisor::shutdown_all(
+        &*plugin_manager_for_shutdown,
+    )
+    .await;
 
     // Shutdown connectors
     info!("Shutting down connectors...");

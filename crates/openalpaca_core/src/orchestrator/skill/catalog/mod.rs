@@ -503,6 +503,14 @@ impl SkillCatalog {
     ///
     /// Plugin skills have no filesystem path — their execution is delegated
     /// to the `PluginSkillExecutor` provided by the plugin runtime.
+    ///
+    /// **The id is lowercased at insert** (design §6.2 #14). Every reader
+    /// lowercases: `get_by_id` looks up `id.to_lowercase()` with no name
+    /// fallback, so a plugin whose `skill/info` returns a mixed-case id was
+    /// unreachable by `/slash` and by `invoke_skill`; and `remove(skill_id)`
+    /// found the verbatim entry only through its name-scan fallback, so a
+    /// plugin supplying both an id slug and a display name leaked a catalog
+    /// entry holding an executor for a killed process at every unload.
     pub fn register_plugin_skill(
         &self,
         skill_id: String,
@@ -510,6 +518,7 @@ impl SkillCatalog {
         executor: Arc<dyn openalpaca_api::plugin_traits::PluginSkillExecutor>,
         plugin_id: String,
     ) {
+        let skill_id = skill_id.to_lowercase();
         let slash_cmd = frontmatter.invoke.slash.clone();
         let aliases = frontmatter.invoke.aliases.clone();
         let entry = SkillEntry {
