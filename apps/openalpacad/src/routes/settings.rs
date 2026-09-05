@@ -288,6 +288,19 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
     (StatusCode::OK, Json(serde_json::to_value(models).unwrap())).into_response()
 }
 
+/// Today's total spend (UTC date), summed from the DB's `llm_usage_daily`
+/// aggregate across every agent/model row for today — **not**
+/// `CostTracker::total_cost()`, which only measures spend since the daemon
+/// booted (GAP-08a). A day's distinct `(agent_id, model)` rows are few; the
+/// query's limit is a generous cap, not a real pagination bound.
+fn total_daily_cost_usd(db: &openalpaca_storage::Database) -> f64 {
+    let repo = openalpaca_storage::repository::LlmUsageRepository::new(db);
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    repo.query_daily_usage(None, Some(&today), 10_000)
+        .map(|rows| rows.iter().map(|r| r.total_cost_usd).sum())
+        .unwrap_or(0.0)
+}
+
 /// GET /v1/orchestrator/config
 pub async fn get_orchestrator_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let service = match &state.llm_settings_service {
@@ -311,7 +324,7 @@ pub async fn get_orchestrator_config(State(state): State<Arc<AppState>>) -> impl
                 .task_registry
                 .list_active()
                 .len();
-            let daily_cost_usd = 0.0; // Cost tracker requires async access via LlmRouter
+            let daily_cost_usd = total_daily_cost_usd(&state.db);
 
             let resp = OrchestratorConfigResponse {
                 model,
@@ -607,7 +620,8 @@ pub async fn update_web_search_config(
 
 #[cfg(test)]
 mod tests {
-    use super::load_cli_backends_config;
+    use super::{load_cli_backends_config, total_daily_cost_usd};
+    use openalpaca_storage::{Database, LlmUsageDaily, LlmUsageRepository};
     use std::fs;
     use std::path::PathBuf;
 
@@ -615,6 +629,63 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("temp dir should be creatable");
         dir
+    }
+
+    fn test_db() -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open test db");
+        (dir, db)
+    }
+
+    #[test]
+    fn total_daily_cost_usd_sums_todays_rows_across_agents_and_models() {
+        let (_dir, db) = test_db();
+        let repo = LlmUsageRepository::new(&db);
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+        repo.upsert_daily_usage(&LlmUsageDaily {
+            date: today.clone(),
+            agent_id: "orchestrator".to_string(),
+            model: "claude-sonnet-4-5-20250929".to_string(),
+            total_requests: 3,
+            total_input_tokens: 900,
+            total_output_tokens: 300,
+            total_cost_usd: 0.30,
+        })
+        .unwrap();
+        repo.upsert_daily_usage(&LlmUsageDaily {
+            date: today.clone(),
+            agent_id: "researcher".to_string(),
+            model: "gpt-4o".to_string(),
+            total_requests: 1,
+            total_input_tokens: 200,
+            total_output_tokens: 100,
+            total_cost_usd: 0.05,
+        })
+        .unwrap();
+        // A different day must not be counted.
+        repo.upsert_daily_usage(&LlmUsageDaily {
+            date: "2020-01-01".to_string(),
+            agent_id: "orchestrator".to_string(),
+            model: "claude-sonnet-4-5-20250929".to_string(),
+            total_requests: 100,
+            total_input_tokens: 100_000,
+            total_output_tokens: 100_000,
+            total_cost_usd: 99.0,
+        })
+        .unwrap();
+
+        let total = total_daily_cost_usd(&db);
+        assert!(
+            (total - 0.35).abs() < 1e-9,
+            "expected 0.35, got {total}"
+        );
+    }
+
+    #[test]
+    fn total_daily_cost_usd_is_zero_with_no_usage() {
+        let (_dir, db) = test_db();
+        assert_eq!(total_daily_cost_usd(&db), 0.0);
     }
 
     #[test]
