@@ -1504,8 +1504,8 @@ fn make_review_skill_catalog() -> (tempfile::TempDir, Arc<skill_catalog::SkillCa
         r#"---
 name: "Code Review"
 description: "Review code for issues"
-command: "review"
-auto_load: false
+invoke:
+  slash: "/review"
 ---
 
 ## Instructions

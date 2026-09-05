@@ -15,15 +15,15 @@ fn create_skill_dir(parent: &Path, name: &str, skill_md: &str) -> PathBuf {
 const REVIEW_SKILL: &str = r#"---
 name: "Code Review"
 description: "Review code for bugs and style issues"
-command: "review"
-trigger_patterns:
-  - "review.*code"
-  - "code review"
-tools_required:
-  - "file_read"
-auto_load: false
-read_when:
-  - "User asks for code review"
+invoke:
+  slash: "/review"
+routing:
+  intent:
+    - "review.*code"
+    - "code review"
+tools:
+  allow:
+    - "file_read"
 ---
 
 ## Instructions
@@ -34,11 +34,12 @@ Analyze the code for bugs and style.
 const EXPLAIN_SKILL: &str = r#"---
 name: "Explain Code"
 description: "Explain what code does"
-command: "explain-code"
-trigger_patterns:
-  - "explain.*code"
-  - "what does.*do"
-auto_load: false
+invoke:
+  slash: "/explain-code"
+routing:
+  intent:
+    - "explain.*code"
+    - "what does.*do"
 ---
 
 ## Instructions
@@ -83,7 +84,10 @@ fn test_get_by_name_fallback() {
     // Lookup by frontmatter name (fallback)
     let entry = catalog.get("Code Review").expect("should find by name");
     assert_eq!(entry.frontmatter.name, "Code Review");
-    assert_eq!(entry.frontmatter.command, Some("review".to_string()));
+    assert_eq!(
+        entry.frontmatter.effective_slash_command(),
+        Some("review".to_string())
+    );
 
     // Case insensitive
     let entry2 = catalog
@@ -285,7 +289,8 @@ fn test_multi_scope_project_overrides_user() {
         r#"---
 name: "Code Review (User)"
 description: "User-level code review"
-command: "review"
+invoke:
+  slash: "/review"
 ---
 "#,
     );
@@ -297,7 +302,8 @@ command: "review"
         r#"---
 name: "Code Review (Project)"
 description: "Project-level code review"
-command: "review"
+invoke:
+  slash: "/review"
 ---
 "#,
     );
@@ -433,7 +439,8 @@ fn test_slash_conflict_produces_validation_error() {
         r#"---
 name: "Skill A"
 description: "First skill"
-command: "review"
+invoke:
+  slash: "/review"
 ---
 "#,
     );
@@ -443,7 +450,8 @@ command: "review"
         r#"---
 name: "Skill B"
 description: "Second skill"
-command: "review"
+invoke:
+  slash: "/review"
 ---
 "#,
     );
@@ -483,8 +491,9 @@ async fn test_concurrent_catalog_reads() {
             r#"---
 name: "Skill {i}"
 description: "Skill number {i}"
-trigger_patterns:
-  - "query.*{i}"
+routing:
+  intent:
+    - "query.*{i}"
 ---
 
 ## Instructions
