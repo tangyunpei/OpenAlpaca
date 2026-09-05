@@ -473,6 +473,17 @@ impl ExtensionLedger {
         )
     }
 
+    /// The §7.1 row for this extension's *current* state, unrendered.
+    ///
+    /// `refusal_if_not_enabled` is the `Enabled`-filtered, string-rendered form
+    /// of the same read; C5's skill refusals need the parts so they can name
+    /// the skill and its requirement around them (design §7.5, §7.2). `None`
+    /// only when the ledger has no record at all (§6.2a — fail-open).
+    pub fn describe_state(&self, ext: &ExtensionId, audience: Audience) -> Option<Described> {
+        let entry = self.records.get(ext)?;
+        Some(entry.state.describe(ext, entry.pending_cause, audience))
+    }
+
     /// Which extension retains this tool name, whatever the registry holds.
     /// **Case-insensitive**, the way `check_agent_capability` lowercases
     /// (design §6.2 #1, X-23).

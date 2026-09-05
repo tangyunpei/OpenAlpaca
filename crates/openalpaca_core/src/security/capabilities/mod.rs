@@ -90,13 +90,35 @@ pub enum Allowlist {
 }
 
 impl Allowlist {
+    /// The **only** way to build [`Allowlist::Only`] outside a test: it
+    /// enforces the variant's documented pre-lowercased contract.
+    ///
+    /// `check_agent_capability` lowercases the tool name and then compares it
+    /// verbatim against the entries, so an allow list carrying a mixed-case
+    /// name — an MCP tool `Acme__Search`, a plugin tool `Notion::Query` — used
+    /// to deny the very tool it was built to admit. Deny-side safe, and wrong:
+    /// the model got a generic capability refusal where the extension design
+    /// promises the attributed one (X-23, design §6.2 #1).
+    pub fn only<I, S>(names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self::Only(
+            names
+                .into_iter()
+                .map(|n| n.as_ref().to_lowercase())
+                .collect(),
+        )
+    }
+
     /// The allow list an agent's constraints spell.
     ///
     /// Template-declared capabilities are a closed set: whatever the template
     /// granted is all the agent gets, and a template that granted nothing
     /// yields an agent that can call nothing.
     pub fn from_agent_constraints(constraints: &AgentConstraints) -> Self {
-        Self::Only(constraints.allowed_capabilities.clone())
+        Self::only(&constraints.allowed_capabilities)
     }
 
     /// Does this allow list admit `capability` (already lowercased)?

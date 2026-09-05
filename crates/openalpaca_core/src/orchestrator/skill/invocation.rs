@@ -203,6 +203,25 @@ impl Orchestrator {
                 vec![]
             };
 
+        // **Fail closed — the total-loss refusal** (design §6.2 #10, §10
+        // case 3). One predicate across both resolution branches: refuse when
+        // **any** required capability is wholly withheld, or — on the legacy
+        // `tools.allow` branch — when every allowed name belongs to a
+        // withdrawn extension. Partial loss is never gating; it runs and
+        // carries the chat-visible prefix below. The SKILL.md body still tells
+        // the model to use the missing tool, so the reliable outcome of
+        // running anyway is a confidently fabricated result.
+        let requirements = self
+            .tool_registry
+            .skill_requirements(&skill_doc.frontmatter);
+        if !requirements.is_satisfiable() {
+            tracing::warn!(
+                skill = skill_name,
+                "Refusing skill: a required capability is wholly withheld"
+            );
+            return Err(requirements.refusal(skill_name));
+        }
+
         // Force-include persona tools during bootstrap mode
         if self.is_bootstrapping() {
             for name in &["update_persona"] {
@@ -323,7 +342,7 @@ impl Orchestrator {
                 agent_id: "orchestrator".to_string(),
                 // Closed set: the skill may call exactly the tools resolved for
                 // it (this arm only runs when that resolution is non-empty).
-                allowed_capabilities: Allowlist::Only(resolved),
+                allowed_capabilities: Allowlist::only(resolved),
                 denied_capabilities: denied_caps,
                 require_confirmation_for: skill_doc
                     .frontmatter
@@ -931,6 +950,16 @@ impl Orchestrator {
             validated
         };
 
+        // Partial loss runs, and says so (design §10 case 3): the user invoked
+        // this skill explicitly, so the result carries the chat-visible
+        // warning naming the extension whose tools it lost. Applied after
+        // validation and truncation — it is the chat layer, not the skill's
+        // declared output.
+        let validated = match requirements.chat_prefix() {
+            Some(prefix) => format!("{prefix}{validated}"),
+            None => validated,
+        };
+
         Ok(SkillInvocationResult {
             content: validated,
             finish_reason: inv_finish_reason,
@@ -989,7 +1018,7 @@ impl Orchestrator {
         // The dedup scope for the announcements below, matching the file-skill
         // site: the request, which is what a skill invoked in a loop varies by.
         let withheld_scope = request_id.to_string();
-        let allowed =
+        let (allowed, requirements) =
             plugin_skill_allowlist(skill_name, fm, &self.tool_registry, &withheld_scope)?;
         let mut denied: Vec<String> = fm.tools.deny.clone();
         for g in &self
@@ -1080,6 +1109,14 @@ impl Orchestrator {
             .await
             .map_err(|e| format!("Plugin skill '{skill_name}' failed: {e}"))?;
 
+        // Partial loss runs, and says so: the user invoked this skill
+        // explicitly, so the surviving provider's result carries the
+        // chat-visible warning naming the extension that went (§10 case 3).
+        let content = match requirements.chat_prefix() {
+            Some(prefix) => format!("{prefix}{content}"),
+            None => content,
+        };
+
         Ok(SkillInvocationResult {
             content,
             finish_reason: LoopFinishReason::Complete,
@@ -1105,31 +1142,65 @@ impl Orchestrator {
 /// A skill that *does* declare `requires_capabilities` which resolve to nothing
 /// has lost the extension providing them (uninstalled, or disabled): it is
 /// refused up front rather than run without the tools it asked for.
+///
+/// **C5 — fail closed at the caller** (design §6.2 #10, #11): the refusal is
+/// the one predicate, `!skill_requirements(fm).is_satisfiable()`, on **both**
+/// resolution branches — any required capability wholly withheld, or every
+/// legacy allowed name withheld. `Allowlist::Only` at the callee is the second
+/// half: an empty list denies every non-ambient capability, so no future
+/// resolver can reopen the escalation by handing an empty vec to a policy.
+///
+/// Returns the requirements beside the allow list so a *partial* loss can carry
+/// its chat-visible prefix (§10 case 3) without a second index read.
 fn plugin_skill_allowlist(
     skill_name: &str,
     fm: &crate::middleware::skill::SkillFrontmatter,
     tool_registry: &crate::tools::ToolRegistry,
     withheld_scope: &str,
-) -> Result<Allowlist, String> {
+) -> Result<(Allowlist, crate::tools::registry::SkillRequirements), String> {
+    let requirements = tool_registry.skill_requirements(fm);
+
     if fm.requires_capabilities.is_empty() {
         // The legacy `tools.allow` fallback is never resolved against the
         // registry, so the same `owner_of` scan is what attributes it: a plugin
         // skill whose allowed names went with a disabled extension is announced
         // here rather than one refused call at a time by the gate's miss arm
-        // (extension design §6.2 #10). Refusing up front on total loss is C5's.
+        // (extension design §6.2 #10), and refused up front on total loss.
         tool_registry.announce_withheld_names(
             fm.tools.allow.iter().map(String::as_str),
             None,
             Some(withheld_scope),
         );
-        return Ok(Allowlist::Only(fm.tools.allow.clone()));
+        if !requirements.is_satisfiable() {
+            tracing::warn!(
+                skill = skill_name,
+                "Refusing plugin skill: every allowed tool belongs to a withdrawn extension"
+            );
+            return Err(requirements.refusal(skill_name));
+        }
+        return Ok((Allowlist::only(&fm.tools.allow), requirements));
     }
 
     let resolution = tool_registry.resolve_capabilities(&fm.requires_capabilities, &[]);
     tool_registry.announce_withheld(&resolution, None, Some(withheld_scope));
     let resolved: Vec<String> = resolution.defs.into_iter().map(|d| d.name).collect();
 
+    if !requirements.is_satisfiable() {
+        tracing::warn!(
+            skill = skill_name,
+            "Refusing plugin skill: a required capability is wholly withheld"
+        );
+        return Err(requirements.refusal(skill_name));
+    }
+
     if resolved.is_empty() {
+        // A0's condition, kept and **not** folded into the predicate above.
+        // §6.2 #11 says the predicate covers "non-empty but resolves to
+        // nothing"; it does not, for a capability nothing ever recorded — an
+        // `unknown` (§7.2) is satisfiable by design so typos keep degrading
+        // silently, and a restart with the extension already disabled produces
+        // exactly that (§10 case 8). This is the empty allow list the
+        // escalation lived in, so it stays a refusal on its own terms.
         let unresolved = fm.requires_capabilities.join(", ");
         tracing::warn!(
             skill = skill_name,
@@ -1143,7 +1214,7 @@ fn plugin_skill_allowlist(
         ));
     }
 
-    Ok(Allowlist::Only(resolved))
+    Ok((Allowlist::only(resolved), requirements))
 }
 
 /// Adapter giving a plugin skill sandboxed tool access during `invoke()`.

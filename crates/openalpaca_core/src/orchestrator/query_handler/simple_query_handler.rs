@@ -224,15 +224,17 @@ impl Orchestrator {
                 tool_names
             );
 
-            // Lowercased: `check_agent_capability` lowercases the tool name
-            // and expects allow-list entries pre-normalized (matters for
-            // mixed-case MCP/plugin tool names on the default surface).
-            let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.to_lowercase()).collect();
             policy_opt = Some(SandboxPolicy {
                 agent_id: "orchestrator".to_string(),
                 // Closed set: the main loop may call exactly the surface it was
                 // handed (this arm only runs when that surface is non-empty).
-                allowed_capabilities: Allowlist::Only(resolved),
+                // `Allowlist::only` lowercases: `check_agent_capability`
+                // lowercases the tool name and compares verbatim, which
+                // matters for mixed-case MCP/plugin names on the default
+                // surface (X-23).
+                allowed_capabilities: Allowlist::only(
+                    tool_defs.iter().map(|t| t.name.as_str()),
+                ),
                 denied_capabilities: vec![],
                 require_confirmation_for: vec![],
                 max_tool_calls: None,

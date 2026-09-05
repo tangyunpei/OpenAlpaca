@@ -371,6 +371,11 @@ async fn async_main(
         }
     };
 
+    // Cloned **before** the move into `Orchestrator::new`: the file watcher's
+    // cron arm needs it for the scheduled-skill availability check
+    // (extension design §6.2 #13).
+    let tool_registry_for_watcher = svcs.tool_registry.clone();
+
     let orchestrator = Arc::new(Orchestrator::new(
         svcs.shared_context.clone(),
         lane_manager.clone(),
@@ -450,6 +455,7 @@ async fn async_main(
             llm_router: llm_router_for_reload,
             secret_store: svcs.secret_store,
             skill_catalog: svcs.skill_catalog,
+            tool_registry: tool_registry_for_watcher,
             daemon_config: daemon_config.clone(),
             web_search_config: web_search_config_for_reload,
             bus: bus.clone(),

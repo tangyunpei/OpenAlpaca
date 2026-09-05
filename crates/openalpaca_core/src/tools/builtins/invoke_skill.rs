@@ -100,8 +100,22 @@ impl InvokeSkillTool {
         }
     }
 
+    /// The miss answer.
+    ///
+    /// Two changes from the bare "unknown skill" dump (design §6.2 #12,
+    /// §10 case 5(a)): the **tombstone** is consulted first, so a skill a
+    /// disabled plugin used to provide is attributed to that plugin instead of
+    /// reading as a typo; and the listing is **availability-filtered**, so it
+    /// never names a skill this tool would refuse.
     fn unknown_skill_error(&self, requested: &str) -> String {
-        let mut names = self.catalog.list_names();
+        if let Some(tomb) = self.catalog.tombstone(requested) {
+            return self.tool_registry.withdrawn_contribution_refusal(
+                "Skill",
+                &tomb.skill_id,
+                &tomb.plugin_id,
+            );
+        }
+        let mut names = self.catalog.available_names();
         names.sort();
         if names.is_empty() {
             format!("Unknown skill '{}'. No skills are available.", requested)

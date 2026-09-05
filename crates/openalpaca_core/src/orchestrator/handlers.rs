@@ -192,6 +192,14 @@ impl Orchestrator {
                 stream_id.as_deref(),
             )
             .await
+        } else if let Some(reply) = self.withdrawn_skill_reply(&intent_source_content) {
+            // A `/slash` naming a skill a **disabled plugin** used to provide.
+            // The catalog's live indices were scrubbed at T2, so the command
+            // missed above and the message would otherwise have fallen through
+            // to the main loop as ordinary chat; the tombstone answers with the
+            // plugin that owns it instead (extension design §10 case 5(a)).
+            mode = "skill_withdrawn".to_string();
+            Ok(reply)
         } else if self.is_bootstrapping() {
             mode = "bootstrap".to_string();
             self.handle_simple_query(

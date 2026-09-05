@@ -902,20 +902,23 @@ impl PluginManager {
             self.ledger.withdraw(&ext, virtual_caps.clone());
         }
 
-        // 2. skills.
+        // 2. skills. The removal leaves a **tombstone** (design §10 case 5(a)):
+        //    `remove` scrubs the command and alias indices, so without one a
+        //    `/slash` or `invoke_skill` for a withdrawn plugin skill reads as
+        //    an unknown name and gets a dump of every catalog entry.
         let skills: Vec<String> = state.registered_skills.drain(..).collect();
         if let Some(catalog) = &self.skill_catalog {
             for skill_id in &skills {
-                catalog.remove(skill_id);
+                catalog.remove_plugin_skill(skill_id, id);
                 debug!(plugin = id, skill = %skill_id, "unregistered plugin skill");
             }
         }
 
-        // 3. agent templates.
+        // 3. agent templates — same tombstone, for `spawn_subagent`.
         let agents: Vec<String> = state.registered_agents.drain(..).collect();
         if let Some(registry) = &self.agent_registry {
             for agent_id in &agents {
-                registry.remove_template(agent_id);
+                registry.remove_plugin_template(agent_id, id);
                 debug!(plugin = id, agent = %agent_id, "unregistered plugin agent template");
             }
         }

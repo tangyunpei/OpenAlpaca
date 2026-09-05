@@ -8,6 +8,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::orchestrator::skill::constraints::EffectiveToolSet;
 use crate::tools::extensions::{ExtensionId, ExtensionLedger};
 
+pub mod availability;
+pub use availability::{
+    CapabilityOracle, RequirementKind, SkillRequirements, WithheldProvider, WithheldSubject,
+};
+
 pub mod capabilities;
 pub use capabilities::{
     annotation_capabilities, validate_annotation_capability, AnnotationCapabilityProvider,
@@ -913,25 +918,18 @@ impl ToolRegistry {
     ) -> Vec<&'a str> {
         let mut unattributed = Vec::new();
         for name in names {
-            let Some(ext) = self.extensions.owner_of(name) else {
-                unattributed.push(name);
-                continue;
-            };
-            let blocked = match self.extensions.state(&ext) {
-                None => false,
-                Some(state) if !state.is_enabled() => true,
-                Some(_) => self.extensions.is_server_withdrawn(&ext, name),
-            };
-            if blocked {
-                self.extensions.note_withheld(
-                    &ext,
+            // One classification, shared with the legacy arm of the one
+            // predicate (`availability::withheld_name`), so the announcement
+            // and the refusal can never disagree about a name.
+            match self.withheld_name(name) {
+                Some(provider) => self.extensions.note_withheld(
+                    &provider.extension,
                     name,
                     crate::tools::extensions::Moment::SurfaceAssembly,
                     ctx,
                     scope_override,
-                );
-            } else {
-                unattributed.push(name);
+                ),
+                None => unattributed.push(name),
             }
         }
         unattributed

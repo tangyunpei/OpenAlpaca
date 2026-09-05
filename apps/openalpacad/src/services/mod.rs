@@ -171,6 +171,13 @@ pub async fn initialize_services(
     )
     .await?;
 
+    // Install the ENABLE axis's availability oracle (extension design §6.2
+    // #12). `SkillRouter::route` takes only `(&str, &SkillCatalog)` and has no
+    // registry handle, so the catalog carries `ToolRegistry` for it, for
+    // `catalog_summary` (`<available_skills>`) and for the `invoke_skill`
+    // listing. Wired here, the one place both exist.
+    skill_catalog.set_availability_oracle(tool_registry.clone());
+
     // Load agent templates from .md files + legacy .toml files
     // (deferred until the tool registry exists so annotation: capabilities
     // in agent frontmatter can be validated against the known set.)

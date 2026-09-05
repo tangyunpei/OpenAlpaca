@@ -908,6 +908,75 @@ mcp_compatible = true
         );
     }
 
+    /// **C5 — the tombstone** (design §10 case 5(a)). T2 scrubs the command and
+    /// alias indices, so without one a `/slash` or `invoke_skill` for a
+    /// withdrawn plugin skill reads as an unknown name. The tombstone survives
+    /// the removal, names the plugin, and is dropped when the skill comes back.
+    #[tokio::test]
+    async fn t2_leaves_a_tombstone_naming_the_plugin_that_provided_the_skill() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\nskill = true\n");
+        std::fs::write(
+            dir.join("skill-info.json"),
+            r#"{"id":"triage","name":"Triage","invoke":{"slash":"/triage"}}"#,
+        )
+        .unwrap();
+        let h = Harness::new(tmp.path());
+        load_running_stub(&h, "echo-test").await;
+        assert!(h.skills.get_by_command("triage").is_some());
+        assert!(h.skills.tombstone("triage").is_none());
+
+        h.manager.disable(&ext("echo-test")).await.unwrap();
+
+        assert!(
+            h.skills.get_by_command("triage").is_none(),
+            "the live indices stay scrubbed exactly as today"
+        );
+        for key in ["triage", "/triage"] {
+            let tomb = h
+                .skills
+                .tombstone(key)
+                .unwrap_or_else(|| panic!("no tombstone under '{key}'"));
+            assert_eq!(tomb.skill_id, "triage");
+            assert_eq!(tomb.plugin_id, "echo-test");
+        }
+
+        // Re-enable: the skill is registered again and the tombstone goes.
+        h.manager.enable(&ext("echo-test")).await.unwrap();
+        assert!(h.skills.get_by_command("triage").is_some());
+        assert!(
+            h.skills.tombstone("triage").is_none(),
+            "a skill that came back invalidates its own tombstone"
+        );
+    }
+
+    /// The same for an agent template: `spawn_subagent` naming a withdrawn one
+    /// is attributed to its plugin rather than reading as an unknown template.
+    #[tokio::test]
+    async fn t2_leaves_a_tombstone_for_a_withdrawn_agent_template() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        let h = Harness::new(tmp.path());
+        load_running_stub(&h, "echo-test").await;
+
+        // Stand in for E4's template registration, which needs `agent/info`.
+        h.agents.register_template(agent_template("reader", &[]));
+        assert!(h.agents.template_tombstone("reader").is_none());
+
+        h.agents.remove_plugin_template("reader", "echo-test");
+        assert!(h.agents.get_template("reader").is_none());
+        assert_eq!(
+            h.agents.template_tombstone("reader").as_deref(),
+            Some("echo-test")
+        );
+
+        h.agents.register_template(agent_template("reader", &[]));
+        assert!(
+            h.agents.template_tombstone("reader").is_none(),
+            "a template that came back invalidates its own tombstone"
+        );
+    }
+
     // ── C4 — T1 step 3: the dependent scan (§3.2 T1, §7.3) ───────────
 
     fn agent_template(id: &str, caps: &[&str]) -> openalpaca_core::agent::template::AgentTemplate {

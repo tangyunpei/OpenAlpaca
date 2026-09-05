@@ -2779,3 +2779,526 @@ impl openalpaca_llm::LlmProvider for SilentMockLlm {
         })
     }
 }
+
+// ===========================================================================
+// C5 — fail-closed + availability (extension design §6.2 #10/#12/#13, §7.5,
+// §10 case 3). One predicate: refuse when **any** required capability is
+// wholly withheld; `partially_withheld` runs with the prefix.
+// ===========================================================================
+
+/// A registry with two MCP servers and one builtin:
+/// * `mcp:github` provides capability `github_issues` (tool
+///   `github__create_issue`) and is **disabled** — wholly withheld;
+/// * `mcp:brave` provides `search` (tool `brave__search`) and is **disabled**,
+///   but `web_search` (a builtin) provides `search` too — partially withheld;
+/// * `shell_execute` — an unrelated live builtin for the legacy-mixed case.
+fn registry_with_a_withheld_and_a_partial_capability(bus: &EventBus) -> Arc<ToolRegistry> {
+    use crate::tools::extensions::{ExtensionId, ExtensionState, WithdrawalCause};
+
+    let registry = Arc::new(ToolRegistry::with_event_bus(bus.clone()).unwrap());
+    let mk = |name: &str, caps: Vec<String>| {
+        let mut tool = make_mock_tool(name);
+        tool.provides_capabilities = caps;
+        registry.register(tool).unwrap();
+    };
+    mk("github__create_issue", vec!["github_issues".to_string()]);
+    mk("brave__search", vec!["search".to_string()]);
+    mk("web_search", vec!["search".to_string()]);
+    mk("shell_execute", vec![]);
+
+    let ledger = registry.extensions();
+    for (ext, tool, cap) in [
+        (
+            ExtensionId::mcp("github"),
+            "github__create_issue",
+            "github_issues",
+        ),
+        (ExtensionId::mcp("brave"), "brave__search", "search"),
+    ] {
+        ledger.upsert(&ext, true, ExtensionState::Enabled);
+        ledger.record_tools(&ext, [tool]);
+        ledger.begin(
+            &ext,
+            ExtensionState::Disabling,
+            Some(WithdrawalCause::Disable),
+        );
+        ledger.withdraw(&ext, [cap.to_string()]);
+        registry.remove(tool);
+        ledger.commit(&ext, ExtensionState::Disabled);
+    }
+    registry
+}
+
+/// Four skills covering both resolution branches and both classifications.
+fn c5_catalog(registry: Arc<ToolRegistry>) -> (tempfile::TempDir, Arc<skill_catalog::SkillCatalog>) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let write = |id: &str, body: &str| {
+        let dir = tmp.path().join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), body).unwrap();
+    };
+
+    // requires_capabilities: [withheld, live] — refused (the one predicate).
+    write(
+        "triage",
+        r#"---
+name: "Triage"
+description: "Triages issues"
+invoke:
+  slash: "/triage"
+  mode: "auto"
+routing:
+  intent:
+    - "triage the backlog"
+requires_capabilities:
+  - github_issues
+  - search
+---
+
+## Instructions
+
+Triage.
+"#,
+    );
+    // requires_capabilities: [partially withheld] — runs, with the prefix.
+    write(
+        "finder",
+        r#"---
+name: "Finder"
+description: "Finds things"
+invoke:
+  slash: "/finder"
+  mode: "auto"
+routing:
+  intent:
+    - "find the thing"
+requires_capabilities:
+  - search
+---
+
+## Instructions
+
+Find.
+"#,
+    );
+    // legacy tools.allow, every name withdrawn — refused.
+    write(
+        "filer",
+        r#"---
+name: "Filer"
+description: "Files issues"
+invoke:
+  slash: "/file"
+  mode: "auto"
+routing:
+  intent:
+    - "file the bug"
+tools:
+  allow:
+    - github__create_issue
+---
+
+## Instructions
+
+File.
+"#,
+    );
+    // legacy tools.allow, one withdrawn + one live builtin — runs with prefix.
+    write(
+        "mixed",
+        r#"---
+name: "Mixed"
+description: "Files issues or shells out"
+invoke:
+  slash: "/mixed"
+  mode: "auto"
+routing:
+  intent:
+    - "mix the thing"
+tools:
+  allow:
+    - github__create_issue
+    - shell_execute
+---
+
+## Instructions
+
+Mix.
+"#,
+    );
+
+    let catalog = skill_catalog::SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+    catalog.set_availability_oracle(registry);
+    (tmp, Arc::new(catalog))
+}
+
+fn c5_orchestrator(
+    bus: &EventBus,
+    registry: Arc<ToolRegistry>,
+    catalog: Arc<skill_catalog::SkillCatalog>,
+) -> Orchestrator {
+    let gate = make_security_gate_with_registry(bus, registry.clone());
+    Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus.clone(),
+        SystemPersona::default(),
+        None,
+        LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        None,
+        catalog,
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    )
+}
+
+fn nested_executor(
+    bus: &EventBus,
+    registry: Arc<ToolRegistry>,
+    catalog: Arc<skill_catalog::SkillCatalog>,
+) -> crate::orchestrator::skill::invoke_executor::SkillInvocationToolExecutor {
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(SilentMockLlm),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    ));
+    crate::orchestrator::skill::invoke_executor::SkillInvocationToolExecutor::new(
+        catalog,
+        registry,
+        router,
+        bus.clone(),
+        vec![],
+        2,
+        None,
+        None,
+        None,
+        1.0,
+        true,
+        vec![],
+        crate::daemon_config::CircuitBreakerConfig::default(),
+        30,
+    )
+}
+
+/// **`/slash` returns the named error as `Ok(reply)`** (§7.5): the
+/// deterministic tier returns directly with no fallback, so this message *is*
+/// the answer and must not depend on what `handlers.rs` does with an `Err`.
+#[tokio::test]
+async fn an_explicit_slash_for_a_withheld_skill_returns_the_named_error_as_ok() {
+    let bus = EventBus::default();
+    let registry = registry_with_a_withheld_and_a_partial_capability(&bus);
+    let (_tmp, catalog) = c5_catalog(registry.clone());
+    let orch = c5_orchestrator(&bus, registry, catalog);
+
+    // Capability branch: one of two capabilities wholly withheld.
+    let reply = orch
+        .handle_message(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "/triage the backlog".to_string(),
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+            None,
+        )
+        .await
+        .expect("the refusal is the reply, returned as Ok — never as Err");
+    assert!(reply.contains("Triage"), "names the skill: {reply}");
+    assert!(
+        reply.contains("github_issues"),
+        "names the capability: {reply}"
+    );
+    assert!(reply.contains("github"), "names the extension: {reply}");
+    assert!(
+        reply.contains("Settings → Extensions"),
+        "names the remedy: {reply}"
+    );
+    assert!(
+        !reply.contains("'search'"),
+        "the still-served capability is not part of the refusal: {reply}"
+    );
+
+    // Legacy branch: every allowed name withdrawn.
+    let reply = orch
+        .handle_message(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "/file this bug".to_string(),
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+            None,
+        )
+        .await
+        .expect("the legacy branch refuses as Ok(reply) too");
+    assert!(reply.contains("Filer"), "{reply}");
+    assert!(reply.contains("github__create_issue"), "{reply}");
+    assert!(reply.contains("github"), "{reply}");
+}
+
+/// The **invocation site** itself refuses, not only the `/slash` tier that
+/// short-circuits before it (design §6.2 #10). This is the security boundary;
+/// the tier above it is presentation.
+#[tokio::test]
+async fn the_top_level_invocation_site_refuses_on_the_same_predicate() {
+    let bus = EventBus::default();
+    let registry = registry_with_a_withheld_and_a_partial_capability(&bus);
+    let (_tmp, catalog) = c5_catalog(registry.clone());
+    let orch = c5_orchestrator(&bus, registry, catalog);
+
+    let ctx = orch.build_context("test:cli", "go");
+    let scope = crate::memory::scope_context::MemoryScopeContext::new(None);
+    for (skill, subject) in [("Triage", "github_issues"), ("Filer", "github__create_issue")] {
+        let err = orch
+            .handle_skill_invocation(
+                Uuid::new_v4(),
+                "cli",
+                skill,
+                "go",
+                "test:cli",
+                &ctx,
+                None,
+                &scope,
+                None,
+                false,
+                None,
+            )
+            .await
+            .expect_err("the invocation site refuses independently of the /slash tier");
+        assert!(err.contains(skill), "names the skill: {err}");
+        assert!(err.contains(subject), "names the requirement: {err}");
+        assert!(err.contains("github"), "names the extension: {err}");
+    }
+}
+
+/// The same predicate, **nested** through `invoke_skill` — the tool result the
+/// model reads. Both branches.
+#[tokio::test]
+async fn a_nested_invoke_skill_refuses_on_the_same_predicate() {
+    let bus = EventBus::default();
+    let registry = registry_with_a_withheld_and_a_partial_capability(&bus);
+    let (_tmp, catalog) = c5_catalog(registry.clone());
+    let nested = nested_executor(&bus, registry, catalog);
+
+    for (tool, skill, subject) in [
+        ("invoke_skill:triage", "triage", "github_issues"),
+        ("invoke_skill:filer", "filer", "github__create_issue"),
+    ] {
+        let err = nested
+            .execute(tool, &serde_json::json!({"query": "go"}))
+            .await
+            .expect_err("a nested skill with a wholly withheld requirement is refused");
+        assert!(err.contains(skill), "names the skill: {err}");
+        assert!(err.contains(subject), "names the requirement: {err}");
+        assert!(err.contains("github"), "names the extension: {err}");
+    }
+}
+
+/// `partially_withheld` never gates: the skill runs, and says so.
+#[tokio::test]
+async fn a_partially_withheld_skill_runs_with_the_chat_visible_prefix() {
+    let bus = EventBus::default();
+    let registry = registry_with_a_withheld_and_a_partial_capability(&bus);
+    let (_tmp, catalog) = c5_catalog(registry.clone());
+    let nested = nested_executor(&bus, registry, catalog);
+
+    // Capability arm: `search` still has a provider (`web_search`).
+    let out = nested
+        .execute("invoke_skill:finder", &serde_json::json!({"query": "go"}))
+        .await
+        .expect("a partially withheld skill still runs");
+    assert!(
+        out.contains("brave"),
+        "the result carries the warning naming the extension: {out}"
+    );
+    assert!(out.contains("search"), "{out}");
+    assert!(out.contains("done"), "the skill's own output survives: {out}");
+
+    // Legacy arm: one withdrawn name, one live builtin.
+    let out = nested
+        .execute("invoke_skill:mixed", &serde_json::json!({"query": "go"}))
+        .await
+        .expect("one live name keeps a legacy-allow skill runnable");
+    assert!(
+        out.contains("github__create_issue"),
+        "the withdrawn half is announced in chat: {out}"
+    );
+    assert!(out.contains("done"), "{out}");
+}
+
+/// Auto-route **drops** the skill — nothing is attempted, so nothing is said
+/// (§7.5). The partial one stays a candidate.
+#[test]
+fn the_router_drops_a_skill_whose_requirement_is_wholly_withheld() {
+    let bus = EventBus::default();
+    let live = Arc::new(ToolRegistry::with_event_bus(bus.clone()).unwrap());
+    for (name, caps) in [
+        ("github__create_issue", vec!["github_issues".to_string()]),
+        ("brave__search", vec!["search".to_string()]),
+        ("web_search", vec!["search".to_string()]),
+        ("shell_execute", vec![]),
+    ] {
+        let mut tool = make_mock_tool(name);
+        tool.provides_capabilities = caps;
+        live.register(tool).unwrap();
+    }
+    let (_tmp_live, catalog_live) = c5_catalog(live);
+    let router = skill_router::SkillRouter::new(0.65, 0.45);
+    assert_eq!(
+        router.route("triage the backlog", &catalog_live).selected,
+        Some("triage".to_string()),
+        "the skill auto-selects while its capabilities are served"
+    );
+    assert_eq!(
+        router.route("file the bug", &catalog_live).selected,
+        Some("filer".to_string())
+    );
+
+    let withdrawn = registry_with_a_withheld_and_a_partial_capability(&bus);
+    let (_tmp, catalog) = c5_catalog(withdrawn);
+    let router = skill_router::SkillRouter::new(0.65, 0.45);
+    assert_eq!(
+        router.route("triage the backlog", &catalog).selected,
+        None,
+        "a wholly withheld capability drops the skill from candidacy"
+    );
+    assert_eq!(
+        router.route("file the bug", &catalog).selected,
+        None,
+        "so does a legacy allow list whose every name is withdrawn"
+    );
+    assert_eq!(
+        router.route("find the thing", &catalog).selected,
+        Some("finder".to_string()),
+        "partial loss never gates candidacy"
+    );
+    assert_eq!(
+        router.route("mix the thing", &catalog).selected,
+        Some("mixed".to_string()),
+        "one live name keeps a legacy-allow skill a candidate"
+    );
+}
+
+/// `<available_skills>` stops coaching the model toward a skill `/slash` would
+/// refuse (§6.2 #12).
+#[tokio::test]
+async fn available_skills_omits_a_skill_whose_requirement_is_wholly_withheld() {
+    let bus = EventBus::default();
+    let registry = registry_with_a_withheld_and_a_partial_capability(&bus);
+    let (_tmp, catalog) = c5_catalog(registry.clone());
+    let orch = c5_orchestrator(&bus, registry, catalog.clone());
+
+    let block = orch.build_skills_catalog_block();
+    assert!(!block.contains("Triage"), "the refused skill is gone: {block}");
+    assert!(!block.contains("Filer"), "so is the legacy one: {block}");
+    assert!(block.contains("Finder"), "partial loss stays listed: {block}");
+    assert!(block.contains("Mixed"), "{block}");
+
+    let listed = catalog.available_names();
+    assert!(!listed.contains(&"triage".to_string()));
+    assert!(!listed.contains(&"filer".to_string()));
+    assert!(listed.contains(&"finder".to_string()));
+    assert!(listed.contains(&"mixed".to_string()));
+}
+
+/// The tombstone answer for a withdrawn plugin skill (§10 case 5(a)): `/slash`
+/// names the plugin instead of falling through to the main loop, and the
+/// `invoke_skill` listing does not dump every catalog name.
+#[tokio::test]
+async fn a_withdrawn_plugin_skill_is_attributed_to_its_plugin_on_slash() {
+    use crate::middleware::skill::{InvokeConfig, SkillFrontmatter};
+    use crate::tools::extensions::{ExtensionId, ExtensionState};
+
+    let bus = EventBus::default();
+    let registry = Arc::new(ToolRegistry::with_event_bus(bus.clone()).unwrap());
+    registry
+        .extensions()
+        .upsert(&ExtensionId::plugin("notion"), false, ExtensionState::Disabled);
+
+    let catalog = Arc::new(skill_catalog::SkillCatalog::new());
+    catalog.set_availability_oracle(registry.clone());
+    let mut fm = SkillFrontmatter {
+        name: "Notion Triage".to_string(),
+        description: "Triage via Notion".to_string(),
+        ..Default::default()
+    };
+    fm.invoke = InvokeConfig {
+        slash: Some("/ntriage".to_string()),
+        ..fm.invoke
+    };
+    catalog.register_plugin_skill(
+        "ntriage".to_string(),
+        fm,
+        Arc::new(TombstoneStubExecutor),
+        "notion".to_string(),
+    );
+    assert!(catalog.get_by_command("ntriage").is_some());
+
+    // T2 withdraws it, leaving the tombstone.
+    catalog.remove_plugin_skill("ntriage", "notion");
+    assert!(catalog.get_by_command("ntriage").is_none());
+
+    let orch = c5_orchestrator(&bus, registry, catalog.clone());
+    let reply = orch
+        .handle_message(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "/ntriage please".to_string(),
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+            None,
+        )
+        .await
+        .expect("the tombstone answer is the reply");
+    assert!(reply.contains("ntriage"), "names the skill: {reply}");
+    assert!(
+        reply.contains("provided by plugin 'notion'"),
+        "names the plugin: {reply}"
+    );
+    assert!(reply.contains("disabled"), "names the state: {reply}");
+
+    // And it comes back when the plugin does.
+    let mut fm = SkillFrontmatter {
+        name: "Notion Triage".to_string(),
+        ..Default::default()
+    };
+    fm.invoke = InvokeConfig {
+        slash: Some("/ntriage".to_string()),
+        ..fm.invoke
+    };
+    catalog.register_plugin_skill(
+        "ntriage".to_string(),
+        fm,
+        Arc::new(TombstoneStubExecutor),
+        "notion".to_string(),
+    );
+    assert!(catalog.tombstone("ntriage").is_none());
+}
+
+struct TombstoneStubExecutor;
+
+#[async_trait]
+impl openalpaca_api::plugin_traits::PluginSkillExecutor for TombstoneStubExecutor {
+    async fn invoke(
+        &self,
+        _query: &str,
+        _context: &serde_json::Value,
+        _tool_executor: &dyn openalpaca_api::plugin_traits::ToolCallbackExecutor,
+    ) -> Result<String, String> {
+        Ok(String::new())
+    }
+    fn plugin_id(&self) -> &str {
+        "notion"
+    }
+    fn skill_id(&self) -> &str {
+        "ntriage"
+    }
+}

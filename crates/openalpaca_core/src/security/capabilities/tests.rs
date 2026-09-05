@@ -166,6 +166,40 @@ fn deny_beats_allow() {
     );
 }
 
+/// C5 / X-23: `Allowlist::only` enforces the variant's pre-lowercased
+/// contract, so a mixed-case **MCP or plugin** tool name is admitted by the
+/// very list that declared it. `check_agent_capability` lowercases the tool
+/// name and then compares verbatim, so a verbatim mixed-case entry denied it —
+/// deny-side safe, and wrong: the model got a generic capability refusal where
+/// the design promises the attributed one.
+#[test]
+fn a_mixed_case_extension_tool_name_is_admitted_by_its_own_allow_list() {
+    let allowed = Allowlist::only(["Acme__Search", "Notion::Query"]);
+    assert_eq!(
+        allowed,
+        Allowlist::Only(vec!["acme__search".to_string(), "notion::query".to_string()])
+    );
+    for tool in ["Acme__Search", "acme__search", "NOTION::Query"] {
+        assert!(
+            CapabilityManager::check_agent_capability("plugin:acme", tool, &allowed, &[]).is_ok(),
+            "'{tool}' must be admitted by the list that declared it"
+        );
+    }
+    assert!(
+        CapabilityManager::check_agent_capability("plugin:acme", "shell_execute", &allowed, &[])
+            .is_err(),
+        "normalization widens nothing"
+    );
+
+    // The contract the constructor exists to enforce: a verbatim mixed-case
+    // entry is exactly the bug.
+    let verbatim = Allowlist::Only(vec!["Acme__Search".to_string()]);
+    assert!(
+        CapabilityManager::check_agent_capability("plugin:acme", "Acme__Search", &verbatim, &[])
+            .is_err()
+    );
+}
+
 #[test]
 fn test_capability_check_case_insensitive() {
     // Deny list with mixed case should match lowercase tool name (after normalize)

@@ -141,6 +141,7 @@ async fn register_skill(wake: &WakeManager, skill_id: &str, fm: &SkillFrontmatte
 pub fn spawn_timer_turn(
     gateway: Arc<Gateway>,
     catalog: Arc<SkillCatalog>,
+    tool_registry: Arc<openalpaca_core::tools::ToolRegistry>,
     local_user_id: String,
     skill_id: String,
 ) {
@@ -151,6 +152,39 @@ pub fn spawn_timer_turn(
         );
         return;
     };
+
+    // **The cron skip** (extension design §6.2 #13, §10 case 4): the same
+    // predicate the router, `<available_skills>` and `/slash` apply. A cron
+    // turn goes through the gateway as a real user message and its result is
+    // pushed cross-channel by the NotificationDispatcher, so running a skill
+    // whose tools are gone is unattended fabrication on a schedule.
+    //
+    // The job stays **registered** — re-enable then needs no re-registration
+    // trigger, which `resync_skill` could not provide anyway. Skip-and-log is
+    // idempotent and self-heals.
+    let requirements = tool_registry.skill_requirements(&entry.frontmatter);
+    if !requirements.is_satisfiable() {
+        warn!(
+            skill = %skill_id,
+            "Scheduled skill fire skipped — {}",
+            requirements.refusal(&skill_id)
+        );
+        // One event **per fire**, scoped to the skill id: a cron fire is a
+        // distinct unattended event and is exempt from §7.4's dedup, and the
+        // skill-id scope keeps two cron skills on one extension from
+        // collapsing into a single warn. The owner's one *notice* was written
+        // at the disable transition (§7.3), never per fire.
+        for (extension, subject) in requirements.attributions() {
+            tool_registry.extensions().note_withheld(
+                extension,
+                subject,
+                openalpaca_core::tools::extensions::Moment::ScheduledSkip,
+                None,
+                Some(&skill_id),
+            );
+        }
+        return;
+    }
     // Deterministic tier: /{slash command}; skills without an explicit slash
     // command resolve via the catalog's skill-ID fallback.
     let command = entry
@@ -361,6 +395,7 @@ Body.
         spawn_timer_turn(
             gateway,
             catalog,
+            Arc::new(openalpaca_core::tools::ToolRegistry::default()),
             "junpei".to_string(),
             "daily-digest".to_string(),
         );
@@ -402,9 +437,299 @@ Body.
             None,
         ));
 
-        spawn_timer_turn(gateway, catalog, "junpei".to_string(), "gone".to_string());
+        spawn_timer_turn(
+            gateway,
+            catalog,
+            Arc::new(openalpaca_core::tools::ToolRegistry::default()),
+            "junpei".to_string(),
+            "gone".to_string(),
+        );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(calls.lock().unwrap().is_empty());
+    }
+
+    // ── C5: the cron skip (extension design §6.2 #13, §10 case 4) ────────
+
+    const WITHHELD_CRON_SKILL: &str = r#"---
+name: "Nightly Filer"
+description: "Files the backlog overnight"
+invoke:
+  mode: scheduled
+  slash: "/nightly"
+  cron: "0 0 9 * * *"
+tools:
+  allow:
+    - github__create_issue
+---
+
+## Instructions
+
+File.
+"#;
+
+    /// A registry whose `mcp:github` has been disabled the way a supervisor
+    /// disables it: capability tombstoned, tool removed, name still attributed.
+    fn registry_with_a_disabled_server(
+        bus: &openalpaca_core::bus::EventBus,
+    ) -> Arc<openalpaca_core::tools::ToolRegistry> {
+        use openalpaca_core::tools::extensions::{ExtensionId, ExtensionState, WithdrawalCause};
+        use openalpaca_core::tools::registry::{RegisteredTool, ToolBackend};
+
+        struct Noop;
+        #[async_trait]
+        impl openalpaca_core::tools::registry::BuiltInTool for Noop {
+            async fn execute(&self, _a: &serde_json::Value) -> Result<String, String> {
+                Ok(String::new())
+            }
+        }
+
+        let registry =
+            Arc::new(openalpaca_core::tools::ToolRegistry::with_event_bus(bus.clone()).unwrap());
+        registry
+            .register(RegisteredTool {
+                definition: openalpaca_llm::ToolDefinition {
+                    name: "github__create_issue".to_string(),
+                    description: "create issue".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    strict: None,
+                    input_examples: None,
+                },
+                backend: ToolBackend::BuiltIn(Arc::new(Noop)),
+                provides_capabilities: vec!["github_issues".to_string()],
+                exempt_from_timeout: false,
+                annotations: None,
+                version: "test".into(),
+                author: "test".into(),
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+
+        // A live builtin provider of `search`, so a multi-capability skill has
+        // one requirement served and one wholly withheld.
+        registry
+            .register(RegisteredTool {
+                definition: openalpaca_llm::ToolDefinition {
+                    name: "web_search".to_string(),
+                    description: "search".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    strict: None,
+                    input_examples: None,
+                },
+                backend: ToolBackend::BuiltIn(Arc::new(Noop)),
+                provides_capabilities: vec!["search".to_string()],
+                exempt_from_timeout: false,
+                annotations: None,
+                version: "test".into(),
+                author: "test".into(),
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+
+        let ext = ExtensionId::mcp("github");
+        let ledger = registry.extensions();
+        ledger.upsert(&ext, true, ExtensionState::Enabled);
+        ledger.record_tools(&ext, ["github__create_issue"]);
+        ledger.begin(
+            &ext,
+            ExtensionState::Disabling,
+            Some(WithdrawalCause::Disable),
+        );
+        ledger.withdraw(&ext, ["github_issues".to_string()]);
+        registry.remove("github__create_issue");
+        ledger.commit(&ext, ExtensionState::Disabled);
+        registry
+    }
+
+    /// A cron skill whose only tool went with a disabled server is **skipped**,
+    /// with one `ScheduledSkip` event **per fire** (no dedup), scoped to the
+    /// skill id — and the job is never deregistered.
+    #[tokio::test]
+    async fn a_cron_fire_is_skipped_once_per_fire_when_its_only_tool_is_withdrawn() {
+        use openalpaca_core::events::SystemEvent;
+        use openalpaca_core::tools::extensions::Moment;
+
+        let tmp = tempfile::tempdir().unwrap();
+        create_skill_dir(tmp.path(), "nightly-filer", WITHHELD_CRON_SKILL);
+        let catalog = Arc::new(catalog_from(tmp.path()));
+
+        let bus = EventBus::default();
+        let registry = registry_with_a_disabled_server(&bus);
+        catalog.set_availability_oracle(registry.clone());
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let gateway = Arc::new(Gateway::new(
+            Arc::new(SharedContext::new()),
+            Arc::new(LaneManager::new()),
+            Arc::new(StubHandler {
+                calls: calls.clone(),
+            }),
+            bus.clone(),
+            None,
+        ));
+
+        let mut rx = bus.subscribe();
+        for _ in 0..3 {
+            spawn_timer_turn(
+                gateway.clone(),
+                catalog.clone(),
+                registry.clone(),
+                "junpei".to_string(),
+                "nightly-filer".to_string(),
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "the turn must never reach the gateway — that is the unattended fabrication"
+        );
+
+        let mut skips = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let SystemEvent::ExtensionCapabilityWithheld {
+                extension,
+                subject,
+                moment,
+                scope,
+                ..
+            } = event
+                && moment == Moment::ScheduledSkip
+            {
+                skips.push((extension.to_string(), subject, scope));
+            }
+        }
+        assert_eq!(
+            skips.len(),
+            3,
+            "one event per fire, never deduped, got {skips:?}"
+        );
+        for (extension, subject, scope) in &skips {
+            assert_eq!(extension, "mcp:github");
+            assert_eq!(subject, "github__create_issue");
+            assert_eq!(scope, "nightly-filer", "the scope key is the skill id");
+        }
+    }
+
+    const MULTI_CAP_CRON_SKILL: &str = r#"---
+name: "Nightly Triage"
+description: "Triages the backlog overnight"
+invoke:
+  mode: scheduled
+  slash: "/ntriage"
+  cron: "0 0 9 * * *"
+requires_capabilities:
+  - github_issues
+  - search
+---
+
+## Instructions
+
+Triage.
+"#;
+
+    /// The **multi-capability** one-predicate case on the cron path: one
+    /// requirement wholly withheld, the other still served. Skipped, with one
+    /// `ScheduledSkip` event scoped to the skill id.
+    #[tokio::test]
+    async fn a_cron_fire_is_skipped_when_one_of_two_capabilities_is_wholly_withheld() {
+        use openalpaca_core::events::SystemEvent;
+        use openalpaca_core::tools::extensions::Moment;
+
+        let tmp = tempfile::tempdir().unwrap();
+        create_skill_dir(tmp.path(), "nightly-triage", MULTI_CAP_CRON_SKILL);
+        let catalog = Arc::new(catalog_from(tmp.path()));
+
+        let bus = EventBus::default();
+        let registry = registry_with_a_disabled_server(&bus);
+        catalog.set_availability_oracle(registry.clone());
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let gateway = Arc::new(Gateway::new(
+            Arc::new(SharedContext::new()),
+            Arc::new(LaneManager::new()),
+            Arc::new(StubHandler {
+                calls: calls.clone(),
+            }),
+            bus.clone(),
+            None,
+        ));
+
+        let mut rx = bus.subscribe();
+        spawn_timer_turn(
+            gateway,
+            catalog,
+            registry,
+            "junpei".to_string(),
+            "nightly-triage".to_string(),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "one wholly withheld capability skips the fire even though the other resolves"
+        );
+        let mut skips = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let SystemEvent::ExtensionCapabilityWithheld {
+                subject,
+                moment,
+                scope,
+                ..
+            } = event
+                && moment == Moment::ScheduledSkip
+            {
+                skips.push((subject, scope));
+            }
+        }
+        assert_eq!(skips.len(), 1, "got {skips:?}");
+        assert_eq!(skips[0].0, "github_issues");
+        assert_eq!(skips[0].1, "nightly-triage");
+    }
+
+    /// The same fire runs normally once the server is back.
+    #[tokio::test]
+    async fn a_cron_fire_runs_when_its_tools_are_served() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_skill_dir(tmp.path(), "nightly-filer", WITHHELD_CRON_SKILL);
+        let catalog = Arc::new(catalog_from(tmp.path()));
+
+        let bus = EventBus::default();
+        let registry = registry_with_a_disabled_server(&bus);
+        // Re-enable: E4 re-registers the tool, E5 restores the tombstones.
+        {
+            use openalpaca_core::tools::extensions::{ExtensionId, ExtensionState};
+            let ext = ExtensionId::mcp("github");
+            let ledger = registry.extensions();
+            ledger.restore(&ext);
+            ledger.upsert(&ext, true, ExtensionState::Enabled);
+        }
+        catalog.set_availability_oracle(registry.clone());
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let gateway = Arc::new(Gateway::new(
+            Arc::new(SharedContext::new()),
+            Arc::new(LaneManager::new()),
+            Arc::new(StubHandler {
+                calls: calls.clone(),
+            }),
+            bus.clone(),
+            None,
+        ));
+
+        spawn_timer_turn(
+            gateway,
+            catalog,
+            registry,
+            "junpei".to_string(),
+            "nightly-filer".to_string(),
+        );
+        for _ in 0..200 {
+            if !calls.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(calls.lock().unwrap().len(), 1);
     }
 
     #[test]

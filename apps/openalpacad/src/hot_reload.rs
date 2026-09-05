@@ -37,6 +37,9 @@ pub struct FileWatcherContext {
     pub llm_router: Option<Arc<openalpaca_llm::LlmRouter>>,
     pub secret_store: Arc<dyn openalpaca_llm::SecretStore>,
     pub skill_catalog: Arc<openalpaca_core::orchestrator::skill_catalog::SkillCatalog>,
+    /// The ENABLE axis's read side for the cron skip: a scheduled skill whose
+    /// requirement is wholly withheld is skipped, not fired (design §6.2 #13).
+    pub tool_registry: Arc<openalpaca_core::tools::ToolRegistry>,
     pub daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
     pub web_search_config: Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
     pub bus: EventBus,
@@ -82,6 +85,7 @@ pub fn spawn_file_watcher(
                     crate::scheduled_skills::spawn_timer_turn(
                         ctx.gateway.clone(),
                         ctx.skill_catalog.clone(),
+                        ctx.tool_registry.clone(),
                         ctx.local_user_id.clone(),
                         skill_id.to_string(),
                     );

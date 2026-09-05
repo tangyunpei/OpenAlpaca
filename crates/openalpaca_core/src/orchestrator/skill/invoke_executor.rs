@@ -198,6 +198,21 @@ impl SkillInvocationToolExecutor {
                 vec![]
             };
 
+        // **Fail closed — the total-loss refusal** (design §6.2 #10, §10
+        // case 3), the same predicate the top-level site applies, on both
+        // resolution branches. This path used to degrade in total silence:
+        // no warn, no event, and `sandbox_policy = None` beneath it.
+        let requirements = self
+            .tool_registry
+            .skill_requirements(&skill_doc.frontmatter);
+        if !requirements.is_satisfiable() {
+            tracing::warn!(
+                skill = skill_id,
+                "Refusing nested skill: a required capability is wholly withheld"
+            );
+            return Err(requirements.refusal(skill_id));
+        }
+
         // Apply the global deny list, mirroring the top-level path in invocation.rs.
         tool_defs.retain(|t| !self.global_tool_deny.contains(&t.name));
 
@@ -403,8 +418,8 @@ impl SkillInvocationToolExecutor {
                 agent_id: format!("skill:{}", skill_id),
                 // Closed set: the nested skill may call exactly the tools
                 // composed for it (this arm only runs when there are some).
-                allowed_capabilities: Allowlist::Only(
-                    tool_defs.iter().map(|t| t.name.clone()).collect(),
+                allowed_capabilities: Allowlist::only(
+                    tool_defs.iter().map(|t| t.name.as_str()),
                 ),
                 denied_capabilities: {
                     let mut denied: Vec<String> = child_tool_ctx
@@ -443,7 +458,7 @@ impl SkillInvocationToolExecutor {
             })
         };
 
-        let result = run_agentic_loop_routed(
+        let mut result = run_agentic_loop_routed(
             self.router.as_ref(),
             messages,
             tool_defs,
@@ -460,6 +475,12 @@ impl SkillInvocationToolExecutor {
             Some(cost_acc.clone()), // shared accumulator
         )
         .await;
+
+        // Partial loss runs and says so — the model named this skill, so the
+        // tool result carries the warning naming the extension (§10 case 3).
+        if let Some(prefix) = requirements.chat_prefix() {
+            result.final_content = format!("{prefix}{}", result.final_content);
+        }
 
         Ok(result)
     }

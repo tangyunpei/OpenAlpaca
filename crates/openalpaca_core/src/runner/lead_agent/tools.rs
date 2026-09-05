@@ -213,7 +213,23 @@ impl BuiltInTool for SpawnSubagentTool {
             .shared_context
             .agent_registry
             .spawn_instance(agent_id, self.task_id.clone())
-            .map_err(|e| format!("Cannot spawn agent '{}': {}", agent_id, e))?;
+            .map_err(|e| {
+                // A template a **disabled plugin** used to contribute is
+                // attributed to that plugin rather than reading as an unknown
+                // name (extension design §10 case 5(a)).
+                match self
+                    .shared_context
+                    .agent_registry
+                    .template_tombstone(agent_id)
+                {
+                    Some(plugin_id) => self.tool_registry.withdrawn_contribution_refusal(
+                        "Agent template",
+                        agent_id,
+                        &plugin_id,
+                    ),
+                    None => format!("Cannot spawn agent '{}': {}", agent_id, e),
+                }
+            })?;
         let instance_id = agent.id.clone();
         self.bus.publish(SystemEvent::AgentStatusChanged {
             agent_id: instance_id.clone(),
