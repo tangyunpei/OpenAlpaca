@@ -21,6 +21,7 @@ import { useGlobalKeys } from "@/components/shell";
 import { resetConnection } from "@/lib/connection";
 import { QueryProvider } from "@/lib/query-provider";
 import { useConfirmationStore } from "@/stores/confirmation";
+import { useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
 import ChatView from "./ChatView";
@@ -65,6 +66,8 @@ interface RecordedRequest {
   url: string;
   method: string;
   body: unknown;
+  /** Headers matter on the wire too: `x-workspace-path` is header-only. */
+  headers: Headers;
 }
 
 let requests: RecordedRequest[] = [];
@@ -82,6 +85,7 @@ function installFetch() {
       url,
       method,
       body: typeof rawBody === "string" ? JSON.parse(rawBody) : null,
+      headers: new Headers(init?.headers),
     });
 
     if (url.includes("/v1/chat/history")) {
@@ -168,6 +172,7 @@ beforeEach(() => {
   FakeEventSource.instances = [];
   resetConnection();
   useUiStore.setState({ ...initialUi, model: null, view: "chat" });
+  useProjectStore.setState({ path: null });
   vi.stubGlobal("EventSource", FakeEventSource);
   installFetch();
 });
@@ -404,5 +409,47 @@ describe("ChatView — density (§8.3)", () => {
     expect(
       screen.getByRole("button", { name: "Comfortable" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("ChatView — the chosen project (plan §4.7 item 2)", () => {
+  /** The one `POST /v1/chat` a send makes. */
+  function chatPost(): RecordedRequest {
+    const post = requests.find(
+      (request) =>
+        request.method === "POST" &&
+        request.url.includes("/v1/chat") &&
+        !request.url.includes("/v1/chat/history"),
+    );
+    if (post === undefined) throw new Error("no POST /v1/chat recorded");
+    return post;
+  }
+
+  it("sends no x-workspace-path when no project is chosen", async () => {
+    renderChat();
+    await sendMessage("hello");
+
+    expect(chatPost().headers.has("x-workspace-path")).toBe(false);
+  });
+
+  it("sends x-workspace-path when a project is chosen", async () => {
+    useProjectStore.setState({ path: "/Users/dev/openalpaca" });
+    renderChat();
+    await sendMessage("hello");
+
+    expect(chatPost().headers.get("x-workspace-path")).toBe(
+      "/Users/dev/openalpaca",
+    );
+  });
+
+  it("carries the project on a steered turn too — it is the same route", async () => {
+    useProjectStore.setState({ path: "/Users/dev/openalpaca" });
+    useUiStore.setState({ steerTargetRunId: "run-1", composerMode: "steer" });
+    renderChat();
+    await sendMessage("try the other branch");
+
+    const post = chatPost();
+    expect(post.body).toMatchObject({ content: "/steer try the other branch" });
+    expect(post.headers.get("x-workspace-path")).toBe("/Users/dev/openalpaca");
   });
 });

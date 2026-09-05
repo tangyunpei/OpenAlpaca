@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
 import SettingsView from "./SettingsView";
@@ -246,6 +247,8 @@ vi.mock("@/hooks/useEventHistory", async (importOriginal) => ({
 
 beforeEach(() => {
   useUiStore.setState({ settingsSectionId: "connection", toast: null });
+  useProjectStore.setState({ path: null });
+  localStorage.clear();
 });
 
 /** Nav items carry a trailing count, so match on the label prefix. */
@@ -339,5 +342,42 @@ describe("SettingsView (§2.5, §5.4)", () => {
     await open("Connectors");
     await open("Connect service");
     expect(useUiStore.getState().toast).toMatch(/no daemon route yet/);
+  });
+
+  /** Plan §4.7 item 2 — where the owner chooses the project the GUI sends. */
+  it("takes a project path and keeps it", async () => {
+    const user = userEvent.setup();
+    render(<SettingsView />);
+
+    await user.type(
+      screen.getByLabelText("Project path"),
+      "/Users/dev/openalpaca",
+    );
+    await user.click(screen.getByRole("button", { name: "Use" }));
+
+    expect(useProjectStore.getState().path).toBe("/Users/dev/openalpaca");
+    expect(useUiStore.getState().toast).toMatch(/Project set/);
+  });
+
+  it("refuses a relative path instead of sending one the daemon misreads", async () => {
+    const user = userEvent.setup();
+    render(<SettingsView />);
+
+    await user.type(screen.getByLabelText("Project path"), "code/app");
+
+    expect(screen.getByRole("button", { name: "Use" })).toBeDisabled();
+    expect(screen.getByText(/An absolute path, please/)).toBeInTheDocument();
+    expect(useProjectStore.getState().path).toBeNull();
+  });
+
+  it("clears back to no project", async () => {
+    const user = userEvent.setup();
+    useProjectStore.setState({ path: "/Users/dev/openalpaca" });
+    render(<SettingsView />);
+
+    await user.click(screen.getByRole("button", { name: "Clear" }));
+
+    expect(useProjectStore.getState().path).toBeNull();
+    expect(screen.getByText(/files go to the home store/)).toBeInTheDocument();
   });
 });

@@ -40,6 +40,7 @@ import { useServerEvent } from "@/hooks/useDaemonEvents";
 import { useTasks } from "@/hooks/useTasks";
 import type { ApprovalScope } from "@/lib/api/types";
 import { GAPS, gapNote } from "@/lib/unavailable";
+import { useProjectStore, workspaceOption } from "@/stores/project";
 import { useUiStore, type ComposerMode } from "@/stores/ui";
 
 import {
@@ -131,6 +132,9 @@ export function useChatSession(): ChatSession {
   const composerMode = useUiStore((s) => s.composerMode);
   const clearSteerTarget = useUiStore((s) => s.clearSteerTarget);
   const showToast = useUiStore((s) => s.showToast);
+  // §4.7 item 2: the project the turn belongs to, sent as `x-workspace-path`.
+  // `null` (no project chosen) sends no header at all.
+  const projectPath = useProjectStore((s) => s.path);
 
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<PendingTurn | null>(null);
@@ -323,7 +327,11 @@ export function useChatSession(): ChatSession {
     });
 
     void stream
-      .send({ content: sent, ...(model === null ? {} : { model }) })
+      .send({
+        content: sent,
+        ...(model === null ? {} : { model }),
+        ...workspaceOption(projectPath),
+      })
       .catch((error: unknown) => {
         setSendError(
           error instanceof Error ? error.message : "Could not reach the daemon",
@@ -344,6 +352,7 @@ export function useChatSession(): ChatSession {
     steer,
     stream,
     model,
+    projectPath,
     clearSteerTarget,
   ]);
 
