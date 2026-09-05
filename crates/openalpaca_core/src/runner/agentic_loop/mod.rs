@@ -11,7 +11,7 @@ pub use config::{LoopConfig, LoopFinishReason, LoopResult, StreamCallback};
 
 // Internal re-exports so the core loop and tests can access submodule items
 use backend::LlmBackend;
-pub(crate) use context::{compress_context, estimate_messages_tokens};
+pub(crate) use context::{compress_context, estimate_messages_tokens, estimate_tools_tokens};
 use tool_helpers::{format_tool_error, format_tool_error_with_hint, truncate_tool_result};
 #[cfg(test)]
 use tool_helpers::MAX_TOOL_RESULT_SIZE;
@@ -220,17 +220,7 @@ async fn run_agentic_loop_inner(
     // schemas on every Router retry attempt. `None` for Direct backend because
     // it uses `ChatRequest` which doesn't pass through `estimate_request_tokens`.
     let tools_token_estimate: Option<u32> = if backend.supports_retry() {
-        let tool_bytes: usize = tools_arc
-            .iter()
-            .map(|t| {
-                let base = t.description.len() + t.parameters.to_string().len();
-                let examples = t.input_examples.as_ref().map_or(0, |ex| {
-                    ex.iter().map(|e| e.to_string().len()).sum()
-                });
-                base + examples
-            })
-            .sum();
-        Some((tool_bytes / 4) as u32)
+        Some(estimate_tools_tokens(&tools_arc) as u32)
     } else {
         None
     };

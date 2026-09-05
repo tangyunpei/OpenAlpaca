@@ -519,7 +519,7 @@ impl Orchestrator {
             + composed.token_budget.dynamic_context_tokens)
             as usize;
         budget.register_section("system_prompt", system_prompt_tokens);
-        budget.register_section("tools", tools_for_loop.len() * 200);
+        budget.register_section("tools", crate::runner::estimate_tools_tokens(&tools_for_loop));
 
         let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
             // The messages vec came out of the compose engine above, which

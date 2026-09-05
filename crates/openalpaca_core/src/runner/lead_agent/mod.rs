@@ -481,7 +481,7 @@ pub async fn run_lead_agent(
                 &daemon_config.load().execution.context,
             );
         budget_snapshot.register_section("system_prompt", system_prompt_tokens);
-        budget_snapshot.register_section("tools", tools.len() * 200);
+        budget_snapshot.register_section("tools", crate::runner::estimate_tools_tokens(&tools));
 
         tracing::debug!(
             request_id = %request_id,
