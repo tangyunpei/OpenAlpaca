@@ -419,9 +419,9 @@ fn titles_for_returns_one_entry_per_known_id() {
     assert_eq!(titles.len(), 2, "a task that no longer exists is absent");
     assert_eq!(titles.get("t1").map(String::as_str), Some("Run one"));
     assert_eq!(titles.get("t3").map(String::as_str), Some("Run three"));
-    assert!(titles.get("gone").is_none());
+    assert!(!titles.contains_key("gone"));
     // t2 was not asked for.
-    assert!(titles.get("t2").is_none());
+    assert!(!titles.contains_key("t2"));
 }
 
 #[test]
