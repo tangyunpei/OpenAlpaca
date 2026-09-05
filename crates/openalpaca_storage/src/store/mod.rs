@@ -28,8 +28,8 @@ mod artifact;
 pub mod migrate;
 
 pub use artifact::{
-    artifact_extension, artifact_file_name, confine_to_root, loose_dir, run_dir, slugify,
-    upload_dir, upload_file_name, version_file_path,
+    artifact_extension, artifact_file_name, confine_to_root, leading_sequence, loose_dir, run_dir,
+    slugify, upload_dir, upload_file_name, version_file_path,
 };
 
 use anyhow::{Context, Result, bail};
@@ -299,6 +299,33 @@ pub fn content_dir(scope: &StoreScope, kind: ContentKind) -> Result<PathBuf> {
     fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create content directory: {}", dir.display()))?;
     Ok(dir)
+}
+
+/// The canonical-path string a content row records as its `project_root`;
+/// `None` is the home store, which is the address baseline (§4.8).
+///
+/// The one place a [`StoreScope`] becomes a stored address, so
+/// `COALESCE(project_root, '')` means the same thing to every writer.
+pub fn project_root_of(scope: &StoreScope) -> Result<Option<String>> {
+    match scope {
+        StoreScope::Home => Ok(None),
+        StoreScope::Project(root) => {
+            let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
+            Ok(Some(canonical.to_string_lossy().to_string()))
+        }
+    }
+}
+
+/// `path` relative to `root`, with `/` separators — the `rel_path` column.
+pub fn relative_to(root: &Path, path: &Path) -> Result<String> {
+    let rel = path
+        .strip_prefix(root)
+        .with_context(|| format!("{} is not under {}", path.display(), root.display()))?;
+    Ok(rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/"))
 }
 
 /// The layout version recorded in `<root>/.layout`, or `None` when the root

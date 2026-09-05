@@ -326,6 +326,17 @@ pub fn artifact_file_name(seq: u32, title: &str, ext: &str) -> String {
     format!("{seq:02}-{slug}.{ext}")
 }
 
+/// The `NN` of `NN-<slug>.<ext>` — the inverse of the sequence prefix
+/// [`artifact_file_name`] and [`upload_file_name`] write, and how a writer
+/// reads the next free sequence out of a directory's existing rows.
+pub fn leading_sequence(file_name: &str) -> Option<u32> {
+    let digits: String = file_name.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 /// `<run_dir>/.versions/<stem>/v<N>.<ext>`, where `stem` and `ext` are the
 /// head file's own file stem and extension.
 pub fn version_file_path(head_path: &Path, version: u32) -> Result<PathBuf> {

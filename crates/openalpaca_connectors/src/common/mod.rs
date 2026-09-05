@@ -2,6 +2,7 @@
 
 use openalpaca_core::gateway::ResolvedAttachment;
 use openalpaca_core::security::policy::Principal;
+use openalpaca_storage::store::StoreScope;
 use openalpaca_storage::{Database, IdentityRepository, NewUpload, UploadStore};
 
 /// Resolve a Principal from an external identity.
@@ -212,6 +213,11 @@ pub fn store_attachment(
             filename,
             mime_type,
             data,
+            // A chat attachment arrives with no project signal of any kind, so
+            // it takes the home store (D2). Nothing here may invent one from
+            // the daemon's working directory (R22).
+            scope: &StoreScope::Home,
+            created: chrono::Utc::now(),
         })
         .map_err(|e| format!("Failed to store attachment: {e}"))?;
 

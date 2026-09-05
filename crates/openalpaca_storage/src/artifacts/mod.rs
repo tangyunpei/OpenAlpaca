@@ -78,7 +78,7 @@ use crate::models::file_asset::FileAssetStatus;
 use crate::models::{ArtifactKind, ArtifactOrigin};
 use crate::store::{
     ContentKind, StoreScope, artifact_extension, artifact_file_name, confine_to_root, content_dir,
-    loose_dir, run_dir, version_file_path,
+    leading_sequence, loose_dir, project_root_of, relative_to, run_dir, version_file_path,
 };
 
 /// `[execution.artifacts] max_versions_per_artifact` (plan §4.6). The config key
@@ -1004,15 +1004,6 @@ fn dir_rows(conn: &Connection, project_key: &str, rel_dir: &str) -> Result<Vec<D
     Ok(out)
 }
 
-/// The `NN` of `NN-<slug>.<ext>`.
-fn leading_sequence(file_name: &str) -> Option<u32> {
-    let digits: String = file_name.chars().take_while(char::is_ascii_digit).collect();
-    if digits.is_empty() {
-        return None;
-    }
-    digits.parse().ok()
-}
-
 /// The §4.2 write protocol. Returns the `rel_path` under `.versions/` that the
 /// previous head now lives at, when there was a previous head — whether this
 /// call rotated it there or an interrupted earlier call already had.
@@ -1181,30 +1172,6 @@ fn artifacts_root_for(record: &ArtifactRecord) -> Result<PathBuf> {
         None => StoreScope::Home,
     };
     content_dir(&scope, ContentKind::Artifacts)
-}
-
-/// `path` relative to `root`, with `/` separators — the `rel_path` column.
-fn relative_to(root: &Path, path: &Path) -> Result<String> {
-    let rel = path
-        .strip_prefix(root)
-        .with_context(|| format!("{} is not under {}", path.display(), root.display()))?;
-    Ok(rel
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/"))
-}
-
-/// The canonical-path string §4.8 requires of every `project_root`; `None` is
-/// the home store, which is the address baseline.
-fn project_root_of(scope: &StoreScope) -> Result<Option<String>> {
-    match scope {
-        StoreScope::Home => Ok(None),
-        StoreScope::Project(root) => {
-            let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
-            Ok(Some(canonical.to_string_lossy().to_string()))
-        }
-    }
 }
 
 /// `file_assets.mime_type` is NOT NULL, so a caller that supplies none gets the

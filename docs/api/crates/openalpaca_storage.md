@@ -21,6 +21,7 @@
 - `models` (crates/openalpaca_storage/src/models/mod.rs)
 - `repository` (crates/openalpaca_storage/src/repository/mod.rs)
 - `store` (crates/openalpaca_storage/src/store/mod.rs)
+- `uploads` (crates/openalpaca_storage/src/uploads/mod.rs)
 
 ## Re-exports
 
@@ -39,6 +40,7 @@
 - `pub use models::SkillHealthMetrics;`
 - `pub use repository::{ AgentRepository, ConfigRepository, ConversationRepository, EventLogRepository, FileAssetRepository, FollowupRecord, FollowupRepository, IdentityRepository, LlmUsageRepository, MemoryRepository, MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository, SkillExecutionRepository, SubAgentRepository, TaskRepository, };`
 - `pub use repository::llm_usage::LlmUsageDaily;`
+- `pub use uploads::{NewUpload, StoredUpload, UploadError, UploadStore};`
 
 ## Related Links
 

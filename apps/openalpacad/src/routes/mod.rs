@@ -2,9 +2,10 @@
 
 use axum::{
     Json,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use openalpaca_core::memory::scope_context::MemoryScopeContext;
 use serde::Serialize;
 
 pub mod agents;
@@ -121,4 +122,32 @@ pub(crate) fn api_error(status: StatusCode, code: &str, message: impl Into<Strin
         }),
     )
         .into_response()
+}
+
+// ── The request's project (plan §4.7) ────────────────────────────────────
+//
+// Two routes now ask the same question of the same header — `GET /v1/status`
+// reports where a turn's files would land, `POST /v1/files/upload` puts an
+// upload there — so the header name and the resolution rule live here once.
+
+/// The `x-workspace-path` header `/v1/chat` reads (`routes/chat.rs`), and the
+/// same value the CLI sends as `workspace_path` on `/v1/command`.
+pub(crate) fn workspace_header(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-workspace-path")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
+/// Resolve a client-sent workspace path the way a chat turn would.
+///
+/// One resolver, no second opinion: `MemoryScopeContext::for_request` owns the
+/// rule (marker walk, canonicalisation, and the `$HOME`-is-not-a-project fold),
+/// so a route never resolves a header a second way. `None` — no header, a path
+/// under no marker, or one that resolves to the home store — means *no
+/// project*, and content placement falls back to the home store. Never the
+/// daemon's working directory (ruling R22).
+pub(crate) fn request_project_root(workspace_path: Option<&str>) -> Option<String> {
+    let path = workspace_path?;
+    MemoryScopeContext::for_request(Some(path)).request_workspace_root
 }

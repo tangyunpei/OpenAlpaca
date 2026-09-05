@@ -28,11 +28,12 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use openalpaca_core::memory::scope_context::MemoryScopeContext;
 use openalpaca_storage::store;
 use serde::Serialize;
 
-use super::api_error;
+// The header reader and the resolver are shared with `POST /v1/files/upload`
+// (`routes/mod.rs`): one header name, one resolver, two consumers.
+use super::{api_error, request_project_root, workspace_header};
 
 /// The `GET /v1/status` body. Phase 8 adds fields; it never renames these.
 #[derive(Debug, Serialize)]
@@ -67,7 +68,7 @@ pub async fn status_handler(headers: HeaderMap) -> Response {
         home_root,
         state_dir,
         db_path,
-        project_root: resolve_project_root(workspace_header(&headers).as_deref()),
+        project_root: request_project_root(workspace_header(&headers).as_deref()),
     };
     (StatusCode::OK, Json(body)).into_response()
 }
@@ -88,25 +89,6 @@ fn store_roots() -> anyhow::Result<(String, String, String)> {
 
 fn display(path: std::path::PathBuf) -> String {
     path.to_string_lossy().into_owned()
-}
-
-/// The same header `/v1/chat` reads (`routes/chat.rs`), and the same name the
-/// CLI sends as `workspace_path` on `/v1/command`.
-fn workspace_header(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-workspace-path")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-}
-
-/// Resolve a client-sent path the way a chat turn would.
-///
-/// One resolver, no second opinion: `for_request` owns the rule (marker walk,
-/// canonicalisation, and the `$HOME`-is-not-a-project fold), so the path this
-/// route reports is the path an `artifact_write` on that turn would use.
-fn resolve_project_root(workspace_path: Option<&str>) -> Option<String> {
-    let path = workspace_path?;
-    MemoryScopeContext::for_request(Some(path)).request_workspace_root
 }
 
 #[cfg(test)]

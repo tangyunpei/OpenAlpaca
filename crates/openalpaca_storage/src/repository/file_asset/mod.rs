@@ -4,6 +4,35 @@ use crate::Database;
 use crate::models::file_asset::{FileAsset, FileAssetStatus};
 use anyhow::Result;
 
+/// The `file_assets` columns every [`FileAsset`] read selects, in the order
+/// [`row_to_file_asset`] expects.
+///
+/// Named explicitly, never `SELECT *`, so the artifact-store columns migration
+/// 036 added (`origin`, `kind`, `project_root`, …) can never shift these
+/// indexes. Shared with [`crate::uploads::UploadStore`], which reads a row back
+/// inside its own transaction and so cannot go through this repository.
+pub(crate) const FILE_ASSET_COLUMNS: &str = "id, owner_id, sha256, filename, mime_type, size_bytes, storage_path, status, extracted_text, extract_error, metadata_json, created_at, updated_at";
+
+/// One row of [`FILE_ASSET_COLUMNS`] as a [`FileAsset`].
+pub(crate) fn row_to_file_asset(row: &rusqlite::Row<'_>) -> Result<FileAsset> {
+    let status_str: String = row.get(7)?;
+    Ok(FileAsset {
+        id: row.get(0)?,
+        owner_id: row.get(1)?,
+        sha256: row.get(2)?,
+        filename: row.get(3)?,
+        mime_type: row.get(4)?,
+        size_bytes: row.get(5)?,
+        storage_path: row.get(6)?,
+        status: FileAssetStatus::parse(&status_str),
+        extracted_text: row.get(8)?,
+        extract_error: row.get(9)?,
+        metadata_json: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
 pub struct FileAssetRepository<'a> {
     db: &'a Database,
 }
@@ -30,13 +59,12 @@ impl<'a> FileAssetRepository<'a> {
 
     pub fn get_by_id(&self, id: &str) -> Result<Option<FileAsset>> {
         self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, owner_id, sha256, filename, mime_type, size_bytes, storage_path, status, extracted_text, extract_error, metadata_json, created_at, updated_at
-                 FROM file_assets WHERE id = ?1",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {FILE_ASSET_COLUMNS} FROM file_assets WHERE id = ?1"
+            ))?;
             let mut rows = stmt.query(rusqlite::params![id])?;
             match rows.next()? {
-                Some(row) => Ok(Some(Self::row_to_asset(row)?)),
+                Some(row) => Ok(Some(row_to_file_asset(row)?)),
                 None => Ok(None),
             }
         })
@@ -44,13 +72,12 @@ impl<'a> FileAssetRepository<'a> {
 
     pub fn get_by_sha256(&self, sha256: &str) -> Result<Option<FileAsset>> {
         self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, owner_id, sha256, filename, mime_type, size_bytes, storage_path, status, extracted_text, extract_error, metadata_json, created_at, updated_at
-                 FROM file_assets WHERE sha256 = ?1 LIMIT 1",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {FILE_ASSET_COLUMNS} FROM file_assets WHERE sha256 = ?1 LIMIT 1"
+            ))?;
             let mut rows = stmt.query(rusqlite::params![sha256])?;
             match rows.next()? {
-                Some(row) => Ok(Some(Self::row_to_asset(row)?)),
+                Some(row) => Ok(Some(row_to_file_asset(row)?)),
                 None => Ok(None),
             }
         })
@@ -105,6 +132,8 @@ impl<'a> FileAssetRepository<'a> {
     /// user asked to keep. Neither is ever garbage-collected.
     pub fn list_orphaned(&self, older_than_hours: i64) -> Result<Vec<FileAsset>> {
         self.db.with_connection(|conn| {
+            // [`FILE_ASSET_COLUMNS`] in the same order, table-qualified for the
+            // join — the one read that cannot use the bare constant.
             let mut stmt = conn.prepare(
                 "SELECT f.id, f.owner_id, f.sha256, f.filename, f.mime_type, f.size_bytes, f.storage_path, f.status, f.extracted_text, f.extract_error, f.metadata_json, f.created_at, f.updated_at
                  FROM file_assets f
@@ -119,7 +148,7 @@ impl<'a> FileAssetRepository<'a> {
             let mut assets = Vec::new();
             let mut rows = stmt.query(rusqlite::params![hours_param])?;
             while let Some(row) = rows.next()? {
-                assets.push(Self::row_to_asset(row)?);
+                assets.push(row_to_file_asset(row)?);
             }
             Ok(assets)
         })
@@ -146,14 +175,14 @@ impl<'a> FileAssetRepository<'a> {
     /// List file assets by status, ordered by creation date (oldest first).
     pub fn list_by_status(&self, status: &FileAssetStatus, limit: usize) -> Result<Vec<FileAsset>> {
         self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, owner_id, sha256, filename, mime_type, size_bytes, storage_path, status, extracted_text, extract_error, metadata_json, created_at, updated_at
-                 FROM file_assets WHERE status = ?1 ORDER BY created_at ASC LIMIT ?2",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {FILE_ASSET_COLUMNS} FROM file_assets
+                 WHERE status = ?1 ORDER BY created_at ASC LIMIT ?2"
+            ))?;
             let mut assets = Vec::new();
             let mut rows = stmt.query(rusqlite::params![status.as_str(), limit as i64])?;
             while let Some(row) = rows.next()? {
-                assets.push(Self::row_to_asset(row)?);
+                assets.push(row_to_file_asset(row)?);
             }
             Ok(assets)
         })
@@ -174,28 +203,6 @@ impl<'a> FileAssetRepository<'a> {
                 results.push((row.get(0)?, row.get(1)?, row.get(2)?));
             }
             Ok(results)
-        })
-    }
-
-    /// Every read above names its columns explicitly, so the artifact-store
-    /// columns migration 036 adds (`origin`, `kind`, `project_root`, …) never
-    /// shift these indexes.
-    fn row_to_asset(row: &rusqlite::Row<'_>) -> Result<FileAsset> {
-        let status_str: String = row.get(7)?;
-        Ok(FileAsset {
-            id: row.get(0)?,
-            owner_id: row.get(1)?,
-            sha256: row.get(2)?,
-            filename: row.get(3)?,
-            mime_type: row.get(4)?,
-            size_bytes: row.get(5)?,
-            storage_path: row.get(6)?,
-            status: FileAssetStatus::parse(&status_str),
-            extracted_text: row.get(8)?,
-            extract_error: row.get(9)?,
-            metadata_json: row.get(10)?,
-            created_at: row.get(11)?,
-            updated_at: row.get(12)?,
         })
     }
 }

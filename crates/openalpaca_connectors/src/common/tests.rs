@@ -242,20 +242,32 @@ mod attachments {
             .expect("store_attachment")
     }
 
+    /// D2: a connector attachment has no project signal, so its bytes take the
+    /// home store — `<home>/uploads/<YYYY-MM-DD>/NN-<slug>.<ext>`, never the
+    /// daemon's working directory.
     #[test]
-    fn an_attachment_is_written_through_the_shared_writer() {
+    fn an_attachment_lands_in_the_home_store_uploads() {
         let home = tempdir().unwrap();
-        let _guard = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+        let home_root = home.path().canonicalize().unwrap();
+        let _guard = HomeStoreGuard::set(&home_root);
         let db = test_db();
 
-        let attachment = store(&db, "owner-1", "photo-notes.txt", b"hello");
+        let attachment = store(&db, "owner-1", "Photo Notes.TXT", b"hello");
 
-        assert_eq!(attachment.filename, "photo-notes.txt");
-        assert_eq!(attachment.size_bytes, 5);
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let expected = home_root
+            .join("uploads")
+            .join(&today)
+            .join("01-photo-notes.txt");
         assert_eq!(
-            std::fs::read(&attachment.storage_path).expect("the bytes are on disk"),
-            b"hello"
+            std::path::PathBuf::from(&attachment.storage_path),
+            expected,
+            "a connector attachment takes the home store"
         );
+        assert_eq!(std::fs::read(&expected).unwrap(), b"hello");
+        // The name the user sees is the one they sent; only the file is slugified.
+        assert_eq!(attachment.filename, "Photo Notes.TXT");
+        assert_eq!(attachment.size_bytes, 5);
         // The row is the writer's, and it counts as upload traffic.
         let repo = openalpaca_storage::FileAssetRepository::new(&db);
         let row = repo.get_by_id(&attachment.file_id).unwrap().expect("row");

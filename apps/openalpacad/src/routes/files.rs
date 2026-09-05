@@ -12,16 +12,36 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
 };
+use chrono::Utc;
+use openalpaca_storage::store::StoreScope;
 use openalpaca_storage::{FileAssetRepository, NewUpload, UploadError, UploadStore};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::io::ReaderStream;
 
 use super::files_types::*;
 use crate::AppState;
 
+/// The store an upload's bytes belong to (D2).
+///
+/// The request's project when the client named one — resolved through
+/// `MemoryScopeContext::for_request`, the same single resolver `/v1/chat` and
+/// `/v1/status` use, never a second reading of the header — and the home store
+/// otherwise. "Otherwise" covers every client that chose no project, a path
+/// under no project marker, and `$HOME` itself, which is not a project. It also
+/// covers every connector attachment, which reaches `UploadStore` without ever
+/// passing through here and always takes [`StoreScope::Home`].
+fn upload_scope(headers: &HeaderMap) -> StoreScope {
+    match super::request_project_root(super::workspace_header(headers).as_deref()) {
+        Some(root) => StoreScope::Project(PathBuf::from(root)),
+        None => StoreScope::Home,
+    }
+}
+
 /// POST /v1/files/upload — Multipart file upload
 pub async fn upload_file_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
     let config = state.daemon_config.load();
@@ -163,9 +183,11 @@ pub async fn upload_file_handler(
 
     // One writer: hashing, the owner-scoped sha256 dedup, placement and the row
     // all live in `UploadStore`, which the connector attachment path shares —
-    // so upload placement can never mean two different things (D2).
+    // so upload placement can never mean two different things (D2). The bytes
+    // land at `<store>/uploads/<YYYY-MM-DD>/NN-<slug>.<ext>`.
     //
     // It writes files and talks to SQLite, so it runs on the blocking pool.
+    let scope = upload_scope(&headers);
     let writer_state = state.clone();
     let owner_id = state.local_user_id.clone();
     let write_name = filename.clone();
@@ -176,6 +198,8 @@ pub async fn upload_file_handler(
             filename: &write_name,
             mime_type: &write_mime,
             data: &data,
+            scope: &scope,
+            created: Utc::now(),
         })
     })
     .await;
@@ -552,6 +576,84 @@ mod tests {
             .expect("read response body");
         let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
         assert_eq!(payload["error"]["code"], "OPEN_FAILED");
+    }
+
+    // --- D2: which store an upload lands in ---
+    //
+    // The placement itself is `UploadStore`'s, tested in
+    // `openalpaca_storage::uploads`. What belongs to the route is the one thing
+    // it decides: the scope, read from `x-workspace-path` through the single
+    // resolver.
+
+    fn headers_with(path: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        if let Some(path) = path {
+            headers.insert("x-workspace-path", path.parse().unwrap());
+        }
+        headers
+    }
+
+    #[test]
+    fn upload_scope_is_the_project_the_request_names() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let root = tmp.path().canonicalize().expect("canonicalize");
+        let _guard = crate::test_util::HomeStoreGuard::set(&root.join("home").join(".openalpaca"));
+
+        let project = root.join("checkout");
+        std::fs::create_dir(&project).expect("create project");
+        std::fs::create_dir(project.join(".git")).expect("create marker");
+        let nested = project.join("crates").join("core");
+        std::fs::create_dir_all(&nested).expect("create nested");
+
+        // A path *inside* the project resolves up to the project root — the same
+        // marker walk a chat turn does, so an upload lands where that turn's
+        // artifacts would.
+        assert_eq!(
+            upload_scope(&headers_with(nested.to_str())),
+            StoreScope::Project(project)
+        );
+    }
+
+    #[test]
+    fn upload_scope_without_a_header_is_the_home_store() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let root = tmp.path().canonicalize().expect("canonicalize");
+        let _guard = crate::test_util::HomeStoreGuard::set(&root.join("home").join(".openalpaca"));
+
+        // No header at all — every client that chose no project, and the shape
+        // every connector attachment reaches the writer with.
+        assert_eq!(upload_scope(&headers_with(None)), StoreScope::Home);
+    }
+
+    #[test]
+    fn upload_scope_for_a_path_under_no_marker_is_the_home_store() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let root = tmp.path().canonicalize().expect("canonicalize");
+        let _guard = crate::test_util::HomeStoreGuard::set(&root.join("home").join(".openalpaca"));
+
+        let loose = root.join("Downloads");
+        std::fs::create_dir(&loose).expect("create dir");
+        assert_eq!(upload_scope(&headers_with(loose.to_str())), StoreScope::Home);
+    }
+
+    /// `$HOME` is not a project: a header pointing anywhere under it with no
+    /// closer marker resolves to `$HOME`, whose "project store" *is* the home
+    /// store. It must fold to `Home`, or a stray header would claim the whole
+    /// home directory as a project.
+    #[test]
+    fn upload_scope_for_a_path_resolving_to_the_home_store_is_the_home_store() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let home = tmp.path().canonicalize().expect("canonicalize").join("home");
+        std::fs::create_dir(&home).expect("create home");
+        std::fs::create_dir(home.join(".openalpaca")).expect("create store");
+        let _guard = crate::test_util::HomeStoreGuard::set(&home.join(".openalpaca"));
+
+        let documents = home.join("Documents");
+        std::fs::create_dir(&documents).expect("create dir");
+        assert_eq!(
+            upload_scope(&headers_with(documents.to_str())),
+            StoreScope::Home
+        );
     }
 
     #[test]
