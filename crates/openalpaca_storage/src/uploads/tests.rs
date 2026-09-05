@@ -75,11 +75,22 @@ impl Fixture {
     }
 
     fn put_in(&self, scope: &StoreScope, owner: &str, filename: &str, data: &[u8]) -> StoredUpload {
+        self.put_typed(scope, owner, filename, "text/plain", data)
+    }
+
+    fn put_typed(
+        &self,
+        scope: &StoreScope,
+        owner: &str,
+        filename: &str,
+        mime_type: &str,
+        data: &[u8],
+    ) -> StoredUpload {
         self.store()
             .put(NewUpload {
                 owner_id: owner,
                 filename,
-                mime_type: "text/plain",
+                mime_type,
                 data,
                 scope,
                 created: day(),
@@ -99,6 +110,19 @@ impl Fixture {
                     "SELECT project_root, rel_path FROM file_assets WHERE id = ?1",
                     rusqlite::params![id],
                     |row| Ok((row.get(0)?, row.get(1)?)),
+                )?)
+            })
+            .unwrap()
+    }
+
+    /// `file_assets.kind` — nullable in the schema, so the accessor is too.
+    fn kind(&self, id: &str) -> Option<String> {
+        self.db
+            .with_connection(|conn| {
+                Ok(conn.query_row(
+                    "SELECT kind FROM file_assets WHERE id = ?1",
+                    rusqlite::params![id],
+                    |row| row.get(0),
                 )?)
             })
             .unwrap()
@@ -579,4 +603,52 @@ fn a_second_upload_of_different_bytes_gets_its_own_row() {
         std::fs::read(&second.asset.storage_path).unwrap(),
         b"goodbye"
     );
+}
+
+// ============================================================================
+// The classification columns (R25)
+// ============================================================================
+
+/// `kind` is written on insert, projected from the upload's own MIME type, so
+/// `GET /v1/artifacts` never hands the client the `null` its `Artifact` type
+/// forbids. Before R25 this column was NULL for *every* upload row.
+#[test]
+fn an_upload_stores_the_kind_its_mime_projects_to() {
+    let fx = Fixture::new();
+
+    for (mime, filename, expected) in [
+        ("text/csv", "rows.csv", "table"),
+        ("image/png", "shot.png", "image"),
+        ("text/html", "page.html", "html"),
+        ("text/markdown", "notes.md", "markdown"),
+        ("application/pdf", "report.pdf", "binary"),
+    ] {
+        let stored = fx.put_typed(
+            &StoreScope::Home,
+            "owner-1",
+            filename,
+            mime,
+            filename.as_bytes(),
+        );
+        assert_eq!(
+            fx.kind(&stored.asset.id).as_deref(),
+            Some(expected),
+            "{mime} should store kind {expected}"
+        );
+    }
+}
+
+/// The same on a project-scoped upload — placement and classification are
+/// independent, and neither writer may leave the column NULL.
+#[test]
+fn a_project_scoped_upload_stores_its_kind_too() {
+    let fx = Fixture::new();
+    let stored = fx.put_typed(
+        &fx.project_scope(),
+        "owner-1",
+        "data.json",
+        "application/json",
+        b"{}",
+    );
+    assert_eq!(fx.kind(&stored.asset.id).as_deref(), Some("code"));
 }

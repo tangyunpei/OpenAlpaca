@@ -14,7 +14,9 @@ use axum::body::to_bytes;
 use axum::http::header::AUTHORIZATION;
 use chrono::Utc;
 use openalpaca_storage::store::StoreScope;
-use openalpaca_storage::{ArtifactRecord, ArtifactStore, Database, NewArtifact};
+use openalpaca_storage::{
+    ArtifactRecord, ArtifactStore, Database, NewArtifact, NewUpload, UploadStore,
+};
 use tempfile::TempDir;
 
 use crate::test_util::HomeStoreGuard;
@@ -87,6 +89,51 @@ impl Fixture {
         let mut new = NewArtifact::new(owner, &scope, ArtifactKind::Markdown, title, body.as_bytes());
         new.note = note;
         ArtifactStore::new(&self.db).put(new).expect("put").0
+    }
+
+    /// One upload, written by the *other* writer — `UploadStore` — so its
+    /// `kind` is whatever R25's projection made of the MIME type the client
+    /// sent, not something an agent declared.
+    fn upload(&self, owner: &str, filename: &str, mime: &str) -> String {
+        let scope = self.scope();
+        UploadStore::new(&self.db)
+            .put(NewUpload {
+                owner_id: owner,
+                filename,
+                mime_type: mime,
+                data: filename.as_bytes(),
+                scope: &scope,
+                created: Utc::now(),
+            })
+            .expect("put upload")
+            .asset
+            .id
+    }
+
+    /// Rows inserted straight into `file_assets`, bypassing both writers: the
+    /// shape of a row that predates migration 036 — `kind` NULL, no `rel_path`
+    /// — and the cheapest way to fill a page. Returns the ids in insert order.
+    fn null_kind_rows(&self, owner: &str, mime: &str, count: usize) -> Vec<String> {
+        let ids: Vec<String> = (0..count).map(|n| format!("raw-{n:05}")).collect();
+        self.db
+            .with_connection(|conn| {
+                let tx = conn.unchecked_transaction()?;
+                for (n, id) in ids.iter().enumerate() {
+                    let filename = format!("raw-{n}.dat");
+                    let path = format!("/nonexistent/{filename}");
+                    tx.execute(
+                        "INSERT INTO file_assets
+                            (id, owner_id, sha256, filename, mime_type, size_bytes,
+                             storage_path, status)
+                         VALUES (?1, ?2, 'sha', ?3, ?4, 0, ?5, 'uploaded')",
+                        [id.as_str(), owner, &filename, mime, &path],
+                    )?;
+                }
+                tx.commit()?;
+                Ok(())
+            })
+            .expect("insert rows with no kind");
+        ids
     }
 
     fn record(&self, id: &str, owner: &str) -> ArtifactRecord {
@@ -437,6 +484,48 @@ async fn the_row_is_a_superset_of_the_client_artifact_type() {
         f.project.path().canonicalize().unwrap().to_string_lossy().as_ref()
     );
     assert_eq!(body["rel_path"], row.rel_path.clone().unwrap());
+}
+
+/// R25: an upload is one of the two origins `/v1/artifacts` lists by default,
+/// and its `kind` comes from the MIME type the writer classified it by — not
+/// the `null` the client's `Artifact` type forbids.
+#[tokio::test]
+async fn an_uploads_row_carries_the_kind_its_mime_projects_to() {
+    let f = Fixture::new();
+    let id = f.upload(OWNER, "rows.csv", "text/csv");
+
+    let (status, body) = split(get_artifact(&f.db, OWNER, &id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["origin"], "upload");
+    assert_eq!(body["kind"], "table");
+
+    let (_, body) = split(list_artifacts(&f.db, OWNER, ListArtifactsParams::default())).await;
+    assert_eq!(body["artifacts"][0]["kind"], "table");
+}
+
+/// R25's read half: a row whose stored `kind` is NULL — one that predates
+/// migration 036, or an upload written before the writer classified them — is
+/// projected from its `mime_type` at the route, so no page can hand the client
+/// a `kind` of `null`.
+#[tokio::test]
+async fn a_row_with_no_stored_kind_still_serialises_one_from_its_mime() {
+    let f = Fixture::new();
+    let id = f.null_kind_rows(OWNER, "text/html", 1).remove(0);
+    assert!(
+        f.record(&id, OWNER).kind.is_none(),
+        "the column really is NULL — the projection is the route's, not the store's"
+    );
+
+    let (status, body) = split(get_artifact(&f.db, OWNER, &id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["kind"], "html");
+
+    let (_, body) = split(list_artifacts(&f.db, OWNER, ListArtifactsParams::default())).await;
+    assert!(
+        !body["artifacts"][0]["kind"].is_null(),
+        "`kind` is never null on the wire"
+    );
+    assert_eq!(body["artifacts"][0]["kind"], "html");
 }
 
 #[tokio::test]

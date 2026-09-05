@@ -85,8 +85,8 @@ use rusqlite::Connection;
 
 use crate::Database;
 use crate::content_io::{fsync_dir, remove_best_effort, sha256_hex};
-use crate::models::ArtifactOrigin;
 use crate::models::file_asset::{FileAsset, FileAssetStatus};
+use crate::models::{ArtifactKind, ArtifactOrigin};
 use crate::repository::file_asset::{FILE_ASSET_COLUMNS, row_to_file_asset};
 use crate::store::{
     ContentKind, StoreScope, confine_to_root, content_dir, leading_sequence, project_root_at,
@@ -250,8 +250,8 @@ impl<'a> UploadStore<'a> {
             let insert = tx.execute(
                 "INSERT INTO file_assets
                     (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path,
-                     status, origin, project_root, rel_path)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                     status, origin, kind, project_root, rel_path)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 rusqlite::params![
                     id,
                     new.owner_id,
@@ -263,6 +263,10 @@ impl<'a> UploadStore<'a> {
                     // Uploaded bytes still owe the background extractor a pass.
                     FileAssetStatus::Uploaded.as_str(),
                     ArtifactOrigin::Upload.as_str(),
+                    // R25: an upload has no kind of its own, so its MIME type
+                    // decides one here rather than leaving the column NULL for
+                    // the read side to explain away.
+                    ArtifactKind::for_mime(new.mime_type).as_str(),
                     project_root,
                     rel_path,
                 ],

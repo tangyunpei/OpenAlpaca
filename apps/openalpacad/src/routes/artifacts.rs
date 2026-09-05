@@ -146,14 +146,21 @@ fn visible(db: &Database, owner_id: &str, id: &str) -> Result<ArtifactRecord, Re
 /// One `Artifact`: the client's type (`unbacked.ts:39-56`) plus the additive
 /// `origin`, `pinned`, `missing`, `path`, `project_root` and `rel_path`.
 ///
-/// `kind` is the stored snake_case spelling and `null` for a legacy row that
-/// predates migration 036; `metadata` is `metadata_json` *parsed*, so a client
-/// never has to `JSON.parse` a string field.
+/// `kind` is the stored snake_case spelling; a row whose column is NULL — one
+/// that predates migration 036, or an upload written before R25 taught the
+/// upload writer to classify one — is projected from its own `mime_type`
+/// ([`ArtifactKind::for_mime`]), so this field is never `null` on the wire and
+/// the client's non-nullable `ArtifactKind` holds. `metadata` is
+/// `metadata_json` *parsed*, so a client never has to `JSON.parse` a string
+/// field.
 fn artifact_json(record: &ArtifactRecord, task_title: Option<&str>) -> serde_json::Value {
     serde_json::json!({
         "id": record.id,
         "name": record.name,
-        "kind": record.kind.map(|k| k.as_str()),
+        "kind": record
+            .kind
+            .unwrap_or_else(|| ArtifactKind::for_mime(&record.mime_type))
+            .as_str(),
         "mime_type": record.mime_type,
         "size_bytes": record.size_bytes,
         "task_id": record.task_id,

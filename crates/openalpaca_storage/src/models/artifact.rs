@@ -8,6 +8,26 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Structured-data and source MIME types outside `text/*` that still render as
+/// code ([`ArtifactKind::for_mime`]). Everything neither listed here nor
+/// `text/*` — archives, office documents, media, `application/octet-stream` —
+/// is `binary`.
+const CODE_MIME_TYPES: &[&str] = &[
+    "application/json",
+    "application/ld+json",
+    "application/yaml",
+    "application/x-yaml",
+    "application/toml",
+    "application/x-toml",
+    "application/xml",
+    "application/javascript",
+    "application/ecmascript",
+    "application/typescript",
+    "application/sql",
+    "application/x-python-code",
+    "application/x-sh",
+];
+
 /// How a client renders an artifact's content.
 ///
 /// Stored in `file_assets.kind`; NULL for legacy uploads that predate 036.
@@ -36,6 +56,39 @@ impl ArtifactKind {
             Self::Image => "image",
             Self::Html => "html",
             Self::Binary => "binary",
+        }
+    }
+
+    /// The kind a MIME type projects to (R25).
+    ///
+    /// Two callers, one map: [`crate::UploadStore::put`] stores it on insert —
+    /// an upload arrives with a MIME type and no kind of its own — and the
+    /// artifact routes fall back to it for a row whose stored `kind` is NULL
+    /// (a pre-036 row, or an upload written before R25), so `kind` is never
+    /// `null` on the wire while the client types it non-nullable.
+    ///
+    /// Total by construction: an unrecognised type is `binary`, the kind that
+    /// promises the least about how the bytes render. `image/*` is matched by
+    /// prefix; the three MIME types a browser executes script from are *not*
+    /// special here — sandboxing them is the content response's job, not the
+    /// classification's.
+    pub fn for_mime(mime: &str) -> Self {
+        let essence = mime
+            .split(';')
+            .next()
+            .unwrap_or(mime)
+            .trim()
+            .to_ascii_lowercase();
+        if essence.starts_with("image/") {
+            return Self::Image;
+        }
+        match essence.as_str() {
+            "text/html" | "application/xhtml+xml" => Self::Html,
+            "text/markdown" | "text/x-markdown" => Self::Markdown,
+            "text/csv" | "text/tab-separated-values" => Self::Table,
+            other if other.starts_with("text/") => Self::Code,
+            other if CODE_MIME_TYPES.contains(&other) => Self::Code,
+            _ => Self::Binary,
         }
     }
 
@@ -116,6 +169,70 @@ mod tests {
                 kind,
                 "{spelling} should survive a JSON round trip"
             );
+        }
+    }
+
+    /// R25: the MIME → kind projection the upload writer stores on insert and
+    /// the artifact routes fall back to, so `kind` is never `null` on the wire.
+    #[test]
+    fn artifact_kind_for_mime_follows_the_r25_table() {
+        for (mime, expected) in [
+            ("image/png", ArtifactKind::Image),
+            ("image/jpeg", ArtifactKind::Image),
+            // Active content, but still an image as far as rendering goes —
+            // the sandboxing of it is the content response's job, not `kind`'s.
+            ("image/svg+xml", ArtifactKind::Image),
+            ("text/html", ArtifactKind::Html),
+            ("application/xhtml+xml", ArtifactKind::Html),
+            ("text/markdown", ArtifactKind::Markdown),
+            ("text/x-markdown", ArtifactKind::Markdown),
+            ("text/csv", ArtifactKind::Table),
+            ("text/tab-separated-values", ArtifactKind::Table),
+            ("text/plain", ArtifactKind::Code),
+            ("text/x-python", ArtifactKind::Code),
+            ("text/yaml", ArtifactKind::Code),
+            ("application/json", ArtifactKind::Code),
+            ("application/yaml", ArtifactKind::Code),
+            ("application/toml", ArtifactKind::Code),
+            ("application/xml", ArtifactKind::Code),
+            ("application/javascript", ArtifactKind::Code),
+            ("application/pdf", ArtifactKind::Binary),
+            ("application/zip", ArtifactKind::Binary),
+            ("application/octet-stream", ArtifactKind::Binary),
+            ("audio/mpeg", ArtifactKind::Binary),
+            ("", ArtifactKind::Binary),
+        ] {
+            assert_eq!(ArtifactKind::for_mime(mime), expected, "mime {mime:?}");
+        }
+    }
+
+    #[test]
+    fn artifact_kind_for_mime_ignores_parameters_and_case() {
+        assert_eq!(
+            ArtifactKind::for_mime("text/HTML; charset=utf-8"),
+            ArtifactKind::Html
+        );
+        assert_eq!(
+            ArtifactKind::for_mime("  text/markdown  "),
+            ArtifactKind::Markdown
+        );
+    }
+
+    /// Whatever the mime, the projection is a spelling the client's union
+    /// declares — a `kind` derived at read time is as valid as a stored one.
+    #[test]
+    fn artifact_kind_for_mime_only_ever_yields_a_gui_spelling() {
+        for mime in [
+            "image/png",
+            "text/html",
+            "text/markdown",
+            "text/csv",
+            "text/plain",
+            "application/json",
+            "application/octet-stream",
+            "nonsense",
+        ] {
+            assert!(GUI_KINDS.contains(&ArtifactKind::for_mime(mime).as_str()));
         }
     }
 
