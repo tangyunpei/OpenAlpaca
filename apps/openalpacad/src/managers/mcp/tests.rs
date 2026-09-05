@@ -18,6 +18,8 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::sync::MutexGuard;
 
+use openalpaca_core::agent::AgentRegistry;
+use openalpaca_core::orchestrator::skill_catalog::SkillCatalog;
 use openalpaca_core::tools::registry::ToolBackend;
 use tempfile::TempDir;
 
@@ -248,43 +250,104 @@ done
 struct Harness {
     _home: TempDir,
     _env: HomeStoreGuard,
+    _skills_dir: TempDir,
     dir: TempDir,
     config_path: PathBuf,
     registry: Arc<ToolRegistry>,
     supervisor: Arc<McpSupervisor>,
     bus: EventBus,
+    agents: Arc<AgentRegistry>,
+    skills: Arc<SkillCatalog>,
 }
+
+/// The default lane every harness scan writes its notice to.
+const NOTICE_LANE: &str = "owner:gui";
 
 impl Harness {
     /// A supervisor over a fresh temp config dir. `drain_secs` is
     /// `[extensions] drain_timeout_secs`.
+    ///
+    /// The registry is built with `with_event_bus` — the production shape from
+    /// C4 (`services/tools.rs`) — so the ledger publishes `mark_failed`'s own
+    /// `failed` event and T1 step 3's `ExtensionCapabilityWithdrawn`. The two
+    /// dependent handles are installed the way `services/mcp.rs` installs them.
     fn new(drain_secs: u64) -> Self {
         let home = tempfile::tempdir().expect("home store");
         let env = HomeStoreGuard::set(home.path());
         let dir = tempfile::tempdir().expect("config dir");
         let config_path = dir.path().join("mcp.toml");
 
-        let registry = Arc::new(ToolRegistry::new().expect("tool registry"));
+        let bus = EventBus::new(256);
+        let registry = Arc::new(ToolRegistry::with_event_bus(bus.clone()).expect("tool registry"));
         let mut cfg = DaemonConfig::default();
         cfg.extensions.drain_timeout_secs = drain_secs;
         let daemon_config = Arc::new(ArcSwap::from_pointee(cfg));
-        let bus = EventBus::new(64);
+        let agents = Arc::new(AgentRegistry::new());
+        let skills_dir = tempfile::tempdir().expect("skills dir");
+        let skills = Arc::new(SkillCatalog::new());
         let supervisor = McpSupervisor::new(
             config_path.clone(),
             Arc::clone(&registry),
             daemon_config,
             bus.clone(),
+        )
+        .with_dependents(
+            Some(Arc::clone(&skills)),
+            Some(Arc::clone(&agents)),
+            NOTICE_LANE,
         );
 
         Self {
             _home: home,
             _env: env,
+            _skills_dir: skills_dir,
             dir,
             config_path,
             registry,
             supervisor,
             bus,
+            agents,
+            skills,
         }
+    }
+
+    /// Register an agent template declaring `caps` — a dependent for T1 step 3.
+    fn declare_template(&self, id: &str, caps: &[&str]) {
+        self.agents
+            .register_template(openalpaca_core::agent::template::AgentTemplate {
+                frontmatter: openalpaca_core::agent::template::AgentTemplateFrontmatter {
+                    id: id.into(),
+                    name: id.into(),
+                    description: String::new(),
+                    icon: None,
+                    singleton: false,
+                    capabilities: caps.iter().map(|c| c.to_string()).collect(),
+                    denied_capabilities: vec![],
+                    temperature: 0.5,
+                    verbosity: "normal".into(),
+                    model: None,
+                    fallback_models: vec![],
+                    max_tool_calls: None,
+                    timeout_seconds: None,
+                    max_cost_per_task: None,
+                    max_rounds: None,
+                    require_confirmation_for: vec![],
+                },
+                body: String::new(),
+                sections: std::collections::HashMap::new(),
+                source: Default::default(),
+            });
+    }
+
+    /// Scan one `SKILL.md` into the catalog — the other kind of dependent.
+    fn declare_skill(&self, id: &str, body: &str) {
+        let d = self._skills_dir.path().join(id);
+        std::fs::create_dir_all(&d).expect("skill dir");
+        std::fs::write(d.join("SKILL.md"), body).expect("write SKILL.md");
+        self.skills.scan_directory(
+            self._skills_dir.path(),
+            openalpaca_core::middleware::skill::SkillScope::Project,
+        );
     }
 
     fn path(&self) -> &Path {
@@ -1778,4 +1841,365 @@ async fn a_bring_up_that_fails_after_the_handshake_tears_its_own_handle_down() {
         "and the bit is on disk"
     );
     assert_eq!(stub.spawn_count(), 1, "no respawn anywhere along that path");
+}
+
+// ============================================================================
+// C4 — T1 step 3: the dependent scan (§3.2 T1, §7.3)
+// ============================================================================
+
+const CAP_SKILL: &str = "---
+id: triage
+name: Triage
+description: Triage inbound work
+invoke:
+  mode: auto
+requires_capabilities:
+  - srv__echo
+---
+Body.
+";
+
+const CRON_SKILL: &str = "---
+id: nightly
+name: Nightly
+description: Runs unattended
+invoke:
+  mode: scheduled
+  cron: \"0 3 * * *\"
+requires_capabilities:
+  - srv__echo
+---
+Body.
+";
+
+const LEGACY_SKILL: &str = "---
+id: legacy-echoer
+name: Legacy Echoer
+description: Resolves by tool name, not capability
+invoke:
+  mode: manual
+tools:
+  allow:
+    - srv__echo
+---
+Body.
+";
+
+/// Every `ExtensionCapabilityWithdrawn` frame the bus holds.
+#[allow(clippy::type_complexity)]
+fn withdrawn_frames(
+    rx: &mut tokio::sync::broadcast::Receiver<openalpaca_core::events::SystemEvent>,
+) -> Vec<(ExtensionId, ExtensionState, WithdrawalCause, Vec<String>, Vec<String>, Vec<String>, String)>
+{
+    let mut out = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let openalpaca_core::events::SystemEvent::ExtensionCapabilityWithdrawn {
+            extension,
+            state,
+            cause,
+            affected_templates,
+            affected_skills,
+            affected_cron_skills,
+            notice_lane,
+            ..
+        } = event
+        {
+            out.push((
+                extension,
+                state,
+                cause,
+                affected_templates,
+                affected_skills,
+                affected_cron_skills,
+                notice_lane,
+            ));
+        }
+    }
+    out
+}
+
+/// **The transition the owner is looking at.** One `ExtensionCapabilityWithdrawn`
+/// per disable, naming every template and skill that just stopped resolving —
+/// including a legacy `tools.allow` skill whose only allowed name was withdrawn.
+#[tokio::test]
+async fn a_disable_announces_its_dependents_exactly_once() {
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), "dependents", StubOpts::default());
+    h.declare(&stub, true);
+    h.declare_template("echo_agent", &["srv__echo"]);
+    h.declare_template("unrelated_agent", &["file_write"]);
+    h.declare_skill("triage", CAP_SKILL);
+    h.declare_skill("nightly", CRON_SKILL);
+    h.declare_skill("legacy-echoer", LEGACY_SKILL);
+
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+
+    let mut events = h.bus.subscribe();
+    h.supervisor.disable(&mcp("srv")).await.expect("disable");
+
+    let frames = withdrawn_frames(&mut events);
+    assert_eq!(frames.len(), 1, "one transition, one announcement: {frames:?}");
+    let (extension, state, cause, templates, skills, cron, lane) = &frames[0];
+    assert_eq!(*extension, mcp("srv"));
+    assert_eq!(*state, ExtensionState::Disabling, "T1 runs inside the window");
+    assert_eq!(*cause, WithdrawalCause::Disable);
+    assert_eq!(templates, &vec!["echo_agent".to_string()]);
+    assert_eq!(
+        skills,
+        &vec![
+            "legacy-echoer".to_string(),
+            "nightly".to_string(),
+            "triage".to_string(),
+        ],
+        "the legacy `tools.allow` skill is named too — its allowed name was withdrawn"
+    );
+    assert_eq!(cron, &vec!["nightly".to_string()]);
+    assert_eq!(lane, NOTICE_LANE);
+
+    // Idempotence: a second disable withdraws nothing, so it announces nothing.
+    let mut events = h.bus.subscribe();
+    h.supervisor.disable(&mcp("srv")).await.expect("redundant disable");
+    assert!(withdrawn_frames(&mut events).is_empty());
+}
+
+/// **The list-change dependent event, moved here from C2** (§3.7 step 5): a
+/// server-driven removal names its dependent template in exactly one
+/// `ExtensionCapabilityWithdrawn { cause: ServerListChange, state: Enabled }` —
+/// the owner did not do this, and the wording must not say *"disabled"*.
+#[tokio::test]
+async fn a_server_driven_removal_names_a_dependent_template_in_one_event() {
+    let (h, stub) = notifying_harness("listchange-dependents").await;
+    h.declare_template("echo_agent", &["srv__echo"]);
+    h.declare_skill("nightly", CRON_SKILL);
+
+    let mut events = h.bus.subscribe();
+    stub.set_tools(&["other"]);
+    stub.notify();
+    assert!(wait_for_tools(&h, &["other"]).await, "echo is withdrawn");
+
+    let frames = withdrawn_frames(&mut events);
+    assert_eq!(frames.len(), 1, "one change, one announcement: {frames:?}");
+    let (extension, state, cause, templates, skills, cron, _) = &frames[0];
+    assert_eq!(*extension, mcp("srv"));
+    assert_eq!(
+        *state,
+        ExtensionState::Enabled,
+        "the server is still enabled — only the tool went"
+    );
+    assert_eq!(*cause, WithdrawalCause::ServerListChange);
+    assert_eq!(templates, &vec!["echo_agent".to_string()]);
+    assert_eq!(skills, &vec!["nightly".to_string()]);
+    assert_eq!(
+        cron,
+        &vec!["nightly".to_string()],
+        "a cron skill that lost its only tool to the server is the same \
+         unattended failure as one that lost it to a toggle"
+    );
+    assert_eq!(
+        WithdrawalCause::ServerListChange.wording(&mcp("srv"), ""),
+        "withdrawn by the server 'srv' (still enabled)"
+    );
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// **§3.4.1's suppression**, implemented as the design's option (a): a reload
+/// publishes its scan **once**, after the outcome is known, and empties
+/// `affected_cron_skills` when it ended `Enabled` — so the dispatcher's rule
+/// stays "post when `affected_cron_skills` is non-empty", with no cause
+/// special case.
+#[tokio::test]
+async fn a_reload_that_ends_enabled_fires_no_cron_notice() {
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), "reload-notice", StubOpts::default());
+    h.declare(&stub, true);
+    h.declare_skill("nightly", CRON_SKILL);
+    h.supervisor.reconcile_all().await;
+
+    let mut events = h.bus.subscribe();
+    h.supervisor.reload(&mcp("srv")).await.expect("reload");
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+
+    let frames = withdrawn_frames(&mut events);
+    assert_eq!(frames.len(), 1, "one transition, one announcement: {frames:?}");
+    let (_, state, cause, _, skills, cron, _) = &frames[0];
+    assert_eq!(*cause, WithdrawalCause::Reload);
+    assert_eq!(*state, ExtensionState::Enabled, "the outcome, not the transient");
+    assert_eq!(skills, &vec!["nightly".to_string()], "the scan still ran");
+    assert!(
+        cron.is_empty(),
+        "but a reload that ended `Enabled` did not take the capability away"
+    );
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// The other half of §3.4.1: a reload that ends `Failed` **does** notify.
+#[tokio::test]
+async fn a_reload_that_ends_failed_fires_the_cron_notice() {
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), "reload-fail", StubOpts::default());
+    h.declare(&stub, true);
+    h.declare_skill("nightly", CRON_SKILL);
+    h.supervisor.reconcile_all().await;
+
+    // The edit the reload will read: a command that cannot start.
+    std::fs::remove_file(&stub.script).expect("remove the server script");
+
+    let mut events = h.bus.subscribe();
+    h.supervisor.reload(&mcp("srv")).await.expect("reload");
+    assert!(
+        matches!(h.state("srv"), Some(ExtensionState::Failed { .. })),
+        "got {:?}",
+        h.state("srv")
+    );
+
+    let frames = withdrawn_frames(&mut events);
+    assert_eq!(frames.len(), 1, "one transition, one announcement: {frames:?}");
+    let (_, state, cause, _, _, cron, _) = &frames[0];
+    assert_eq!(*cause, WithdrawalCause::Reload);
+    assert!(matches!(state, ExtensionState::Failed { .. }));
+    assert_eq!(
+        cron,
+        &vec!["nightly".to_string()],
+        "the reload did take the capability away, so the owner is told"
+    );
+}
+
+/// **The notice reaches the default lane.** The one failure mode with no human
+/// in the loop: a cron skill that just lost its only tool.
+///
+/// Not `SystemEvent::WorkflowProgress`, which rev 1 named: `handle_progress`
+/// dispatches only to `:telegram` / `:imessage` / `:discord` lane keys, so the
+/// default `:gui` lane falls through all three branches and the notice would
+/// have been a silent no-op for the default user. This asserts the replacement
+/// end to end — supervisor → bus → `NotificationDispatcher` → conversation row,
+/// and supervisor → bus → `event_bridge` → `ServerEvent`.
+#[tokio::test]
+async fn a_disable_with_a_cron_dependent_writes_one_notice_to_the_default_lane() {
+    use openalpaca_api::events::ServerEvent;
+    use openalpaca_storage::{ConversationRepository, Database};
+
+    let h = Harness::new(1);
+    let one = stub_server(h.path(), "notice-one", StubOpts::default());
+    let two = stub_server(h.path(), "notice-two", StubOpts::default());
+    // Two servers; only `srv` provides the cron skill's capability.
+    h.write_config(&format!(
+        r#"[defaults]
+connect_timeout_secs = 10
+request_timeout_secs = 3
+max_reconnect_attempts = 3
+reconnect_backoff_ms = 20
+
+[servers.srv]
+transport = "stdio"
+command = "{one}"
+enabled = true
+
+[servers.other]
+transport = "stdio"
+command = "{two}"
+enabled = true
+"#,
+        one = one.script.display(),
+        two = two.script.display(),
+    ));
+    h.declare_skill("nightly", CRON_SKILL);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    assert_eq!(h.state("other"), Some(ExtensionState::Enabled));
+
+    // The two consumers `main.rs` wires onto the same bus.
+    let db_dir = tempfile::tempdir().expect("db dir");
+    let db = Database::open(&db_dir.path().join("notice.db")).expect("db");
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let broadcaster =
+        crate::events::EventBroadcaster::new(64, "instance-1".to_string(), Some(db.clone()));
+    let mut server_events = broadcaster.subscribe();
+    crate::event_bridge::spawn_event_bridge(broadcaster, &h.bus, None, cancel.clone());
+    tokio::spawn(
+        crate::notification::NotificationDispatcher::new(
+            h.bus.subscribe(),
+            db.clone(),
+            cancel.clone(),
+            None,
+        )
+        .run(),
+    );
+
+    let conversations = ConversationRepository::new(&db);
+    let rows = |repo: &ConversationRepository| {
+        repo.list_by_lane(NOTICE_LANE, 50, 0).expect("list_by_lane")
+    };
+    assert!(rows(&conversations).is_empty(), "nothing before the toggle");
+
+    h.supervisor.disable(&mcp("srv")).await.expect("disable");
+
+    assert!(
+        eventually(Duration::from_secs(5), || !rows(&conversations).is_empty()).await,
+        "the notice must reach the default lane"
+    );
+    let written = rows(&conversations);
+    assert_eq!(written.len(), 1, "exactly one row: {written:?}");
+    assert_eq!(
+        written[0].role, "assistant",
+        "`role` is hardcoded `assistant`, which is why the GUI transcript renders it"
+    );
+    assert_eq!(
+        written[0].source.as_deref(),
+        Some("gui"),
+        "the lane's own source — a `system`-sourced default lane would be wrong forever after"
+    );
+    assert!(
+        written[0].content.contains("nightly"),
+        "it names the skill: {}",
+        written[0].content
+    );
+    assert!(
+        written[0].content.contains("disabled"),
+        "and is worded from the cause: {}",
+        written[0].content
+    );
+
+    // Exactly one `ServerEvent` peer, carrying `ts` and `instance_id`.
+    let mut withdrawn = Vec::new();
+    while let Ok(event) = server_events.try_recv() {
+        if let ServerEvent::ExtensionCapabilityWithdrawn {
+            id,
+            cause,
+            affected_cron_skills,
+            instance_id,
+            ..
+        } = event
+        {
+            withdrawn.push((id, cause, affected_cron_skills, instance_id));
+        }
+    }
+    assert_eq!(withdrawn.len(), 1, "one broadcast: {withdrawn:?}");
+    assert_eq!(withdrawn[0].0, "srv");
+    assert_eq!(withdrawn[0].1, "disable");
+    assert_eq!(withdrawn[0].2, vec!["nightly".to_string()]);
+    assert_eq!(withdrawn[0].3, "instance-1");
+
+    // A second disable of an **unrelated** extension has no cron dependent, so
+    // it announces on the bus but writes nothing to the lane.
+    h.supervisor
+        .disable(&mcp("other"))
+        .await
+        .expect("disable the unrelated server");
+    assert!(
+        eventually(Duration::from_secs(2), || h.state("other")
+            == Some(ExtensionState::Disabled))
+        .await
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        rows(&conversations).len(),
+        1,
+        "S4 is about withdrawn capabilities, not announcing inventory"
+    );
+
+    cancel.cancel();
+    h.supervisor.shutdown_all().await;
 }

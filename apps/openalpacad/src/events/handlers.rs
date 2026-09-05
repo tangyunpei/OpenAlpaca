@@ -427,6 +427,70 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
+    /// Broadcast an S4 withholding and persist it (extension design §7.1,
+    /// §7.2, §6.2 #13). Already deduped by the ledger.
+    #[allow(clippy::too_many_arguments)]
+    pub fn extension_capability_withheld(
+        &self,
+        kind: &str,
+        id: &str,
+        subject: &str,
+        moment: &str,
+        state: &str,
+        scope: &str,
+        stale: bool,
+    ) {
+        let event = ServerEvent::ExtensionCapabilityWithheld {
+            kind: kind.to_string(),
+            id: id.to_string(),
+            subject: subject.to_string(),
+            moment: moment.to_string(),
+            state: state.to_string(),
+            scope: scope.to_string(),
+            stale,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast T1 step 3's dependent scan and persist it (extension design
+    /// §3.2 T1, §7.3). One per transition, never deduped.
+    #[allow(clippy::too_many_arguments)]
+    pub fn extension_capability_withdrawn(
+        &self,
+        kind: &str,
+        id: &str,
+        state: &str,
+        cause: &str,
+        capabilities: Vec<String>,
+        tools: Vec<String>,
+        affected_templates: Vec<String>,
+        affected_skills: Vec<String>,
+        affected_cron_skills: Vec<String>,
+        notice_lane: &str,
+    ) {
+        let event = ServerEvent::ExtensionCapabilityWithdrawn {
+            kind: kind.to_string(),
+            id: id.to_string(),
+            state: state.to_string(),
+            cause: cause.to_string(),
+            capabilities,
+            tools,
+            affected_templates,
+            affected_skills,
+            affected_cron_skills,
+            notice_lane: notice_lane.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
     /// Broadcast a SOUL.md update event and persist it
     pub fn soul_updated(
         &self,

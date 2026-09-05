@@ -515,6 +515,56 @@ pub fn spawn_event_bridge(
                         generation,
                         tools_changed,
                     );
+                }
+                openalpaca_core::events::SystemEvent::ExtensionCapabilityWithheld {
+                    ref extension, ref subject, moment, ref state, ref scope, stale, ..
+                } => {
+                    tracing::debug!(
+                        %extension, %subject, moment = moment.word(), %state, stale,
+                        "Extension capability withheld"
+                    );
+                    eb.extension_capability_withheld(
+                        extension.kind.as_str(),
+                        &extension.name,
+                        subject,
+                        moment.word(),
+                        state,
+                        scope,
+                        stale,
+                    );
+                }
+                openalpaca_core::events::SystemEvent::ExtensionCapabilityWithdrawn {
+                    ref extension,
+                    ref state,
+                    cause,
+                    ref capabilities,
+                    ref tools,
+                    ref affected_templates,
+                    ref affected_skills,
+                    ref affected_cron_skills,
+                    ref notice_lane,
+                    ..
+                } => {
+                    tracing::info!(
+                        %extension,
+                        cause = cause.word(),
+                        templates = affected_templates.len(),
+                        skills = affected_skills.len(),
+                        cron_skills = affected_cron_skills.len(),
+                        "Extension capabilities withdrawn"
+                    );
+                    eb.extension_capability_withdrawn(
+                        extension.kind.as_str(),
+                        &extension.name,
+                        state.word(),
+                        cause.word(),
+                        capabilities.clone(),
+                        tools.clone(),
+                        affected_templates.clone(),
+                        affected_skills.clone(),
+                        affected_cron_skills.clone(),
+                        notice_lane,
+                    );
                 } // NO catch-all: compiler will flag any missing SystemEvent variant
             }
         }
@@ -575,6 +625,104 @@ mod tests {
                 assert_eq!(instance_id, "test-instance");
             }
             other => panic!("Expected WorkflowStarted, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    /// The S4 withholding frame carries `ts` **and** `instance_id` — the two
+    /// fields the six `plugin_*` variants omit (GAP-22), which is what makes
+    /// this family's rows orderable.
+    #[tokio::test]
+    async fn test_extension_capability_withheld_bridged_with_ts_and_instance_id() {
+        use openalpaca_core::tools::extensions::{ExtensionId, Moment};
+
+        let (bus, mut rx, cancel) = setup_bridge();
+        let before = chrono::Utc::now();
+        bus.publish(SystemEvent::ExtensionCapabilityWithheld {
+            extension: ExtensionId::mcp("github"),
+            subject: "github__create_issue".into(),
+            moment: Moment::AttemptedUse,
+            state: "disabled".into(),
+            scope: "task-1".into(),
+            agent_id: None,
+            task_id: Some("task-1".into()),
+            stale: false,
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::ExtensionCapabilityWithheld {
+                kind,
+                id,
+                subject,
+                moment,
+                state,
+                scope,
+                stale,
+                ts,
+                instance_id,
+            } => {
+                assert_eq!(kind, "mcp");
+                assert_eq!(id, "github");
+                assert_eq!(subject, "github__create_issue");
+                assert_eq!(moment, "attempted_use");
+                assert_eq!(state, "disabled");
+                assert_eq!(scope, "task-1");
+                assert!(!stale);
+                assert!(ts >= before);
+                assert_eq!(instance_id, "test-instance");
+            }
+            other => panic!("Expected ExtensionCapabilityWithheld, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    /// T1 step 3's transition frame, with the lists the `NotificationDispatcher`
+    /// and the GUI read.
+    #[tokio::test]
+    async fn test_extension_capability_withdrawn_bridged_with_its_lists() {
+        use openalpaca_core::tools::extensions::{ExtensionId, ExtensionState, WithdrawalCause};
+
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::ExtensionCapabilityWithdrawn {
+            extension: ExtensionId::plugin("acme"),
+            state: ExtensionState::Disabling,
+            cause: WithdrawalCause::Deny,
+            capabilities: vec!["net_read".into()],
+            tools: vec!["acme::fetch".into()],
+            affected_templates: vec!["reader".into()],
+            affected_skills: vec!["nightly".into()],
+            affected_cron_skills: vec!["nightly".into()],
+            notice_lane: "owner:gui".into(),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::ExtensionCapabilityWithdrawn {
+                kind,
+                id,
+                state,
+                cause,
+                capabilities,
+                tools,
+                affected_templates,
+                affected_skills,
+                affected_cron_skills,
+                notice_lane,
+                instance_id,
+                ..
+            } => {
+                assert_eq!(kind, "plugin");
+                assert_eq!(id, "acme");
+                assert_eq!(state, "disabling");
+                assert_eq!(cause, "deny", "the wording is keyed on the cause, not the state");
+                assert_eq!(capabilities, vec!["net_read".to_string()]);
+                assert_eq!(tools, vec!["acme::fetch".to_string()]);
+                assert_eq!(affected_templates, vec!["reader".to_string()]);
+                assert_eq!(affected_skills, vec!["nightly".to_string()]);
+                assert_eq!(affected_cron_skills, vec!["nightly".to_string()]);
+                assert_eq!(notice_lane, "owner:gui");
+                assert_eq!(instance_id, "test-instance");
+            }
+            other => panic!("Expected ExtensionCapabilityWithdrawn, got {other:?}"),
         }
         cancel.cancel();
     }

@@ -373,6 +373,56 @@ impl EventBroadcaster {
                     });
                     repo.log("extension_state_changed", None, Some(&detail), None)
                 }
+                // S4 moment 1/2 — a withheld capability (already deduped)
+                ServerEvent::ExtensionCapabilityWithheld {
+                    kind,
+                    id,
+                    subject,
+                    moment,
+                    state,
+                    scope,
+                    stale,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "kind": kind,
+                        "id": id,
+                        "subject": subject,
+                        "moment": moment,
+                        "state": state,
+                        "scope": scope,
+                        "stale": stale,
+                    });
+                    repo.log("extension_capability_withheld", None, Some(&detail), None)
+                }
+                // S4 moment 3 — T1 step 3's dependent scan, one per transition
+                ServerEvent::ExtensionCapabilityWithdrawn {
+                    kind,
+                    id,
+                    state,
+                    cause,
+                    capabilities,
+                    tools,
+                    affected_templates,
+                    affected_skills,
+                    affected_cron_skills,
+                    notice_lane,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "kind": kind,
+                        "id": id,
+                        "state": state,
+                        "cause": cause,
+                        "capabilities": capabilities,
+                        "tools": tools,
+                        "affected_templates": affected_templates,
+                        "affected_skills": affected_skills,
+                        "affected_cron_skills": affected_cron_skills,
+                        "notice_lane": notice_lane,
+                    });
+                    repo.log("extension_capability_withdrawn", None, Some(&detail), None)
+                }
                 // Plugin lifecycle events
                 ServerEvent::PluginLoaded {
                     plugin_id, tools, ..

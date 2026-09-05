@@ -39,12 +39,23 @@ pub(super) async fn build_mcp_supervisor(
     tool_registry: &Arc<ToolRegistry>,
     daemon_config: &Arc<ArcSwap<DaemonConfig>>,
     bus: &EventBus,
+    skill_catalog: &Arc<openalpaca_core::orchestrator::skill_catalog::SkillCatalog>,
+    agent_registry: &Arc<openalpaca_core::agent::AgentRegistry>,
+    default_lane_key: &str,
 ) -> Arc<McpSupervisor> {
     let supervisor = McpSupervisor::new(
         config_base_dir.join("mcp.toml"),
         Arc::clone(tool_registry),
         Arc::clone(daemon_config),
         bus.clone(),
+    )
+    // T1 step 3's dependent scan reads both registries and writes its cron
+    // notice to the default lane (extension design §7.3). `PluginManager`
+    // already holds the same two handles.
+    .with_dependents(
+        Some(Arc::clone(skill_catalog)),
+        Some(Arc::clone(agent_registry)),
+        default_lane_key,
     );
 
     supervisor.reconcile_all().await;

@@ -728,6 +728,7 @@ impl ExtensionLedger {
         detail: impl Into<String>,
     ) -> bool {
         let detail = detail.into();
+        let word;
         {
             let Some(mut entry) = self.records.get_mut(ext) else {
                 tracing::debug!(extension = %ext, generation, "mark_failed on an unrecorded extension");
@@ -759,6 +760,7 @@ impl ExtensionLedger {
             };
             entry.pending_cause = None;
             entry.since = Utc::now();
+            word = entry.state.word();
         }
 
         tracing::warn!(
@@ -769,6 +771,19 @@ impl ExtensionLedger {
             "extension marked failed"
         );
         self.clear_warned(ext);
+
+        // `mark_failed` is a transition and is announced like one — from C4 by
+        // the ledger over its own bus, not by the reaper on dequeue (design
+        // §3.6). A superseded reap therefore still announces the crash that
+        // *did* happen, and the event carries the generation so a late notice
+        // arriving after load N+1's `enabled` stays unambiguous.
+        self.publish(SystemEvent::ExtensionStateChanged {
+            extension: ext.clone(),
+            state: word.to_string(),
+            generation,
+            tools_changed: false,
+            timestamp: Utc::now(),
+        });
 
         if let Some(tx) = self.reaper(ext.kind)
             && tx.send((ext.clone(), generation)).is_err()
@@ -1073,8 +1088,11 @@ impl ExtensionLedger {
     /// Announce a withholding, deduped per `(ScopeKey, extension, moment)` for
     /// ten minutes. The **error** is never suppressed — only the announcement.
     ///
-    /// `scope_override` is `Moment::ScheduledSkip`'s skill id: a cron fire is a
-    /// distinct unattended event and never dedupes (design §6.2 #13).
+    /// `scope_override` supplies the `ScopeKey` where the caller has no
+    /// [`ToolContext`] to derive one from — `Moment::ScheduledSkip`'s skill id
+    /// (a cron fire is a distinct unattended event and never dedupes, design
+    /// §6.2 #13), and the skill-invocation surface sites, which hold a
+    /// `request_id` but build their `ToolContext` further down.
     pub fn note_withheld(
         &self,
         ext: &ExtensionId,
@@ -1118,6 +1136,20 @@ impl ExtensionLedger {
                 stale,
                 "extension capability withheld"
             );
+            // The event is part of the announcement, so it rides the same
+            // dedup as the `warn!` — and, like it, never suppresses the error
+            // (design §7.4). A ledger with no bus logs and returns.
+            self.publish(SystemEvent::ExtensionCapabilityWithheld {
+                extension: ext.clone(),
+                subject: subject.to_string(),
+                moment,
+                state: state_word.to_string(),
+                scope,
+                agent_id,
+                task_id,
+                stale,
+                timestamp: Utc::now(),
+            });
         } else {
             tracing::debug!(
                 extension = %ext,
@@ -1165,6 +1197,17 @@ impl ExtensionLedger {
         true
     }
 
+    /// Forget this extension's announcements, so the next one is made again.
+    ///
+    /// Design §7.4 names only `withdraw()` and `restore()`; C1 also cleared on
+    /// `commit`, `upsert`, `store_state`, `mark_failed` and `restore_caps`, and
+    /// **C4 keeps the wider rule** (the decision the C2 review carried here).
+    /// Every extra site is a state transition of the same extension, which is
+    /// exactly the moment a suppressed announcement would have gone stale —
+    /// `Enabled → Failed{Crashed}` reaches `mark_failed` with no `withdraw`
+    /// between it and the last warn. The set governs observability only, so
+    /// announcing once more is the safe direction; suppressing across a
+    /// transition is not.
     fn clear_warned(&self, ext: &ExtensionId) {
         self.warned.retain(|(_, recorded, _), _| recorded != ext);
     }

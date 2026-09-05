@@ -49,9 +49,9 @@ use openalpaca_core::middleware::skill::{InvokeConfig, RoutingConfig, SkillFront
 use openalpaca_core::orchestrator::skill_catalog::SkillCatalog;
 use openalpaca_core::tools::ToolRegistry;
 use openalpaca_core::tools::extensions::{
-    Consent, DeclaredContributions, ExtensionError, ExtensionId, ExtensionKind, ExtensionLedger,
-    ExtensionRecord, ExtensionState, ExtensionSupervisor, FailureReason, Transition,
-    UnapprovedReason, WithdrawalCause,
+    Consent, DeclaredContributions, DependentScan, ExtensionError, ExtensionId, ExtensionKind,
+    ExtensionLedger, ExtensionRecord, ExtensionState, ExtensionSupervisor, FailureReason,
+    PendingScan, Transition, UnapprovedReason, WithdrawalCause, WithdrawnSet,
 };
 use openalpaca_core::tools::registry::{
     CapabilityProvider, ProviderHandle, RegisteredTool, ToolBackend,
@@ -279,6 +279,10 @@ pub struct PluginManager {
     /// A test drives [`Self::reap`] by hand instead, which is what makes the
     /// *reaper superseded* scenarios deterministic rather than raced.
     reaper_rx: StdMutex<Option<UnboundedReceiver<(ExtensionId, u64)>>>,
+    /// The daemon's default lane, `{local_user_id}:gui`, carried on T1 step 3's
+    /// event so the `NotificationDispatcher` knows where to write the cron
+    /// notice (design §7.3 step 1). Empty until `with_notice_lane`.
+    notice_lane: String,
 }
 
 impl PluginManager {
@@ -312,7 +316,15 @@ impl PluginManager {
             secret_store: None,
             locks: StdMutex::new(HashMap::new()),
             reaper_rx: StdMutex::new(Some(rx)),
+            notice_lane: String::new(),
         }
+    }
+
+    /// Attach the daemon's default lane, `{local_user_id}:gui` — where T1 step
+    /// 3's cron notice is written (design §7.3 step 1).
+    pub fn with_notice_lane(mut self, lane: impl Into<String>) -> Self {
+        self.notice_lane = lane.into();
+        self
     }
 
     /// Attach a lifecycle event sink. Events emitted before this is called
@@ -496,8 +508,7 @@ impl PluginManager {
     async fn orphan(&self, name: &str, table: &Result<PermissionTable, PluginError>) {
         let ext = ExtensionId::plugin(name.to_string());
         let _lock = self.lock_for(name).await;
-        self.t1(&ext);
-        self.t2(name).await;
+        self.teardown(&ext, WithdrawalCause::DeclarationGone).await;
         self.t4(name).await;
         let bit = table.as_ref().map(|t| t.enabled(name)).unwrap_or(true);
         self.ledger.upsert(&ext, bit, ExtensionState::Orphaned);
@@ -697,8 +708,7 @@ impl PluginManager {
                     .begin(ext, ExtensionState::Disabling, Some(cause)),
                 Transition::Took(_)
             );
-        self.t1(ext);
-        self.t2(&ext.name).await;
+        self.teardown(ext, cause).await;
         if from_enabled {
             self.t3(ext).await;
         }
@@ -770,22 +780,83 @@ impl PluginManager {
     /// disable after E-FAIL — a no-op. Only names the ledger *currently*
     /// attributes to this extension are touched (§10 case 13).
     ///
-    /// **Step 3** — the dependent scan, `ExtensionCapabilityWithdrawn` and the
-    /// cron notice — lands in C4 with the event and the two registry handles.
-    fn t1(&self, ext: &ExtensionId) -> usize {
-        let mut withdrawn = 0usize;
+    /// **Step 3** is [`t1_t2`](Self::t1_t2)'s: for a plugin the withdrawn set is
+    /// T1's tombstones **plus T2 step 1's virtual capabilities**, so the scan
+    /// cannot run until T2 has withdrawn them (design §3.2 T1 step 3).
+    fn t1(&self, ext: &ExtensionId) -> WithdrawnSet {
+        let mut withdrawn = WithdrawnSet::default();
         for name in self.ledger.tool_names(ext) {
             if self.ledger.owner_of(&name).as_ref() != Some(ext) {
                 continue;
             }
             if let Some(tool) = self.tool_registry.get(&name) {
                 self.ledger.withdraw(ext, tool.provides_capabilities.clone());
+                withdrawn.add_capabilities(tool.provides_capabilities.clone());
             }
             if self.tool_registry.remove(&name) {
-                withdrawn += 1;
+                withdrawn.add_tool(name);
             }
         }
         withdrawn
+    }
+
+    /// **T1 → T2 → T1 step 3.** The order every teardown path takes.
+    ///
+    /// The scan runs after T2 because the withdrawn set it intersects with is
+    /// the union of T1 step 1's per-tool capabilities and T2 step 1's virtual
+    /// ones, which no tool carries (design §3.2 T1 step 3, T2 step 1). It fires
+    /// Returns the set rather than announcing it, because `reload` publishes
+    /// step 3 only once the outcome is known (§3.4.1); every other path goes
+    /// through [`teardown`](Self::teardown), which announces immediately. Step 3
+    /// fires only on a non-empty set, so a second, idempotent pass announces
+    /// nothing: one transition, one announcement (§7.3).
+    async fn t1_t2(&self, ext: &ExtensionId) -> PendingScan {
+        let mut withdrawn = self.t1(ext);
+        withdrawn.add_capabilities(self.t2(&ext.name).await);
+        // Classify **now**, against the index T1/T2 just emptied: once a reload's
+        // E4 has re-registered everything, nothing reads as lost.
+        self.scan().classify(&withdrawn)
+    }
+
+    /// [`t1_t2`](Self::t1_t2) plus its step-3 publish — every path but `reload`.
+    async fn teardown(&self, ext: &ExtensionId, cause: WithdrawalCause) {
+        let pending = self.t1_t2(ext).await;
+        self.publish_scan(ext, cause, &pending, false);
+    }
+
+    /// Publish a reload's deferred T1 step 3 (§3.4.1, §7.3): the event carries
+    /// the reload's **outcome** state, and `affected_cron_skills` is emptied
+    /// when it ended `Enabled` — the reload did not take the capability away.
+    fn publish_reload_scan(&self, ext: &ExtensionId, pending: Option<PendingScan>) {
+        let Some(pending) = pending else { return };
+        let ended_enabled = self
+            .ledger
+            .state(ext)
+            .is_some_and(|state| state.is_enabled());
+        self.publish_scan(ext, WithdrawalCause::Reload, &pending, ended_enabled);
+    }
+
+    /// T1 step 3 proper: read the state the transition is in and announce.
+    fn publish_scan(
+        &self,
+        ext: &ExtensionId,
+        cause: WithdrawalCause,
+        pending: &PendingScan,
+        suppress_cron_notice: bool,
+    ) {
+        let state = self.ledger.state(ext).unwrap_or(ExtensionState::Disabling);
+        self.scan()
+            .announce(ext, &state, cause, pending, suppress_cron_notice);
+    }
+
+    /// **T1 step 3's** reader.
+    fn scan(&self) -> DependentScan<'_> {
+        DependentScan {
+            registry: &self.tool_registry,
+            agents: self.agent_registry.as_deref(),
+            skills: self.skill_catalog.as_deref(),
+            notice_lane: &self.notice_lane,
+        }
     }
 
     // ── T2 — CONTRIBUTION WITHDRAWAL ─────────────────────────────────
@@ -808,10 +879,13 @@ impl PluginManager {
     /// When the bridges land, `LlmRouter::deregister_provider` and a
     /// `ConnectorManager::unregister_platform` go here, beside these lines.
     /// **Whatever E4 registers, T2 deregisters, in the same supervisor.**
-    async fn t2(&self, id: &str) {
+    ///
+    /// Returns step 1's **virtual** capabilities, which T1 step 3 unions into
+    /// the withdrawn set it scans with (design §7.3).
+    async fn t2(&self, id: &str) -> Vec<String> {
         let mut plugins = self.plugins.write().await;
         let Some(state) = plugins.get_mut(id) else {
-            return;
+            return Vec::new();
         };
         let ext = ExtensionId::plugin(id.to_string());
 
@@ -825,7 +899,7 @@ impl PluginManager {
         }
         let virtual_caps = state.manifest.capabilities.virtual_.provides.clone();
         if !virtual_caps.is_empty() {
-            self.ledger.withdraw(&ext, virtual_caps);
+            self.ledger.withdraw(&ext, virtual_caps.clone());
         }
 
         // 2. skills.
@@ -851,6 +925,8 @@ impl PluginManager {
         state.registered_provider = None;
         state.registered_models.clear();
         state.registered_tools.clear();
+
+        virtual_caps
     }
 
     // ── T3 — DRAIN ───────────────────────────────────────────────────
@@ -931,8 +1007,10 @@ impl PluginManager {
             return;
         }
         info!(extension = %ext, "E-PRE: tearing down a previous load's residue");
-        self.t1(ext);
-        self.t2(&ext.name).await;
+        // Cause `Crash`, for parity with the other residue exits: the state
+        // this tears down is a pre-reaper `Failed{Crashed}` (design §3.3 E-PRE,
+        // §3.3.1).
+        self.teardown(ext, WithdrawalCause::Crash).await;
         self.t4(&ext.name).await;
     }
 
@@ -1490,11 +1568,11 @@ impl PluginManager {
     /// unconditional teardown here would unpublish its tools and kill its live
     /// process while leaving the row `Enabled`.
     pub async fn reap(&self, ext: &ExtensionId, generation: u64) {
-        // Until C4 gives the ledger its own bus, the crash's announcement is the
-        // reaper's, published on dequeue — before the re-check, so a superseded
-        // reap still announces the crash that *did* happen.
-        self.emit_state(ext, "failed", generation);
-
+        // The crash's announcement is `mark_failed`'s own, published over the
+        // ledger's bus at the instant the state changed (design §3.6) — not the
+        // reaper's on dequeue, which C3 used only because the ledger had no bus
+        // until C4. A superseded reap still announces the crash that *did*
+        // happen, for the same reason it did then.
         let _lock = self.lock_for(&ext.name).await;
         let entitled = self.ledger.record(ext).is_some_and(|r| {
             matches!(
@@ -1510,8 +1588,7 @@ impl PluginManager {
             return;
         }
 
-        self.t1(ext);
-        self.t2(&ext.name).await;
+        self.teardown(ext, WithdrawalCause::Crash).await;
         self.t4(&ext.name).await;
     }
 
@@ -1589,8 +1666,7 @@ impl PluginManager {
                     ExtensionState::Disabling,
                     Some(WithdrawalCause::Deny),
                 ) {
-                    self.t1(&ext);
-                    self.t2(name).await;
+                    self.teardown(&ext, WithdrawalCause::Deny).await;
                     self.t3(&ext).await;
                     self.t4(name).await;
                 }
@@ -1599,8 +1675,7 @@ impl PluginManager {
             // `Crash` and **no** T0 — the residue exits never enter `Disabling`
             // (design §3.2 W-deny, §3.3.1).
             Some(ExtensionState::Failed { .. }) => {
-                self.t1(&ext);
-                self.t2(name).await;
+                self.teardown(&ext, WithdrawalCause::Crash).await;
                 self.t4(name).await;
             }
             _ => {}
@@ -2046,8 +2121,7 @@ impl ExtensionSupervisor for PluginManager {
             return self.row(id).await;
         };
 
-        self.t1(id);
-        self.t2(&id.name).await;
+        self.teardown(id, WithdrawalCause::Disable).await;
         let stragglers = self.t3(id).await;
         self.t4(&id.name).await;
         self.commit(id, ExtensionState::Disabled);
@@ -2098,6 +2172,12 @@ impl ExtensionSupervisor for PluginManager {
         // now"* until someone repairs the file and enables it again.
         let table = self.permission_gate.load_table().map_err(store_error)?;
 
+        // §3.4.1's suppression, the design's option (a): T1's step 3 is
+        // **deferred** on a reload until the outcome is known, and its cron
+        // notice is emptied when the reload ended `Enabled`. The dispatcher's
+        // rule stays §7.3 step 2's verbatim, with no cause special case.
+        let mut deferred: Option<PendingScan> = None;
+
         match record.state {
             ExtensionState::Enabled => {
                 let Transition::Took(_) = self.ledger.begin(
@@ -2107,8 +2187,7 @@ impl ExtensionSupervisor for PluginManager {
                 ) else {
                     return Err(ExtensionError::NotLoaded);
                 };
-                self.t1(id);
-                self.t2(&id.name).await;
+                deferred = Some(self.t1_t2(id).await);
                 self.t3(id).await;
                 self.t4(&id.name).await;
                 // The `Disabling → Enabling` CAS follows: T5's dedup-clear and
@@ -2120,10 +2199,12 @@ impl ExtensionSupervisor for PluginManager {
 
         let Transition::Took(generation) = self.ledger.begin(id, ExtensionState::Enabling, None)
         else {
+            self.publish_reload_scan(id, deferred);
             return self.row(id).await;
         };
         self.e_pre(id).await;
         self.load(id, &dir, manifest, &table, generation).await;
+        self.publish_reload_scan(id, deferred);
         self.row(id).await
     }
 

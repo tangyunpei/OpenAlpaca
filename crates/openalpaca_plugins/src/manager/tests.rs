@@ -352,6 +352,9 @@ mcp_compatible = true
         spawned_pids(dir).len()
     }
 
+    /// The default lane every harness scan carries on its event.
+    const NOTICE_LANE: &str = "owner:gui";
+
     struct Harness {
         manager: Arc<PluginManager>,
         tools: Arc<ToolRegistry>,
@@ -380,10 +383,13 @@ mcp_compatible = true
         }
 
         fn build(root: &Path, home: Option<HomeStoreGuard>) -> Self {
-            let tools = Arc::new(ToolRegistry::new().unwrap());
+            let bus = EventBus::new(256);
+            // The production shape from C4 (`services/tools.rs`): the ledger
+            // holds the bus, so `mark_failed` announces its own `failed` and
+            // T1 step 3 publishes `ExtensionCapabilityWithdrawn`.
+            let tools = Arc::new(ToolRegistry::with_event_bus(bus.clone()).unwrap());
             let skills = Arc::new(SkillCatalog::new());
             let agents = Arc::new(AgentRegistry::new());
-            let bus = EventBus::new(64);
             let manager = Arc::new(
                 PluginManager::new(
                     root.to_path_buf(),
@@ -391,7 +397,8 @@ mcp_compatible = true
                     Some(Arc::clone(&skills)),
                     Some(Arc::clone(&agents)),
                 )
-                .with_event_bus(bus.clone()),
+                .with_event_bus(bus.clone())
+                .with_notice_lane(NOTICE_LANE),
             );
             Self {
                 manager,
@@ -519,9 +526,17 @@ mcp_compatible = true
     /// Approve the stub and bring it up through the scan, asserting it came up
     /// running with its tool registered and its child alive.
     async fn load_running_stub(h: &Harness, name: &str) -> PluginInfo {
+        load_running_stub_with_caps(h, name, &[]).await
+    }
+
+    /// The same, for a stub whose manifest declares `capabilities.provides`:
+    /// consent has to be recorded against that list or E1's drift check parks
+    /// it at `Unapproved{CapabilitiesGrew}` instead of loading it.
+    async fn load_running_stub_with_caps(h: &Harness, name: &str, caps: &[&str]) -> PluginInfo {
+        let caps: Vec<String> = caps.iter().map(|c| c.to_string()).collect();
         h.manager
             .permission_gate
-            .approve(name, &[])
+            .approve(name, &caps)
             .expect("approve the stub");
         h.scan().await;
 
@@ -890,6 +905,142 @@ mcp_compatible = true
         assert!(
             h.skills.get("MixedCase").is_none(),
             "the entry itself survived, holding an executor for a dead process"
+        );
+    }
+
+    // ── C4 — T1 step 3: the dependent scan (§3.2 T1, §7.3) ───────────
+
+    fn agent_template(id: &str, caps: &[&str]) -> openalpaca_core::agent::template::AgentTemplate {
+        openalpaca_core::agent::template::AgentTemplate {
+            frontmatter: openalpaca_core::agent::template::AgentTemplateFrontmatter {
+                id: id.into(),
+                name: id.into(),
+                description: String::new(),
+                icon: None,
+                singleton: false,
+                capabilities: caps.iter().map(|c| c.to_string()).collect(),
+                denied_capabilities: vec![],
+                temperature: 0.5,
+                verbosity: "normal".into(),
+                model: None,
+                fallback_models: vec![],
+                max_tool_calls: None,
+                timeout_seconds: None,
+                max_cost_per_task: None,
+                max_rounds: None,
+                require_confirmation_for: vec![],
+            },
+            body: String::new(),
+            sections: std::collections::HashMap::new(),
+            source: Default::default(),
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn withdrawn_frames(
+        rx: &mut tokio::sync::broadcast::Receiver<openalpaca_core::events::SystemEvent>,
+    ) -> Vec<(ExtensionId, ExtensionState, WithdrawalCause, Vec<String>, String)> {
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let openalpaca_core::events::SystemEvent::ExtensionCapabilityWithdrawn {
+                extension,
+                state,
+                cause,
+                affected_templates,
+                notice_lane,
+                ..
+            } = event
+            {
+                out.push((extension, state, cause, affected_templates, notice_lane));
+            }
+        }
+        out
+    }
+
+    /// **`deny` produces a scan worded *"denied"*, never *"disabled"*** (design
+    /// §3.2 T1 step 3, §6.2 #8): the owner revoked *trust*, not a toggle, and
+    /// the wording is keyed on the cause rather than on the transient state,
+    /// which is `Disabling` for both verbs.
+    #[tokio::test]
+    async fn deny_announces_its_dependents_worded_denied_not_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\n\n[capabilities]\nprovides = [\"net_read\"]\n",
+        );
+        let h = Harness::new(tmp.path());
+        load_running_stub_with_caps(&h, "echo-test", &["net_read"]).await;
+        h.agents.register_template(agent_template("reader", &["net_read"]));
+        h.agents.register_template(agent_template("writer", &["fs_write"]));
+
+        let mut events = h.bus.subscribe();
+        h.manager.deny_plugin("echo-test").await.unwrap();
+
+        let frames = withdrawn_frames(&mut events);
+        assert_eq!(frames.len(), 1, "one transition, one announcement: {frames:?}");
+        let (extension, state, cause, templates, lane) = &frames[0];
+        assert_eq!(*extension, ext("echo-test"));
+        assert_eq!(*state, ExtensionState::Disabling, "T1 runs inside the window");
+        assert_eq!(*cause, WithdrawalCause::Deny);
+        assert_eq!(templates, &vec!["reader".to_string()]);
+        assert_eq!(lane, NOTICE_LANE);
+
+        // The wording the `warn!` and the owner notice render, keyed on the
+        // cause the event carries — a consent word, never "disabled".
+        assert_eq!(cause.wording(extension, ""), "denied");
+        assert_ne!(cause.wording(extension, ""), "disabled");
+    }
+
+    /// The same scan under `disable` reads *"disabled"* — the two verbs differ
+    /// only by the cause, and both pass through `Disabling`.
+    #[tokio::test]
+    async fn disable_announces_its_dependents_worded_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\n\n[capabilities]\nprovides = [\"net_read\"]\n",
+        );
+        let h = Harness::new(tmp.path());
+        load_running_stub_with_caps(&h, "echo-test", &["net_read"]).await;
+        h.agents.register_template(agent_template("reader", &["net_read"]));
+
+        let mut events = h.bus.subscribe();
+        h.manager.disable(&ext("echo-test")).await.unwrap();
+
+        let frames = withdrawn_frames(&mut events);
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(frames[0].2, WithdrawalCause::Disable);
+        assert_eq!(frames[0].3, vec!["reader".to_string()]);
+        assert_eq!(frames[0].2.wording(&frames[0].0, ""), "disabled");
+    }
+
+    /// **T2 step 1's virtual capabilities are in the scanned set too** — T1's
+    /// per-tool recording never sees them, so the scan cannot run until T2 has
+    /// withdrawn them (design §3.2 T1 step 3, T2 step 1).
+    #[tokio::test]
+    async fn the_scan_covers_a_virtual_capability_only_template() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\n\n[capabilities.virtual]\nprovides = [\"annotation:echo_stub\"]\n",
+        );
+        let h = Harness::new(tmp.path());
+        load_running_stub(&h, "echo-test").await;
+        h.agents
+            .register_template(agent_template("annotator", &["annotation:echo_stub"]));
+
+        let mut events = h.bus.subscribe();
+        h.manager.disable(&ext("echo-test")).await.unwrap();
+
+        let frames = withdrawn_frames(&mut events);
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(
+            frames[0].3,
+            vec!["annotator".to_string()],
+            "a scan run before T2 would have missed it entirely"
         );
     }
 

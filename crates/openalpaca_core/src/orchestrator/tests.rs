@@ -2576,3 +2576,206 @@ async fn test_bare_pause_resume_resolve_via_lane() {
     let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
     assert_eq!(json["new_status"], "running");
 }
+
+// ── C4: S4 moment 2 on the legacy `tools.allow` branch (design §6.2 #10) ──
+
+/// A registry whose ledger publishes, holding one **disabled** MCP server that
+/// still owns the name `github__create_issue` — T1's retained attribution.
+fn registry_with_a_disabled_server(bus: &EventBus) -> Arc<ToolRegistry> {
+    use crate::tools::extensions::{ExtensionId, ExtensionState};
+
+    let registry = Arc::new(ToolRegistry::with_event_bus(bus.clone()).unwrap());
+    let ext = ExtensionId::mcp("github");
+    let mut tool = make_mock_tool("github__create_issue");
+    tool.backend = ToolBackend::Mcp {
+        client: Arc::new(openalpaca_mcp::McpClient::disconnected_for_tests("github")),
+        remote_name: "create_issue".to_string(),
+        server_name: "github".to_string(),
+        generation: 1,
+    };
+    tool.author = "mcp:github".to_string();
+    registry.register(tool).unwrap();
+
+    let ledger = registry.extensions();
+    ledger.upsert(&ext, true, ExtensionState::Enabled);
+    ledger.record_tools(&ext, ["github__create_issue"]);
+
+    // T0–T5 as a supervisor runs them: the name stays attributed after T1.
+    ledger.begin(
+        &ext,
+        ExtensionState::Disabling,
+        Some(crate::tools::extensions::WithdrawalCause::Disable),
+    );
+    registry.remove("github__create_issue");
+    ledger.commit(&ext, ExtensionState::Disabled);
+    registry
+}
+
+fn legacy_allow_catalog() -> (tempfile::TempDir, Arc<skill_catalog::SkillCatalog>) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join("filer");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        r#"---
+name: "Filer"
+description: "Files issues"
+invoke:
+  slash: "/file"
+tools:
+  allow:
+    - github__create_issue
+---
+
+## Instructions
+
+File the issue.
+"#,
+    )
+    .unwrap();
+    let catalog = skill_catalog::SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+    (tmp, Arc::new(catalog))
+}
+
+fn withheld_frames(
+    rx: &mut tokio::sync::broadcast::Receiver<SystemEvent>,
+) -> Vec<(String, String, crate::tools::extensions::Moment)> {
+    let mut out = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let SystemEvent::ExtensionCapabilityWithheld {
+            extension,
+            subject,
+            moment,
+            ..
+        } = event
+        {
+            out.push((extension.to_string(), subject, moment));
+        }
+    }
+    out
+}
+
+/// The nested path emitted **nothing** before C4 — no warn, no event — while
+/// the top-level one emitted an unattributed *"references unknown tools"*.
+/// Both now attribute the name to the extension that took it.
+#[tokio::test]
+async fn a_legacy_tools_allow_skill_is_attributed_on_both_the_top_level_and_the_nested_path() {
+    use crate::tools::extensions::Moment;
+
+    let bus = EventBus::default();
+    let registry = registry_with_a_disabled_server(&bus);
+    let (_tmp, catalog) = legacy_allow_catalog();
+
+    // ── Top level: the `/slash` tier reaches `invocation.rs`'s legacy branch.
+    let gate = make_security_gate_with_registry(&bus, registry.clone());
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus.clone(),
+        SystemPersona::default(),
+        None,
+        LoopConfig::default(),
+        gate,
+        registry.clone(),
+        None,
+        None,
+        catalog.clone(),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    let mut rx = bus.subscribe();
+
+    let _ = orch
+        .handle_message(
+            Uuid::new_v4(),
+            "cli".to_string(),
+            "/file this bug".to_string(),
+            Principal::System,
+            Scope::Global,
+            "test:cli".to_string(),
+            None,
+            None,
+        )
+        .await;
+
+    let frames = withheld_frames(&mut rx);
+    assert_eq!(
+        frames.len(),
+        1,
+        "one attributed announcement on the top-level path, got {frames:?}"
+    );
+    assert_eq!(frames[0].0, "mcp:github");
+    assert_eq!(frames[0].1, "github__create_issue");
+    assert_eq!(frames[0].2, Moment::SurfaceAssembly);
+
+    // ── Nested: `invoke_skill:filer` through `SkillInvocationToolExecutor`.
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(SilentMockLlm),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    ));
+    let nested = crate::orchestrator::skill::invoke_executor::SkillInvocationToolExecutor::new(
+        catalog,
+        registry,
+        router,
+        bus.clone(),
+        vec![],
+        2,
+        None,
+        None,
+        None,
+        1.0,
+        true,
+        vec![],
+        crate::daemon_config::CircuitBreakerConfig::default(),
+        30,
+    );
+    let mut rx = bus.subscribe();
+    let _ = nested
+        .execute(
+            "invoke_skill:filer",
+            &serde_json::json!({"query": "file this bug"}),
+        )
+        .await;
+
+    let frames = withheld_frames(&mut rx);
+    assert_eq!(
+        frames.len(),
+        1,
+        "the nested path announced nothing at all before C4, got {frames:?}"
+    );
+    assert_eq!(frames[0].0, "mcp:github");
+    assert_eq!(frames[0].1, "github__create_issue");
+    assert_eq!(frames[0].2, Moment::SurfaceAssembly);
+}
+
+struct SilentMockLlm;
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for SilentMockLlm {
+    fn name(&self) -> &str {
+        "silent-mock"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        _request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        Ok(openalpaca_llm::ChatResponse {
+            content: "done".to_string(),
+            tool_calls: vec![],
+            model: "mock-model".to_string(),
+            usage: openalpaca_llm::Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                ..Default::default()
+            },
+            finish_reason: openalpaca_llm::FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        })
+    }
+}

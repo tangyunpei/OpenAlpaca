@@ -27,18 +27,21 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use openalpaca_core::agent::AgentRegistry;
 use openalpaca_core::bus::EventBus;
 use openalpaca_core::config_io::atomic_write_toml;
 use openalpaca_core::daemon_config::DaemonConfig;
 use openalpaca_core::events::SystemEvent;
+use openalpaca_core::orchestrator::skill_catalog::SkillCatalog;
 use openalpaca_core::tools::ToolRegistry;
 use openalpaca_core::tools::extensions::{
-    ExtensionError, ExtensionId, ExtensionKind, ExtensionLedger, ExtensionRecord, ExtensionState,
-    ExtensionSupervisor, FailureReason, Transition, WithdrawalCause,
+    DependentScan, ExtensionError, ExtensionId, ExtensionKind, ExtensionLedger, ExtensionRecord,
+    ExtensionState, ExtensionSupervisor, FailureReason, PendingScan, Transition, WithdrawalCause,
+    WithdrawnSet,
 };
 use openalpaca_core::tools::mcp::{
     HttpAuthConfig, LoadError, McpConfig, McpDefaults, McpServerConfig, bridge,
@@ -147,6 +150,19 @@ pub struct McpSupervisor {
     /// Live `tools/list_changed` reader tasks, so a test can observe that the
     /// one belonging to a torn-down load exited (§3.3 E-PRE, E-FAIL).
     readers_running: Arc<AtomicUsize>,
+    /// What T1 step 3 scans and where its notice goes (§7.3). Installed once,
+    /// after construction, because `Arc::new_cyclic` rules out a `mut self`
+    /// builder; absent in a harness that does not drive the scan.
+    dependents: OnceLock<Dependents>,
+}
+
+/// The two registries T1 step 3 intersects the withdrawn set with, plus the
+/// lane its cron notice is written to (design §7.3). `PluginManager` already
+/// holds the same pair as `Option`s.
+struct Dependents {
+    skills: Option<Arc<SkillCatalog>>,
+    agents: Option<Arc<AgentRegistry>>,
+    notice_lane: String,
 }
 
 impl McpSupervisor {
@@ -174,7 +190,42 @@ impl McpSupervisor {
             own_writes: StdMutex::new(VecDeque::with_capacity(OWN_WRITE_RING)),
             reaper_rx: StdMutex::new(Some(rx)),
             readers_running: Arc::new(AtomicUsize::new(0)),
+            dependents: OnceLock::new(),
         })
+    }
+
+    /// Install the handles T1 step 3 scans (design §7.3). Write-once; a second
+    /// call is ignored and logged.
+    pub fn with_dependents(
+        self: Arc<Self>,
+        skills: Option<Arc<SkillCatalog>>,
+        agents: Option<Arc<AgentRegistry>>,
+        notice_lane: &str,
+    ) -> Arc<Self> {
+        if self
+            .dependents
+            .set(Dependents {
+                skills,
+                agents,
+                notice_lane: notice_lane.to_string(),
+            })
+            .is_err()
+        {
+            tracing::warn!("MCP supervisor dependents already installed");
+        }
+        self
+    }
+
+    /// **T1 step 3's** reader. Absent dependents mean an empty scan — the event
+    /// still fires, naming nothing.
+    fn scan(&self) -> DependentScan<'_> {
+        let d = self.dependents.get();
+        DependentScan {
+            registry: &self.tool_registry,
+            agents: d.and_then(|d| d.agents.as_deref()),
+            skills: d.and_then(|d| d.skills.as_deref()),
+            notice_lane: d.map(|d| d.notice_lane.as_str()).unwrap_or(""),
+        }
     }
 
     /// Start the crash reaper: one sequential task per kind that drains
@@ -407,23 +458,57 @@ impl McpSupervisor {
     /// never delete a tool B displaced it from (§10 case 13).
     ///
     /// **Step 3** — the dependent scan, `ExtensionCapabilityWithdrawn` and the
-    /// cron notice — lands in C4 with the event and the agent-registry handle.
-    /// It fires only on a non-empty withdrawn set, which is the count returned
-    /// here.
-    fn t1(&self, ext: &ExtensionId, _cause: WithdrawalCause) -> usize {
-        let mut withdrawn = 0usize;
+    /// cron notice — runs here too, on a non-empty withdrawn set only, so a
+    /// second pass over an extension whose tools are already gone announces
+    /// nothing: one transition, one announcement (§7.3).
+    fn t1(&self, ext: &ExtensionId, cause: WithdrawalCause) -> usize {
+        let withdrawn = self.t1_steps_1_2(ext);
+        let count = withdrawn.tools.len();
+        let state = self.ledger.state(ext).unwrap_or(ExtensionState::Disabling);
+        self.scan().run(ext, &state, cause, &withdrawn, false);
+        count
+    }
+
+    /// T1 steps 1–2 **plus step 3's classification**, for the one caller that
+    /// publishes later: `reload`, whose cron notice is suppressed unless the
+    /// reload ends `Failed` (§3.4.1, §7.3). The classification has to happen
+    /// here — once E4 has re-registered everything, nothing reads as lost.
+    fn t1_deferred(&self, ext: &ExtensionId) -> PendingScan {
+        let withdrawn = self.t1_steps_1_2(ext);
+        self.scan().classify(&withdrawn)
+    }
+
+    fn t1_steps_1_2(&self, ext: &ExtensionId) -> WithdrawnSet {
+        let mut withdrawn = WithdrawnSet::default();
         for name in self.ledger.tool_names(ext) {
             if self.ledger.owner_of(&name).as_ref() != Some(ext) {
                 continue;
             }
             if let Some(tool) = self.tool_registry.get(&name) {
                 self.ledger.withdraw(ext, tool.provides_capabilities.clone());
+                withdrawn.add_capabilities(tool.provides_capabilities.clone());
             }
             if self.tool_registry.remove(&name) {
-                withdrawn += 1;
+                withdrawn.add_tool(name);
             }
         }
         withdrawn
+    }
+
+    /// Publish a reload's deferred T1 step 3 (§3.4.1, §7.3): the event carries
+    /// the reload's **outcome** state, and `affected_cron_skills` is emptied
+    /// when it ended `Enabled` — the reload did not take the capability away.
+    fn publish_reload_scan(&self, id: &ExtensionId, pending: Option<PendingScan>) {
+        let Some(pending) = pending else { return };
+        let state = self.ledger.state(id).unwrap_or(ExtensionState::Disabling);
+        let ended_enabled = state.is_enabled();
+        self.scan().announce(
+            id,
+            &state,
+            WithdrawalCause::Reload,
+            &pending,
+            ended_enabled,
+        );
     }
 
     // ── T3 — DRAIN ───────────────────────────────────────────────────────
@@ -926,15 +1011,16 @@ impl McpSupervisor {
         // stays retained and is *flagged*, which is what both gate arms read to
         // refuse it with the "withdrawn by the server" wording instead of an
         // unattributed not-found.
+        let mut server_withdrawn_set = WithdrawnSet::default();
         for name in &removed {
             if let Some(tool) = self.tool_registry.get(name) {
                 self.ledger.withdraw(ext, tool.provides_capabilities.clone());
+                server_withdrawn_set.add_capabilities(tool.provides_capabilities.clone());
             }
             self.tool_registry.remove(name);
             self.ledger.flag_server_withdrawn(ext, name);
+            server_withdrawn_set.add_tool(name.clone());
         }
-        // T1 step 3 over the removed set, with `WithdrawalCause::ServerListChange`
-        // — the dependent scan, its event and the cron notice — is C4's.
 
         // Step 6 — added names: E4 verbatim, under the case-13 collision rule
         // and the **current** generation.
@@ -985,6 +1071,22 @@ impl McpSupervisor {
         self.ledger.record_tools(ext, union);
         self.ledger.stamp_tools_changed(ext);
 
+        // T1 step 3 over the removed set, `state: Enabled` — the owner did not
+        // do this and the wording must not say "disabled" (§3.7 step 5).
+        //
+        // Run **after** step 6/7 rather than between steps 5 and 6, where §3.7
+        // words it: the withdrawn set is identical either way, but the total /
+        // partial classification reads the index the change actually leaves
+        // behind, so a capability this same change re-provided is not announced
+        // as a total loss and then silently repaired.
+        self.scan().run(
+            ext,
+            &ExtensionState::Enabled,
+            WithdrawalCause::ServerListChange,
+            &server_withdrawn_set,
+            false,
+        );
+
         tracing::info!(
             extension = %ext,
             generation,
@@ -1009,13 +1111,11 @@ impl McpSupervisor {
     /// process while leaving the row `Enabled` — the exact stale-actor teardown
     /// the generations exist to prevent.
     pub async fn reap(&self, ext: &ExtensionId, generation: u64) {
-        // Until C4 gives the ledger its own bus, the crash's announcement is
-        // the reaper's, published on dequeue — before the re-check, so a
-        // superseded reap still announces the crash that *did* happen. The
-        // event carries the generation, so the log stays unambiguous even when
-        // it lands after load N+1's `enabled`.
-        self.emit(ext, "failed", generation, false);
-
+        // The crash's announcement is `mark_failed`'s own, published over the
+        // ledger's bus at the instant the state changed (§3.6) — not the
+        // reaper's on dequeue, which C2 used only because the ledger had no bus
+        // until C4. A superseded reap still announces the crash that *did*
+        // happen, for the same reason it did then.
         let _lock = self.lock_for(&ext.name).await;
         let current = self.ledger.record(ext);
         let entitled = current.as_ref().is_some_and(|r| {
@@ -1407,6 +1507,13 @@ impl ExtensionSupervisor for McpSupervisor {
             return Err(ExtensionError::NotLoaded);
         };
 
+        // §3.4.1's suppression, implemented as the design's option (a): T1's
+        // step 3 is **deferred** on a reload until the outcome is known, and
+        // its cron notice is emptied when the reload ended `Enabled`. The
+        // dispatcher's rule stays §7.3's verbatim — post when
+        // `affected_cron_skills` is non-empty — with no cause special case.
+        let mut deferred: Option<PendingScan> = None;
+
         match record.state {
             ExtensionState::Enabled => {
                 // T0 records `Reload` as the pending cause, so a call landing
@@ -1420,7 +1527,7 @@ impl ExtensionSupervisor for McpSupervisor {
                 ) else {
                     return Err(ExtensionError::NotLoaded);
                 };
-                self.t1(id, WithdrawalCause::Reload);
+                deferred = Some(self.t1_deferred(id));
                 self.t3(id).await;
                 self.t4(name).await;
                 // The `Disabling → Enabling` CAS: T5's dedup-clear and emit do
@@ -1432,10 +1539,12 @@ impl ExtensionSupervisor for McpSupervisor {
 
         let Transition::Took(generation) = self.ledger.begin(id, ExtensionState::Enabling, None)
         else {
+            self.publish_reload_scan(id, deferred);
             return self.row(id, Vec::new());
         };
         self.e_pre(id).await;
         self.load(name, &cfg, &defaults, generation).await;
+        self.publish_reload_scan(id, deferred);
         self.row(id, Vec::new())
     }
 

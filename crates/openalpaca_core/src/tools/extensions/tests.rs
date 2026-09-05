@@ -528,3 +528,152 @@ fn an_unrecorded_extension_is_allowed_and_counts_nothing() {
     drop(guard);
     assert!(ledger.begin_run(&ext, 3).is_ok());
 }
+
+// ── C4: the announcement is one `warn!` **and** one event (design §7.1, §7.4)
+
+/// Drain a bus receiver into the `ExtensionCapabilityWithheld` frames it holds.
+fn withheld_events(
+    rx: &mut tokio::sync::broadcast::Receiver<crate::events::SystemEvent>,
+) -> Vec<(ExtensionId, String, Moment, String)> {
+    let mut out = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let crate::events::SystemEvent::ExtensionCapabilityWithheld {
+            extension,
+            subject,
+            moment,
+            scope,
+            ..
+        } = event
+        {
+            out.push((extension, subject, moment, scope));
+        }
+    }
+    out
+}
+
+#[tracing_test::traced_test]
+#[test]
+fn a_hundred_blocked_attempts_in_one_task_announce_once_and_fail_a_hundred_times() {
+    let bus = crate::bus::EventBus::new(256);
+    let mut rx = bus.subscribe();
+    let ledger = ExtensionLedger::with_event_bus(bus);
+    let ext = mcp("github");
+    ledger.upsert(&ext, false, ExtensionState::Disabled);
+    let ctx = ToolContext {
+        task_id: Some("task-1".into()),
+        ..Default::default()
+    };
+
+    for _ in 0..100 {
+        assert!(
+            ledger
+                .check(&ext, "github__create_issue", None, Some(&ctx))
+                .is_err(),
+            "the error is never suppressed — only the announcement is deduped"
+        );
+    }
+
+    assert_eq!(ledger.warned_count(), 1);
+    let events = withheld_events(&mut rx);
+    assert_eq!(events.len(), 1, "one event per scope, not one per attempt");
+    assert_eq!(events[0].0, ext);
+    assert_eq!(events[0].1, "github__create_issue");
+    assert_eq!(events[0].2, Moment::AttemptedUse);
+    assert_eq!(events[0].3, "task-1", "the scope key is the task");
+
+    // The `warned_count` observable, tightened: exactly one `warn!` line, and
+    // ninety-nine `debug!` ones beside it.
+    logs_assert(|lines: &[&str]| {
+        let warns = lines
+            .iter()
+            .filter(|l| l.contains("WARN") && l.contains("extension capability withheld"))
+            .count();
+        if warns == 1 {
+            Ok(())
+        } else {
+            Err(format!("expected exactly one WARN line, saw {warns}"))
+        }
+    });
+}
+
+#[tracing_test::traced_test]
+#[test]
+fn eight_surface_assemblies_in_one_task_announce_once() {
+    let bus = crate::bus::EventBus::new(256);
+    let mut rx = bus.subscribe();
+    let ledger = ExtensionLedger::with_event_bus(bus);
+    let ext = mcp("github");
+    ledger.upsert(&ext, false, ExtensionState::Disabled);
+    let ctx = ToolContext {
+        // One lead agent, one task, eight subagents from the same template.
+        task_id: Some("workflow-7".into()),
+        agent_id: Some("code_agent::a1".into()),
+        ..Default::default()
+    };
+
+    for _ in 0..8 {
+        ledger.note_withheld(&ext, "issues", Moment::SurfaceAssembly, Some(&ctx), None);
+    }
+
+    assert_eq!(ledger.warned_count(), 1);
+    let events = withheld_events(&mut rx);
+    assert_eq!(events.len(), 1, "one announcement per workflow");
+    assert_eq!(events[0].2, Moment::SurfaceAssembly);
+    assert_eq!(events[0].3, "workflow-7");
+
+    logs_assert(|lines: &[&str]| {
+        let warns = lines
+            .iter()
+            .filter(|l| l.contains("WARN") && l.contains("extension capability withheld"))
+            .count();
+        if warns == 1 {
+            Ok(())
+        } else {
+            Err(format!("expected exactly one WARN line, saw {warns}"))
+        }
+    });
+}
+
+/// The `Moment::ScheduledSkip` **shape** C5's cron skip publishes: exempt from
+/// dedup, and its scope key is the **skill id**, so two cron skills on one
+/// extension never collapse into one line (design §6.2 #13, §7.4).
+#[test]
+fn a_scheduled_skip_publishes_one_event_per_fire_scoped_to_the_skill() {
+    let bus = crate::bus::EventBus::new(256);
+    let mut rx = bus.subscribe();
+    let ledger = ExtensionLedger::with_event_bus(bus);
+    let ext = mcp("github");
+    ledger.upsert(&ext, false, ExtensionState::Disabled);
+
+    ledger.note_withheld(&ext, "issues", Moment::ScheduledSkip, None, Some("nightly"));
+    ledger.note_withheld(&ext, "issues", Moment::ScheduledSkip, None, Some("nightly"));
+    ledger.note_withheld(&ext, "issues", Moment::ScheduledSkip, None, Some("hourly"));
+
+    let events = withheld_events(&mut rx);
+    assert_eq!(events.len(), 3, "a cron fire is a distinct unattended event");
+    assert!(events.iter().all(|e| e.2 == Moment::ScheduledSkip));
+    assert_eq!(
+        events.iter().map(|e| e.3.as_str()).collect::<Vec<_>>(),
+        vec!["nightly", "nightly", "hourly"],
+        "the scope key is the skill id, not the `ToolContext` fallback"
+    );
+    assert_eq!(ledger.warned_count(), 0, "and nothing is recorded as deduped");
+}
+
+#[test]
+fn attempted_use_and_surface_assembly_are_separate_moments() {
+    let ledger = ExtensionLedger::new();
+    let ext = mcp("github");
+    ledger.upsert(&ext, false, ExtensionState::Disabled);
+    let ctx = ToolContext {
+        task_id: Some("task-1".into()),
+        ..Default::default()
+    };
+    let _ = ledger.check(&ext, "github__create_issue", None, Some(&ctx));
+    ledger.note_withheld(&ext, "issues", Moment::SurfaceAssembly, Some(&ctx), None);
+    assert_eq!(
+        ledger.warned_count(),
+        2,
+        "the moment is the third component of the dedup key"
+    );
+}

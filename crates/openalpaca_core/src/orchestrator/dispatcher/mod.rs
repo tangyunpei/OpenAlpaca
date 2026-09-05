@@ -8,6 +8,12 @@ pub(crate) mod outcome;
 mod tests;
 pub(crate) mod usage;
 
+/// The one half of `post_update` that reaches the default lane. Re-exported
+/// because `outcome` is `pub(crate)` while `dispatcher` is `pub`: the daemon's
+/// `NotificationDispatcher` writes T1 step 3's cron notice through it
+/// (extension design §7.3 step 2).
+pub use outcome::persist_conversation;
+
 use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
@@ -32,7 +38,7 @@ use openalpaca_storage::repository::dispatch_decision::{
 
 // Re-export for use by child modules (lead_agent)
 pub(super) use memory::spawn_task_memory_extraction;
-use outcome::{finalize_task_with_outcome, persist_conversation, update_state_with_retry};
+use outcome::{finalize_task_with_outcome, update_state_with_retry};
 #[cfg(test)]
 use outcome::{build_task_outcome, finalize_task};
 

@@ -61,6 +61,14 @@ export function invalidationKeysFor(
     case "chat_stream_ended":
       return [qk.chat.all(), qk.conversations.all()];
 
+    // T1 step 3's transition event (ADR-030 §7.3, §9.5). The dispatcher writes
+    // the cron notice as a conversation row on the default lane, so an open chat
+    // has to refetch to show it without a reload — the same reason
+    // `chat_stream_ended` invalidates chat. The extension/tool/skill/agent keys
+    // land with the Extensions view in C7.
+    case "extension_capability_withdrawn":
+      return [qk.chat.all()];
+
     case "connector_status":
       return [qk.connectors.all()];
 

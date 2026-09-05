@@ -327,9 +327,20 @@ pub(super) fn completion_status_line(
 }
 
 /// Persist a task result as a conversation message.
-/// `pub(crate)` so the lead-agent `post_update` tool can reuse it.
+///
+/// `pub` — re-exported from `orchestrator::dispatcher` — because the lead
+/// agent's `post_update` tool and the daemon's `NotificationDispatcher` both
+/// reuse it: T1 step 3's cron notice is written to the default lane through
+/// exactly this call (extension design §7.3 step 2).
+///
+/// Two things about the arguments, stated so nobody re-derives them: the
+/// `source` argument is the **column**, not the role — `role` is hardcoded
+/// `"assistant"` below, which is why the row renders (the GUI transcript skips
+/// only `role === "system"`) — and it should be the lane's own source, because
+/// `get_or_create_conversation` creates a missing conversation with whatever
+/// `source` it is handed.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn persist_conversation(
+pub fn persist_conversation(
     db: &openalpaca_storage::Database,
     lane_key: &str,
     source: &str,

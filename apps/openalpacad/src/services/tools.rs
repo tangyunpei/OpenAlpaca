@@ -21,12 +21,20 @@ pub(super) async fn build_tool_registry(
     bus: &EventBus,
     daemon_config: &Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
     web_search_config: &Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
+    skill_catalog: &Arc<openalpaca_core::orchestrator::skill_catalog::SkillCatalog>,
+    agent_registry: &Arc<openalpaca_core::agent::AgentRegistry>,
+    default_lane_key: &str,
 ) -> anyhow::Result<(
     Arc<openalpaca_core::tools::ToolRegistry>,
     ConnectorSendLock,
     Arc<crate::managers::mcp::McpSupervisor>,
 )> {
-    let tool_registry = openalpaca_core::tools::ToolRegistry::new()
+    // **The one production `with_event_bus` call** (extension design §7.1).
+    // C1 landed the constructor and left every caller on `new()`; C4 installs
+    // the bus here, together with the `ExtensionCapabilityWithheld` variant it
+    // exists to publish. The other 100 `new()`/`default()` sites are tests: a
+    // ledger with no bus logs and returns.
+    let tool_registry = openalpaca_core::tools::ToolRegistry::with_event_bus(bus.clone())
         .map_err(|e| anyhow::anyhow!(e))?;
 
     // Register built-in tools (including update_persona)
@@ -115,6 +123,9 @@ pub(super) async fn build_tool_registry(
         &tool_registry,
         daemon_config,
         bus,
+        skill_catalog,
+        agent_registry,
+        default_lane_key,
     )
     .await;
 

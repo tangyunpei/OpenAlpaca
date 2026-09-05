@@ -149,25 +149,51 @@ impl SkillInvocationToolExecutor {
             .load_full(skill_id)
             .map_err(|e| format!("Failed to load skill '{}': {}", skill_id, e))?;
 
-        // Resolve tools for nested skill
+        // Resolve tools for nested skill.
+        //
+        // **S4 moment 2** on both branches (extension design §7.2, §6.2 #10).
+        // This path had *no* warning at all before — not even the unattributed
+        // one the top-level site emits — so a withdrawn extension tool
+        // disappeared here in total silence, with `sandbox_policy = None`
+        // beneath it. The refusal on total loss is C5's.
+        let ctx = self.parent_tool_context.as_ref();
         let mut tool_defs: Vec<ToolDefinition> =
             if !skill_doc.frontmatter.requires_capabilities.is_empty() {
                 let deny = &skill_doc.frontmatter.tools.deny;
-                let mut defs = self
+                let resolution = self
                     .tool_registry
-                    .tools_for_capabilities(&skill_doc.frontmatter.requires_capabilities);
+                    .resolve_capabilities(&skill_doc.frontmatter.requires_capabilities, &[]);
+                self.tool_registry.announce_withheld(&resolution, ctx, None);
+                let mut defs = resolution.defs;
                 defs.retain(|t| !deny.contains(&t.name));
                 defs
             } else if !skill_doc.frontmatter.tools.allow.is_empty() {
-                skill_doc
-                    .frontmatter
-                    .tools
-                    .allow
+                let names = &skill_doc.frontmatter.tools.allow;
+                let resolved: Vec<ToolDefinition> = names
                     .iter()
                     .filter_map(|name| {
                         self.tool_registry.get(name).map(|t| t.definition.clone())
                     })
-                    .collect()
+                    .collect();
+                if resolved.len() < names.len() {
+                    let resolved_names: Vec<&str> =
+                        resolved.iter().map(|d| d.name.as_str()).collect();
+                    let missing: Vec<&str> = names
+                        .iter()
+                        .filter(|n| !resolved_names.contains(&n.as_str()))
+                        .map(|n| n.as_str())
+                        .collect();
+                    let unattributed =
+                        self.tool_registry.announce_withheld_names(missing, ctx, None);
+                    if !unattributed.is_empty() {
+                        tracing::warn!(
+                            "Skill '{}' references unknown tools: {:?}",
+                            skill_id,
+                            unattributed
+                        );
+                    }
+                }
+                resolved
             } else {
                 vec![]
             };

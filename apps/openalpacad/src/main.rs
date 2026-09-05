@@ -302,6 +302,7 @@ async fn async_main(
         &user_path,
         &identity_path,
         &cancel_token,
+        &default_lane_key,
     )
     .await?;
 
@@ -337,8 +338,11 @@ async fn async_main(
         .with_event_sink(Arc::new(move |event| eb_for_plugins.broadcast(event)))
         // T5/E5 publish `SystemEvent::ExtensionStateChanged` here, which the
         // event bridge forwards to the `ServerEvent` peer C2 added
-        // (extension design §7.3). C4 moves this onto the ledger itself.
+        // (extension design §7.3). `mark_failed`'s own `failed` event moved
+        // onto the ledger's bus in C4 (§3.6); the supervisor keeps the rest.
         .with_event_bus(bus.clone())
+        // T1 step 3's cron notice is written to the default lane (§7.3 step 1).
+        .with_notice_lane(default_lane_key.clone())
         // `[extensions] drain_timeout_secs` bounds T3.
         .with_daemon_config(daemon_config.clone()),
     );

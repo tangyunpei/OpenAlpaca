@@ -858,6 +858,85 @@ impl ToolRegistry {
         resolution
     }
 
+    /// **S4 moment 2** — announce what `resolve_capabilities` just lost
+    /// (design §7.2).
+    ///
+    /// `withheld` and `partially_withheld` get the **same** attributed `warn!`
+    /// and `ExtensionCapabilityWithheld { Moment::SurfaceAssembly }`: a skill
+    /// that expected A's tools just lost them, and nothing else would say so.
+    /// The resolution still proceeds with B's tools; partial withdrawal never
+    /// gates. `unknown` is `debug!` only — a typo and a withdrawal are
+    /// indistinguishable today, so promoting unattributed misses would fire on
+    /// every existing install.
+    ///
+    /// The attribution says which of the two kinds of provider it is by the
+    /// state word it carries: a *blocked* provider is not `Enabled`, while a
+    /// **server-withdrawn** one is `Enabled` and simply no longer offers the
+    /// name (§3.7).
+    pub fn announce_withheld(
+        &self,
+        resolution: &CapabilityResolution,
+        ctx: Option<&ToolContext>,
+        scope_override: Option<&str>,
+    ) {
+        for entry in resolution
+            .withheld
+            .iter()
+            .chain(resolution.partially_withheld.iter())
+        {
+            for provider in &entry.providers {
+                self.extensions.note_withheld(
+                    &provider.extension,
+                    &entry.capability,
+                    crate::tools::extensions::Moment::SurfaceAssembly,
+                    ctx,
+                    scope_override,
+                );
+            }
+        }
+    }
+
+    /// The **legacy `tools.allow`** arm of the same classification
+    /// (design §6.2 #10, §7.2).
+    ///
+    /// A skill whose `requires_capabilities` is empty resolves names with
+    /// `get()`, not through the capability index, so every miss is put through
+    /// `owner_of`: a name owned by an extension that is not `Enabled` — or
+    /// server-withdrawn under an `Enabled` one — is announced exactly like a
+    /// withheld capability. Returns the misses with **no** ledger owner, which
+    /// keep today's unattributed *"references unknown tools"* warning.
+    pub fn announce_withheld_names<'a>(
+        &self,
+        names: impl IntoIterator<Item = &'a str>,
+        ctx: Option<&ToolContext>,
+        scope_override: Option<&str>,
+    ) -> Vec<&'a str> {
+        let mut unattributed = Vec::new();
+        for name in names {
+            let Some(ext) = self.extensions.owner_of(name) else {
+                unattributed.push(name);
+                continue;
+            };
+            let blocked = match self.extensions.state(&ext) {
+                None => false,
+                Some(state) if !state.is_enabled() => true,
+                Some(_) => self.extensions.is_server_withdrawn(&ext, name),
+            };
+            if blocked {
+                self.extensions.note_withheld(
+                    &ext,
+                    name,
+                    crate::tools::extensions::Moment::SurfaceAssembly,
+                    ctx,
+                    scope_override,
+                );
+            } else {
+                unattributed.push(name);
+            }
+        }
+        unattributed
+    }
+
     /// Tool definitions for all "extension" tools — those bridged from MCP
     /// servers (`ToolBackend::Mcp`, registered as `<server>__<tool>`) or
     /// provided by plugins (`ToolBackend::Plugin`, registered as

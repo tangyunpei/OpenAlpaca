@@ -115,6 +115,23 @@ impl NotificationDispatcher {
                 } => {
                     self.handle_progress(&lane_key, &message).await;
                 }
+                SystemEvent::ExtensionCapabilityWithdrawn {
+                    ref extension,
+                    ref state,
+                    cause,
+                    ref affected_cron_skills,
+                    ref notice_lane,
+                    ..
+                } => {
+                    self.handle_extension_notice(
+                        extension,
+                        state,
+                        cause,
+                        affected_cron_skills,
+                        notice_lane,
+                    )
+                    .await;
+                }
                 _ => {}
             }
         }
@@ -215,6 +232,84 @@ impl NotificationDispatcher {
             self.try_cross_channel_discord(&task.created_by, &content)
                 .await;
         }
+    }
+
+    /// **T1 step 3's owner notice** (extension design §7.3 step 2).
+    ///
+    /// A cron skill runs unattended: the event log alone is not enough for the
+    /// one failure mode with no human in the loop. So when a transition leaves
+    /// a cron-scheduled skill wholly unsatisfiable, the owner gets **one**
+    /// notice per transition — never per fire.
+    ///
+    /// Not `SystemEvent::WorkflowProgress`: `handle_progress` dispatches only to
+    /// lane keys ending `:telegram`, `:imessage` or `:discord`, so the default
+    /// `:gui` lane falls through all three branches and the notice would be a
+    /// silent no-op for the default user. This does what `post_update` does —
+    /// **write** the conversation row, **then** fan out cross-channel.
+    async fn handle_extension_notice(
+        &self,
+        extension: &openalpaca_core::tools::extensions::ExtensionId,
+        state: &openalpaca_core::tools::extensions::ExtensionState,
+        cause: openalpaca_core::tools::extensions::WithdrawalCause,
+        affected_cron_skills: &[String],
+        notice_lane: &str,
+    ) {
+        if affected_cron_skills.is_empty() || notice_lane.is_empty() {
+            return;
+        }
+
+        let one = affected_cron_skills.len() == 1;
+        let mut content = format!(
+            "Scheduled {} {} can no longer run — {} '{}': {}. {} run again once it is \
+             available; nothing else was changed.",
+            if one { "skill" } else { "skills" },
+            affected_cron_skills
+                .iter()
+                .map(|s| format!("'{s}'"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            extension.kind.prose(),
+            extension.name,
+            // Detail-free: this row is chat-visible and the model reads it back,
+            // so the free-text `detail` travels below, wrapped (§7.1).
+            cause.wording_without_detail(extension),
+            if one { "It will" } else { "They will" },
+        );
+        if let openalpaca_core::tools::extensions::ExtensionState::Failed { detail, .. } = state
+            && !detail.is_empty()
+        {
+            content.push_str("\n\n");
+            content.push_str(&openalpaca_core::tools::extensions::describe::wrap_detail(
+                detail,
+            ));
+        }
+
+        // Write — the half that reaches the default lane and `GET
+        // /v1/chat/history`. `"gui"` is the lane's own source, passed as the
+        // `source` **column**: if the default lane has no conversation row yet,
+        // `get_or_create_conversation` creates one with whatever source it is
+        // handed, and a `"system"`-sourced default lane would be wrong forever.
+        openalpaca_core::orchestrator::dispatcher::persist_conversation(
+            &self.db,
+            notice_lane,
+            "gui",
+            content.clone(),
+            None,
+            0,
+            0,
+            0,
+        );
+
+        // Push — the same cross-channel fan-out `handle_failure` uses for
+        // non-connector-origin tasks. The dispatcher has no `local_user_id`
+        // field, so the user id is derived from the lane the same way
+        // `resolve_telegram_chat_id` derives it from a `:telegram` lane.
+        let Some(user_id) = notice_lane.strip_suffix(":gui") else {
+            return;
+        };
+        let _ = self.try_cross_channel_telegram(user_id, &content).await;
+        self.try_cross_channel_imessage(user_id, &content).await;
+        self.try_cross_channel_discord(user_id, &content).await;
     }
 
     /// Push a mid-workflow progress update to the lane's originating channel.

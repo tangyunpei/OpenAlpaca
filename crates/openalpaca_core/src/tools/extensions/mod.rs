@@ -19,9 +19,13 @@ use std::fmt;
 
 pub mod describe;
 mod ledger;
+pub mod scan;
+#[cfg(test)]
+mod scan_tests;
 
 pub use describe::{Audience, Described};
 pub use ledger::{CallGuard, ExtensionLedger, ExtensionRecord, ScopedRun, Transition};
+pub use scan::{DependentScan, PendingScan, ScanOutcome, WithdrawnSet};
 
 // ============================================================================
 // Identity
@@ -309,6 +313,31 @@ pub enum WithdrawalCause {
 }
 
 impl WithdrawalCause {
+    /// The literal the `ServerEvent` peer and the event log carry — the same
+    /// word `serde(rename_all = "snake_case")` produces.
+    pub fn word(&self) -> &'static str {
+        match self {
+            Self::Disable => "disable",
+            Self::Watcher => "watcher",
+            Self::DeclarationGone => "declaration_gone",
+            Self::Deny => "deny",
+            Self::Reload => "reload",
+            Self::Crash => "crash",
+            Self::ServerListChange => "server_list_change",
+        }
+    }
+
+    /// The §7.3 phrase with **no** `<detail>` interpolated, for a surface on
+    /// which the detail must travel separately, wrapped (§7.1) — the cron
+    /// notice, which is a chat row the model reads back. `Crash` is the only
+    /// row that reads `detail` at all.
+    pub fn wording_without_detail(&self, ext: &ExtensionId) -> String {
+        match self {
+            Self::Crash => "stopped running (crashed)".to_string(),
+            other => other.wording(ext, ""),
+        }
+    }
+
     /// The §7.3 wording this cause keys. `detail` is only read by `Crash`.
     pub fn wording(&self, ext: &ExtensionId, detail: &str) -> String {
         match self {
@@ -335,6 +364,18 @@ pub enum Moment {
     AttemptedUse,
     SurfaceAssembly,
     ScheduledSkip,
+}
+
+impl Moment {
+    /// The literal the `ServerEvent` peer and the event log carry — the same
+    /// word `serde(rename_all = "snake_case")` produces.
+    pub fn word(&self) -> &'static str {
+        match self {
+            Self::AttemptedUse => "attempted_use",
+            Self::SurfaceAssembly => "surface_assembly",
+            Self::ScheduledSkip => "scheduled_skip",
+        }
+    }
 }
 
 // ============================================================================

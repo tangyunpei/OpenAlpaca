@@ -146,11 +146,24 @@ impl Orchestrator {
         // Resolve tools via capability model, falling back to legacy name-based matching.
         // Intent-suggested tools are intentionally NOT merged here to maintain
         // skill-level tool isolation (P1-1 security fix).
+        //
+        // **S4 moment 2** on both branches (extension design §7.2, §6.2 #10):
+        // a capability whose every provider is gone — or a legacy allowed name
+        // whose owning extension is not `Enabled` — is announced with an
+        // attributed `warn!` + `ExtensionCapabilityWithheld {
+        // Moment::SurfaceAssembly }`. The **refusal** on total loss is C5's;
+        // this is the attribution that lands with the event. The dedup scope is
+        // the request, which has no `ToolContext` yet at this point.
+        let withheld_scope = request_id.to_string();
         let mut tool_defs: Vec<openalpaca_llm::ToolDefinition> =
             if !skill_doc.frontmatter.requires_capabilities.is_empty() {
                 // New path: capability-based resolution
+                let resolution = self
+                    .tool_registry
+                    .resolve_capabilities(&skill_doc.frontmatter.requires_capabilities, &[]);
                 self.tool_registry
-                    .tools_for_capabilities(&skill_doc.frontmatter.requires_capabilities)
+                    .announce_withheld(&resolution, None, Some(&withheld_scope));
+                resolution.defs
             } else if !skill_doc.frontmatter.tools.allow.is_empty() {
                 // Legacy fallback: direct tool name matching
                 let names = &skill_doc.frontmatter.tools.allow;
@@ -168,11 +181,22 @@ impl Orchestrator {
                         .filter(|n| !resolved_names.contains(&n.as_str()))
                         .map(|n| n.as_str())
                         .collect();
-                    tracing::warn!(
-                        "Skill '{}' references unknown tools: {:?}",
-                        skill_name,
-                        missing
+                    // Every miss the ledger attributes is announced with the
+                    // extension that took it; the rest keep today's
+                    // unattributed warning, because a typo and a withdrawal are
+                    // indistinguishable for a name nothing ever owned.
+                    let unattributed = self.tool_registry.announce_withheld_names(
+                        missing,
+                        None,
+                        Some(&withheld_scope),
                     );
+                    if !unattributed.is_empty() {
+                        tracing::warn!(
+                            "Skill '{}' references unknown tools: {:?}",
+                            skill_name,
+                            unattributed
+                        );
+                    }
                 }
                 resolved
             } else {
@@ -962,7 +986,11 @@ impl Orchestrator {
         let ledger = Arc::clone(self.tool_registry.extensions());
         let _run_guard = ledger.begin_run(&extension, executor.generation())?;
 
-        let allowed = plugin_skill_allowlist(skill_name, fm, &self.tool_registry)?;
+        // The dedup scope for the announcements below, matching the file-skill
+        // site: the request, which is what a skill invoked in a loop varies by.
+        let withheld_scope = request_id.to_string();
+        let allowed =
+            plugin_skill_allowlist(skill_name, fm, &self.tool_registry, &withheld_scope)?;
         let mut denied: Vec<String> = fm.tools.deny.clone();
         for g in &self
             .daemon_config
@@ -1081,16 +1109,25 @@ fn plugin_skill_allowlist(
     skill_name: &str,
     fm: &crate::middleware::skill::SkillFrontmatter,
     tool_registry: &crate::tools::ToolRegistry,
+    withheld_scope: &str,
 ) -> Result<Allowlist, String> {
     if fm.requires_capabilities.is_empty() {
+        // The legacy `tools.allow` fallback is never resolved against the
+        // registry, so the same `owner_of` scan is what attributes it: a plugin
+        // skill whose allowed names went with a disabled extension is announced
+        // here rather than one refused call at a time by the gate's miss arm
+        // (extension design §6.2 #10). Refusing up front on total loss is C5's.
+        tool_registry.announce_withheld_names(
+            fm.tools.allow.iter().map(String::as_str),
+            None,
+            Some(withheld_scope),
+        );
         return Ok(Allowlist::Only(fm.tools.allow.clone()));
     }
 
-    let resolved: Vec<String> = tool_registry
-        .tools_for_capabilities(&fm.requires_capabilities)
-        .into_iter()
-        .map(|d| d.name)
-        .collect();
+    let resolution = tool_registry.resolve_capabilities(&fm.requires_capabilities, &[]);
+    tool_registry.announce_withheld(&resolution, None, Some(withheld_scope));
+    let resolved: Vec<String> = resolution.defs.into_iter().map(|d| d.name).collect();
 
     if resolved.is_empty() {
         let unresolved = fm.requires_capabilities.join(", ");

@@ -59,6 +59,10 @@ export type ServerEvent =
   | { type: "workflow_steered"; task_id: string; lane_key: string; ts: string; instance_id: string; _id: number }
   | { type: "workflow_progress"; task_id: string; lane_key: string; message: string; ts: string; instance_id: string; _id: number }
   | { type: "followup_queued"; lane_key: string; followup_id: number; kind: string; ts: string; instance_id: string; _id: number }
+  // The extension family (ADR-030). Unlike the six plugin variants below, every
+  // one of these carries `ts` and `instance_id`, so its rows are orderable.
+  | { type: "extension_capability_withheld"; kind: string; id: string; subject: string; moment: string; state: string; scope: string; stale: boolean; ts: string; instance_id: string; _id: number }
+  | { type: "extension_capability_withdrawn"; kind: string; id: string; state: string; cause: string; capabilities: string[]; tools: string[]; affected_templates: string[]; affected_skills: string[]; affected_cron_skills: string[]; notice_lane: string; ts: string; instance_id: string; _id: number }
   // GAP-22: the six plugin variants carry neither `ts` nor `instance_id`.
   | { type: "plugin_loaded"; plugin_id: string; tools: string[]; _id: number }
   | { type: "plugin_unloaded"; plugin_id: string; _id: number }

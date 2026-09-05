@@ -62,14 +62,14 @@ fn plugin_skill_total_loss_cannot_call_unrelated_builtin() {
     };
 
     // Extension installed: the skill is scoped to the tool it asked for.
-    let allowed = plugin_skill_allowlist("acme-search", &fm, &registry(true)).unwrap();
+    let allowed = plugin_skill_allowlist("acme-search", &fm, &registry(true), "scope").unwrap();
     assert_eq!(allowed, Allowlist::Only(vec!["acme__search".to_string()]));
     assert!(!denies(&allowed, "acme__search"));
     assert!(denies(&allowed, "shell_execute"));
 
     // Extension absent or disabled: the requirement resolves to nothing. The
     // skill is refused up front instead of running with a widened reach.
-    let err = plugin_skill_allowlist("acme-search", &fm, &registry(false))
+    let err = plugin_skill_allowlist("acme-search", &fm, &registry(false), "scope")
         .expect_err("a skill whose required capabilities resolve to nothing must be refused");
     assert!(err.contains("acme-search"), "refusal must name the skill: {err}");
     assert!(
@@ -93,7 +93,7 @@ fn plugin_skill_with_no_lists_cannot_call_any_tool() {
 
     // No `requires_capabilities` and no `tools.allow`: nothing to refuse up
     // front, but nothing granted either.
-    let allowed = plugin_skill_allowlist("bare", &fm, &registry(true)).unwrap();
+    let allowed = plugin_skill_allowlist("bare", &fm, &registry(true), "scope").unwrap();
     assert_eq!(allowed, Allowlist::Only(vec![]));
     for tool in ["shell_execute", "acme__search", "workspace_read"] {
         assert!(

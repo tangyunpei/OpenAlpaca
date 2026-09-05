@@ -270,6 +270,51 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// **S4 moment 1 / 2** — a capability was withheld from a caller
+    /// (extension design §7.1, §7.2, §6.2 #13). Deduped per
+    /// `(scope, extension, moment)` for ten minutes: the announcement, never
+    /// the error.
+    ExtensionCapabilityWithheld {
+        /// `"mcp"` | `"plugin"`.
+        kind: String,
+        id: String,
+        /// The tool name, capability or skill id the withholding is about.
+        subject: String,
+        /// `"attempted_use"` | `"surface_assembly"` | `"scheduled_skip"`.
+        moment: String,
+        /// The record's state word, or `"unrecorded"`.
+        state: String,
+        /// The dedup scope key — the skill id for `scheduled_skip`.
+        scope: String,
+        /// The caller held a previous load's handle.
+        stale: bool,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// **S4 moment 3** — T1 step 3's dependent scan: one per transition, never
+    /// deduped (extension design §3.2 T1, §7.3).
+    ExtensionCapabilityWithdrawn {
+        /// `"mcp"` | `"plugin"`.
+        kind: String,
+        id: String,
+        /// The record's state word at the transition.
+        state: String,
+        /// `"disable"` | `"watcher"` | `"declaration_gone"` | `"deny"` |
+        /// `"reload"` | `"crash"` | `"server_list_change"` — what the wording is
+        /// keyed on, never the state.
+        cause: String,
+        capabilities: Vec<String>,
+        tools: Vec<String>,
+        affected_templates: Vec<String>,
+        affected_skills: Vec<String>,
+        /// The cron-scheduled subset; the owner notice fires only when this is
+        /// non-empty.
+        affected_cron_skills: Vec<String>,
+        /// The daemon's default lane, where the notice was written.
+        notice_lane: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
     /// A plugin was loaded and registered its tools
     PluginLoaded {
         plugin_id: String,

@@ -270,7 +270,8 @@ impl BuiltInTool for SpawnSubagentTool {
         }
 
         // 6. Resolve tools for subagent's skills
-        let tools = crate::tools::resolve_agent_tools(&agent, &self.tool_registry);
+        let tools =
+            crate::tools::resolve_agent_tools(&agent, &self.tool_registry, Some(&subagent_tool_ctx));
 
         // 7. Build LoopConfig from daemon defaults + agent constraints
         let mut loop_config =

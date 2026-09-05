@@ -59,6 +59,9 @@ pub async fn initialize_services(
     user_path: &Path,
     identity_path: &Path,
     cancel_token: &CancellationToken,
+    // The daemon's default lane, `{local_user_id}:gui` — where T1 step 3's
+    // cron notice is written (extension design §7.3 step 1).
+    default_lane_key: &str,
 ) -> Result<InitializedServices> {
     let shared_context = Arc::new(SharedContext::new());
 
@@ -129,6 +132,28 @@ pub async fn initialize_services(
         .unwrap_or_default();
     let web_search_config = Arc::new(ArcSwap::from_pointee(web_search_cfg));
 
+    // Build SkillCatalog — **before** the tool registry, because the MCP
+    // supervisor's first `reconcile_all` happens inside `build_tool_registry`
+    // and T1 step 3's dependent scan needs the catalog handle from
+    // construction (extension design §7.3). The catalog reads only
+    // `config/skills`, so nothing here depends on the registry.
+    let skill_catalog = {
+        let catalog = openalpaca_core::orchestrator::skill_catalog::SkillCatalog::new();
+        let skills_dir = config_base_dir.join("skills");
+        if skills_dir.exists() {
+            let count = catalog.scan_directory(
+                &skills_dir,
+                openalpaca_core::middleware::skill::SkillScope::Project,
+            );
+            info!(
+                "Skill catalog: loaded {} skill(s) from {}",
+                count,
+                skills_dir.display()
+            );
+        }
+        Arc::new(catalog)
+    };
+
     // Build ToolRegistry
     let (tool_registry, connector_send_lock, mcp_supervisor) = tools::build_tool_registry(
         config_base_dir,
@@ -140,6 +165,9 @@ pub async fn initialize_services(
         bus,
         daemon_config,
         &web_search_config,
+        &skill_catalog,
+        &shared_context.agent_registry,
+        default_lane_key,
     )
     .await?;
 
@@ -157,24 +185,6 @@ pub async fn initialize_services(
     let security_gate = Arc::new(openalpaca_core::security::gate::SecurityGate::new(
         sandbox_manager,
     ));
-
-    // Build SkillCatalog
-    let skill_catalog = {
-        let catalog = openalpaca_core::orchestrator::skill_catalog::SkillCatalog::new();
-        let skills_dir = config_base_dir.join("skills");
-        if skills_dir.exists() {
-            let count = catalog.scan_directory(
-                &skills_dir,
-                openalpaca_core::middleware::skill::SkillScope::Project,
-            );
-            info!(
-                "Skill catalog: loaded {} skill(s) from {}",
-                count,
-                skills_dir.display()
-            );
-        }
-        Arc::new(catalog)
-    };
 
     // Build SkillRouter with configurable thresholds from daemon config
     let skill_router = {

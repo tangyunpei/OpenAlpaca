@@ -203,7 +203,7 @@ mod tests {
             llm_config: AgentLlmConfig::default(),
         };
 
-        let defs = resolve_agent_tools(&agent, &registry);
+        let defs = resolve_agent_tools(&agent, &registry, None);
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "srv__echo");
     }
