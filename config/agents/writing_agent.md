@@ -4,6 +4,7 @@ name: "Writing Agent"
 description: "Focused on content writing, document generation, and text refinement"
 capabilities:
   - "file_write"
+  - "artifact_write"
   - "workspace_read"
   - "workspace_write"
 denied_capabilities:

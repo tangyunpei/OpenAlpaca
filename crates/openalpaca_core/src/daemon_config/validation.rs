@@ -255,6 +255,19 @@ impl DaemonConfig {
             1.0,
             "skill_defaults.router_suggest_threshold",
         );
+        // ── Execution > Artifacts ──
+        clamp_val(
+            &mut self.execution.artifacts.max_artifact_bytes,
+            1024,
+            100 * 1024 * 1024,
+            "artifacts.max_artifact_bytes",
+        );
+        clamp_val(
+            &mut self.execution.artifacts.max_versions_per_artifact,
+            1,
+            200,
+            "artifacts.max_versions_per_artifact",
+        );
         // ── Security ──
         clamp_val(
             &mut self.security.max_input_length,

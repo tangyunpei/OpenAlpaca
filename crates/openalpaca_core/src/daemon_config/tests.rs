@@ -367,3 +367,84 @@ drain_timeout_secs = 7
     assert_eq!(config.execution.skill_defaults.max_rounds, 9);
     assert_eq!(config.extensions.drain_timeout_secs, 7);
 }
+
+// ── Artifact store: [execution.artifacts] (plan §4.6) ──
+
+fn assert_artifacts_is_default(artifacts: &crate::daemon_config::ArtifactsConfig) {
+    // 10 MB — the `file_write` cap, not the 50 MB upload cap: this content
+    // comes out of a context window.
+    assert_eq!(artifacts.max_artifact_bytes, 10 * 1024 * 1024);
+    assert_eq!(artifacts.max_versions_per_artifact, 20);
+}
+
+#[test]
+fn test_artifacts_defaults() {
+    assert_artifacts_is_default(&DaemonConfig::default().execution.artifacts);
+}
+
+#[test]
+fn test_artifacts_absent_table_parses_to_defaults() {
+    let config: DaemonConfig = toml::from_str("").unwrap();
+    assert_artifacts_is_default(&config.execution.artifacts);
+
+    // [execution] present but [execution.artifacts] absent.
+    let config: DaemonConfig = toml::from_str(
+        r#"
+[execution.agent_defaults]
+max_rounds = 9
+"#,
+    )
+    .unwrap();
+    assert_artifacts_is_default(&config.execution.artifacts);
+}
+
+#[test]
+fn test_artifacts_partial_table_keeps_field_defaults() {
+    let config: DaemonConfig = toml::from_str(
+        r#"
+[execution.artifacts]
+max_versions_per_artifact = 5
+"#,
+    )
+    .unwrap();
+    assert_eq!(config.execution.artifacts.max_versions_per_artifact, 5);
+    assert_eq!(config.execution.artifacts.max_artifact_bytes, 10 * 1024 * 1024);
+}
+
+#[test]
+fn test_artifacts_from_toml() {
+    let config: DaemonConfig = toml::from_str(
+        r#"
+[execution.artifacts]
+max_artifact_bytes = 4096
+max_versions_per_artifact = 3
+"#,
+    )
+    .unwrap();
+    assert_eq!(config.execution.artifacts.max_artifact_bytes, 4096);
+    assert_eq!(config.execution.artifacts.max_versions_per_artifact, 3);
+}
+
+#[test]
+fn test_artifacts_serde_round_trip() {
+    let serialized = toml::to_string(&DaemonConfig::default()).unwrap();
+    let config: DaemonConfig = toml::from_str(&serialized).unwrap();
+    assert_artifacts_is_default(&config.execution.artifacts);
+}
+
+#[test]
+fn test_artifacts_validate_clamps() {
+    let mut config = DaemonConfig::default();
+    config.execution.artifacts.max_artifact_bytes = 1;
+    config.execution.artifacts.max_versions_per_artifact = 0;
+    config.validate();
+    assert_eq!(config.execution.artifacts.max_artifact_bytes, 1024);
+    assert_eq!(config.execution.artifacts.max_versions_per_artifact, 1);
+
+    let mut config = DaemonConfig::default();
+    config.execution.artifacts.max_artifact_bytes = u64::MAX;
+    config.execution.artifacts.max_versions_per_artifact = 10_000;
+    config.validate();
+    assert_eq!(config.execution.artifacts.max_artifact_bytes, 100 * 1024 * 1024);
+    assert_eq!(config.execution.artifacts.max_versions_per_artifact, 200);
+}

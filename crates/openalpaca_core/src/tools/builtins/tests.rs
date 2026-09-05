@@ -3,8 +3,8 @@ use super::*;
 #[test]
 fn test_builtin_tools_count_without_db() {
     let tools = builtin_tools(None, None, None, None, None);
-    // 5 base tools + 2 workspace tools (workspace_read, workspace_write)
-    assert_eq!(tools.len(), 7);
+    // 6 base tools (incl. artifact_write) + 2 workspace tools
+    assert_eq!(tools.len(), 8);
 }
 
 #[test]
@@ -13,8 +13,8 @@ fn test_builtin_tools_count_with_db() {
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let tools = builtin_tools(Some(db), None, Some(dc), None, None);
-    // 6 base tools (with memory_search) + 2 workspace tools (workspace_read, workspace_write)
-    assert_eq!(tools.len(), 8);
+    // 7 base tools (with memory_search) + 2 workspace tools
+    assert_eq!(tools.len(), 9);
 }
 
 #[test]
@@ -42,8 +42,8 @@ fn test_builtin_tools_with_persona_context_includes_update_persona() {
     };
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let tools = builtin_tools_with_persona_context(Some(db), None, ctx, Some(dc), None, None, None);
-    // 8 base (6 + 2 workspace) + 1 update_persona = 9 (no send since connector_send_provider is None)
-    assert_eq!(tools.len(), 9, "Should have 9 tools (8 base + update_persona)");
+    // 9 base (7 + 2 workspace) + 1 update_persona = 10 (no send since connector_send_provider is None)
+    assert_eq!(tools.len(), 10, "Should have 10 tools (9 base + update_persona)");
     assert!(
         tools.iter().any(|t| t.definition.name == "update_persona"),
         "update_persona tool must be present"
@@ -175,8 +175,8 @@ fn test_builtin_tools_uses_explicit_workspace_root() {
 
     // Pass an explicit workspace root — should not fall back to current_dir()
     let tools = builtin_tools(None, None, None, None, Some(ws_root.clone()));
-    // 5 base tools + 2 workspace tools (workspace_read, workspace_write)
-    assert_eq!(tools.len(), 7);
+    // 6 base tools (incl. artifact_write) + 2 workspace tools
+    assert_eq!(tools.len(), 8);
 
     // Verify tools were created (they compile and register without error
     // when given an explicit workspace root).
@@ -190,8 +190,8 @@ fn test_builtin_tools_falls_back_to_current_dir_when_none() {
     // When workspace_root is None, should fall back to current_dir()
     // This must not panic even if current_dir() is available.
     let tools = builtin_tools(None, None, None, None, None);
-    // 5 base tools + 2 workspace tools (workspace_read, workspace_write)
-    assert_eq!(tools.len(), 7);
+    // 6 base tools (incl. artifact_write) + 2 workspace tools
+    assert_eq!(tools.len(), 8);
 }
 
 // --- json_to_cli_args ---
@@ -221,8 +221,8 @@ fn test_json_to_cli_args_non_object() {
 fn annotations_for_builtin_known_names() {
     let names = [
         "file_read", "file_write", "workspace_read", "workspace_write",
-        "memory_search", "send", "shell_execute", "update_persona",
-        "web_fetch", "web_search",
+        "artifact_write", "memory_search", "send", "shell_execute",
+        "update_persona", "web_fetch", "web_search",
     ];
     for name in names {
         assert!(
@@ -240,7 +240,7 @@ fn annotations_for_builtin_unknown_returns_none() {
 
 #[test]
 fn annotations_for_builtin_destructive_tools_tagged() {
-    for name in ["file_write", "workspace_write", "shell_execute", "update_persona", "send"] {
+    for name in ["file_write", "workspace_write", "artifact_write", "shell_execute", "update_persona", "send"] {
         let ann = annotations_for_builtin(name).unwrap();
         assert_eq!(ann.destructive_hint, Some(true), "{name} should be destructive");
     }
@@ -260,8 +260,300 @@ fn annotations_for_builtin_open_world_correct() {
         let ann = annotations_for_builtin(name).unwrap();
         assert_eq!(ann.open_world_hint, Some(true), "{name} should be open_world");
     }
-    for name in ["file_read", "file_write", "workspace_read", "workspace_write", "memory_search", "update_persona"] {
+    for name in ["file_read", "file_write", "workspace_read", "workspace_write", "artifact_write", "memory_search", "update_persona"] {
         let ann = annotations_for_builtin(name).unwrap();
         assert_eq!(ann.open_world_hint, Some(false), "{name} should NOT be open_world");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// workspace_write(entry_type="artifact") — the spill bridge (plan §4.6)
+// ---------------------------------------------------------------------------
+
+mod workspace_artifact_spill {
+    use super::*;
+    use crate::orchestrator::task_state::{TaskState, WorkspaceEntry};
+    use crate::test_util::HomeStoreGuard;
+    use crate::tools::registry::ToolContext;
+    use openalpaca_storage::{Database, FileAssetRepository, Task, TaskStatus};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    const OWNER: &str = "owner-1";
+    const TASK_ID: &str = "t-4444dddd-0000-0000-0000-000000000000";
+
+    struct Fixture {
+        _home: TempDir,
+        _env: HomeStoreGuard,
+        _db_dir: TempDir,
+        project: TempDir,
+        db: Database,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let home = TempDir::new().unwrap();
+            let env = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+            let project = TempDir::new().unwrap();
+            let db_dir = TempDir::new().unwrap();
+            let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+            let now = chrono::Utc::now();
+            openalpaca_storage::repository::TaskRepository::new(&db)
+                .create(&Task {
+                    id: TASK_ID.to_string(),
+                    title: "Spill run".to_string(),
+                    description: None,
+                    status: TaskStatus::Running,
+                    priority: 0,
+                    progress_current: None,
+                    progress_total: None,
+                    result_summary: None,
+                    created_by: OWNER.to_string(),
+                    source_lane: "cli".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                    completed_at: None,
+                    state_json: Some(TaskState::initial("spill run", &[]).to_json()),
+                    state_version: 0,
+                    outcome_json: None,
+                    outcome_kind: None,
+                    artifact_count: 0,
+                })
+                .unwrap();
+            Self {
+                _home: home,
+                _env: env,
+                _db_dir: db_dir,
+                project,
+                db,
+            }
+        }
+
+        fn project_root(&self) -> PathBuf {
+            self.project.path().canonicalize().unwrap()
+        }
+
+        fn tool(&self) -> WorkspaceWriteTool {
+            WorkspaceWriteTool {
+                db: Some(self.db.clone()),
+                daemon_config: None,
+            }
+        }
+
+        fn ctx(&self) -> ToolContext {
+            ToolContext {
+                agent_id: Some("writing_agent".to_string()),
+                task_id: Some(TASK_ID.to_string()),
+                owner_id: Some(OWNER.to_string()),
+                workspace_id: Some(self.project_root().to_str().unwrap().to_string()),
+                ..Default::default()
+            }
+        }
+
+        fn state(&self) -> TaskState {
+            let task = openalpaca_storage::repository::TaskRepository::new(&self.db)
+                .get(TASK_ID)
+                .unwrap()
+                .unwrap();
+            serde_json::from_str(task.state_json.as_deref().unwrap()).unwrap()
+        }
+
+        fn entry(&self, key: &str) -> WorkspaceEntry {
+            self.state()
+                .workspace
+                .entries
+                .into_iter()
+                .find(|e| e.key == key)
+                .unwrap()
+        }
+    }
+
+    fn long_body() -> String {
+        // Comfortably past the 512-char preview bound.
+        (0..40)
+            .map(|i| format!("line {i}: the quick brown fox jumps over the lazy dog\n"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn artifact_entry_spills_to_the_store_and_keeps_a_preview() {
+        let fx = Fixture::new();
+        let body = long_body();
+
+        let out = fx
+            .tool()
+            .execute_with_context(
+                &serde_json::json!({
+                    "key": "draft_v1",
+                    "content": body,
+                    "entry_type": "artifact"
+                }),
+                &fx.ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("draft_v1"), "{out}");
+
+        let entry = fx.entry("draft_v1");
+        let asset_id = entry
+            .file_asset_id
+            .clone()
+            .expect("an artifact entry must carry its file_asset_id");
+
+        // The entry keeps a 512-char preview, not the whole body.
+        assert!(
+            entry.content.chars().count() <= 512,
+            "preview is {} chars",
+            entry.content.chars().count()
+        );
+        assert!(entry.content.starts_with("line 0: the quick brown fox"));
+        assert!(entry.content.len() < body.len());
+
+        // …and `format_for_prompt` renders that preview.
+        let prompt = fx.state().workspace.format_for_prompt(&[]);
+        assert!(prompt.contains("line 0: the quick brown fox"));
+        assert!(!prompt.contains("line 39"));
+
+        // The full bytes are in the project store, under the run directory.
+        let asset = FileAssetRepository::new(&fx.db)
+            .get_by_id(&asset_id)
+            .unwrap()
+            .expect("the spilled asset must resolve by id");
+        assert_eq!(asset.owner_id, OWNER);
+        let path = PathBuf::from(&asset.storage_path);
+        assert!(
+            path.starts_with(fx.project_root().join(".openalpaca").join("artifacts")),
+            "spilled to {}",
+            path.display()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+    }
+
+    /// The payoff chain: the pointer `collect_artifacts_from_workspace` builds
+    /// now carries a resolvable id, so `artifact_count` counts something real
+    /// and artifact delivery has a file to send.
+    #[tokio::test]
+    async fn the_artifact_pointer_now_resolves() {
+        let fx = Fixture::new();
+        fx.tool()
+            .execute_with_context(
+                &serde_json::json!({
+                    "key": "final_report", "content": long_body(), "entry_type": "artifact"
+                }),
+                &fx.ctx(),
+            )
+            .await
+            .unwrap();
+
+        let pointers = fx.state().collect_artifacts_from_workspace();
+        assert_eq!(pointers.len(), 1);
+        let id = pointers[0]
+            .file_asset_id
+            .clone()
+            .expect("ArtifactPointer.file_asset_id must be populated");
+        assert!(
+            FileAssetRepository::new(&fx.db)
+                .get_by_id(&id)
+                .unwrap()
+                .is_some(),
+            "the pointer must resolve to a file asset"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_text_entry_never_spills() {
+        let fx = Fixture::new();
+        let body = long_body();
+
+        fx.tool()
+            .execute_with_context(
+                &serde_json::json!({"key": "notes", "content": body, "entry_type": "text"}),
+                &fx.ctx(),
+            )
+            .await
+            .unwrap();
+
+        let entry = fx.entry("notes");
+        assert!(entry.file_asset_id.is_none());
+        assert_eq!(entry.content, body, "text entries keep their full content");
+        assert!(
+            !fx.project_root().join(".openalpaca").join("artifacts").exists(),
+            "a text entry must not create an artifact store"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_file_asset_id_wins_and_suppresses_the_spill() {
+        let fx = Fixture::new();
+        let body = long_body();
+
+        fx.tool()
+            .execute_with_context(
+                &serde_json::json!({
+                    "key": "upload_backed",
+                    "content": body,
+                    "entry_type": "artifact",
+                    "file_asset_id": "already-uploaded-id"
+                }),
+                &fx.ctx(),
+            )
+            .await
+            .unwrap();
+
+        let entry = fx.entry("upload_backed");
+        assert_eq!(entry.file_asset_id.as_deref(), Some("already-uploaded-id"));
+        assert_eq!(entry.content, body);
+        assert!(!fx.project_root().join(".openalpaca").join("artifacts").exists());
+    }
+
+    #[tokio::test]
+    async fn rewriting_the_same_key_supersedes_the_artifact() {
+        let fx = Fixture::new();
+        let ctx = fx.ctx();
+        let tool = fx.tool();
+
+        for body in ["first body\n", "second body\n"] {
+            tool.execute_with_context(
+                &serde_json::json!({"key": "draft", "content": body, "entry_type": "artifact"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        }
+
+        let entry = fx.entry("draft");
+        let id = entry.file_asset_id.clone().unwrap();
+        let store = openalpaca_storage::ArtifactStore::new(&fx.db);
+        let record = store.get(&id, OWNER).unwrap().unwrap();
+        assert_eq!(record.version, 2, "the second write supersedes");
+        assert_eq!(
+            std::fs::read_to_string(&record.storage_path).unwrap(),
+            "second body\n"
+        );
+    }
+
+    /// A store failure must not lose the entry: the write still lands, keeps
+    /// its full content, and the caller is told the spill did not happen.
+    #[tokio::test]
+    async fn a_failed_spill_degrades_loudly_and_keeps_the_content() {
+        let fx = Fixture::new();
+        let body = long_body();
+        // A file where the store root must be a directory — `ensure_store`
+        // cannot create `<project>/.openalpaca`, so `put` fails.
+        std::fs::write(fx.project_root().join(".openalpaca"), b"not a directory").unwrap();
+
+        let out = fx
+            .tool()
+            .execute_with_context(
+                &serde_json::json!({"key": "doomed", "content": body, "entry_type": "artifact"}),
+                &fx.ctx(),
+            )
+            .await
+            .unwrap();
+
+        assert!(out.contains("could not be saved"), "{out}");
+        let entry = fx.entry("doomed");
+        assert!(entry.file_asset_id.is_none());
+        assert_eq!(entry.content, body);
     }
 }

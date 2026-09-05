@@ -56,3 +56,39 @@ pub(crate) fn template_from_agent(agent: &SubAgent) -> AgentTemplate {
         source: AgentSource::default(),
     }
 }
+
+/// Serializes every test in this crate that re-points `OPENALPACA_HOME_STORE`.
+///
+/// The variable is process-global and every store accessor reads it on each
+/// call, so two modules holding *separate* locks would still race. This is the
+/// crate's one lock; `config_io` and the artifact tools both take it.
+static HOME_STORE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Points `OPENALPACA_HOME_STORE` at a temp root for the guard's lifetime.
+/// No test ever touches the real `~/.openalpaca`.
+pub(crate) struct HomeStoreGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl HomeStoreGuard {
+    pub(crate) fn set(path: &std::path::Path) -> Self {
+        let lock = HOME_STORE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let prev = std::env::var_os(openalpaca_storage::store::HOME_STORE_ENV);
+        // SAFETY: serialized by HOME_STORE_ENV_LOCK — the crate's only writer.
+        unsafe { std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, path) };
+        Self { _lock: lock, prev }
+    }
+}
+
+impl Drop for HomeStoreGuard {
+    fn drop(&mut self) {
+        // SAFETY: as above — still holding the lock.
+        match self.prev.take() {
+            Some(v) => unsafe { std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, v) },
+            None => unsafe { std::env::remove_var(openalpaca_storage::store::HOME_STORE_ENV) },
+        }
+    }
+}

@@ -6,6 +6,7 @@ icon: "swiss_knife"
 capabilities:
   - "file_read"
   - "file_write"
+  - "artifact_write"
   - "shell_execute"
   - "web_access"
   - "memory_read"

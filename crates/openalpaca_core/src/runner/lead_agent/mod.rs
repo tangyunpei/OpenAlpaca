@@ -141,6 +141,19 @@ pub async fn run_lead_agent(
     if let Some(mem_tool) = tool_registry.get("memory_search") {
         tools.push(mem_tool.definition.clone());
     }
+    // artifact_write (plan §4.6) — the lead writes deliverables itself as well
+    // as delegating them. Offered only where the lead's own template declares
+    // the capability: the lead's surface is assembled here rather than resolved
+    // from the template, so this is the listing that keeps it a per-template
+    // grant instead of an ambient one.
+    if lead_agent
+        .capabilities
+        .iter()
+        .any(|c| c.name == "artifact_write")
+        && let Some(tool) = tool_registry.get("artifact_write")
+    {
+        tools.push(tool.definition.clone());
+    }
     // Extension tools (MCP-bridged `<server>__<tool>` + plugin-provided
     // `<plugin>::<tool>`) join the lead surface by default, less those whose
     // extension is not enabled — same policy as the main loop (tool/skill

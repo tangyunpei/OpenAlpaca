@@ -8,6 +8,7 @@ pub struct ExecutionConfig {
     pub lead_agent_defaults: LeadAgentDefaults,
     pub skill_defaults: SkillDefaults,
     pub context: ContextBudgetConfig,
+    pub artifacts: ArtifactsConfig,
 }
 
 /// Fallback defaults for regular agents (when agent TOML `[constraints]` are absent).
@@ -92,6 +93,40 @@ impl Default for SkillDefaults {
             max_tools_per_round: 3,
             router_auto_select_threshold: 0.65,
             router_suggest_threshold: 0.45,
+        }
+    }
+}
+
+/// Caps on artifacts produced by agents (`artifact_write`, and the
+/// `workspace_write(entry_type="artifact")` spill). Deserialized from
+/// `[execution.artifacts]` in daemon.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ArtifactsConfig {
+    /// Largest single artifact body accepted, in bytes. Defaults to 10 MB —
+    /// `file_write`'s cap, not the 50 MB upload cap: this content comes out of
+    /// a context window, not off a disk.
+    #[serde(default = "default_max_artifact_bytes")]
+    pub max_artifact_bytes: u64,
+    /// Versions retained per artifact. On write, the oldest superseded version
+    /// beyond this bound is pruned (file + row); the head is never pruned.
+    #[serde(default = "default_max_versions_per_artifact")]
+    pub max_versions_per_artifact: u32,
+}
+
+fn default_max_artifact_bytes() -> u64 {
+    10 * 1024 * 1024
+}
+
+fn default_max_versions_per_artifact() -> u32 {
+    20
+}
+
+impl Default for ArtifactsConfig {
+    fn default() -> Self {
+        Self {
+            max_artifact_bytes: default_max_artifact_bytes(),
+            max_versions_per_artifact: default_max_versions_per_artifact(),
         }
     }
 }

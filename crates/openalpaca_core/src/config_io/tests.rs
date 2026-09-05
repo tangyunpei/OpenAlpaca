@@ -1,41 +1,10 @@
 use super::*;
-use std::ffi::OsString;
-use std::sync::{Mutex, MutexGuard};
 
 /// `backups_dir()` reads `OPENALPACA_HOME_STORE` on every call, so the writer
-/// tests must not run concurrently with each other. No test ever touches the
-/// real `~/.openalpaca`.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct HomeStoreGuard {
-    _lock: MutexGuard<'static, ()>,
-    prev: Option<OsString>,
-}
-
-impl HomeStoreGuard {
-    fn set(path: &Path) -> Self {
-        let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let prev = std::env::var_os(openalpaca_storage::store::HOME_STORE_ENV);
-        // SAFETY: serialized by ENV_LOCK; these are the only tests in this
-        // binary that touch the variable.
-        unsafe { std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, path) };
-        Self { _lock: lock, prev }
-    }
-}
-
-impl Drop for HomeStoreGuard {
-    fn drop(&mut self) {
-        // SAFETY: as above — still holding ENV_LOCK.
-        match self.prev.take() {
-            Some(v) => unsafe {
-                std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, v)
-            },
-            None => unsafe {
-                std::env::remove_var(openalpaca_storage::store::HOME_STORE_ENV)
-            },
-        }
-    }
-}
+/// tests must not run concurrently with each other — or with any other module
+/// that re-points it. The guard (and its crate-wide lock) lives in
+/// `crate::test_util`. No test ever touches the real `~/.openalpaca`.
+use crate::test_util::HomeStoreGuard;
 
 const HAND_AUTHORED: &str = r#"# The MCP servers this daemon connects out to.
 # Every comment in this file is the owner's, and must survive a daemon write.

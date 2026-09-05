@@ -71,6 +71,17 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["execution", "lead_agent_defaults"],
         field: "max_cost",
     },
+    // Execution: Artifacts
+    TomlMapping {
+        schema_key: "daemon.execution.artifacts.max_artifact_bytes",
+        section: &["execution", "artifacts"],
+        field: "max_artifact_bytes",
+    },
+    TomlMapping {
+        schema_key: "daemon.execution.artifacts.max_versions_per_artifact",
+        section: &["execution", "artifacts"],
+        field: "max_versions_per_artifact",
+    },
     // Orchestrator: Memory (cont.)
     TomlMapping {
         schema_key: "daemon.orchestrator.summary_min_new_older_messages",

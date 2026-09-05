@@ -4,6 +4,16 @@
 [execution.lead_agent_defaults]
 batch_spawn_enabled = true
 
+[execution.artifacts]
+# Largest single artifact body `artifact_write` (and the
+# `workspace_write(entry_type = "artifact")` spill) will accept, in bytes.
+# Default 10485760 (10 MB) — file_write's cap, not the 50 MB upload cap:
+# this content comes out of a context window.
+# max_artifact_bytes = 10485760
+# Versions kept per artifact under `.versions/`. On write, the oldest
+# superseded version beyond this bound is pruned; the head is never pruned.
+# max_versions_per_artifact = 20
+
 [orchestrator.routing]
 # Routing V2: everything past the deterministic tier (slash task control,
 # skills, /steer) and the social fast path enters the main loop, where
