@@ -185,6 +185,15 @@ fn error_code(body: &serde_json::Value) -> &str {
     body["error"]["code"].as_str().unwrap_or("<no code>")
 }
 
+/// One response header, as a string.
+fn header(response: &Response, name: &str) -> Option<String> {
+    response
+        .headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
 // ============================================================================
 // GAP-11 — the inline check on the two content routes
 // ============================================================================
@@ -273,6 +282,89 @@ async fn a_wrong_token_is_a_401_on_the_file_content_route() {
     let response =
         crate::routes::files::file_content(&f.db, OWNER, TOKEN, &no_headers(), None, &row.id).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ============================================================================
+// What a navigated content response may do (R27)
+// ============================================================================
+
+/// An `html` artifact is agent output — possibly built from untrusted web
+/// content — and `?token=` makes it reachable by *navigation* on the daemon
+/// origin. `Content-Security-Policy: sandbox` (no `allow-scripts`) is what
+/// stops its own script reading the token out of `location.search` and driving
+/// every other `/v1/*` route as the user.
+#[tokio::test]
+async fn an_html_artifact_is_served_nosniff_and_sandboxed() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let new = NewArtifact::new(
+        OWNER,
+        &scope,
+        ArtifactKind::Html,
+        "Report",
+        b"<script>fetch('/v1/tasks')</script>" as &[u8],
+    );
+    let row = ArtifactStore::new(&f.db).put(new).expect("put").0;
+
+    let response = artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        header(&response, "content-type").as_deref(),
+        Some("text/html")
+    );
+    assert_eq!(
+        header(&response, "x-content-type-options").as_deref(),
+        Some("nosniff")
+    );
+    assert_eq!(
+        header(&response, "content-security-policy").as_deref(),
+        Some("sandbox")
+    );
+}
+
+/// Everything else carries `nosniff` — the response must never be sniffed into
+/// a document type it did not declare — and nothing more: a sandbox CSP on a
+/// download would be noise.
+#[tokio::test]
+async fn a_markdown_artifact_is_nosniff_but_not_sandboxed() {
+    let f = Fixture::new();
+    let row = f.put(OWNER, "Notes", "hello\n", None);
+
+    let response = artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        header(&response, "content-type").as_deref(),
+        Some("text/markdown")
+    );
+    assert_eq!(
+        header(&response, "x-content-type-options").as_deref(),
+        Some("nosniff")
+    );
+    assert!(
+        header(&response, "content-security-policy").is_none(),
+        "only a document a browser executes script from is sandboxed"
+    );
+}
+
+/// The same shape with user-supplied bytes: an uploaded SVG is active content
+/// served through `/v1/files/{id}/content?token=`, and it shares the helper.
+#[tokio::test]
+async fn an_uploaded_svg_is_sandboxed_on_the_file_content_route() {
+    let f = Fixture::new();
+    let id = f.upload(OWNER, "diagram.svg", "image/svg+xml");
+
+    let response =
+        crate::routes::files::file_content(&f.db, OWNER, TOKEN, &no_headers(), Some(TOKEN), &id)
+            .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        header(&response, "x-content-type-options").as_deref(),
+        Some("nosniff")
+    );
+    assert_eq!(
+        header(&response, "content-security-policy").as_deref(),
+        Some("sandbox")
+    );
 }
 
 // ============================================================================
@@ -451,7 +543,11 @@ async fn the_limit_and_offset_page_the_list() {
 #[tokio::test]
 async fn a_page_spanning_three_tasks_carries_every_title() {
     let f = Fixture::new();
-    for (id, title) in [("task-a", "Run A"), ("task-b", "Run B"), ("task-c", "Run C")] {
+    for (id, title) in [
+        ("task-a", "Run A"),
+        ("task-b", "Run B"),
+        ("task-c", "Run C"),
+    ] {
         f.task(id, title);
     }
     f.put(OWNER, "From A", "a\n", Some("task-a"));

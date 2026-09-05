@@ -171,11 +171,44 @@ pub(crate) fn invalid_token() -> Response {
     (StatusCode::UNAUTHORIZED, "Invalid token").into_response()
 }
 
+/// The MIME types a browser will execute script from when it *navigates* to a
+/// response — the reason [`content_response`] sends a sandboxing CSP (R27).
+///
+/// Compared on the essence, so a `;charset=` parameter or an odd case cannot
+/// slip past. `image/svg+xml` belongs here: an SVG document can carry a
+/// `<script>`, and an uploaded one is user-supplied bytes.
+fn is_script_bearing_document(mime_type: &str) -> bool {
+    let essence = mime_type
+        .split(';')
+        .next()
+        .unwrap_or(mime_type)
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        essence.as_str(),
+        "text/html" | "application/xhtml+xml" | "image/svg+xml"
+    )
+}
+
 /// Stream a file as a content response: its MIME type, an inline
 /// `Content-Disposition` with the filename sanitised against header injection,
-/// and `Referrer-Policy: no-referrer` — the §9 mitigation for a bearer token
-/// that can now ride in a URL, which must be on *every* content response, not
-/// only the ones reached with `?token=`.
+/// and the three headers that make serving those bytes on the daemon origin
+/// safe.
+///
+/// - `Referrer-Policy: no-referrer` — the §9 mitigation for a bearer token that
+///   can now ride in a URL.
+/// - `X-Content-Type-Options: nosniff` — the response is what it says it is; a
+///   `text/plain` artifact is never sniffed into a document.
+/// - `Content-Security-Policy: sandbox` for a document a browser executes
+///   script from (R27). `?token=` made these routes reachable by navigation,
+///   and an `html` artifact is agent output — possibly assembled from
+///   untrusted web content — rendered on the daemon origin, where its own
+///   script could read the token straight out of `location.search` and drive
+///   every other `/v1/*` route as the user. The sandbox is the bare directive:
+///   no `allow-scripts`, no `allow-same-origin`.
+///
+/// All three are on the shared body rather than per route, so no content
+/// response can be missing one.
 pub(crate) async fn content_response(
     path: &std::path::Path,
     mime_type: &str,
@@ -207,6 +240,16 @@ pub(crate) async fn content_response(
         axum::http::header::REFERRER_POLICY,
         axum::http::HeaderValue::from_static("no-referrer"),
     );
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    if is_script_bearing_document(mime_type) {
+        headers.insert(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            axum::http::HeaderValue::from_static("sandbox"),
+        );
+    }
 
     let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file));
     (headers, body).into_response()
