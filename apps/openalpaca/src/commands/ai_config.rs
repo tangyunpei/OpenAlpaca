@@ -175,7 +175,7 @@ pub fn delete_ai_value(key: &str) -> Result<()> {
                 let cli_id = format!("{}_cli", provider);
                 // Delete keychain secrets for removed keys
                 for k in keys.iter() {
-                    if (k.id == cli_id || keys.len() == 1)
+                    if k.id == cli_id
                         && let Some(ref sref) = k.secret_ref
                     {
                         let _ = store.delete(sref);
@@ -186,14 +186,8 @@ pub fn delete_ai_value(key: &str) -> Result<()> {
                 keys.retain(|k| k.id != cli_id);
                 if keys.len() < before {
                     // Removed cli key — done
-                } else if keys.len() == 1 {
-                    // 2. Migration fallback: exactly one key (legacy) → remove it
-                    if let Some(ref sref) = keys[0].secret_ref {
-                        let _ = store.delete(sref);
-                    }
-                    keys.remove(0);
                 } else if !keys.is_empty() {
-                    // 3. Multiple keys, no cli key → remove first primary, else first
+                    // 2. No cli key → remove first primary, else first
                     let pos = keys
                         .iter()
                         .position(|k| k.priority.as_deref() == Some("primary"))
