@@ -183,6 +183,12 @@ pub async fn initialize_services(
     // in agent frontmatter can be validated against the known set.)
     agents::load_agent_templates(config_base_dir, db, &shared_context, &tool_registry)?;
 
+    // The MCP crash reaper starts **after** the templates are loaded: its T1
+    // step 3 intersects the withdrawn capabilities with the agent registry, and
+    // a crash inside the boot window would otherwise report a dependent scan
+    // that names nothing (extension design §7.3, C4 review).
+    mcp_supervisor.spawn_reaper();
+
     // Build security chain
     let sandbox_manager = Arc::new(openalpaca_core::security::sandbox::SandboxManager::new(
         tool_registry.clone(),

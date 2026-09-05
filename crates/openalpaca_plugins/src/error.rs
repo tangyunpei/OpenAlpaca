@@ -12,8 +12,16 @@ pub enum PluginError {
     ProcessCrashed,
     #[error("timeout waiting for plugin response")]
     Timeout,
+    /// A JSON-RPC error object. `data` is carried verbatim because §4.2's
+    /// plugin classification reads `error.data.reason == "needs_authorization"`
+    /// and its optional `hint`; dropping it here is what made that branch of
+    /// the classifier unreachable (extension design §4.2, §8 `hint`).
     #[error("plugin returned error: {code} {message}")]
-    RpcError { code: i64, message: String },
+    RpcError {
+        code: i64,
+        message: String,
+        data: Option<serde_json::Value>,
+    },
     #[error("channel closed")]
     ChannelClosed,
     #[error("permission denied: {0}")]

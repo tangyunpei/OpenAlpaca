@@ -27,7 +27,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -81,6 +81,13 @@ struct ServerHandle {
     /// declaration: `call_tool` holds the transport mutex across its await, so
     /// a straggler can hold `disconnect` off for up to one request.
     request_timeout: Duration,
+    /// `serverInfo.version` from this incarnation's handshake — the API row's
+    /// `version` (§8). It is a fact about the *live* connection, so a row that
+    /// is not `Enabled` reports `null` rather than a remembered string.
+    version: Option<String>,
+    /// E4's name collisions for this load — the API row's `skipped_tools`
+    /// (§8, §10 case 13).
+    skipped_tools: Vec<String>,
 }
 
 /// The last **declaration set that parsed** (§10 case 15). An unparseable
@@ -150,10 +157,10 @@ pub struct McpSupervisor {
     /// Live `tools/list_changed` reader tasks, so a test can observe that the
     /// one belonging to a torn-down load exited (§3.3 E-PRE, E-FAIL).
     readers_running: Arc<AtomicUsize>,
-    /// What T1 step 3 scans and where its notice goes (§7.3). Installed once,
-    /// after construction, because `Arc::new_cyclic` rules out a `mut self`
-    /// builder; absent in a harness that does not drive the scan.
-    dependents: OnceLock<Dependents>,
+    /// What T1 step 3 scans and where its notice goes (§7.3). Supplied at
+    /// construction — there is no window in which a supervisor exists without
+    /// the handles its dependent scan needs.
+    dependents: Dependents,
 }
 
 /// The two registries T1 step 3 intersects the withdrawn set with, plus the
@@ -168,15 +175,29 @@ struct Dependents {
 impl McpSupervisor {
     /// Build the supervisor and register its crash-reaper channel with the
     /// ledger. Call [`Self::spawn_reaper`] to start draining it.
+    ///
+    /// The three dependent handles T1 step 3 scans (§7.3) are constructor
+    /// arguments, not a post-construction installer: a write-once setter left a
+    /// window — however short — in which a crash's dependent scan could name
+    /// nothing, and there is no caller that wants one.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config_path: PathBuf,
         tool_registry: Arc<ToolRegistry>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
         bus: EventBus,
+        skills: Option<Arc<SkillCatalog>>,
+        agents: Option<Arc<AgentRegistry>>,
+        notice_lane: impl Into<String>,
     ) -> Arc<Self> {
         let ledger = Arc::clone(tool_registry.extensions());
         let (tx, rx) = unbounded_channel();
         ledger.on_crash(ExtensionKind::Mcp, tx);
+        let dependents = Dependents {
+            skills,
+            agents,
+            notice_lane: notice_lane.into(),
+        };
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
             config_path,
@@ -190,41 +211,18 @@ impl McpSupervisor {
             own_writes: StdMutex::new(VecDeque::with_capacity(OWN_WRITE_RING)),
             reaper_rx: StdMutex::new(Some(rx)),
             readers_running: Arc::new(AtomicUsize::new(0)),
-            dependents: OnceLock::new(),
+            dependents,
         })
     }
 
-    /// Install the handles T1 step 3 scans (design §7.3). Write-once; a second
-    /// call is ignored and logged.
-    pub fn with_dependents(
-        self: Arc<Self>,
-        skills: Option<Arc<SkillCatalog>>,
-        agents: Option<Arc<AgentRegistry>>,
-        notice_lane: &str,
-    ) -> Arc<Self> {
-        if self
-            .dependents
-            .set(Dependents {
-                skills,
-                agents,
-                notice_lane: notice_lane.to_string(),
-            })
-            .is_err()
-        {
-            tracing::warn!("MCP supervisor dependents already installed");
-        }
-        self
-    }
-
-    /// **T1 step 3's** reader. Absent dependents mean an empty scan — the event
-    /// still fires, naming nothing.
+    /// **T1 step 3's** reader.
     fn scan(&self) -> DependentScan<'_> {
-        let d = self.dependents.get();
+        let d = &self.dependents;
         DependentScan {
             registry: &self.tool_registry,
-            agents: d.and_then(|d| d.agents.as_deref()),
-            skills: d.and_then(|d| d.skills.as_deref()),
-            notice_lane: d.map(|d| d.notice_lane.as_str()).unwrap_or(""),
+            agents: d.agents.as_deref(),
+            skills: d.skills.as_deref(),
+            notice_lane: d.notice_lane.as_str(),
         }
     }
 
@@ -308,13 +306,27 @@ impl McpSupervisor {
         }
     }
 
-    /// The record as the API reads it, with any per-call warnings attached.
+    /// The record as the API reads it: the ledger's snapshot plus the row data
+    /// only the supervisor holds — the transport it declares, the version and
+    /// the skipped names of the live handshake, and any per-call warnings
+    /// (design §8).
     fn row(&self, ext: &ExtensionId, warnings: Vec<String>) -> Result<ExtensionRecord, ExtensionError> {
         let mut record = self
             .ledger
             .record(ext)
             .ok_or_else(|| ExtensionError::NotFound(ext.clone()))?;
         record.warnings = warnings;
+        // §4: the `config/mcp.toml` pseudo-record has no disposition anyone can
+        // read, so its row is `enabled: null` and every verb on it is
+        // `409 store_unreadable`.
+        record.disposition_readable = ext.name != CONFIG_PSEUDO_ID;
+        record.transport = self
+            .declaration(&ext.name)
+            .map(|(cfg, _)| cfg.transport_kind().to_string());
+        if let Some(handle) = self.handles.lock_or_recover().get(&ext.name) {
+            record.version = handle.version.clone();
+            record.skipped_tools = handle.skipped_tools.clone();
+        }
         Ok(record)
     }
 
@@ -706,9 +718,12 @@ impl McpSupervisor {
             }
         };
 
-        let server_version = client
-            .server_info()
-            .map(|i| i.version.to_string())
+        // The row's `version` (§8) is this incarnation's handshake, kept only
+        // as long as the handle: `Some` when the server told us one, `None`
+        // when it did not — never the placeholder the tool stamps.
+        let client_version = client.server_info().map(|i| i.version.to_string());
+        let server_version = client_version
+            .clone()
             .unwrap_or_else(|| "unknown".to_string());
 
         // E2 — take the change receiver with the client, once, and start the
@@ -775,6 +790,8 @@ impl McpSupervisor {
                 client,
                 generation,
                 request_timeout,
+                version: client_version,
+                skipped_tools: skipped.clone(),
             },
         );
         self.ledger.restore(&ext);
@@ -1030,9 +1047,11 @@ impl McpSupervisor {
             .filter(|n| !removed.contains(n))
             .cloned()
             .collect();
+        let mut skipped: Vec<String> = Vec::new();
         for name in &added {
             if self.is_live_incumbent(ext, name) {
                 tracing::warn!(extension = %ext, tool = %name, "tool name collision — skipping");
+                skipped.push(name.clone());
                 continue;
             }
             let tool = incoming[name].clone();
@@ -1060,6 +1079,15 @@ impl McpSupervisor {
         // Per capability, never per extension: a whole-extension `restore`
         // would erase the tombstones step 5 just wrote.
         self.ledger.restore_caps(ext, restored_caps);
+
+        // Step 6 is "E4 verbatim", so its collisions join the load's on the
+        // row's `skipped_tools` (§8) rather than vanishing between the two
+        // lists. Same incarnation, same handle — the set is replaced, not
+        // appended to, because a name that no longer collides is no longer
+        // skipped.
+        if let Some(handle) = self.handles.lock_or_recover().get_mut(&ext.name) {
+            handle.skipped_tools = skipped;
+        }
 
         // Step 7 — record the union, so attribution of the removed names
         // survives exactly as it survives a disable. **The generation is not
@@ -1579,6 +1607,10 @@ impl ExtensionSupervisor for McpSupervisor {
             .list()
             .into_iter()
             .filter(|r| r.id.kind == ExtensionKind::Mcp)
+            // Through `row` so every listed row carries the same supervisor-side
+            // fields a single-verb response does — including the pseudo-record's
+            // `enabled: null` (design §8).
+            .filter_map(|r| self.row(&r.id, Vec::new()).ok())
             .collect()
     }
 
@@ -1763,4 +1795,4 @@ impl<T> LockOrRecover<T> for StdMutex<T> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

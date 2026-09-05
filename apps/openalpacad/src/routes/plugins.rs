@@ -13,8 +13,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use openalpaca_core::tools::extensions::{ExtensionError, ExtensionId, ExtensionSupervisor};
-use openalpaca_plugins::PluginError;
+use openalpaca_core::tools::extensions::{ExtensionId, ExtensionSupervisor};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -30,44 +29,14 @@ pub struct SetConfigRequest {
 
 // ── Error mapping ────────────────────────────────────────────────
 
-/// HTTP status for a failed plugin lifecycle call.
+/// HTTP status for a failed plugin lifecycle call, and for a supervisor-level
+/// refusal.
 ///
-/// A failed *write* is the daemon's fault, not the caller's: the plugin root
-/// is unwritable, `.permissions.toml` is a directory, the disk is full. Design
-/// §3.2 (W-deny) requires a consent decision that cannot be persisted to
-/// answer `500` and change nothing — reporting it as `400` would tell the
-/// client to fix a request that was never the problem.
-///
-/// Everything else stays `400`: an unknown plugin name, a load refused because
-/// the plugin still holds a live handle, a manifest that will not parse.
-fn plugin_error_status(error: &PluginError) -> StatusCode {
-    match error {
-        PluginError::Io(_) | PluginError::Json(_) | PluginError::StoreWriteFailed(_) => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-        PluginError::StoreUnreadable(_) => StatusCode::CONFLICT,
-        _ => StatusCode::BAD_REQUEST,
-    }
-}
-
-/// HTTP status for a supervisor-level refusal (extension design §4, §8).
-///
-/// The status codes are the route's, not the supervisor's — C6 states the same
-/// mapping on `/v1/extensions`; this is the legacy route wearing it until C7
-/// deletes it. A **failed write** is `500` and took no transition; an
-/// **unreadable store** is `409 store_unreadable` and took none either.
-fn extension_error_status(error: &ExtensionError) -> StatusCode {
-    match error {
-        ExtensionError::NotFound(_) => StatusCode::NOT_FOUND,
-        ExtensionError::NotLoaded
-        | ExtensionError::StoreUnreadable(_)
-        | ExtensionError::UnsupportedForKind
-        | ExtensionError::NotOrphaned => StatusCode::CONFLICT,
-        ExtensionError::WriteFailed(_) | ExtensionError::Internal(_) => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
+/// Both mappings now live on the `/v1/extensions` routes (extension design §8)
+/// and are re-used verbatim here: this is the legacy route wearing C6's
+/// mapping until C7 deletes it, so the two families cannot drift for the one
+/// commit in which both exist.
+use crate::routes::extensions::{extension_error_status, plugin_error_status};
 
 // ── Handlers ─────────────────────────────────────────────────────
 
@@ -220,7 +189,7 @@ pub async fn set_plugin_config_handler(
     };
 
     // Convert serde_json::Value to toml::Value
-    let toml_value = json_to_toml(&request.value);
+    let toml_value = crate::routes::extensions::json_to_toml(&request.value);
 
     match pm.set_plugin_config(&name, &request.key, toml_value).await {
         Ok(()) => (
@@ -238,39 +207,12 @@ pub async fn set_plugin_config_handler(
     }
 }
 
-/// Convert a `serde_json::Value` to a `toml::Value`.
-fn json_to_toml(v: &serde_json::Value) -> toml::Value {
-    match v {
-        serde_json::Value::String(s) => toml::Value::String(s.clone()),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                toml::Value::Integer(i)
-            } else if let Some(f) = n.as_f64() {
-                toml::Value::Float(f)
-            } else {
-                toml::Value::String(n.to_string())
-            }
-        }
-        serde_json::Value::Bool(b) => toml::Value::Boolean(*b),
-        serde_json::Value::Array(arr) => {
-            toml::Value::Array(arr.iter().map(json_to_toml).collect())
-        }
-        serde_json::Value::Object(obj) => {
-            let mut map = toml::map::Map::new();
-            for (k, v) in obj {
-                map.insert(k.clone(), json_to_toml(v));
-            }
-            toml::Value::Table(map)
-        }
-        serde_json::Value::Null => toml::Value::String(String::new()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use openalpaca_core::tools::ToolRegistry;
-    use openalpaca_plugins::PluginManager;
+    use openalpaca_core::tools::extensions::ExtensionError;
+    use openalpaca_plugins::{PluginError, PluginManager};
 
     /// Design §3.2 W-deny: a consent decision that cannot be persisted must
     /// answer `500` and change nothing. The failure is the daemon's — here

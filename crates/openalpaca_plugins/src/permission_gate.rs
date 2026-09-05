@@ -255,6 +255,31 @@ impl PermissionGate {
         Ok(())
     }
 
+    /// Remove a plugin's entry entirely — the **only** path that ever deletes
+    /// one (design §5.1, §8's `DELETE /v1/extensions/plugin/{id}`).
+    ///
+    /// Reconciles never delete: a vanished directory parks as `Orphaned` with
+    /// its disposition and consent preserved, because deleting the entry would
+    /// silently flip the plugin back on the next time the directory reappears.
+    /// Only the owner's explicit Remove gets here.
+    pub fn remove_entry(&self, plugin_name: &str) -> Result<(), PluginError> {
+        self.load_table()?;
+        let owned = plugin_name.to_string();
+        atomic_write_toml(
+            &self.permissions_path,
+            move |doc| {
+                doc.remove(owned.as_str());
+                Ok(())
+            },
+            |rendered| parse_permissions(rendered).map(|_| ()),
+        )
+        .map_err(|e| {
+            PluginError::StoreWriteFailed(format!("{}: {e}", self.permissions_path.display()))
+        })?;
+        debug!(plugin = plugin_name, "plugin permissions entry removed");
+        Ok(())
+    }
+
     fn write_consent(
         &self,
         plugin_name: &str,

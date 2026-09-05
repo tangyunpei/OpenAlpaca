@@ -165,6 +165,13 @@ pub struct PluginState {
     pub registered_agents: Vec<String>,
     pub plugin_dir: PathBuf,
     pub capability_provider_handle: Option<ProviderHandle>,
+    /// E4 name collisions for this load — the API row's `skipped_tools`
+    /// (design §8, §10 case 13).
+    pub(crate) skipped_tools: Vec<String>,
+    /// The API row's `hint` (design §8): a URL or a key name the owner can act
+    /// on, taken from a bring-up error's `error.data.hint`. Never free-form
+    /// detail — that is the row's `detail`.
+    pub(crate) hint: Option<String>,
     /// The exit the §3.6 `try_wait` sweep observed, if it has.
     ///
     /// T4 reads it to skip `shutdown()`/`kill()`: after a reaped exit tokio's
@@ -190,6 +197,8 @@ impl PluginState {
             registered_agents: Vec::new(),
             plugin_dir,
             capability_provider_handle: None,
+            skipped_tools: Vec::new(),
+            hint: None,
             exit_status: None,
         }
     }
@@ -503,6 +512,20 @@ impl PluginManager {
         }
     }
 
+    /// Is this one name in the same **table ∪ map** vanished set the boot scan
+    /// uses?
+    ///
+    /// The per-extension `reconcile` used the map alone, which gave `Orphaned`
+    /// no trigger after a restart — the map is empty then, so an entry whose
+    /// directory is gone produced no record and `DELETE
+    /// /v1/extensions/plugin/{id}` had nothing to target (C3 review).
+    async fn is_vanished(&self, name: &str, table: &Result<PermissionTable, PluginError>) -> bool {
+        self.plugins.read().await.contains_key(name)
+            || table
+                .as_ref()
+                .is_ok_and(|t| t.names().contains(&name))
+    }
+
     /// Park one vanished plugin as `Orphaned`, tearing down anything it still
     /// holds first (§4.1's *declaration gone — plugin* column).
     async fn orphan(&self, name: &str, table: &Result<PermissionTable, PluginError>) {
@@ -730,6 +753,14 @@ impl PluginManager {
                     PluginState::handle_free(manifest, dir.to_path_buf()),
                 );
             }
+        }
+    }
+
+    /// Record (or clear) the row's actionable `hint` (design §8). A no-op when
+    /// no `PluginState` is tracked — an orphan has no row data to carry one.
+    async fn set_hint(&self, id: &str, hint: Option<String>) {
+        if let Some(state) = self.plugins.write().await.get_mut(id) {
+            state.hint = hint;
         }
     }
 
@@ -1030,6 +1061,9 @@ impl PluginManager {
         generation: u64,
     ) {
         let id = ext.name.clone();
+        // This load owns the row's `hint`: whatever a previous attempt recorded
+        // is cleared before this one can classify (design §8).
+        self.set_hint(&id, None).await;
 
         // ── E1 — CONSENT + DRIFT ──────────────────────────────────────
         //
@@ -1119,7 +1153,9 @@ impl PluginManager {
                 // outlived the switch.
                 warn!(plugin = %id, error = %e, "plugin initialize failed");
                 shutdown_child(&id, process, None).await;
-                self.commit(ext, self.failure(classify_bringup(&e), e.to_string()));
+                let (reason, hint) = classify_bringup(&e);
+                self.set_hint(&id, hint).await;
+                self.commit(ext, self.failure(reason, e.to_string()));
                 return;
             }
         }
@@ -1130,7 +1166,9 @@ impl PluginManager {
             Err(e) => {
                 warn!(plugin = %id, error = %e, "plugin tool discovery failed");
                 shutdown_child(&id, process, None).await; // E-FAIL
-                self.commit(ext, self.failure(classify_bringup(&e), e.to_string()));
+                let (reason, hint) = classify_bringup(&e);
+                self.set_hint(&id, hint).await;
+                self.commit(ext, self.failure(reason, e.to_string()));
                 return;
             }
         };
@@ -1316,6 +1354,7 @@ impl PluginManager {
     ) -> Result<Vec<String>, PluginError> {
         let id = ext.name.clone();
         let mut registered_tools: Vec<String> = Vec::with_capacity(discovered.tools.len());
+        let mut skipped_tools: Vec<String> = Vec::new();
 
         for tool in discovered.tools {
             let tool_name = tool.definition.name.clone();
@@ -1331,6 +1370,7 @@ impl PluginManager {
                     incumbent = %incumbent,
                     "tool name collision — skipping"
                 );
+                skipped_tools.push(tool_name);
                 continue;
             }
             if let Err(e) = self.tool_registry.replace(tool) {
@@ -1428,6 +1468,7 @@ impl PluginManager {
                 registered_skills,
                 registered_agents,
                 capability_provider_handle,
+                skipped_tools,
                 ..PluginState::handle_free(manifest, dir.to_path_buf())
             },
         );
@@ -1761,6 +1802,7 @@ impl PluginManager {
             record.missing_config_keys = missing.clone();
         }
         if let Some(state) = self.plugins.read().await.get(&ext.name) {
+            record.version = Some(state.manifest.plugin.version.clone());
             record.declared = Some(DeclaredContributions {
                 capabilities: state.manifest.capabilities.provides.clone(),
                 virtual_capabilities: state.manifest.capabilities.virtual_.provides.clone(),
@@ -1770,6 +1812,8 @@ impl PluginManager {
             record.agents = state.registered_agents.clone();
             record.connector = state.registered_connector.clone();
             record.provider = state.registered_provider.clone();
+            record.skipped_tools = state.skipped_tools.clone();
+            record.hint = state.hint.clone();
         }
         Ok(record)
     }
@@ -1850,9 +1894,41 @@ impl PluginManager {
     /// disposition and its consent are deliberately kept (design §5.1).
     fn guard_orphan(&self, id: &ExtensionId) -> Result<(), ExtensionError> {
         match self.ledger.state(id) {
-            Some(ExtensionState::Orphaned) => Err(ExtensionError::NotOrphaned),
+            Some(ExtensionState::Orphaned) => Err(ExtensionError::Orphaned),
             _ => Ok(()),
         }
+    }
+
+    /// **`DELETE /v1/extensions/plugin/{id}`.** Remove an `Orphaned` row: the
+    /// `.permissions.toml` entry through the same atomic writer, then the
+    /// ledger record (design §8, §5.1).
+    ///
+    /// `Orphaned` rows only — anything else is `409 not_orphaned`; an unknown
+    /// id is `404`. It never touches a plugin directory: uninstalling one is
+    /// GAP-24.
+    ///
+    /// A row becomes `Orphaned` at the boot scan or at a `reconcile` whose
+    /// directory is gone. A *sticky* orphan — a directory that is present but
+    /// no longer holds a `plugin.toml` — recovers only through a restart or
+    /// through this DELETE, which is what the `409` message says.
+    pub async fn remove_orphan(&self, name: &str) -> Result<(), ExtensionError> {
+        let ext = ExtensionId::plugin(name.to_string());
+        let _lock = self.lock_for(name).await;
+        match self.ledger.state(&ext) {
+            Some(ExtensionState::Orphaned) => {}
+            Some(_) => return Err(ExtensionError::NotOrphaned),
+            None => return Err(ExtensionError::NotFound(ext)),
+        }
+        // Fail-closed first, exactly as every other write does: an unreadable
+        // store refuses the edit before anything is touched.
+        self.permission_gate.load_table().map_err(store_error)?;
+        self.permission_gate
+            .remove_entry(name)
+            .map_err(store_error)?;
+        self.ledger.drop_record(&ext);
+        self.plugins.write().await.remove(name);
+        info!(plugin = name, "orphaned plugin entry removed");
+        Ok(())
     }
 
     // ── Config ───────────────────────────────────────────────────────
@@ -2221,7 +2297,7 @@ impl ExtensionSupervisor for PluginManager {
         let dir = self.plugin_dir.join(&id.name);
         if dir.join("plugin.toml").exists() {
             self.reconcile_dir(&dir, &table).await;
-        } else if self.plugins.read().await.contains_key(&id.name) {
+        } else if self.is_vanished(&id.name, &table).await {
             self.orphan(&id.name, &table).await;
         }
         self.row(id).await
@@ -2302,23 +2378,38 @@ fn declared_types(manifest: &PluginManifest) -> BTreeMap<String, bool> {
     ])
 }
 
-/// Bring-up classification for plugins (design §4.2).
+/// Bring-up classification for plugins (design §4.2), plus the row's optional
+/// `hint` (§8).
 ///
-/// **Honestly bounded:** §4.2 allows a plugin's `initialize` error to carry
-/// `error.data.reason == "needs_authorization"`, but `StdioChannel` drops
-/// `error.data` when it builds `PluginError::RpcError`, so that signal cannot
-/// reach here today and a bring-up failure degrades to `Unreachable` — which is
-/// exactly what §4.2 says happens absent the signal.
-fn classify_bringup(error: &PluginError) -> FailureReason {
+/// **Honestly bounded:** the `NeedsAuthorization` arm fires only when the
+/// plugin's own JSON-RPC error says so — `error.data.reason ==
+/// "needs_authorization"`, with an optional `error.data.hint` the row then
+/// carries. Absent that signal a bring-up failure degrades to `Unreachable` or
+/// `Crashed`, which is exactly what §4.2 says happens. Nothing is inferred from
+/// the message text.
+fn classify_bringup(error: &PluginError) -> (FailureReason, Option<String>) {
     match error {
-        PluginError::MissingConfig(missing) => FailureReason::NeedsConfig {
-            missing: missing.clone(),
-        },
+        PluginError::MissingConfig(missing) => (
+            FailureReason::NeedsConfig {
+                missing: missing.clone(),
+            },
+            None,
+        ),
         PluginError::InvalidManifest(_) | PluginError::ManifestNotFound(_) => {
-            FailureReason::ConfigInvalid
+            (FailureReason::ConfigInvalid, None)
         }
-        PluginError::ChannelClosed | PluginError::ProcessCrashed => FailureReason::Crashed,
-        _ => FailureReason::Unreachable,
+        PluginError::ChannelClosed | PluginError::ProcessCrashed => {
+            (FailureReason::Crashed, None)
+        }
+        PluginError::RpcError {
+            data: Some(data), ..
+        } if data.get("reason").and_then(|r| r.as_str()) == Some("needs_authorization") => (
+            FailureReason::NeedsAuthorization,
+            data.get("hint")
+                .and_then(|h| h.as_str())
+                .map(str::to_string),
+        ),
+        _ => (FailureReason::Unreachable, None),
     }
 }
 

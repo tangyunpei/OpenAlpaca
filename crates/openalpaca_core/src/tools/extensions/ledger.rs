@@ -157,6 +157,16 @@ pub struct ExtensionRecord {
     /// pseudo-record. C6 renders those rows' `enabled` as `null` and answers
     /// every verb on them with `409 store_unreadable` (design §4).
     pub disposition_readable: bool,
+    /// The extension's own version — a plugin manifest's `plugin.version`, an
+    /// MCP server's `serverInfo.version` from the live handshake. `None` when
+    /// nothing has told us one (design §8).
+    pub version: Option<String>,
+    /// MCP only — `"stdio"` or `"streamable-http"`, read from the declaration
+    /// (design §8). `None` for plugins and for the pseudo-record.
+    pub transport: Option<String>,
+    /// E4 name collisions: names this load did **not** publish because another
+    /// *enabled* extension currently serves them (design §8, §10 case 13).
+    pub skipped_tools: Vec<String>,
     /// Plugins only — the tri-state consent word; `None` for MCP.
     pub consent: Option<Consent>,
     /// Plugins only — what `plugin.toml` declares, read at scan (X-19).
@@ -254,6 +264,9 @@ impl LedgerEntry {
             // it returns from the verb that produced them.
             warnings: Vec::new(),
             disposition_readable: true,
+            version: None,
+            transport: None,
+            skipped_tools: Vec::new(),
             consent: None,
             declared: None,
             skills: Vec::new(),

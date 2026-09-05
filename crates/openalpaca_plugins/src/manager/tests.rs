@@ -97,6 +97,67 @@ mod unit_tests {
         assert_eq!(json["key"], "val");
         assert_eq!(json["arr"], serde_json::json!([1, 2]));
     }
+
+    /// R17: `error.data` now reaches the classifier, so §4.2's
+    /// `NeedsAuthorization` arm is reachable and the row's `hint` is populated.
+    ///
+    /// It fires **only** on the plugin's own declared reason. Nothing is
+    /// inferred from the message text — a misclassification here would put an
+    /// "Authorize" button on a crash.
+    #[test]
+    fn a_declared_needs_authorization_classifies_and_carries_its_hint() {
+        let (reason, hint) = classify_bringup(&PluginError::RpcError {
+            code: -32001,
+            message: "not authorized".into(),
+            data: Some(serde_json::json!({
+                "reason": "needs_authorization",
+                "hint": "https://example.com/authorize",
+            })),
+        });
+        assert_eq!(reason, FailureReason::NeedsAuthorization);
+        assert!(reason.actionable(), "the GUI must render a CTA");
+        assert_eq!(hint.as_deref(), Some("https://example.com/authorize"));
+
+        // The hint is optional; the reason is not conditional on it.
+        let (reason, hint) = classify_bringup(&PluginError::RpcError {
+            code: -32001,
+            message: "not authorized".into(),
+            data: Some(serde_json::json!({"reason": "needs_authorization"})),
+        });
+        assert_eq!(reason, FailureReason::NeedsAuthorization);
+        assert_eq!(hint, None);
+    }
+
+    /// Absent the signal a bring-up failure degrades to `Unreachable` — which
+    /// is exactly what §4.2 says happens.
+    #[test]
+    fn an_rpc_error_without_the_signal_stays_unreachable() {
+        for data in [
+            None,
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({"reason": "something else"})),
+            // The words appear in the *message*, which is deliberately not read.
+            Some(serde_json::json!({"detail": "needs_authorization"})),
+        ] {
+            let (reason, hint) = classify_bringup(&PluginError::RpcError {
+                code: -1,
+                message: "needs_authorization, surely".into(),
+                data,
+            });
+            assert_eq!(reason, FailureReason::Unreachable);
+            assert_eq!(hint, None);
+        }
+        assert_eq!(
+            classify_bringup(&PluginError::ProcessCrashed).0,
+            FailureReason::Crashed
+        );
+        assert_eq!(
+            classify_bringup(&PluginError::MissingConfig(vec!["token".into()])).0,
+            FailureReason::NeedsConfig {
+                missing: vec!["token".into()]
+            }
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1725,6 +1786,8 @@ mcp_compatible = true
         );
 
         // §4.1's `Orphaned` row: every verb is a 409 and only `DELETE` applies.
+        // The word is `orphaned` — `not_orphaned` is `DELETE`'s refusal on a row
+        // that is *not* one (design §8; C6 split the two).
         for result in [
             h.manager.enable(&ext("echo-test")).await,
             h.manager.disable(&ext("echo-test")).await,
@@ -1733,10 +1796,22 @@ mcp_compatible = true
             h.manager.deny_plugin("echo-test").await,
         ] {
             assert!(
-                matches!(result, Err(ExtensionError::NotOrphaned)),
+                matches!(result, Err(ExtensionError::Orphaned)),
                 "an orphaned row accepted a verb: {result:?}"
             );
         }
+
+        // …and `DELETE` does apply, removing the one entry §5.1 says nothing
+        // else may ever delete.
+        h.manager
+            .remove_orphan("echo-test")
+            .await
+            .expect("an orphan is removable");
+        let raw = std::fs::read_to_string(tmp.path().join(".permissions.toml")).unwrap();
+        assert!(
+            !raw.contains("echo-test"),
+            "the owner's explicit Remove should delete the entry: {raw}"
+        );
     }
 
     /// **`Orphaned` at a cold start** — the state's only production trigger

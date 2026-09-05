@@ -399,7 +399,11 @@ pub enum ExtensionError {
     /// A verb this kind does not have — `409 unsupported_for_kind`.
     #[error("unsupported_for_kind")]
     UnsupportedForKind,
-    /// The row is `Orphaned` and only `DELETE` applies — `409 not_orphaned`.
+    /// The row is `Orphaned`, so every verb but `DELETE` is a `409` (§4.1's
+    /// `Orphaned` row, §8's *"`409` orphaned"* on `enable`) — `409 orphaned`.
+    #[error("orphaned")]
+    Orphaned,
+    /// `DELETE` against a row that is **not** `Orphaned` — `409 not_orphaned`.
     #[error("not_orphaned")]
     NotOrphaned,
     /// Step W failed, so no CAS was taken and nothing changed — `500`.

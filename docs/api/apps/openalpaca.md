@@ -26,6 +26,7 @@
 | `openalpaca llm` | Manage LLM settings, keys, and usage | `apps/openalpaca/src/commands/llm.rs` |
 | `openalpaca chat` | Chat with the Orchestrator | `apps/openalpaca/src/commands/chat.rs` |
 | `openalpaca plugin` | Manage plugins (list, approve, deny, enable, disable, config) | `apps/openalpaca/src/commands/plugin.rs` |
+| `openalpaca ext` | Manage extensions — MCP servers and plugins (list, info, enable, disable, reload, approve, deny, remove) | `apps/openalpaca/src/commands/ext.rs` |
 
 ## Request/Query Types
 
@@ -122,6 +123,20 @@
   - `stop`
   - `restart`
 - Parsed flags: `--count`, `--daemon-only`
+
+### `ext`
+
+- Source: `apps/openalpaca/src/commands/ext.rs`
+- Enum `ExtCommands` variants:
+  - `list` (fields: `include_orphaned`, `format`)
+  - `info` (fields: `kind`, `id`)
+  - `enable` (fields: `kind`, `id`)
+  - `disable` (fields: `kind`, `id`)
+  - `reload` (fields: `kind`, `id`)
+  - `approve` (fields: `id`)
+  - `deny` (fields: `id`)
+  - `remove` (fields: `id`)
+- Parsed flags: `--format`, `--include-orphaned`
 
 ### `gui`
 

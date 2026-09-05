@@ -58,6 +58,9 @@ enum Commands {
 
     /// Manage plugins (list, approve, deny, enable, disable, config)
     Plugin(commands::plugin::PluginArgs),
+
+    /// Manage extensions — MCP servers and plugins (list, info, enable, disable, reload, approve, deny, remove)
+    Ext(commands::ext::ExtArgs),
 }
 
 #[tokio::main]
@@ -74,5 +77,6 @@ async fn main() -> Result<()> {
         Commands::Llm(args) => commands::llm::run(args).await,
         Commands::Chat(args) => commands::chat::run(args).await,
         Commands::Plugin(args) => commands::plugin::run(args).await,
+        Commands::Ext(args) => commands::ext::run(args).await,
     }
 }

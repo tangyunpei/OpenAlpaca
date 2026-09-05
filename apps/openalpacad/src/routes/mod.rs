@@ -17,6 +17,7 @@ pub mod connectors;
 pub mod dispatch_decisions;
 pub mod events;
 pub mod events_history;
+pub mod extensions;
 pub mod files;
 mod files_types;
 pub mod orchestrator_latency;
@@ -26,6 +27,7 @@ pub mod plugins;
 pub mod skills;
 pub mod tasks;
 mod tasks_types;
+pub mod tools;
 
 pub use agents::{
     agent_action_handler,
@@ -59,6 +61,10 @@ pub use connectors::{
 pub use dispatch_decisions::dispatch_decisions_handler;
 pub use events::events_handler;
 pub use events_history::events_history_handler;
+pub use extensions::{
+    delete_extension_handler, extension_action_handler, get_extension_config_handler,
+    list_extensions_handler, set_extension_config_handler,
+};
 pub use files::{
     get_file_content_handler, get_file_metadata_handler, open_file_handler, upload_file_handler,
 };
@@ -81,6 +87,7 @@ pub use tasks::{
     create_task_handler, get_task_handler, list_tasks_handler,
     task_action_handler,
 };
+pub use tools::list_tools_handler;
 
 // ── Shared error envelope ────────────────────────────────────────────
 //

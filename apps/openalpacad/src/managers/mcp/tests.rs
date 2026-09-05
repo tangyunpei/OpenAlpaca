@@ -33,13 +33,13 @@ use tempfile::TempDir;
 /// `~/.openalpaca`.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-struct HomeStoreGuard {
+pub(crate) struct HomeStoreGuard {
     _lock: MutexGuard<'static, ()>,
     prev: Option<OsString>,
 }
 
 impl HomeStoreGuard {
-    fn set(path: &Path) -> Self {
+    pub(crate) fn set(path: &Path) -> Self {
         let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prev = std::env::var_os(openalpaca_storage::store::HOME_STORE_ENV);
         // SAFETY: serialized by ENV_LOCK; these are the only tests in this
@@ -290,8 +290,6 @@ impl Harness {
             Arc::clone(&registry),
             daemon_config,
             bus.clone(),
-        )
-        .with_dependents(
             Some(Arc::clone(&skills)),
             Some(Arc::clone(&agents)),
             NOTICE_LANE,
@@ -721,6 +719,9 @@ async fn enabling_an_unreachable_command_returns_the_row_with_the_bit_true_and_s
         Arc::clone(&registry),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
         EventBus::new(16),
+        None,
+        None,
+        NOTICE_LANE,
     );
     restarted.reconcile_all().await;
     let after = registry

@@ -344,7 +344,11 @@ async fn async_main(
         // T1 step 3's cron notice is written to the default lane (§7.3 step 1).
         .with_notice_lane(default_lane_key.clone())
         // `[extensions] drain_timeout_secs` bounds T3.
-        .with_daemon_config(daemon_config.clone()),
+        .with_daemon_config(daemon_config.clone())
+        // Without this the `secret_ref` half of a sensitive config key cannot
+        // be resolved and the plugin parks at `Failed{NeedsConfig}` reporting a
+        // key that *is* set (extension design §8, X-29).
+        .with_secret_store(svcs.secret_store.clone()),
     );
     // The crash reaper: one sequential task draining `mark_failed`'s channel
     // (extension design §3.6). Started before the scan, so a plugin that dies
@@ -353,7 +357,12 @@ async fn async_main(
     if let Err(e) = plugin_manager.start().await {
         warn!("plugin manager startup: {e}");
     }
-    let plugin_manager_for_shutdown = plugin_manager.clone();
+
+    // The ENABLE axis's one handle (extension design §6.2 #15): the routes, the
+    // CLI and the shutdown path all reach both supervisors through it.
+    let extensions =
+        crate::managers::extensions::Extensions::new(mcp_supervisor.clone(), plugin_manager.clone());
+    let extensions_for_shutdown = extensions.clone();
 
     // Step 10: Create ConfirmationBroker and construct Orchestrator
     let confirmation_broker = Arc::new(openalpaca_core::security::confirmation::ConfirmationBroker::new());
@@ -373,8 +382,10 @@ async fn async_main(
 
     // Cloned **before** the move into `Orchestrator::new`: the file watcher's
     // cron arm needs it for the scheduled-skill availability check
-    // (extension design §6.2 #13).
+    // (extension design §6.2 #13), and `AppState.tool_registry` is GAP-18's
+    // read path for `GET /v1/tools` (§6.2 #15).
     let tool_registry_for_watcher = svcs.tool_registry.clone();
+    let tool_registry_for_state = svcs.tool_registry.clone();
 
     let orchestrator = Arc::new(Orchestrator::new(
         svcs.shared_context.clone(),
@@ -627,6 +638,8 @@ async fn async_main(
         daemon_config_path,
         web_search_config: svcs.web_search_config,
         confirmation_broker: Some(confirmation_broker),
+        tool_registry: tool_registry_for_state,
+        extensions: extensions.clone(),
         plugin_manager: Some(plugin_manager),
     });
 
@@ -674,20 +687,13 @@ async fn async_main(
         services::flush_cost_tracker(router, &db_for_shutdown, &cost_tracker_date).await;
     }
 
-    // Close every live MCP connection. Nothing tore these down before: rmcp
-    // kills its child from a `Drop` guard that does not fire on `process::exit`
-    // (extension design §3.5). C6 moves this behind `Extensions::shutdown_all`.
-    info!("Shutting down MCP servers...");
-    openalpaca_core::tools::extensions::ExtensionSupervisor::shutdown_all(&*mcp_supervisor).await;
-
-    // And every plugin child. Nothing tore these down before either:
-    // `kill_on_drop` does not fire on `process::exit`, so a plugin's child
-    // could outlive the daemon (extension design §3.5).
-    info!("Shutting down plugins...");
-    openalpaca_core::tools::extensions::ExtensionSupervisor::shutdown_all(
-        &*plugin_manager_for_shutdown,
-    )
-    .await;
+    // Close every live MCP connection and every plugin child. Nothing tore
+    // either down before: rmcp kills its child from a `Drop` guard that does not
+    // fire on `process::exit`, and `kill_on_drop` does not either (extension
+    // design §3.5). `Extensions::shutdown_all` bounds the sweep, so a busy
+    // server cannot hold the exit open indefinitely.
+    info!("Shutting down extensions...");
+    extensions_for_shutdown.shutdown_all().await;
 
     // Shutdown connectors
     info!("Shutting down connectors...");

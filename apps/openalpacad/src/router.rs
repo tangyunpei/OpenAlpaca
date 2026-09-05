@@ -237,7 +237,28 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/chat/confirmations/{request_id}",
             post(crate::routes::confirm_tool),
         )
-        // Plugin routes
+        // Extension routes — the ENABLE axis (extension design §8, ADR-030)
+        .route(
+            "/v1/extensions",
+            get(crate::routes::list_extensions_handler),
+        )
+        .route(
+            "/v1/extensions/{kind}/{id}",
+            delete(crate::routes::delete_extension_handler),
+        )
+        .route(
+            "/v1/extensions/{kind}/{id}/config",
+            get(crate::routes::get_extension_config_handler)
+                .post(crate::routes::set_extension_config_handler),
+        )
+        // enable | disable | reload | approve | deny
+        .route(
+            "/v1/extensions/{kind}/{id}/{verb}",
+            post(crate::routes::extension_action_handler),
+        )
+        // Tool catalog (GAP-18) — read-only; no per-tool toggle (S1)
+        .route("/v1/tools", get(crate::routes::list_tools_handler))
+        // Plugin routes — superseded by /v1/extensions; deleted in C7
         .route(
             "/v1/plugins",
             get(crate::routes::list_plugins_handler),

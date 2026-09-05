@@ -52,6 +52,9 @@ opener.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# `McpClient::disconnected_for_tests` — a client shell for a `ToolBackend::Mcp`
+# with no live server, which the `GET /v1/tools` origin tests need.
+openalpaca_mcp = { path = "../../crates/openalpaca_mcp", features = ["test-utils"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

@@ -48,11 +48,9 @@ pub(super) async fn build_mcp_supervisor(
         Arc::clone(tool_registry),
         Arc::clone(daemon_config),
         bus.clone(),
-    )
-    // T1 step 3's dependent scan reads both registries and writes its cron
-    // notice to the default lane (extension design §7.3). `PluginManager`
-    // already holds the same two handles.
-    .with_dependents(
+        // T1 step 3's dependent scan reads both registries and writes its cron
+        // notice to the default lane (extension design §7.3). `PluginManager`
+        // already holds the same two handles.
         Some(Arc::clone(skill_catalog)),
         Some(Arc::clone(agent_registry)),
         default_lane_key,
@@ -68,9 +66,9 @@ pub(super) async fn build_mcp_supervisor(
         "MCP server bootstrap complete"
     );
 
-    // Only now: a reap that arrived during boot would have found the record it
-    // names in a state the re-check rejects anyway, but starting the drain
-    // after the first reconcile keeps the ordering obvious.
-    supervisor.spawn_reaper();
+    // The reaper is **not** started here: it is started after
+    // `load_agent_templates` (`services/mod.rs`), so a boot-window crash's
+    // dependent scan can name the templates that declare the lost capabilities
+    // rather than reporting an empty set (C4 review).
     supervisor
 }

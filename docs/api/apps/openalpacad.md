@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 73.
+- Total documented method/path endpoints: 79.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -54,6 +54,11 @@
 | PUT | `/v1/daemon/config/providers/web-search` | `bearer` | `update_web_search_config` | `UpdateWebSearchRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
 | GET | `/v1/events` | `query_token` | `events_handler` | - | `HashMap<String, String>` | `apps/openalpacad/src/routes/events.rs` |
 | GET | `/v1/events/history` | `bearer` | `events_history_handler` | - | `events_history::HistoryParams` | `apps/openalpacad/src/routes/events_history.rs` |
+| GET | `/v1/extensions` | `bearer` | `list_extensions_handler` | - | `extensions::ListQuery` | `apps/openalpacad/src/routes/extensions.rs` |
+| DELETE | `/v1/extensions/{kind}/{id}` | `bearer` | `delete_extension_handler` | - | - | `apps/openalpacad/src/routes/extensions.rs` |
+| GET | `/v1/extensions/{kind}/{id}/config` | `bearer` | `get_extension_config_handler` | - | - | `apps/openalpacad/src/routes/extensions.rs` |
+| POST | `/v1/extensions/{kind}/{id}/config` | `bearer` | `set_extension_config_handler` | `extensions::SetConfigRequest` | - | `apps/openalpacad/src/routes/extensions.rs` |
+| POST | `/v1/extensions/{kind}/{id}/{verb}` | `bearer` | `extension_action_handler` | - | - | `apps/openalpacad/src/routes/extensions.rs` |
 | POST | `/v1/files/upload` | `bearer` | `upload_file_handler` | - | - | `apps/openalpacad/src/routes/files.rs` |
 | GET | `/v1/files/{id}` | `bearer` | `get_file_metadata_handler` | - | - | `apps/openalpacad/src/routes/files.rs` |
 | GET | `/v1/files/{id}/content` | `bearer` | `get_file_content_handler` | - | - | `apps/openalpacad/src/routes/files.rs` |
@@ -91,6 +96,7 @@
 | POST | `/v1/tasks` | `bearer` | `create_task_handler` | `CreateTaskRequest` | - | `apps/openalpacad/src/routes/tasks.rs` |
 | GET | `/v1/tasks/{id}` | `bearer` | `get_task_handler` | - | - | `apps/openalpacad/src/routes/tasks.rs` |
 | POST | `/v1/tasks/{id}/action` | `bearer` | `task_action_handler` | `TaskActionRequest` | - | `apps/openalpacad/src/routes/tasks.rs` |
+| GET | `/v1/tools` | `bearer` | `list_tools_handler` | - | - | `apps/openalpacad/src/routes/tools.rs` |
 
 ## Request/Query Types
 
@@ -253,6 +259,25 @@
 |---|---|
 | `limit` | `Option<usize>` |
 | `agent_id` | `Option<String>` |
+
+### `extensions::ListQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/extensions.rs`
+
+| Field | Type |
+|---|---|
+| `include_orphaned` | `bool` |
+
+### `extensions::SetConfigRequest`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/extensions.rs`
+
+| Field | Type |
+|---|---|
+| `key` | `String` |
+| `value` | `serde_json::Value` |
 
 ### `orchestrator_latency::AggregateParams`
 
