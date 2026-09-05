@@ -533,9 +533,7 @@ fn test_build_task_outcome_with_db_and_state_json() {
                 completed_at: Some(now),
             },
         ],
-        constraints: TaskConstraints {
-            pipeline_sequential: true,
-        },
+        constraints: TaskConstraints {},
         workspace: TaskWorkspace::default(),
         created_at: now,
         updated_at: now,

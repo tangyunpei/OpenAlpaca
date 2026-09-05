@@ -26,7 +26,6 @@ fn test_initial_state() {
     assert_eq!(state.steps[0].status, "pending");
     assert_eq!(state.steps[1].step_order, 1);
     assert_eq!(state.steps[1].agent_id, "a2");
-    assert!(state.constraints.pipeline_sequential);
 }
 
 #[test]
@@ -292,7 +291,7 @@ fn test_backward_compat_no_workspace_field() {
     let old_json = r#"{
         "objective": "test",
         "steps": [],
-        "constraints": {"max_agents": 1, "pipeline_sequential": true},
+        "constraints": {"max_agents": 1},
         "created_at": "2024-01-01T00:00:00Z",
         "updated_at": "2024-01-01T00:00:00Z"
     }"#;
