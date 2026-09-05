@@ -12,7 +12,12 @@ import type {
 export interface ChatHistoryQuery {
   limit?: number;
   offset?: number;
-  /** Omit to let the daemon answer for `state.default_lane_key` and echo it back (GAP-16). */
+  /**
+   * Omit to let the daemon answer for `state.default_lane_key` and echo it
+   * back — one round trip, no separate identity lookup needed. `GET /v1/me`
+   * (GAP-16, closed) serves the same `default_lane_key` up front for a
+   * caller that wants it before sending anything.
+   */
   laneKey?: string;
 }
 
@@ -45,9 +50,10 @@ export interface RespondToConfirmationInput {
   requestId: string;
   approved: boolean;
   /**
-   * GAP-01: the daemon's `ConfirmationBody` is `{ approved }` only, so this is
-   * dropped server-side. Serde ignores unknown fields, so sending it is safe
-   * and makes the client correct the day the route is widened.
+   * `entire_tool` caches the approval for the rest of the session; an
+   * omitted scope (or `these_args`) approves this call only (GAP-01, closed
+   * — the daemon's `ConfirmationBody` forwards this to the sandbox instead of
+   * discarding it).
    */
   approvalScope?: ApprovalScope;
 }

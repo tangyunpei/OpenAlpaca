@@ -7,7 +7,7 @@
  *
  * Two honesty notes ride with that write. It is **daemon-wide**, not
  * per-conversation (GAP-13), and the per-provider token figure the design shows
- * as "today" is lifetime (`ProviderUsageSummary.total_tokens`, GAP-08). The
+ * as "today" is lifetime (`ProviderUsageSummary.total_tokens`, GAP-08c). The
  * per-provider on/off switch has no route at all (GAP-15), so it is rendered as
  * the design draws it and disabled.
  */

@@ -19,9 +19,9 @@ describe("gap registry", () => {
     }
   });
 
-  it("covers all 23 gaps from API_MAP §3", () => {
-    expect(listGaps()).toHaveLength(23);
-    expect(listGaps()[0]?.id).toBe("GAP-01");
+  it("covers the 20 gaps still open from API_MAP §3 (GAP-01/07/08a/08b/16 retired in Phase 0)", () => {
+    expect(listGaps()).toHaveLength(20);
+    expect(listGaps()[0]?.id).toBe("GAP-02");
     expect(listGaps().at(-1)?.id).toBe("GAP-23");
   });
 });

@@ -60,6 +60,12 @@ export interface Task {
   /** List route only — the detail route returns `assignments` instead. */
   assigned_agents?: TaskAssignedAgent[];
   outcome?: ParsedOutcome;
+  /**
+   * List route only (GAP-08b) — one grouped `cost_for_tasks` query per page,
+   * `0` for a task with no logged LLM calls. The detail route's `Task` has no
+   * such field yet; that unification is a later phase (see `run-model.ts`).
+   */
+  cost_usd?: number;
 }
 
 export type AssignmentStatusValue =
@@ -172,12 +178,16 @@ export interface ChatDeleteResponse {
   deleted: number;
 }
 
-/** `ApprovalScope` (`security/confirmation.rs`). Dropped by the HTTP route today — GAP-01. */
+/**
+ * `ApprovalScope` (`security/confirmation.rs`). Forwarded by the HTTP route
+ * to the sandbox's `ConfirmationResponse` (GAP-01, closed): an omitted or
+ * `these_args` scope approves this call only; `entire_tool` caches the
+ * approval for the rest of the session.
+ */
 export type ApprovalScope = "these_args" | "entire_tool";
 
 export interface ConfirmationRequestBody {
   approved: boolean;
-  /** Sent optimistically; the daemon currently discards it (GAP-01). */
   approval_scope?: ApprovalScope;
 }
 
@@ -362,7 +372,7 @@ export interface CliBackendStatus {
   enabled: boolean;
 }
 
-/** `health` is hardcoded `"healthy"`; `total_tokens` is lifetime, not today (GAP-08). */
+/** `health` is hardcoded `"healthy"`; `total_tokens` is lifetime, not today (GAP-08c). */
 export interface ProviderUsageSummary {
   provider: string;
   total_cost_usd: number;
@@ -411,7 +421,7 @@ export interface LlmUsageDaily {
 
 // ── Orchestrator ────────────────────────────────────────────────────────────
 
-/** `daily_cost_usd` is hardcoded `0.0` server-side — GAP-08.2. */
+/** `daily_cost_usd` sums today's UTC `llm_usage_daily` rows (GAP-08a, closed). */
 export interface OrchestratorConfigResponse {
   model: string;
   fallback_models: string[];

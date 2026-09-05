@@ -24,7 +24,7 @@ ROUTES_DIR = ROOT / "apps" / "openalpacad" / "src" / "routes"
 CLI_MAIN = ROOT / "apps" / "openalpaca" / "src" / "main.rs"
 CLI_COMMANDS_DIR = ROOT / "apps" / "openalpaca" / "src" / "commands"
 GUI_API_DIR = ROOT / "apps" / "openalpaca-gui" / "src" / "lib" / "api"
-GUI_DAEMON_FILE = ROOT / "apps" / "openalpaca-gui" / "src" / "lib" / "daemon.ts"
+GUI_DAEMON_FILE = ROOT / "apps" / "openalpaca-gui" / "src" / "lib" / "events.ts"
 GUI_TAURI_FILE = ROOT / "apps" / "openalpaca-gui" / "src-tauri" / "src" / "lib.rs"
 CARGO_TOML = ROOT / "Cargo.toml"
 MIGRATIONS_DIR = ROOT / "crates" / "openalpaca_storage" / "src" / "migrations"
@@ -1195,7 +1195,7 @@ def generate_openalpaca_gui_doc(gui_info: dict[str, object]) -> str:
         "",
         "- Frontend API wrappers: `apps/openalpaca-gui/src/lib/api/*.ts`.",
         "- Tauri backend commands: `apps/openalpaca-gui/src-tauri/src/lib.rs`.",
-        "- Daemon event stream client: `apps/openalpaca-gui/src/lib/daemon.ts`.",
+        "- Daemon event stream client: `apps/openalpaca-gui/src/lib/events.ts`.",
         "",
         "## Auth",
         "",

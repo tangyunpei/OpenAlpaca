@@ -3,10 +3,11 @@
  *
  * The `ServerEvent` union below is ported verbatim from the retired SvelteKit
  * client (`.daemon-legacy-reference.ts`), which tracks
- * `crates/openalpaca_api/src/events/mod.rs`. Two quirks are preserved because
- * they are real: the six `plugin_*` variants carry no `ts`/`instance_id`
- * (GAP-22), and `task_status.title` / `agent_status.name` arrive empty on
- * updates (GAP-07).
+ * `crates/openalpaca_api/src/events/mod.rs`. One quirk is preserved because
+ * it is real: the six `plugin_*` variants carry no `ts`/`instance_id`
+ * (GAP-22). `task_status.title` / `agent_status.name` used to arrive empty on
+ * updates (GAP-07, closed) — the daemon now fills both at every producer
+ * site, so the wire shape below was already correct and needed no change.
  *
  * **The socket is best-effort.** On `RecvError::Lagged(n)` the server logs and
  * continues, so a slow client silently loses `n` events with no notification,

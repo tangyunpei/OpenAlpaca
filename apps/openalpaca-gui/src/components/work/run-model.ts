@@ -1,15 +1,17 @@
 /**
  * The `Run` view model (DESIGN_SPEC §4.3) derived from a daemon `Task`.
  *
- * The design's `Run` carries five hand-written fields the daemon does not
- * serve. Each is handled explicitly rather than invented:
+ * The design's `Run` carries several hand-written fields the daemon does not
+ * serve directly. Each is handled explicitly rather than invented:
  *
  *   `short`  — there is no short title on the wire, so the full `title` is
  *              rendered and truncated by CSS (same call `RunningNowSection`
  *              made).
  *   `meta`   — `11m 04s · 5/8 steps · $0.41`. Duration and steps are real
  *              (`created_at`→`completed_at`, `progress_current/total`); the
- *              cost segment is **omitted**, never estimated — GAP-08.
+ *              cost segment is included only when `task.cost_usd` is present
+ *              (GAP-08b, closed — `GET /v1/tasks` list rows carry it, the
+ *              single-task detail route does not yet), never estimated.
  *   `note`   — the daemon's own `result_summary` / `outcome_summary`, first
  *              line only. No note ⇒ no note row.
  *   `stamp`  — `completed_at` (falling back to `updated_at`) as `HH:MM`.
@@ -194,7 +196,7 @@ export interface Run {
   id: string;
   title: string;
   status: UiStatus;
-  /** `11m 04s · 5/8 steps` — no cost segment; see GAP-08. */
+  /** `11m 04s · 5/8 steps · $0.41` — the cost segment only when known. */
   meta: string;
   /** `14:22:41`, or `null` if `created_at` is unreadable. */
   started: string | null;
@@ -207,6 +209,8 @@ export interface Run {
   artifacts: OutcomeArtifact[];
   /** `completed_at ?? updated_at`, for the "today" partition. */
   finishedAt: Date | null;
+  /** `task.cost_usd` (list route only — GAP-08b) — `null`, never guessed. */
+  costUsd: number | null;
 }
 
 /**
@@ -245,7 +249,10 @@ export function runDurationMs(task: Task, now: Date): number | null {
   return Math.max(0, ended.getTime() - started.getTime());
 }
 
-/** `11m 04s · 5/8 steps`. Cost is deliberately absent (GAP-08). */
+/**
+ * `11m 04s · 5/8 steps · $0.41`. The cost segment is added only when
+ * `task.cost_usd` is a number — omitted, never estimated, when it is not.
+ */
 export function runMeta(task: Task, now: Date): string {
   const segments: string[] = [];
   const duration = runDurationMs(task, now);
@@ -253,6 +260,9 @@ export function runMeta(task: Task, now: Date): string {
   const { progress_current: current, progress_total: total } = task;
   if (total !== null && total > 0) {
     segments.push(`${current ?? 0}/${total} steps`);
+  }
+  if (typeof task.cost_usd === "number") {
+    segments.push(`$${task.cost_usd.toFixed(2)}`);
   }
   return segments.join(" · ");
 }
@@ -278,6 +288,7 @@ export function toRun(task: Task, now: Date = new Date()): Run {
     artifacts,
     finishedAt:
       parseTimestamp(task.completed_at) ?? parseTimestamp(task.updated_at),
+    costUsd: typeof task.cost_usd === "number" ? task.cost_usd : null,
   };
 }
 

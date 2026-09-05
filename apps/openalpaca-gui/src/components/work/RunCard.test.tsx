@@ -21,6 +21,7 @@ const run = (patch: Partial<Run> = {}): Run => ({
   artifactCount: 0,
   artifacts: [],
   finishedAt: null,
+  costUsd: null,
   ...patch,
 });
 

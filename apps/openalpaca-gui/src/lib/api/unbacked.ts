@@ -14,9 +14,9 @@
  * working alternative rather than an empty state, the view handles the gap at
  * the point of use — `components/work/run-actions` disables `Start now`,
  * `Re-run` and `Queue follow-up` and names the missing route, `useChatSession`
- * does the `/steer …` send itself, `views/work/EventLogSection` shows the live
- * socket instead of a per-run history, and the lane key is learned from the
- * first chat reply. The adapters below stay as the shape those routes take.
+ * does the `/steer …` send itself, and `views/work/EventLogSection` shows the
+ * live socket instead of a per-run history. The adapters below stay as the
+ * shape those routes take.
  */
 
 import { sendChatMessage } from "../chat-stream";
@@ -298,21 +298,4 @@ export interface ToolCatalogEntry {
 /** GAP-18 — the Settings → Skills rows are really tools, and nothing lists them. */
 export function listToolCatalog(): Availability<ToolCatalogEntry[]> {
   return unavailable("GAP-18");
-}
-
-// ── Identity (GAP-16) ───────────────────────────────────────────────────────
-
-export interface Identity {
-  user_id: string;
-  default_lane_key: string;
-  sources: string[];
-}
-
-/**
- * GAP-16 — no `/v1/me`. The lane key is instead learned from the `lane_key`
- * echoed by `GET /v1/chat/history` or `POST /v1/chat`, which is why
- * `useChatHistory` omits the param on first load.
- */
-export function getIdentity(): Availability<Identity> {
-  return unavailable("GAP-16");
 }

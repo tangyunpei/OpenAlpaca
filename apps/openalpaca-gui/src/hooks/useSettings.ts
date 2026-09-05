@@ -53,7 +53,7 @@ export function useKeyStatus(): UseQueryResult<KeyStatusMap> {
   });
 }
 
-/** `health` is hardcoded `"healthy"` and `total_tokens` is lifetime (GAP-08). */
+/** `health` is hardcoded `"healthy"` and `total_tokens` is lifetime (GAP-08c). */
 export function useProviderUsage(): UseQueryResult<ProviderUsageSummary[]> {
   return useQuery({
     queryKey: qk.settings.providerUsage(),

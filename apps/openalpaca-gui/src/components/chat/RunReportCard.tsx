@@ -4,10 +4,13 @@
  *
  * Every value on the card is something the daemon sent: the id and title come
  * from the task, the duration from `created_at → completed_at`, the artifact
- * chips from the run outcome's own artifact refs. Cost has no source at all
- * (GAP-08 — `daily_cost_usd` is hardcoded and there is no per-task cost), so
- * the `$` segment is **omitted** rather than printed as `$0.00`; `note` is
- * where the card says why something is missing.
+ * chips from the run outcome's own artifact refs. Cost has no source *here*:
+ * this report is built entirely from live `workflow_started`/`task_status`
+ * WS frames (GAP-23 — a stored message carries no run link, so there is no
+ * REST fetch to attach one to), and neither event carries a cost field, even
+ * though `GET /v1/tasks` now does (GAP-08b). The `$` segment is **omitted**
+ * rather than printed as `$0.00`; `note` is where the card says why something
+ * is missing.
  */
 
 import { FileBadge, type FileKind } from "@/components/ui";

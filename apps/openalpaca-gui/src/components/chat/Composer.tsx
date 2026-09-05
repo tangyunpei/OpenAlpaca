@@ -6,9 +6,9 @@
  * replaces it, which is also why the global `Enter → approve` binding in §4.5
  * can never collide with `Enter → send`.
  *
- * `Always allow` sends `approval_scope: "entire_tool"` even though the daemon
- * drops it today (GAP-01, serde ignores unknown fields). The caller is
- * responsible for telling the user the truth about what that did.
+ * `Always allow` sends `approval_scope: "entire_tool"`, which the daemon
+ * caches for the rest of the session (GAP-01, closed). The caller
+ * (`useChatSession`) is responsible for the toast that confirms it.
  */
 
 import { useLayoutEffect, useRef } from "react";

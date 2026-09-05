@@ -79,9 +79,21 @@ describe("formatClock", () => {
 describe("runMeta", () => {
   const now = new Date("2026-08-31T14:33:45Z");
 
-  it("joins duration and steps, and never invents a cost (GAP-08)", () => {
+  it("joins duration and steps, and never invents a cost when none is served", () => {
     expect(runMeta(task(), now)).toBe("11m 04s · 5/8 steps");
     expect(runMeta(task(), now)).not.toContain("$");
+  });
+
+  it("appends the cost segment when the list route serves cost_usd (GAP-08b)", () => {
+    expect(runMeta(task({ cost_usd: 0.41 }), now)).toBe(
+      "11m 04s · 5/8 steps · $0.41",
+    );
+  });
+
+  it("still renders an explicit zero cost rather than omitting it", () => {
+    expect(runMeta(task({ cost_usd: 0 }), now)).toBe(
+      "11m 04s · 5/8 steps · $0.00",
+    );
   });
 
   it("drops the step segment when no total is known", () => {
@@ -115,6 +127,11 @@ describe("toRun", () => {
 
   it("has no note when the daemon supplied none", () => {
     expect(toRun(task()).note).toBeNull();
+  });
+
+  it("carries cost_usd through as costUsd, null when the route omits it", () => {
+    expect(toRun(task()).costUsd).toBeNull();
+    expect(toRun(task({ cost_usd: 1.25 })).costUsd).toBe(1.25);
   });
 });
 

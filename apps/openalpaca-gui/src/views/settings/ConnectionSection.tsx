@@ -3,17 +3,20 @@
  *
  * Real: the liveness dot and instance id (`GET /v1/health`), the endpoint (the
  * Tauri `ConnectionInfo`), Reconnect (re-bootstrap + reopen the socket), and
- * today's spend/runs/tokens (`GET /v1/llm/usage/daily` summed client-side,
- * because `orchestrator/config.daily_cost_usd` is hardcoded `0.0`).
+ * today's spend/runs/tokens — spend from `GET /v1/orchestrator/config`'s
+ * `daily_cost_usd` (GAP-08a, closed), tokens summed client-side from
+ * `GET /v1/llm/usage/daily` (still the only source for those).
  *
  * Unavailable: uptime, `Schema vNN` and `Copy log path` — `/v1/health` is four
  * fields and the migration count is compile-time only (GAP-14) — and the spend
- * *cap*, which nothing serves, so the design's progress bar has no denominator
- * and is omitted rather than drawn against a guess (GAP-08).
+ * *cap*, which nothing serves because there is no daily budget by design (N4:
+ * caps are per-workflow/per-turn), so the design's progress bar has no
+ * denominator and is omitted rather than drawn against a guess (GAP-08c).
  */
 
 import { Button } from "@/components/ui";
 import { useConnectionStatus } from "@/hooks/useConnection";
+import { useOrchestratorConfig } from "@/hooks/useOrchestrator";
 import { useTasks } from "@/hooks/useTasks";
 import { useDaemonStatusDetail } from "@/hooks/useUnbacked";
 import { COST_NOTE, useTodaySpend, formatSpend } from "@/hooks/useUsage";
@@ -27,6 +30,7 @@ import { compactCount } from "./format";
 export function ConnectionSection() {
   const connection = useConnectionStatus();
   const detail = useDaemonStatusDetail();
+  const orchestrator = useOrchestratorConfig();
   const spend = useTodaySpend();
   const showToast = useUiStore((s) => s.showToast);
 
@@ -41,8 +45,11 @@ export function ConnectionSection() {
   // GAP-14 is permanent until `/v1/status` lands; narrow rather than assume.
   const detailNote = detail.available ? null : gapDetail(detail);
 
+  // Tokens have no source but the daily rollup; cost is the daemon's own
+  // authoritative figure (same rows, computed server-side).
   const tokens =
     spend.data === undefined ? 0 : spend.data.tokensIn + spend.data.tokensOut;
+  const dailyCostUsd = orchestrator.data?.daily_cost_usd;
 
   return (
     <div className="flex flex-col gap-[16px]">
@@ -78,8 +85,7 @@ export function ConnectionSection() {
         stats={[
           {
             label: "spend",
-            value:
-              spend.data === undefined ? "—" : formatSpend(spend.data.costUsd),
+            value: dailyCostUsd === undefined ? "—" : formatSpend(dailyCostUsd),
           },
           {
             label: "runs",
@@ -91,10 +97,7 @@ export function ConnectionSection() {
           },
         ]}
       >
-        <GapNote>
-          {COST_NOTE} — the spend cap is not served, so the design&apos;s
-          progress bar has no denominator to draw against.
-        </GapNote>
+        <GapNote>{COST_NOTE}.</GapNote>
       </StatCard>
     </div>
   );

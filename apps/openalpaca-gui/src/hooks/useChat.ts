@@ -49,7 +49,9 @@ import { qk } from "@/lib/query-keys";
 
 /**
  * `GET /v1/chat/history`. Omitting `laneKey` lets the daemon answer for its
- * default lane and echo the key back — the only way to learn it (GAP-16).
+ * default lane and echo the key back, so this stays the one-round-trip path
+ * for the chat view itself; `GET /v1/me` (GAP-16, closed) is there for a
+ * caller that needs the default lane before it has any chat history to ask.
  */
 export function useChatHistory(
   query: ChatHistoryQuery = {},

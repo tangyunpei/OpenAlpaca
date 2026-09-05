@@ -108,8 +108,8 @@ describe("unavailableActionNotes", () => {
 
 describe("gapTooltip", () => {
   it("carries both the note and the proposal", () => {
-    const tooltip = gapTooltip("GAP-08");
-    expect(tooltip).toContain("Cost reporting not yet available");
+    const tooltip = gapTooltip("GAP-08c");
+    expect(tooltip).toContain("Spend is not capped daily by design");
     expect(tooltip).toContain("/v1/usage/summary");
   });
 });

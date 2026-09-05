@@ -23,7 +23,11 @@ import { create } from "zustand";
 export interface PendingToolConfirmation {
   /** The tool the daemon is waiting on. */
   toolName: string;
-  /** The run holding it — `null` when the mapping is unknown (GAP-07). */
+  /**
+   * The run holding it. `agent_status`'s `agent_id → current_task_id` is the
+   * only mapping available; `null` when it has not arrived yet rather than
+   * being guessed.
+   */
   runId: string | null;
   /** `resolve("approved")`. */
   approve: () => void;

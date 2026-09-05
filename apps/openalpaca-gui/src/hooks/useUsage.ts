@@ -1,9 +1,12 @@
 /**
  * Spend and token counts.
  *
- * Everything here is client-side arithmetic because of GAP-08:
- * `orchestrator/config.daily_cost_usd` is hardcoded `0.0`, there is no
- * per-task cost query param, and the cost cap is not served at all.
+ * `useTodaySpend` sums `GET /v1/llm/usage/daily` client-side because tokens
+ * and request counts have no other source; the daemon now serves the same
+ * day's total cost directly on `GET /v1/orchestrator/config.daily_cost_usd`
+ * (GAP-08a, closed). What is still genuinely missing is a served cost cap
+ * (GAP-08c) — there is no daily budget by design (N4: caps are per-workflow
+ * and per-turn), so the design's spend progress bar has no denominator.
  */
 
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
@@ -43,8 +46,8 @@ export function useTodaySpend(
   });
 }
 
-/** The note to show beside any cost figure the daemon cannot cap or attribute. */
-export const COST_NOTE = gapNote(GAPS["GAP-08"]);
+/** The note to show beside a spend figure the daemon does not cap. */
+export const COST_NOTE = gapNote(GAPS["GAP-08c"]);
 
 /** Format a spend figure the way the design does (`$0.0184`). */
 export function formatSpend(costUsd: number): string {

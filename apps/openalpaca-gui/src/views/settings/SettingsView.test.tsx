@@ -86,7 +86,7 @@ vi.mock("@/hooks/useOrchestrator", async (importOriginal) => ({
       fallback_models: [],
       active_agents: 0,
       active_tasks: 0,
-      daily_cost_usd: 0,
+      daily_cost_usd: 0.0184,
     }),
   useUpdateOrchestratorConfig: () => mutation(),
 }));

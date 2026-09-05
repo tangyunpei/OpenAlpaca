@@ -16,14 +16,12 @@
  */
 
 export type GapId =
-  | "GAP-01"
   | "GAP-02"
   | "GAP-03"
   | "GAP-04"
   | "GAP-05"
   | "GAP-06"
-  | "GAP-07"
-  | "GAP-08"
+  | "GAP-08c"
   | "GAP-09"
   | "GAP-10"
   | "GAP-11"
@@ -31,7 +29,6 @@ export type GapId =
   | "GAP-13"
   | "GAP-14"
   | "GAP-15"
-  | "GAP-16"
   | "GAP-17"
   | "GAP-18"
   | "GAP-19"
@@ -58,17 +55,6 @@ export interface GapDescriptor {
 }
 
 export const GAPS: Record<GapId, GapDescriptor> = {
-  "GAP-01": {
-    id: "GAP-01",
-    label: "Allowlist scope",
-    missingApi: "POST /v1/chat/confirmations/{id} ignores `approval_scope`",
-    proposedEndpoint:
-      'POST /v1/chat/confirmations/{id} { approved, approval_scope: "entire_tool" }',
-    blocks: 'The confirmation card\'s "Always allow" button',
-    fixSize: "XS",
-    noteOverride:
-      "Always-allow is not yet honoured by the daemon — it approves this call only",
-  },
   "GAP-02": {
     id: "GAP-02",
     label: "Steering API",
@@ -115,27 +101,17 @@ export const GAPS: Record<GapId, GapDescriptor> = {
     blocks: "Re-run on a terminal run; Start now on a queued run",
     fixSize: "S",
   },
-  "GAP-07": {
-    id: "GAP-07",
-    label: "Task titles on status events",
+  "GAP-08c": {
+    id: "GAP-08c",
+    label: "Usage summary",
     missingApi:
-      'event_bridge sends `title: ""` on every task_status but TaskCreated',
+      "no GET /v1/usage/summary; the per-provider token figure sums the lifetime all_provider_usage(), not today; no cost cap is served",
     proposedEndpoint:
-      "carry the title through the SystemEvent → ServerEvent bridge",
-    blocks: "Live run titles without an N+1 refetch",
-    fixSize: "XS",
-    noteOverride:
-      "Live status events omit the run title — titles are refetched",
-  },
-  "GAP-08": {
-    id: "GAP-08",
-    label: "Cost reporting",
-    missingApi:
-      "daily_cost_usd is hardcoded 0.0; no per-task cost; no cost cap served",
-    proposedEndpoint:
-      "GET /v1/usage/summary?window=today; GET /v1/llm/usage?task_id=",
-    blocks: "Per-run $ figures, today's spend, the spend cap",
+      "GET /v1/usage/summary?window=today → { date, total_cost_usd, by_provider[], caps: { workflow_max_cost_usd, agent_max_cost_usd } }",
+    blocks: "Today's per-provider token figure; a served spend-cap line",
     fixSize: "S",
+    noteOverride:
+      "Spend is not capped daily by design — caps are per workflow, so the progress bar has no denominator to draw against",
   },
   "GAP-09": {
     id: "GAP-09",
@@ -203,15 +179,6 @@ export const GAPS: Record<GapId, GapDescriptor> = {
     proposedEndpoint: "PUT /v1/settings/llm/providers/{provider}/enabled",
     blocks: "The per-provider toggle in Models & keys",
     fixSize: "S",
-  },
-  "GAP-16": {
-    id: "GAP-16",
-    label: "Identity endpoint",
-    missingApi: "no route returns the default lane key or local_user_id",
-    proposedEndpoint: "GET /v1/me",
-    blocks: "Loading a transcript before the first send",
-    fixSize: "S",
-    noteOverride: "The default lane is learned from the first reply",
   },
   "GAP-17": {
     id: "GAP-17",

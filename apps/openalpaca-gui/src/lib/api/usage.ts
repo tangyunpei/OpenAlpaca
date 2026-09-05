@@ -7,11 +7,7 @@ export interface LlmUsageQuery {
   agentId?: string;
   keyId?: string;
   limit?: number;
-  /**
-   * GAP-08.1: the repository has `get_task_usage` but the route's query struct
-   * accepts only `{ agent_id, key_id, limit }`, so this is ignored today. Sent
-   * anyway — serde drops unknown params and the day it lands the UI is correct.
-   */
+  /** Wins over `agentId`/`keyId` when more than one is set (GAP-08b, closed). */
   taskId?: string;
 }
 
@@ -59,10 +55,10 @@ export function todayIsoDate(now: Date = new Date()): string {
 }
 
 /**
- * Sum a day's per-agent/per-model rows into one figure.
- *
- * GAP-08.2 is why this exists client-side: `GET /v1/orchestrator/config`
- * reports `daily_cost_usd` but the handler hardcodes `0.0`.
+ * Sum a day's per-agent/per-model rows into one figure — tokens and request
+ * counts have no other source. (`daily_cost_usd` on `GET /v1/orchestrator/config`
+ * now serves the cost half of this from the same rows server-side — GAP-08a,
+ * closed — but this stays the only way to get today's token/request totals.)
  */
 export function summarizeDailyUsage(
   date: string,

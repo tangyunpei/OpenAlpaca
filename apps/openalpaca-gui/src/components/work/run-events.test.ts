@@ -81,7 +81,7 @@ describe("runEventsFromRing", () => {
     );
   });
 
-  it("falls back to a plain sentence when the title is empty (GAP-07)", () => {
+  it("falls back to a plain sentence when the title is empty", () => {
     const [started] = runEventsFromRing(
       [
         {

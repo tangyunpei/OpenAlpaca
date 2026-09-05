@@ -46,7 +46,7 @@ describe("usePublishConfirmation", () => {
     expect(useConfirmationStore.getState().pending).toBeNull();
   });
 
-  it("keeps a null run id rather than guessing one (GAP-07)", () => {
+  it("keeps a null run id rather than guessing one", () => {
     render(<Publisher pending={{ ...confirmation, runId: null }} />);
     expect(useConfirmationStore.getState().pending?.runId).toBeNull();
   });

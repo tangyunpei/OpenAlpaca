@@ -5,12 +5,14 @@
  * The whole column scrolls as one — it has no sticky header, unlike the
  * Library's (§2.3).
  *
- * Two honest absences in the header:
- *   * `$0.41` per run — nothing serves per-run cost (GAP-08), so the meta row
- *     carries a `cost —` cell whose tooltip names the route that would fill it
- *     rather than an invented figure.
- *   * the run's own detail is refetched by id, because live `task_status`
- *     events arrive with `title: ""` (GAP-07).
+ * One honest absence in the header: `GET /v1/tasks/{id}` (this view's own
+ * fetch) has no `cost_usd` field — only the list route does (GAP-08b landed
+ * there, not here; the two shapes unify in a later phase). `run` therefore
+ * prefers the detail's own cost when it has one and falls back to the list
+ * row's (`fallbackRun`) otherwise, so the figure shown while browsing from
+ * the Work list does not vanish once the detail request resolves; it reads
+ * `cost —` only when neither source has one (e.g. opened outside the list's
+ * fetched window).
  */
 
 import { useMemo } from "react";
@@ -22,7 +24,6 @@ import {
   UnavailableActionsNote,
 } from "@/components/work/RunActionBar";
 import {
-  gapTooltip,
   liveRunActions,
   terminalRunActions,
   type RunActionId,
@@ -59,10 +60,19 @@ export function RunDetail({
   const ring = useEventRing();
 
   const task = detail.data?.task;
-  const run = useMemo<Run | null>(
-    () => (task === undefined ? fallbackRun : toRun(task)),
-    [task, fallbackRun],
-  );
+  const run = useMemo<Run | null>(() => {
+    if (task === undefined) return fallbackRun;
+    const detailRun = toRun(task);
+    const costUsd = fallbackRun?.costUsd ?? null;
+    if (detailRun.costUsd !== null || costUsd === null) return detailRun;
+    // The detail route carries no cost_usd; fold in the list row's figure
+    // (already fetched to get here) rather than letting it disappear once
+    // the detail request resolves.
+    const meta = [detailRun.meta, `$${costUsd.toFixed(2)}`]
+      .filter((segment) => segment !== "")
+      .join(" · ");
+    return { ...detailRun, costUsd, meta };
+  }, [task, fallbackRun]);
 
   const assignments = useMemo<RunAssignment[]>(
     () => detail.data?.assignments ?? [],
@@ -99,9 +109,14 @@ export function RunDetail({
         <span>{run.id.slice(0, 8)}</span>
         {run.meta !== "" && <span>{run.meta}</span>}
         {run.started !== null && <span>{`started ${run.started}`}</span>}
-        <span title={gapTooltip("GAP-08")} className="text-faint">
-          cost —
-        </span>
+        {run.costUsd === null && (
+          <span
+            title="This run is outside the list's fetched window, which is the only route that serves cost"
+            className="text-faint"
+          >
+            cost —
+          </span>
+        )}
       </div>
 
       {live ? (

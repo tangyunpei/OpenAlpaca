@@ -12,9 +12,10 @@
  *     strips. It targets the lane's active workflow, not a chosen run.
  *   * **GAP-03** queueing a follow-up has no write route at all, so the
  *     composer refuses and says why instead of quietly sending a chat message.
- *   * **GAP-01** `Always allow` sends `approval_scope: "entire_tool"`, which
- *     the daemon drops; the toast says that rather than the design's
- *     "it won't ask again".
+ *   * `Always allow` sends `approval_scope: "entire_tool"`, which the daemon
+ *     now honours for the rest of the session (GAP-01, closed) — the toast
+ *     uses the design's own copy (§4.4): `{tool} added to the allowlist — it
+ *     won't ask again`.
  *   * **GAP-23** messages carry no run link, so run reports are session-local:
  *     built from the delegation this client started plus the `task_status`
  *     frames it saw. They do not survive a reload.
@@ -386,9 +387,14 @@ export function useChatSession(): ChatSession {
   const approve = useCallback(() => answer("approved"), [answer]);
   const deny = useCallback(() => answer("denied"), [answer]);
   const alwaysAllow = useCallback(() => {
+    const toolName = firstConfirmation?.toolName ?? null;
     answer("approved", "entire_tool");
-    showToast(gapNote(GAPS["GAP-01"]));
-  }, [answer, showToast]);
+    // §4.4's own copy — the daemon now caches `EntireTool` for the rest of
+    // the session, so this is no longer a polite lie.
+    if (toolName !== null) {
+      showToast(`${toolName} added to the allowlist — it won't ask again`);
+    }
+  }, [answer, firstConfirmation, showToast]);
 
   return {
     items,

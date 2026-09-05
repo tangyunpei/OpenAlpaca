@@ -31,7 +31,7 @@ import {
   useOrchestratorConfig,
   useUpdateOrchestratorConfig,
 } from "@/hooks/useOrchestrator";
-import { formatSpend, useTodaySpend } from "@/hooks/useUsage";
+import { formatSpend } from "@/hooks/useUsage";
 import { usePublishConfirmation } from "@/stores/confirmation";
 import {
   selectPanelOn,
@@ -81,7 +81,6 @@ export default function ChatView({
   const models = useModels();
   const orchestrator = useOrchestratorConfig();
   const updateOrchestrator = useUpdateOrchestratorConfig();
-  const spend = useTodaySpend();
 
   const session = useChatSession();
 
@@ -192,7 +191,9 @@ export default function ChatView({
           }}
           modelNote={MODEL_SCOPE_NOTE}
           spend={
-            spend.data === undefined ? null : formatSpend(spend.data.costUsd)
+            orchestrator.data === undefined
+              ? null
+              : formatSpend(orchestrator.data.daily_cost_usd)
           }
         />
       </section>

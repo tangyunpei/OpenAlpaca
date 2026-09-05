@@ -223,7 +223,7 @@ describe("ChatView — streaming lifecycle (§3.11, API_MAP §4.1)", () => {
   });
 });
 
-describe("ChatView — tool confirmation (§3.14, §3.16a, GAP-01)", () => {
+describe("ChatView — tool confirmation (§3.14, §3.16a)", () => {
   async function block(): Promise<FakeEventSource> {
     renderChat();
     const source = await sendMessage("run the audit");
@@ -285,7 +285,7 @@ describe("ChatView — tool confirmation (§3.14, §3.16a, GAP-01)", () => {
     expect(await screen.findByText("Denied")).toBeInTheDocument();
   });
 
-  it("sends `approval_scope: entire_tool` for Always allow (GAP-01)", async () => {
+  it("sends `approval_scope: entire_tool` for Always allow", async () => {
     await block();
     fireEvent.click(screen.getByRole("button", { name: "Always allow" }));
 
@@ -299,10 +299,10 @@ describe("ChatView — tool confirmation (§3.14, §3.16a, GAP-01)", () => {
       });
     });
 
-    // The daemon drops the scope today, so the toast says exactly that.
+    // The daemon now honours the scope, so the toast uses §4.4's real copy.
     await waitFor(() =>
       expect(useUiStore.getState().toast).toBe(
-        "Always-allow is not yet honoured by the daemon — it approves this call only",
+        "shell_execute added to the allowlist — it won't ask again",
       ),
     );
   });
