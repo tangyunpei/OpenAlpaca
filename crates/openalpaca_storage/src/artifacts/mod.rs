@@ -32,6 +32,34 @@
 //! the previous version's bytes intact under `.versions/` — the invariant the
 //! protocol buys is that no reader ever sees a *truncated* file, and that the
 //! old bytes are never destroyed before the new ones are complete on disk.
+//!
+//! **Two additions to the plan's literal protocol.** Every failure path removes
+//! `.<stem>.tmp`, so an abandoned write strands nothing in the run directory;
+//! and each rename is followed by an `fsync` of the directory it changed, since
+//! a rename is directory metadata and step 3's data `fsync` does not force it
+//! (without this the two renames could persist out of order under power loss).
+//! Both are best-effort: neither failing turns a completed write into an error.
+//!
+//! ## Recovering from an interrupted put
+//!
+//! The two file-system questions `put` asks before rotating, and what it does:
+//!
+//! | head file | `.versions/<stem>/v<N-1>.<ext>` | Action |
+//! |---|---|---|
+//! | present | absent  | Healthy store — rotate the head into `v<N-1>` (the ordinary supersede). |
+//! | present | present | An **interrupted put**: the head holds bytes no committed row describes, `v<N-1>` is the committed previous version. Do **not** rotate — step 4's rename discards the orphaned head, and `v<N-1>` is reported as the rotated path. |
+//! | absent  | present | A put died between steps 3 and 4. The bytes are already where they belong; report them so v(N-1)'s row stops claiming the head path. |
+//! | absent  | absent  | The head was removed outside the store. Nothing to rotate. |
+//!
+//! The discriminator is exact rather than heuristic: in a healthy store
+//! v(N-1)'s bytes *are* the head until the rotate moves them, so
+//! `.versions/<stem>/v<N-1>.<ext>` cannot exist while the head does. Testing the
+//! head first would let `fs::rename` — which silently replaces its destination —
+//! overwrite a committed version with uncommitted bytes.
+//!
+//! The interrupted state is not exclusive to power loss: any failure after the
+//! bytes land and before `tx.commit()` (an FK violation on `task_id`, a unique
+//! index conflict, a disk-full `INSERT`) leaves exactly the same thing on disk.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -990,7 +1018,8 @@ fn leading_sequence(file_name: &str) -> Option<u32> {
 ///
 /// Steps, in order, with a crash point after each: write `.<stem>.tmp` → fsync
 /// → rename the current head into `.versions/<stem>/v<N-1>.<ext>` → rename the
-/// tmp file onto the head path.
+/// tmp file onto the head path. Every failure path removes the tmp file, so a
+/// write that never completes strands nothing in the run directory.
 fn write_bytes(
     artifacts_root: &Path,
     dir: &Path,
@@ -1005,8 +1034,35 @@ fn write_bytes(
         .with_context(|| format!("head file name has no stem: {head_name}"))?;
     let tmp = confine_to_root(artifacts_root, &dir.join(format!(".{stem}.tmp")))?;
 
+    let outcome = write_bytes_steps(
+        artifacts_root,
+        dir,
+        head_path,
+        &tmp,
+        content,
+        previous_version,
+    );
+    if outcome.is_err() {
+        // A `.<stem>.tmp` left behind by a failed write would outlive everything
+        // that could explain it: the artifact may never be written again, and
+        // only a retry of this exact address would truncate it.
+        remove_best_effort(&tmp);
+    }
+    outcome
+}
+
+/// The four steps themselves. Separated from [`write_bytes`] only so the tmp
+/// file has exactly one cleanup site.
+fn write_bytes_steps(
+    artifacts_root: &Path,
+    dir: &Path,
+    head_path: &Path,
+    tmp: &Path,
+    content: &[u8],
+    previous_version: Option<u32>,
+) -> Result<Option<String>> {
     let mut file =
-        fs::File::create(&tmp).with_context(|| format!("failed to create {}", tmp.display()))?;
+        fs::File::create(tmp).with_context(|| format!("failed to create {}", tmp.display()))?;
     file.write_all(content)
         .with_context(|| format!("failed to write {}", tmp.display()))?;
     crash_point(WriteStep::TmpWritten)?;
@@ -1019,7 +1075,29 @@ fn write_bytes(
     if let Some(previous) = previous_version {
         let version_path =
             confine_to_root(artifacts_root, &version_file_path(head_path, previous)?)?;
-        if head_path.exists() {
+        // The two-question recovery table (see the module docs). `version_path`
+        // is asked *first*: in a healthy store v(N-1)'s bytes are the head until
+        // the rotate moves them, so an existing `v<N-1>.<ext>` can only be the
+        // committed previous version left there by an interrupted put — and
+        // `fs::rename` would silently replace it.
+        if version_path.exists() {
+            if head_path.exists() {
+                // Interrupted put: the head holds bytes no committed row
+                // describes. Rotating them here would destroy the only copy of
+                // v(N-1) and leave its row pointing at another version's bytes.
+                // The head is discarded by step 4's rename below.
+                tracing::warn!(
+                    "Discarding an uncommitted head at {}: {} already holds the committed \
+                     version {previous} (an earlier put did not commit)",
+                    head_path.display(),
+                    version_path.display()
+                );
+            }
+            // Either way the previous version's bytes are already where they
+            // belong — report the real location so its row stops claiming the
+            // head path.
+            rotated_rel = Some(relative_to(artifacts_root, &version_path)?);
+        } else if head_path.exists() {
             if let Some(parent) = version_path.parent() {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -1031,27 +1109,54 @@ fn write_bytes(
                     version_path.display()
                 )
             })?;
-            rotated_rel = Some(relative_to(artifacts_root, &version_path)?);
-        } else if version_path.exists() {
-            // The head is gone but its rotated copy is there: an earlier `put`
-            // died in the window between the two renames and rolled its row
-            // back. The bytes are already where they belong — report the real
-            // location so the version row stops claiming the head path.
+            if let Some(parent) = version_path.parent() {
+                fsync_dir(parent);
+            }
+            fsync_dir(dir);
             rotated_rel = Some(relative_to(artifacts_root, &version_path)?);
         }
     }
     crash_point(WriteStep::Rotated)?;
 
-    fs::rename(&tmp, head_path).with_context(|| {
+    fs::rename(tmp, head_path).with_context(|| {
         format!(
             "failed to move {} into place at {}",
             tmp.display(),
             head_path.display()
         )
     })?;
+    fsync_dir(dir);
     crash_point(WriteStep::HeadRenamed)?;
 
     Ok(rotated_rel)
+}
+
+/// `fsync` a directory so a rename that just happened is durable.
+///
+/// An addition to the plan's literal §4.2 protocol, which forces only the tmp
+/// file's *data*: a rename is a directory-metadata change, and without this the
+/// rotate and the head rename could persist out of order under power loss.
+/// Best-effort — the bytes are already durable, so a filesystem that will not
+/// let us open or sync a directory must not fail the write.
+fn fsync_dir(dir: &Path) {
+    match fs::File::open(dir) {
+        Ok(handle) => {
+            if let Err(e) = handle.sync_all() {
+                tracing::debug!("Failed to fsync {}: {e}", dir.display());
+            }
+        }
+        Err(e) => tracing::debug!("Failed to open {} for fsync: {e}", dir.display()),
+    }
+}
+
+/// Deletes a file that may not be there. A stray file is a leak, never a reason
+/// to fail a write whose bytes are already in place.
+fn remove_best_effort(path: &Path) {
+    if let Err(e) = fs::remove_file(path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!("Failed to remove {}: {e}", path.display());
+    }
 }
 
 /// Deletes the oldest version rows beyond `max_versions`, returning their

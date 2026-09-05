@@ -147,13 +147,7 @@ fn put_creates_the_head_at_the_clean_path() {
         !head.parent().unwrap().join(".versions").exists(),
         "a first put must not create .versions/"
     );
-    // No tmp file is left behind.
-    let leftovers: Vec<_> = fs::read_dir(head.parent().unwrap())
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-        .filter(|n| n.ends_with(".tmp"))
-        .collect();
-    assert!(leftovers.is_empty(), "tmp leftovers: {leftovers:?}");
+    assert_no_tmp_leftovers(head.parent().unwrap());
 }
 
 #[test]
@@ -359,6 +353,21 @@ fn assert_nothing_is_truncated(dir: &Path, old: &str, new: &str) {
     );
 }
 
+/// The protocol's `.<stem>.tmp` must never outlive the call that created it —
+/// on the success path *and* on every error or crash path.
+fn assert_no_tmp_leftovers(dir: &Path) {
+    let leftovers: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "tmp leftovers in {}: {leftovers:?}",
+        dir.display()
+    );
+}
+
 /// Runs one crash injection against an artifact that already has v1, and
 /// returns the run directory plus the post-crash record.
 fn crash_during_second_put(step: WriteStep) -> (Fixture, PathBuf, String) {
@@ -388,6 +397,7 @@ fn crash_during_second_put(step: WriteStep) -> (Fixture, PathBuf, String) {
 fn a_crash_after_the_tmp_write_leaves_the_head_fully_old() {
     let (f, dir, id) = crash_during_second_put(WriteStep::TmpWritten);
     assert_nothing_is_truncated(&dir, "old\n", "new\n");
+    assert_no_tmp_leftovers(&dir);
     assert_eq!(
         fs::read_to_string(dir.join("01-notes.md")).unwrap(),
         "old\n"
@@ -403,6 +413,7 @@ fn a_crash_after_the_tmp_write_leaves_the_head_fully_old() {
 fn a_crash_after_the_fsync_leaves_the_head_fully_old() {
     let (f, dir, id) = crash_during_second_put(WriteStep::Fsynced);
     assert_nothing_is_truncated(&dir, "old\n", "new\n");
+    assert_no_tmp_leftovers(&dir);
     assert_eq!(
         fs::read_to_string(dir.join("01-notes.md")).unwrap(),
         "old\n"
@@ -415,6 +426,7 @@ fn a_crash_after_the_fsync_leaves_the_head_fully_old() {
 fn a_crash_after_the_rotate_keeps_the_old_bytes_whole_under_versions() {
     let (f, dir, id) = crash_during_second_put(WriteStep::Rotated);
     assert_nothing_is_truncated(&dir, "old\n", "new\n");
+    assert_no_tmp_leftovers(&dir);
     // The specified protocol renames the head away before renaming the tmp in,
     // so this is the one window where the head path itself is absent — the old
     // bytes are whole and addressable at the rotated path.
@@ -432,6 +444,7 @@ fn a_crash_after_the_rotate_keeps_the_old_bytes_whole_under_versions() {
 fn a_crash_after_the_head_rename_leaves_the_head_fully_new() {
     let (f, dir, id) = crash_during_second_put(WriteStep::HeadRenamed);
     assert_nothing_is_truncated(&dir, "old\n", "new\n");
+    assert_no_tmp_leftovers(&dir);
     assert_eq!(
         fs::read_to_string(dir.join("01-notes.md")).unwrap(),
         "new\n"
@@ -467,6 +480,99 @@ fn a_put_after_a_crash_still_succeeds() {
     assert_eq!(v1.rel_path, "loose/2026-09-01/.versions/01-notes/v1.md");
     let path = f.store().resolve_content(&id, Some(1)).unwrap();
     assert_eq!(fs::read_to_string(path).unwrap(), "old\n");
+    assert_no_tmp_leftovers(&dir);
+}
+
+#[test]
+fn a_put_after_an_interrupted_head_rename_never_rotates_over_v1() {
+    // The crash at `HeadRenamed` leaves the *uncommitted* new bytes at the head
+    // and the true, committed v1 at `.versions/01-notes/v1.md` (the row rolled
+    // back to v1 with sha("old\n")). A recovering put must not rotate the
+    // orphaned head over v1 — that would destroy v1's only copy and leave v1's
+    // row describing bytes of another version.
+    let (f, dir, id) = crash_during_second_put(WriteStep::HeadRenamed);
+    let v1_sha = f.store().versions(&id).unwrap()[0].sha256.clone();
+    assert_eq!(v1_sha, sha256_hex(b"old\n"), "the row still describes v1");
+
+    let scope = f.scope();
+    let mut retry = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"newer\n");
+    retry.created = at(1);
+    let (record, created) = f.store().put(retry).unwrap();
+    assert!(!created);
+    assert_eq!(record.id, id);
+    assert_eq!(record.version, 2);
+
+    assert_eq!(
+        fs::read_to_string(dir.join("01-notes.md")).unwrap(),
+        "newer\n",
+        "the head is the newest content"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join(".versions/01-notes/v1.md")).unwrap(),
+        "old\n",
+        "v1's committed bytes must survive the recovering put"
+    );
+    let mut on_disk: Vec<String> = fs::read_dir(dir.join(".versions/01-notes"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    on_disk.sort();
+    assert_eq!(
+        on_disk,
+        vec!["v1.md".to_string()],
+        "the orphaned head is discarded, not parked in .versions/"
+    );
+
+    let rows = f.store().versions(&id).unwrap();
+    assert_eq!(rows.len(), 2);
+    let v1 = rows.iter().find(|r| r.version == 1).unwrap();
+    assert_eq!(v1.rel_path, "loose/2026-09-01/.versions/01-notes/v1.md");
+    assert_eq!(
+        v1.sha256, v1_sha,
+        "v1's row sha still describes v1's own bytes"
+    );
+    let path = f.store().resolve_content(&id, Some(1)).unwrap();
+    assert_eq!(
+        fs::read_to_string(path).unwrap(),
+        "old\n",
+        "resolve_content(v1) serves v1's bytes, not another version's"
+    );
+    assert_no_tmp_leftovers(&dir);
+}
+
+#[test]
+fn an_interrupted_head_rename_leaves_v1_readable_without_a_put() {
+    // The same interrupted state, read rather than written: `resolve_content`
+    // and `verify` must find everything present and destroy nothing.
+    let (f, dir, id) = crash_during_second_put(WriteStep::HeadRenamed);
+
+    let root = f.project_root().to_string_lossy().to_string();
+    assert_eq!(
+        f.store().verify(Some(&root)).unwrap(),
+        0,
+        "the head is present, so nothing is marked missing"
+    );
+    let record = f.store().get(&id, OWNER).unwrap().unwrap();
+    assert!(!record.missing());
+    assert_eq!(record.version, 1);
+
+    // v1 *is* the current version, so it resolves to the head — whose bytes the
+    // interrupted put replaced. That stale sha is §4.8's hand-edit row (the
+    // next put or `verify` records it as a version — Phase 8). What must not
+    // happen is the loss of v1's bytes: they are whole under `.versions/`.
+    let head = f.store().resolve_content(&id, None).unwrap();
+    assert_eq!(head, dir.join("01-notes.md"));
+    assert_eq!(f.store().resolve_content(&id, Some(1)).unwrap(), head);
+    assert_eq!(
+        fs::read_to_string(dir.join(".versions/01-notes/v1.md")).unwrap(),
+        "old\n",
+        "reads must not disturb the committed v1 bytes"
+    );
+    assert_eq!(
+        f.store().versions(&id).unwrap()[0].sha256,
+        sha256_hex(b"old\n")
+    );
+    assert_no_tmp_leftovers(&dir);
 }
 
 // ============================================================================
