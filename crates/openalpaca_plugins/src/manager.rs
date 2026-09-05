@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -44,7 +45,10 @@ pub enum PluginStatus {
     NeedsConfig { missing_keys: Vec<String> },
     /// Plugin process is running and tools are registered.
     Running,
-    /// Plugin process crashed; will retry after `backoff_until`.
+    /// The plugin is not up and its load failed: the process crashed, or the
+    /// load never got it running (the entry would not spawn, `initialize` or
+    /// `tools/list` failed). A parked, handle-free state — the next `enable`
+    /// or `approve` retries the load rather than reporting success.
     Crashed {
         error: String,
         backoff_until: Instant,
@@ -133,6 +137,13 @@ pub struct PluginState {
     pub plugin_dir: PathBuf,
     // NEW P3e:
     pub capability_provider_handle: Option<ProviderHandle>,
+    /// Which load owns this entry, while a load owns it.
+    ///
+    /// Stamped by [`PluginManager::claim_load_slot`] on the `Loading` claim
+    /// and cleared the moment the entry stops being one, so a load can tell
+    /// *its own* claim from the identical-looking claim of a load that took
+    /// the slot after a teardown freed it.
+    pub(crate) claim_token: Option<u64>,
 }
 
 impl PluginState {
@@ -158,6 +169,7 @@ impl PluginState {
             last_health: None,
             plugin_dir,
             capability_provider_handle: None,
+            claim_token: None,
         }
     }
 
@@ -175,23 +187,28 @@ impl PluginState {
             || matches!(self.status, PluginStatus::Loading)
     }
 
-    /// Is this entry a load's outstanding claim — `Loading`, holding nothing?
+    /// Is this entry *this* load's outstanding claim — the `Loading` state
+    /// [`claim_load_slot`](PluginManager::claim_load_slot) stamped with
+    /// `token`, still holding nothing?
     ///
-    /// A load's step 8 writes its handles in only when it still finds its own
-    /// claim in the slot. The claim is unique while it stands (nothing else
-    /// can insert over an in-flight entry), so anything else found there
-    /// means a teardown took the claim away.
-    fn is_pending_claim(&self) -> bool {
+    /// A load publishes its registrations and writes its handles in only when
+    /// it still finds its own claim in the slot. The token is what makes that
+    /// "its own": a teardown can free the slot mid-load and a second load can
+    /// claim it, and the two claims are otherwise indistinguishable — same
+    /// status word, same absent handles, same plugin name.
+    fn is_pending_claim(&self, token: u64) -> bool {
         matches!(self.status, PluginStatus::Loading)
             && self.process.is_none()
             && self.capability_provider_handle.is_none()
+            && self.claim_token == Some(token)
     }
 }
 
 /// Outcome of trying to claim a plugin's map slot for a load.
 enum LoadClaim {
-    /// The slot was free and now holds this load's `Loading` state.
-    Claimed,
+    /// The slot was free and now holds this load's `Loading` state, stamped
+    /// with `token` — the load's proof of ownership at step 8.
+    Claimed { token: u64 },
     /// Someone else owns it — a running plugin or a load already in flight.
     /// Nothing was changed; the reported status is theirs.
     InFlight { status: String },
@@ -208,6 +225,24 @@ enum OnInFlight {
     /// paths (`approve`, `enable`), whose caller asked for "make it run",
     /// which it already is or is about to be.
     Succeed,
+}
+
+/// What a load discovered from a plugin, before any of it is published.
+///
+/// Tool names, skill ids and agent-template ids are the same for every load of
+/// a given plugin, so they are not safe to publish until the load knows it
+/// still owns the plugin's slot: a load that lost it would overwrite the
+/// owner's registrations with proxies bound to a child it is about to kill,
+/// and unregistering them again — all three registries are keyed by name or id
+/// — would scrub the owner's. Held here until step 8 either publishes them or
+/// drops them.
+struct Discovered {
+    tools: Vec<RegisteredTool>,
+    connector: Option<String>,
+    provider: Option<String>,
+    models: Vec<String>,
+    skill: Option<(String, SkillFrontmatter, Arc<PluginSkillBridge>)>,
+    agent: Option<AgentTemplate>,
 }
 
 // ── PluginInfo ──────────────────────────────────────────────────────
@@ -245,6 +280,10 @@ pub struct PluginManager {
     skill_catalog: Option<Arc<SkillCatalog>>,
     agent_registry: Option<Arc<AgentRegistry>>,
     event_sink: Option<PluginEventSink>,
+    /// Hands out the per-load claim tokens (see [`PluginState::claim_token`]).
+    /// Monotonic and never reused, so a token identifies one load attempt for
+    /// the life of the process.
+    next_claim_token: AtomicU64,
 }
 
 impl PluginManager {
@@ -269,6 +308,7 @@ impl PluginManager {
             skill_catalog,
             agent_registry,
             event_sink: None,
+            next_claim_token: AtomicU64::new(1),
         }
     }
 
@@ -332,9 +372,11 @@ impl PluginManager {
     /// 3. Validate required config keys
     /// 4. Spawn the plugin process
     /// 5. Send `initialize` RPC (for non-MCP plugins)
-    /// 6. Discover tools via `tools/list` RPC
-    /// 7. Register discovered tools in the shared `ToolRegistry`
-    /// 8. Track the plugin as `Running`
+    /// 6. Discover tools via `tools/list` RPC, plus any connector, provider,
+    ///    skill and agent template the manifest declares
+    /// 7. Publish them to the shared registries — but only as part of step 8,
+    ///    since a load that has lost the plugin's slot must publish nothing
+    /// 8. Track the plugin as `Running`, if this load still owns the slot
     ///
     /// Refuses with [`PluginError::HandleHeld`] when the plugin is already
     /// running or another load is in flight; the consent paths
@@ -353,6 +395,10 @@ impl PluginManager {
     /// free. A check-then-act here is not enough — a claimed entry holds no
     /// handles until step 8, so the loser would spawn a second child and
     /// overwrite the winner's process and capability provider.
+    ///
+    /// The claim carries a token identifying *this* load, so the load can
+    /// still recognise its own claim after a teardown and a second load have
+    /// been through the slot.
     async fn claim_load_slot(
         &self,
         name: &str,
@@ -367,15 +413,38 @@ impl PluginManager {
                 status: existing.status.to_string(),
             };
         }
-        plugins.insert(
-            name.to_string(),
-            PluginState::handle_free(
-                manifest.clone(),
-                plugin_dir.to_path_buf(),
-                PluginStatus::Loading,
-            ),
+        let token = self.next_claim_token.fetch_add(1, Ordering::Relaxed);
+        let mut claim = PluginState::handle_free(
+            manifest.clone(),
+            plugin_dir.to_path_buf(),
+            PluginStatus::Loading,
         );
-        LoadClaim::Claimed
+        claim.claim_token = Some(token);
+        plugins.insert(name.to_string(), claim);
+        LoadClaim::Claimed { token }
+    }
+
+    /// Park this load's claim under `status`, giving the slot up.
+    ///
+    /// Every exit from a claimed load that is not "the plugin is now running"
+    /// goes through here: the approval, config and failure parks. Writing only
+    /// over the load's *own* claim is what keeps a park from relabelling an
+    /// entry that a teardown and a second load have since put in the slot —
+    /// and what makes `Loading` mean "a load is in flight" rather than
+    /// "something once tried", which every later `enable`/`approve` reads as
+    /// "already on its way" and answers with a success that does nothing.
+    ///
+    /// Returns whether the claim was still there to park.
+    async fn park_claim(&self, name: &str, token: u64, status: PluginStatus) -> bool {
+        let mut plugins = self.plugins.write().await;
+        match plugins.get_mut(name) {
+            Some(state) if state.is_pending_claim(token) => {
+                state.status = status;
+                state.claim_token = None;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The load itself; `on_in_flight` decides what losing the claim means.
@@ -390,42 +459,75 @@ impl PluginManager {
         info!(plugin = %name, "loading plugin");
 
         // Claim the slot (atomic check + `Loading` insert).
-        if let LoadClaim::InFlight { status } =
-            self.claim_load_slot(&name, &manifest, plugin_dir).await
-        {
-            return match on_in_flight {
-                OnInFlight::Succeed => {
-                    info!(
-                        plugin = %name,
-                        %status,
-                        "plugin is already loaded or loading; not reloading"
-                    );
-                    Ok(())
-                }
-                OnInFlight::Refuse => {
-                    error!(
-                        plugin = %name,
-                        %status,
-                        "refusing to load over a plugin that is running or already loading"
-                    );
-                    Err(PluginError::HandleHeld(name))
-                }
-            };
-        }
+        let token = match self.claim_load_slot(&name, &manifest, plugin_dir).await {
+            LoadClaim::Claimed { token } => token,
+            LoadClaim::InFlight { status } => {
+                return match on_in_flight {
+                    OnInFlight::Succeed => {
+                        info!(
+                            plugin = %name,
+                            %status,
+                            "plugin is already loaded or loading; not reloading"
+                        );
+                        Ok(())
+                    }
+                    OnInFlight::Refuse => {
+                        error!(
+                            plugin = %name,
+                            %status,
+                            "refusing to load over a plugin that is running or already loading"
+                        );
+                        Err(PluginError::HandleHeld(name))
+                    }
+                };
+            }
+        };
 
+        // Steps 2–8 run against the claimed slot. A load that fails there must
+        // give the claim up: `Loading` is how both the CAS and `enable`'s
+        // pre-check recognise a load in flight, so a claim nobody will ever
+        // finish makes every later `enable`/`approve` a success that does
+        // nothing — with no way back short of a disable/enable round trip or a
+        // restart. The park is by token, so the one error that means "the slot
+        // is no longer mine" (step 8's) correctly leaves the new owner alone.
+        let result = self.load_claimed(plugin_dir, manifest, &name, token).await;
+        if let Err(ref e) = result {
+            self.park_claim(
+                &name,
+                token,
+                PluginStatus::Crashed {
+                    error: e.to_string(),
+                    backoff_until: Instant::now(),
+                },
+            )
+            .await;
+        }
+        result
+    }
+
+    /// Steps 2–8 of the load, against the slot this load claimed under
+    /// `token`.
+    ///
+    /// The branches that end the load without running the plugin (awaiting
+    /// approval, denied, needs config) park the claim themselves; every
+    /// failure is handed back to [`load_plugin`](Self::load_plugin), which
+    /// parks it as [`PluginStatus::Crashed`].
+    async fn load_claimed(
+        &self,
+        plugin_dir: &Path,
+        manifest: PluginManifest,
+        name: &str,
+        token: u64,
+    ) -> Result<(), PluginError> {
         // Step 2: Check approval
-        match self.permission_gate.is_approved(&name) {
+        match self.permission_gate.is_approved(name) {
             None => {
                 // Never seen — park in WaitingApproval
                 info!(plugin = %name, "plugin awaiting approval");
-                {
-                    let mut plugins = self.plugins.write().await;
-                    if let Some(state) = plugins.get_mut(&name) {
-                        state.status = PluginStatus::WaitingApproval;
-                    }
-                }
+                self.park_claim(name, token, PluginStatus::WaitingApproval)
+                    .await;
                 self.emit(ServerEvent::PluginPendingApproval {
-                    plugin_id: name.clone(),
+                    plugin_id: name.to_string(),
                     capabilities: manifest.capabilities.provides.clone(),
                 });
                 return Ok(());
@@ -433,10 +535,7 @@ impl PluginManager {
             Some(false) => {
                 // Explicitly denied — a consent decision, so it reads `denied`.
                 debug!(plugin = %name, "plugin is denied, not loading");
-                let mut plugins = self.plugins.write().await;
-                if let Some(state) = plugins.get_mut(&name) {
-                    state.status = PluginStatus::Denied;
-                }
+                self.park_claim(name, token, PluginStatus::Denied).await;
                 return Ok(());
             }
             Some(true) => {
@@ -445,7 +544,7 @@ impl PluginManager {
         }
 
         // Step 3: Config validation
-        let provided_config = self.permission_gate.load_plugin_config(&name);
+        let provided_config = self.permission_gate.load_plugin_config(name);
         let missing = manifest.missing_config_keys(&provided_config);
         if !missing.is_empty() {
             info!(
@@ -453,16 +552,16 @@ impl PluginManager {
                 missing = ?missing,
                 "plugin needs configuration"
             );
-            {
-                let mut plugins = self.plugins.write().await;
-                if let Some(state) = plugins.get_mut(&name) {
-                    state.status = PluginStatus::NeedsConfig {
-                        missing_keys: missing.clone(),
-                    };
-                }
-            }
+            self.park_claim(
+                name,
+                token,
+                PluginStatus::NeedsConfig {
+                    missing_keys: missing.clone(),
+                },
+            )
+            .await;
             self.emit(ServerEvent::PluginNeedsConfig {
-                plugin_id: name.clone(),
+                plugin_id: name.to_string(),
                 missing_keys: missing,
             });
             return Ok(());
@@ -483,7 +582,7 @@ impl PluginManager {
 
             process
                 .initialize(
-                    &name,
+                    name,
                     &manifest.plugin.version,
                     &manifest.capabilities.provides,
                     config_json,
@@ -491,122 +590,204 @@ impl PluginManager {
                 .await?;
         }
 
-        // Step 6: Discover tools
-        let mut registered_tools = Vec::new();
+        // Steps 6–7: discover what the plugin contributes. Nothing reaches a
+        // shared registry here — see [`Discovered`].
+        let mut tools = Vec::new();
         if manifest.types.tools {
-            let tools = self.discover_tools(&name, &manifest, &process).await?;
-            registered_tools = tools;
+            tools = self.discover_tools(name, &manifest, &process).await?;
         }
 
         // Discover connector
-        let mut registered_connector = None;
+        let mut connector = None;
         if manifest.types.connector {
             match process.channel.call("connector/info", Value::Object(Default::default())).await {
                 Ok(info) => {
                     let platform = info.get("platform")
                         .and_then(|p| p.as_str())
-                        .unwrap_or(&name)
+                        .unwrap_or(name)
                         .to_string();
                     info!(plugin = %name, platform = %platform, "discovered connector");
-                    registered_connector = Some(platform);
+                    connector = Some(platform);
                 }
                 Err(e) => warn!(plugin = %name, error = %e, "connector/info failed"),
             }
         }
 
         // Discover provider
-        let mut registered_provider = None;
-        let mut registered_models = Vec::new();
+        let mut provider = None;
+        let mut models = Vec::new();
         if manifest.types.provider {
             match process.channel.call("provider/info", Value::Object(Default::default())).await {
                 Ok(info) => {
                     let provider_name = info.get("provider_name")
                         .and_then(|p| p.as_str())
-                        .unwrap_or(&name)
+                        .unwrap_or(name)
                         .to_string();
-                    if let Some(models) = info.get("models").and_then(|m| m.as_array()) {
-                        for model in models {
+                    if let Some(found) = info.get("models").and_then(|m| m.as_array()) {
+                        for model in found {
                             if let Some(model_id) = model.get("id").and_then(|id| id.as_str()) {
-                                registered_models.push(model_id.to_string());
+                                models.push(model_id.to_string());
                             }
                         }
                     }
-                    info!(plugin = %name, provider = %provider_name, models = registered_models.len(), "discovered provider");
-                    registered_provider = Some(provider_name);
+                    info!(plugin = %name, provider = %provider_name, models = models.len(), "discovered provider");
+                    provider = Some(provider_name);
                 }
                 Err(e) => warn!(plugin = %name, error = %e, "provider/info failed"),
             }
         }
 
         // Discover skill
-        let mut registered_skills = Vec::new();
+        let mut skill = None;
         if manifest.types.skill {
             match process.channel.call("skill/info", Value::Object(Default::default())).await {
                 Ok(info) => {
                     let id = info.get("id")
                         .and_then(|i| i.as_str())
-                        .unwrap_or(&name)
+                        .unwrap_or(name)
                         .to_string();
 
-                    if let Some(ref catalog) = self.skill_catalog {
-                        let bridge = Arc::new(PluginSkillBridge::new(
-                            name.clone(),
-                            id.clone(),
-                            process.channel.clone(),
-                        ));
-
-                        let frontmatter = build_skill_frontmatter_from_info(&info, &name);
-
-                        catalog.register_plugin_skill(
-                            id.clone(),
-                            frontmatter,
-                            bridge,
-                            name.clone(),
-                        );
-                        registered_skills.push(id.clone());
-                        info!(plugin = %name, skill = %id, "registered plugin skill");
-                    }
+                    let bridge = Arc::new(PluginSkillBridge::new(
+                        name.to_string(),
+                        id.clone(),
+                        process.channel.clone(),
+                    ));
+                    let frontmatter = build_skill_frontmatter_from_info(&info, name);
+                    info!(plugin = %name, skill = %id, "discovered plugin skill");
+                    skill = Some((id, frontmatter, bridge));
                 }
                 Err(e) => warn!(plugin = %name, error = %e, "skill/info failed"),
             }
         }
 
         // Discover agent
-        let mut registered_agents = Vec::new();
+        let mut agent = None;
         if manifest.types.agent {
             match process.channel.call("agent/info", Value::Object(Default::default())).await {
                 Ok(info) => {
                     let id = info.get("id")
                         .and_then(|i| i.as_str())
-                        .unwrap_or(&name)
+                        .unwrap_or(name)
                         .to_string();
 
-                    if let Some(ref registry) = self.agent_registry {
-                        let bridge = Arc::new(PluginAgentBridge::new(
-                            name.clone(),
-                            id.clone(),
-                            process.channel.clone(),
-                        ));
-
-                        let template = build_agent_template_from_info(&info, &name, bridge);
-
-                        registry.register_template(template);
-                        registered_agents.push(id.clone());
-                        info!(plugin = %name, agent = %id, "registered plugin agent");
-                    }
+                    let bridge = Arc::new(PluginAgentBridge::new(
+                        name.to_string(),
+                        id.clone(),
+                        process.channel.clone(),
+                    ));
+                    info!(plugin = %name, agent = %id, "discovered plugin agent");
+                    agent = Some(build_agent_template_from_info(&info, name, bridge));
                 }
                 Err(e) => warn!(plugin = %name, error = %e, "agent/info failed"),
             }
         }
 
+        let discovered = Discovered {
+            tools,
+            connector,
+            provider,
+            models,
+            skill,
+            agent,
+        };
+
+        // Step 8: publish and track as Running — if this load still owns the
+        // slot. A teardown (deny/disable) that ran while this load was
+        // spawning has removed the claim, and another load may already own it;
+        // publishing then would overwrite that owner's registrations — same
+        // tool names, same skill and template ids — with proxies for a child
+        // this load is about to kill, and releasing them again would scrub the
+        // owner's. A load that lost publishes nothing and kills only its own
+        // child, so it cannot leave a live, untracked one behind (S2).
+        let mut plugins = self.plugins.write().await;
+        if !plugins
+            .get(name)
+            .is_some_and(|entry| entry.is_pending_claim(token))
+        {
+            drop(plugins);
+            warn!(
+                plugin = %name,
+                "plugin was torn down while loading; discarding the load"
+            );
+            shutdown_child(name, process).await;
+            return Err(PluginError::Unavailable(format!(
+                "plugin '{name}' was torn down while loading"
+            )));
+        }
+        // Publishing runs under the same lock acquisition as the claim check —
+        // it is all synchronous, so nothing can tear the entry down between
+        // the two — and the entry that owns the registrations goes in with
+        // them.
+        let loaded = self.publish(manifest, plugin_dir.to_path_buf(), process, discovered);
+        let registered_tools = loaded.registered_tools.clone();
+        plugins.insert(name.to_string(), loaded);
+        drop(plugins);
+
+        self.emit(ServerEvent::PluginLoaded {
+            plugin_id: name.to_string(),
+            tools: registered_tools,
+        });
+
+        info!(plugin = %name, "plugin loaded successfully");
+        Ok(())
+    }
+
+    /// Publish a winning load's discoveries to the shared registries and build
+    /// the entry that owns them.
+    ///
+    /// Synchronous, and called with the plugin map held: the registrations and
+    /// the entry listing them are installed together.
+    fn publish(
+        &self,
+        manifest: PluginManifest,
+        plugin_dir: PathBuf,
+        process: PluginProcess,
+        discovered: Discovered,
+    ) -> PluginState {
+        let name = manifest.plugin.name.clone();
+
+        let mut registered_tools = Vec::with_capacity(discovered.tools.len());
+        for tool in discovered.tools {
+            let tool_name = tool.definition.name.clone();
+            match self.tool_registry.register(tool) {
+                Ok(()) => {
+                    debug!(plugin = %name, tool = %tool_name, "registered plugin tool");
+                    registered_tools.push(tool_name);
+                }
+                Err(e) => warn!(
+                    plugin = %name,
+                    tool = %tool_name,
+                    error = %e,
+                    "failed to register plugin tool — skipping"
+                ),
+            }
+        }
+
+        let mut registered_skills = Vec::new();
+        if let (Some(catalog), Some((id, frontmatter, bridge))) =
+            (self.skill_catalog.as_ref(), discovered.skill)
+        {
+            catalog.register_plugin_skill(id.clone(), frontmatter, bridge, name.clone());
+            info!(plugin = %name, skill = %id, "registered plugin skill");
+            registered_skills.push(id);
+        }
+
+        let mut registered_agents = Vec::new();
+        if let (Some(registry), Some(template)) = (self.agent_registry.as_ref(), discovered.agent) {
+            let id = template.frontmatter.id.clone();
+            registry.register_template(template);
+            info!(plugin = %name, agent = %id, "registered plugin agent template");
+            registered_agents.push(id);
+        }
+
         // P3e: if manifest declares virtual capabilities, register a PluginCapabilityProvider.
-        let provider_handle = if !manifest.capabilities.virtual_.provides.is_empty() {
+        let capability_provider_handle = if !manifest.capabilities.virtual_.provides.is_empty() {
             let provider = PluginCapabilityProvider::new(
-                manifest.plugin.name.clone(),
+                name.clone(),
                 manifest.capabilities.virtual_.provides.clone(),
             );
             let handle = self.tool_registry.register_capability_provider(Arc::new(provider));
-            tracing::info!(
+            info!(
                 plugin = %name,
                 handle = %handle,
                 cap_count = manifest.capabilities.virtual_.provides.len(),
@@ -617,59 +798,18 @@ impl PluginManager {
             None
         };
 
-        // Step 8: Track state as Running — if this load still owns the slot.
-        let loaded = PluginState {
+        PluginState {
             process: Some(process),
-            registered_tools: registered_tools.clone(),
-            registered_connector,
-            registered_provider,
-            registered_models,
+            registered_tools,
+            registered_connector: discovered.connector,
+            registered_provider: discovered.provider,
+            registered_models: discovered.models,
             registered_skills,
             registered_agents,
             last_health: Some(Instant::now()),
-            capability_provider_handle: provider_handle,
-            ..PluginState::handle_free(
-                manifest,
-                plugin_dir.to_path_buf(),
-                PluginStatus::Running,
-            )
-        };
-        // A teardown (deny/disable) that ran while this load was spawning has
-        // removed the claim, and something else may already own the slot.
-        // Writing the handles in anyway would either orphan that owner's or
-        // hide this load's, so the load that lost releases what it registered
-        // instead of leaving a live, untracked child behind (S2).
-        let orphaned = {
-            let mut plugins = self.plugins.write().await;
-            match plugins.get(&name) {
-                // The claim is still standing: this load owns the slot.
-                Some(claim) if claim.is_pending_claim() => {
-                    plugins.insert(name.clone(), loaded);
-                    None
-                }
-                // Gone (a teardown removed it) or replaced (re-parked, or
-                // another load finished into the freed slot) — not ours.
-                _ => Some(loaded),
-            }
-        };
-        if let Some(state) = orphaned {
-            warn!(
-                plugin = %name,
-                "plugin was torn down while loading; releasing what the load registered"
-            );
-            self.release_state(&name, state).await;
-            return Err(PluginError::Unavailable(format!(
-                "plugin '{name}' was torn down while loading"
-            )));
+            capability_provider_handle,
+            ..PluginState::handle_free(manifest, plugin_dir, PluginStatus::Running)
         }
-
-        self.emit(ServerEvent::PluginLoaded {
-            plugin_id: name.clone(),
-            tools: registered_tools,
-        });
-
-        info!(plugin = %name, "plugin loaded successfully");
-        Ok(())
     }
 
     /// Unload a plugin: unregister tools, send shutdown RPC, kill process.
@@ -747,26 +887,8 @@ impl PluginManager {
         // deregistration from LlmRouter are the daemon's responsibility, since
         // PluginManager does not hold references to those subsystems.
 
-        // Graceful shutdown + kill, then wait for the child to actually go.
-        // `kill()` is `Child::start_kill`, which only *initiates* termination:
-        // without the wait, "the plugin's process is gone" would be a race the
-        // caller cannot win.
-        if let Some(mut process) = state.process {
-            if let Err(e) = process.shutdown().await {
-                warn!(plugin = name, error = %e, "shutdown RPC failed, killing");
-            }
-            process.kill();
-            match tokio::time::timeout(CHILD_EXIT_TIMEOUT, process.child.wait()).await {
-                Ok(Ok(status)) => debug!(plugin = name, ?status, "plugin child exited"),
-                Ok(Err(e)) => {
-                    warn!(plugin = name, error = %e, "failed to wait for plugin child")
-                }
-                Err(_) => warn!(
-                    plugin = name,
-                    "child did not exit after kill within {}s",
-                    CHILD_EXIT_TIMEOUT.as_secs()
-                ),
-            }
+        if let Some(process) = state.process {
+            shutdown_child(name, process).await;
         }
     }
 
@@ -1021,14 +1143,18 @@ impl PluginManager {
 
     // ── internal helpers ─────────────────────────────────────────────
 
-    /// Discover tools from a running plugin via `tools/list` RPC and register
-    /// them in the shared `ToolRegistry`.
+    /// Discover tools from a running plugin via `tools/list` RPC and build a
+    /// [`RegisteredTool`] for each.
+    ///
+    /// Registration is deliberately *not* done here: it happens in
+    /// [`publish`](Self::publish), once the load knows it still owns the
+    /// plugin's slot (see [`Discovered`]).
     async fn discover_tools(
         &self,
         plugin_name: &str,
         manifest: &PluginManifest,
         process: &PluginProcess,
-    ) -> Result<Vec<String>, PluginError> {
+    ) -> Result<Vec<RegisteredTool>, PluginError> {
         let result = process
             .channel
             .call("tools/list", serde_json::json!({}))
@@ -1040,7 +1166,7 @@ impl PluginManager {
             .cloned()
             .unwrap_or_default();
 
-        let mut registered = Vec::with_capacity(tools_array.len());
+        let mut discovered = Vec::with_capacity(tools_array.len());
 
         for tool_val in &tools_array {
             let bare_name = tool_val
@@ -1078,7 +1204,7 @@ impl PluginManager {
                 process.channel.clone(),
             );
 
-            let registered_tool = RegisteredTool {
+            discovered.push(RegisteredTool {
                 definition,
                 backend: ToolBackend::Plugin(Arc::new(proxy)),
                 provides_capabilities: manifest.capabilities.provides.clone(),
@@ -1087,35 +1213,45 @@ impl PluginManager {
                 version: manifest.plugin.version.clone(),
                 author: format!("plugin:{}", manifest.plugin.name),
                 created_at: chrono::Utc::now(),
-            };
-
-            match self.tool_registry.register(registered_tool) {
-                Ok(()) => {
-                    registered.push(namespaced_name.clone());
-                    debug!(
-                        plugin = plugin_name,
-                        tool = %namespaced_name,
-                        "registered plugin tool"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        plugin = plugin_name,
-                        tool = %namespaced_name,
-                        error = %e,
-                        "failed to register plugin tool — skipping"
-                    );
-                }
-            }
+            });
+            debug!(
+                plugin = plugin_name,
+                tool = %namespaced_name,
+                "discovered plugin tool"
+            );
         }
 
         info!(
             plugin = plugin_name,
-            count = registered.len(),
-            "discovered and registered tools"
+            count = discovered.len(),
+            "discovered tools"
         );
 
-        Ok(registered)
+        Ok(discovered)
+    }
+}
+
+/// Stop a plugin child: graceful shutdown RPC, then kill, then wait for it to
+/// actually go.
+///
+/// `kill()` is `Child::start_kill`, which only *initiates* termination:
+/// without the wait, "the plugin's process is gone" would be a race the caller
+/// cannot win. Waits at most [`CHILD_EXIT_TIMEOUT`].
+async fn shutdown_child(name: &str, mut process: PluginProcess) {
+    if let Err(e) = process.shutdown().await {
+        warn!(plugin = name, error = %e, "shutdown RPC failed, killing");
+    }
+    process.kill();
+    match tokio::time::timeout(CHILD_EXIT_TIMEOUT, process.child.wait()).await {
+        Ok(Ok(status)) => debug!(plugin = name, ?status, "plugin child exited"),
+        Ok(Err(e)) => {
+            warn!(plugin = name, error = %e, "failed to wait for plugin child")
+        }
+        Err(_) => warn!(
+            plugin = name,
+            "child did not exit after kill within {}s",
+            CHILD_EXIT_TIMEOUT.as_secs()
+        ),
     }
 }
 
@@ -1561,12 +1697,13 @@ mcp_compatible = true
 
     /// Make the stub's startup slow and countable.
     ///
-    /// The entry becomes a wrapper that appends a line to `spawns.log` and
-    /// sleeps before it `exec`s the stub. The log counts *every* child the
-    /// plugin ever started, including one that was orphaned and reaped, which
-    /// the manager's own bookkeeping cannot show; the sleep stretches the
-    /// window between a load's `Loading` claim and its step 8, which is where
-    /// two overlapping loads collide.
+    /// The entry becomes a wrapper that appends its own pid to `spawns.log`
+    /// and sleeps before it `exec`s the stub (`exec` keeps the pid, so the
+    /// logged number is the stub's). The log names *every* child the plugin
+    /// ever started, including one that was orphaned and reaped, which the
+    /// manager's own bookkeeping cannot show; the sleep stretches the window
+    /// between a load's `Loading` claim and its step 8, which is where two
+    /// overlapping loads collide.
     fn slow_the_entry(dir: &Path) {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1575,7 +1712,7 @@ mcp_compatible = true
         // so both relative paths resolve there.
         std::fs::write(
             &wrapper,
-            "#!/bin/sh\necho spawned >> spawns.log\nsleep 0.5\nexec ./echo-server.sh\n",
+            "#!/bin/sh\necho $$ >> spawns.log\nsleep 0.5\nexec ./echo-server.sh\n",
         )
         .unwrap();
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1589,11 +1726,17 @@ mcp_compatible = true
         .unwrap();
     }
 
+    /// The pids of every child the plugin at `dir` has spawned (see
+    /// `slow_the_entry`), oldest first.
+    fn spawned_pids(dir: &Path) -> Vec<u32> {
+        std::fs::read_to_string(dir.join("spawns.log"))
+            .map(|log| log.lines().filter_map(|l| l.trim().parse().ok()).collect())
+            .unwrap_or_default()
+    }
+
     /// How many children the plugin at `dir` has spawned (see `slow_the_entry`).
     fn spawn_count(dir: &Path) -> usize {
-        std::fs::read_to_string(dir.join("spawns.log"))
-            .map(|log| log.lines().count())
-            .unwrap_or(0)
+        spawned_pids(dir).len()
     }
 
     struct Harness {
@@ -1904,6 +2047,186 @@ mcp_compatible = true
         h.manager.unload_plugin("echo-test").await.unwrap();
         assert_eq!(h.stub_caps(), 0, "a capability provider outlived the plugin");
         assert!(!pid_alive(pid), "the tracked child outlived the unload");
+    }
+
+    /// A load that fails after claiming the slot must park the plugin, not
+    /// leave the claim standing.
+    ///
+    /// `Loading` is what the CAS and `enable`'s pre-check both read as "a load
+    /// is in flight", so a claim nobody will ever finish turns every later
+    /// `enable`/`approve` into a success that does nothing — forever, since
+    /// nothing else resets the status. The trigger is the most ordinary plugin
+    /// failure there is: the manifest's entry is not there.
+    #[tokio::test]
+    async fn a_failed_load_parks_the_plugin_and_a_later_enable_retries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        let h = Harness::new(tmp.path());
+        h.manager.permission_gate.approve("echo-test", &[]).unwrap();
+
+        let entry = dir.join("echo-server.sh");
+        let stashed = dir.join("echo-server.sh.away");
+        std::fs::rename(&entry, &stashed).unwrap();
+
+        let err = h.manager.try_load_plugin(&dir).await.unwrap_err();
+        assert!(
+            matches!(err, PluginError::SpawnFailed(_)),
+            "expected the spawn to fail, got {err:?}"
+        );
+
+        // The entry reads a failed word, so the claim is not mistaken for a
+        // live one.
+        let info = h.info("echo-test").await;
+        assert!(
+            info.status.starts_with("crashed"),
+            "a failed load left the plugin at {:?}",
+            info.status
+        );
+
+        // `enable` therefore reports the failure instead of answering success
+        // and doing nothing.
+        let err = h.manager.enable_plugin("echo-test").await.unwrap_err();
+        assert!(
+            matches!(err, PluginError::SpawnFailed(_)),
+            "enable answered {err:?} instead of the load failure"
+        );
+
+        // And with the entry back in place the very same call loads it.
+        std::fs::rename(&stashed, &entry).unwrap();
+        h.manager.enable_plugin("echo-test").await.unwrap();
+
+        let info = h.info("echo-test").await;
+        assert_eq!(info.status, "running", "the repaired plugin did not load");
+        assert_eq!(info.tools, vec!["echo-test::echo".to_string()]);
+        assert!(pid_alive(h.child_pid("echo-test").await));
+    }
+
+    /// The claim itself — `Loading`, holding no handle yet — is what a second
+    /// load collides with, and what it does then is the caller's choice.
+    ///
+    /// Reached directly rather than through two overlapping enables, whose
+    /// first request wins the cheap status pre-check long before the CAS.
+    #[tokio::test]
+    async fn a_standing_claim_refuses_one_load_and_no_ops_the_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        // Nothing may spawn here; the log is the proof.
+        slow_the_entry(&dir);
+        let h = Harness::new(tmp.path());
+        h.manager.permission_gate.approve("echo-test", &[]).unwrap();
+
+        // Claim the slot and leave the claim standing, exactly as a load
+        // between its CAS and its step 8 does.
+        let manifest = PluginManifest::from_dir(&dir).unwrap();
+        assert!(
+            matches!(
+                h.manager.claim_load_slot("echo-test", &manifest, &dir).await,
+                LoadClaim::Claimed { .. }
+            ),
+            "the first claim on a free slot must be granted"
+        );
+        assert_eq!(h.info("echo-test").await.status, "loading");
+
+        // A second claim finds the slot taken and reports whose it is.
+        match h.manager.claim_load_slot("echo-test", &manifest, &dir).await {
+            LoadClaim::InFlight { status } => assert_eq!(status, "loading"),
+            LoadClaim::Claimed { .. } => panic!("a standing claim was handed out twice"),
+        }
+
+        // `Refuse` — the boot scan and the config retry — says so loudly.
+        let err = h.manager.try_load_plugin(&dir).await.unwrap_err();
+        assert!(
+            matches!(&err, PluginError::HandleHeld(name) if name == "echo-test"),
+            "expected HandleHeld, got {err:?}"
+        );
+
+        // `Succeed` — approve and enable — answers success without reloading.
+        h.manager
+            .load_plugin(&dir, OnInFlight::Succeed)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            h.info("echo-test").await.status,
+            "loading",
+            "a load that lost the claim moved it anyway"
+        );
+        assert_eq!(spawn_count(&dir), 0, "a load that lost the claim spawned");
+    }
+
+    /// The load that loses the slot must leave the survivor's registrations
+    /// alone.
+    ///
+    /// Tool names, skill ids and agent-template ids are identical across two
+    /// loads of the same plugin, so a loser that "releases what it registered"
+    /// by name releases the *survivor's* — scrubbing the tool out of the
+    /// registry while the map still says the plugin is running with it. The
+    /// interleave: a load claims the slot, a disable tears the claim out, an
+    /// enable claims the freed slot, and the first load reaches step 8 last.
+    #[tokio::test]
+    async fn a_load_that_loses_the_slot_leaves_the_survivors_registrations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\nskill = true\nagent = true\n\n\
+             [capabilities.virtual]\nprovides = [\"annotation:echo_stub\"]\n",
+        );
+        slow_the_entry(&dir);
+        let h = Harness::new(tmp.path());
+        h.manager.permission_gate.approve("echo-test", &[]).unwrap();
+
+        // The first load claims the slot and then sits in `tools/list` for
+        // ~0.5 s (the wrapper entry sleeps before it execs the stub). The
+        // teardown and the second load happen inside that window.
+        let (first, second) = tokio::join!(h.manager.try_load_plugin(&dir), async {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            h.manager.disable_plugin("echo-test").await.unwrap();
+            h.manager.enable_plugin("echo-test").await
+        });
+        // Exactly one load owns the slot, and the other one lost it at step 8
+        // — the path under test.
+        let lost = match (&first, &second) {
+            (Err(e), Ok(())) | (Ok(()), Err(e)) => e.to_string(),
+            _ => panic!("exactly one load must own the slot: {first:?} / {second:?}"),
+        };
+        assert!(
+            lost.contains("torn down while loading"),
+            "the losing load failed somewhere else: {lost}"
+        );
+
+        let info = h.info("echo-test").await;
+        assert_eq!(info.status, "running", "no load ended up owning the plugin");
+        assert_eq!(info.tools, vec!["echo-test::echo".to_string()]);
+
+        // Everything the surviving load published is still published.
+        assert!(
+            h.tools
+                .registered_tool_names()
+                .iter()
+                .any(|n| n == "echo-test::echo"),
+            "the losing load unregistered the survivor's tool"
+        );
+        assert!(
+            h.skills.get("echo-test").is_some(),
+            "the losing load unregistered the survivor's skill"
+        );
+        assert!(
+            h.agents.get_template("echo-test").is_some(),
+            "the losing load unregistered the survivor's agent template"
+        );
+        assert_eq!(h.stub_caps(), 1, "the stub's virtual cap is not provided once");
+
+        // Two children were started; exactly one — the tracked one — is left.
+        let spawned = spawned_pids(&dir);
+        assert_eq!(spawned.len(), 2, "the interleave did not produce two loads");
+        let alive: Vec<u32> = spawned.into_iter().filter(|p| pid_alive(*p)).collect();
+        assert_eq!(alive.len(), 1, "expected exactly one live child, got {alive:?}");
+        assert_eq!(
+            alive[0],
+            h.child_pid("echo-test").await,
+            "the live child is not the one the manager tracks"
+        );
     }
 }
 
