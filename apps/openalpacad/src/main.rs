@@ -106,7 +106,7 @@ fn main() -> Result<()> {
     let master_key_dir = store::master_key_dir().context("Failed to resolve the state dir")?;
 
     // D6+D7: ensure_at is race-safe; on failure, fail fast.
-    match openalpaca_llm::key_encryption::KeyEncryptor::ensure_at(&master_key_dir) {
+    match openalpaca_llm::keys::key_encryption::KeyEncryptor::ensure_at(&master_key_dir) {
         Ok(hex_key) => {
             // SAFETY: No other threads exist yet — tokio runtime has not started.
             unsafe {

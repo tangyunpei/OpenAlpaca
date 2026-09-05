@@ -341,7 +341,7 @@ async fn handle_llm_config_change(ctx: &FileWatcherContext) {
                             if let Some(provider_type) =
                                 openalpaca_llm::config::parse_provider_type_pub(provider_name)
                             {
-                                match openalpaca_llm::settings_service::build_key_pool_from_provider_config(
+                                match openalpaca_llm::config::settings_service::build_key_pool_from_provider_config(
                                     provider_config,
                                     provider_type.clone(),
                                     Some(&*ctx.secret_store),
