@@ -3,6 +3,7 @@
 //! Provides the single path module (`store`), the discovery mechanism,
 //! the singleton lock, and the SQLite database for daemon/GUI/CLI coordination.
 
+pub mod artifacts;
 pub mod config_schema;
 pub mod database;
 pub mod discovery;
@@ -14,6 +15,10 @@ pub mod store;
 #[cfg(test)]
 pub(crate) mod test_util;
 
+pub use artifacts::{
+    ArtifactDiff, ArtifactError, ArtifactQuery, ArtifactRecord, ArtifactStore, ArtifactVersionRow,
+    NewArtifact,
+};
 pub use database::Database;
 pub use models::{Agent, EventLog, Memory, MemoryRole};
 pub use models::{AgentMetrics, AgentTaskHistory, SubAgentConfig};

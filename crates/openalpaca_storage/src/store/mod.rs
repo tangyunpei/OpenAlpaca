@@ -515,4 +515,4 @@ fn readme_text(is_home: bool) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

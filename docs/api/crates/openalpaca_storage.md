@@ -13,6 +13,7 @@
 
 ## Modules
 
+- `artifacts` (crates/openalpaca_storage/src/artifacts/mod.rs)
 - `config_schema` (crates/openalpaca_storage/src/config_schema/mod.rs)
 - `database` (crates/openalpaca_storage/src/database/mod.rs)
 - `discovery` (crates/openalpaca_storage/src/discovery/mod.rs)
@@ -23,6 +24,7 @@
 
 ## Re-exports
 
+- `pub use artifacts::{ ArtifactDiff, ArtifactError, ArtifactQuery, ArtifactRecord, ArtifactStore, ArtifactVersionRow, NewArtifact, };`
 - `pub use database::Database;`
 - `pub use models::{Agent, EventLog, Memory, MemoryRole};`
 - `pub use models::{AgentMetrics, AgentTaskHistory, SubAgentConfig};`
