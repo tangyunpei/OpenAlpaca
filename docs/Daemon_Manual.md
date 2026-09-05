@@ -39,10 +39,10 @@ Install package (target machine):
 `install.sh` also supports `--url <https://...>` (instead of `--file`), `--prefix <dir>` (default `~/.local/openalpaca`), `--app-dir <dir>` (macOS app bundle location, default `~/Applications`), and `--yes` (non-interactive). Linux (`package-linux.sh`) and Windows (`package-windows.ps1` / `install-windows.ps1`) equivalents exist alongside the macOS scripts.
 
 Runtime paths after installer-based startup:
-- config base dir: `~/Library/Application Support/OpenAlpaca/config`
-- discovery: `~/Library/Application Support/OpenAlpaca/discovery.json`
-- database: `~/Library/Application Support/OpenAlpaca/openalpaca.db`
-- daemon log (CLI-managed startup): `~/Library/Application Support/OpenAlpaca/daemon.log`
+- config base dir: `~/.openalpaca/config`
+- discovery: `~/.openalpaca/state/discovery.json`
+- database: `~/.openalpaca/state/openalpaca.db`
+- daemon log (CLI-managed startup): `~/.openalpaca/state/logs/daemon.log`
 
 ## Startup and Lifecycle
 

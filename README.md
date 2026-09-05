@@ -96,7 +96,7 @@ Config directory resolution: `OPENALPACA_CONFIG_DIR` env var → walk up from th
 | `config/skills/*/SKILL.md` | Skill definitions (four ship in-repo: code-review, commit-message, create-skill, explain-code). |
 | `config/orchestrator/` | Live persona documents `SOUL.md` / `USER.md` / `IDENTITY.md` — generated on first run from `config/orchestrator/templates/`; not checked in. |
 
-Runtime data lives in `~/Library/Application Support/OpenAlpaca/` on macOS (`~/.local/share/openalpaca/` on Linux): `openalpaca.db`, `discovery.json`, `openalpacad.lock`, `.master_key`, `plugins/`, `assets/`.
+Runtime data lives in `~/.openalpaca/` (same path on every platform; `OPENALPACA_HOME_STORE` overrides it, absolute paths only): `state/` holds `openalpaca.db`, `discovery.json`, `openalpacad.lock`, `.master_key`, and logs; `config/` and `plugins/` sit beside it.
 
 ## Documentation
 

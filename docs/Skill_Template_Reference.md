@@ -359,19 +359,11 @@ The LLM sees tools `skill_script:lint_code` and `skill_script:analyze_deps`. Whe
 
 For a working example, see the shipped `create-skill` skill (`config/skills/create-skill/`), which bundles four shell scripts.
 
-### 4.10 Legacy Fields
+### 4.10 Ignored Fields
 
-These fields exist for backward compatibility with older skill definitions. They are parsed but **never serialized** (`#[serde(skip_serializing)]`). At parse time, they are mapped to their modern equivalents via `apply_legacy_compat()`.
+The `command`, `trigger_patterns`, `tools_required`, and `auto_load` legacy-compat fields — and the `apply_legacy_compat()` bridge that mapped them onto `invoke.slash`, `routing.intent`, `tools.allow`, and `invoke.mode` — were deleted from `SkillFrontmatter` in a purge (no tracked skill under `config/skills/` used them, and plugin-contributed skills already build the new schema directly). Write skills against `invoke`, `routing`, and `tools`; the old field names are no longer recognized.
 
-| Legacy Field | Type | Default | Maps To | Condition |
-|-------------|------|---------|---------|-----------|
-| `command` | `Option<String>` | `None` | `invoke.slash` (with `/` prefix) | Only if `invoke.slash` is `None` |
-| `auto_load` | `bool` | `false` | `invoke.mode = "auto"` | Only if `invoke.mode` is still `"manual"` |
-| `trigger_patterns` | `Vec<String>` | `[]` | `routing.intent` | Only if `routing.intent` is empty |
-| `tools_required` | `Vec<String>` | `[]` | `tools.allow` | Only if `tools.allow` is empty |
-| `read_when` | `Vec<String>` | `[]` | *(dropped — parsed and ignored)* | — |
-
-**Migration**: New-spec fields always take precedence over legacy fields. If both are present, legacy values are ignored.
+One field remains harmless to leave in older frontmatter: `read_when` (`Vec<String>`) is not a `SkillFrontmatter` field, so it is parsed as ordinary YAML and then silently dropped — it has no effect.
 
 ---
 
@@ -979,9 +971,6 @@ Created from `depends_on` (Section 8); like script tools, they are invocation-sc
 
 **Deprecation warnings at startup**
 - `context.summarize.enabled: true` and non-empty `tools.defaults` produce "is deprecated and has no effect" warnings in the catalog's validation errors. Remove the fields.
-
-**Legacy fields ignored when new-spec fields are present**
-- Legacy compat only applies when the corresponding new field is empty/None. If both `command` and `invoke.slash` are set, `command` is ignored.
 
 ### Script-Related Errors
 

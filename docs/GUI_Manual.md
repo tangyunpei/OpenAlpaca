@@ -38,8 +38,8 @@ Install artifact (on target machine):
 After installation:
 - GUI app path: `~/Applications/openalpaca-gui.app`
 - GUI startup will spawn daemon with:
-  - `OPENALPACA_CONFIG_DIR=~/Library/Application Support/OpenAlpaca/config`
-  - working directory `~/Library/Application Support/OpenAlpaca`
+  - `OPENALPACA_CONFIG_DIR=~/.openalpaca/config`
+  - working directory `~/.openalpaca`
 
 ## Connection Lifecycle
 

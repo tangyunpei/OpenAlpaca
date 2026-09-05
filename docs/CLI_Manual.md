@@ -44,7 +44,7 @@ Defaults:
 - binaries: `~/.local/openalpaca`
 - GUI app: `~/Applications/openalpaca-gui.app`
 - PATH link: `~/.local/bin/openalpaca`
-- runtime config/data: `~/Library/Application Support/OpenAlpaca/`
+- runtime config/data: `~/.openalpaca/` (`OPENALPACA_HOME_STORE` overrides — absolute paths only)
 
 Linux and Windows packaging/install scripts also exist under `scripts/release/` (`package-linux.sh`, `package-windows.ps1`, `install-windows.ps1`, `uninstall.sh`, `uninstall-windows.ps1`).
 
@@ -93,7 +93,7 @@ Notes:
 - `restart` restarts daemon only.
 - `tail` streams live daemon events (not historical query output); `--count` limits the number of events shown, default `0` = unlimited (Ctrl+C to stop).
 - Optional daemon binary override: `OPENALPACA_DAEMON_BIN=/abs/path/openalpacad`.
-- Daemon startup sets `OPENALPACA_CONFIG_DIR` to `~/Library/Application Support/OpenAlpaca/config`.
+- Daemon startup sets `OPENALPACA_CONFIG_DIR` to `~/.openalpaca/config`.
 
 ### `config`
 

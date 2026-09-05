@@ -123,8 +123,8 @@ src/
 
 ## Files and paths
 
-- `~/Library/Application Support/OpenAlpaca/discovery.json` (macOS) — daemon base URL, bearer token, instance id; read-only for the GUI.
-- `~/Library/Application Support/OpenAlpaca/config/` — created by the GUI and passed to the spawned daemon as `OPENALPACA_CONFIG_DIR`.
+- `~/.openalpaca/state/discovery.json` — daemon base URL, bearer token, instance id; read-only for the GUI.
+- `~/.openalpaca/config/` — created by the GUI and passed to the spawned daemon as `OPENALPACA_CONFIG_DIR`.
 - Dev server: port 1420, strict (`tauri.conf.json` `devUrl` points at it); `src-tauri/` is excluded from the watcher.
 - Pins and pane widths are per-machine `localStorage` keys (`oa-pins`, `oa-pane-widths`) — GAP-12 records that there is no server-side pin.
 

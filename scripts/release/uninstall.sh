@@ -38,11 +38,11 @@ case "$OS" in
   *)      die "Unsupported OS: $OS. On Windows, use uninstall-windows.ps1." ;;
 esac
 
+# The runtime data/config root: `<home>/.openalpaca` on every platform (it
+# does not follow the OS's data-directory convention — see
+# `crates/openalpaca_storage/src/store/mod.rs::home_root()`).
 data_dir() {
-  case "$PLATFORM" in
-    macos) echo "$HOME/Library/Application Support/OpenAlpaca" ;;
-    linux) echo "$HOME/.local/share/openalpaca" ;;
-  esac
+  echo "$HOME/.openalpaca"
 }
 
 # ── Argument Parsing ─────────────────────────────────────────
@@ -94,7 +94,7 @@ fi
 
 # ── Stop running daemon ──────────────────────────────────────
 
-DISCOVERY_JSON="$DATA_DIR/discovery.json"
+DISCOVERY_JSON="$DATA_DIR/state/discovery.json"
 if [[ -f "$DISCOVERY_JSON" ]]; then
   pid="$(grep -Eo '"pid"[[:space:]]*:[[:space:]]*[0-9]+' "$DISCOVERY_JSON" | head -n1 | grep -Eo '[0-9]+' || true)"
   if [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1; then

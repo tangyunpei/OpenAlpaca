@@ -34,7 +34,7 @@ daemon's real HTTP/SSE/WS surface.
 
 ### 1.1 How it works today
 
-The daemon writes `~/Library/Application Support/OpenAlpaca/discovery.json`
+The daemon writes `~/.openalpaca/state/discovery.json`
 (`crates/openalpaca_storage/src/discovery/mod.rs`):
 
 ```jsonc
@@ -802,8 +802,8 @@ GET /v1/status            # authenticated sibling of the public /v1/health
   "started_at": "2026-08-27T12:10:04Z",
   "uptime_secs": 353582,
   "schema_version": 34,
-  "data_dir": "/Users/…/Library/Application Support/OpenAlpaca",
-  "log_path": "/Users/…/Library/Application Support/OpenAlpaca/openalpacad.log",
+  "data_dir": "/Users/…/.openalpaca",
+  "log_path": "/Users/…/.openalpaca/state/logs/daemon.log",
   "db_path": "/Users/…/openalpaca.db",
   "listen": { "host": "127.0.0.1", "port": 51823 },
   "connectors_running": 2,
@@ -964,7 +964,7 @@ event log or a dedicated counter.
 
 **Why nothing fits:** `router.rs` exposes list / approve / deny / enable / disable /
 config only. Installation today means dropping a directory into
-`~/Library/Application Support/OpenAlpaca/plugins/` by hand and restarting the daemon.
+`~/.openalpaca/plugins/` by hand and restarting the daemon.
 
 **Proposal:**
 

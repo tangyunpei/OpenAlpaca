@@ -102,6 +102,9 @@ apps/openalpaca-gui/src-tauri/gen/
 !docs/tools/*.md
 !scripts/eval/steer_routing/README.md
 !docs/api/*
+!docs/api/apps/*.md
+!docs/api/crates/*.md
+!docs/api/database/*.md
 !docs/plans/Unified_Memory_System.md
 !config/agents/*.md
 !config/orchestrator/templates/
@@ -116,6 +119,7 @@ apps/openalpaca-gui/src-tauri/gen/
 .claude/*   
 config/.master_key
 config/llm.toml
+config/llm.toml.lock
 
 
 

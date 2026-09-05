@@ -108,13 +108,38 @@ Defaults after install:
 - Daemon binary: `~/.local/openalpaca/libexec/openalpacad`
 - CLI symlink: `~/.local/bin/openalpaca`
 - GUI app: `~/Applications/openalpaca-gui.app`
-- Runtime root: `~/Library/Application Support/OpenAlpaca`
-- Runtime config: `~/Library/Application Support/OpenAlpaca/config`
-- Runtime DB: `~/Library/Application Support/OpenAlpaca/openalpaca.db`
+- Runtime root: `~/.openalpaca`
+- Runtime config: `~/.openalpaca/config`
+- Runtime DB: `~/.openalpaca/state/openalpaca.db`
 
 When the CLI launches the daemon, it sets `OPENALPACA_CONFIG_DIR` to the
 runtime config directory above — that is the config the installed daemon
 actually reads (not any repo checkout).
+
+Override the whole runtime root with `OPENALPACA_HOME_STORE=/abs/path`. It
+must be an absolute path — an empty or relative value is rejected and the
+daemon refuses to start.
+
+## Migrating From the Old Data Directory
+
+Older installs kept everything under `~/Library/Application Support/OpenAlpaca`
+(macOS) / `~/.local/share/openalpaca` (Linux). The first boot of a rebuilt
+daemon or CLI moves that directory's contents into the new `~/.openalpaca`
+layout automatically:
+
+- The move is **idempotent and resumable** (a process killed mid-move
+  finishes on the next boot) but **not reversible** — back up the old
+  directory before upgrading if you want to keep a fallback.
+- A **still-running old daemon blocks the move**: stop it first (`openalpaca
+  daemon stop` against the old install, or kill the process holding
+  `openalpacad.lock` in the old directory).
+- If **both** the old directory and `~/.openalpaca/state` end up holding an
+  `openalpaca.db`, the daemon (and any CLI command that opens the database
+  directly, e.g. `openalpaca config ...`) refuses to start until you move one
+  aside — the error names both paths.
+- Anything the mover doesn't recognize left behind in the old directory
+  produces a boot warning (check the daemon log) rather than being deleted
+  silently.
 
 ## Run and Verify
 
@@ -142,7 +167,9 @@ Re-run installer with a newer artifact:
 
 Upgrade keeps:
 
-- `~/Library/Application Support/OpenAlpaca` data and config
+- `~/.openalpaca` data and config (see [Migrating From the Old Data
+  Directory](#migrating-from-the-old-data-directory) if you're upgrading from
+  a pre-root-move install)
 
 Upgrade replaces:
 
@@ -164,16 +191,21 @@ It stops a running daemon, then removes:
 - the `~/.local/bin/openalpaca` symlink
 - the PATH block from `~/.zshrc` and `~/.bashrc`
 
-User data at `~/Library/Application Support/OpenAlpaca` is **not** removed;
-delete it manually for a complete cleanup.
+User data at `~/.openalpaca` is **not** removed; delete it manually for a
+complete cleanup.
 
 ## Other Platforms
 
 - **Linux**: `install.sh` / `uninstall.sh` work as-is. Differences from macOS:
   the GUI is an AppImage installed to `<prefix>/gui/openalpaca-gui.AppImage`
-  (with a desktop entry and icon under `~/.local/share/`), `--app-dir` is
-  ignored, and the data dir is `~/.local/share/openalpaca`. Build artifacts
-  with `./scripts/release/package-linux.sh` on a Linux machine
+  (with a desktop entry and icon under `~/.local/share/`) and `--app-dir` is
+  ignored; the data dir is the same `~/.openalpaca` as macOS (the store root
+  is `<home>/.openalpaca` on every platform — it does not follow the
+  platform's data-directory convention). A pre-root-move install's legacy
+  data lived at `~/.local/share/openalpaca` and is moved on first boot of the
+  rebuilt binaries; see [Migrating From the Old Data
+  Directory](#migrating-from-the-old-data-directory). Build artifacts with
+  `./scripts/release/package-linux.sh` on a Linux machine
   (`x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`).
 - **Windows**: use the PowerShell scripts `scripts/release/package-windows.ps1`,
   `install-windows.ps1`, and `uninstall-windows.ps1`.
@@ -189,4 +221,9 @@ delete it manually for a complete cleanup.
     The installer already runs best-effort quarantine removal; if needed:
     - `xattr -dr com.apple.quarantine ~/Applications/openalpaca-gui.app`
 - Daemon not starting
-  - Check `~/Library/Application Support/OpenAlpaca/daemon.log`.
+  - Check `~/.openalpaca/state/logs/daemon.log`.
+- `two databases: ... has not moved yet and ... already exists` at startup
+  - Both the old and new data directories hold an `openalpaca.db`. Keep the
+    one you want (the legacy file is the older install's data), move or
+    remove the other, and restart. See [Migrating From the Old Data
+    Directory](#migrating-from-the-old-data-directory).
