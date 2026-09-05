@@ -18,6 +18,9 @@ pub(super) fn settings_error(status: StatusCode, code: &str, message: &str) -> i
 
 #[derive(Debug, Deserialize)]
 pub struct LlmUsageQuery {
+    /// GAP-08b: checked first in `get_llm_usage` — a task-scoped query wins
+    /// over `agent_id`/`key_id` when more than one is present.
+    pub task_id: Option<String>,
     pub agent_id: Option<String>,
     pub key_id: Option<String>,
     pub limit: Option<usize>,

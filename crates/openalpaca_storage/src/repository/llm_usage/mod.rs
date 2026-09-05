@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::Row;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// A single LLM API call log entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,6 +236,39 @@ impl<'a> LlmUsageRepository<'a> {
                 usage.push(row?);
             }
             Ok(usage)
+        })
+    }
+
+    /// Sum of `cost_usd` from `llm_call_log`, grouped by `task_id`, for the
+    /// given task ids — one query regardless of how many tasks are passed
+    /// (GAP-08b, backs the per-row cost on `GET /v1/tasks`). A task with no
+    /// logged cost is simply absent from the map; callers default to 0.0.
+    pub fn cost_for_tasks(&self, task_ids: &[String]) -> Result<HashMap<String, f64>> {
+        if task_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        self.db.with_connection(|conn| {
+            let placeholders: String = task_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT task_id, SUM(cost_usd) FROM llm_call_log \
+                 WHERE task_id IN ({placeholders}) GROUP BY task_id"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::ToSql> = task_ids
+                .iter()
+                .map(|id| id as &dyn rusqlite::ToSql)
+                .collect();
+            let rows = stmt.query_map(params.as_slice(), |row| {
+                let task_id: String = row.get(0)?;
+                let cost: f64 = row.get(1)?;
+                Ok((task_id, cost))
+            })?;
+            let mut costs = HashMap::new();
+            for row in rows {
+                let (task_id, cost) = row?;
+                costs.insert(task_id, cost);
+            }
+            Ok(costs)
         })
     }
 

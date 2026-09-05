@@ -384,7 +384,9 @@ pub async fn get_llm_usage(
     let repo = openalpaca_storage::repository::LlmUsageRepository::new(&state.db);
     let limit = query.limit.unwrap_or(50).min(1000);
 
-    let result = if let Some(ref agent_id) = query.agent_id {
+    let result = if let Some(ref task_id) = query.task_id {
+        repo.get_task_usage(task_id, limit)
+    } else if let Some(ref agent_id) = query.agent_id {
         repo.get_agent_usage(agent_id, limit)
     } else if let Some(ref key_id) = query.key_id {
         repo.get_usage_by_key(key_id, limit)
