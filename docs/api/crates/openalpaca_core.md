@@ -13,6 +13,7 @@
 - `bus` (crates/openalpaca_core/src/bus.rs)
 - `chat` (crates/openalpaca_core/src/chat/mod.rs)
 - `compose` (crates/openalpaca_core/src/compose/mod.rs)
+- `config_io` (crates/openalpaca_core/src/config_io.rs)
 - `context` (crates/openalpaca_core/src/context/mod.rs)
 - `context_budget` (crates/openalpaca_core/src/context_budget/mod.rs)
 - `daemon_config` (crates/openalpaca_core/src/daemon_config/mod.rs)

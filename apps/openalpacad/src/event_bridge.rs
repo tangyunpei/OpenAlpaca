@@ -500,6 +500,19 @@ pub fn spawn_event_bridge(
                 } => {
                     tracing::info!(%lane_key, followup_id, %kind, "Follow-up queued");
                     eb.followup_queued(lane_key, followup_id, kind);
+                }
+                openalpaca_core::events::SystemEvent::ExtensionStateChanged {
+                    ref extension, ref state, generation, tools_changed, ..
+                } => {
+                    // The `ServerEvent` peer, the `eb.extension_state_changed(..)`
+                    // forwarding and the persistence arm land with the MCP
+                    // supervisor — the first commit with a transition to
+                    // announce. This arm exists now because the `SystemEvent`
+                    // match is exhaustive by design.
+                    tracing::debug!(
+                        %extension, %state, generation, tools_changed,
+                        "Extension state changed (not yet forwarded)"
+                    );
                 } // NO catch-all: compiler will flag any missing SystemEvent variant
             }
         }

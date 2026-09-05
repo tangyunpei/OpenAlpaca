@@ -58,7 +58,7 @@ async fn mcp_tool_flows_through_registry_execute_with_context() {
     // Build a fresh tool registry and register all discovered tools.
     let registry = ToolRegistry::new().expect("new registry");
     for tool in tools {
-        let reg = bridge::rmcp_tool_to_registered("fs", "test-v1", tool, Arc::clone(&client));
+        let reg = bridge::rmcp_tool_to_registered("fs", "test-v1", tool, Arc::clone(&client), 0);
         registry.register(reg).expect("register");
     }
 

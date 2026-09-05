@@ -410,4 +410,22 @@ pub enum SystemEvent {
         kind: String,
         timestamp: DateTime<Utc>,
     },
+    /// An extension's observed state changed — T5, E5, `mark_failed`, T5-deny,
+    /// T5-gone and §3.7's tool-list refresh (extension design ADR-030).
+    ///
+    /// Declared here, in C1, because the plugin supervisor publishes it and
+    /// `openalpaca_plugins` cannot see a variant the daemon crate would add.
+    ExtensionStateChanged {
+        extension: crate::tools::extensions::ExtensionId,
+        /// The record's new state word, or `"removed"` when the declaration is
+        /// gone and the row simply disappears.
+        state: String,
+        /// The load the change belongs to, so the event log stays unambiguous
+        /// when a late crash notice arrives after a newer load's events.
+        generation: u64,
+        /// Set only by a server-driven `tools/list_changed` refresh.
+        #[serde(default)]
+        tools_changed: bool,
+        timestamp: DateTime<Utc>,
+    },
 }

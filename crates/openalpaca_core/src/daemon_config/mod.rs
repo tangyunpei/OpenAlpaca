@@ -29,6 +29,28 @@ pub struct ExperimentalConfig {
     pub ephemeral_pressure_layer: bool,
 }
 
+/// `[extensions]` — the ENABLE axis's one knob (extension design §3.2 T3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtensionsConfig {
+    /// How long a disable waits for in-flight tool calls and out-of-process
+    /// runs to finish before tearing the extension down anyway.
+    ///
+    /// There is no per-request `SandboxPolicy` at the supervisor level to take
+    /// a `max_tool_runtime_secs` from — policies are built per call site — so
+    /// this is the only input. On expiry the supervisor warns with the
+    /// straggler count and proceeds.
+    pub drain_timeout_secs: u64,
+}
+
+impl Default for ExtensionsConfig {
+    fn default() -> Self {
+        Self {
+            drain_timeout_secs: 10,
+        }
+    }
+}
+
 /// Root config loaded from `config/daemon.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -42,6 +64,8 @@ pub struct DaemonConfig {
     pub telemetry: TelemetryConfig,
     #[serde(default)]
     pub experimental: ExperimentalConfig,
+    #[serde(default)]
+    pub extensions: ExtensionsConfig,
 }
 
 /// Load daemon config from a TOML file. Returns defaults if file is missing or unparseable.

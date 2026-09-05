@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::orchestrator::skill::constraints::EffectiveToolSet;
+use crate::tools::extensions::{ExtensionId, ExtensionLedger};
 
 pub mod capabilities;
 pub use capabilities::{
@@ -97,6 +98,13 @@ pub enum ToolBackend {
         client: Arc<openalpaca_mcp::McpClient>,
         remote_name: String,
         server_name: String,
+        /// Which load of the server this handle belongs to (design §3.0 Fact 3).
+        /// Stamped once, at the single construction site
+        /// (`tools/mcp/bridge.rs`), from the number E0 handed the supervisor.
+        /// The gate compares it against the ledger record's current generation,
+        /// so a snapshot holding a sealed client from a previous load is
+        /// refused as `Stale` rather than talking to a dead transport.
+        generation: u64,
     },
 }
 
@@ -120,6 +128,14 @@ pub trait BuiltInTool: Send + Sync {
 #[derive(Clone)]
 pub struct RegisteredTool {
     pub definition: ToolDefinition,
+    /// The execution backend.
+    ///
+    /// **Reading this outside `ToolRegistry` bypasses the extension gate**
+    /// (design §6.3): every path to an MCP client or a plugin executor must go
+    /// through `execute`/`execute_with_context`, which check the ledger before
+    /// they dispatch. The field cannot be made private — plugin and MCP
+    /// registration build the struct by literal — so this is enforced by test
+    /// and comment, not by the type system.
     pub backend: ToolBackend,
     pub provides_capabilities: Vec<String>,
     /// When true, SandboxManager skips the per-tool timeout for this tool.
@@ -139,6 +155,32 @@ pub struct RegisteredTool {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+impl RegisteredTool {
+    /// Which extension owns this tool, derived — never stored on the struct,
+    /// which has 79 construction sites and no `Default` (design §3.1).
+    ///
+    /// `None` for `BuiltIn` / `Http` / `Command` — those are never on the
+    /// ENABLE axis. Both identity producers are single-site and already exist:
+    /// `bridge.rs` (`"mcp:{server}"`) and `manager.rs` (`"plugin:{name}"`).
+    pub fn extension_id(&self) -> Option<ExtensionId> {
+        match &self.backend {
+            ToolBackend::Mcp { server_name, .. } => Some(ExtensionId::mcp(server_name)),
+            ToolBackend::Plugin(_) => self.author.strip_prefix("plugin:").map(ExtensionId::plugin),
+            _ => None,
+        }
+    }
+
+    /// Which load of the extension this handle belongs to (design §3.0 Fact 3).
+    /// `None` for non-extension tools.
+    pub fn incarnation(&self) -> Option<u64> {
+        match &self.backend {
+            ToolBackend::Mcp { generation, .. } => Some(*generation),
+            ToolBackend::Plugin(executor) => Some(executor.generation()),
+            _ => None,
+        }
+    }
+}
+
 /// Central registry mapping tool names to definitions and execution backends.
 ///
 /// Backed by `DashMap` for lock-free concurrent reads and writes.
@@ -147,6 +189,10 @@ pub struct RegisteredTool {
 pub struct ToolRegistry {
     tools: DashMap<String, RegisteredTool>,
     capability_index: DashMap<String, Vec<String>>, // capability → tool names
+    /// The ENABLE axis's bookkeeping. Shared by `Arc::clone` in `Clone`, which
+    /// is what makes a deep snapshot read *live* extension state at the gate
+    /// (design §3.0).
+    extensions: Arc<ExtensionLedger>,
     http_client: reqwest::Client,
     capability_providers: DashMap<ProviderHandle, Arc<dyn capabilities::CapabilityProvider>>,
     next_provider_handle: AtomicU64,
@@ -172,6 +218,9 @@ impl Clone for ToolRegistry {
         Self {
             tools,
             capability_index,
+            // ONE Arc::clone covers all four snapshot sites and every future
+            // one, by construction — this is the whole design (§3.0 Fact 1).
+            extensions: Arc::clone(&self.extensions),
             http_client: self.http_client.clone(),
             capability_providers,
             next_provider_handle: AtomicU64::new(
@@ -190,6 +239,26 @@ impl Default for ToolRegistry {
 
 impl ToolRegistry {
     pub fn new() -> Result<Self, String> {
+        Self::build(ExtensionLedger::new())
+    }
+
+    /// A registry whose ledger can announce on the event bus (design §7.1).
+    ///
+    /// `new()` and `Default` are unchanged and stay arg-free — of the 101
+    /// construction sites exactly one is production, and it moves to this
+    /// constructor in C4 together with the event variant it exists to publish.
+    /// A ledger with no bus logs via `tracing` and returns.
+    pub fn with_event_bus(bus: crate::bus::EventBus) -> Result<Self, String> {
+        Self::build(ExtensionLedger::with_event_bus(bus))
+    }
+
+    /// The ENABLE axis's bookkeeping. Supervisors reach it from the
+    /// `Arc<ToolRegistry>` they already hold.
+    pub fn extensions(&self) -> &Arc<ExtensionLedger> {
+        &self.extensions
+    }
+
+    fn build(ledger: ExtensionLedger) -> Result<Self, String> {
         let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= 10 {
                 attempt.error("too many redirects")
@@ -209,6 +278,7 @@ impl ToolRegistry {
         let registry = Self {
             tools: DashMap::new(),
             capability_index: DashMap::new(),
+            extensions: Arc::new(ledger),
             http_client,
             capability_providers: DashMap::new(),
             next_provider_handle: AtomicU64::new(0),
@@ -241,6 +311,33 @@ impl ToolRegistry {
             return Err("Tool name cannot contain null bytes".to_string());
         }
 
+        let mut tool = tool;
+        if let Some(ext) = tool.extension_id() {
+            // T3's bound on an in-flight call is an invariant this design
+            // enforces, not a property of the sandbox: the timeout wrapper is
+            // skipped entirely for exempt tools, so an extension tool could
+            // outlive the drain forever (design §3.2 T3).
+            if tool.exempt_from_timeout {
+                tracing::warn!(
+                    tool = %tool.definition.name,
+                    extension = %ext,
+                    "extension tools may never be exempt from the per-call timeout; forcing false"
+                );
+                tool.exempt_from_timeout = false;
+            }
+            // Fail-open is safe only while an unrecorded registration is
+            // visible (design §6.2a). Expected on every extension registration
+            // from the first boot after C1 until the supervisors land.
+            if self.extensions.record(&ext).is_none() {
+                tracing::warn!(
+                    tool = %tool.definition.name,
+                    extension = %ext,
+                    "extension tool registered with no ledger record"
+                );
+            }
+        }
+        let name = &tool.definition.name;
+
         let _guard = self.provider_mutex.lock().unwrap_or_else(|p| p.into_inner());
 
         // String capabilities
@@ -268,9 +365,16 @@ impl ToolRegistry {
         if let Some((_, tool)) = self.tools.remove(name) {
             let _guard = self.provider_mutex.lock().unwrap_or_else(|p| p.into_inner());
 
+            // Keys whose last provider just left, dropped after the retains so
+            // no `get_mut` guard is alive when they are removed.
+            let mut emptied: Vec<String> = Vec::new();
+
             for cap in &tool.provides_capabilities {
                 if let Some(mut names) = self.capability_index.get_mut(cap) {
                     names.retain(|n| n != name);
+                    if names.is_empty() {
+                        emptied.push(cap.clone());
+                    }
                 }
             }
             // Scrub virtual capabilities from registered providers.
@@ -278,13 +382,33 @@ impl ToolRegistry {
                 for cap in provider_entry.value().derive_capabilities(&tool) {
                     if let Some(mut names) = self.capability_index.get_mut(&cap) {
                         names.retain(|n| n != name);
+                        if names.is_empty() {
+                            emptied.push(cap.clone());
+                        }
                     }
                 }
+            }
+            // Drop the key rather than leaving it mapped to `[]` — otherwise a
+            // disabled extension's capabilities survive as phantom keys in
+            // anything built from the index (design §6.2 #4).
+            for cap in emptied {
+                self.capability_index.remove_if(&cap, |_, names| names.is_empty());
             }
             true
         } else {
             false
         }
+    }
+
+    /// Remove-then-register. **Mandatory** on every reload path, not defensive:
+    /// `register` overwrites `tools` but *appends* to `capability_index` with no
+    /// dedupe, while only `remove` scrubs — so an enable/disable/enable cycle
+    /// that skipped the remove would leak duplicate index edges that reads
+    /// survive (they dedupe via a `seen` set) and no test would ever fail on
+    /// (design §3.3 E4).
+    pub fn replace(&self, tool: RegisteredTool) -> Result<(), String> {
+        self.remove(&tool.definition.name);
+        self.register(tool)
     }
 
     /// Look up a tool by name. Returns a clone because DashMap guards
@@ -302,20 +426,98 @@ impl ToolRegistry {
         tool_name: &str,
         arguments: &serde_json::Value,
     ) -> Result<String, String> {
+        self.dispatch(tool_name, arguments, None).await
+    }
+
+    /// Execute a tool by name with per-invocation context.
+    /// Routes to BuiltInTool::execute_with_context() for BuiltIn backends.
+    /// For Http/Command/Plugin backends, context is ignored (they don't need identity).
+    pub async fn execute_with_context(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
+        self.dispatch(tool_name, arguments, Some(ctx)).await
+    }
+
+    /// The single dispatch path — **and the single place the extension gate
+    /// runs** (design §6.2 #1, §6.3).
+    ///
+    /// Both public execute methods funnel here so the gate is taken exactly
+    /// once per call: before the refactor, `execute_with_context`'s
+    /// `Http | Command | Plugin` arm delegated to `execute`, which would have
+    /// double-taken the `CallGuard` and double-counted the drain.
+    ///
+    /// The gate has **two arms**, because registry removal alone is not
+    /// enforcement:
+    ///
+    /// * **hit** — a run holding a deep snapshot still finds the entry
+    ///   (§3.0 Fact 1). Check the entry's extension, including the generation
+    ///   its handle carries.
+    /// * **miss** — the ordinary skill runs against the live registry and sees
+    ///   the entry vanish at T1 (§3.0 Fact 2). The DashMap miss would
+    ///   short-circuit with an unattributed *"not found"*, so ask the ledger
+    ///   who retains the name and return the same attributed refusal.
+    async fn dispatch(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        ctx: Option<&ToolContext>,
+    ) -> Result<String, String> {
         // Extract definition + backend and drop the DashMap guard before any .await
-        let (definition, backend) = {
-            let entry = self
-                .tools
-                .get(tool_name)
-                .ok_or_else(|| format!("Unknown tool: '{}'", tool_name))?;
-            (entry.definition.clone(), entry.backend.clone())
+        let looked_up = self.tools.get(tool_name).map(|entry| {
+            (
+                entry.definition.clone(),
+                entry.backend.clone(),
+                entry.extension_id(),
+                entry.incarnation(),
+            )
+        });
+
+        let Some((definition, backend, extension, incarnation)) = looked_up else {
+            // MISS ARM. `check` returns `Ok` for an unknown owner, for an
+            // `Enabled` owner that is not server-withdrawing the name, and for
+            // an extension with no ledger record at all — all of which fall
+            // through to the ordinary not-found error.
+            if let Some(ext) = self.extensions.owner_of(tool_name) {
+                self.extensions.check(&ext, tool_name, None, ctx)?;
+            }
+            return Err(match ctx {
+                Some(_) => format!("Tool '{}' not found in registry", tool_name),
+                None => format!("Unknown tool: '{}'", tool_name),
+            });
+        };
+
+        // HIT ARM. `None` is a builtin / http / command tool — never gated.
+        // The guard lives across the awaited backend call below, which is what
+        // T3's drain counts.
+        let _guard = match &extension {
+            Some(ext) => Some(self.extensions.check(ext, tool_name, incarnation, ctx)?),
+            None => None,
         };
 
         // Pre-validate arguments against the tool's JSON Schema definition.
         validate_tool_arguments(&definition, arguments)?;
 
+        if ctx.is_some()
+            && matches!(
+                backend,
+                ToolBackend::Http { .. } | ToolBackend::Command { .. } | ToolBackend::Plugin(_)
+            )
+        {
+            tracing::trace!(
+                tool_name,
+                agent_id = ?ctx.and_then(|c| c.agent_id.as_ref()),
+                "Tool context discarded (non-BuiltIn backend)"
+            );
+        }
+
         match &backend {
-            ToolBackend::BuiltIn(handler) => handler.execute(arguments).await,
+            ToolBackend::BuiltIn(handler) => match ctx {
+                Some(ctx) => handler.execute_with_context(arguments, ctx).await,
+                None => handler.execute(arguments).await,
+            },
             ToolBackend::Http {
                 method,
                 url,
@@ -331,12 +533,26 @@ impl ToolRegistry {
                 timeout_secs,
             } => execute_command(command, args_template.as_deref(), *timeout_secs, arguments).await,
             ToolBackend::Plugin(executor) => executor.execute(tool_name, arguments).await,
-            ToolBackend::Mcp { client, remote_name, server_name } => {
-                tracing::debug!(
-                    server = %server_name,
-                    remote_name = %remote_name,
-                    "MCP tool call (no context)"
-                );
+            ToolBackend::Mcp {
+                client,
+                remote_name,
+                server_name,
+                ..
+            } => {
+                match ctx {
+                    Some(ctx) => tracing::debug!(
+                        server = %server_name,
+                        remote_name = %remote_name,
+                        agent_id = ?ctx.agent_id,
+                        skill_stack = ?ctx.skill_stack,
+                        "MCP tool call"
+                    ),
+                    None => tracing::debug!(
+                        server = %server_name,
+                        remote_name = %remote_name,
+                        "MCP tool call (no context)"
+                    ),
+                }
                 match client.call_tool(remote_name, arguments.clone(), None).await {
                     Ok(result) => crate::tools::mcp::bridge::serialize_call_result(result),
                     Err(e) => {
@@ -352,66 +568,6 @@ impl ToolRegistry {
                         ))
                     }
                 }
-            }
-        }
-    }
-
-    /// Execute a tool by name with per-invocation context.
-    /// Routes to BuiltInTool::execute_with_context() for BuiltIn backends.
-    /// For Http/Command/Plugin backends, context is ignored (they don't need identity).
-    pub async fn execute_with_context(
-        &self,
-        tool_name: &str,
-        arguments: &serde_json::Value,
-        ctx: &ToolContext,
-    ) -> Result<String, String> {
-        // Extract definition + backend and drop the DashMap guard before any .await
-        let (definition, backend) = {
-            let entry = self
-                .tools
-                .get(tool_name)
-                .ok_or_else(|| format!("Tool '{}' not found in registry", tool_name))?;
-            (entry.definition.clone(), entry.backend.clone())
-        };
-
-        // Pre-validate arguments (same validation as execute())
-        validate_tool_arguments(&definition, arguments)?;
-
-        match &backend {
-            ToolBackend::BuiltIn(implementation) => {
-                implementation.execute_with_context(arguments, ctx).await
-            }
-            ToolBackend::Mcp { client, remote_name, server_name } => {
-                tracing::debug!(
-                    server = %server_name,
-                    remote_name = %remote_name,
-                    agent_id = ?ctx.agent_id,
-                    skill_stack = ?ctx.skill_stack,
-                    "MCP tool call"
-                );
-                match client.call_tool(remote_name, arguments.clone(), None).await {
-                    Ok(result) => crate::tools::mcp::bridge::serialize_call_result(result),
-                    Err(e) => {
-                        tracing::warn!(
-                            server = %server_name,
-                            remote_name = %remote_name,
-                            error_category = ?e.category(),
-                            error = %e,
-                            "MCP tool call failed"
-                        );
-                        Err(format!(
-                            "MCP server '{server_name}' tool '{remote_name}' failed: {e}"
-                        ))
-                    }
-                }
-            }
-            ToolBackend::Http { .. } | ToolBackend::Command { .. } | ToolBackend::Plugin(_) => {
-                tracing::trace!(
-                    tool_name,
-                    agent_id = ?ctx.agent_id,
-                    "Tool context discarded (non-BuiltIn backend)"
-                );
-                self.execute(tool_name, arguments).await
             }
         }
     }
@@ -556,23 +712,7 @@ impl ToolRegistry {
     /// Uses the inverted capability index for O(capabilities * tools_per_cap) lookup
     /// instead of scanning all registered tools.
     pub fn tools_for_capabilities(&self, capabilities: &[String]) -> Vec<ToolDefinition> {
-        if capabilities.is_empty() {
-            return vec![];
-        }
-        let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::new();
-        for cap in capabilities {
-            if let Some(names) = self.capability_index.get(cap) {
-                for name in names.value() {
-                    if seen.insert(name.clone()) {
-                        if let Some(tool) = self.tools.get(name) {
-                            result.push(tool.definition.clone());
-                        }
-                    }
-                }
-            }
-        }
-        result
+        self.resolve_capabilities(capabilities, &[]).defs
     }
 
     /// Returns tool definitions for all tools whose `provides_capabilities`
@@ -586,31 +726,90 @@ impl ToolRegistry {
         capabilities: &[String],
         denied: &[String],
     ) -> Vec<ToolDefinition> {
+        self.resolve_capabilities(capabilities, denied).defs
+    }
+
+    /// Resolve capabilities to tool definitions **and say what was lost**.
+    ///
+    /// This is the single point at which a disabled extension's disappearance
+    /// stops being invisible (design §6.2 #3, §7.2): today an unindexed
+    /// capability simply contributes nothing — no error, no warn, no
+    /// diagnostic — and with two providers of one capability, disabling one
+    /// shrinks the tool set with no signal at all.
+    ///
+    /// Classification per requested capability:
+    /// * **withheld** — the index lookup is empty *and* the tombstone set is
+    ///   non-empty: every provider is gone.
+    /// * **partially withheld** — the lookup is non-empty but the tombstone set
+    ///   records a provider: A is disabled while B still serves it.
+    /// * **unknown** — both empty: nothing ever provided it. `debug!` only,
+    ///   because a typo and a withdrawal are indistinguishable today and
+    ///   promoting unattributed misses would fire on every existing install.
+    ///
+    /// `defs` is byte-for-byte what the two wrappers returned before.
+    pub fn resolve_capabilities(
+        &self,
+        capabilities: &[String],
+        denied: &[String],
+    ) -> CapabilityResolution {
+        let mut resolution = CapabilityResolution::default();
         if capabilities.is_empty() {
-            return vec![];
+            return resolution;
         }
         let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::new();
         for cap in capabilities {
+            let mut resolved_any = false;
             if let Some(names) = self.capability_index.get(cap) {
+                resolved_any = !names.value().is_empty();
                 for name in names.value() {
-                    if seen.insert(name.clone()) {
-                        if let Some(tool) = self.tools.get(name) {
-                            // Full capability set = string caps + virtual caps from all providers.
+                    if seen.insert(name.clone())
+                        && let Some(tool) = self.tools.get(name)
+                    {
+                        // Full capability set = string caps + virtual caps from all providers.
+                        let has_denied = !denied.is_empty() && {
                             let mut all_caps: Vec<String> = tool.provides_capabilities.clone();
                             for provider_entry in self.capability_providers.iter() {
-                                all_caps.extend(provider_entry.value().derive_capabilities(tool.value()));
+                                all_caps.extend(
+                                    provider_entry.value().derive_capabilities(tool.value()),
+                                );
                             }
-                            let has_denied = all_caps.iter().any(|c| denied.contains(c));
-                            if !has_denied {
-                                result.push(tool.definition.clone());
-                            }
+                            all_caps.iter().any(|c| denied.contains(c))
+                        };
+                        if !has_denied {
+                            resolution.defs.push(tool.definition.clone());
                         }
                     }
                 }
             }
+
+            let recorded = self.extensions.recorded_providers(cap);
+            if recorded.is_empty() {
+                if !resolved_any {
+                    tracing::debug!(capability = %cap, "capability resolves to nothing and was never provided");
+                    resolution.unknown.push(cap.clone());
+                }
+                continue;
+            }
+            let blocked: Vec<WithheldBy> = self
+                .extensions
+                .blocked_providers(cap)
+                .into_iter()
+                .map(|(extension, server_withdrawn)| WithheldBy {
+                    extension,
+                    server_withdrawn,
+                })
+                .collect();
+            let entry = WithheldCapability {
+                capability: cap.clone(),
+                providers: blocked,
+            };
+            if resolved_any {
+                resolution.partially_withheld.push(entry);
+            } else {
+                resolution.withheld.push(entry);
+            }
         }
-        result
+        resolution
     }
 
     /// Tool definitions for all "extension" tools — those bridged from MCP
@@ -624,6 +823,9 @@ impl ToolRegistry {
     /// `BuiltIn`, custom TOML tools as `Http`/`Command`. Sorted by name so
     /// callers get a deterministic surface (DashMap iteration is unordered,
     /// and tool ordering feeds prompt-cache fingerprints).
+    /// Tools whose extension is not `Enabled` are dropped — **hygiene only**,
+    /// so the model does not burn a round on a call the gate will refuse. An
+    /// absent ledger entry counts as enabled (design §6.2 #2, §6.2a).
     pub fn extension_tool_defs(&self, deny: &[String]) -> Vec<ToolDefinition> {
         let mut defs: Vec<ToolDefinition> = self
             .tools
@@ -633,11 +835,26 @@ impl ToolRegistry {
                     e.value().backend,
                     ToolBackend::Mcp { .. } | ToolBackend::Plugin(_)
                 ) && !deny.contains(e.key())
+                    && self.extension_is_available(e.value())
             })
             .map(|e| e.value().definition.clone())
             .collect();
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
+    }
+
+    /// The `extension_tool_defs` state filter, reusable by the main loop's
+    /// `tool_selection = "full"` branch, which builds its surface from
+    /// `registered_tool_names()` + `get()` and so never passes through the
+    /// filter above (design §6.2 #2).
+    pub fn extension_is_available(&self, tool: &RegisteredTool) -> bool {
+        match tool.extension_id() {
+            None => true,
+            Some(ext) => self
+                .extensions
+                .state(&ext)
+                .is_none_or(|state| state.is_enabled()),
+        }
     }
 
     /// Return the names of tools that use command backends (i.e., execute via shell).
@@ -651,6 +868,40 @@ impl ToolRegistry {
             })
             .collect()
     }
+}
+
+/// What `resolve_capabilities` found, and what it could not find (design §7.2).
+#[derive(Debug, Clone, Default)]
+pub struct CapabilityResolution {
+    /// The tool definitions, exactly as the two wrappers returned them.
+    pub defs: Vec<ToolDefinition>,
+    /// Every provider is gone. `CapabilityOracle::is_satisfiable` is "this list
+    /// is empty" — one predicate for invocation, the router, the catalog, the
+    /// cron skip and `/slash`.
+    pub withheld: Vec<WithheldCapability>,
+    /// A provider was withdrawn but another still serves the capability. Warned
+    /// and reported, **never gating**.
+    pub partially_withheld: Vec<WithheldCapability>,
+    /// Nothing ever provided it — a typo, or an annotation capability. `debug!`
+    /// only, so no existing install changes behaviour on upgrade.
+    pub unknown: Vec<String>,
+}
+
+/// One capability and the recorded providers that cannot currently serve it.
+#[derive(Debug, Clone)]
+pub struct WithheldCapability {
+    pub capability: String,
+    pub providers: Vec<WithheldBy>,
+}
+
+/// The attribution a warning, a `/slash` refusal or a cron skip carries.
+#[derive(Debug, Clone)]
+pub struct WithheldBy {
+    pub extension: ExtensionId,
+    /// `true` when the extension is still `Enabled` and the *server* withdrew
+    /// the name (design §3.7): the attribution names the owner as **still
+    /// enabled**, never as disabled.
+    pub server_withdrawn: bool,
 }
 
 /// Execute an HTTP backend tool call using the shared HTTP client.

@@ -183,9 +183,12 @@ impl Orchestrator {
                                 .registered_tool_names()
                                 .iter()
                                 .filter(|n| !deny.contains(n))
-                                .filter_map(|n| {
-                                    self.tool_registry.get(n).map(|t| t.definition.clone())
-                                })
+                                .filter_map(|n| self.tool_registry.get(n))
+                                // The third assembly site: it never passes
+                                // through `extension_tool_defs`, so it carries
+                                // the same state filter (design §6.2 #2).
+                                .filter(|t| self.tool_registry.extension_is_available(t))
+                                .map(|t| t.definition.clone())
                                 .collect()
                         } else {
                             tool_defs

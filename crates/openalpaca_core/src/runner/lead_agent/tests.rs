@@ -1254,6 +1254,7 @@ fn mcp_backend() -> crate::tools::registry::ToolBackend {
         client: Arc::new(openalpaca_mcp::McpClient::disconnected_for_tests("srv")),
         remote_name: "echo".to_string(),
         server_name: "srv".to_string(),
+        generation: 0,
     }
 }
 

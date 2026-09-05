@@ -114,6 +114,9 @@ fastembed = "4"
 
 # config
 toml = "0.9"
+# Format-preserving TOML editing for the atomic config writer
+# (openalpaca_core::config_io) — every comment in a hand-authored file survives.
+toml_edit = "0.25"
 dashmap = "6"
 which = "8"
 tokio-util = { version = "0.7", features = ["rt"] }

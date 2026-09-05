@@ -1,5 +1,6 @@
 pub mod builtins;
 pub mod config;
+pub mod extensions;
 pub mod mcp;
 pub mod platform;
 pub mod registry;

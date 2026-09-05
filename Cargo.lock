@@ -4203,6 +4203,7 @@ dependencies = [
  "blake3",
  "chrono",
  "dashmap",
+ "file-lock",
  "futures-util",
  "infer 0.16.0",
  "lru",
@@ -4222,6 +4223,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.9.12+spec-1.1.0",
+ "toml_edit 0.25.13+spec-1.1.0",
  "tracing",
  "tracing-test",
  "url",
@@ -7314,6 +7316,7 @@ dependencies = [
  "indexmap 2.14.1",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 

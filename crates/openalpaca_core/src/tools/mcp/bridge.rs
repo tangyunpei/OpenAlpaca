@@ -17,11 +17,18 @@ use crate::tools::registry::{RegisteredTool, ToolBackend};
 /// The registered definition uses the namespaced name
 /// `<server_name>__<remote_name>` so MCP-provided tools can't collide with
 /// built-ins or with tools from other servers.
+///
+/// `generation` is the load this handle belongs to — the number E0 handed the
+/// supervisor (extension design §3.0 Fact 3). This is the **single** production
+/// stamping site for MCP. Until the MCP supervisor lands, its one production
+/// caller passes `0`, which is inert: with no ledger record the gate fails open
+/// and never compares it.
 pub fn rmcp_tool_to_registered(
     server_name: &str,
     server_version: &str,
     tool: Tool,
     client: Arc<McpClient>,
+    generation: u64,
 ) -> RegisteredTool {
     let remote_name = tool.name.to_string();
     let namespaced_name = format!("{server_name}__{remote_name}");
@@ -47,6 +54,7 @@ pub fn rmcp_tool_to_registered(
         client,
         remote_name: remote_name.clone(),
         server_name: server_name.to_string(),
+        generation,
     };
 
     RegisteredTool {
@@ -157,7 +165,7 @@ mod tests {
     fn registered_mcp_tool_provides_capability_per_name() {
         let client = Arc::new(McpClient::disconnected_for_tests("srv"));
         let tool = Tool::new("echo", "Echo tool", serde_json::Map::new());
-        let registered = rmcp_tool_to_registered("srv", "1.0", tool, client);
+        let registered = rmcp_tool_to_registered("srv", "1.0", tool, client, 0);
         assert_eq!(registered.definition.name, "srv__echo");
         assert_eq!(registered.provides_capabilities, vec!["srv__echo".to_string()]);
     }
@@ -172,7 +180,7 @@ mod tests {
 
         let client = Arc::new(McpClient::disconnected_for_tests("srv"));
         let tool = Tool::new("echo", "Echo tool", serde_json::Map::new());
-        let registered = rmcp_tool_to_registered("srv", "1.0", tool, client);
+        let registered = rmcp_tool_to_registered("srv", "1.0", tool, client, 0);
 
         let registry = Arc::new(ToolRegistry::default());
         registry.register(registered).expect("register MCP tool");

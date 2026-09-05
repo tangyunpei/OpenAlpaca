@@ -137,6 +137,9 @@ async fn connect_and_register_one(
             server_version,
             tool,
             Arc::clone(&client),
+            // C2's supervisor threads E0's number here; until then there is no
+            // ledger record to compare it against, so the gate fails open.
+            0,
         );
         let name = reg.definition.name.clone();
         match tool_registry.register(reg) {
