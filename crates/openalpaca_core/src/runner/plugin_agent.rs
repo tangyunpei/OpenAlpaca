@@ -475,6 +475,115 @@ mod tests {
         );
     }
 
+    /// A stub whose `step` flips the toggle **and then** fails — a T0 that
+    /// lands between the loop's step-boundary check and the `step` RPC, which
+    /// is the window `run_scoped` exists to cover.
+    struct FlippingExecutor {
+        ledger: Arc<ExtensionLedger>,
+        extension: ExtensionId,
+        steps: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl PluginAgentExecutor for FlippingExecutor {
+        async fn spawn(
+            &self,
+            _instance_id: &str,
+            _task_id: &str,
+            _instructions: &str,
+            _context: &serde_json::Value,
+        ) -> Result<bool, String> {
+            Ok(true)
+        }
+
+        async fn step(
+            &self,
+            _instance_id: &str,
+            _tool_results: Option<&serde_json::Value>,
+        ) -> Result<(String, String, Vec<serde_json::Value>), String> {
+            *self.steps.lock().unwrap() += 1;
+            // T4 kills the child under the in-flight RPC; the ledger flips
+            // first, exactly as `disable` orders it.
+            self.ledger.begin(
+                &self.extension,
+                crate::tools::extensions::ExtensionState::Disabling,
+                Some(crate::tools::extensions::WithdrawalCause::Disable),
+            );
+            Err("plugin child process crashed".to_string())
+        }
+
+        async fn stop(&self, _instance_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn plugin_id(&self) -> &str {
+            "stub_plugin"
+        }
+
+        fn agent_id(&self) -> &str {
+            "stub_agent"
+        }
+    }
+
+    /// **`run_scoped` rewrites `PluginLoopOutcome::Failed`** — the case §3.2
+    /// T3(b) names as the one a `Result`-only wrapper would miss.
+    ///
+    /// The plugin reads `Enabled` when the loop passes its step boundary, so
+    /// the boundary check lets the run through; the toggle flips *inside*
+    /// `step`, and the loop reports `Failed { error: "plugin agent step failed:
+    /// …process crashed" }` — not an `Err`. The caller must still see the S4
+    /// refusal, which only [`ScopedRun`]'s second implementor delivers.
+    #[tokio::test(start_paused = true)]
+    async fn a_step_that_fails_after_the_toggle_flips_gets_the_s4_refusal() {
+        let ledger = Arc::new(ExtensionLedger::new());
+        let ext = ExtensionId::plugin("notion");
+        ledger.upsert(&ext, true, crate::tools::extensions::ExtensionState::Enabled);
+        let generation = ledger.generation(&ext).unwrap();
+
+        let executor = Arc::new(FlippingExecutor {
+            ledger: Arc::clone(&ledger),
+            extension: ext.clone(),
+            steps: Mutex::new(0),
+        });
+        let exec: Arc<dyn PluginAgentExecutor> = executor.clone();
+        let (sandbox, _registry) = make_sandbox();
+
+        let outcome = ledger
+            .run_scoped(
+                &ext,
+                run_plugin_agent_loop(
+                    &exec,
+                    "plugin-instance",
+                    "task-1",
+                    "do the thing",
+                    &serde_json::json!({}),
+                    &sandbox,
+                    &policy(),
+                    &ToolContext::default(),
+                    None,
+                    Some(&scope(&ledger, generation)),
+                ),
+            )
+            .await;
+
+        assert_eq!(
+            *executor.steps.lock().unwrap(),
+            1,
+            "the step-boundary check pre-empted the RPC; the rewrite window was never entered"
+        );
+        let PluginLoopOutcome::Failed { error, .. } = outcome else {
+            panic!("a step that errored must not report success");
+        };
+        assert!(
+            error.contains("is being turned off right now"),
+            "expected the S4 refusal, got: {error}"
+        );
+        assert!(
+            !error.contains("process crashed"),
+            "the caller got the transport string: {error}"
+        );
+    }
+
     /// The step-boundary check is what makes the stop *deliberate*: the loop
     /// terminates at its next step rather than waiting for T4 to close the
     /// channel under it.

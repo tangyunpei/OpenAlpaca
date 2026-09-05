@@ -8,6 +8,9 @@
 #   skill/info  → the contents of ./skill-info.json when the plugin directory
 #                 holds one, otherwise an empty result (the daemon then defaults
 #                 the skill's id and name to the plugin's own)
+#   provider/info → the contents of ./provider-info.json when the plugin
+#                 directory holds one (a provider_name and a models list),
+#                 otherwise an empty result
 #   everything else → an empty result
 
 while true; do
@@ -67,6 +70,11 @@ elif method == 'skill/info' and os.path.exists('skill-info.json'):
     # The child's cwd is its plugin directory, so a test can hand the stub a
     # skill descriptor (a mixed-case id, a slash command) by dropping a file in.
     with open('skill-info.json') as f:
+        resp = {'jsonrpc': '2.0', 'id': mid, 'result': json.load(f)}
+elif method == 'provider/info' and os.path.exists('provider-info.json'):
+    # Same shape for the provider probe: a test that needs the supervisor to
+    # record models drops a {"provider_name": …, "models": [{"id": …}]} here.
+    with open('provider-info.json') as f:
         resp = {'jsonrpc': '2.0', 'id': mid, 'result': json.load(f)}
 else:
     resp = {'jsonrpc': '2.0', 'id': mid, 'result': {}}

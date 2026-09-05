@@ -457,11 +457,19 @@ impl PluginManager {
         Ok(dirs)
     }
 
-    /// A tracked plugin whose directory is gone parks as `Orphaned`, disposition
-    /// and consent preserved — **never** deleted (design §5.1). Deleting the
+    /// A plugin whose directory is gone parks as `Orphaned`, disposition and
+    /// consent preserved — **never** deleted (design §5.1). Deleting the
     /// permissions entry would silently flip the extension back on at the next
     /// reconcile, and a vanished directory is very often a path difference
     /// rather than an uninstall.
+    ///
+    /// The vanished set is **`.permissions.toml`'s entries ∪ the in-memory
+    /// map**, minus the directories that are present. The map alone would give
+    /// `Orphaned` no trigger at the one moment it has one: at a daemon start
+    /// the map is empty, so an entry whose directory is gone would produce no
+    /// record at all — nothing for `?include_orphaned=true` to show and nothing
+    /// for `DELETE /v1/extensions/plugin/{id}` to target (design §4.1
+    /// *declaration gone — plugin*, §5.1 row 2).
     async fn park_vanished(
         &self,
         present: &[PathBuf],
@@ -472,16 +480,13 @@ impl PluginManager {
             .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
             .collect();
 
-        let vanished: Vec<String> = self
-            .plugins
-            .read()
-            .await
-            .keys()
-            .filter(|name| !live.contains(*name))
-            .cloned()
-            .collect();
+        let mut vanished: std::collections::BTreeSet<String> =
+            self.plugins.read().await.keys().cloned().collect();
+        if let Ok(table) = table {
+            vanished.extend(table.names().into_iter().map(String::from));
+        }
 
-        for name in vanished {
+        for name in vanished.into_iter().filter(|name| !live.contains(name)) {
             self.orphan(&name, table).await;
         }
     }
@@ -497,7 +502,8 @@ impl PluginManager {
         let bit = table.as_ref().map(|t| t.enabled(name)).unwrap_or(true);
         self.ledger.upsert(&ext, bit, ExtensionState::Orphaned);
         self.plugins.write().await.remove(name);
-        self.emit_state(&ext, "orphaned", 0);
+        let generation = self.ledger.generation(&ext).unwrap_or(0);
+        self.emit_state(&ext, "orphaned", generation);
         info!(plugin = %name, "plugin directory is gone; the record is kept as orphaned");
     }
 
@@ -541,6 +547,10 @@ impl PluginManager {
                     FailureReason::ConfigInvalid,
                     "manifest name does not match directory",
                 ),
+                // The directory no longer declares *this* extension, which is
+                // what `DeclarationGone` names; a live load of the old manifest
+                // is torn down before the row is parked.
+                WithdrawalCause::DeclarationGone,
             )
             .await;
             return;
@@ -557,6 +567,10 @@ impl PluginManager {
                     manifest,
                     true,
                     self.failure(FailureReason::ConfigInvalid, e.to_string()),
+                    // Fail-closed (§5.1): a plugin whose disposition nobody can
+                    // read does not keep running under a row that says it
+                    // failed.
+                    WithdrawalCause::Watcher,
                 )
                 .await;
                 return;
@@ -564,6 +578,12 @@ impl PluginManager {
         };
 
         // §6.2 #7, read straight off §4.1's table: consent pre-empts the switch.
+        //
+        // The cause each branch carries is the one the §7.1 wording keys on
+        // while the teardown runs: `Deny` ("denied") only where the store
+        // actually reads `approved = false`; `Watcher` ("disabled") for a
+        // decision that is no longer there and for the cleared bit — the
+        // out-of-band read, which is what a reconcile is.
         let bit = table.enabled(&id);
         match table.approved(&id) {
             None => {
@@ -573,6 +593,7 @@ impl PluginManager {
                     manifest.clone(),
                     bit,
                     unapproved(UnapprovedReason::NeverSeen),
+                    WithdrawalCause::Watcher,
                 )
                 .await;
                 self.emit(ServerEvent::PluginPendingApproval {
@@ -581,12 +602,26 @@ impl PluginManager {
                 });
             }
             Some(false) => {
-                self.park(&ext, dir, manifest, bit, unapproved(UnapprovedReason::Denied))
-                    .await;
+                self.park(
+                    &ext,
+                    dir,
+                    manifest,
+                    bit,
+                    unapproved(UnapprovedReason::Denied),
+                    WithdrawalCause::Deny,
+                )
+                .await;
             }
             Some(true) if !bit => {
-                self.park(&ext, dir, manifest, false, ExtensionState::Disabled)
-                    .await;
+                self.park(
+                    &ext,
+                    dir,
+                    manifest,
+                    false,
+                    ExtensionState::Disabled,
+                    WithdrawalCause::Watcher,
+                )
+                .await;
             }
             Some(true) => {
                 self.track(&ext, dir, manifest.clone()).await;
@@ -603,7 +638,23 @@ impl PluginManager {
         }
     }
 
-    /// Record a handle-free entry and store a terminal state for it.
+    /// Park a plugin at a terminal, **handle-free** state: tear down whatever it
+    /// still holds, record the declaration, then store the state.
+    ///
+    /// Every state parked here — `Unapproved{*}`, `Disabled`, the two
+    /// `Failed{ConfigInvalid}` rows — is a *"holds none"* cell of §3.3.1's
+    /// ownership matrix, so storing one **over a live handle** is precisely the
+    /// hole §4.1 calls "a live hole in the approval gate": the row says the
+    /// owner refused it, or turned it off, while the child keeps running with
+    /// its tools registered and its capability provider installed. The scan and
+    /// `reconcile`/`reconcile_all` reach here from `Enabled` whenever the store
+    /// or the manifest changed under a running plugin — the watcher entrant
+    /// §3.2 W lists — and C6 puts both behind routes and the CLI.
+    ///
+    /// The teardown runs **before** `track` replaces the cached manifest, so
+    /// T2's virtual-capability tombstone is built from the manifest the live
+    /// load actually registered rather than from the one that has just
+    /// superseded it on disk.
     async fn park(
         &self,
         ext: &ExtensionId,
@@ -611,12 +662,47 @@ impl PluginManager {
         manifest: PluginManifest,
         bit: bool,
         state: ExtensionState,
+        cause: WithdrawalCause,
     ) {
+        self.teardown_held(ext, cause).await;
         self.track(ext, dir, manifest).await;
         let word = state.word().to_string();
         self.ledger.upsert(ext, bit, state);
         let generation = self.ledger.generation(ext).unwrap_or(0);
         self.emit_state(ext, &word, generation);
+    }
+
+    /// T0 → T1 → T2 → T3 → T4 on whatever the map still holds, or the residue's
+    /// T1 → T2 → T4 when the record is not `Enabled`.
+    ///
+    /// The two shapes are `deny`'s (design §3.2 W-deny, §3.3.1): from `Enabled`
+    /// the CAS flips the gate first, so the drain waits only for work that has
+    /// already been refused; from a pre-reaper `Failed{Crashed}` there is no T0
+    /// and no drain, because the residue exits never enter `Disabling` and the
+    /// gate has refused since `mark_failed`.
+    async fn teardown_held(&self, ext: &ExtensionId, cause: WithdrawalCause) {
+        let holds = self
+            .plugins
+            .read()
+            .await
+            .get(&ext.name)
+            .is_some_and(|s| s.holds_handle());
+        if !holds {
+            return;
+        }
+        info!(extension = %ext, cause = ?cause, "parking a plugin that still holds a handle");
+        let from_enabled = matches!(self.ledger.state(ext), Some(ExtensionState::Enabled))
+            && matches!(
+                self.ledger
+                    .begin(ext, ExtensionState::Disabling, Some(cause)),
+                Transition::Took(_)
+            );
+        self.t1(ext);
+        self.t2(&ext.name).await;
+        if from_enabled {
+            self.t3(ext).await;
+        }
+        self.t4(&ext.name).await;
     }
 
     /// Make sure a handle-free `PluginState` exists for this directory, without
@@ -808,9 +894,15 @@ impl PluginManager {
     async fn t4(&self, id: &str) {
         let taken = {
             let mut plugins = self.plugins.write().await;
-            plugins
-                .get_mut(id)
-                .and_then(|state| state.process.take().map(|p| (p, state.exit_status)))
+            plugins.get_mut(id).and_then(|state| {
+                state.process.take().map(|process| {
+                    // The observed exit belongs to the process just taken: a
+                    // path that reused this entry afterwards would otherwise
+                    // read a stale "already exited" and skip a real kill.
+                    let exited = state.exit_status.take();
+                    (process, exited)
+                })
+            })
         };
         let Some((process, exited)) = taken else {
             return;
@@ -1435,8 +1527,8 @@ impl PluginManager {
     pub async fn approve_plugin(&self, name: &str) -> Result<ExtensionRecord, ExtensionError> {
         let ext = ExtensionId::plugin(name.to_string());
         self.guard_orphan(&ext)?;
-        let (dir, manifest) = self.declaration(&ext).await?;
         let _lock = self.lock_for(name).await;
+        let (dir, manifest) = self.declaration(&ext).await?;
 
         // W first: the consent decision reaches disk before anything starts.
         self.permission_gate.load_table().map_err(store_error)?;
@@ -1519,6 +1611,9 @@ impl PluginManager {
         self.ledger
             .store_state(&ext, unapproved(UnapprovedReason::Denied));
         self.emit_record(&ext);
+        self.emit(ServerEvent::PluginUnloaded {
+            plugin_id: name.to_string(),
+        });
         self.emit(ServerEvent::PluginDisabled {
             plugin_id: name.to_string(),
             reason: "denied by user".to_string(),
@@ -1573,9 +1668,13 @@ impl PluginManager {
             .ok_or_else(|| ExtensionError::NotFound(ext.clone()))?;
         let table = self.permission_gate.load_table();
         record.disposition_readable = table.is_ok();
-        record.consent = Some(Consent::from_approved(
-            table.as_ref().ok().and_then(|t| t.approved(&ext.name)),
-        ));
+        // §4: on a row whose store is unreadable *neither* fact is readable, so
+        // consent is `None` rather than the affirmative word `pending` — which
+        // would report a decision nobody can see as "no decision".
+        record.consent = table
+            .as_ref()
+            .ok()
+            .map(|t| Consent::from_approved(t.approved(&ext.name)));
         if let ExtensionState::Failed {
             reason: FailureReason::NeedsConfig { missing },
             ..
@@ -1883,8 +1982,8 @@ impl ExtensionSupervisor for PluginManager {
     async fn enable(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError> {
         self.guard_kind(id)?;
         self.guard_orphan(id)?;
-        let (dir, manifest) = self.declaration(id).await?;
         let _lock = self.lock_for(&id.name).await;
+        let (dir, manifest) = self.declaration(id).await?;
 
         self.write_bit(&id.name, true)?;
         self.ledger.set_disposition(id, true);
@@ -1952,6 +2051,12 @@ impl ExtensionSupervisor for PluginManager {
         let stragglers = self.t3(id).await;
         self.t4(&id.name).await;
         self.commit(id, ExtensionState::Disabled);
+        // The two legacy producers this teardown replaces: `unload_plugin`
+        // emitted `PluginUnloaded` on every unload and the verb emitted
+        // `PluginDisabled`. Both keep firing until C7 deletes the route (§7.3).
+        self.emit(ServerEvent::PluginUnloaded {
+            plugin_id: id.name.clone(),
+        });
         self.emit(ServerEvent::PluginDisabled {
             plugin_id: id.name.clone(),
             reason: "disabled by user".to_string(),
@@ -1977,12 +2082,22 @@ impl ExtensionSupervisor for PluginManager {
     async fn reload(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError> {
         self.guard_kind(id)?;
         self.guard_orphan(id)?;
-        let (dir, manifest) = self.declaration(id).await?;
         let _lock = self.lock_for(&id.name).await;
+        let (dir, manifest) = self.declaration(id).await?;
 
         let Some(record) = self.ledger.record(id) else {
             return Err(ExtensionError::NotLoaded);
         };
+
+        // The store is read **before** T0, the way `enable`/`disable` put W
+        // before their CAS: §3.2's persistence rule is that nothing is ever
+        // left in `Enabling`/`Disabling` because of a disk error. Read after
+        // T4, an unreadable store returned `409` with the child already killed,
+        // every contribution withdrawn and the record stranded in `Disabling`,
+        // where the gate refuses everything with *"is being reloaded right
+        // now"* until someone repairs the file and enables it again.
+        let table = self.permission_gate.load_table().map_err(store_error)?;
+
         match record.state {
             ExtensionState::Enabled => {
                 let Transition::Took(_) = self.ledger.begin(
@@ -2003,7 +2118,6 @@ impl ExtensionSupervisor for PluginManager {
             _ => return Err(ExtensionError::NotLoaded),
         }
 
-        let table = self.permission_gate.load_table().map_err(store_error)?;
         let Transition::Took(generation) = self.ledger.begin(id, ExtensionState::Enabling, None)
         else {
             return self.row(id).await;
@@ -2070,8 +2184,8 @@ impl ExtensionSupervisor for PluginManager {
         let count = live.len();
         for name in live {
             let _lock = self.lock_for(&name).await;
-            self.t3(&ExtensionId::plugin(name.clone())).await;
             self.t2(&name).await;
+            self.t3(&ExtensionId::plugin(name.clone())).await;
             self.t4(&name).await;
         }
         info!(plugins = count, "plugins shut down");

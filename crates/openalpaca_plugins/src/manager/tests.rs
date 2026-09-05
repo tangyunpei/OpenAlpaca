@@ -105,6 +105,13 @@ mod event_sink_tests {
     use openalpaca_core::tools::ToolRegistry;
     use std::sync::Mutex as StdMutex;
 
+    /// Unconditional, not incidental: these tests write `.permissions.toml`
+    /// through `atomic_write_toml`, whose backup rotation resolves through
+    /// `OPENALPACA_HOME_STORE`. They happen to write a not-yet-existing file
+    /// exactly once each — the one case that rotates nothing — but a second
+    /// write in any of them would land a backup in the real `~/.openalpaca`.
+    use crate::permission_gate::tests::HomeStoreGuard;
+
     /// Stub sink that records every emitted event.
     fn recording_sink() -> (PluginEventSink, Arc<StdMutex<Vec<ServerEvent>>>) {
         let events: Arc<StdMutex<Vec<ServerEvent>>> = Arc::new(StdMutex::new(Vec::new()));
@@ -151,6 +158,7 @@ entry = "./nonexistent-entry"
     #[tokio::test]
     async fn emits_pending_approval_on_first_scan() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = HomeStoreGuard::set(&tmp.path().join(".home"));
         write_manifest(&tmp.path().join("my-plugin"), "my-plugin", "");
 
         let (manager, events) = manager_with_sink(tmp.path());
@@ -169,6 +177,7 @@ entry = "./nonexistent-entry"
     #[tokio::test]
     async fn emits_needs_config_when_required_keys_missing() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = HomeStoreGuard::set(&tmp.path().join(".home"));
         write_manifest(
             &tmp.path().join("cfg-plugin"),
             "cfg-plugin",
@@ -200,6 +209,7 @@ required = true
     #[tokio::test]
     async fn emits_disabled_on_deny() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = HomeStoreGuard::set(&tmp.path().join(".home"));
         write_manifest(&tmp.path().join("deny-plugin"), "deny-plugin", "");
 
         let (manager, events) = manager_with_sink(tmp.path());
@@ -222,6 +232,7 @@ required = true
     #[tokio::test]
     async fn no_sink_is_a_noop() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = HomeStoreGuard::set(&tmp.path().join(".home"));
         write_manifest(&tmp.path().join("silent-plugin"), "silent-plugin", "");
 
         let manager = PluginManager::new(
@@ -1118,23 +1129,43 @@ mcp_compatible = true
     }
 
     /// **S2 residue guard** (design §3.2 T2 step 4): after `disable` the row
-    /// reads `connector: null, provider: null`, and the model registry holds
-    /// nothing for the plugin's provider.
+    /// reads `connector: null, provider: null` and the plugin's recorded model
+    /// set is empty.
+    ///
+    /// The models third is asserted against `PluginState.registered_models` —
+    /// what E3 recorded and T2 clears — because that is the only place a plugin
+    /// provider's models exist today: the provider bridge is not wired into
+    /// `LlmRouter` yet, so a freshly built `ModelRegistry` is empty whatever the
+    /// supervisor does, and `LlmRouter::list_models_for_provider` is a live
+    /// network call (design §3.2 T2). When the bridge lands, the deregistration
+    /// goes beside T2's clear and this assertion gains a second half.
     #[tokio::test]
     async fn a_disabled_plugin_leaves_no_connector_or_provider_residue() {
         let tmp = tempfile::tempdir().unwrap();
-        install_stub_plugin(
+        let dir = install_stub_plugin(
             tmp.path(),
             "echo-test",
             "[types]\ntools = true\nconnector = true\nprovider = true\n",
         );
+        // The stub answers `provider/info` from a file when one is present, so
+        // the load has real models to record.
+        std::fs::write(
+            dir.join("provider-info.json"),
+            r#"{"provider_name":"echo-provider","models":[{"id":"echo-small"},{"id":"echo-large"}]}"#,
+        )
+        .unwrap();
         let h = Harness::new(tmp.path());
         load_running_stub(&h, "echo-test").await;
 
         // Whatever E4 registered is on the row while it is enabled.
         let row = h.row("echo-test").await;
         assert!(row.connector.is_some(), "the stub declared a connector");
-        assert!(row.provider.is_some(), "the stub declared a provider");
+        assert_eq!(row.provider.as_deref(), Some("echo-provider"));
+        assert_eq!(
+            h.info("echo-test").await.models,
+            vec!["echo-small".to_string(), "echo-large".to_string()],
+            "the load recorded no models to withdraw"
+        );
 
         h.manager.disable(&ext("echo-test")).await.unwrap();
 
@@ -1142,13 +1173,9 @@ mcp_compatible = true
         assert_eq!(row.state, ExtensionState::Disabled);
         assert_eq!(row.connector, None, "a disabled row still names a connector");
         assert_eq!(row.provider, None, "a disabled row still names a provider");
-
-        // The registered model set — not `LlmRouter::list_models_for_provider`,
-        // which is a live network call.
-        let registry = openalpaca_llm::ModelRegistry::new(Default::default());
         assert!(
-            registry.list_models().is_empty(),
-            "a plugin provider's models are registered somewhere"
+            h.info("echo-test").await.models.is_empty(),
+            "a disabled plugin's provider models are still registered"
         );
     }
 
@@ -1206,8 +1233,17 @@ mcp_compatible = true
             0,
             "a directory whose manifest lies about its name was spawned"
         );
-        // And the two never shared an entry: the honest plugin is untouched.
-        assert_eq!(h.child_pid("echo-test").await, h.child_pid("echo-test").await);
+        // And the two never shared an entry: a second scan parks the impostor
+        // again and the honest plugin's child is the same one, still running.
+        let honest_pid = h.child_pid("echo-test").await;
+        h.scan().await;
+        assert_eq!(
+            h.child_pid("echo-test").await,
+            honest_pid,
+            "the impostor's scan replaced the honest plugin's entry"
+        );
+        assert!(pid_alive(honest_pid), "the honest plugin's child was killed");
+        assert_eq!(spawn_count(&impostor), 0);
     }
 
     /// **A sweep-detected crash followed by the reaper's T4 produces no
@@ -1277,8 +1313,20 @@ mcp_compatible = true
         let disable = tokio::spawn(async move { manager.disable(&ext("echo-test")).await });
 
         // The gate flips at T0, so the run's own exit is already the S4 refusal
-        // while the drain is still waiting for it.
-        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        // while the drain is still waiting for it. Wait for that flip by
+        // reading it, not by sleeping: on a loaded machine a fixed sleep can
+        // expire while the row still says `Enabled`, and nothing would rewrite.
+        for _ in 0..500 {
+            if h.manager.ledger.state(&ext("echo-test")) == Some(ExtensionState::Disabling) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            h.manager.ledger.state(&ext("echo-test")),
+            Some(ExtensionState::Disabling),
+            "the disable never reached T0"
+        );
         let refusal = h
             .manager
             .ledger
@@ -1468,6 +1516,322 @@ mcp_compatible = true
                 matches!(result, Err(ExtensionError::NotOrphaned)),
                 "an orphaned row accepted a verb: {result:?}"
             );
+        }
+    }
+
+    /// **`Orphaned` at a cold start** — the state's only production trigger
+    /// (design §5.1 row 2, §4.1 *declaration gone — plugin*).
+    ///
+    /// A daemon that boots with an entry in `.permissions.toml` whose directory
+    /// is gone starts with an **empty** map, so a vanished set computed from the
+    /// map alone produces no record at all: nothing for `?include_orphaned=true`
+    /// to show and nothing for C6's `DELETE` to target. The entry is the only
+    /// thing that remembers the plugin, so it is the set the scan must read.
+    #[tokio::test]
+    async fn a_cold_start_parks_a_vanished_directorys_entry_as_orphaned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        let h = Harness::new(tmp.path());
+        load_running_stub(&h, "echo-test").await;
+        ExtensionSupervisor::shutdown_all(&*h.manager).await;
+
+        // The directory goes while the daemon is down.
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // A restart: fresh in-memory state, the same `.permissions.toml`.
+        let restarted = Harness::restart(tmp.path());
+        restarted.scan().await;
+
+        let row = restarted.row("echo-test").await;
+        assert_eq!(
+            row.state,
+            ExtensionState::Orphaned,
+            "the boot scan produced no orphan for an entry whose directory is gone"
+        );
+        assert!(row.disposition.0, "the orphan lost the owner's toggle");
+        assert_eq!(row.consent, Some(Consent::Approved), "consent was lost");
+
+        // The row is what C6's `?include_orphaned=true` and `DELETE` read.
+        let rows = ExtensionSupervisor::list(&*restarted.manager).await;
+        assert!(
+            rows.iter()
+                .any(|r| r.id == ext("echo-test") && r.state == ExtensionState::Orphaned),
+            "the orphan is invisible to `list()`: {rows:?}"
+        );
+
+        // And the entry itself is never deleted.
+        let raw = std::fs::read_to_string(tmp.path().join(".permissions.toml")).unwrap();
+        assert!(raw.contains("echo-test"), "the entry was deleted: {raw}");
+    }
+
+    /// **A park never leaves a live handle behind** (design §3.3.1's S2
+    /// invariant, §4.1 "a live hole in the approval gate").
+    ///
+    /// The store's consent is revoked out of band — an owner editing the file,
+    /// or C6's aggregator reconciling — and the next `reconcile` reads
+    /// `approved = false`. Parking `Unapproved{Denied}` over a running child
+    /// would leave its tools registered and its capability provider installed
+    /// under a row that says the owner refused it.
+    #[tokio::test]
+    async fn a_reconcile_over_a_revoked_approval_tears_the_live_plugin_down() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\n\n[capabilities.virtual]\nprovides = [\"annotation:echo_stub\"]\n",
+        );
+        let h = Harness::new(tmp.path());
+        load_running_stub(&h, "echo-test").await;
+        let pid = h.child_pid("echo-test").await;
+
+        // The store alone changes: no verb, no teardown yet.
+        h.manager.permission_gate.deny("echo-test").unwrap();
+        h.manager.reconcile(&ext("echo-test")).await.unwrap();
+
+        let row = h.row("echo-test").await;
+        assert_eq!(
+            row.state,
+            ExtensionState::Unapproved {
+                reason: UnapprovedReason::Denied
+            }
+        );
+        assert!(!pid_alive(pid), "the denied plugin's child {pid} is alive");
+        assert!(!h.holds_process("echo-test").await);
+        assert!(!h.has_tool("echo-test::echo"), "its tool is still callable");
+        assert_eq!(h.stub_caps(), 0, "its capability provider is still installed");
+    }
+
+    /// The same hole through the toggle: the bit is cleared out of band and the
+    /// reconcile reads `enabled = false` (design §3.3.1, §5.1's watcher row).
+    #[tokio::test]
+    async fn a_reconcile_over_a_cleared_bit_tears_the_live_plugin_down() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\n\n[capabilities.virtual]\nprovides = [\"annotation:echo_stub\"]\n",
+        );
+        let h = Harness::new(tmp.path());
+        load_running_stub(&h, "echo-test").await;
+        let pid = h.child_pid("echo-test").await;
+
+        h.manager
+            .permission_gate
+            .set_enabled("echo-test", false)
+            .unwrap();
+        h.manager.reconcile(&ext("echo-test")).await.unwrap();
+
+        assert_eq!(h.state("echo-test").await, ExtensionState::Disabled);
+        assert!(!pid_alive(pid), "the disabled plugin's child {pid} is alive");
+        assert!(!h.holds_process("echo-test").await);
+        assert!(!h.has_tool("echo-test::echo"));
+        assert_eq!(h.stub_caps(), 0);
+    }
+
+    /// **Two overlapping enables load the plugin once** — the property A2's
+    /// claim token used to carry and the per-extension mutex plus E0's CAS now
+    /// carry (design §3, §3.3 E0).
+    ///
+    /// The entry is made slow *and countable*: `spawns.log` names every child
+    /// the plugin ever started, which the manager's own bookkeeping cannot show,
+    /// so a second bring-up that was torn down again would still be visible.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_enables_load_the_plugin_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\n\n[capabilities.virtual]\nprovides = [\"annotation:echo_stub\"]\n",
+        );
+        slow_the_entry(&dir);
+
+        let h = Harness::new(tmp.path());
+        h.manager.permission_gate.approve("echo-test", &[]).unwrap();
+        h.manager
+            .permission_gate
+            .set_enabled("echo-test", false)
+            .unwrap();
+        h.scan().await;
+        assert_eq!(h.state("echo-test").await, ExtensionState::Disabled);
+        assert_eq!(spawn_count(&dir), 0, "a disabled plugin was started");
+        let generation = h.manager.ledger.generation(&ext("echo-test")).unwrap();
+        // The registry carries built-in providers of its own, so the plugin's
+        // is counted as a delta.
+        let providers = h.tools.provider_handles().len();
+
+        let first = tokio::spawn({
+            let manager = Arc::clone(&h.manager);
+            async move { manager.enable(&ext("echo-test")).await }
+        });
+        let second = tokio::spawn({
+            let manager = Arc::clone(&h.manager);
+            async move { manager.enable(&ext("echo-test")).await }
+        });
+        let (first, second) = tokio::join!(first, second);
+        first.unwrap().unwrap();
+        second.unwrap().unwrap();
+        assert_eq!(h.state("echo-test").await, ExtensionState::Enabled);
+        assert_eq!(
+            spawn_count(&dir),
+            1,
+            "the second enable spawned a child of its own: {:?}",
+            spawned_pids(&dir)
+        );
+        assert_eq!(
+            h.child_pid("echo-test").await,
+            spawned_pids(&dir)[0],
+            "the map holds a child the log does not name"
+        );
+        assert_eq!(
+            h.tools.provider_handles().len(),
+            providers + 1,
+            "the losing enable installed a capability provider of its own"
+        );
+        assert_eq!(h.stub_caps(), 1, "the stub's virtual cap is registered twice");
+        assert_eq!(
+            h.manager.ledger.generation(&ext("echo-test")),
+            Some(generation + 1),
+            "the losing enable took an E0 CAS of its own"
+        );
+        assert!(h.manager.ledger.audit(&h.tools).is_empty());
+    }
+
+    /// **The `HandleHeld` insert guard** (design §2.2), driven rather than
+    /// argued: E5's map write refuses to replace an entry that still holds a
+    /// live handle, and E4b takes back everything the refused attempt published.
+    ///
+    /// It is an assertion — E-PRE and T4 both run under the mutex this load
+    /// holds, so no legitimate path reaches it — but an untested `error!` +
+    /// unwind branch is not an assertion, it is dead weight. This calls E4/E5
+    /// directly, which is the only way to stand a second load up beside a live
+    /// one.
+    #[tokio::test]
+    async fn publishing_over_a_live_handle_is_refused_and_unwinds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\n\n[capabilities.virtual]\nprovides = [\"annotation:echo_stub\"]\n",
+        );
+        let h = Harness::new(tmp.path());
+        load_running_stub(&h, "echo-test").await;
+        let live_pid = h.child_pid("echo-test").await;
+        let live_handle = h.provider_handle("echo-test").await;
+        let providers = h.tools.provider_handles().len();
+
+        // A second bring-up of the same plugin, published behind the live one's
+        // back.
+        let manifest = PluginManifest::from_dir(&dir).unwrap();
+        let intruder = PluginProcess::spawn(&manifest, &dir).unwrap();
+        let intruder_pid = intruder.child.id().expect("the second child has a pid");
+        let discovered = Discovered {
+            tools: vec![mock_plugin_tool("echo-test::intruder", "echo-test")],
+            connector: None,
+            provider: None,
+            models: Vec::new(),
+            skill: None,
+            agent: None,
+        };
+
+        let err = h
+            .manager
+            .publish(&ext("echo-test"), &dir, manifest, intruder, discovered)
+            .await
+            .expect_err("E5 published over a live handle");
+        assert!(
+            matches!(err, PluginError::HandleHeld(ref id) if id == "echo-test"),
+            "expected HandleHeld, got {err:?}"
+        );
+
+        // E4b: everything the refused attempt published is back off, and its
+        // child is gone.
+        assert!(
+            !h.has_tool("echo-test::intruder"),
+            "the refused attempt's tool stayed registered"
+        );
+        assert_eq!(
+            h.tools.provider_handles().len(),
+            providers,
+            "the refused attempt's capability provider stayed installed"
+        );
+        assert!(
+            !pid_alive(intruder_pid),
+            "the refused attempt's child {intruder_pid} was left running"
+        );
+
+        // The live load is untouched.
+        assert_eq!(h.child_pid("echo-test").await, live_pid);
+        assert!(pid_alive(live_pid));
+        assert_eq!(h.provider_handle("echo-test").await, live_handle);
+        assert!(h.has_tool("echo-test::echo"));
+        assert_eq!(h.stub_caps(), 1);
+    }
+
+    /// **A reload over an unreadable store leaves the row alone** (design §3.2:
+    /// "Nothing is ever left in `Enabling`/`Disabling` because of a disk
+    /// error").
+    ///
+    /// `reload` used to read the store *after* T0–T4, so a file that became
+    /// unparseable in between returned `409` with the child already killed,
+    /// every contribution withdrawn and the record stranded in `Disabling` —
+    /// after which the gate refused everything for that extension with *"is
+    /// being reloaded right now"*. The read belongs before T0, the way
+    /// `enable`/`disable` put W before their CAS.
+    #[tokio::test]
+    async fn a_reload_over_an_unreadable_store_leaves_the_row_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        let h = Harness::new(tmp.path());
+        load_running_stub(&h, "echo-test").await;
+        let pid = h.child_pid("echo-test").await;
+
+        let store = tmp.path().join(".permissions.toml");
+        let garbage = "[echo-test\napproved = yes";
+        std::fs::write(&store, garbage).unwrap();
+
+        let err = h
+            .manager
+            .reload(&ext("echo-test"))
+            .await
+            .expect_err("a reload over an unreadable store must refuse");
+        assert!(
+            matches!(err, ExtensionError::StoreUnreadable(_)),
+            "expected store_unreadable, got {err:?}"
+        );
+
+        let state = h.manager.ledger.state(&ext("echo-test")).unwrap();
+        assert_ne!(
+            state,
+            ExtensionState::Disabling,
+            "the record is stranded mid-reload; every verb now reads `reloading`"
+        );
+        assert_eq!(state, ExtensionState::Enabled);
+        assert!(pid_alive(pid), "the child was killed by a refused reload");
+        assert!(h.has_tool("echo-test::echo"));
+    }
+
+    /// A plugin-authored tool, for the tests that publish one by hand.
+    fn mock_plugin_tool(name: &str, plugin: &str) -> RegisteredTool {
+        RegisteredTool {
+            definition: ToolDefinition {
+                name: name.to_string(),
+                description: "test".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Http {
+                method: "GET".into(),
+                url: "http://example.com".into(),
+                headers: Default::default(),
+                timeout_secs: 10,
+            },
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "0.0.0".into(),
+            author: format!("plugin:{plugin}"),
+            created_at: chrono::Utc::now(),
         }
     }
 }

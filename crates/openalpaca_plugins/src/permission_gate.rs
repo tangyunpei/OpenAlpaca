@@ -115,6 +115,16 @@ impl PermissionTable {
         self.entries.get(plugin).map(|e| e.enabled).unwrap_or(true)
     }
 
+    /// Every plugin the store carries an entry for.
+    ///
+    /// The scan's vanished set is computed from this **union** the in-memory
+    /// map: at a cold start the map is empty, so the entry is the only thing
+    /// that remembers a plugin whose directory is gone, and without it
+    /// `Orphaned` would have no boot trigger at all (design §5.1 row 2).
+    pub fn names(&self) -> Vec<&str> {
+        self.entries.keys().map(|k| k.as_str()).collect()
+    }
+
     /// The capability list recorded at approval, for the E1 drift check.
     pub fn recorded_capabilities(&self, plugin: &str) -> Vec<String> {
         self.entries
