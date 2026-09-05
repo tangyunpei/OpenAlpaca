@@ -5,7 +5,9 @@
  * approve / deny / enable / disable. The status strings are the daemon's own
  * (`PluginStatus::fmt` in `crates/openalpaca_plugins/src/manager.rs`):
  * `loading`, `waiting-approval`, `needs-config (…)`, `running`, `crashed: …`,
- * `disabled`, `stopped` — matched here rather than guessed at.
+ * `disabled`, `denied`, `stopped` — matched here rather than guessed at.
+ * `denied` is the consent refusal (the plugin is unloaded and stays out until
+ * it is approved again); `disabled` is only the toggle position.
  *
  * A plugin waiting for first-load approval gets Approve/Deny instead of a
  * toggle: that is the gate the daemon actually enforces, and a switch would

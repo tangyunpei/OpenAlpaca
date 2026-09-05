@@ -27,6 +27,10 @@ use crate::manifest::PluginManifest;
 use crate::permission_gate::PermissionGate;
 use crate::process_pool::PluginProcess;
 
+/// How long a teardown waits for a killed plugin child to actually exit
+/// before giving up and letting the kernel finish the job.
+const CHILD_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 // ── PluginStatus ────────────────────────────────────────────────────────
 
 /// Current lifecycle status of a plugin.
@@ -47,6 +51,10 @@ pub enum PluginStatus {
     },
     /// Explicitly disabled by the user.
     Disabled,
+    /// The user refused the first-load approval. A consent decision, not a
+    /// toggle position: `disabled` says "off for now", `denied` says "never
+    /// without a fresh approval".
+    Denied,
     /// Gracefully stopped (unloaded).
     Stopped,
 }
@@ -62,6 +70,7 @@ impl fmt::Display for PluginStatus {
             PluginStatus::Running => write!(f, "running"),
             PluginStatus::Crashed { error, .. } => write!(f, "crashed: {error}"),
             PluginStatus::Disabled => write!(f, "disabled"),
+            PluginStatus::Denied => write!(f, "denied"),
             PluginStatus::Stopped => write!(f, "stopped"),
         }
     }
@@ -298,11 +307,11 @@ impl PluginManager {
                 return Ok(());
             }
             Some(false) => {
-                // Explicitly denied
-                debug!(plugin = %name, "plugin is denied, marking disabled");
+                // Explicitly denied — a consent decision, so it reads `denied`.
+                debug!(plugin = %name, "plugin is denied, not loading");
                 let mut plugins = self.plugins.write().await;
                 if let Some(state) = plugins.get_mut(&name) {
-                    state.status = PluginStatus::Disabled;
+                    state.status = PluginStatus::Denied;
                 }
                 return Ok(());
             }
@@ -560,12 +569,26 @@ impl PluginManager {
         // deregistration from LlmRouter are the daemon's responsibility, since
         // PluginManager does not hold references to those subsystems.
 
-        // Graceful shutdown + kill
+        // Graceful shutdown + kill, then wait for the child to actually go.
+        // `kill()` is `Child::start_kill`, which only *initiates* termination:
+        // without the wait, "the plugin's process is gone" would be a race the
+        // caller cannot win.
         if let Some(mut process) = state.process {
             if let Err(e) = process.shutdown().await {
                 warn!(plugin = name, error = %e, "shutdown RPC failed, killing");
             }
             process.kill();
+            match tokio::time::timeout(CHILD_EXIT_TIMEOUT, process.child.wait()).await {
+                Ok(Ok(status)) => debug!(plugin = name, ?status, "plugin child exited"),
+                Ok(Err(e)) => {
+                    warn!(plugin = name, error = %e, "failed to wait for plugin child")
+                }
+                Err(_) => warn!(
+                    plugin = name,
+                    "child did not exit after kill within {}s",
+                    CHILD_EXIT_TIMEOUT.as_secs()
+                ),
+            }
         }
 
         self.emit(ServerEvent::PluginUnloaded {
@@ -597,15 +620,25 @@ impl PluginManager {
         self.try_load_plugin(&plugin_dir).await
     }
 
-    /// Deny a plugin.
+    /// Deny a plugin: record the refusal, then tear the plugin down.
+    ///
+    /// **Write-first.** The consent decision reaches `.permissions.toml`
+    /// before anything is unloaded, so a crash between the two cannot lose it
+    /// — the worst case is a denied plugin that is still loaded until the next
+    /// boot, never a plugin the owner refused that boots as approved. A failed
+    /// write returns the error and changes nothing: the child keeps running
+    /// and its tools, skills and agent templates stay registered.
+    ///
+    /// The plugin is then parked as [`PluginStatus::Denied`] — a consent word,
+    /// not the toggle position `disabled` — so it still appears in listings.
     pub async fn deny_plugin(&self, name: &str) -> Result<(), PluginError> {
+        // W-deny: `approved = false`, `capabilities = []`.
         self.permission_gate.deny(name)?;
 
-        {
-            let mut plugins = self.plugins.write().await;
-            if let Some(state) = plugins.get_mut(name) {
-                state.status = PluginStatus::Disabled;
-            }
+        // Teardown: whatever the map holds for this plugin goes, exactly as a
+        // disable would tear it down.
+        if !self.unload_and_park(name, PluginStatus::Denied).await? {
+            debug!(plugin = name, "denied a plugin that is not tracked");
         }
 
         self.emit(ServerEvent::PluginDisabled {
@@ -643,40 +676,11 @@ impl PluginManager {
 
     /// Disable a plugin: unload it and mark as disabled.
     pub async fn disable_plugin(&self, name: &str) -> Result<(), PluginError> {
-        // Unload first (removes from map, unregisters tools, kills process)
-        // Capture manifest and dir before unload removes the entry.
-        let (manifest, plugin_dir) = {
-            let plugins = self.plugins.read().await;
-            let state = plugins.get(name).ok_or_else(|| {
-                PluginError::Unavailable(format!("plugin '{}' not found", name))
-            })?;
-            (state.manifest.clone(), state.plugin_dir.clone())
-        };
-
-        // Perform the actual unload
-        self.unload_plugin(name).await?;
-
-        // Re-insert with Disabled status so it still appears in listings
-        {
-            let mut plugins = self.plugins.write().await;
-            plugins.insert(
-                name.to_string(),
-                PluginState {
-                    manifest,
-                    status: PluginStatus::Disabled,
-                    process: None,
-                    registered_tools: Vec::new(),
-                    registered_connector: None,
-                    registered_provider: None,
-                    registered_models: Vec::new(),
-                    registered_skills: Vec::new(),
-                    registered_agents: Vec::new(),
-                    restart_count: 0,
-                    last_health: None,
-                    plugin_dir,
-                    capability_provider_handle: None,
-                },
-            );
+        if !self.unload_and_park(name, PluginStatus::Disabled).await? {
+            return Err(PluginError::Unavailable(format!(
+                "plugin '{}' not found",
+                name
+            )));
         }
 
         self.permission_gate.deny(name)?;
@@ -688,6 +692,54 @@ impl PluginManager {
 
         info!(plugin = name, "plugin disabled");
         Ok(())
+    }
+
+    /// Unload a plugin and re-park its entry with `status`.
+    ///
+    /// The teardown is [`unload_plugin`](Self::unload_plugin) — it unregisters
+    /// the tools, skills and agent templates, releases the capability provider
+    /// and kills the child — followed by a re-insert carrying no handles, so
+    /// the plugin still appears in listings under its new status.
+    ///
+    /// Returns `false` (and does nothing) when the plugin is not tracked;
+    /// callers decide whether that is an error.
+    async fn unload_and_park(
+        &self,
+        name: &str,
+        status: PluginStatus,
+    ) -> Result<bool, PluginError> {
+        // Capture what the re-insert needs before the unload removes the entry.
+        let Some((manifest, plugin_dir)) = ({
+            let plugins = self.plugins.read().await;
+            plugins
+                .get(name)
+                .map(|state| (state.manifest.clone(), state.plugin_dir.clone()))
+        }) else {
+            return Ok(false);
+        };
+
+        self.unload_plugin(name).await?;
+
+        let mut plugins = self.plugins.write().await;
+        plugins.insert(
+            name.to_string(),
+            PluginState {
+                manifest,
+                status,
+                process: None,
+                registered_tools: Vec::new(),
+                registered_connector: None,
+                registered_provider: None,
+                registered_models: Vec::new(),
+                registered_skills: Vec::new(),
+                registered_agents: Vec::new(),
+                restart_count: 0,
+                last_health: None,
+                plugin_dir,
+                capability_provider_handle: None,
+            },
+        );
+        Ok(true)
     }
 
     /// List all tracked plugins with full metadata.
@@ -1062,6 +1114,7 @@ mod tests {
         assert_eq!(PluginStatus::WaitingApproval.to_string(), "waiting-approval");
         assert_eq!(PluginStatus::Running.to_string(), "running");
         assert_eq!(PluginStatus::Disabled.to_string(), "disabled");
+        assert_eq!(PluginStatus::Denied.to_string(), "denied");
         assert_eq!(PluginStatus::Stopped.to_string(), "stopped");
 
         let needs = PluginStatus::NeedsConfig {
@@ -1263,6 +1316,214 @@ required = true
         );
         // Must not panic without a sink attached.
         manager.try_load_plugin(&plugin_dir).await.unwrap();
+    }
+}
+
+/// Lifecycle tests that drive a real child process.
+///
+/// Everything above tests the manager against plugins that never spawn
+/// (`entry = "./nonexistent-entry"`). Deny and enable are teardown paths, so
+/// they need a plugin that actually holds a process, a tool, a skill, an agent
+/// template and a capability provider — the committed stub plugin at
+/// `tests/fixtures/echo-plugin/` provides that.
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use openalpaca_core::agent::registry::AgentRegistry;
+    use openalpaca_core::orchestrator::skill_catalog::SkillCatalog;
+    use openalpaca_core::tools::ToolRegistry;
+
+    /// The committed stub: Content-Length-framed JSON-RPC over stdio, answers
+    /// `tools/list` with one `echo` tool and every other method with an empty
+    /// result — enough for `skill/info` and `agent/info` to register a skill
+    /// and an agent template under the plugin's own name.
+    fn stub_script() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/echo-plugin/echo-server.sh")
+    }
+
+    /// Lay out a plugin directory under `root` holding the stub script and a
+    /// manifest with `extra` appended (types, virtual capabilities, …).
+    fn install_stub_plugin(root: &Path, name: &str, extra: &str) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        // fs::copy carries the mode across on Unix, so the entry stays executable.
+        std::fs::copy(stub_script(), dir.join("echo-server.sh")).unwrap();
+        std::fs::write(
+            dir.join("plugin.toml"),
+            format!(
+                r#"
+[plugin]
+name = "{name}"
+version = "0.1.0"
+entry = "./echo-server.sh"
+mcp_compatible = true
+{extra}
+"#
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
+    struct Harness {
+        manager: PluginManager,
+        tools: Arc<ToolRegistry>,
+        skills: Arc<SkillCatalog>,
+        agents: Arc<AgentRegistry>,
+    }
+
+    impl Harness {
+        fn new(root: &Path) -> Self {
+            let tools = Arc::new(ToolRegistry::new().unwrap());
+            let skills = Arc::new(SkillCatalog::new());
+            let agents = Arc::new(AgentRegistry::new());
+            let manager = PluginManager::new(
+                root.to_path_buf(),
+                Arc::clone(&tools),
+                Some(Arc::clone(&skills)),
+                Some(Arc::clone(&agents)),
+            );
+            Self {
+                manager,
+                tools,
+                skills,
+                agents,
+            }
+        }
+
+        async fn info(&self, name: &str) -> PluginInfo {
+            self.manager
+                .list_plugins()
+                .await
+                .into_iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("plugin '{name}' is not tracked"))
+        }
+
+        /// PID of the plugin's child process. Panics unless one is held.
+        async fn child_pid(&self, name: &str) -> u32 {
+            let plugins = self.manager.plugins.read().await;
+            plugins
+                .get(name)
+                .and_then(|s| s.process.as_ref())
+                .and_then(|p| p.child.id())
+                .unwrap_or_else(|| panic!("plugin '{name}' holds no child process"))
+        }
+
+        /// `try_wait` on the held child: `None` while it is still running.
+        async fn child_exited(&self, name: &str) -> Option<std::process::ExitStatus> {
+            let mut plugins = self.manager.plugins.write().await;
+            plugins
+                .get_mut(name)
+                .and_then(|s| s.process.as_mut())
+                .unwrap_or_else(|| panic!("plugin '{name}' holds no child process"))
+                .try_wait()
+        }
+    }
+
+    /// Is `pid` still a live process? `sh -c "kill -0"` uses the shell builtin,
+    /// so this needs no `/bin/kill` and no extra dependency.
+    fn pid_alive(pid: u32) -> bool {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("kill -0 {pid} 2>/dev/null"))
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Load the stub as an approved plugin and assert it came up whole.
+    async fn load_running_stub(harness: &Harness, dir: &Path, name: &str, extra_checks: bool) {
+        harness.manager.permission_gate.approve(name, &[]).unwrap();
+        harness.manager.try_load_plugin(dir).await.unwrap();
+
+        let info = harness.info(name).await;
+        assert_eq!(info.status, "running", "stub plugin failed to start");
+        assert_eq!(info.tools, vec![format!("{name}::echo")]);
+        if extra_checks {
+            assert_eq!(info.skills, vec![name.to_string()]);
+            assert_eq!(info.agents, vec![name.to_string()]);
+        }
+        assert!(
+            harness.child_exited(name).await.is_none(),
+            "stub child exited during load"
+        );
+    }
+
+    /// A1 (bug B): deny must tear the plugin down, not just relabel it.
+    #[tokio::test]
+    async fn deny_unloads_the_plugin_and_kills_its_child() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\nskill = true\nagent = true\n",
+        );
+        let h = Harness::new(tmp.path());
+        load_running_stub(&h, &dir, "echo-test", true).await;
+        let pid = h.child_pid("echo-test").await;
+
+        h.manager.deny_plugin("echo-test").await.unwrap();
+
+        // The consent decision is persisted and reported as a consent word.
+        assert_eq!(
+            h.manager.permission_gate.is_approved("echo-test"),
+            Some(false)
+        );
+        // Nothing of the plugin is left on any surface.
+        let info = h.info("echo-test").await;
+        assert!(info.tools.is_empty(), "tools survived deny: {:?}", info.tools);
+        assert!(info.skills.is_empty(), "skills survived deny");
+        assert!(info.agents.is_empty(), "agents survived deny");
+        assert!(
+            !h.tools
+                .registered_tool_names()
+                .iter()
+                .any(|n| n == "echo-test::echo"),
+            "the tool is still in the registry"
+        );
+        assert!(h.skills.get("echo-test").is_none(), "skill still catalogued");
+        assert!(
+            h.agents.get_template("echo-test").is_none(),
+            "agent template still registered"
+        );
+
+        // And the child is gone, not merely forgotten.
+        assert!(!pid_alive(pid), "plugin child {pid} outlived the denial");
+
+        // The reported word is the consent decision, never "disabled".
+        assert_eq!(info.status, "denied");
+    }
+
+    /// A1 write-first (design §3.2 W-deny): if the denial cannot be persisted,
+    /// nothing is torn down — a half-applied deny would leave a plugin running
+    /// that the next boot considers approved.
+    #[tokio::test]
+    async fn deny_that_cannot_be_persisted_changes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        let h = Harness::new(tmp.path());
+        load_running_stub(&h, &dir, "echo-test", false).await;
+        let pid = h.child_pid("echo-test").await;
+
+        // Make the permissions write fail: a directory cannot be overwritten
+        // by a file.
+        let permissions = tmp.path().join(".permissions.toml");
+        std::fs::remove_file(&permissions).unwrap();
+        std::fs::create_dir(&permissions).unwrap();
+
+        let err = h.manager.deny_plugin("echo-test").await.unwrap_err();
+        assert!(
+            matches!(err, PluginError::Io(_)),
+            "expected the failed write to surface, got {err:?}"
+        );
+
+        let info = h.info("echo-test").await;
+        assert_eq!(info.status, "running", "a failed write tore the plugin down");
+        assert_eq!(info.tools, vec!["echo-test::echo".to_string()]);
+        assert!(h.child_exited("echo-test").await.is_none());
+        assert!(pid_alive(pid), "plugin child {pid} was killed anyway");
     }
 }
 
