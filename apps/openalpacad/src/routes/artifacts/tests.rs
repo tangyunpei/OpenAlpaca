@@ -444,6 +444,93 @@ async fn the_limit_and_offset_page_the_list() {
     assert_eq!(body["artifacts"].as_array().unwrap().len(), 1);
 }
 
+/// R26: the titles for a whole page come from one `titles_for` lookup, not one
+/// `TaskRepository::get` per row — and the answer is the same one the per-row
+/// join gave: every run's own title, `null` for a loose artifact and for a run
+/// whose task row is gone.
+#[tokio::test]
+async fn a_page_spanning_three_tasks_carries_every_title() {
+    let f = Fixture::new();
+    for (id, title) in [("task-a", "Run A"), ("task-b", "Run B"), ("task-c", "Run C")] {
+        f.task(id, title);
+    }
+    f.put(OWNER, "From A", "a\n", Some("task-a"));
+    f.put(OWNER, "From B", "b\n", Some("task-b"));
+    f.put(OWNER, "Also B", "b2\n", Some("task-b"));
+    f.put(OWNER, "From C", "c\n", Some("task-c"));
+    f.put(OWNER, "Loose", "d\n", None);
+
+    let (status, body) = split(list_artifacts(&f.db, OWNER, ListArtifactsParams::default())).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let rows = body["artifacts"].as_array().expect("an artifacts array");
+    assert_eq!(rows.len(), 5);
+    for row in rows {
+        let expected = match row["task_id"].as_str() {
+            Some("task-a") => Some("Run A"),
+            Some("task-b") => Some("Run B"),
+            Some("task-c") => Some("Run C"),
+            Some(other) => panic!("unexpected task id {other}"),
+            None => None,
+        };
+        assert_eq!(
+            row["task_title"].as_str(),
+            expected,
+            "row {} carries its own run's title",
+            row["name"]
+        );
+    }
+}
+
+// ============================================================================
+// Bounds on the page (R26)
+// ============================================================================
+
+#[test]
+fn the_requested_limit_is_clamped_not_refused() {
+    assert_eq!(page_limit(None), None, "the store's default page");
+    assert_eq!(page_limit(Some(0)), None, "never SQLite's 'no limit'");
+    assert_eq!(page_limit(Some(-1)), None);
+    assert_eq!(page_limit(Some(2)), Some(2));
+    assert_eq!(page_limit(Some(MAX_LIST_LIMIT)), Some(MAX_LIST_LIMIT));
+    assert_eq!(page_limit(Some(100_000)), Some(MAX_LIST_LIMIT));
+}
+
+/// The clamp end to end: a caller asking for a hundred thousand rows gets
+/// `MAX_LIST_LIMIT` of them, and `total` still says exactly how many exist.
+#[tokio::test]
+async fn a_huge_limit_returns_at_most_max_list_limit_rows() {
+    let f = Fixture::new();
+    let count = (MAX_LIST_LIMIT + 1) as usize;
+    f.null_kind_rows(OWNER, "text/plain", count);
+
+    let params = ListArtifactsParams {
+        limit: Some(100_000),
+        ..Default::default()
+    };
+    let (status, body) = split(list_artifacts(&f.db, OWNER, params)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["artifacts"].as_array().unwrap().len() as i64,
+        MAX_LIST_LIMIT
+    );
+    assert_eq!(body["total"], count, "the total stays exact and unpaged");
+}
+
+#[tokio::test]
+async fn a_negative_offset_is_a_400() {
+    let f = Fixture::new();
+    f.put(OWNER, "Notes", "hello\n", None);
+
+    let params = ListArtifactsParams {
+        offset: Some(-1),
+        ..Default::default()
+    };
+    let (status, body) = split(list_artifacts(&f.db, OWNER, params)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&body), "INVALID_OFFSET");
+}
+
 // ============================================================================
 // The row's shape (§4.9: a superset of the client's `Artifact`)
 // ============================================================================

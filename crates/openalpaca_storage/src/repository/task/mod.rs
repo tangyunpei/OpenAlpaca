@@ -1,10 +1,17 @@
 //! Repository for task operations
 
+use std::collections::HashMap;
+
 use crate::Database;
 use crate::models::task::{OutcomeKind, Task, TaskStatus};
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{OptionalExtension, Row};
+
+/// How many ids [`TaskRepository::titles_for`] puts in one `IN (…)`. Well under
+/// SQLite's default variable limit (999), and one statement covers a full
+/// artifact page, whose own limit is smaller than this.
+const TITLES_FOR_CHUNK: usize = 500;
 
 /// Repository for task CRUD operations.
 pub struct TaskRepository<'a> {
@@ -64,6 +71,42 @@ impl<'a> TaskRepository<'a> {
                 .context("Failed to get task")?;
             Ok(task)
         })
+    }
+
+    /// `id -> title` for the ids that exist — the list routes' join (R26).
+    ///
+    /// Two columns, one statement per [`TITLES_FOR_CHUNK`] ids, all inside a
+    /// single connection acquisition. The alternative a caller reaches for —
+    /// [`Self::get`] per id — materializes a whole [`Task`] each time, blobs
+    /// (`state_json`, `outcome_json`) included, and takes the global connection
+    /// mutex once per row, to read one short string.
+    ///
+    /// Ids with no row are simply absent from the map (a run whose task was
+    /// deleted has no title, which is not an error); an empty slice queries
+    /// nothing.
+    pub fn titles_for(&self, ids: &[String]) -> Result<HashMap<String, String>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        self.db
+            .with_connection(|conn| {
+                let mut titles = HashMap::with_capacity(ids.len());
+                for chunk in ids.chunks(TITLES_FOR_CHUNK) {
+                    let placeholders = vec!["?"; chunk.len()].join(", ");
+                    let mut stmt = conn.prepare(&format!(
+                        "SELECT id, title FROM task WHERE id IN ({placeholders})"
+                    ))?;
+                    let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?;
+                    for row in rows {
+                        let (id, title) = row?;
+                        titles.insert(id, title);
+                    }
+                }
+                Ok(titles)
+            })
+            .context("Failed to load task titles")
     }
 
     /// List tasks by creator.

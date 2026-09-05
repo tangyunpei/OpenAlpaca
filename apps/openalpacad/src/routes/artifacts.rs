@@ -28,7 +28,7 @@
 //! weakened — the owner check below is what it always was; only authentication
 //! moved.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::{
@@ -63,7 +63,10 @@ pub struct ListArtifactsParams {
     pub q: Option<String>,
     #[serde(default)]
     pub include_missing: bool,
+    /// Clamped to [`MAX_LIST_LIMIT`] (R26); non-positive means the default
+    /// page size the store applies when no limit is given.
     pub limit: Option<i64>,
+    /// Negative is a `400`, not a silent first page.
     pub offset: Option<i64>,
 }
 
@@ -83,6 +86,24 @@ pub struct DiffParams {
 #[derive(Debug, Deserialize)]
 pub struct PinRequest {
     pub pinned: bool,
+}
+
+// ── Paging bounds (R26) ──────────────────────────────────────────
+
+/// The largest page `GET /v1/artifacts` will build, whatever `?limit=` asks
+/// for. The list route costs one page query, one `COUNT(*)` and one title
+/// lookup, all on the connection every other subsystem shares, so the page is
+/// bounded rather than left to the caller.
+pub(crate) const MAX_LIST_LIMIT: i64 = 500;
+
+/// `?limit=`, resolved against the two bounds.
+///
+/// A non-positive value is `None` — the store's `DEFAULT_LIST_LIMIT`, never
+/// SQLite's "no limit". Anything above [`MAX_LIST_LIMIT`] is *clamped* rather
+/// than refused: the caller gets a smaller page and an exact `total`, which is
+/// how it learns there is more to fetch.
+fn page_limit(requested: Option<i64>) -> Option<i64> {
+    requested.filter(|n| *n > 0).map(|n| n.min(MAX_LIST_LIMIT))
 }
 
 // ── Status mapping ───────────────────────────────────────────────
@@ -200,30 +221,39 @@ fn version_json(row: &ArtifactVersionRow) -> serde_json::Value {
     })
 }
 
-/// `task.title` for each distinct `task_id` on the page.
+/// `task.title` for each distinct `task_id` on the page — **one** lookup for
+/// the whole page (R26), whatever the page size.
 ///
-/// A per-row lookup rather than a SQL join: the artifact surface has exactly
-/// one reader of `task`, and the page is `DEFAULT_LIST_LIMIT` rows with far
-/// fewer distinct runs. `None` covers both a loose artifact and a run whose row
-/// is gone.
+/// [`TaskRepository::titles_for`] reads two columns; the `get`-per-row this
+/// replaced materialized a whole `Task` (`state_json` and `outcome_json`
+/// included) and took the global connection mutex once per row, to produce one
+/// short string each. A missing entry covers both a loose artifact and a run
+/// whose task row is gone, and a failed lookup degrades to no titles rather
+/// than to no page.
 fn task_titles(db: &Database, records: &[ArtifactRecord]) -> HashMap<String, String> {
-    let repo = TaskRepository::new(db);
-    let mut titles = HashMap::new();
-    for id in records.iter().filter_map(|r| r.task_id.as_deref()) {
-        if titles.contains_key(id) {
-            continue;
-        }
-        if let Ok(Some(task)) = repo.get(id) {
-            titles.insert(id.to_string(), task.title);
+    let ids: Vec<String> = records
+        .iter()
+        .filter_map(|r| r.task_id.clone())
+        .collect::<HashSet<String>>()
+        .into_iter()
+        .collect();
+
+    match TaskRepository::new(db).titles_for(&ids) {
+        Ok(titles) => titles,
+        Err(e) => {
+            tracing::warn!("failed to load task titles for an artifact page: {e}");
+            HashMap::new()
         }
     }
-    titles
 }
 
 // ── The routes ───────────────────────────────────────────────────
 
 /// `GET /v1/artifacts` — one page plus the unpaged total (§7: a paginated list
 /// is an envelope, never a bare array).
+///
+/// The page is at most [`MAX_LIST_LIMIT`] rows and costs three queries no
+/// matter how many: the page, the `COUNT(*)`, and one `titles_for` lookup.
 pub(crate) fn list_artifacts(
     db: &Database,
     owner_id: &str,
@@ -265,10 +295,18 @@ pub(crate) fn list_artifacts(
     query.pinned = params.pinned;
     query.q = params.q;
     query.include_missing = params.include_missing;
-    // A non-positive limit is the store's default page, not SQLite's "no
-    // limit"; a negative offset is the first page.
-    query.limit = params.limit.filter(|n| *n > 0);
-    query.offset = params.offset.unwrap_or(0).max(0);
+    query.limit = page_limit(params.limit);
+    // A negative offset is a request nobody can serve — refusing it beats
+    // silently answering with the first page, which is a different question.
+    let offset = params.offset.unwrap_or(0);
+    if offset < 0 {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_OFFSET",
+            format!("offset must not be negative, got {offset}"),
+        );
+    }
+    query.offset = offset;
 
     let (records, total) = match ArtifactStore::new(db).list(&query) {
         Ok(page) => page,

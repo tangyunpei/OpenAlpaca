@@ -400,3 +400,61 @@ fn workspace_id_round_trips_and_defaults_to_none() {
         None
     );
 }
+
+// ============================================================================
+// titles_for — the artifact list's join (R26)
+// ============================================================================
+
+#[test]
+fn titles_for_returns_one_entry_per_known_id() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+    for (id, title) in [("t1", "Run one"), ("t2", "Run two"), ("t3", "Run three")] {
+        repo.create(&make_task(id, title)).unwrap();
+    }
+
+    let ids = ["t1".to_string(), "t3".to_string(), "gone".to_string()];
+    let titles = repo.titles_for(&ids).unwrap();
+
+    assert_eq!(titles.len(), 2, "a task that no longer exists is absent");
+    assert_eq!(titles.get("t1").map(String::as_str), Some("Run one"));
+    assert_eq!(titles.get("t3").map(String::as_str), Some("Run three"));
+    assert!(titles.get("gone").is_none());
+    // t2 was not asked for.
+    assert!(titles.get("t2").is_none());
+}
+
+#[test]
+fn titles_for_an_empty_slice_is_an_empty_map() {
+    let db = setup_db();
+    assert!(TaskRepository::new(&db).titles_for(&[]).unwrap().is_empty());
+}
+
+/// More ids than one `IN (…)` may carry: the helper chunks rather than
+/// building a statement with thousands of placeholders (SQLite's variable
+/// limit) or falling back to one query per id.
+#[test]
+fn titles_for_chunks_past_the_in_limit() {
+    let db = setup_db();
+    let count = 1_200;
+    db.with_connection(|conn| {
+        let tx = conn.unchecked_transaction()?;
+        for n in 0..count {
+            tx.execute(
+                "INSERT INTO task (id, title, created_by, source_lane)
+                 VALUES (?1, ?2, 'user1', 'cli')",
+                [format!("t{n:05}"), format!("Run {n}")],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    })
+    .unwrap();
+
+    let ids: Vec<String> = (0..count).map(|n| format!("t{n:05}")).collect();
+    let titles = TaskRepository::new(&db).titles_for(&ids).unwrap();
+
+    assert_eq!(titles.len(), count);
+    assert_eq!(titles.get("t00000").map(String::as_str), Some("Run 0"));
+    assert_eq!(titles.get("t01199").map(String::as_str), Some("Run 1199"));
+}
