@@ -332,8 +332,12 @@ fn version_file_path_rejects_a_path_with_no_parent() {
 
 #[test]
 fn artifact_extension_prefers_an_allow_listed_name_hint() {
+    // R21: the allow-list is now per-kind, so the name hint's extension must
+    // belong to the *declared* kind's set to win. Was `ArtifactKind::Binary`
+    // (whose set does not include `csv`) before this ruling; `Table`'s set
+    // does, so this still demonstrates name-hint-over-mime precedence.
     assert_eq!(
-        artifact_extension(ArtifactKind::Binary, Some("image/png"), Some("report.CSV")),
+        artifact_extension(ArtifactKind::Table, Some("image/png"), Some("report.CSV")),
         "csv"
     );
 }
@@ -374,8 +378,13 @@ fn artifact_extension_falls_to_mime_when_kind_has_no_fixed_extension() {
 
 #[test]
 fn artifact_extension_mime_heuristic_fallback_for_an_unlisted_mime() {
+    // R21: the mime tier is now also kind-constrained. Was
+    // `ArtifactKind::Binary` before this ruling, but `toml` is not in
+    // `Binary`'s set (archives/office formats only) so the heuristic's
+    // result would now be rejected there; `Code`'s set does include `toml`,
+    // so this still demonstrates the heuristic-fallback path.
     assert_eq!(
-        artifact_extension(ArtifactKind::Binary, Some("application/x-toml"), None),
+        artifact_extension(ArtifactKind::Code, Some("application/x-toml"), None),
         "toml"
     );
 }
@@ -388,6 +397,137 @@ fn artifact_extension_defaults_to_bin() {
         artifact_extension(ArtifactKind::Binary, Some("application/octet-stream"), None),
         "bin"
     );
+}
+
+// ============================================================================
+// artifact_extension — R21: kind-constrained extension tiers
+//
+// Every tier (name hint, kind default, mime) now selects only within the
+// declared kind's own acceptable-extension set; a name hint or mime value
+// naming an extension outside that set is ignored, not honoured. These are
+// the tests named verbatim in task-22-fix1-findings.md's ruling R21.
+// ============================================================================
+
+#[test]
+fn table_kind_rejects_an_html_name_hint_and_falls_to_its_own_default() {
+    // Before R21: `html` was on the flat allow-list and was checked *before*
+    // the kind map, so a `Table` artifact could be forced to `.html` merely
+    // by an untrusted model-supplied name hint. `html` is not in `Table`'s
+    // set, so this now falls through to `Table`'s own kind default, `csv`.
+    assert_eq!(
+        artifact_extension(ArtifactKind::Table, None, Some("output.html")),
+        "csv"
+    );
+}
+
+#[test]
+fn image_kind_never_derives_a_shell_extension_from_a_mime_heuristic() {
+    // Before R21: the mime heuristic fallback turned any `text/x-*` MIME type
+    // into that extension for any kind whose `kind_default_extension` is
+    // `None` (`Code`, `Image`, `Binary`) — so `text/x-sh` produced `.sh` for
+    // an `Image` artifact. `sh` is not in `Image`'s set (raster formats
+    // only), so the heuristic's result is now rejected and this falls all
+    // the way to `bin`.
+    let ext = artifact_extension(ArtifactKind::Image, Some("text/x-sh"), None);
+    assert_ne!(ext, "sh");
+    assert_eq!(ext, "bin");
+}
+
+#[test]
+fn markdown_kind_honors_an_in_kind_name_hint() {
+    // `txt` is in `Markdown`'s acceptable set (prose/document extensions),
+    // so a name hint of `notes.txt` is honoured rather than falling to
+    // `Markdown`'s own default of `md`. (`Markdown`/`Plan` are the closest
+    // existing `ArtifactKind` variants to the "Document" kind named in the
+    // findings — there is no literal `Document` variant; see the fix report.)
+    assert_eq!(
+        artifact_extension(ArtifactKind::Markdown, None, Some("notes.txt")),
+        "txt"
+    );
+}
+
+#[test]
+fn code_kind_does_not_grant_shell_script_extensions_via_name_hint() {
+    // Decision (documented in the fix report): `sh`/`bash`/`zsh`/`ps1`/`php`/
+    // `command` are treated as active-content extensions blocked in every
+    // kind's set, with no carve-out for `Code` — unlike `js`/`ts` (source
+    // text that isn't directly executed by a double-click), a `.sh` file can
+    // be made to run by a double-click once its executable bit is set. This
+    // is the more restrictive of the two readings R21 leaves open, chosen
+    // per the escalation instruction to prefer the restrictive reading when
+    // ambiguous. `Code`'s `kind_default_extension` is `None`, so with no
+    // mime supplied this falls all the way to `bin`.
+    assert_eq!(
+        artifact_extension(ArtifactKind::Code, None, Some("x.sh")),
+        "bin"
+    );
+}
+
+#[test]
+fn code_kind_does_grant_the_js_family_via_name_hint() {
+    // The one explicit carve-out R21 names: `js` is active content "when not
+    // Code" — implying it is ordinary source text when the declared kind
+    // *is* `Code`. Exercised for the whole family the grammar groups with it.
+    for (name, ext) in [
+        ("app.js", "js"),
+        ("component.jsx", "jsx"),
+        ("main.ts", "ts"),
+        ("widget.tsx", "tsx"),
+    ] {
+        assert_eq!(
+            artifact_extension(ArtifactKind::Code, None, Some(name)),
+            ext
+        );
+    }
+}
+
+#[test]
+fn html_kind_is_the_only_route_to_the_html_extension_via_name_hint() {
+    assert_eq!(
+        artifact_extension(ArtifactKind::Html, None, Some("page.htm")),
+        "htm"
+    );
+    // Every other kind rejects it and falls to its own default/mime/bin —
+    // spot-checked against the two kinds the original review flagged.
+    assert_eq!(
+        artifact_extension(ArtifactKind::Table, None, Some("page.html")),
+        "csv"
+    );
+    assert_eq!(
+        artifact_extension(ArtifactKind::Terminal, None, Some("page.html")),
+        "log"
+    );
+}
+
+#[test]
+fn no_kind_grants_a_universally_blocked_active_content_extension() {
+    // R21's active-content list, minus the two explicit carve-outs this
+    // module implements (`html`/`htm` under `Html`, `js`/`jsx`/`ts`/`tsx`
+    // under `Code`) — none of these must appear in *any* kind's acceptable
+    // set, so a name hint can never select them regardless of declared kind.
+    const UNIVERSALLY_BLOCKED: &[&str] = &[
+        "xhtml", "svg", "sh", "bash", "zsh", "command", "ps1", "php", "exe", "bat", "cmd", "scr",
+        "jar", "app", "dmg", "pkg",
+    ];
+    for kind in [
+        ArtifactKind::Markdown,
+        ArtifactKind::Code,
+        ArtifactKind::Terminal,
+        ArtifactKind::Table,
+        ArtifactKind::Plan,
+        ArtifactKind::Image,
+        ArtifactKind::Html,
+        ArtifactKind::Binary,
+    ] {
+        for blocked in UNIVERSALLY_BLOCKED {
+            let name_hint = format!("payload.{blocked}");
+            let ext = artifact_extension(kind, None, Some(&name_hint));
+            assert_ne!(
+                ext, *blocked,
+                "{kind:?} must not honour name hint extension {blocked:?}"
+            );
+        }
+    }
 }
 
 // ============================================================================

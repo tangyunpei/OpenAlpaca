@@ -19,6 +19,40 @@
 //! also used at `openalpaca_core::tools::builtins::helpers::resolve_workspace_path_for_write`;
 //! reimplemented here because `openalpaca_storage` is a leaf crate below
 //! `openalpaca_core` in the dependency graph and cannot import it).
+//!
+//! ## `artifact_extension`'s per-kind acceptable-extension sets (R21)
+//!
+//! [`artifact_extension`]'s three fallback tiers (name hint → kind default →
+//! mime) each select an extension only from the *declared kind's own*
+//! acceptable set — a flat, kind-blind allow-list previously let a
+//! model-supplied `name_hint` or `mime` force an extension unrelated to (and
+//! more dangerous than) the artifact's own `kind`, e.g. a `Table` artifact
+//! written to disk as `.html` on the strength of a `name_hint` of
+//! `"output.html"` alone. Active-content extensions (capable of running code
+//! or a script when opened directly — `html`, `htm`, `xhtml`, `svg`, `sh`,
+//! `bash`, `zsh`, `command`, `ps1`, `php`, `exe`, `bat`, `cmd`, `scr`, `jar`,
+//! `app`, `dmg`, `pkg`) are reachable only through a kind whose own set names
+//! them — today that means `html`/`htm` only under [`ArtifactKind::Html`],
+//! and `js`/`jsx`/`ts`/`tsx` only under [`ArtifactKind::Code`] (ordinary
+//! source text, not directly executed by a double-click, unlike a `.sh`/
+//! `.command` script once its executable bit is set). No kind grants
+//! `sh`/`bash`/`zsh`/`ps1`/`php`/`command` or any packaged-executable
+//! extension — see [`kind_allowed_extensions`] for the reasoning behind that
+//! choice where the ruling left it open.
+//!
+//! | Kind | Acceptable extensions (name hint / mime tiers) | Kind default |
+//! |---|---|---|
+//! | `Markdown`, `Plan` | `md` `markdown` `mdx` `txt` `rst` `adoc` `tex` `pdf` `mmd` | `md` |
+//! | `Terminal` | `log` `txt` | `log` |
+//! | `Table` | `csv` `tsv` `json` | `csv` |
+//! | `Code` | `py` `js` `jsx` `ts` `tsx` `rs` `go` `java` `kt` `kts` `c` `h` `cpp` `hpp` `cs` `rb` `swift` `sql` `lua` `r` `scala` `pl` `css` `scss` `less` `vue` `svelte` `json` `yaml` `yml` `toml` `xml` `ini` `conf` `cfg` `env` `diff` `patch` `lock` `ipynb` | none (→ mime → `bin`) |
+//! | `Image` | `png` `jpg` `jpeg` `gif` `webp` `bmp` `ico` `tiff` | none (→ mime → `bin`) |
+//! | `Html` | `html` `htm` | `html` |
+//! | `Binary` | `zip` `tar` `gz` `tgz` `7z` `pdf` `doc` `docx` `xls` `xlsx` `ppt` `pptx` | none (→ mime → `bin`) |
+//!
+//! There is no `ArtifactKind::Document` variant — the "Document" example in
+//! the ruling's test list is realized against `Markdown`/`Plan`, the two
+//! existing kinds closest to free-form prose (both already default to `md`).
 
 use std::path::{Path, PathBuf};
 
@@ -59,33 +93,6 @@ const DEFAULT_EXTENSION: &str = "bin";
 const RESERVED_DEVICE_NAMES: &[&str] = &[
     "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
-];
-
-/// Extensions `artifact_extension` will trust on a model-supplied `name_hint`.
-/// A name hint is otherwise-untrusted model output, so this list — not the
-/// full `ext` grammar — decides whether it's honoured; anything else falls
-/// through to the `kind`/`mime` maps. Kept short and unsurprising rather than
-/// exhaustive.
-#[rustfmt::skip]
-const ALLOWED_NAME_HINT_EXTENSIONS: &[&str] = &[
-    // text / docs
-    "md", "markdown", "txt", "rst", "adoc", "tex",
-    // data / config
-    "json", "yaml", "yml", "toml", "csv", "tsv", "xml", "ini", "conf", "cfg", "env",
-    // code
-    "py", "js", "jsx", "ts", "tsx", "rs", "go", "java", "kt", "kts", "c", "h", "cpp", "hpp",
-    "cs", "rb", "php", "swift", "sh", "bash", "zsh", "ps1", "sql", "lua", "r", "scala", "pl",
-    "css", "scss", "less", "vue", "svelte",
-    // web
-    "html", "htm",
-    // office / documents
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
-    // images
-    "png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico", "tiff",
-    // archives
-    "zip", "tar", "gz", "tgz", "7z",
-    // misc
-    "log", "diff", "patch", "lock", "ipynb", "mmd",
 ];
 
 /// Explicit MIME → extension mappings for `artifact_extension`'s third
@@ -338,18 +345,22 @@ pub fn version_file_path(head_path: &Path, version: u32) -> Result<PathBuf> {
 
 /// Extension precedence: an allow-listed extension on the model-supplied
 /// `name_hint` → a fixed extension for `kind` → a `mime` mapping → `bin`.
+/// R21: every tier is kind-constrained — see the module docs' per-kind
+/// table. A name hint or mime value naming an extension outside the
+/// declared `kind`'s own acceptable set is not honoured at that tier; it
+/// falls through exactly as if it had been absent.
 pub fn artifact_extension(
     kind: ArtifactKind,
     mime: Option<&str>,
     name_hint: Option<&str>,
 ) -> String {
-    if let Some(ext) = name_hint.and_then(extension_from_allowed_name) {
+    if let Some(ext) = name_hint.and_then(|name| extension_from_allowed_name(kind, name)) {
         return ext;
     }
     if let Some(ext) = kind_default_extension(kind) {
         return ext.to_string();
     }
-    if let Some(ext) = mime.and_then(mime_extension) {
+    if let Some(ext) = mime.and_then(|m| mime_extension_for_kind(kind, m)) {
         return ext;
     }
     DEFAULT_EXTENSION.to_string()
@@ -367,6 +378,48 @@ fn kind_default_extension(kind: ArtifactKind) -> Option<&'static str> {
     }
 }
 
+/// `artifact_extension`'s per-kind acceptable-extension sets (R21) — see the
+/// module docs' table for the rendered version of the same data plus the
+/// reasoning behind it. Both the name-hint tier and the mime tier ([see
+/// `mime_extension_for_kind`]) select only from the declared kind's own set
+/// here; nothing outside it is ever honoured regardless of tier.
+///
+/// Two deliberate, documented choices where the ruling left the answer open:
+///
+/// - `sh`/`bash`/`zsh`/`ps1`/`php`/`command` are **not** granted to `Code`,
+///   even though a `Code` artifact could legitimately be shell-script source.
+///   Unlike `js`/`ts` (inert as plain text; a browser or Node must be told to
+///   run them), a `.sh`/`.command` file can be made to execute via a simple
+///   double-click once its executable bit is set — the more restrictive
+///   reading, chosen because the ruling left this ambiguous and the
+///   escalation instruction is to prefer the restrictive set when in doubt.
+/// - There is no `ArtifactKind::Document` variant. `Markdown` and `Plan` —
+///   the two kinds already defaulting to `md` — share the "Document" set
+///   (`md`, `markdown`, `mdx`, `txt`, `rst`, `adoc`, `tex`, `pdf`, `mmd`).
+fn kind_allowed_extensions(kind: ArtifactKind) -> &'static [&'static str] {
+    match kind {
+        ArtifactKind::Markdown | ArtifactKind::Plan => &[
+            "md", "markdown", "mdx", "txt", "rst", "adoc", "tex", "pdf", "mmd",
+        ],
+        ArtifactKind::Terminal => &["log", "txt"],
+        ArtifactKind::Table => &["csv", "tsv", "json"],
+        ArtifactKind::Code => &[
+            "py", "js", "jsx", "ts", "tsx", "rs", "go", "java", "kt", "kts", "c", "h", "cpp",
+            "hpp", "cs", "rb", "swift", "sql", "lua", "r", "scala", "pl", "css", "scss", "less",
+            "vue", "svelte", "json", "yaml", "yml", "toml", "xml", "ini", "conf", "cfg", "env",
+            "diff", "patch", "lock", "ipynb",
+        ],
+        // Raster formats only — `svg` is active content (can embed a
+        // `<script>`) and is deliberately excluded; there is no `Svg` kind
+        // for it to be reachable through.
+        ArtifactKind::Image => &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff"],
+        ArtifactKind::Html => &["html", "htm"],
+        ArtifactKind::Binary => &[
+            "zip", "tar", "gz", "tgz", "7z", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+        ],
+    }
+}
+
 fn mime_extension(mime: &str) -> Option<String> {
     let mime = mime
         .split(';')
@@ -375,7 +428,7 @@ fn mime_extension(mime: &str) -> Option<String> {
         .trim()
         .to_ascii_lowercase();
     if let Some((_, ext)) = MIME_EXTENSIONS.iter().find(|(m, _)| *m == mime) {
-        return Some((*ext).to_string());
+        return Some(ext.to_string());
     }
     // Heuristic fallback for anything not in the explicit table: the
     // subtype, minus a leading "x-" facet and any "+suffix" (RFC 6839
@@ -387,11 +440,25 @@ fn mime_extension(mime: &str) -> Option<String> {
     normalize_ext(subtype)
 }
 
-/// The extension on `name`, if present and on the trusted allow-list.
-fn extension_from_allowed_name(name: &str) -> Option<String> {
+/// [`mime_extension`], constrained to `kind`'s own acceptable set (R21) —
+/// applies to both the explicit-table hit and the heuristic fallback alike,
+/// since neither channel is more trustworthy than the other once an upload
+/// or a tool result supplies the `mime` value.
+fn mime_extension_for_kind(kind: ArtifactKind, mime: &str) -> Option<String> {
+    let ext = mime_extension(mime)?;
+    kind_allowed_extensions(kind)
+        .contains(&ext.as_str())
+        .then_some(ext)
+}
+
+/// The extension on `name`, if present and within `kind`'s own acceptable
+/// set (R21) — `name` is otherwise-untrusted model output, so the declared
+/// `kind` (not the full `ext` grammar) decides whether it's honoured;
+/// anything else falls through to the `kind`/`mime` tiers.
+fn extension_from_allowed_name(kind: ArtifactKind, name: &str) -> Option<String> {
     let raw = Path::new(name).extension()?.to_str()?;
     let normalized = normalize_ext(raw)?;
-    ALLOWED_NAME_HINT_EXTENSIONS
+    kind_allowed_extensions(kind)
         .contains(&normalized.as_str())
         .then_some(normalized)
 }
