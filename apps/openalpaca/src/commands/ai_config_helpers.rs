@@ -11,10 +11,10 @@ use openalpaca_llm::keys::secret_store::{KeyringSecretStore, MemorySecretStore, 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Ensure master key exists at canonical app_dir before any crypto operations.
+/// Ensure master key exists at its canonical location before any crypto operations.
 pub(super) fn ensure_master_key() {
-    if let Ok(app_dir) = openalpaca_storage::paths::app_dir() {
-        let _ = KeyEncryptor::ensure_at(&app_dir);
+    if let Ok(dir) = openalpaca_storage::store::master_key_dir() {
+        let _ = KeyEncryptor::ensure_at(&dir);
     }
 }
 
@@ -46,9 +46,9 @@ pub fn llm_config_path() -> Result<PathBuf> {
             return Ok(p.join("llm.toml"));
         }
     }
-    // 2. Writable app_dir/config/
-    if let Ok(app) = openalpaca_storage::paths::app_dir() {
-        let p = app.join("config").join("llm.toml");
+    // 2. Writable home_root()/config/
+    if let Ok(dir) = openalpaca_storage::store::runtime_config_dir() {
+        let p = dir.join("llm.toml");
         if p.exists() {
             return Ok(p);
         }

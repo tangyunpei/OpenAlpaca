@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use openalpaca_storage::{ConfigRepository, Database, paths};
+use openalpaca_storage::{ConfigRepository, Database, store};
 
 use crate::output::OutputFormat;
 
@@ -42,7 +42,7 @@ pub enum ConfigAction {
 }
 
 pub async fn run(args: ConfigArgs) -> Result<()> {
-    let db_path = paths::database_path()?;
+    let db_path = store::database_path()?;
     let db = Database::open(&db_path).context("Failed to open database")?;
     let repo = ConfigRepository::new(&db);
 

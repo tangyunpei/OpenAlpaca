@@ -15,7 +15,7 @@ use openalpaca_core::{
     lane::LaneManager,
     security::policy::{Principal, Scope},
 };
-use openalpaca_storage::{Database, paths};
+use openalpaca_storage::{Database, store};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("TELOXIDE_TOKEN").expect("TELOXIDE_TOKEN environment variable not set");
 
     // 3. Connect to the real system database (shared with Daemon)
-    let db_path = paths::database_path()?;
+    let db_path = store::database_path()?;
     println!("Using Database: {}", db_path.display());
 
     let db = Database::open(&db_path)?;

@@ -185,7 +185,7 @@ pub async fn upload_file_handler(
     // Same content but different owner — fall through to create a new record
 
     // Compute storage path
-    let storage_path = match openalpaca_storage::paths::asset_storage_path(&sha256) {
+    let storage_path = match openalpaca_storage::store::interim_asset_storage_path(&sha256) {
         Ok(p) => p,
         Err(e) => {
             return error_response(

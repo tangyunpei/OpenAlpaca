@@ -42,7 +42,7 @@ use openalpaca_core::{
     orchestrator::Orchestrator,
     runner::LoopConfig,
 };
-use openalpaca_storage::{Database, discovery, paths};
+use openalpaca_storage::{Database, discovery, store};
 use openalpaca_wake::manager::WakeManager;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,9 +66,14 @@ fn main() -> Result<()> {
 
     info!("OpenAlpaca Daemon starting...");
 
-    // Migrate legacy app dir (com.openalpaca.OpenAlpaca → OpenAlpaca) before
-    // acquiring the singleton lock, since the lock file lives inside app_dir.
-    paths::migrate_legacy_app_dir();
+    // D1: everything lives under ~/.openalpaca. Seed the home store, then move
+    // any legacy app dir into it — before acquiring the singleton lock, since
+    // the lock file itself moves and the database must not be open mid-rename.
+    if let Err(e) = store::ensure_store(&store::StoreScope::Home) {
+        error!("FATAL: cannot create the OpenAlpaca home store: {e:#}");
+        std::process::exit(1);
+    }
+    store::migrate::move_app_root();
 
     // D3: Singleton lock FIRST — prevents all multi-process races.
     // Acquired before any config I/O or key generation.
@@ -96,37 +101,12 @@ fn main() -> Result<()> {
         );
     }
 
-    // D1: Master key always at app_dir (canonical, CWD-independent).
-    let app_dir = paths::app_dir().context("Failed to get app dir")?;
-
-    // Legacy migration: if config_base_dir/.master_key exists but app_dir/.master_key doesn't,
-    // copy legacy key to app_dir using atomic create-new.
-    let legacy_key_path = config_base_dir.join(".master_key");
-    if legacy_key_path.exists()
-        && !app_dir.join(".master_key").exists()
-        && let Ok(hex) = std::fs::read_to_string(&legacy_key_path)
-    {
-        std::fs::create_dir_all(&app_dir).ok();
-        // Atomic copy: if another process beat us, that's fine
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(app_dir.join(".master_key"))
-        {
-            use std::io::Write;
-            let _ = f.write_all(hex.trim().as_bytes());
-            let _ = f.flush();
-            let _ = f.sync_all();
-        }
-        info!(
-            "Migrated legacy master key from {} to {}",
-            legacy_key_path.display(),
-            app_dir.join(".master_key").display()
-        );
-    }
+    // D1: master key always in the state dir (canonical, CWD-independent); the
+    // mover owns relocating an existing one.
+    let master_key_dir = store::master_key_dir().context("Failed to resolve the state dir")?;
 
     // D6+D7: ensure_at is race-safe; on failure, fail fast.
-    match openalpaca_llm::key_encryption::KeyEncryptor::ensure_at(&app_dir) {
+    match openalpaca_llm::key_encryption::KeyEncryptor::ensure_at(&master_key_dir) {
         Ok(hex_key) => {
             // SAFETY: No other threads exist yet — tokio runtime has not started.
             unsafe {
@@ -134,13 +114,13 @@ fn main() -> Result<()> {
             }
             info!(
                 "Master key loaded from {}",
-                app_dir.join(".master_key").display()
+                master_key_dir.join(".master_key").display()
             );
         }
         Err(e) => {
             error!(
                 "FATAL: Cannot ensure master key at {}: {e}",
-                app_dir.display()
+                master_key_dir.display()
             );
             std::process::exit(1);
         }
@@ -183,9 +163,12 @@ async fn async_main(
     let token = disc.auth.token.clone();
 
     // Step 3: Initialize database
-    let db_path = paths::database_path()?;
+    let db_path = store::database_path()?;
     let db = Database::open(&db_path).context("Failed to initialize database")?;
     info!("Database initialized: {}", db_path.display());
+    // Repairs the absolute file_asset paths the root move broke. Idempotent:
+    // matches zero rows on every boot after the first.
+    store::migrate::rebase_asset_paths(&db);
     bootstrap::migrate_preference_summaries(&db);
     // Routing V2 Phase 3: fail all orphaned (non-terminal) tasks from the
     // previous daemon generation. MUST stay here — after the DB opens and
@@ -328,8 +311,7 @@ async fn async_main(
     let cost_tracker_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
     // Initialize PluginManager
-    let plugin_dir = paths::app_dir()?.join("plugins");
-    std::fs::create_dir_all(&plugin_dir).ok();
+    let plugin_dir = store::plugins_dir()?;
     let eb_for_plugins = event_broadcaster.clone();
     let plugin_manager = Arc::new(
         openalpaca_plugins::PluginManager::new(
