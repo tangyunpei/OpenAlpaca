@@ -87,6 +87,34 @@ fn t0_records_the_pending_cause_so_reload_reads_as_reloading() {
     assert!(refusal.contains("is being turned off right now"), "{refusal}");
 }
 
+#[test]
+fn a_reloads_cause_survives_the_cas_into_enabling() {
+    // §3.4.1 words the **whole** T0–E5 window *reloading*; a call landing in
+    // the E-half must not be told the extension is "still starting", which
+    // reads as a first load rather than as a thing that was here a moment ago.
+    let ledger = ExtensionLedger::new();
+    let ext = mcp("github");
+    ledger.upsert(&ext, true, ExtensionState::Enabled);
+    ledger.begin(&ext, ExtensionState::Disabling, Some(WithdrawalCause::Reload));
+    ledger.begin(&ext, ExtensionState::Enabling, None);
+
+    let refusal = ledger
+        .check(&ext, "github__create_issue", None, None)
+        .expect_err("Enabling must block");
+    assert!(refusal.contains("is being reloaded right now"), "{refusal}");
+
+    // And it is not carried anywhere else: an ordinary enable from `Disabled`
+    // — and every enable after this reload commits — reads as a start.
+    ledger.commit(&ext, ExtensionState::Enabled);
+    ledger.begin(&ext, ExtensionState::Disabling, Some(WithdrawalCause::Disable));
+    ledger.commit(&ext, ExtensionState::Disabled);
+    ledger.begin(&ext, ExtensionState::Enabling, None);
+    let refusal = ledger
+        .check(&ext, "github__create_issue", None, None)
+        .expect_err("Enabling must block");
+    assert!(refusal.contains("is still starting"), "{refusal}");
+}
+
 // ── mark_failed (design §3.6) ────────────────────────────────────────────
 
 #[test]

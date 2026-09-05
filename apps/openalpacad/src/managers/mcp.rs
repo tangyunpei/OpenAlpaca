@@ -89,6 +89,25 @@ struct Declared {
     servers: BTreeMap<String, McpServerConfig>,
 }
 
+/// What one §3.7 tool-list refresh did.
+///
+/// Returned so the *path* can be asserted rather than only its effect:
+/// "superseded" is a branch, and a test that observes nothing but "the
+/// registry did not change" passes exactly as well when the refresh never
+/// reached step 3's re-check at all. The reader task ignores the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolListRefresh {
+    /// Step 5/6 ran: names were removed, added, or both.
+    Applied,
+    /// The fetch succeeded and the live set was already the server's set.
+    NoChange,
+    /// Step 3 refused it: the row is no longer `Enabled`, or this is not the
+    /// incarnation that notified.
+    Superseded,
+    /// Step 2's fetch failed. The recorded set is kept exactly as it was.
+    FetchFailed,
+}
+
 /// A `bearer_env` / `api_key_env` that is not set in the daemon's environment.
 /// OpenAlpaca refuses up front rather than attempting the connection, so the
 /// row can name the missing key (§4.2, X-31).
@@ -261,6 +280,60 @@ impl McpSupervisor {
             .map(|cfg| (cfg, declared.defaults.clone()))
     }
 
+    /// The declaration **as it is on disk right now**, re-read under the
+    /// per-extension mutex. This is what E2 builds from on both route verbs.
+    ///
+    /// `declared` is the last set a *reconcile* parsed, and neither route verb
+    /// runs one: `enable`'s own W has just rewritten the file underneath it,
+    /// and `reload`'s whole job is *"apply my edit"* (§3.4.1) against a file
+    /// whose watcher event §10 case 15 explicitly allows to be dropped — "the
+    /// route path never depends on the watcher" is that case's own sentence.
+    /// Building from the cache is how a route `enable` came to stamp a
+    /// fingerprint the file never carried, and how a `reload` came to reconnect
+    /// the declaration the owner had just replaced.
+    ///
+    /// The cached entry for **this** server is refreshed on the way through so
+    /// the two cannot drift; the rest of the set is left alone, because a
+    /// block that appeared or vanished elsewhere is a reconcile's diff to run,
+    /// not a side effect of one server's verb.
+    ///
+    /// A store that does not parse keeps the **last-good** declaration, exactly
+    /// as the watcher does (§10 case 15): a verb on a running server must not
+    /// turn into a teardown because someone is mid-edit. `None` means the block
+    /// is not declared, which is the caller's `404`/`409`.
+    fn fresh_declaration(&self, name: &str) -> Option<(McpServerConfig, McpDefaults)> {
+        match McpConfig::load(&self.config_path) {
+            Ok(config) => {
+                let cfg = config.servers.get(name).cloned()?;
+                {
+                    let mut declared = self.declared.lock_or_recover();
+                    declared.defaults = config.defaults.clone();
+                    declared.servers.insert(name.to_string(), cfg.clone());
+                }
+                Some((cfg, config.defaults))
+            }
+            Err(LoadError::NotFound(_)) => {
+                // The file is the store; without it nothing is declared. The
+                // cached set is left for the next reconcile, which is what
+                // tears the records down (T5-gone) — a verb must not turn a
+                // missing file into a silent unload.
+                tracing::warn!(
+                    path = %self.config_path.display(),
+                    "config/mcp.toml is gone; nothing is declared"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %self.config_path.display(),
+                    error = %e,
+                    "config/mcp.toml does not parse; building from the last good declaration"
+                );
+                self.declaration(name)
+            }
+        }
+    }
+
     // ── W — PERSIST ──────────────────────────────────────────────────────
 
     /// **Step W.** Write `enabled = <bool>` through the atomic, comment-
@@ -402,14 +475,27 @@ impl McpSupervisor {
     /// the sender inside `disconnect` ends its receiver, and it exits on its
     /// own next turn — after failing the state re-check that makes a straggler
     /// notification harmless.
+    ///
+    /// **The seal goes on before the map entry comes off.** `disconnect` stores
+    /// it on its first poll, so a teardown that removed the entry first would
+    /// have a window — one dropped future wide, which is what cancelling a
+    /// `reconcile_all` mid-`join_all` would be — holding a live, *unsealed*
+    /// client that no later T4 could find, because T4 asks the map. Removing
+    /// afterwards makes that unreachable: whatever cancels, the entry is still
+    /// there for the next teardown, and a second `disconnect` is a no-op.
     async fn t4(&self, name: &str) -> Option<String> {
-        let handle = self.handles.lock_or_recover().remove(name);
-        let handle = handle?;
+        let (client, generation, request_timeout) = {
+            let handles = self.handles.lock_or_recover();
+            let handle = handles.get(name)?;
+            (
+                Arc::clone(&handle.client),
+                handle.generation,
+                handle.request_timeout,
+            )
+        };
 
-        let bound = handle.request_timeout + Duration::from_secs(1);
-        let generation = handle.generation;
-        let client = Arc::clone(&handle.client);
-        match tokio::time::timeout(bound, (*client).clone().disconnect()).await {
+        let bound = request_timeout + Duration::from_secs(1);
+        let outcome = match tokio::time::timeout(bound, (*client).clone().disconnect()).await {
             Ok(Ok(())) => {
                 tracing::debug!(server = %name, generation, "MCP client disconnected and sealed");
                 None
@@ -430,7 +516,7 @@ impl McpSupervisor {
                     ?bound,
                     "MCP teardown detached: a call is still holding the transport"
                 );
-                let detached = Arc::clone(&handle.client);
+                let detached = Arc::clone(&client);
                 tokio::spawn(async move {
                     if let Err(e) = (*detached).clone().disconnect().await {
                         tracing::debug!(error = %e, "detached MCP disconnect finished with an error");
@@ -438,7 +524,12 @@ impl McpSupervisor {
                 });
                 Some("teardown pending: 1 call still holding the transport".to_string())
             }
-        }
+        };
+        // Sealed by now on every arm above, including the detached one: the
+        // timeout polled `disconnect` at least once, and the seal is its first
+        // statement.
+        self.handles.lock_or_recover().remove(name);
+        outcome
     }
 
     /// **E-PRE.** Tear down whatever the map still holds for this extension
@@ -729,7 +820,7 @@ impl McpSupervisor {
                     continue;
                 }
                 let Some(sup) = me.upgrade() else { break };
-                sup.on_tool_list_changed(&ext, generation, &client).await;
+                let _ = sup.on_tool_list_changed(&ext, generation, &client).await;
             }
             tracing::debug!(extension = %ext, generation, "MCP change reader exited");
         });
@@ -748,7 +839,7 @@ impl McpSupervisor {
         ext: &ExtensionId,
         generation: u64,
         client: &Arc<McpClient>,
-    ) {
+    ) -> ToolListRefresh {
         // Step 2 — fetch, no mutex held.
         let fetched = match client.list_tools_once().await {
             Ok(tools) => tools,
@@ -775,7 +866,7 @@ impl McpSupervisor {
                     };
                     self.ledger.mark_failed(ext, generation, reason, detail);
                 }
-                return;
+                return ToolListRefresh::FetchFailed;
             }
         };
 
@@ -788,7 +879,7 @@ impl McpSupervisor {
             .is_some_and(|r| r.state.is_enabled() && r.generation == generation);
         if !live {
             tracing::debug!(extension = %ext, generation, "tool list change superseded");
-            return;
+            return ToolListRefresh::Superseded;
         }
 
         // Step 4 — diff against the **live subset**: a name the server dropped
@@ -828,7 +919,7 @@ impl McpSupervisor {
 
         if removed.is_empty() && added.is_empty() {
             tracing::debug!(extension = %ext, "tool list refresh: no change");
-            return;
+            return ToolListRefresh::NoChange;
         }
 
         // Step 5 — removed names: T1 verbatim, minus the state change. The name
@@ -902,6 +993,7 @@ impl McpSupervisor {
             "MCP server changed its tool set"
         );
         self.emit(ext, "enabled", generation, true);
+        ToolListRefresh::Applied
     }
 
     // ── §3.6 — the crash reaper ──────────────────────────────────────────
@@ -1232,9 +1324,9 @@ impl ExtensionSupervisor for McpSupervisor {
     async fn enable(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError> {
         self.guard_kind(id)?;
         let name = &id.name;
-        let Some((cfg, defaults)) = self.declaration(name) else {
+        if !self.is_declared(name) {
             return Err(self.unknown_or_unreadable(id));
-        };
+        }
 
         let _lock = self.lock_for(name).await;
 
@@ -1245,6 +1337,12 @@ impl ExtensionSupervisor for McpSupervisor {
             self.write_bit(name, true)?;
         }
         self.ledger.set_disposition(id, true);
+
+        // E2 builds from the declaration on disk — the one W has just written
+        // into — never from the set the last reconcile happened to cache.
+        let Some((cfg, defaults)) = self.fresh_declaration(name) else {
+            return Err(self.unknown_or_unreadable(id));
+        };
 
         // E0 — a CAS failure (enable on `Enabled`) returns the current row and
         // never reaches E-PRE. It is deliberately **not** a reload: a redundant
@@ -1295,11 +1393,16 @@ impl ExtensionSupervisor for McpSupervisor {
     async fn reload(&self, id: &ExtensionId) -> Result<ExtensionRecord, ExtensionError> {
         self.guard_kind(id)?;
         let name = &id.name;
-        let Some((cfg, defaults)) = self.declaration(name) else {
+        if !self.is_declared(name) {
             return Err(self.unknown_or_unreadable(id));
-        };
+        }
 
         let _lock = self.lock_for(name).await;
+        // "Apply my edit" reads the edit: the declaration on disk, under this
+        // hold, not the one a watcher event may never have delivered.
+        let Some((cfg, defaults)) = self.fresh_declaration(name) else {
+            return Err(self.unknown_or_unreadable(id));
+        };
         let Some(record) = self.ledger.record(id) else {
             return Err(ExtensionError::NotLoaded);
         };
@@ -1376,11 +1479,18 @@ impl ExtensionSupervisor for McpSupervisor {
     ///
     /// State is left alone: the process is going away and the ledger is memory
     /// only.
+    ///
+    /// T3 before T4, as §3.5's "T2–T4 for every `Enabled` extension" says (T2
+    /// is the plugin half): an in-flight tool call is allowed to finish rather
+    /// than having the transport pulled out from under it mid-request. It is
+    /// the same bounded drain a disable runs, so a straggler costs shutdown
+    /// `drain_timeout_secs` and no more.
     async fn shutdown_all(&self) {
         let live: Vec<String> = self.handles.lock_or_recover().keys().cloned().collect();
         let count = live.len();
         for name in live {
             let _lock = self.lock_for(&name).await;
+            self.t3(&ExtensionId::mcp(&name)).await;
             self.t4(&name).await;
         }
         tracing::info!(

@@ -429,6 +429,12 @@ impl ExtensionLedger {
     /// reads so a `reload`'s window is worded *reloading*, never *being turned
     /// off*. Legal from `Enabled` and `Failed{*}`.
     ///
+    /// A **reload** keeps that cause across its own `Disabling → Enabling`
+    /// CAS: §3.4.1 promises the *reloading* wording for the whole T0–E5
+    /// window, and the E-half is half of it. That is the one thing an
+    /// `Enabling` carries — `cause` stays `None` for this target, as the
+    /// design's signature says.
+    ///
     /// From the instant T0 takes, `check` returns `Blocked` everywhere, in
     /// every snapshot. Everything after is bookkeeping.
     pub fn begin(
@@ -459,9 +465,17 @@ impl ExtensionLedger {
                         if !legal {
                             return Transition::Refused(Some(entry.state.clone()));
                         }
+                        // The only cause that survives into `Enabling`, and
+                        // only from the reload path's own CAS. Nothing stale
+                        // can be carried: `commit` clears `pending_cause` at
+                        // the end of every transition, so the sole record that
+                        // reaches here still holding one is a reload in flight
+                        // under its own mutex hold.
+                        let reloading = entry.state == ExtensionState::Disabling
+                            && entry.pending_cause == Some(WithdrawalCause::Reload);
                         entry.generation += 1;
                         entry.state = ExtensionState::Enabling;
-                        entry.pending_cause = None;
+                        entry.pending_cause = reloading.then_some(WithdrawalCause::Reload);
                         entry.since = Utc::now();
                         Transition::Took(entry.generation)
                     }

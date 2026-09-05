@@ -195,7 +195,12 @@ impl ExtensionState {
                 Some("Enable".to_string()),
                 true,
             ),
-            Self::Disabling if pending_cause == Some(WithdrawalCause::Reload) => (
+            // Both halves of a `reload`'s T0–E5 window read the same row
+            // (§3.4.1): *being turned off* would be false for a verb that ends
+            // `Enabled`, and *still starting* would lose the "it was here a
+            // moment ago" half that tells a caller to retry rather than to
+            // report the tool as new or missing.
+            Self::Disabling | Self::Enabling if pending_cause == Some(WithdrawalCause::Reload) => (
                 format!("{kind} '{id}' is being reloaded right now"),
                 Some("retry on your next round"),
                 Some("do not report it as failed or as turned off"),

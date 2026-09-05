@@ -7,6 +7,15 @@
 //! rendering of the **parsed block, not of its bytes** — a comment, a blank
 //! line or a key-order edit changes nothing; a value edit does.
 //!
+//! **The `enabled` bit is not in the preimage.** It is the diff key's *other*
+//! half and drives a different verb (§3.3 E2 lists the fields the preimage
+//! covers and the bit is not among them). Hashing it as well made the two
+//! halves disagree: W writes the bit *before* E0, so a route `enable` that
+//! stamped a bit-bearing fingerprint recorded a value the file no longer had,
+//! and every later reconcile read `changed = true` for a declaration nobody
+//! had touched — a false *"reload to apply"* on an `Enabled` row and, on a
+//! `Failed` row, a retry outside §3.4's closed list of four.
+//!
 //! **No secret enters the hash**, which is why no salt and no keyed hash are
 //! needed: every `env.*` value, every `extra_headers.*` value and a literal
 //! `auth.bearer` are replaced by the fixed marker `<masked>` (keys kept).
@@ -34,13 +43,25 @@ const MASKED: &str = "<masked>";
 /// costs at most a redundant reload, never a wrong one.
 pub fn config_fingerprint(server: &McpServerConfig) -> String {
     let preimage = match toml::Value::try_from(server) {
-        Ok(value) => canonical_render(&mask(value)),
+        Ok(value) => canonical_render(&mask(without_disposition(value))),
         Err(e) => {
             tracing::warn!(error = %e, "MCP block could not be rendered for its fingerprint");
             format!("unrenderable: {e}")
         }
     };
     blake3::hash(preimage.as_bytes()).to_hex().to_string()
+}
+
+/// Drop the disposition bit: it is the diff key's own half (edge case 15 =
+/// presence + bit + fingerprint) and the two halves drive different verbs, so
+/// hashing it here would make an untouched declaration read as changed for as
+/// long as the two disagree.
+fn without_disposition(value: toml::Value) -> toml::Value {
+    let toml::Value::Table(mut table) = value else {
+        return value;
+    };
+    table.remove("enabled");
+    toml::Value::Table(table)
 }
 
 /// Replace every credential-bearing value with [`MASKED`], keeping keys.
@@ -208,10 +229,12 @@ mod tests {
     }
 
     #[test]
-    fn the_enabled_bit_is_part_of_the_block_but_the_diff_key_carries_it_separately() {
-        // Stated so nobody removes the bit from edge case 15's diff key on the
-        // theory that the fingerprint already covers it: it does, but the two
-        // halves drive different verbs.
+    fn the_enabled_bit_is_not_in_the_preimage_the_diff_key_carries_it_separately() {
+        // §3.3 E2 lists what the preimage covers and the bit is not on that
+        // list: edge case 15's diff key is presence + **bit** + fingerprint,
+        // and the two halves drive different verbs. Keeping the bit in here as
+        // well is what let a route `enable` stamp a fingerprint that disagreed
+        // with the file it was built from for as long as the row lived.
         let on = block(STDIO);
         let off = block(
             r#"
@@ -223,7 +246,7 @@ mod tests {
             enabled = false
         "#,
         );
-        assert_ne!(config_fingerprint(&on), config_fingerprint(&off));
+        assert_eq!(config_fingerprint(&on), config_fingerprint(&off));
     }
 
     #[test]

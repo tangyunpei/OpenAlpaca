@@ -1052,6 +1052,49 @@ async fn reload_bumps_the_generation_keeps_the_bit_and_staleifies_a_snapshot() {
     );
 }
 
+/// **Fix round 1, finding 1 (the second face).** `reload`'s job is *"apply my
+/// edit"* (§3.4.1), and §10 case 15 says the route path never depends on the
+/// watcher — filesystem events are `try_send` with drop-on-full and losing one
+/// is explicitly tolerated. So `reload` must read the declaration **on disk**
+/// under its own mutex hold, not the set the last reconcile happened to cache:
+/// otherwise a dropped event makes it reconnect the *old* declaration, bump the
+/// generation and report `Enabled` — a silent lie.
+#[tokio::test]
+async fn a_reload_applies_an_edit_the_watcher_never_delivered() {
+    let h = Harness::new(1);
+    let old = stub_server(h.path(), "reload-old", StubOpts::default());
+    let new = stub_server(h.path(), "reload-new", StubOpts::default());
+    h.declare(&old, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    assert_eq!(old.spawn_count(), 1, "the declared command started");
+
+    // The owner edits `command`. The watcher event is dropped: no reconcile
+    // runs, so the supervisor's cached declaration still names the old command.
+    h.write_config(&declaration(&new, true, ""));
+
+    let row = h.supervisor.reload(&mcp("srv")).await.expect("reload");
+
+    assert_eq!(row.state, ExtensionState::Enabled);
+    assert_eq!(new.spawn_count(), 1, "reload started the command on disk");
+    assert!(new.any_alive(), "and that is the live child");
+    assert_eq!(old.spawn_count(), 1, "the old command was not started again");
+    assert!(
+        eventually(Duration::from_secs(5), || !old.any_alive()).await,
+        "the previous load's child is gone"
+    );
+
+    // E2 stamped the fingerprint of the block it actually built from.
+    let on_disk = McpConfig::load(&h.config_path).expect("parse");
+    assert_eq!(
+        h.record("srv").expect("record").config_fingerprint,
+        Some(config_fingerprint(on_disk.servers.get("srv").expect("srv"))),
+        "the stored fingerprint is the on-disk declaration's"
+    );
+
+    h.supervisor.shutdown_all().await;
+}
+
 // ============================================================================
 // The fingerprint half of edge case 15's diff key
 // ============================================================================
@@ -1149,6 +1192,81 @@ async fn a_rotated_env_value_changes_the_fingerprint_of_nothing() {
     );
 
     h.supervisor.shutdown_all().await;
+}
+
+/// **Fix round 1, finding 1.** A route `enable` must leave the next reconcile
+/// nothing to do for a declaration nobody touched.
+///
+/// Two things make that true, and this test fails without either: the `enabled`
+/// bit is **not** in the fingerprint preimage (§3.3 E2 lists the covered fields
+/// and the bit is edge case 15's *other* diff-key half, driving a different
+/// verb), and E2 stamps the declaration **on disk** rather than the pre-W
+/// snapshot the supervisor happened to be holding. Otherwise the stored
+/// fingerprint disagrees with the file for as long as the row lives, and the
+/// next `mcp.toml` change — an edit to a *different* server — reads
+/// `changed = true` for this one: on a `Failed` row a retry outside §3.4's
+/// closed list of four, on an `Enabled` row a false
+/// *"declaration changed; reload to apply"* that repeats forever.
+#[tokio::test]
+async fn a_route_enable_leaves_the_next_reconcile_nothing_to_retry() {
+    let h = Harness::new(1);
+    let other = stub_server(h.path(), "fp-other", StubOpts::default());
+    let config = |srv_enabled: bool, other_extra: &str| {
+        format!(
+            r#"[defaults]
+connect_timeout_secs = 5
+request_timeout_secs = 3
+
+[servers.srv]
+transport = "stdio"
+command = "/definitely/not/a/command/xyzzy"
+enabled = {srv_enabled}
+
+[servers.other]
+transport = "stdio"
+command = "{other}"
+enabled = false
+{other_extra}
+"#,
+            other = other.script.display()
+        )
+    };
+
+    h.write_config(&config(false, ""));
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Disabled));
+
+    // The route the GUI drives: W flips the bit on disk, then E0–E5 cannot
+    // connect — the `Failed` row §3.4 trigger 2 would retry on a real change.
+    let row = h.supervisor.enable(&mcp("srv")).await.expect("enable");
+    assert!(
+        matches!(row.state, ExtensionState::Failed { .. }),
+        "the declared command does not exist: {:?}",
+        row.state
+    );
+    let after_enable = row.generation;
+
+    let on_disk = McpConfig::load(&h.config_path).expect("parse");
+    assert_eq!(
+        h.record("srv").expect("record").config_fingerprint,
+        Some(config_fingerprint(on_disk.servers.get("srv").expect("srv"))),
+        "E2 stamps the declaration on disk, not the pre-W snapshot"
+    );
+
+    // A hand edit to the **other** server is what drives the next reconcile.
+    h.write_config(&config(true, r#"args = ["--verbose"]"#));
+    h.supervisor.reconcile_all().await;
+
+    let after = h.record("srv").expect("record");
+    assert_eq!(
+        after.generation, after_enable,
+        "nothing about srv changed, so §3.4's trigger 2 must not fire"
+    );
+    assert!(
+        matches!(after.state, ExtensionState::Failed { .. }),
+        "and the row is where the enable left it"
+    );
+    assert!(!other.any_alive(), "the untouched disabled server never started");
 }
 
 // ============================================================================
@@ -1394,17 +1512,57 @@ async fn a_removal_and_an_addition_in_one_change_keep_their_own_tombstones() {
 /// nothing: step 3 takes the mutex the disable holds and then fails the
 /// `Enabled` re-check. There is no path by which a non-`Enabled` server can
 /// change the registry.
+///
+/// The hand-off is **driven, not raced**. Firing the notifier and disabling
+/// straight after asserts only the outcome: the notifier polls on a 50 ms tick,
+/// so the refresh may never reach step 3 at all — its receiver ends at T4
+/// first — and "nothing changed" then passes for the wrong reason. Here the
+/// test holds the per-extension mutex itself, so the refresh fetches against
+/// the still-live child and queues on step 3's `lock_for` while the whole
+/// disable runs underneath it; the returned [`ToolListRefresh`] names the
+/// branch that actually ran.
 #[tokio::test]
 async fn a_notification_that_arrives_around_a_disable_is_superseded() {
     let (h, stub) = notifying_harness("superseded-list").await;
+    let ext = mcp("srv");
+    let generation = h.record("srv").expect("record").generation;
+    // The incarnation's own client — the one its reader task would hand to the
+    // refresh, taken from the map so this is the real hand-off.
+    let client = h
+        .supervisor
+        .handles
+        .lock_or_recover()
+        .get("srv")
+        .map(|handle| Arc::clone(&handle.client))
+        .expect("a live handle");
 
     stub.set_tools(&["echo", "late"]);
-    stub.notify();
-    h.supervisor.disable(&mcp("srv")).await.expect("disable");
 
+    let guard = h.supervisor.lock_for("srv").await;
+    let sup = Arc::clone(&h.supervisor);
+    let refreshing =
+        tokio::spawn(async move { sup.on_tool_list_changed(&mcp("srv"), generation, &client).await });
+    // Long enough for one line of `sh` over a pipe. If the fetch had not landed
+    // the refresh would report `FetchFailed` and this test would fail loudly
+    // rather than pass without exercising step 3.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // The disable, verbatim from the verb, under the hold the test already has.
+    h.supervisor.write_bit("srv", false).expect("W");
+    h.supervisor.ledger.set_disposition(&ext, false);
+    let warnings = h
+        .supervisor
+        .run_disable("srv", WithdrawalCause::Disable)
+        .await;
+    assert!(warnings.is_empty(), "a clean teardown: {warnings:?}");
+    drop(guard);
+
+    assert_eq!(
+        refreshing.await.expect("the refresh task"),
+        ToolListRefresh::Superseded,
+        "step 3's re-check is the branch this test is named for"
+    );
     assert_eq!(h.state("srv"), Some(ExtensionState::Disabled));
-    // Give any straggler refresh every chance to land.
-    tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(
         h.registry
             .registered_tool_names()
@@ -1413,6 +1571,11 @@ async fn a_notification_that_arrives_around_a_disable_is_superseded() {
         "after T5 the registry holds nothing from the server"
     );
     assert!(h.registry.get("srv__late").is_none(), "least of all a new tool");
+    assert_eq!(
+        h.record("srv").expect("record").tools_changed_at,
+        None,
+        "and a superseded refresh stamps nothing"
+    );
 }
 
 /// **(5) A failed refresh keeps the recorded set.** A transient error must not
